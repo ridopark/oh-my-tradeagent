@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/audit-event.json",
+  "title": "AuditEvent",
+  "description": "Append-only audit-log event scoped by (tenant_id, strategy_id). Every state-changing Activity in the system emits one.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.AuditEvent",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "event_id",
+    "occurred_at",
+    "kind",
+    "subject"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "UUID v4 for this event row."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp set by the originator of the event (broker for fills, sidecar for posted, workflow for decided)."
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Event kind tag (e.g., SignalReceived, SignalRejected, EntryFilled, EntryExpired, ExitRequested, KillSwitchTripped, KillSwitchResetApproved, ReconciliationCompleted, JournalOrphan, BrokerOrphan, OrphanSTC, SymbolDriftDetected)."
+    },
+    "subject": {
+      "type": "object",
+      "description": "Free-form structured payload for the event. Schema-by-kind to be formalized as the system grows; v0 uses ad-hoc shape.",
+      "existingJavaType": "java.util.Map<String, Object>",
+      "additionalProperties": true
+    },
+    "actor": {
+      "type": "string",
+      "description": "Who or what produced this event (e.g., 'workflow:CopytradeSignalWorkflow', 'activity:exec.place_order', 'operator:ridopark')."
+    },
+    "workflow_id": {
+      "type": "string",
+      "description": "Originating workflow ID, if applicable. Allows correlation across the audit log without joining Temporal history."
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Optional cross-event correlation key (e.g., a signal_id linking SignalReceived → EntryFilled → ExitRequested)."
+    }
+  }
+}

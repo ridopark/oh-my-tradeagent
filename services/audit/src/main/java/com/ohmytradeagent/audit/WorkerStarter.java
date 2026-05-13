@@ -1,0 +1,26 @@
+package com.ohmytradeagent.audit;
+
+import io.temporal.worker.WorkerFactory;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
+import org.springframework.stereotype.Component;
+
+/**
+ * Starts the Temporal WorkerFactory after Spring finishes wiring all workers + activities. Using
+ * ApplicationReadyEvent (rather than @PostConstruct on the factory) guarantees every {@code
+ * factory.newWorker(...)} bean has run before we start polling.
+ */
+@Component
+public class WorkerStarter {
+
+  private final WorkerFactory workerFactory;
+
+  public WorkerStarter(WorkerFactory workerFactory) {
+    this.workerFactory = workerFactory;
+  }
+
+  @EventListener(ApplicationReadyEvent.class)
+  public void start() {
+    workerFactory.start();
+  }
+}

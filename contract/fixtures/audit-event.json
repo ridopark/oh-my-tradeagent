@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "copytrade-v1",
+  "event_id": "5d8b8a3f-1a3a-4f1d-92b1-9f1a3a4f1d92",
+  "occurred_at": "2026-05-16T13:35:00Z",
+  "kind": "SignalReceived",
+  "subject": {
+    "signal_id": "1234567890123456789:0",
+    "author": "ridopark"
+  },
+  "actor": "workflow:CopytradeSignalWorkflow",
+  "workflow_id": "t-dev/s-copytrade-v1/sig/1234567890123456789:0",
+  "correlation_id": "1234567890123456789:0"
+}

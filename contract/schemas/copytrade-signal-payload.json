@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/copytrade-signal-payload.json",
+  "title": "CopytradeSignalPayload",
+  "description": "Parsed Discord BTO/STC/AVG line emitted by signal-source-discord and consumed by CopytradeSignalWorkflow. Reference: docs/plans/PLAN.md, oh-my-opentrade/backend/internal/domain/copytrade.go.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.CopytradeSignalPayload",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "signal_id",
+    "message_id",
+    "author",
+    "posted_at",
+    "action",
+    "ticker",
+    "expiry",
+    "strike",
+    "right",
+    "price",
+    "raw_line"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "description": "DTO contract version. Workers reject newer-than-build inputs to force orchestrator rollback. Start at 1; bump when fields change in non-backward-compatible ways.",
+      "minimum": 1
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Tenant scope key. Required on every Activity payload and workflow input."
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Strategy scope key within the tenant."
+    },
+    "signal_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Deterministic dedupe key. Shape: '<message_id>:<line_index>'."
+    },
+    "message_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Discord message id the line was parsed from."
+    },
+    "author": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Discord username that posted the line."
+    },
+    "posted_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp when the message was posted on Discord (source-of-truth: sidecar from Discord DOM)."
+    },
+    "action": {
+      "type": "string",
+      "enum": ["BTO", "STC", "AVG"],
+      "description": "Author intent: buy-to-open, sell-to-close, or retrospective average-note."
+    },
+    "ticker": {
+      "type": "string",
+      "pattern": "^[A-Z]{1,6}$",
+      "description": "Underlying equity symbol; uppercase, no exchange suffix."
+    },
+    "expiry": {
+      "type": "string",
+      "format": "date",
+      "description": "Option expiry date (YYYY-MM-DD) at 00:00 UTC of that calendar date."
+    },
+    "strike": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Strike price, dollars."
+    },
+    "right": {
+      "type": "string",
+      "enum": ["C", "P"],
+      "description": "Option right: Call or Put."
+    },
+    "price": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Author's stated fill premium (per contract, dollars). 5-30s stale by the time we read it; size off fresh ask not this."
+    },
+    "tail": {
+      "type": "string",
+      "description": "Raw trailing text after the parsed grammar (e.g., 'half out', 'partial'). Empty string if none."
+    },
+    "raw_line": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The line as parsed, for audit."
+    }
+  }
+}

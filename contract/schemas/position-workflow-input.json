@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/position-workflow-input.json",
+  "title": "PositionWorkflowInput",
+  "description": "Input to PositionWorkflow at start. Phase 0 ships the DTO slot; the workflow body lands in Phase 3.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.PositionWorkflowInput",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "entry_signal_id",
+    "contract_symbol",
+    "qty",
+    "entry_premium"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entry_signal_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "signal_id of the BTO that opened the position. Disambiguates re-BTO on the same OCC under WorkflowIDReusePolicy.REJECT_DUPLICATE."
+    },
+    "contract_symbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OCC option symbol (e.g., NVDA250516C00140000). Set as a Search Attribute 'ContractSymbol' on workflow start for STC dispatch."
+    },
+    "qty": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Original position size, contracts."
+    },
+    "entry_premium": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Fill premium per contract, dollars (source-of-truth: broker fill, not author-posted price)."
+    },
+    "source_signal_workflow_id": {
+      "type": "string",
+      "description": "Workflow ID of the CopytradeSignalWorkflow that spawned this position. Optional; useful for cross-workflow audit correlation."
+    }
+  }
+}

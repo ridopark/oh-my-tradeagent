@@ -1,0 +1,9 @@
+# Temporal dynamic config for the dev compose stack.
+# Empty defaults are fine for Phase 0; tighten as services scale.
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true
+    constraints: {}
