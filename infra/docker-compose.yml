@@ -85,10 +85,15 @@ services:
 
         register_sa() {
           name=$$1; type=$$2
-          if temporal operator search-attribute create --name "$$name" --type "$$type" 2>&1 | grep -qiE "already exists|AlreadyExists"; then
+          # Capture both output and exit code; distinguish "already exists" from real failures.
+          output=$$(temporal operator search-attribute create --name "$$name" --type "$$type" 2>&1) && rc=0 || rc=$$?
+          if echo "$$output" | grep -qiE "already exists|AlreadyExists"; then
             echo "  $$name already registered."
-          else
+          elif [ "$$rc" -eq 0 ]; then
             echo "  $$name registered ($$type)."
+          else
+            echo "  $$name FAILED to register (rc=$$rc): $$output" >&2
+            exit 1
           fi
         }
 

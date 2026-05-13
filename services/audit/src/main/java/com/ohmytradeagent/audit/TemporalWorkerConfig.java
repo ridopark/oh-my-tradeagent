@@ -6,9 +6,6 @@ import io.temporal.serviceclient.WorkflowServiceStubs;
 import io.temporal.serviceclient.WorkflowServiceStubsOptions;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
-import jakarta.annotation.PostConstruct;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -22,8 +19,6 @@ import org.springframework.context.annotation.Configuration;
  */
 @Configuration
 public class TemporalWorkerConfig {
-
-  private static final Logger log = LoggerFactory.getLogger(TemporalWorkerConfig.class);
 
   @Value("${temporal.target:localhost:7233}")
   private String target;
@@ -56,16 +51,5 @@ public class TemporalWorkerConfig {
     Worker worker = factory.newWorker(taskQueue);
     worker.registerWorkflowImplementationTypes(CopytradeSignalWorkflowImpl.class);
     return worker;
-  }
-
-  @PostConstruct
-  public void startWorker() {
-    // Started after the WorkerFactory has all workers registered. The factory is a singleton bean,
-    // so by @PostConstruct time the @Bean Worker methods above have all run.
-    log.info(
-        "Starting Temporal worker (target={}, namespace={}, taskQueue={})",
-        target,
-        namespace,
-        taskQueue);
   }
 }
