@@ -32,20 +32,23 @@ A Temporal-orchestrated microservice system that mirrors options trades from a v
         │
         ▼  Playwright DOM polling, ~1s
 ┌──────────────────────────┐
-│ signal-source-discord    │  Python sidecar, one per (tenant, strategy, channel)
+│ signal-source-discord    │  Python sidecar, replica >= 1 per (tenant, strategy, channel)
 │ - Playwright DOM watcher │
 │ - regex parser           │
-│ - seen_ids.json (bound)  │
+│ - in-memory dedupe LRU   │  (cost-only; correctness via Temporal workflow_id)
 └────────────┬─────────────┘
              │ Temporal client: start_workflow(
              │   CopytradeSignalWorkflow,
              │   payload,
              │   workflow_id="t-{tenant}/s-{strategy}/sig/{signal_id}",
              │   id_reuse_policy=REJECT_DUPLICATE,
-             │   task_queue="orchestrator-core")
+             │   task_queue="orchestrator-core",
+             │   search_attributes={TenantStrategy: "t-{tenant}/s-{strategy}"})
              ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ Temporal Cluster (server + history + matching + frontend)   │
+│   Advanced Visibility (Postgres 12+) — required from Phase 0│
+│   custom Search Attributes: TenantStrategy, ContractSymbol  │
 └──────────┬──────────────────────────────────────────────────┘
            │  workers poll task queues
            ▼
@@ -56,17 +59,21 @@ A Temporal-orchestrated microservice system that mirrors options trades from a v
 │     - PositionWorkflow (per open position, long-running)            │
 │     - BTOEntryTimerWorkflow (per pending BTO)                       │
 │     - ReconciliationWorkflow (scheduled)                            │
-│     - KillSwitchWorkflow (per (tenant, strategy), session-long)     │
+│     - KillSwitchWorkflow (per (tenant, strategy), long-running)     │
+│   in-process activities (folded from risk-svc + contract-resolver):│
+│     - risk.check_entry / check_exit                                 │
+│     - contract.resolve / lookup (option_symbol_cache in Postgres)   │
+│     - keyword_matcher.match                                         │
 │   task queue: orchestrator-core                                     │
-└──┬─────────┬─────────┬─────────┬─────────┬─────────┬───────────────┘
-   │         │         │         │         │         │
-   ▼         ▼         ▼         ▼         ▼         ▼
-┌─────┐  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌──────┐
-│risk │  │contract│ │ exec-  │ │market- │ │platform│ │audit │
-│-svc │  │resolver│ │alpaca  │ │data-svc│ │ -svc   │ │-svc  │
-└─────┘  └────────┘ │/tradier│ └────────┘ └────────┘ └──────┘
-                    │ /ibkr  │
-                    └────────┘
+└──┬─────────┬─────────┬─────────┬───────────────────────────────────┘
+   │         │         │         │
+   ▼         ▼         ▼         ▼
+┌────────┐ ┌────────┐ ┌────────┐ ┌──────┐
+│ exec-  │ │market- │ │platform│ │audit │
+│alpaca  │ │data-svc│ │ -svc   │ │-svc  │
+│/tradier│ └────────┘ └────────┘ └──────┘
+│ /ibkr  │
+└────────┘
 
    ┌──────────────────────────────────────────┐
    │ api-gateway (Java, Spring Boot REST)     │  → operator + admin clients
@@ -81,10 +88,8 @@ A Temporal-orchestrated microservice system that mirrors options trades from a v
 
 | Service | Lang | Task queue(s) | Owns | Persistent state |
 |---|---|---|---|---|
-| `signal-source-discord` | Python | (Temporal client only) | Playwright lifecycle; parser; `seen_ids.json`; `storage_state.json`; heartbeat | Local volume |
-| `orchestrator-svc` | Java | `orchestrator-core` | All workflows + workflow-local activities | None (Temporal history is the state) |
-| `risk-svc` | Java | `risk` | Author whitelist; max-positions count; signal-age veto; killswitch read; size cap | Postgres (config), Redis (counters) |
-| `contract-resolver-svc` | Java | `contract` | OCC symbol generation; tradability check; entry quote | None (read-through to broker) |
+| `signal-source-discord` | Python | (Temporal client only) | Playwright lifecycle; parser; `storage_state.json`; heartbeat; in-memory dedupe LRU (cost-only) | Local volume (cookies / heartbeat); replica >= 1 supported |
+| `orchestrator-svc` | Java | `orchestrator-core` | All workflows + workflow-local activities (risk gates, contract resolution, keyword matcher) | Postgres (`option_symbol_cache`) for contract resolver |
 | `exec-svc-alpaca-paper` | Java | `broker-alpaca-paper` | Place/cancel/status on Alpaca paper | Postgres (`OrderIntentJournal` per broker env) |
 | `exec-svc-alpaca-live` | Java | `broker-alpaca-live` | Same, live | Postgres |
 | `exec-svc-tradier-paper` | Java | `broker-tradier-paper` | Tradier sandbox | Postgres |
@@ -104,10 +109,21 @@ Paper + live live on separate task queues so a misconfigured `broker_target` rou
 | Workflow | Lifetime | Started by | Workflow ID shape |
 |---|---|---|---|
 | `CopytradeSignalWorkflow` | ≤ 90s | Sidecar | `t-<tenant>/s-<strategy>/sig/<signal_id>` |
-| `PositionWorkflow` | minutes-to-hours | `CopytradeSignalWorkflow` on BTO fill | `t-<tenant>/s-<strategy>/pos/<OCC>` |
+| `PositionWorkflow` | minutes-to-hours | `CopytradeSignalWorkflow` on BTO fill | `t-<tenant>/s-<strategy>/pos/<OCC>/<entry_signal_id>` (entry_signal_id disambiguates same-day re-BTO on a closed contract) |
 | `BTOEntryTimerWorkflow` | ≤ TTL (90s paper / 30s live) | `CopytradeSignalWorkflow` | `t-<tenant>/s-<strategy>/btottl/<signal_id>` |
 | `ReconciliationWorkflow` | seconds per run | Temporal Schedule (every 5 min + startup) | `t-<tenant>/s-<strategy>/recon/<broker_env>/<run_id>` |
-| `KillSwitchWorkflow` | session-long | Temporal Schedule (daily per `(tenant, strategy)`) | `t-<tenant>/s-<strategy>/killswitch/<date>` |
+| `KillSwitchWorkflow` | long-running; `continueAsNew` after each market close | One-time bootstrap per `(tenant, strategy)`; survives DST/holidays/Schedule pauses | `t-<tenant>/s-<strategy>/killswitch` |
+
+### Search attributes (required from Phase 0)
+
+Temporal's standard SQL Visibility does **not** support `STARTS_WITH` on `WorkflowId` — only exact `=` / `!=` / `IN`. To filter by `(tenant, strategy)` or by contract symbol, the cluster runs with **Advanced Visibility** (Postgres 12+ adv-visibility schema; Elasticsearch not required) and we register two custom Search Attributes at Phase 0:
+
+| Search attribute | Type | Set on | Used by |
+|---|---|---|---|
+| `TenantStrategy` | Keyword | Every workflow start (`"t-<tenant>/s-<strategy>"`) | `risk.count_running_positions`, `KillSwitchWorkflow` `risk_breach` cascade, `api-gateway` `GET /positions`, audit queries |
+| `ContractSymbol` | Keyword | `PositionWorkflow` start (OCC symbol) | STC dispatch — find the active `PositionWorkflow` for a contract |
+
+`listWorkflowExecutions(...)` is always filtered on these SAs plus `ExecutionStatus`, never on `WorkflowId` prefix. STC's OCC→active-position lookup is `TenantStrategy = "t-<t>/s-<s>" AND ContractSymbol = "<OCC>" AND ExecutionStatus = "Running"`, returning ≤ 1 workflow ID. For hot-path reads, the same OCC→workflow-ID mapping is cached in Redis (TTL = 1 trading day) so STC handling does not depend on Visibility latency.
 
 ### Signals (durable, async)
 
@@ -132,12 +148,14 @@ Paper + live live on separate task queues so a misconfigured `broker_target` rou
 
 ### Updates (synchronous, validated state changes)
 
-| Update | Target | Validation | Effect |
-|---|---|---|---|
-| `force_close` | `PositionWorkflow` | Caller authorized | Immediate full exit; returns final order id |
-| `adjust_trail` | `PositionWorkflow` | New giveback pct in bounds | Update CHANDELIER giveback |
-| `trip_killswitch` | `KillSwitchWorkflow` | Caller authorized | Trip; cascade `risk_breach` signals to children |
-| `reset_killswitch` | `KillSwitchWorkflow` | Caller authorized | Reset to normal |
+Each Update has two stages: a synchronous **Validator** (must be deterministic, no I/O) and an async **Handler**. Callers choose a `WaitPolicy`: `Admitted` (returns once accepted into the workflow's queue), `Accepted` (returns after Validator passes), or `Completed` (returns after Handler finishes). `api-gateway` translates HTTP semantics from this column.
+
+| Update | Target | Validator | WaitPolicy (default) | Handler effect | In-flight handling |
+|---|---|---|---|---|---|
+| `force_close` | `PositionWorkflow` | Caller is authorized operator | `Completed` (HTTP 200 with final order id) | Sets `force_exit=true`; cancels any in-flight exit, places marketable-to-bid for full remaining qty | If `exit_in_flight`, cancel current order then place force-exit; new exits/STCs rejected until force completes |
+| `adjust_trail` | `PositionWorkflow` | New giveback pct in `(0, 0.5]`; trail armed | `Accepted` | Updates `giveback_pct` for subsequent `chandelier_tick` evals | No interaction with in-flight orders |
+| `trip_killswitch` | `KillSwitchWorkflow` | Caller is authorized; not already tripped | `Accepted` (HTTP 202 immediately; cascade is async) | Sets `tripped=true`; fan-out `risk_breach` signals to all running workflows for `(tenant, strategy)` via `TenantStrategy` SA query | New `CopytradeSignalWorkflow`s fail-closed on `killswitch_state` query |
+| `reset_killswitch` | `KillSwitchWorkflow` | Caller is authorized; `tripped == true`; dual-control approver IDs distinct (Phase 5 — Issue #21) | `Completed` | Sets `tripped=false`; writes `KillSwitchResetApproved` audit event with both approver IDs | None |
 
 ## End-to-end flows
 
@@ -160,19 +178,24 @@ Paper + live live on separate task queues so a misconfigured `broker_target` rou
        task_queue="orchestrator-core")
    │
    ▼
-[CopytradeSignalWorkflow] (Java, orchestrator-svc)
+[CopytradeSignalWorkflow] (Java, orchestrator-svc, queue=orchestrator-core, search_attrs={TenantStrategy})
   1. audit.log(SignalReceived)                              [audit queue]
   2. cfg = platform.strategy_get(tenant, strategy)          [platform queue]
-  3. decision = risk.check_entry(payload, cfg)              [risk queue]
+  3. decision = risk.check_entry(payload, cfg)              [in-process activity]
        - author in cfg.author_whitelist
        - age = now - payload.posted_at ≤ cfg.max_signal_age_secs
-       - killswitch.query("state").tripped == false
-       - count_running_position_workflows(tenant, strategy) < cfg.max_positions
+       - killswitch.query("killswitch_state").tripped == false  (workflow-not-found → fail-closed)
+       - count_running_position_workflows: listWorkflowExecutions(
+           WorkflowType='PositionWorkflow' AND
+           TenantStrategy='t-<t>/s-<s>' AND
+           ExecutionStatus='Running') < cfg.max_positions
      if not Allowed: audit.log(SignalRejected); return
-  4. contract = contract_resolver.resolve(
-       ticker, expiry, strike, right, cfg.broker_target)    [contract queue]
-       → OCC symbol, bid, ask, mid
-  5. qty = sizing.from_cfg(cfg, payload.price)
+  4. contract = contract.resolve(                           [in-process activity]
+       ticker, expiry, strike, right, cfg.broker_target)
+       → OCC symbol, bid, ask, mid (cached in option_symbol_cache)
+  5. allocation = capital_allocator.for_strategy(tenant, strategy) * cfg.capital_weight
+     qty        = clamp(floor(allocation / (payload.price * 100)),
+                        cfg.min_contracts, cfg.max_contracts)
   6. intent_key = workflow_id + ":entry"
      broker_order_id = exec.place_order(
        intent_key, contract, BUY, qty,
@@ -188,9 +211,13 @@ Paper + live live on separate task queues so a misconfigured `broker_target` rou
   8. workflow.await(fill_received OR ttl_expired)
   9a. on fill:
         start_child PositionWorkflow(
-          id="t-<tenant>/s-<strategy>/pos/<OCC>",
+          id="t-<tenant>/s-<strategy>/pos/<OCC>/<signal_id>",   # entry_signal_id disambiguates re-BTO
+          search_attrs={TenantStrategy: "t-<t>/s-<s>",
+                        ContractSymbol: "<OCC>"},
           parent_close_policy=ABANDON,
           input=PositionWorkflowInput(contract, qty, entry_premium, source_signal_id))
+        # Cache OCC -> workflow_id in Redis (TTL = 1 trading day) for hot-path STC lookup.
+        redis.setex(f"pos:t-<t>/s-<s>:<OCC>", 86400, position_workflow_id)
         audit.log(EntryFilled); return
   9b. on TTL expiry:
         exec.cancel_order(broker_order_id)
@@ -207,15 +234,25 @@ Paper + live live on separate task queues so a misconfigured `broker_target` rou
   1. audit.log
   2. cfg = platform.strategy_get
   3. risk.check_exit (cheaper: killswitch + author whitelist only)
-  4. contract = contract_resolver.resolve_occ(ticker, expiry, strike, right)
+  4. contract = contract.resolve_occ(ticker, expiry, strike, right)   # in-process
   5. fraction = KeywordPartialMatcher.match(payload.tail, cfg.partial_fractions)
                 .orElse(cfg.default_stc_fraction)
-  6. position_id = f"t-{tenant}/s-{strategy}/pos/{OCC}"
-     if not position_exists(position_id):
-        # STC arrived before BTO filled. Buffer up to 90s.
+  6. # Find active PositionWorkflow for this OCC. Hot path: Redis cache.
+     #                                              Fallback: Visibility query.
+     position_id = redis.get(f"pos:t-<t>/s-<s>:{OCC}")
+     if not position_id:
+        results = listWorkflowExecutions(
+          WorkflowType='PositionWorkflow' AND
+          TenantStrategy='t-<t>/s-<s>' AND
+          ContractSymbol='{OCC}' AND
+          ExecutionStatus='Running')
+        position_id = results.first()?.workflow_id
+     if not position_id:
+        # STC arrived before BTO filled. Buffer up to 90s, re-check cache + Visibility.
         for _ in range(9):
            workflow.sleep(10s)
-           if position_exists(position_id): break
+           position_id = redis.get(...) or listWorkflowExecutions(...).first()
+           if position_id: break
         else:
            audit.log(OrphanSTC); return
      temporal.signal_workflow(position_id, "partial_exit",
@@ -283,28 +320,47 @@ Paper + live live on separate task queues so a misconfigured `broker_target` rou
 ### Kill switch flow
 
 ```
-Daily Schedule → start KillSwitchWorkflow("t-<tenant>/s-<strategy>/killswitch/<date>")
+One-time bootstrap per (tenant, strategy):
+   start KillSwitchWorkflow("t-<tenant>/s-<strategy>/killswitch",
+     search_attrs={TenantStrategy: "t-<tenant>/s-<strategy>"})
 
-KillSwitchWorkflow state: {tripped: false, reason: "", tripped_at: null}
+KillSwitchWorkflow (long-running, NOT a daily Schedule — survives DST/holidays/pauses):
+  state = {tripped: false, reason: "", tripped_at: null, trading_day: today}
 
-Internal timer activity (runs every 60s):
-   pnl = platform.daily_pnl(tenant, strategy)
-   if pnl < -cfg.daily_loss_threshold:
-      self.update("trip_killswitch", {reason="auto:daily_loss", value=pnl})
+  loop:
+    # Internal timer fires every 60s during market hours
+    workflow.sleep(60s)
+    if not platform.market_is_open(now):
+       if now > today.market_close:
+          # Reset daily counters; preserve manual-trip state across days only if operator chose to.
+          state.trading_day = next_market_open_date(now)
+          # continueAsNew keeps history bounded and refreshes search attributes
+          continueAsNew(state)
+          return
+       continue
+    pnl = platform.daily_pnl(tenant, strategy, state.trading_day)
+    if pnl < -cfg.daily_loss_threshold:
+       self.update("trip_killswitch", {reason="auto:daily_loss", value=pnl})
 
-trip_killswitch Update handler:
-   if not state.tripped:
-      state.tripped = true; state.reason = ...; state.tripped_at = workflow.now()
-      audit.log(KillSwitchTripped)
-      for wf_id in list_running_workflows(prefix="t-<tenant>/s-<strategy>/"):
-         signal_workflow(wf_id, "risk_breach", {reason})
+  trip_killswitch Update handler:
+    if not state.tripped:
+       state.tripped = true; state.reason = ...; state.tripped_at = workflow.now()
+       audit.log(KillSwitchTripped)
+       # Cascade via Search Attribute, not workflow-ID prefix
+       for wf in listWorkflowExecutions(
+            TenantStrategy='t-<tenant>/s-<strategy>' AND
+            ExecutionStatus='Running'):
+          if wf.workflow_id != self.workflow_id:
+             signal_workflow(wf.workflow_id, "risk_breach", {reason})
 
-risk-svc reads state via KillSwitchWorkflow.query("killswitch_state") on each entry.
+risk.check_entry reads state via KillSwitchWorkflow.query("killswitch_state").
+On workflow-not-found (e.g. cluster restart before bootstrap), the `risk.check_entry` Activity fails CLOSED — entries rejected with `kill_switch_unavailable` until the workflow is started.
 ```
 
 ## Cross-cutting concerns
 
-- **Idempotency layers** (4): sidecar `seen_ids.json` → Temporal `workflow_id` REJECT_DUPLICATE → `OrderIntentJournal` `intent_key` → broker `client_order_id`. Each layer protects a specific crash window; their composition gives "exactly one order per Discord line, ever."
+- **Idempotency layers** (3): Temporal `workflow_id` REJECT_DUPLICATE → `OrderIntentJournal` `intent_key` → broker `client_order_id`. Each layer protects a specific crash window; their composition gives "exactly one order per Discord line, ever." The sidecar maintains an in-memory dedupe LRU as a cost optimization (suppresses duplicate `start_workflow` RPCs across DOM polls); it is **not** a correctness layer, so the sidecar can run with replica >= 1 for HA.
+- **Workflow visibility**: self-hosted Temporal with **Advanced Visibility on Postgres 12+** (no Elasticsearch). Two custom Search Attributes (`TenantStrategy` and `ContractSymbol`) are registered at Phase 0 and stamped on every workflow start; all cross-workflow listing (max-positions check, killswitch fan-out, STC dispatch, `api-gateway` `GET /positions`) goes through `listWorkflowExecutions` filtered on these SAs plus `ExecutionStatus`. `WorkflowId STARTS_WITH` is **not** used — Temporal's SQL Visibility does not support it for the system `WorkflowId` field even on advanced visibility. Adequate to ~1M open workflows per namespace; ES revisitable only if ad-hoc audit text-search is later required.
 - **Multi-tenant scoping**: `(tenant_id, strategy_id)` on every payload + workflow ID prefix. CI guardrails:
   - `check_no_global_secrets.py` — credentials only via `SecretsResolver(tenant_id, ...)`.
   - `check_workflow_determinism.py` — workflow classes do not import `java.io.*`, `java.net.*`, `java.time.Clock`, `Math.random`, or call `System.currentTimeMillis()` / `Instant.now()` / `LocalDateTime.now()`.
@@ -322,7 +378,8 @@ risk-svc reads state via KillSwitchWorkflow.query("killswitch_state") on each en
 - **Retries**: per-Activity retry policies; non-retryable types (`InsufficientFundsError`, `InvalidContractError`, `AuthError`, `QuotaExceededError`, `KillSwitchActiveError`) short-circuit.
 - **Rate limits**: per-broker worker concurrency caps (Alpaca 200/min, Tradier 120/min, IBKR ~50/sec but with separate order rate-limiting).
 - **Live / paper separation**: separate Temporal task queues; CI guardrail blocks code paths that route paper to live.
-- **PositionWorkflow versioning**: `Workflow.getVersion(...)` checkpoints around any logic that may change across orchestrator-svc redeploys (exit ladder math, trail evaluation). New code paths run only on new positions; existing positions complete on old logic.
+- **Workflow input schema versioning**: every workflow-input DTO carries a `schema_version` integer field. Workers reject inputs whose `schema_version` is newer than the running build (forces orchestrator-svc rollback rather than ambiguous replay). The runbook for orchestrator-svc redeploy with running long-lived `PositionWorkflow`s lives at `docs/ops/orchestrator-redeploy.md` and offers two paths: (a) drain — pause new `start_child PositionWorkflow` calls, wait for existing to complete, deploy; (b) pin — bundle a versioned `contract/java` jar with each orchestrator release so both old-version and new-version workers can replay any in-flight workflow.
+- **PositionWorkflow code versioning**: `Workflow.getVersion(...)` checkpoints around any logic that may change across orchestrator-svc redeploys (exit ladder math, trail evaluation). New code paths run only on new positions; existing positions complete on old logic. Combined with `schema_version` above, this gives a documented "drain or pin" choice rather than ad-hoc replay surprises.
 
 ## Repo layout
 
@@ -355,10 +412,8 @@ oh-my-tradeagent/
 │   │   ├── pom.xml
 │   │   └── src/main/java/com/ohmytradeagent/orchestrator/
 │   │       ├── workflows/               # CopytradeSignalWorkflow, PositionWorkflow, ...
-│   │       ├── activities/              # workflow-local activities only
+│   │       ├── activities/              # in-process: risk gates, contract resolver, keyword matcher
 │   │       └── OrchestratorApplication.java
-│   ├── risk/
-│   ├── contract-resolver/
 │   ├── exec-alpaca/
 │   ├── exec-tradier/
 │   ├── exec-ibkr/                       # later phase
@@ -390,31 +445,33 @@ Python pieces (`contract/python`, `services/signal-source-discord`) are not Mave
 
 | Phase | Scope | Done when |
 |---|---|---|
-| **0. Skeleton + contract** | Maven root POM with `contract-java` module and a placeholder `audit` service. JSON Schema for `CopytradeSignalPayload` + `AuditEvent`. Generated Java DTOs + pydantic models. docker-compose with Temporal + Postgres + Redis + Prometheus + OTel collector. CI runs (Spotless / Checkstyle / `mvn verify` / contract round-trip). | `mvn verify` green; `docker compose up` brings up the stack; a hand-crafted `temporal workflow start CopytradeSignalWorkflow` on a placeholder workflow audit-logs the payload with `tenant_id=dev, strategy_id=copytrade-v1`. |
+| **0. Skeleton + contract** | Maven root POM with `contract-java` module and a placeholder `audit` service. JSON Schema for `CopytradeSignalPayload` + `AuditEvent` + `PositionWorkflowInput`, each carrying `schema_version`. Generated Java DTOs + pydantic models. docker-compose with Temporal + Postgres + Redis + Prometheus + OTel collector. **Temporal cluster configured for Advanced Visibility (Postgres 12+) and bootstrapped with custom Search Attributes `TenantStrategy` (Keyword) and `ContractSymbol` (Keyword).** CI runs (Spotless / Checkstyle / `mvn verify` / contract round-trip). | `mvn verify` green; `docker compose up` brings up the stack; `temporal operator search-attribute list` shows `TenantStrategy` and `ContractSymbol`; a hand-crafted `temporal workflow start CopytradeSignalWorkflow` with both SAs set audit-logs the payload and is discoverable via `listWorkflowExecutions(TenantStrategy='t-dev/s-copytrade-v1')`. |
 | **0b. Platform foundations** | `platform-svc` with `TenantRegistry`, `StrategyRegistry`, `SecretsResolver` (local-file backend), `QuotaTracker` (Redis skeleton — returns Allowed), `MarketCalendar`, `CapitalAllocator` (static `capital_weight`). Seed `tenants/dev/tenant.yaml` + `tenants/dev/strategies/copytrade-v1.yaml`. `audit-svc` append-only writes wired through jOOQ. CI guardrail `check_no_global_secrets.py` added. | Workflow can call `platform.strategy_get(tenant, strategy)` and receive `StrategyConfig` parsed from YAML; `SecretsResolver(tenant, "dummy")` returns the seed secret; `audit_log` writes a row to Postgres. CI blocks a PR that imports a credential outside `SecretsResolver`. |
-| **1. Sidecar → Temporal** | Port `services/discord-copytrade` from oh-my-opentrade. Replace HTTP `emit.py` with Temporal Python SDK `client.start_workflow`. Workflow body is a no-op that audit-logs the payload. Bootstrap container preserved for one-time Discord login. Parser unit tests ported. | A Discord post triggers a workflow with `workflow_id = "t-dev/s-copytrade-v1/sig/<message_id>:<i>"`. Re-posting the same message produces `WorkflowAlreadyExists` (durable dedupe verified). Parser tests pass (40+ adversarial cases). |
-| **2. Risk + contract resolver + exec paper (no exits yet)** | `risk-svc` with author whitelist + signal-age veto + killswitch read (returns false for now) + max-positions count via Temporal `listWorkflowExecutions`. `contract-resolver-svc` with OCC symbol generation + entry quote against chosen paper broker (Tradier sandbox recommended). `exec-svc-{broker}-paper` with `OrderIntentJournal` (jOOQ + Postgres) + place_order + cancel_order + get_order_status. Full BTO path wired in `CopytradeSignalWorkflow`. | A vetted BTO on Discord produces a paper option order with no duplicates under simulated `orchestrator-svc` crash + restart between journal write and broker call. Journal idempotency tests run in CI against `Testcontainers` Postgres. |
-| **3. PositionWorkflow + STC exits + BTO TTL** | `PositionWorkflow` (Java) with `partial_exit` signal handler, EOD/expiry timers, signal-id dedupe set, in-flight exit guard. `BTOEntryTimerWorkflow`. `CopytradeSignalWorkflow` STC branch with `KeywordPartialMatcher` + position lookup + signal dispatch. | One paper position: BTO → filled (PositionWorkflow starts) → STC "half out" → 50% closes → STC "out" → remainder closes → workflow completes. `TestWorkflowEnvironment` E2E test green. EOD timer at simulated 15:55 ET force-flattens. |
+| **1. Sidecar → Temporal** | Port `services/discord-copytrade` from oh-my-opentrade. Replace HTTP `emit.py` with Temporal Python SDK `client.start_workflow` that sets `TenantStrategy` Search Attribute on every start. Workflow body is a no-op that audit-logs the payload. Bootstrap container preserved for one-time Discord login. Sidecar uses in-memory LRU only (no `seen_ids.json`); supports replica >= 1. Parser unit tests ported. | A Discord post triggers a workflow with `workflow_id = "t-dev/s-copytrade-v1/sig/<message_id>:<i>"` and `TenantStrategy='t-dev/s-copytrade-v1'`. Re-posting the same message produces `WorkflowAlreadyExists` (durable dedupe verified). Two sidecar replicas running concurrently do not produce duplicate workflows. Parser tests pass (40+ adversarial cases). |
+| **2a. Risk + contract resolver (in-process; no broker)** | In-process `risk.check_entry` Activity (author whitelist + signal-age veto + killswitch read (returns false for now) + max-positions count via `listWorkflowExecutions(TenantStrategy=..., WorkflowType='PositionWorkflow', ExecutionStatus='Running')`). In-process `contract.resolve` Activity with deterministic OCC symbol generation + (deferred) broker `lookup` cross-check + `option_symbol_cache` (Postgres). Capital-weight sizing wired. No order placement yet. | A vetted BTO routes through risk → contract → audit-log only; rejected BTOs (bad author / stale / over max-positions) produce typed audit events; no `OrderIntent` is created. |
+| **2b. Exec paper (no exits yet)** | `exec-svc-tradier-paper` with `OrderIntentJournal` (jOOQ + Postgres) + `place_order` + `cancel_order` + `get_order_status`. Full BTO path wired in `CopytradeSignalWorkflow`; BTO TTL handled inline (no separate timer workflow yet). | A vetted BTO produces a paper option order with no duplicates under simulated `orchestrator-svc` crash + restart between journal write and broker call. Journal idempotency tests run in CI against `Testcontainers` Postgres. |
+| **3. PositionWorkflow + STC exits + BTO TTL** | `PositionWorkflow` (Java) with `partial_exit` signal handler, EOD/expiry timers, signal-id dedupe set, in-flight exit guard. `BTOEntryTimerWorkflow`. `CopytradeSignalWorkflow` STC branch with `KeywordPartialMatcher` + Redis-cached OCC→workflow_id lookup with Visibility fallback + signal dispatch. `ContractSymbol` SA set on every `PositionWorkflow`. | One paper position: BTO → filled (PositionWorkflow starts; cache populated) → STC "half out" → 50% closes → STC "out" → remainder closes → workflow completes. `TestWorkflowEnvironment` E2E test green. EOD timer at simulated 15:55 ET force-flattens. STC dispatched after orchestrator restart (cache cold) still finds the position via Visibility. |
 | **4. Trailing exit (CHANDELIER_TRAIL)** | `market-data-svc` streaming option quotes via broker WS; `subscribe_premium` Activity that fires `chandelier_tick` Signals into `PositionWorkflow`. `PositionWorkflow.arm_chandelier` handler + tick evaluation. First-partial-arms logic in STC flow. | After arm via simulated STC, an injected quote sequence reaching peak then giving back `cfg.trail_giveback_pct` triggers a full exit. |
-| **5. Kill switch + reconciliation + api-gateway** | `KillSwitchWorkflow` (daily Temporal Schedule) with `trip_killswitch` / `reset_killswitch` Updates, `risk_breach` cascade via `listWorkflowExecutions` + `signalWorkflow`. Auto-trip activity on daily-loss threshold. `ReconciliationWorkflow` (Temporal Schedule every 5 min + startup). `api-gateway` with `GET /positions`, `POST /killswitch/trip`, `POST /positions/:id/force-close`, `GET /audit`. | Tripping killswitch via REST halts new entries and force-closes open positions within 5s. Recon catches a manually-induced journal-broker mismatch and surfaces it via audit. |
+| **5. Kill switch + reconciliation + api-gateway** | `KillSwitchWorkflow` (long-running, `continueAsNew` daily) with `trip_killswitch` / `reset_killswitch` Updates, `risk_breach` cascade via `listWorkflowExecutions(TenantStrategy=...)` + `signalWorkflow`. Auto-trip activity on daily-loss threshold. `risk.check_entry` fails closed on missing kill-switch workflow. `ReconciliationWorkflow` (Temporal Schedule every 5 min + startup). `api-gateway` with `GET /positions`, `POST /killswitch/trip`, `POST /positions/:id/force-close`, `GET /audit`. | Tripping killswitch via REST halts new entries and force-closes open positions within 5s. Recon catches a manually-induced journal-broker mismatch and surfaces it via audit. Restarting Temporal cluster without the kill-switch workflow blocks all new entries with `kill_switch_unavailable`. |
+| **5b. Production topology + ops** | k8s manifests (or Nomad / docker-swarm, TBD); CI/CD pipeline (image build + push + deploy gates); on-call runbooks for `orchestrator-redeploy`, `discord-session-expired`, `temporal-cluster-down`, `kill-switch-stuck`, `journal-broker-mismatch`; secret-rotation policy (Vault transit / AWS-SM versioning); audit-log retention policy. Blue/green or drain-then-pin redeploy support for orchestrator-svc with running `PositionWorkflow`s. | A green redeploy of orchestrator-svc with 3+ running `PositionWorkflow`s completes with zero workflow stalls; runbook drills pass for at least 3 of the 5 documented incidents. |
 | **6. Multi-tenant production** | `SecretsResolver` Vault / AWS-SM adapter. `QuotaTracker` Redis enforcement at scale (real broker call counters, per-tenant concurrent-position caps). Per-tenant audit-log queries. Second tenant onboarded via `tenants/<id>/`. CI guardrail expanded to enforce tenant scoping on every Activity. | A second tenant runs side-by-side on isolated broker creds and isolated audit; quota exhaustion produces clean `QuotaExceededError` halts; cross-tenant queries return empty. |
-| **7. Live broker promotion** | `exec-svc-tradier-live` or `exec-svc-ibkr-live` wired with separate task queue; manual promotion flow (operator sign-off + N paper days of green metrics); per-strategy capital allocator producing live `contracts_per_signal`; live-only alerting (PagerDuty / Slack). | First tenant + strategy promoted under small-size constraints; live trade executes successfully; rollback path tested (revert `broker_target` in YAML; recon catches any in-flight live order). |
+| **7. Live broker promotion** | `exec-svc-tradier-live` or `exec-svc-ibkr-live` wired with separate task queue; manual promotion flow (operator sign-off + quantified paper metrics — see Issue #23); per-strategy capital allocator producing live `contracts_per_signal`; live-only alerting (PagerDuty / Slack). | First tenant + strategy promoted under small-size constraints; live trade executes successfully; rollback path tested (revert `broker_target` in YAML; recon catches any in-flight live order). |
 
 ## Open questions
 
-1. **Paper broker for options.** Tradier sandbox (recommended; full chains, OK fill simulation), Alpaca options paper (newer, less proven for sandbox), or IBKR paper (best fidelity, painful onboarding). Drives Phase 2 broker SDK choice.
+1. **Paper broker for options.** **Resolved (2026-05-13): Tradier sandbox** for Phases 2–5. Free, REST/JSON, full options chains, fast onboarding. Alpaca options paper deferred (newer, less proven for sandbox); IBKR paper rejected for v0 (onboarding tax wrong for a learning project). Live broker (Tradier live vs IBKR live) chosen at Phase 7. Known sandbox quirk: marketable limits fill effectively instantly with no realistic slippage — treat sandbox as a correctness harness, not a fill-quality harness.
 2. **Discord session refresh cadence.** When does `storage_state.json` invalidate, and how do we alert on it before the next post?
 3. **Reconciliation cadence.** 5 min default; do live options need 60s?
 4. **Market-data dependency in v0.** Defer trailing to Phase 4 (no market-data on Phase 2-3 critical path), or include from Phase 3? Recommend deferring.
 5. **PositionWorkflow versioning policy.** `Workflow.getVersion` at every change-point, vs blue/green orchestrator deploys waiting for positions to drain. Different tradeoffs; both supported by Temporal.
 6. **Audit-log retention.** Per-tenant configurable or single platform default; 30 / 90 / 365 days.
 7. **Quota policy defaults.** Initial values for broker calls/min, concurrent positions, concurrent workflows per tenant.
-8. **Sizing policy v0.** Static `contracts_per_signal` per strategy (simpler), or capital-weight-derived (`qty = floor(allocation / (price * 100))`, closer to the reference). Recommend static for Phase 2-3, capital-weight by Phase 6.
-9. **OCC-symbol generation source of truth.** Build deterministically from `(ticker, expiry, strike, right)` in `contract-resolver-svc`, vs query broker's list-contracts endpoint. Recommend deterministic + cross-check against broker.
+8. **Sizing policy v0.** **Resolved (2026-05-13): capital-weight from Phase 2** with floor + cap. Formula: `allocation = capital_per_strategy * cfg.capital_weight; qty = clamp(floor(allocation / (price * 100)), cfg.min_contracts, cfg.max_contracts)`. Defaults for paper: `min_contracts=1`, `max_contracts=5`. `CapitalAllocator` from Phase 0b is already on the path; deferring to Phase 6 was rejected because static `contracts_per_signal=1` skews capital footprint ~10× across signal price ranges (correctness, not polish). `strategy-config.json` schema gains `capital_weight`, `min_contracts`, `max_contracts`.
+9. **OCC-symbol generation source of truth.** **Resolved (2026-05-13): deterministic generation + broker `lookup` cross-check, cached.** `contract-resolver-svc` builds the canonical OCC symbol from `(ticker, expiry, strike, right)`, verifies via broker `lookup` (catches corporate-action suffixes like `AAPL1`), and caches the mapping in Postgres `option_symbol_cache` until next expiry. On generated-vs-broker mismatch: `audit.log(SymbolDriftDetected, {generated, broker_returned})`, use broker's symbol for the order, populate cache.
 10. **AVG handling.** Reference skips by default (`skip_avg=true`). Same here unless overridden per strategy.
-11. **Same-author re-BTO on a held contract.** Reference treats Pending/Open as a separate position. Same here, or merge into existing `PositionWorkflow`?
+11. **Same-author re-BTO on a held contract.** **Resolved (2026-05-13): each entry gets its own `PositionWorkflow`.** Workflow ID is `t-<t>/s-<s>/pos/<OCC>/<entry_signal_id>` (entry_signal_id disambiguates so `REJECT_DUPLICATE` does not block a same-day re-BTO on a contract that previously closed). STC dispatch finds the active position via `TenantStrategy + ContractSymbol + ExecutionStatus=Running` Visibility query (Redis-cached for hot path). If multiple positions are open on the same OCC, STC signals the oldest by start time. Mirrors the reference's Pending/Open separation.
 12. **Hot-reload of StrategyConfig.** v0 requires restart; v1+ may add a `platform.strategy_subscribe` push channel.
-13. **Listing running workflows by prefix.** Temporal supports `listWorkflowExecutions` with a search-attribute filter. Phase 2 needs `TenantId` + `StrategyId` as search attributes registered on the cluster — confirm cluster supports custom search attributes (Temporal Cloud yes; self-hosted requires Elasticsearch).
+13. **Listing running workflows by prefix.** **Resolved (2026-05-13, revised after architect review): self-hosted Temporal with Advanced Visibility on Postgres 12+ (no Elasticsearch), plus two custom Search Attributes (`TenantStrategy` Keyword, `ContractSymbol` Keyword) registered at Phase 0.** Initial design used `WorkflowId STARTS_WITH 't-<t>/s-<s>/...'` (Issue #1) but Temporal's SQL Visibility does **not** support `STARTS_WITH` on the system `WorkflowId` field, even on advanced visibility. SAs are exact-match Keyword queries that work on both standard and advanced visibility for Keyword type; we use advanced visibility specifically so `listWorkflowExecutions` supports rich queries and pagination at scale. STC dispatch additionally caches OCC→workflow_id in Redis to keep the hot path off Visibility latency.
 
 ## Prior art
 

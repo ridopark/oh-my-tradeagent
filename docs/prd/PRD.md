@@ -18,13 +18,13 @@ A Temporal-orchestrated microservice system that:
 
 - **Watches** one vetted Discord channel via a Playwright sidecar (Python, mirroring the reference).
 - **Parses** each BTO/STC/AVG line into a typed signal and starts a `CopytradeSignalWorkflow` keyed by `signal_id`. Temporal dedupes via `WorkflowIDReusePolicy=REJECT_DUPLICATE` — no shared-secret HTTP gateway, no in-memory dedupe map.
-- **Enforces deterministic gates** (author whitelist, max positions, signal-age veto, kill switch, position-size cap) in `risk-svc` before any broker call.
+- **Enforces deterministic gates** (author whitelist, max positions, signal-age veto, kill switch, position-size cap) as in-process Activities in the orchestrator before any broker call.
 - **Resolves the OCC contract symbol** and submits an idempotent option order through a broker-specific `exec-svc` worker, journaling the intent in Postgres **before** the broker API is hit so crash recovery has a single source of truth.
 - **Manages the position lifecycle** in a durable `PositionWorkflow` (one per open position) that converts subsequent STC signals to partial/full closes via Temporal Signals, arms a CHANDELIER_TRAIL on first partial, and force-flattens at EOD / option expiry.
 - **Isolates tenants** at the workflow ID prefix and at every Activity boundary: `(tenant_id, strategy_id)` is required on every payload, every audit event, every credential resolve.
 - **Audits everything**: append-only event log per tenant, queryable via api-gateway.
 
-The system is **durable** (Temporal replays workflows after crashes), **idempotent** (4-layer dedupe: sidecar `seen_ids` → Temporal `workflow_id` → `OrderIntentJournal` → broker `client_order_id`), **explainable** (every order traces back through workflow history to a specific Discord line + author), and **operator-overridable** (`force_close` Update, `trip_killswitch` Update).
+The system is **durable** (Temporal replays workflows after crashes), **idempotent** (3-layer dedupe: Temporal `workflow_id` → `OrderIntentJournal` → broker `client_order_id`; sidecar in-memory LRU is a cost-only optimization, not a correctness layer), **explainable** (every order traces back through workflow history to a specific Discord line + author), and **operator-overridable** (`force_close` Update, `trip_killswitch` Update).
 
 ## User Stories
 
@@ -41,7 +41,7 @@ The system is **durable** (Temporal replays workflows after crashes), **idempote
 11. As an operator, I want to query any running `PositionWorkflow` for current state (size, avg cost, in-flight exits, last signal), so that I can audit decisions in real time.
 12. As an operator, I want to force-close a specific position via a `force_close` Update on its `PositionWorkflow`, so that I can override the bot without taking it offline.
 13. As an operator, I want broker credentials resolved per-tenant via `SecretsResolver`, so that no code path can accidentally load a global key.
-14. As an operator, I want orders idempotent at four layers (sidecar dedupe, Temporal `workflow_id`, `OrderIntentJournal`, broker `client_order_id`), so that crashes between any two of them cannot double-fill.
+14. As an operator, I want orders idempotent at three layers (Temporal `workflow_id` REJECT_DUPLICATE, `OrderIntentJournal`, broker `client_order_id`), so that crashes between any two of them cannot double-fill. The sidecar's in-memory LRU is a cost optimization, not a correctness layer, so the sidecar can run with replica >= 1 for HA.
 15. As an operator, I want `ReconciliationWorkflow` to run on worker startup and every 5 minutes, comparing `OrderIntentJournal` to broker open orders, so that orphan orders (journal-no-broker, broker-no-journal, filled-but-not-acked) are surfaced quickly.
 16. As an operator, I want to add a second tenant without touching code, so that onboarding is mechanical.
 17. As an operator, I want per-tenant broker-call and concurrent-position quotas enforced by `QuotaTracker`, so that one tenant cannot starve another. (LLM-token slots exist in the contract for the future agentic phase; unused in v0.)
@@ -105,26 +105,28 @@ Longest-keyword-first matching so "all out" wins over "out". Table is per-strate
 - `CapitalAllocator.allocate(tenant_id, balance) -> Map<StrategyId, AllocatedCapital>` (static `capital_weight` for v0)
 - `AuditLogger.log(tenant_id, event) -> void`
 
-### Service inventory (8 Java + 1 Python sidecar)
+### Service inventory (6 Java + 1 Python sidecar)
 
 | Service | Language | Responsibility |
 |---|---|---|
-| `signal-source-discord` | Python | Playwright DOM watcher, parser, Temporal client (`start_workflow`). One container per `(tenant, strategy, channel)`. |
-| `orchestrator-svc` | Java | All Temporal workflows + workflow-local activities. |
-| `risk-svc` | Java | Deterministic gates as Activities. |
-| `contract-resolver-svc` | Java | OCC symbol resolution + read-only quote for entry pricing. |
+| `signal-source-discord` | Python | Playwright DOM watcher, parser, Temporal client (`start_workflow`). Replica >= 1 per `(tenant, strategy, channel)`; in-memory dedupe LRU is cost-only. |
+| `orchestrator-svc` | Java | All Temporal workflows + in-process Activities (risk gates, contract resolution, keyword matcher). |
 | `exec-svc-{alpaca,tradier,ibkr}` | Java | One per broker target; wraps `OrderIntentJournal`; runs on broker-specific task queue. |
 | `market-data-svc` | Java | Streaming option quotes for `PositionWorkflow.arm_chandelier`. |
 | `platform-svc` | Java | `TenantRegistry`, `StrategyRegistry`, `SecretsResolver`, `QuotaTracker`, `CapitalAllocator`, `MarketCalendar` Activities. |
 | `audit-svc` | Java | Append-only event log per `(tenant, strategy)`. |
 | `api-gateway` | Java | Operator REST: kill switch, force close, status, audit query. Translates HTTP to Temporal Signals/Queries/Updates. |
 
+Risk gates and contract resolution were originally split into `risk-svc` and `contract-resolver-svc`. Both were stateless except for a single Postgres cache and added a task-queue hop per invocation; they were folded into `orchestrator-svc` after architect review (Issue #8). The Java packages stay separate so they can be promoted to standalone services later if real load asymmetry appears.
+
 ### Architectural decisions
 
 - **Workflow-as-orchestrator, not service-call-graph orchestrator.** Sequencing lives in Temporal workflow code (Java), not in distributed event sagas or HTTP chains. The Risk → Place gate is in workflow code; a misbehaving service cannot bypass it.
 - **No LLM in copy-trade hot path.** The reference is fully deterministic; we keep it that way. LLM slots exist in `StrategyConfig` for the future agentic phase; unset in v0.
 - **Polyglot at the Temporal boundary.** Sidecar (Python) and orchestrator (Java) communicate via JSON-over-Temporal-wire, with DTOs generated from `contract/schemas/*.json` for both languages. No HTTP between sidecar and orchestrator.
-- **Idempotency in 4 layers** (sidecar `seen_ids`, Temporal `workflow_id`, `OrderIntentJournal`, broker `client_order_id`) because no single layer covers all crash points.
+- **Idempotency in 3 layers** (Temporal `workflow_id` REJECT_DUPLICATE, `OrderIntentJournal`, broker `client_order_id`) because no single layer covers all crash points. The sidecar's in-memory LRU is an optional cost optimization, not a correctness layer; sidecars run with replica >= 1.
+- **Advanced Visibility + custom Search Attributes** on the Temporal cluster from Phase 0. `TenantStrategy` (Keyword) on every workflow; `ContractSymbol` (Keyword) on `PositionWorkflow`. All cross-workflow listing (max-positions, killswitch fan-out, STC dispatch, operator REST) uses these SAs; `WorkflowId STARTS_WITH` is not used because Temporal's SQL Visibility does not support it on the system `WorkflowId` field.
+- **Workflow-input schema versioning is explicit.** Every workflow-input DTO carries a `schema_version` integer field. Workers reject inputs whose `schema_version` is newer than their build, forcing rollback rather than ambiguous replay.
 - **Paper as default; live promotion requires manual approval.** Paper and live use separate Temporal task queues so a misconfigured broker target routes to a queue with no worker, not to the wrong account.
 - **Pinned broker SDK versions and contract schema versions.** Bumping either is a deliberate operation, not a passive drift.
 - **PositionWorkflow versioning is explicit.** `Workflow.getVersion(...)` is wrapped around every change-point in long-lived workflows so in-flight positions complete on the code they started with.
@@ -132,7 +134,8 @@ Longest-keyword-first matching so "all out" wins over "out". Table is per-strate
 ### Schema decisions
 
 - Every signal, decision, order intent, fill, exit, audit event has a Pydantic/Java DTO generated from JSON Schema in `contract/schemas/`.
-- Non-retryable error types are typed (`InsufficientFundsError`, `InvalidContractError`, `AuthError`, `QuotaExceededError`, `KillSwitchActiveError`) so Temporal retry policies act on them precisely.
+- Every workflow-input DTO carries an integer `schema_version` field. Workers compare to their compiled-in version and reject newer inputs (forces orchestrator-svc rollback) rather than guessing through replay.
+- Non-retryable error types are typed (`InsufficientFundsError`, `InvalidContractError`, `AuthError`, `QuotaExceededError`, `KillSwitchActiveError`, `KillSwitchUnavailableError`) so Temporal retry policies act on them precisely.
 - Time-sensitive fields (`posted_at`, `submitted_at`, `filled_at`, `decided_at`) are RFC3339 UTC with explicit source-of-truth ownership: broker sets fill timestamps, sidecar sets `posted_at` from Discord DOM, workflow sets `decided_at`.
 
 ## Testing Decisions
@@ -189,7 +192,7 @@ For v0, the following are explicit non-goals:
 
 ### Idempotency is treated as financial risk
 
-Double-firing an option order in copy-trade is uniquely expensive: options are leveraged, sizes are small, and a duplicate can flip the position from "what the author posted" to "double-sized losing trade I didn't intend." The 4-layer idempotency is not paranoia; it accounts for the fact that any single layer has a non-zero failure mode under crash + retry. Each layer was added because the layer below it was insufficient to cover a specific real-world failure mode in the reference system.
+Double-firing an option order in copy-trade is uniquely expensive: options are leveraged, sizes are small, and a duplicate can flip the position from "what the author posted" to "double-sized losing trade I didn't intend." The 3-layer idempotency is not paranoia; it accounts for the fact that any single layer has a non-zero failure mode under crash + retry. Each layer was added because the layer below it was insufficient to cover a specific real-world failure mode in the reference system. The reference used a fourth, sidecar-local `seen_ids.json` layer, but the architect review (Issue #10) found it redundant once Temporal's durable `WorkflowIDReusePolicy=REJECT_DUPLICATE` is in place and showed it forced the sidecar to be a singleton — we keep an in-memory LRU as a cost-only optimization so the sidecar can run replicated.
 
 ### Why Temporal, specifically
 
@@ -213,7 +216,7 @@ The strongest argument is broker fit: IBKR's TWS API is canonically Java + C++, 
 - Audit-log retention: per-tenant configurable or platform default; 30/90/365 days.
 - Quota policy defaults: initial values for broker calls/min, concurrent positions, concurrent workflows per tenant.
 - Sizing policy v0: static `contracts_per_signal` per strategy, or capital-weight-derived (`qty = floor(allocation / (price * 100))`). Static is simpler; capital-weight is closer to the reference.
-- OCC-symbol generation source of truth: build from `(ticker, expiry, strike, right)` deterministically in `contract-resolver-svc`, vs query broker. Recommend deterministic + cross-check against broker's list-contracts endpoint.
+- OCC-symbol generation source of truth: build from `(ticker, expiry, strike, right)` deterministically in the orchestrator's in-process `contract.resolve` Activity, vs query broker. Recommend deterministic + cross-check against broker's list-contracts endpoint.
 - AVG handling: reference skips by default (`skip_avg=true`). Same here unless overridden per strategy.
 - Same-author re-BTO on a held contract: reference treats `Pending`/`Open` as a separate position. Same here, or merge?
 - Hot-reload of `StrategyConfig`: v0 requires restart; v1+ may add a `platform.strategy_subscribe` push channel.
