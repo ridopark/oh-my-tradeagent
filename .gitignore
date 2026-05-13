@@ -1,0 +1,30 @@
+# Claude Code local config
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Java / Maven
+target/
+*.class
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+
+# Secrets
+.env
+*.env.local
+*.key
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
