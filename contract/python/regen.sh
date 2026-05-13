@@ -22,7 +22,8 @@ uv run datamodel-codegen \
   --use-schema-description \
   --collapse-root-models \
   --use-standard-collections \
-  --use-union-operator
+  --use-union-operator \
+  --disable-timestamp
 
 echo "Regenerated under $OUT_DIR/"
 find "$OUT_DIR" -name '*.py' | sort
