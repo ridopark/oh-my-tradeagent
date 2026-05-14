@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: market-data-svc
+
+temporal:
+  target: ${TEMPORAL_TARGET:localhost:7233}
+  namespace: ${TEMPORAL_NAMESPACE:default}
+  task-queue: ${TEMPORAL_TASK_QUEUE:market-data}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus

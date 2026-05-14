@@ -1,16 +1,22 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
+import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
+import com.ohmytradeagent.contract.PremiumTick;
+import com.ohmytradeagent.contract.SubscribePremiumRequest;
+import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
+import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -26,6 +32,11 @@ import java.util.Map;
  * #partialExit(PartialExitRequest)}, fills via {@link #onFill(FillEvent)}, and force-flattens on
  * EOD (15:55 ET) or expiry close (15:30 ET for 0DTE). Deterministic by construction — all time
  * reads go through {@link MarketCalendarActivities} or {@link Workflow}.
+ *
+ * <p>Phase 4 adds CHANDELIER_TRAIL: the CopytradeSignalWorkflow's STC branch may signal {@link
+ * #armChandelier(ArmChandelierPayload)} after the partial exit, which subscribes a premium stream
+ * via market-data-svc. Each {@link #chandelierTick(PremiumTick)} updates the peak and fires a
+ * flatten when the tick falls to or below {@code peak * (1 - giveback_pct)}.
  */
 public class PositionWorkflowImpl implements PositionWorkflow {
 
@@ -42,7 +53,19 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String KIND_EXPIRY_FORCE_FLATTENED = "ExpiryForceFlattened";
   private static final String KIND_POSITION_CLOSED = "PositionClosed";
 
+  // Phase 4 audit kinds
+  private static final String KIND_CHANDELIER_ARMED = "ChandelierArmed";
+  private static final String KIND_CHANDELIER_TRAIL_FIRED = "ChandelierTrailFired";
+  private static final String KIND_CHANDELIER_ARM_REJECTED = "ChandelierArmRejected";
+  private static final String KIND_CHANDELIER_SUBSCRIPTION_FAILED = "ChandelierSubscriptionFailed";
+  private static final String KIND_CHANDELIER_UNARMED_BY_EXIT = "ChandelierUnarmedByExit";
+
+  private static final String VERSION_CHANDELIER = "chandelier-v1";
+
+  private static final BigDecimal MAX_GIVEBACK = new BigDecimal("0.5");
+
   static final String EXEC_TASK_QUEUE_PAPER = CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_PAPER;
+  static final String MARKET_DATA_TASK_QUEUE = "market-data";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -58,6 +81,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               .setTaskQueue(EXEC_TASK_QUEUE_PAPER)
               .setStartToCloseTimeout(Duration.ofSeconds(15))
               .build());
+  private final SubscribePremiumActivity marketData =
+      Workflow.newActivityStub(
+          SubscribePremiumActivity.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(MARKET_DATA_TASK_QUEUE)
+              .setStartToCloseTimeout(Duration.ofSeconds(10))
+              .build());
 
   private PositionWorkflowInput input;
   private long remainingQty;
@@ -69,6 +99,39 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private String currentInFlightSignalId;
   private boolean eodFired;
   private boolean expiryFired;
+
+  // Phase 4: chandelier-trail state
+  private boolean trailingArmed;
+  private BigDecimal peakPremium;
+  private BigDecimal givebackPct;
+  private long ticksReceived;
+  private BigDecimal lastTickPremium;
+  private OffsetDateTime lastTickAt;
+
+  /**
+   * Buffered arm payloads. Signal handlers only enqueue (no activity calls); the main loop drains
+   * and executes the subscribe activity. Keeps signal-processing deterministic and avoids two
+   * concurrent arm signals racing through {@code marketData.subscribePremium}.
+   */
+  private final ArrayDeque<ArmChandelierPayload> pendingArms = new ArrayDeque<>();
+
+  /**
+   * Buffered ticks. Drained by the main loop AFTER arm processing so the arm vs tick race ("arm and
+   * tick signals arrive in the same workflow task") never drops a fire-worthy tick.
+   */
+  private final ArrayDeque<PremiumTick> pendingTicks = new ArrayDeque<>();
+
+  /** True once a tick crosses the threshold; main loop fires the flatten. */
+  private boolean chandelierFireRequested;
+
+  /** Tick that triggered the fire — recorded so the audit subject carries trigger_premium. */
+  private PremiumTick fireTriggerTick;
+
+  /** Threshold at fire time — recorded for the audit subject. */
+  private BigDecimal fireThreshold;
+
+  /** Set when the workflow's own close logic flattens. Drives the un-armed-by-exit audit. */
+  private String closeReason;
 
   @Override
   public String run(PositionWorkflowInput in) {
@@ -108,16 +171,49 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
 
     while (remainingQty > 0 && !eodFired && !expiryFired) {
-      Workflow.await(() -> !pendingExits.isEmpty() || eodFired || expiryFired || remainingQty == 0);
+      Workflow.await(
+          () ->
+              !pendingExits.isEmpty()
+                  || !pendingArms.isEmpty()
+                  || !pendingTicks.isEmpty()
+                  || chandelierFireRequested
+                  || eodFired
+                  || expiryFired
+                  || remainingQty == 0);
       if (eodFired || expiryFired || remainingQty == 0) {
         break;
       }
-      PartialExitRequest req = pendingExits.poll();
-      processOne(req);
+      // Drain arms first so a co-arriving tick sees armed=true.
+      while (!pendingArms.isEmpty()) {
+        processArm(pendingArms.poll());
+      }
+      // Then drain ticks; processTick latches chandelierFireRequested on threshold breach.
+      while (!pendingTicks.isEmpty()) {
+        processTick(pendingTicks.poll());
+      }
+      if (chandelierFireRequested) {
+        chandelierFireRequested = false;
+        fireChandelier();
+        // flattenRemaining sets remainingQty=0 -> next iteration exits the loop.
+        continue;
+      }
+      if (!pendingExits.isEmpty()) {
+        PartialExitRequest req = pendingExits.poll();
+        processOne(req);
+      }
     }
 
     if (eodFired || expiryFired) {
       flattenRemaining(eodFired ? "eod" : "expiry");
+    }
+
+    // Phase 4: if the position closed via a non-chandelier path while the trail was armed, audit
+    // that the trail was torn down by the exit.
+    if (trailingArmed) {
+      String reason = closeReason != null ? closeReason : "normal_stc";
+      if (!"chandelier_trail".equals(reason)) {
+        auditLog(KIND_CHANDELIER_UNARMED_BY_EXIT, subject("reason", reason));
+      }
     }
 
     auditLog(
@@ -132,6 +228,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   @Override
   public void partialExit(PartialExitRequest req) {
+    // Phase 3 latent-bug fix: if the position is already drained, surface a clear audit instead of
+    // recording a "duplicate_signal_id" muddle.
+    if (remainingQty <= 0) {
+      auditLog(
+          KIND_EXIT_DUPLICATE_SUPPRESSED,
+          subject("signal_id", req.getSignalId(), "note", "position_already_drained"));
+      return;
+    }
     if (!processedSignalIds.add(req.getSignalId())) {
       auditLog(
           KIND_EXIT_DUPLICATE_SUPPRESSED,
@@ -162,6 +266,143 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   @Override
   public void onFill(FillEvent event) {
     this.lastFillEvent = event;
+  }
+
+  @Override
+  public void armChandelier(ArmChandelierPayload p) {
+    int v = Workflow.getVersion(VERSION_CHANDELIER, Workflow.DEFAULT_VERSION, 1);
+    if (v == Workflow.DEFAULT_VERSION) {
+      return;
+    }
+    // Buffer only — main loop performs validation and the subscribe activity to keep signal
+    // handlers free of activity calls (deterministic-by-default pattern, matches partialExit).
+    pendingArms.add(p);
+  }
+
+  @Override
+  public void chandelierTick(PremiumTick tick) {
+    int v = Workflow.getVersion(VERSION_CHANDELIER, Workflow.DEFAULT_VERSION, 1);
+    if (v == Workflow.DEFAULT_VERSION) {
+      return;
+    }
+    // Buffer only — main loop drains AFTER arms so a co-arriving arm+tick pair fires correctly.
+    pendingTicks.add(tick);
+  }
+
+  /** Main-loop tick processor: drops ticks while unarmed, ratchets the peak, latches on breach. */
+  private void processTick(PremiumTick tick) {
+    if (!trailingArmed) {
+      return;
+    }
+    ticksReceived++;
+    lastTickPremium = tick.getPremium();
+    lastTickAt = tick.getRetrievedAt();
+
+    if (tick.getPremium().compareTo(peakPremium) > 0) {
+      peakPremium = tick.getPremium();
+    }
+    BigDecimal threshold = peakPremium.multiply(BigDecimal.ONE.subtract(givebackPct));
+    if (tick.getPremium().compareTo(threshold) <= 0 && !chandelierFireRequested) {
+      chandelierFireRequested = true;
+      fireTriggerTick = tick;
+      fireThreshold = threshold;
+    }
+  }
+
+  /** Main-loop arm processor: validates, calls the subscribe activity, mutates state. */
+  private void processArm(ArmChandelierPayload p) {
+    if (trailingArmed) {
+      // Idempotent — second arm is a silent no-op (no audit, KISS).
+      return;
+    }
+    BigDecimal peak = p.getPeakPremium();
+    BigDecimal gb = p.getGivebackPct();
+    if (peak == null || peak.signum() <= 0) {
+      auditLog(
+          KIND_CHANDELIER_ARM_REJECTED,
+          subject(
+              "reason",
+              "invalid_peak",
+              "source_signal_id",
+              p.getSourceSignalId(),
+              "peak_premium",
+              peak));
+      return;
+    }
+    if (gb == null || gb.signum() <= 0 || gb.compareTo(MAX_GIVEBACK) > 0) {
+      auditLog(
+          KIND_CHANDELIER_ARM_REJECTED,
+          subject(
+              "reason",
+              "invalid_giveback",
+              "source_signal_id",
+              p.getSourceSignalId(),
+              "giveback_pct",
+              gb));
+      return;
+    }
+
+    SubscribePremiumRequest req = new SubscribePremiumRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId(input.getTenantId());
+    req.setStrategyId(input.getStrategyId());
+    req.setContractSymbol(input.getContractSymbol());
+    req.setPositionWorkflowId(Workflow.getInfo().getWorkflowId());
+
+    SubscribePremiumResult res = marketData.subscribePremium(req);
+    if (res.getStatus() == SubscribePremiumResult.Status.FAILED) {
+      auditLog(
+          KIND_CHANDELIER_SUBSCRIPTION_FAILED,
+          subject(
+              "source_signal_id", p.getSourceSignalId(),
+              "error", res.getError()));
+      return;
+    }
+
+    trailingArmed = true;
+    peakPremium = peak;
+    givebackPct = gb;
+    auditLog(
+        KIND_CHANDELIER_ARMED,
+        subject(
+            "source_signal_id",
+            p.getSourceSignalId(),
+            "peak_premium",
+            peak,
+            "giveback_pct",
+            gb,
+            "subscription_id",
+            res.getSubscriptionId()));
+  }
+
+  /** Main-loop chandelier fire handler. Emits the audit then flattens the remaining quantity. */
+  private void fireChandelier() {
+    auditLog(
+        KIND_CHANDELIER_TRAIL_FIRED,
+        subject(
+            "peak_premium", peakPremium,
+            "trigger_premium", fireTriggerTick.getPremium(),
+            "threshold", fireThreshold,
+            "giveback_pct", givebackPct,
+            "remaining_qty", remainingQty));
+    closeReason = "chandelier_trail";
+    flattenRemaining("chandelier_trail");
+  }
+
+  @Override
+  public TrailingState trailingState() {
+    BigDecimal threshold =
+        (trailingArmed && peakPremium != null && givebackPct != null)
+            ? peakPremium.multiply(BigDecimal.ONE.subtract(givebackPct))
+            : null;
+    return new TrailingState(
+        trailingArmed,
+        peakPremium,
+        givebackPct,
+        threshold,
+        lastTickPremium,
+        lastTickAt,
+        ticksReceived);
   }
 
   private void processOne(PartialExitRequest req) {
@@ -206,22 +447,42 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       exitInFlight = false;
       currentInFlightBrokerOrderId = null;
       currentInFlightSignalId = null;
+      if (remainingQty == 0 && closeReason == null) {
+        closeReason = "normal_stc";
+      }
     }
     // On EOD/expiry pre-emption we leave exitInFlight/currentInFlightSignalId set so
     // flattenRemaining() can cancel the still-open broker order.
   }
 
   private void flattenRemaining(String reason) {
-    String kindReq =
-        "eod".equals(reason)
-            ? KIND_EOD_FORCE_FLATTEN_REQUESTED
-            : KIND_EXPIRY_FORCE_FLATTEN_REQUESTED;
+    String kindReq;
+    String kindDone;
+    if ("eod".equals(reason)) {
+      kindReq = KIND_EOD_FORCE_FLATTEN_REQUESTED;
+      kindDone = KIND_EOD_FORCE_FLATTENED;
+    } else if ("expiry".equals(reason)) {
+      kindReq = KIND_EXPIRY_FORCE_FLATTEN_REQUESTED;
+      kindDone = KIND_EXPIRY_FORCE_FLATTENED;
+    } else {
+      // chandelier_trail or other Phase 4+ reasons: re-use the EOD audit kinds so downstream
+      // dashboards see a single force-flatten pattern (the audit subject carries `reason` for
+      // disambiguation via the existing ChandelierTrailFired event).
+      kindReq = KIND_EOD_FORCE_FLATTEN_REQUESTED;
+      kindDone = KIND_EOD_FORCE_FLATTENED;
+    }
+
     auditLog(
         kindReq,
         subject(
-            "entry_signal_id", input.getEntrySignalId(),
-            "contract_symbol", input.getContractSymbol(),
-            "remaining_qty", remainingQty));
+            "entry_signal_id",
+            input.getEntrySignalId(),
+            "contract_symbol",
+            input.getContractSymbol(),
+            "remaining_qty",
+            remainingQty,
+            "reason",
+            reason));
 
     if (exitInFlight && currentInFlightSignalId != null) {
       String intentKey = Workflow.getInfo().getWorkflowId() + ":exit:" + currentInFlightSignalId;
@@ -242,14 +503,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       exec.placeOrder(intent);
       long flattened = remainingQty;
       remainingQty = 0;
-      String kindDone =
-          "eod".equals(reason) ? KIND_EOD_FORCE_FLATTENED : KIND_EXPIRY_FORCE_FLATTENED;
       auditLog(
           kindDone,
           subject(
-              "entry_signal_id", input.getEntrySignalId(),
-              "contract_symbol", input.getContractSymbol(),
-              "qty_flattened", flattened));
+              "entry_signal_id",
+              input.getEntrySignalId(),
+              "contract_symbol",
+              input.getContractSymbol(),
+              "qty_flattened",
+              flattened,
+              "reason",
+              reason));
     } catch (RuntimeException e) {
       auditLog(
           KIND_EOD_FORCE_FLATTEN_FAILED,
@@ -257,6 +521,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               "entry_signal_id", input.getEntrySignalId(),
               "contract_symbol", input.getContractSymbol(),
               "error", e.getMessage(),
+              "reason", reason,
               "note", "orphan_until_phase_5_reconcile"));
     }
   }

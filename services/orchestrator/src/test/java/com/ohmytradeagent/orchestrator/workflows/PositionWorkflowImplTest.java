@@ -8,13 +8,17 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
+import com.ohmytradeagent.contract.PremiumTick;
+import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
+import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -39,6 +43,7 @@ class PositionWorkflowImplTest {
   private AuditActivities audit;
   private ExecActivities exec;
   private MarketCalendarActivities calendar;
+  private SubscribePremiumActivity marketData;
 
   @BeforeEach
   void setUp() {
@@ -49,16 +54,62 @@ class PositionWorkflowImplTest {
     audit = Mockito.mock(AuditActivities.class);
     calendar = Mockito.mock(MarketCalendarActivities.class);
     exec = Mockito.mock(ExecActivities.class);
+    marketData = Mockito.mock(SubscribePremiumActivity.class);
 
     // Default calendar: no EOD/expiry pressure
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
     when(calendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+    // Default market-data: subscription succeeds.
+    when(marketData.subscribePremium(any())).thenReturn(subscribedResult());
 
     coreWorker.registerActivitiesImplementations(audit, calendar);
     Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_PAPER);
     brokerWorker.registerActivitiesImplementations(exec);
+    Worker mdWorker = env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
+    mdWorker.registerActivitiesImplementations(marketData);
 
     env.start();
+  }
+
+  private static SubscribePremiumResult subscribedResult() {
+    SubscribePremiumResult r = new SubscribePremiumResult();
+    r.setSchemaVersion(1L);
+    r.setSubscriptionId("sub-test");
+    r.setSubscribedAt(OffsetDateTime.now());
+    r.setStatus(SubscribePremiumResult.Status.SUBSCRIBED);
+    return r;
+  }
+
+  private static SubscribePremiumResult failedSubscription(String error) {
+    SubscribePremiumResult r = new SubscribePremiumResult();
+    r.setSchemaVersion(1L);
+    r.setSubscriptionId("");
+    r.setSubscribedAt(OffsetDateTime.now());
+    r.setStatus(SubscribePremiumResult.Status.FAILED);
+    r.setError(error);
+    return r;
+  }
+
+  private ArmChandelierPayload armPayload(
+      String posWfId, String sourceSignalId, BigDecimal peak, BigDecimal giveback) {
+    ArmChandelierPayload p = new ArmChandelierPayload();
+    p.setSchemaVersion(1L);
+    p.setTenantId("dev");
+    p.setStrategyId("copytrade-v1");
+    p.setPositionWorkflowId(posWfId);
+    p.setSourceSignalId(sourceSignalId);
+    p.setPeakPremium(peak);
+    p.setGivebackPct(giveback);
+    return p;
+  }
+
+  private PremiumTick tick(BigDecimal premium) {
+    PremiumTick t = new PremiumTick();
+    t.setSchemaVersion(1L);
+    t.setContractSymbol("NVDA  260516C00140000");
+    t.setPremium(premium);
+    t.setRetrievedAt(OffsetDateTime.now());
+    return t;
   }
 
   @AfterEach
@@ -202,6 +253,219 @@ class PositionWorkflowImplTest {
     verify(exec, atLeastOnce()).cancelOrder(anyString());
     captureKind("EodForceFlattenRequested");
     captureKind("EodForceFlattened");
+  }
+
+  // ---------- Phase 4: CHANDELIER_TRAIL ----------
+
+  @Test
+  void armChandelier_validInput_armsAndAuditsChandelierArmed() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-arm-valid");
+    WorkflowStub.fromTyped(stub).start(input(5));
+
+    stub.armChandelier(
+        armPayload("pos-arm-valid", "src-sig-1", new BigDecimal("2.85"), new BigDecimal("0.15")));
+
+    // Drain to completion so the workflow terminates cleanly.
+    stub.partialExit(partialExitRequest("sig-close", "pos-arm-valid", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-x", 5L, new BigDecimal("3.10"), OffsetDateTime.now()));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent armed = captureKind("ChandelierArmed");
+    assertThat(armed.getSubject())
+        .containsEntry("source_signal_id", "src-sig-1")
+        .containsEntry("subscription_id", "sub-test");
+    assertThat(((Number) armed.getSubject().get("peak_premium")).doubleValue()).isEqualTo(2.85);
+    assertThat(((Number) armed.getSubject().get("giveback_pct")).doubleValue()).isEqualTo(0.15);
+  }
+
+  @Test
+  void armChandelier_invalidPeak_rejectsAndAuditsArmRejected() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-arm-bad-peak");
+    WorkflowStub.fromTyped(stub).start(input(3));
+
+    stub.armChandelier(armPayload("pos-arm-bad-peak", "src-sig-bp", null, new BigDecimal("0.15")));
+
+    stub.partialExit(partialExitRequest("sig-close", "pos-arm-bad-peak", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent rej = captureKind("ChandelierArmRejected");
+    assertThat(rej.getSubject()).containsEntry("reason", "invalid_peak");
+  }
+
+  @Test
+  void armChandelier_invalidGiveback_rejectsAndAuditsArmRejected() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-arm-bad-gb");
+    WorkflowStub.fromTyped(stub).start(input(3));
+
+    stub.armChandelier(
+        armPayload("pos-arm-bad-gb", "src-sig-bg", new BigDecimal("2.85"), new BigDecimal("0.60")));
+
+    stub.partialExit(partialExitRequest("sig-close", "pos-arm-bad-gb", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent rej = captureKind("ChandelierArmRejected");
+    assertThat(rej.getSubject()).containsEntry("reason", "invalid_giveback");
+  }
+
+  @Test
+  void armChandelier_subscribeReturnsFailed_auditsSubscriptionFailedAndStaysUnarmed()
+      throws Exception {
+    when(marketData.subscribePremium(any())).thenReturn(failedSubscription("upstream down"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-arm-subfail");
+    WorkflowStub.fromTyped(stub).start(input(3));
+
+    stub.armChandelier(
+        armPayload(
+            "pos-arm-subfail", "src-sig-sf", new BigDecimal("2.85"), new BigDecimal("0.15")));
+
+    // A subsequent tick must NOT fire (workflow not armed).
+    stub.chandelierTick(tick(new BigDecimal("2.40")));
+
+    stub.partialExit(partialExitRequest("sig-close", "pos-arm-subfail", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent failed = captureKind("ChandelierSubscriptionFailed");
+    assertThat(failed.getSubject())
+        .containsEntry("source_signal_id", "src-sig-sf")
+        .containsEntry("error", "upstream down");
+
+    // No fire event.
+    assertThat(captureAll("ChandelierTrailFired")).isEmpty();
+  }
+
+  @Test
+  void armChandelier_secondArm_isNoOp() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-arm-second");
+    WorkflowStub.fromTyped(stub).start(input(3));
+
+    stub.armChandelier(
+        armPayload("pos-arm-second", "src-sig-A", new BigDecimal("2.85"), new BigDecimal("0.15")));
+    stub.armChandelier(
+        armPayload("pos-arm-second", "src-sig-B", new BigDecimal("3.10"), new BigDecimal("0.10")));
+
+    stub.partialExit(partialExitRequest("sig-close", "pos-arm-second", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // Only one ChandelierArmed audit emitted.
+    assertThat(captureAll("ChandelierArmed")).hasSize(1);
+  }
+
+  @Test
+  void chandelierTick_beforeArm_ignored() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-tick-before-arm");
+    WorkflowStub.fromTyped(stub).start(input(3));
+
+    stub.chandelierTick(tick(new BigDecimal("1.00")));
+
+    stub.partialExit(partialExitRequest("sig-close", "pos-tick-before-arm", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    assertThat(captureAll("ChandelierTrailFired")).isEmpty();
+  }
+
+  @Test
+  void chandelierTick_belowPeakAboveThreshold_noFire() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-tick-near-no-fire");
+    WorkflowStub.fromTyped(stub).start(input(5));
+
+    // peak=3.00, gb=0.15 -> threshold = 3.00 * 0.85 = 2.55
+    stub.armChandelier(
+        armPayload(
+            "pos-tick-near-no-fire", "src-sig-1", new BigDecimal("3.00"), new BigDecimal("0.15")));
+    // tick=2.60 -> 2.60 > 2.55, no fire.
+    stub.chandelierTick(tick(new BigDecimal("2.60")));
+
+    stub.partialExit(partialExitRequest("sig-close", "pos-tick-near-no-fire", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-x", 5L, new BigDecimal("2.85"), OffsetDateTime.now()));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    assertThat(captureAll("ChandelierTrailFired")).isEmpty();
+  }
+
+  @Test
+  void chandelierTick_tickAtExactThreshold_fires() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-tick-exact-threshold");
+    WorkflowStub.fromTyped(stub).start(input(5));
+
+    // peak=3.00, gb=0.10 -> threshold = 2.70
+    stub.armChandelier(
+        armPayload(
+            "pos-tick-exact-threshold",
+            "src-sig-1",
+            new BigDecimal("3.00"),
+            new BigDecimal("0.10")));
+    // tick=2.70 -> tick <= threshold fires.
+    stub.chandelierTick(tick(new BigDecimal("2.70")));
+
+    // Workflow auto-flattens on fire; wait for the flatten placeOrder.
+    waitForPlaceOrderCount(1);
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent fired = captureKind("ChandelierTrailFired");
+    assertThat(((Number) fired.getSubject().get("threshold")).doubleValue()).isEqualTo(2.70);
+    assertThat(((Number) fired.getSubject().get("trigger_premium")).doubleValue()).isEqualTo(2.70);
+  }
+
+  @Test
+  void chandelierTick_risingThenGivebackBreach_firesFlattenRemaining() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-tick-rising");
+    WorkflowStub.fromTyped(stub).start(input(5));
+
+    stub.armChandelier(
+        armPayload("pos-tick-rising", "src-sig-1", new BigDecimal("3.00"), new BigDecimal("0.15")));
+    // Ratchet to 4.00 -> threshold = 4.00 * 0.85 = 3.40
+    stub.chandelierTick(tick(new BigDecimal("4.00")));
+    // 3.30 <= 3.40 -> fire
+    stub.chandelierTick(tick(new BigDecimal("3.30")));
+
+    waitForPlaceOrderCount(1);
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent fired = captureKind("ChandelierTrailFired");
+    assertThat(((Number) fired.getSubject().get("peak_premium")).doubleValue()).isEqualTo(4.00);
+    assertThat(((Number) fired.getSubject().get("threshold")).doubleValue()).isEqualTo(3.40);
+    assertThat(((Number) fired.getSubject().get("trigger_premium")).doubleValue()).isEqualTo(3.30);
+    assertThat(asLong(fired.getSubject().get("remaining_qty"))).isEqualTo(5L);
+  }
+
+  @Test
+  void chandelierUnarmedByExit_normalStcCompletes_emitsAuditWhenArmed() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-unarmed-stc");
+    WorkflowStub.fromTyped(stub).start(input(3));
+
+    stub.armChandelier(
+        armPayload("pos-unarmed-stc", "src-sig-1", new BigDecimal("2.85"), new BigDecimal("0.15")));
+
+    // Drain to remaining=0 via STC (not chandelier).
+    stub.partialExit(partialExitRequest("sig-close", "pos-unarmed-stc", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.10"), OffsetDateTime.now()));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent unarmed = captureKind("ChandelierUnarmedByExit");
+    assertThat(unarmed.getSubject()).containsEntry("reason", "normal_stc");
   }
 
   // ---------- helpers ----------

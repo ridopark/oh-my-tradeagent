@@ -14,6 +14,7 @@ import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
@@ -21,6 +22,7 @@ import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
@@ -53,6 +55,7 @@ class CopytradeSignalWorkflowImplTest {
   private ExecActivities exec;
   private PositionLookupActivities positionLookup;
   private MarketCalendarActivities calendar;
+  private SubscribePremiumActivity marketData;
 
   @BeforeEach
   void setUp() {
@@ -68,14 +71,23 @@ class CopytradeSignalWorkflowImplTest {
     exec = Mockito.mock(ExecActivities.class);
     positionLookup = Mockito.mock(PositionLookupActivities.class);
     calendar = Mockito.mock(MarketCalendarActivities.class);
+    marketData = Mockito.mock(SubscribePremiumActivity.class);
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
     when(calendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+    SubscribePremiumResult ok = new SubscribePremiumResult();
+    ok.setSchemaVersion(1L);
+    ok.setSubscriptionId("sub-test");
+    ok.setSubscribedAt(OffsetDateTime.now());
+    ok.setStatus(SubscribePremiumResult.Status.SUBSCRIBED);
+    when(marketData.subscribePremium(any())).thenReturn(ok);
 
     coreWorker.registerActivitiesImplementations(
         audit, strategy, risk, contract, positionLookup, calendar);
     // ExecActivities lives on the exec-svc task queue; register a separate worker.
     Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_PAPER);
     brokerWorker.registerActivitiesImplementations(exec);
+    Worker mdWorker = env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
+    mdWorker.registerActivitiesImplementations(marketData);
 
     env.start();
   }
@@ -242,6 +254,93 @@ class CopytradeSignalWorkflowImplTest {
     assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
     verify(positionLookup, atLeastOnce())
         .findPositionWorkflowId("dev", "copytrade-v1", "NVDA  260516C00140000");
+  }
+
+  @Test
+  void stcAction_trailOnPartialTrue_emitsChandelierArmRequested() {
+    StrategyConfig cfg = stcConfig();
+    cfg.setTrailOnPartial(true);
+    cfg.setTrailGivebackPct(new BigDecimal("0.15"));
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+
+    String posWfId = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-trail";
+    PositionWorkflow posStub =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                PositionWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId(posWfId)
+                    .build());
+    io.temporal.client.WorkflowStub.fromTyped(posStub).start(positionInput());
+
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(posWfId);
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setAction(CopytradeSignalPayload.Action.STC);
+    p.setTail("half out");
+    p.setSignalId("stc-trail-1");
+    runWorkflow(p);
+
+    capture("ExitRequested");
+    AuditEvent armReq = capture("ChandelierArmRequested");
+    assertThat(armReq.getSubject()).containsEntry("signal_id", "stc-trail-1");
+    assertThat(armReq.getSubject()).containsEntry("position_workflow_id", posWfId);
+    assertThat(((Number) armReq.getSubject().get("peak_premium")).doubleValue()).isEqualTo(2.30);
+    assertThat(((Number) armReq.getSubject().get("giveback_pct")).doubleValue()).isEqualTo(0.15);
+  }
+
+  @Test
+  void stcAction_trailOnPartialFalse_emitsOnlyExitRequested() {
+    StrategyConfig cfg = stcConfig();
+    cfg.setTrailOnPartial(false);
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+
+    String posWfId = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-no-trail";
+    PositionWorkflow posStub =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                PositionWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId(posWfId)
+                    .build());
+    io.temporal.client.WorkflowStub.fromTyped(posStub).start(positionInput());
+
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(posWfId);
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setAction(CopytradeSignalPayload.Action.STC);
+    p.setTail("half out");
+    p.setSignalId("stc-no-trail-1");
+    runWorkflow(p);
+
+    capture("ExitRequested");
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    assertThat(
+            all.getAllValues().stream().anyMatch(e -> "ChandelierArmRequested".equals(e.getKind())))
+        .isFalse();
   }
 
   private com.ohmytradeagent.contract.PositionWorkflowInput positionInput() {

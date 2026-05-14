@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/subscribe-premium-request.json",
+  "title": "SubscribePremiumRequest",
+  "description": "Phase 4: request from PositionWorkflow to market-data-svc to subscribe a premium stream for a contract. The market-data worker, on each tick, signals chandelier_tick on the named PositionWorkflow.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.SubscribePremiumRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "contract_symbol",
+    "position_workflow_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "contract_symbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OCC option symbol to subscribe."
+    },
+    "position_workflow_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target PositionWorkflow workflow_id to receive chandelier_tick signals."
+    }
+  }
+}

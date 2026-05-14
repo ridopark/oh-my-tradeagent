@@ -32,3 +32,7 @@ partial_fractions:
   trim: 0.25
 pending_ttl_paper_secs: 90
 pending_ttl_live_secs: 30
+
+# Phase 4 trailing exit
+trail_on_partial: true
+trail_giveback_pct: 0.15

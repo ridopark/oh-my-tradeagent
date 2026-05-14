@@ -14,6 +14,7 @@
     <module>services/audit</module>
     <module>services/orchestrator</module>
     <module>services/exec-tradier-paper</module>
+    <module>services/market-data</module>
   </modules>
 
   <properties>
