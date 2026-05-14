@@ -1,0 +1,203 @@
+"""Discord channel watcher.
+
+Single-responsibility: poll the channel DOM, parse new messages, hand each
+parsed signal to an ``Emitter``. The Emitter abstraction is the seam that
+makes the watcher unit-testable without Temporal — see ``tests/test_watcher.py``.
+
+The reference (oh-my-opentrade/services/discord-copytrade/watcher.py) persisted
+a ``seen_ids.json`` file as an idempotency layer. We drop that here: Temporal's
+``WorkflowIDReusePolicy=REJECT_DUPLICATE`` keyed on the signal_id is the durable
+dedupe. The in-memory ``OrderedDict`` LRU below is a cost optimization — it
+suppresses redundant ``start_workflow`` RPCs across DOM polls. Two replicas
+running concurrently are safe: at most one of them wins the Temporal start;
+the other gets a ``deduped=True`` ``EmitResult`` back from the Emitter.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import pathlib
+from collections import OrderedDict
+from datetime import datetime, timezone
+
+from ohmytradeagent_contract.models.copytrade_signal_payload import (
+    Action,
+    CopytradeSignalPayload,
+    Right,
+)
+from playwright.async_api import Page, async_playwright
+
+from .discord_dom import extract_recent
+from .emitter import Emitter
+from .parser import ParsedSignal, parse_message
+
+
+class _BoundedSeenLRU:
+    """Single-purpose data class: a bounded ordered set used as an LRU cache.
+
+    Extracted as a class so the eviction policy lives in one place rather than
+    being inlined in the watcher loop (SRP). The semantics intentionally match
+    only the watcher's needs — adding, membership testing, eviction on cap —
+    no general-purpose collection API.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        self._capacity = capacity
+        self._items: OrderedDict[str, None] = OrderedDict()
+
+    def add(self, key: str) -> None:
+        if key in self._items:
+            self._items.move_to_end(key)
+            return
+        self._items[key] = None
+        if len(self._items) > self._capacity:
+            self._items.popitem(last=False)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._items
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+class Watcher:
+    """Polling loop. Construct with a configured Emitter and state dir; call run()."""
+
+    DEFAULT_LRU_CAPACITY = 500
+    INITIAL_SCRAPE_LIMIT = 50
+    TICK_SCRAPE_LIMIT = 25
+    DOM_READY_TIMEOUT_MS = 30_000
+
+    def __init__(
+        self,
+        *,
+        channel_url: str,
+        state_dir: pathlib.Path,
+        emitter: Emitter,
+        tenant_id: str,
+        strategy_id: str,
+        log: logging.Logger,
+        poll_interval_secs: float,
+        lru_capacity: int = DEFAULT_LRU_CAPACITY,
+    ) -> None:
+        self._channel_url = channel_url
+        self._state_dir = state_dir
+        self._emitter = emitter
+        self._tenant_id = tenant_id
+        self._strategy_id = strategy_id
+        self._log = log
+        self._poll_interval = poll_interval_secs
+        self._heartbeat_path = state_dir / "heartbeat"
+        self._storage_state_path = state_dir / "storage_state.json"
+        self._seen = _BoundedSeenLRU(lru_capacity)
+
+    async def run(self) -> None:
+        if not self._storage_state_path.exists():
+            raise RuntimeError(
+                f"storage_state.json missing at {self._storage_state_path} "
+                "— run bootstrap first (see README)"
+            )
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(storage_state=str(self._storage_state_path))
+            page = await context.new_page()
+            self._log.info("navigating to %s", self._channel_url)
+            await page.goto(self._channel_url, wait_until="domcontentloaded")
+            await page.wait_for_selector(
+                'li[id^="chat-messages-"]', timeout=self.DOM_READY_TIMEOUT_MS
+            )
+
+            # Seed the LRU with currently-visible message IDs so a fresh
+            # process doesn't replay the channel backlog. Identical to the
+            # reference's "seed seen_ids on startup" behaviour.
+            initial = await extract_recent(page, limit=self.INITIAL_SCRAPE_LIMIT)
+            for m in initial:
+                self._seen.add(m.message_id)
+            self._log.info("seeded %d existing messages", len(self._seen))
+
+            while True:
+                try:
+                    await self._tick(page)
+                except Exception:  # noqa: BLE001
+                    self._log.exception("tick error")
+                self._heartbeat_path.touch()
+                await asyncio.sleep(self._poll_interval)
+
+    async def _tick(self, page: Page) -> None:
+        msgs = await extract_recent(page, limit=self.TICK_SCRAPE_LIMIT)
+        for m in msgs:
+            if m.message_id in self._seen:
+                continue
+            self._seen.add(m.message_id)
+            if not m.content.strip():
+                continue
+            parsed = parse_message(m.content)
+            if not parsed:
+                self._log.debug("no signal in message %s", m.message_id)
+                continue
+            for i, sig in enumerate(parsed):
+                payload = self._build_payload(
+                    message_id=m.message_id,
+                    line_index=i,
+                    author=m.author,
+                    posted_at_iso=m.timestamp_iso,
+                    sig=sig,
+                )
+                await self._emit_one(payload)
+
+    def _build_payload(
+        self,
+        *,
+        message_id: str,
+        line_index: int,
+        author: str,
+        posted_at_iso: str | None,
+        sig: ParsedSignal,
+    ) -> CopytradeSignalPayload:
+        # Compose pydantic model directly — DRY across the polyglot boundary:
+        # both Java orchestrator and Python sidecar consume the same schema.
+        posted_at = (
+            datetime.fromisoformat(posted_at_iso.replace("Z", "+00:00"))
+            if posted_at_iso
+            else datetime.now(timezone.utc)
+        )
+        return CopytradeSignalPayload(
+            schema_version=1,
+            tenant_id=self._tenant_id,
+            strategy_id=self._strategy_id,
+            signal_id=f"{message_id}:{line_index}",
+            message_id=message_id,
+            author=author,
+            posted_at=posted_at,
+            action=Action(sig.action),
+            ticker=sig.ticker,
+            expiry=sig.expiry,
+            strike=sig.strike,
+            right=Right(sig.right),
+            price=sig.price,
+            tail=sig.tail,
+            raw_line=sig.raw_line,
+        )
+
+    async def _emit_one(self, payload: CopytradeSignalPayload) -> None:
+        result = await self._emitter.emit(payload)
+        if result.deduped:
+            self._log.info(
+                "deduped %s (workflow_id=%s)", payload.signal_id, result.workflow_id
+            )
+            return
+        self._log.info(
+            "emitted %s %s %s %s%s @ %s (author=%s, workflow_id=%s)",
+            payload.action.value,
+            payload.ticker,
+            payload.expiry,
+            payload.strike,
+            payload.right.value,
+            payload.price,
+            payload.author,
+            result.workflow_id,
+        )
