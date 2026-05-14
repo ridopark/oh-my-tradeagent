@@ -158,10 +158,8 @@ class Watcher:
         posted_at_iso: str | None,
         sig: ParsedSignal,
     ) -> CopytradeSignalPayload:
-        # Compose pydantic model directly — DRY across the polyglot boundary:
-        # both Java orchestrator and Python sidecar consume the same schema.
         posted_at = (
-            datetime.fromisoformat(posted_at_iso.replace("Z", "+00:00"))
+            datetime.fromisoformat(posted_at_iso)
             if posted_at_iso
             else datetime.now(timezone.utc)
         )

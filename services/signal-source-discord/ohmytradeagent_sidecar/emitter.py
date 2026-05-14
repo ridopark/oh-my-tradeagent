@@ -26,7 +26,6 @@ from temporalio.common import (
     WorkflowIDReusePolicy,
 )
 from temporalio.exceptions import WorkflowAlreadyStartedError
-from temporalio.service import RPCError, RPCStatusCode
 
 
 WORKFLOW_TYPE = "CopytradeSignalWorkflow"
@@ -100,10 +99,6 @@ class TemporalEmitter:
             return EmitResult(workflow_id=wf_id, deduped=False)
         except WorkflowAlreadyStartedError:
             return EmitResult(workflow_id=wf_id, deduped=True)
-        except RPCError as exc:
-            if exc.status == RPCStatusCode.ALREADY_EXISTS:
-                return EmitResult(workflow_id=wf_id, deduped=True)
-            raise
 
     async def close(self) -> None:
         # temporalio.Client has no explicit close; the gRPC channel is owned by
