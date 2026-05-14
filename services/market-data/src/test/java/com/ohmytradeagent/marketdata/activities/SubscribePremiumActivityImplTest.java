@@ -113,7 +113,7 @@ class SubscribePremiumActivityImplTest {
   }
 
   @Test
-  @Timeout(value = 30, unit = TimeUnit.SECONDS)
+  @Timeout(value = 60, unit = TimeUnit.SECONDS)
   void subscribeAndPushTick_signalsCapturingWorkflow() throws Exception {
     String posWfId = "pos-wf-test-1";
     CapturingWorkflow target =
@@ -144,9 +144,9 @@ class SubscribePremiumActivityImplTest {
         new BigDecimal("3.10"),
         OffsetDateTime.parse("2026-05-13T17:55:00Z"));
 
-    // 25s deadline (under the 30s @Timeout) — CI runners under load have hit 11s+ for signal
-    // propagation through TestWorkflowEnvironment; the prior 10s was too tight.
-    long deadline = System.currentTimeMillis() + 25_000;
+    // 50s deadline (under the 60s @Timeout) — CI runners under load have hit >25s for signal
+    // propagation through TestWorkflowEnvironment; the prior 25s was still too tight.
+    long deadline = System.currentTimeMillis() + 50_000;
     while (System.currentTimeMillis() < deadline && TickCapture.lastTick == null) {
       Thread.sleep(50);
     }
