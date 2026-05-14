@@ -66,6 +66,7 @@ jobs:
             5. Write the review to /tmp/review.md (start with the literal first line `${STICKY_MARKER}` so re-runs update in place).
             6. Post via the project helper:
                scripts/gh-sticky-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" "${STICKY_MARKER}" /tmp/review.md
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: "--allowed-tools 'Bash Read Grep'"
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -178,6 +179,7 @@ jobs:
                followed by `Findings & follow-ups` (severity-tagged) and `Verdict: READY TO MERGE | NEEDS FIXES | BLOCKED`.
             6. Post via the project helper:
                scripts/gh-sticky-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" "${STICKY_MARKER}" /tmp/qa-report.md
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: "--allowed-tools 'Bash Read Grep' --max-turns 40"
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
