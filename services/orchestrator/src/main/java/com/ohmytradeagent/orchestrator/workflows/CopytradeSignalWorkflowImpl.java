@@ -35,6 +35,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private static final String KIND_ENTRY_EXPIRED = "EntryExpired";
   private static final String KIND_ENTRY_FILLED = "EntryFilled";
 
+  private static final String REASON_TTL_EXPIRED = "ttl_expired";
+
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
 
@@ -59,7 +61,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               .setStartToCloseTimeout(Duration.ofSeconds(15))
               .build());
 
-  private volatile FillEvent fillEvent;
+  private FillEvent fillEvent;
 
   @Override
   public void onFill(FillEvent event) {
@@ -68,21 +70,21 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   @Override
   public String process(CopytradeSignalPayload payload) {
-    audit.log(
-        auditEvent(payload, KIND_SIGNAL_RECEIVED, Map.of("signal_id", payload.getSignalId())));
+    logAudit(payload, KIND_SIGNAL_RECEIVED, subject("signal_id", payload.getSignalId()));
 
     StrategyConfig config = strategy.get(payload.getTenantId(), payload.getStrategyId());
 
     RiskDecision decision = risk.checkEntry(payload, config);
     if (!decision.allowed()) {
-      Map<String, Object> subject = new LinkedHashMap<>();
-      subject.put("signal_id", payload.getSignalId());
-      subject.put("reason_code", decision.reason().name());
+      Map<String, Object> rejectSubject =
+          subject(
+              "signal_id", payload.getSignalId(),
+              "reason_code", decision.reason().name(),
+              "outcome", "REJECTED");
       if (decision.detail() != null) {
-        subject.put("reason_detail", decision.detail());
+        rejectSubject.put("reason_detail", decision.detail());
       }
-      subject.put("outcome", "REJECTED");
-      audit.log(auditEvent(payload, KIND_SIGNAL_REJECTED, subject));
+      logAudit(payload, KIND_SIGNAL_REJECTED, rejectSubject);
       return payload.getSignalId();
     }
 
@@ -92,75 +94,92 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
     long contracts = Sizing.computeContracts(payload, config, capital);
 
-    Map<String, Object> acceptedSubject = new LinkedHashMap<>();
-    acceptedSubject.put("signal_id", payload.getSignalId());
-    acceptedSubject.put("option_symbol", resolved.optionSymbol());
-    acceptedSubject.put("contracts", contracts);
-    acceptedSubject.put("ref_premium", payload.getPrice());
-    audit.log(auditEvent(payload, KIND_SIGNAL_ACCEPTED, acceptedSubject));
+    logAudit(
+        payload,
+        KIND_SIGNAL_ACCEPTED,
+        subject(
+            "signal_id", payload.getSignalId(),
+            "option_symbol", resolved.optionSymbol(),
+            "contracts", contracts,
+            "ref_premium", payload.getPrice()));
 
     String intentKey = Workflow.getInfo().getWorkflowId() + ":entry";
     OrderIntent intent = newIntent(payload, config, resolved, contracts, intentKey);
     OrderIntentResult placed = exec.placeOrder(intent);
 
-    Map<String, Object> submittedSubject = new LinkedHashMap<>();
-    submittedSubject.put("intent_key", placed.getIntentKey());
-    submittedSubject.put("broker_order_id", placed.getBrokerOrderId());
-    submittedSubject.put("option_symbol", resolved.optionSymbol());
-    submittedSubject.put("side", "BUY");
-    submittedSubject.put("qty", contracts);
-    submittedSubject.put("broker_target", config.getBrokerTarget().value());
-    audit.log(auditEvent(payload, KIND_ORDER_SUBMITTED, submittedSubject));
+    logAudit(
+        payload,
+        KIND_ORDER_SUBMITTED,
+        subject(
+            "intent_key", placed.getIntentKey(),
+            "broker_order_id", placed.getBrokerOrderId(),
+            "option_symbol", resolved.optionSymbol(),
+            "side", "BUY",
+            "qty", contracts,
+            "broker_target", config.getBrokerTarget().value()));
 
     long ttlSecs = pendingTtlSecs(config);
     boolean filled = Workflow.await(Duration.ofSeconds(ttlSecs), () -> fillEvent != null);
 
     if (filled) {
-      Map<String, Object> filledSubject = new LinkedHashMap<>();
-      filledSubject.put("signal_id", payload.getSignalId());
-      filledSubject.put("intent_key", placed.getIntentKey());
-      filledSubject.put("broker_order_id", fillEvent.brokerOrderId());
-      filledSubject.put("filled_qty", fillEvent.filledQty());
-      filledSubject.put("avg_fill_price", fillEvent.avgFillPrice());
-      filledSubject.put("outcome", "FILLED");
-      audit.log(auditEvent(payload, KIND_ENTRY_FILLED, filledSubject));
+      logAudit(
+          payload,
+          KIND_ENTRY_FILLED,
+          subject(
+              "signal_id", payload.getSignalId(),
+              "intent_key", placed.getIntentKey(),
+              "broker_order_id", fillEvent.brokerOrderId(),
+              "filled_qty", fillEvent.filledQty(),
+              "avg_fill_price", fillEvent.avgFillPrice(),
+              "outcome", "FILLED"));
       // Phase 3 hooks PositionWorkflow start here.
       return payload.getSignalId();
     }
 
-    // TTL expired — try to cancel the broker order.
-    Map<String, Object> cancelReqSubject = new LinkedHashMap<>();
-    cancelReqSubject.put("intent_key", placed.getIntentKey());
-    cancelReqSubject.put("broker_order_id", placed.getBrokerOrderId());
-    cancelReqSubject.put("reason", "ttl_expired");
-    audit.log(auditEvent(payload, KIND_ORDER_CANCEL_REQUESTED, cancelReqSubject));
+    handleTtlExpired(payload, placed, intentKey, ttlSecs);
+    return payload.getSignalId();
+  }
+
+  private void handleTtlExpired(
+      CopytradeSignalPayload payload, OrderIntentResult placed, String intentKey, long ttlSecs) {
+    logAudit(
+        payload,
+        KIND_ORDER_CANCEL_REQUESTED,
+        subject(
+            "intent_key", placed.getIntentKey(),
+            "broker_order_id", placed.getBrokerOrderId(),
+            "reason", REASON_TTL_EXPIRED));
 
     OrderIntentResult cancelResult = exec.cancelOrder(intentKey);
     if (cancelResult.getState() == OrderIntentResult.State.CANCELLED) {
-      Map<String, Object> cancelledSubject = new LinkedHashMap<>();
-      cancelledSubject.put("intent_key", placed.getIntentKey());
-      cancelledSubject.put("broker_order_id", placed.getBrokerOrderId());
-      cancelledSubject.put("reason", "ttl_expired");
-      audit.log(auditEvent(payload, KIND_ORDER_CANCELLED, cancelledSubject));
+      logAudit(
+          payload,
+          KIND_ORDER_CANCELLED,
+          subject(
+              "intent_key", placed.getIntentKey(),
+              "broker_order_id", placed.getBrokerOrderId(),
+              "reason", REASON_TTL_EXPIRED));
     } else {
-      Map<String, Object> cancelFailedSubject = new LinkedHashMap<>();
-      cancelFailedSubject.put("intent_key", placed.getIntentKey());
-      cancelFailedSubject.put("broker_order_id", placed.getBrokerOrderId());
-      cancelFailedSubject.put("broker_reason", cancelResult.getLastError());
-      cancelFailedSubject.put("severity", "ERROR");
-      cancelFailedSubject.put("note", "orphan_position_until_phase_3");
-      audit.log(auditEvent(payload, KIND_ORDER_CANCEL_FAILED, cancelFailedSubject));
+      logAudit(
+          payload,
+          KIND_ORDER_CANCEL_FAILED,
+          subject(
+              "intent_key", placed.getIntentKey(),
+              "broker_order_id", placed.getBrokerOrderId(),
+              "broker_reason", cancelResult.getLastError(),
+              "severity", "ERROR",
+              "note", "orphan_position_until_phase_3"));
     }
 
-    Map<String, Object> expiredSubject = new LinkedHashMap<>();
-    expiredSubject.put("signal_id", payload.getSignalId());
-    expiredSubject.put("intent_key", placed.getIntentKey());
-    expiredSubject.put("broker_order_id", placed.getBrokerOrderId());
-    expiredSubject.put("ttl_secs", ttlSecs);
-    expiredSubject.put("outcome", "EXPIRED");
-    audit.log(auditEvent(payload, KIND_ENTRY_EXPIRED, expiredSubject));
-
-    return payload.getSignalId();
+    logAudit(
+        payload,
+        KIND_ENTRY_EXPIRED,
+        subject(
+            "signal_id", payload.getSignalId(),
+            "intent_key", placed.getIntentKey(),
+            "broker_order_id", placed.getBrokerOrderId(),
+            "ttl_secs", ttlSecs,
+            "outcome", "EXPIRED"));
   }
 
   private long pendingTtlSecs(StrategyConfig config) {
@@ -187,6 +206,22 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     i.setLimitPrice(payload.getPrice());
     i.setRecordedAt(OffsetDateTime.now());
     return i;
+  }
+
+  private void logAudit(CopytradeSignalPayload payload, String kind, Map<String, Object> subject) {
+    audit.log(auditEvent(payload, kind, subject));
+  }
+
+  /** Builds an insertion-ordered subject map from alternating key/value varargs. */
+  private static Map<String, Object> subject(Object... kv) {
+    if ((kv.length & 1) != 0) {
+      throw new IllegalArgumentException("subject() requires an even number of key/value args");
+    }
+    Map<String, Object> m = new LinkedHashMap<>(kv.length);
+    for (int i = 0; i < kv.length; i += 2) {
+      m.put((String) kv[i], kv[i + 1]);
+    }
+    return m;
   }
 
   private AuditEvent auditEvent(
