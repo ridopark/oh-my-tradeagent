@@ -26,6 +26,7 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  id-token: write  # required by anthropics/claude-code-action@v1 OIDC flow
 
 concurrency:
   group: claude-pr-${{ github.event.pull_request.number }}
@@ -148,8 +149,7 @@ jobs:
                followed by `Findings & follow-ups` (severity-tagged) and `Verdict: READY TO MERGE | NEEDS FIXES | BLOCKED`.
             6. Post via the project helper:
                scripts/gh-sticky-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" "${STICKY_MARKER}" /tmp/qa-report.md
-          allowed_tools: "Bash,Read,Grep"
-          claude_args: "--max-turns 40"
+          claude_args: "--allowed-tools 'Bash Read Grep' --max-turns 40"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STICKY_MARKER: ${{ env.STICKY_MARKER }}

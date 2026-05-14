@@ -83,6 +83,15 @@ services:
           sleep 2
         done
 
+        echo "Waiting for default namespace (auto-setup is async on cold start)..."
+        for i in $$(seq 1 30); do
+          if temporal operator namespace describe default >/dev/null 2>&1; then
+            echo "default namespace ready."
+            break
+          fi
+          sleep 2
+        done
+
         register_sa() {
           name=$$1; type=$$2
           # Capture both output and exit code; distinguish "already exists" from real failures.
