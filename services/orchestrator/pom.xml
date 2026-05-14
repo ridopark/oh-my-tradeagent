@@ -40,6 +40,13 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-data-redis</artifactId>
     </dependency>
+    <!-- Provides JacksonAutoConfiguration's @Bean ObjectMapper, required by
+         AuditActivitiesImpl. The orchestrator-svc has no web stack, so we add the json
+         starter directly rather than pulling in spring-boot-starter-web. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-json</artifactId>
+    </dependency>
 
     <dependency>
       <groupId>org.flywaydb</groupId>

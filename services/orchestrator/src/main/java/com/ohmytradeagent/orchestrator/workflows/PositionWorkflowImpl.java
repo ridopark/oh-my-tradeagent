@@ -263,6 +263,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   @Override
   public void partialExit(PartialExitRequest req) {
+    // Temporal can dispatch signals before the @WorkflowMethod body has executed (the constructor
+    // ran, but `run(input)` hasn't reached `this.input = in` yet). In that race, `input` is null
+    // and
+    // every auditLog call below would NPE. Buffer the signal; the main loop drains pendingExits
+    // after init and applies the validation/audit logic uniformly via processOne.
+    if (input == null) {
+      pendingExits.add(req);
+      return;
+    }
     // Phase 3 latent-bug fix: if the position is already drained, surface a clear audit instead of
     // recording a "duplicate_signal_id" muddle.
     if (remainingQty <= 0) {
@@ -330,10 +339,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     if (v == Workflow.DEFAULT_VERSION) {
       return;
     }
-    auditLog(
-        KIND_RISK_BREACH_RECEIVED,
-        subject("reason", payload.getReason(), "actor", payload.getActor()));
     pendingRiskBreaches.add(payload);
+    // auditLog dereferences `input` — only safe once run() has assigned it. Skip the
+    // "received" audit on the signal-before-run race; processRiskBreach still emits ActedOn
+    // in the main loop after init.
+    if (input != null) {
+      auditLog(
+          KIND_RISK_BREACH_RECEIVED,
+          subject("reason", payload.getReason(), "actor", payload.getActor()));
+    }
   }
 
   @Override
@@ -365,6 +379,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     ForceCloseResult result = new ForceCloseResult();
     result.setSchemaVersion(1L);
     result.setExitSignalId(exitSignalId);
+
+    // Update can land before run() body executes; buffer the directive so the main loop processes
+    // it after init. ACCEPTED is the right semantic — the operator's exit_signal_id is the dedupe
+    // key, and the actual flatten happens once the workflow is fully initialized.
+    if (input == null) {
+      pendingForceCloses.add(
+          new ForceCloseDirective(request.getOperatorId(), request.getReason(), exitSignalId));
+      result.setStatus(ForceCloseResult.Status.ACCEPTED);
+      return result;
+    }
 
     if (remainingQty <= 0) {
       auditLog(
