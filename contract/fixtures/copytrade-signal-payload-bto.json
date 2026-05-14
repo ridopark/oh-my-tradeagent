@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "copytrade-v1",
+  "signal_id": "1234567890123456789:0",
+  "message_id": "1234567890123456789",
+  "author": "ridopark",
+  "posted_at": "2026-05-16T13:35:00Z",
+  "action": "BTO",
+  "ticker": "NVDA",
+  "expiry": "2026-05-16",
+  "strike": 140.0,
+  "right": "C",
+  "price": 2.30,
+  "tail": "small",
+  "raw_line": "BTO NVDA 5/16 140C @ 2.30 small"
+}

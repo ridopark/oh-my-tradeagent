@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0                              http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.ohmytradeagent</groupId>
+    <artifactId>oh-my-tradeagent-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>contract-java</artifactId>
+  <name>oh-my-tradeagent contract (Java DTOs)</name>
+  <description>Java DTOs generated from contract/schemas/*.json. Source of truth is the JSON Schema; do not hand-edit generated files.</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.jsonschema2pojo</groupId>
+        <artifactId>jsonschema2pojo-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>generate-contract-dtos</id>
+            <goals>
+              <goal>generate</goal>
+            </goals>
+            <phase>generate-sources</phase>
+            <configuration>
+              <sourceDirectory>${project.basedir}/../schemas</sourceDirectory>
+              <targetPackage>com.ohmytradeagent.contract</targetPackage>
+              <outputDirectory>${project.build.directory}/generated-sources/jsonschema2pojo</outputDirectory>
+              <annotationStyle>jackson2</annotationStyle>
+              <generateBuilders>true</generateBuilders>
+              <includeAdditionalProperties>false</includeAdditionalProperties>
+              <includeJsr303Annotations>false</includeJsr303Annotations>
+              <includeJsr305Annotations>false</includeJsr305Annotations>
+              <includeToString>true</includeToString>
+              <includeHashcodeAndEquals>true</includeHashcodeAndEquals>
+              <serializable>true</serializable>
+              <useTitleAsClassname>true</useTitleAsClassname>
+              <usePrimitives>false</usePrimitives>
+              <useBigDecimals>true</useBigDecimals>
+              <dateTimeType>java.time.OffsetDateTime</dateTimeType>
+              <dateType>java.time.LocalDate</dateType>
+              <sourceType>jsonschema</sourceType>
+              <useLongIntegers>true</useLongIntegers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <configuration>
+          <java>
+            <includes>
+              <include>src/**/*.java</include>
+            </includes>
+            <googleJavaFormat>
+              <version>1.25.2</version>
+              <style>GOOGLE</style>
+            </googleJavaFormat>
+            <removeUnusedImports/>
+            <trimTrailingWhitespace/>
+            <endWithNewline/>
+          </java>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
