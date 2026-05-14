@@ -83,18 +83,40 @@ services:
           sleep 2
         done
 
+        echo "Waiting for default namespace (auto-setup is async on cold start)..."
+        for i in $$(seq 1 30); do
+          if temporal operator namespace describe default >/dev/null 2>&1; then
+            echo "default namespace ready."
+            break
+          fi
+          sleep 2
+        done
+
         register_sa() {
           name=$$1; type=$$2
-          # Capture both output and exit code; distinguish "already exists" from real failures.
-          output=$$(temporal operator search-attribute create --name "$$name" --type "$$type" 2>&1) && rc=0 || rc=$$?
-          if echo "$$output" | grep -qiE "already exists|AlreadyExists"; then
-            echo "  $$name already registered."
-          elif [ "$$rc" -eq 0 ]; then
-            echo "  $$name registered ($$type)."
-          else
-            echo "  $$name FAILED to register (rc=$$rc): $$output" >&2
-            exit 1
-          fi
+          # auto-setup's visibility-manager init is async relative to the
+          # default namespace becoming describable; a sub-second window
+          # exists where this call returns "Namespace default is not found"
+          # transiently. Retry on that specific error for up to ~60s.
+          for attempt in $$(seq 1 30); do
+            output=$$(temporal operator search-attribute create --name "$$name" --type "$$type" 2>&1) && rc=0 || rc=$$?
+            if echo "$$output" | grep -qiE "already exists|AlreadyExists"; then
+              echo "  $$name already registered."
+              return 0
+            elif [ "$$rc" -eq 0 ]; then
+              echo "  $$name registered ($$type)."
+              return 0
+            elif echo "$$output" | grep -qiE "Namespace .* is not found|namespace not found"; then
+              [ "$$attempt" -eq 1 ] && echo "  $$name: visibility manager not ready yet, retrying..."
+              sleep 2
+              continue
+            else
+              echo "  $$name FAILED to register (rc=$$rc): $$output" >&2
+              return 1
+            fi
+          done
+          echo "  $$name FAILED: visibility manager never became ready after 60s" >&2
+          return 1
         }
 
         echo "Registering custom Search Attributes..."

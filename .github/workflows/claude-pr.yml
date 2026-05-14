@@ -1,0 +1,169 @@
+name: Claude review + QA
+
+# Runs Claude as a reviewer + a QA executor on every PR.
+#
+# Auth: uses CLAUDE_CODE_OAUTH_TOKEN (tied to a Claude Max subscription).
+# Generate with `claude setup-token` on a workstation logged into the Max
+# account, then add as a repo secret.
+#
+# Cost model: each PR sync triggers two jobs (paths-ignore short-circuits
+# docs-only PRs). The concurrency group cancels superseded runs.
+#
+# Fork-PR safety: GitHub does not expose repo secrets to runs from forks.
+# Both jobs gate on head.repo == base.repo so external contributors see a
+# clean skip instead of a hard failure at the action step.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "**/README*"
+      - ".gitignore"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write  # required by anthropics/claude-code-action@v1 OIDC flow
+
+concurrency:
+  group: claude-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Claude code review
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      STICKY_MARKER: "<!-- claude-code-review -->"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Code review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are reviewing PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            Steps:
+            1. Read `.claude/agents/code-reviewer.md` for the project review rubric.
+            2. `gh pr view ${{ github.event.pull_request.number }} --json title,body,headRefName,baseRefName`
+            3. `gh pr diff ${{ github.event.pull_request.number }}`
+            4. Produce a structured review:
+               - Overview (1-2 sentences)
+               - Findings (severity-tagged: blocker | major | minor | nit). Section by:
+                 * Correctness
+                 * Project conventions (Java 21 / Spring Boot 3 / Maven / jOOQ / Temporal Java SDK; Python 3.12 / pydantic v2 / Temporal Python SDK; JSON Schema as source of truth for cross-language DTOs)
+                 * Security
+                 * Test coverage
+               - Verdict: READY | NEEDS FIXES | BLOCKED
+            5. Write the review to /tmp/review.md (start with the literal first line `${STICKY_MARKER}` so re-runs update in place).
+            6. Post via the project helper:
+               scripts/gh-sticky-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" "${STICKY_MARKER}" /tmp/review.md
+          claude_args: "--allowed-tools 'Bash Read Grep'"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STICKY_MARKER: ${{ env.STICKY_MARKER }}
+
+  qa:
+    name: Claude QA (execute PR test plan)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      STICKY_MARKER: "<!-- claude-qa-report -->"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Bring up Temporal stack
+        run: |
+          docker compose -f infra/docker-compose.yml up -d postgres temporal temporal-bootstrap redis
+          for _ in $(seq 1 60); do
+            state=$(docker inspect -f '{{.State.Status}}' infra-temporal-bootstrap-1 2>/dev/null || echo missing)
+            if [ "$state" = "exited" ]; then
+              code=$(docker inspect -f '{{.State.ExitCode}}' infra-temporal-bootstrap-1)
+              [ "$code" = "0" ] && { echo "temporal-bootstrap exit=0"; break; }
+              echo "temporal-bootstrap failed (exit=$code)" >&2
+              docker logs infra-temporal-bootstrap-1 >&2 || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Build Java artifacts
+        run: mvn -B -ntp -DskipTests package
+
+      - name: Install Python packages (editable)
+        run: |
+          # Guard each module so PRs that don't touch every service still pass.
+          for module in contract/python services/signal-source-discord; do
+            if [ -d "$module" ]; then
+              echo "::group::install $module"
+              (cd "$module" && uv sync && uv pip install -e .)
+              echo "::endgroup::"
+            else
+              echo "skipping $module (not on this branch)"
+            fi
+          done
+
+      - name: Launch audit-svc (Phase 0 worker)
+        run: |
+          nohup java -jar services/audit/target/audit-svc-0.1.0-SNAPSHOT.jar > /tmp/audit-svc.log 2>&1 &
+          for _ in $(seq 1 60); do
+            grep -q "Started AuditApplication" /tmp/audit-svc.log && break
+            sleep 1
+          done
+          grep -q "Started AuditApplication" /tmp/audit-svc.log || { tail -50 /tmp/audit-svc.log; exit 1; }
+
+      - name: Execute PR test plan via qa-inspector
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are the qa-inspector for PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            Steps:
+            1. Read `.claude/agents/qa-inspector.md` for your role.
+            2. `gh pr view ${{ github.event.pull_request.number }} --json body --jq .body > /tmp/pr-body.md`
+            3. Extract the "## Test plan" section (between that header and the next top-level `## ` header or EOF). Parse each `- [ ]` checklist item.
+            4. For each item, infer the command and run it. Reference rules:
+               - `validate_phase1.py` → `cd services/signal-source-discord && TEMPORAL_TARGET=localhost:7233 uv run python -m tests.validate_phase1`
+               - Visibility queries → `docker run --rm --entrypoint temporal --network infra_default temporalio/admin-tools:1.25 workflow list --address temporal:7233 --query "..."`
+               - "Two replicas concurrency" → covered by `validate_phase1.py` (two TemporalEmitter clients race the same signal_id); cite that.
+               - "CI jobs green" → skip; this workflow is the Claude QA pass, the static CI runs in `.github/workflows/ci.yml`.
+               - Items needing credentials we don't have → skip with an explicit reason.
+            5. Write a markdown table to /tmp/qa-report.md beginning with the literal first line `${STICKY_MARKER}`:
+               `| # | Item | Status | Evidence |`
+               followed by `Findings & follow-ups` (severity-tagged) and `Verdict: READY TO MERGE | NEEDS FIXES | BLOCKED`.
+            6. Post via the project helper:
+               scripts/gh-sticky-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" "${STICKY_MARKER}" /tmp/qa-report.md
+          claude_args: "--allowed-tools 'Bash Read Grep' --max-turns 40"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STICKY_MARKER: ${{ env.STICKY_MARKER }}
+
+      - name: Teardown
+        if: always()
+        run: |
+          pkill -f audit-svc || true
+          docker compose -f infra/docker-compose.yml down -v || true
