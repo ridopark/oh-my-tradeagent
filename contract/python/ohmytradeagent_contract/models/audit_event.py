@@ -32,7 +32,7 @@ class AuditEvent(BaseModel):
     """
     kind: constr(min_length=1)
     """
-    Event kind tag (e.g., SignalReceived, SignalRejected, EntryFilled, EntryExpired, ExitRequested, KillSwitchTripped, KillSwitchResetApproved, ReconciliationCompleted, JournalOrphan, BrokerOrphan, OrphanSTC, SymbolDriftDetected).
+    Event kind tag (e.g., SignalReceived, SignalAccepted, SignalRejected, EntryFilled, EntryExpired, ExitRequested, KillSwitchTripped, KillSwitchResetApproved, ReconciliationCompleted, JournalOrphan, BrokerOrphan, OrphanSTC, SymbolDriftDetected).
     """
     subject: dict[str, Any]
     """

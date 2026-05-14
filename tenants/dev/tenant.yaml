@@ -1,0 +1,4 @@
+tenant_id: dev
+display_name: Local development tenant
+strategies:
+  - copytrade-v1

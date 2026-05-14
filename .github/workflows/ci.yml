@@ -21,6 +21,10 @@ jobs:
           cache: maven
 
       - name: mvn verify
+        env:
+          # Enables ContractActivitiesImplIT (Testcontainers Postgres). The IT is gated so a
+          # local `mvn verify` on a Docker-Desktop-on-WSL2 workstation can skip it cleanly.
+          RUN_DB_ITS: "true"
         run: mvn -B -ntp verify
 
   python:
