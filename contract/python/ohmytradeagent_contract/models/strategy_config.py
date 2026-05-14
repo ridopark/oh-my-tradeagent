@@ -97,5 +97,9 @@ class StrategyConfig(BaseModel):
     """
     daily_loss_threshold: PositiveFloat | None = None
     """
-    Phase 5: KillSwitchWorkflow auto-trip threshold on cumulative daily loss for (tenant, strategy).
+    Phase 5: KillSwitchWorkflow auto-trip threshold (absolute dollars) on realized cumulative daily loss for (tenant, strategy). Auto-trip fires when realizedPnL <= -daily_loss_threshold. Phase 5 ships realized-only PnL composition (sum of EntryFilled/ExitFilled premia from audit_log); MTM on open positions lands in Phase 5b.
+    """
+    reset_cooldown_secs: conint(ge=0) | None = None
+    """
+    Phase 5: cool-down window (seconds) blocking new entries after a kill-switch reset. risk.check_entry rejects with KILL_SWITCH_COOLING_DOWN until cooling_down_until elapses. Closes the post-reset signal-backlog stampede vector.
     """
