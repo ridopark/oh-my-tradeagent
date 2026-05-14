@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/partial-exit-request.json",
+  "title": "PartialExitRequest",
+  "description": "Signal payload to PositionWorkflow.partial_exit. Dispatched by CopytradeSignalWorkflow STC branch after KeywordPartialMatcher resolves the fraction. signal_id is the dedupe key inside the position.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.PartialExitRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "signal_id",
+    "position_workflow_id",
+    "fraction",
+    "ref_premium",
+    "reason",
+    "author",
+    "raw_line",
+    "occurred_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "signal_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Dedupe key inside the receiving PositionWorkflow. Shape: '<message_id>:<line_index>'."
+    },
+    "position_workflow_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target PositionWorkflow workflow_id (resolved via Redis cache + Visibility fallback)."
+    },
+    "fraction": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "Fraction of remaining qty to close. Resolved from KeywordPartialMatcher.match(tail, cfg.partial_fractions, cfg.default_stc_fraction)."
+    },
+    "ref_premium": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Author-posted exit premium (for audit; not source-of-truth for fill price)."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Why the exit fired (e.g., 'stc_signal')."
+    },
+    "author": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Discord author who posted the STC line."
+    },
+    "raw_line": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The STC line as parsed, for audit."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp when the signal was emitted (sidecar source-of-truth)."
+    }
+  }
+}

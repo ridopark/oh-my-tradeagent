@@ -17,6 +17,8 @@ import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
+import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
+import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
@@ -26,9 +28,12 @@ import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -46,20 +51,28 @@ class CopytradeSignalWorkflowImplTest {
   private RiskActivities risk;
   private ContractActivities contract;
   private ExecActivities exec;
+  private PositionLookupActivities positionLookup;
+  private MarketCalendarActivities calendar;
 
   @BeforeEach
   void setUp() {
     env = TestWorkflowEnvironment.newInstance();
     Worker coreWorker = env.newWorker(CORE_QUEUE);
-    coreWorker.registerWorkflowImplementationTypes(CopytradeSignalWorkflowImpl.class);
+    coreWorker.registerWorkflowImplementationTypes(
+        CopytradeSignalWorkflowImpl.class, PositionWorkflowImpl.class);
 
     audit = Mockito.mock(AuditActivities.class);
     strategy = Mockito.mock(StrategyActivities.class);
     risk = Mockito.mock(RiskActivities.class);
     contract = Mockito.mock(ContractActivities.class);
     exec = Mockito.mock(ExecActivities.class);
+    positionLookup = Mockito.mock(PositionLookupActivities.class);
+    calendar = Mockito.mock(MarketCalendarActivities.class);
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    when(calendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
 
-    coreWorker.registerActivitiesImplementations(audit, strategy, risk, contract);
+    coreWorker.registerActivitiesImplementations(
+        audit, strategy, risk, contract, positionLookup, calendar);
     // ExecActivities lives on the exec-svc task queue; register a separate worker.
     Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_PAPER);
     brokerWorker.registerActivitiesImplementations(exec);
@@ -171,6 +184,116 @@ class CopytradeSignalWorkflowImplTest {
         .containsEntry("broker_reason", "order already filled")
         .containsEntry("severity", "ERROR")
         .containsEntry("note", "orphan_position_until_phase_3");
+  }
+
+  @Test
+  void avgAction_skipAvgTrue_emitsAvgSkipped_andNoExecCalls() {
+    when(strategy.get(anyString(), anyString())).thenReturn(config());
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setAction(CopytradeSignalPayload.Action.AVG);
+    runWorkflow(p);
+
+    AuditEvent skipped = capture("AvgSkipped");
+    assertThat(skipped.getSubject()).containsEntry("signal_id", p.getSignalId());
+    verify(exec, never()).placeOrder(any());
+    verify(positionLookup, never()).findPositionWorkflowId(anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void stcAction_cacheHit_dispatchesExitRequestedAudit() {
+    when(strategy.get(anyString(), anyString())).thenReturn(stcConfig());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+
+    // Start a real PositionWorkflow so the external signal has a target. We don't care about
+    // its outcome — we only assert the dispatch (audit + lookup call) on the parent side.
+    String posWfId = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-1";
+    PositionWorkflow posStub =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                PositionWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId(posWfId)
+                    .build());
+    io.temporal.client.WorkflowStub.fromTyped(posStub).start(positionInput());
+
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(posWfId);
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setAction(CopytradeSignalPayload.Action.STC);
+    p.setTail("half out");
+    p.setSignalId("222:0");
+    runWorkflow(p);
+
+    AuditEvent exit = capture("ExitRequested");
+    assertThat(exit.getSubject()).containsEntry("signal_id", "222:0");
+    assertThat(exit.getSubject()).containsEntry("option_symbol", "NVDA  260516C00140000");
+    assertThat(exit.getSubject()).containsEntry("position_workflow_id", posWfId);
+    assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
+    verify(positionLookup, atLeastOnce())
+        .findPositionWorkflowId("dev", "copytrade-v1", "NVDA  260516C00140000");
+  }
+
+  private com.ohmytradeagent.contract.PositionWorkflowInput positionInput() {
+    com.ohmytradeagent.contract.PositionWorkflowInput in =
+        new com.ohmytradeagent.contract.PositionWorkflowInput();
+    in.setSchemaVersion(1L);
+    in.setTenantId("dev");
+    in.setStrategyId("copytrade-v1");
+    in.setEntrySignalId("entry-1");
+    in.setContractSymbol("NVDA  260516C00140000");
+    in.setQty(5L);
+    in.setEntryPremium(new BigDecimal("2.30"));
+    return in;
+  }
+
+  @Test
+  void stcAction_cacheMissAndBufferExpires_emitsOrphanStc() {
+    StrategyConfig cfg = stcConfig();
+    cfg.setPendingTtlPaperSecs(10L); // 1 attempt
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setAction(CopytradeSignalPayload.Action.STC);
+    p.setTail("out");
+    p.setSignalId("333:0");
+    runWorkflow(p);
+
+    AuditEvent orphan = capture("OrphanSTC");
+    assertThat(orphan.getSubject()).containsEntry("signal_id", "333:0");
+    assertThat(((Number) orphan.getSubject().get("attempts")).intValue()).isPositive();
+  }
+
+  private StrategyConfig stcConfig() {
+    StrategyConfig c = config();
+    c.setDefaultStcFraction(new BigDecimal("0.5"));
+    Map<String, BigDecimal> fractions = new LinkedHashMap<>();
+    fractions.put("half", new BigDecimal("0.5"));
+    fractions.put("out", new BigDecimal("1.0"));
+    fractions.put("half out", new BigDecimal("0.5"));
+    c.setPartialFractions(fractions);
+    return c;
   }
 
   private void setupApprovedMocks() {

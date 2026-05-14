@@ -50,4 +50,41 @@ class YamlStrategyRegistryTest {
         .isInstanceOf(YamlStrategyRegistry.StrategyNotFoundException.class)
         .hasMessageContaining("ghost-strategy");
   }
+
+  @Test
+  void loadsPhase3PartialFractions(@TempDir Path tenantsDir) throws Exception {
+    Path file = tenantsDir.resolve("dev/strategies/copytrade-v1.yaml");
+    Files.createDirectories(file.getParent());
+    Files.writeString(
+        file,
+        """
+        schema_version: 1
+        tenant_id: dev
+        strategy_id: copytrade-v1
+        broker_target: paper
+        author_whitelist:
+          - acme_trader
+        max_signal_age_secs: 1800
+        max_positions: 5
+        capital_weight: 0.2
+        min_contracts: 1
+        max_contracts: 5
+        default_stc_fraction: 0.5
+        partial_fractions:
+          out: 1.0
+          half: 0.5
+          "half out": 0.5
+          trim: 0.25
+        pending_ttl_paper_secs: 90
+        """);
+
+    YamlStrategyRegistry registry = new YamlStrategyRegistry(tenantsDir.toString());
+    StrategyConfig cfg = registry.get("dev", "copytrade-v1");
+
+    assertThat(cfg.getDefaultStcFraction().compareTo(new java.math.BigDecimal("0.5"))).isZero();
+    assertThat(cfg.getPartialFractions()).containsKeys("out", "half", "half out", "trim");
+    assertThat(cfg.getPartialFractions().get("trim"))
+        .isEqualByComparingTo(new java.math.BigDecimal("0.25"));
+    assertThat(cfg.getPendingTtlPaperSecs()).isEqualTo(90L);
+  }
 }

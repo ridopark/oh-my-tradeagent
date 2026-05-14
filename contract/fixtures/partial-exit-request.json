@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "copytrade-v1",
+  "signal_id": "1234567890123456790:0",
+  "position_workflow_id": "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/1234567890123456789:0",
+  "fraction": 0.5,
+  "ref_premium": 2.85,
+  "reason": "stc_signal",
+  "author": "acme_trader",
+  "raw_line": "STC NVDA 5/16 140C @ 2.85 half out",
+  "occurred_at": "2026-05-13T17:45:00Z"
+}
