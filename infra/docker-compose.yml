@@ -153,5 +153,48 @@ services:
       - "4317:4317"
       - "4318:4318"
 
+  # Discord watcher. State (cookies + heartbeat) lives on a named volume so
+  # restart preserves session. Replica >= 1 is safe (durable dedupe via Temporal).
+  # To run two replicas: `docker compose -f infra/docker-compose.yml up -d --scale signal-source-discord=2`.
+  signal-source-discord:
+    build:
+      context: ..
+      dockerfile: services/signal-source-discord/Dockerfile
+    depends_on:
+      temporal:
+        condition: service_started
+      temporal-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      DISCORD_CHANNEL_URL: ${DISCORD_CHANNEL_URL:-}
+      TENANT_ID: ${TENANT_ID:-dev}
+      STRATEGY_ID: ${STRATEGY_ID:-copytrade-v1}
+      TEMPORAL_TARGET: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: orchestrator-core
+      POLL_INTERVAL_SECS: "1.0"
+      LOG_LEVEL: info
+    volumes:
+      - sidecar-state:/app/state
+    restart: unless-stopped
+    profiles: ["sidecar"]
+
+  # Bootstrap (login) sidecar: same image, run interactively with display
+  # forwarding to capture Discord cookies into sidecar-state once.
+  # `docker compose -f infra/docker-compose.yml --profile bootstrap run --rm sidecar-bootstrap`
+  sidecar-bootstrap:
+    build:
+      context: ..
+      dockerfile: services/signal-source-discord/Dockerfile
+    entrypoint: ["python", "-m", "ohmytradeagent_sidecar.bootstrap"]
+    environment:
+      DISCORD_CHANNEL_URL: ${DISCORD_CHANNEL_URL:-}
+      DISPLAY: ${DISPLAY:-}
+    volumes:
+      - sidecar-state:/app/state
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    profiles: ["bootstrap"]
+
 volumes:
   postgres-data:
+  sidecar-state:
