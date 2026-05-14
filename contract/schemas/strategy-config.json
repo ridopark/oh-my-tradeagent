@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/strategy-config.json",
+  "title": "StrategyConfig",
+  "description": "Per-strategy configuration loaded from tenants/<tenant>/strategies/<strategy>.yaml. Drives risk gates, sizing, and exit logic in CopytradeSignalWorkflow + PositionWorkflow. Phase 2a consumes a minimal required subset (author whitelist, signal-age, max-positions, capital-weight sizing); fields used only in later phases are optional and documented inline.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.StrategyConfig",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "broker_target",
+    "author_whitelist",
+    "max_signal_age_secs",
+    "max_positions",
+    "capital_weight",
+    "min_contracts",
+    "max_contracts"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. Workers reject newer-than-build inputs to force orchestrator-svc rollback. See CopytradeSignalPayload.schema_version."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "broker_target": {
+      "type": "string",
+      "enum": ["paper", "live"],
+      "description": "Routes Activities to paper-or-live broker task queues. Phase 2a does not place orders; field reserved for Phase 2b."
+    },
+    "author_whitelist": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "Discord author IDs whose signals are admitted. Risk gate AUTHOR_NOT_WHITELISTED on miss."
+    },
+    "max_signal_age_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3600,
+      "description": "Reject signals older than this. Risk gate SIGNAL_TOO_OLD on exceed."
+    },
+    "max_positions": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Max concurrent open PositionWorkflows per (tenant, strategy). Counted via listWorkflowExecutions(TenantStrategy=..., WorkflowType='PositionWorkflow', ExecutionStatus='Running')."
+    },
+    "capital_weight": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "Fraction of strategy capital allocated per signal. allocation = capital_per_strategy * capital_weight."
+    },
+    "min_contracts": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Lower clamp on computed quantity."
+    },
+    "max_contracts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "Upper clamp on computed quantity. min<=max enforced by application validator (cross-field constraint not expressible in JSON Schema)."
+    },
+    "skip_avg": {
+      "type": "boolean",
+      "description": "If true, AVG (average-down) actions are skipped by the workflow. Default true per PLAN.md Open Question #10."
+    },
+    "default_stc_fraction": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "Phase 3: default fraction closed when an STC line has no recognized partial keyword."
+    },
+    "partial_fractions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1
+      },
+      "description": "Phase 3: keyword -> fraction mapping for KeywordPartialMatcher (e.g. {\"half\": 0.5, \"third\": 0.33, \"out\": 1.0})."
+    },
+    "pending_ttl_paper_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Phase 2b/3: BTO entry order TTL for paper broker target."
+    },
+    "pending_ttl_live_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Phase 2b/3: BTO entry order TTL for live broker target."
+    },
+    "trail_on_partial": {
+      "type": "boolean",
+      "description": "Phase 4: arm CHANDELIER_TRAIL on first partial exit."
+    },
+    "trail_giveback_pct": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 0.5,
+      "description": "Phase 4: trailing-stop giveback fraction once armed."
+    },
+    "daily_loss_threshold": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Phase 5: KillSwitchWorkflow auto-trip threshold on cumulative daily loss for (tenant, strategy)."
+    }
+  }
+}

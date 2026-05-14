@@ -126,14 +126,28 @@ jobs:
             fi
           done
 
-      - name: Launch audit-svc (Phase 0 worker)
+      - name: Launch orchestrator-svc (Temporal worker on orchestrator-core queue)
         run: |
-          nohup java -jar services/audit/target/audit-svc-0.1.0-SNAPSHOT.jar > /tmp/audit-svc.log 2>&1 &
-          for _ in $(seq 1 60); do
-            grep -q "Started AuditApplication" /tmp/audit-svc.log && break
-            sleep 1
-          done
-          grep -q "Started AuditApplication" /tmp/audit-svc.log || { tail -50 /tmp/audit-svc.log; exit 1; }
+          # Phase 2a launches orchestrator-svc; Phase 1's audit-svc placeholder is no longer
+          # the worker host. If a branch predates Phase 2a (no orchestrator-svc module yet),
+          # fall back to audit-svc so older PRs still validate.
+          if [ -f services/orchestrator/target/orchestrator-svc-0.1.0-SNAPSHOT-boot.jar ]; then
+            nohup java -jar services/orchestrator/target/orchestrator-svc-0.1.0-SNAPSHOT-boot.jar \
+              > /tmp/orchestrator-svc.log 2>&1 &
+            for _ in $(seq 1 60); do
+              grep -q "Started OrchestratorApplication" /tmp/orchestrator-svc.log && break
+              sleep 1
+            done
+            grep -q "Started OrchestratorApplication" /tmp/orchestrator-svc.log \
+              || { tail -100 /tmp/orchestrator-svc.log; exit 1; }
+          else
+            nohup java -jar services/audit/target/audit-svc-0.1.0-SNAPSHOT.jar > /tmp/audit-svc.log 2>&1 &
+            for _ in $(seq 1 60); do
+              grep -q "Started AuditApplication" /tmp/audit-svc.log && break
+              sleep 1
+            done
+            grep -q "Started AuditApplication" /tmp/audit-svc.log || { tail -50 /tmp/audit-svc.log; exit 1; }
+          fi
 
       - name: Execute PR test plan via qa-inspector
         uses: anthropics/claude-code-action@v1
@@ -165,5 +179,6 @@ jobs:
       - name: Teardown
         if: always()
         run: |
+          pkill -f orchestrator-svc || true
           pkill -f audit-svc || true
           docker compose -f infra/docker-compose.yml down -v || true

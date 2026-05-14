@@ -1,22 +1,21 @@
-package com.ohmytradeagent.audit;
+package com.ohmytradeagent.orchestrator.config;
 
+import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.ContractActivities;
+import com.ohmytradeagent.orchestrator.activities.RiskActivities;
+import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
 import io.temporal.serviceclient.WorkflowServiceStubs;
 import io.temporal.serviceclient.WorkflowServiceStubsOptions;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
+import java.time.Clock;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-/**
- * Wires the Temporal worker for audit-svc. Registers {@link CopytradeSignalWorkflow} on the
- * configured task queue. Service connects to Temporal via {@code temporal.target} and operates in
- * namespace {@code temporal.namespace}.
- *
- * <p>Phase 0 scope: registration only. No activities yet; subsequent phases add them.
- */
 @Configuration
 public class TemporalWorkerConfig {
 
@@ -28,6 +27,11 @@ public class TemporalWorkerConfig {
 
   @Value("${temporal.task-queue:orchestrator-core}")
   private String taskQueue;
+
+  @Bean
+  public Clock systemClock() {
+    return Clock.systemUTC();
+  }
 
   @Bean
   public WorkflowServiceStubs workflowServiceStubs() {
@@ -47,9 +51,15 @@ public class TemporalWorkerConfig {
   }
 
   @Bean
-  public Worker worker(WorkerFactory factory) {
+  public Worker worker(
+      WorkerFactory factory,
+      AuditActivities audit,
+      StrategyActivities strategy,
+      RiskActivities risk,
+      ContractActivities contract) {
     Worker worker = factory.newWorker(taskQueue);
     worker.registerWorkflowImplementationTypes(CopytradeSignalWorkflowImpl.class);
+    worker.registerActivitiesImplementations(audit, strategy, risk, contract);
     return worker;
   }
 }

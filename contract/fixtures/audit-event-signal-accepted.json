@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "copytrade-v1",
+  "event_id": "0193b2ff-1a64-7c2b-9c9e-3b5fbe7c3a01",
+  "occurred_at": "2026-05-13T17:22:31Z",
+  "kind": "SignalAccepted",
+  "subject": {
+    "signal_id": "111222333:0",
+    "option_symbol": "NVDA  260516C00140000",
+    "contracts": 1,
+    "ref_premium": 2.30
+  },
+  "actor": "workflow:CopytradeSignalWorkflow",
+  "workflow_id": "t-dev/s-copytrade-v1/sig/111222333:0",
+  "correlation_id": "111222333:0"
+}

@@ -12,6 +12,7 @@
   <modules>
     <module>contract/java</module>
     <module>services/audit</module>
+    <module>services/orchestrator</module>
   </modules>
 
   <properties>
@@ -27,7 +28,7 @@
 
     <junit-jupiter.version>5.11.4</junit-jupiter.version>
     <assertj.version>3.27.0</assertj.version>
-    <testcontainers.version>1.20.4</testcontainers.version>
+    <testcontainers.version>1.20.6</testcontainers.version>
 
     <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
     <maven-surefire-plugin.version>3.5.2</maven-surefire-plugin.version>
