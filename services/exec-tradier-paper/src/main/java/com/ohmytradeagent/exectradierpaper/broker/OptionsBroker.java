@@ -1,0 +1,28 @@
+package com.ohmytradeagent.exectradierpaper.broker;
+
+/**
+ * Broker port. Implementations (Tradier sandbox, Tradier live, IBKR, Alpaca, ...) plug in via
+ * Spring profiles. The contract callers depend on:
+ *
+ * <ol>
+ *   <li>{@code placeOrder} is idempotent on {@code client_order_id}: a repeated call with the same
+ *       client_order_id returns the same broker_order_id with {@code alreadyExisted=true} rather
+ *       than placing a duplicate.
+ *   <li>{@code cancelOrder} on an already-filled order returns {@code cancelled=false} with a
+ *       broker-provided reason; callers treat this as an orphan-position signal, never a silent
+ *       success.
+ * </ol>
+ *
+ * <p>The {@link StubBroker} enforces these in memory. The {@code TradierPaperBroker} HTTP adapter
+ * (deferred) layers a GET-by-tag lookup before the POST so we don't rely on Tradier sandbox's
+ * actual duplicate-POST behavior (which historically returns HTTP 400, not the original
+ * broker_order_id).
+ */
+public interface OptionsBroker {
+
+  PlaceOrderResponse placeOrder(PlaceOrderRequest request);
+
+  CancelResponse cancelOrder(String brokerOrderId);
+
+  BrokerOrderStatus getOrderStatus(String brokerOrderId);
+}

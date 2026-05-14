@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "copytrade-v1",
+  "event_id": "0193b300-0001-7c2b-9c9e-3b5fbe7c3a10",
+  "occurred_at": "2026-05-13T17:22:32Z",
+  "kind": "OrderSubmitted",
+  "subject": {
+    "intent_key": "t-dev/s-copytrade-v1/sig/111222333:0:entry",
+    "broker_order_id": "stub-t-dev/s-copytrade-v1/sig/111222333:0:entry",
+    "option_symbol": "NVDA  260516C00140000",
+    "side": "BUY",
+    "qty": 1,
+    "broker_target": "paper"
+  },
+  "actor": "activity:exec.placeOrder",
+  "workflow_id": "t-dev/s-copytrade-v1/sig/111222333:0",
+  "correlation_id": "111222333:0"
+}

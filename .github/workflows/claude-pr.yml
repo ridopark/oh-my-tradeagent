@@ -149,6 +149,22 @@ jobs:
             grep -q "Started AuditApplication" /tmp/audit-svc.log || { tail -50 /tmp/audit-svc.log; exit 1; }
           fi
 
+      - name: Launch exec-tradier-paper-svc (Temporal worker on broker-tradier-paper queue)
+        run: |
+          # Phase 2b adds the exec service. Skip cleanly for branches that predate it.
+          jar=services/exec-tradier-paper/target/exec-tradier-paper-svc-0.1.0-SNAPSHOT-boot.jar
+          if [ -f "$jar" ]; then
+            nohup java -jar "$jar" > /tmp/exec-tradier-paper-svc.log 2>&1 &
+            for _ in $(seq 1 60); do
+              grep -q "Started ExecTradierPaperApplication" /tmp/exec-tradier-paper-svc.log && break
+              sleep 1
+            done
+            grep -q "Started ExecTradierPaperApplication" /tmp/exec-tradier-paper-svc.log \
+              || { tail -100 /tmp/exec-tradier-paper-svc.log; exit 1; }
+          else
+            echo "exec-tradier-paper-svc jar not present on this branch — skipping"
+          fi
+
       - name: Execute PR test plan via qa-inspector
         uses: anthropics/claude-code-action@v1
         with:
@@ -179,6 +195,7 @@ jobs:
       - name: Teardown
         if: always()
         run: |
+          pkill -f exec-tradier-paper-svc || true
           pkill -f orchestrator-svc || true
           pkill -f audit-svc || true
           docker compose -f infra/docker-compose.yml down -v || true

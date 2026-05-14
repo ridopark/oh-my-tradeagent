@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "copytrade-v1",
+  "intent_key": "t-dev/s-copytrade-v1/sig/111222333:0:entry",
+  "signal_id": "111222333:0",
+  "broker_target": "paper",
+  "option_symbol": "NVDA  260516C00140000",
+  "side": "BUY",
+  "qty": 1,
+  "limit_price": 2.30,
+  "recorded_at": "2026-05-13T17:22:31Z"
+}

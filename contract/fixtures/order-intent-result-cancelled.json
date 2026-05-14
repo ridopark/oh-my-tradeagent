@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "intent_key": "t-dev/s-copytrade-v1/sig/111222333:0:entry",
+  "broker_order_id": "stub-t-dev/s-copytrade-v1/sig/111222333:0:entry",
+  "state": "CANCELLED",
+  "last_state_at": "2026-05-13T17:23:02Z"
+}
