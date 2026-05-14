@@ -2,9 +2,12 @@ package com.ohmytradeagent.orchestrator.config;
 
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
+import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
+import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
 import io.temporal.serviceclient.WorkflowServiceStubs;
@@ -56,10 +59,14 @@ public class TemporalWorkerConfig {
       AuditActivities audit,
       StrategyActivities strategy,
       RiskActivities risk,
-      ContractActivities contract) {
+      ContractActivities contract,
+      PositionLookupActivities positionLookup,
+      MarketCalendarActivities calendar) {
     Worker worker = factory.newWorker(taskQueue);
-    worker.registerWorkflowImplementationTypes(CopytradeSignalWorkflowImpl.class);
-    worker.registerActivitiesImplementations(audit, strategy, risk, contract);
+    worker.registerWorkflowImplementationTypes(
+        CopytradeSignalWorkflowImpl.class, PositionWorkflowImpl.class);
+    worker.registerActivitiesImplementations(
+        audit, strategy, risk, contract, positionLookup, calendar);
     return worker;
   }
 }

@@ -17,6 +17,7 @@ from ohmytradeagent_contract.models.copytrade_signal_payload import (
     CopytradeSignalPayload,
     Right,
 )
+from ohmytradeagent_contract.models.partial_exit_request import PartialExitRequest
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -50,6 +51,21 @@ def test_audit_event_round_trips() -> None:
     assert model.tenant_id == "dev"
     assert model.kind == "SignalReceived"
     assert model.subject["signal_id"] == "1234567890123456789:0"
+
+    serialized = json.loads(model.model_dump_json(by_alias=True))
+    assert serialized == original
+
+
+def test_partial_exit_request_round_trips() -> None:
+    original = _load("partial-exit-request.json")
+
+    model = PartialExitRequest.model_validate(original)
+
+    assert model.schema_version == 1
+    assert model.tenant_id == "dev"
+    assert model.strategy_id == "copytrade-v1"
+    assert model.fraction == 0.5
+    assert model.reason == "stc_signal"
 
     serialized = json.loads(model.model_dump_json(by_alias=True))
     assert serialized == original

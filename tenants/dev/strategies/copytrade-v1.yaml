@@ -17,3 +17,18 @@ max_contracts: 5
 
 # Phase 2a default per Open Question #10
 skip_avg: true
+
+# Phase 3 exit logic
+default_stc_fraction: 0.5
+partial_fractions:
+  out: 1.0
+  "all out": 1.0
+  close: 1.0
+  half: 0.5
+  "half out": 0.5
+  partial: 0.5
+  third: 0.33
+  "two thirds": 0.67
+  trim: 0.25
+pending_ttl_paper_secs: 90
+pending_ttl_live_secs: 30

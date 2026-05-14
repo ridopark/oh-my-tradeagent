@@ -65,4 +65,23 @@ class RoundTripTest {
 
     assertThat(roundTripped).isEqualTo(original);
   }
+
+  @Test
+  void partialExitRequest_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("partial-exit-request.json"));
+
+    PartialExitRequest deserialized = mapper.readValue(json, PartialExitRequest.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getTenantId()).isEqualTo("dev");
+    assertThat(deserialized.getStrategyId()).isEqualTo("copytrade-v1");
+    assertThat(deserialized.getFraction().doubleValue()).isEqualTo(0.5);
+    assertThat(deserialized.getReason()).isEqualTo("stc_signal");
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
 }
