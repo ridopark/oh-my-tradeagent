@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "copytrade-v1",
+  "event_id": "0193b300-0002-7c2b-9c9e-3b5fbe7c3a11",
+  "occurred_at": "2026-05-13T17:23:02Z",
+  "kind": "OrderCancelled",
+  "subject": {
+    "intent_key": "t-dev/s-copytrade-v1/sig/111222333:0:entry",
+    "broker_order_id": "stub-t-dev/s-copytrade-v1/sig/111222333:0:entry",
+    "reason": "ttl_expired"
+  },
+  "actor": "workflow:CopytradeSignalWorkflow",
+  "workflow_id": "t-dev/s-copytrade-v1/sig/111222333:0",
+  "correlation_id": "111222333:0"
+}
