@@ -525,7 +525,9 @@ class PositionWorkflowImplTest {
   }
 
   private void waitForPlaceOrderCount(int n) throws InterruptedException {
-    long deadline = System.currentTimeMillis() + 10_000;
+    // 50s deadline — CI runners under load have hit >25s waiting for signal-driven workflow
+    // activity dispatch through TestWorkflowEnvironment; the happy path returns in <0.5s.
+    long deadline = System.currentTimeMillis() + 50_000;
     while (System.currentTimeMillis() < deadline) {
       try {
         verify(exec, times(n)).placeOrder(any());
