@@ -67,7 +67,7 @@ jobs:
             5. Write the review to /tmp/review.md (start with the literal first line `${STICKY_MARKER}` so re-runs update in place).
             6. Post via the project helper:
                scripts/gh-sticky-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" "${STICKY_MARKER}" /tmp/review.md
-          allowed_tools: "Bash,Read,Grep"
+          claude_args: "--allowed-tools 'Bash Read Grep'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STICKY_MARKER: ${{ env.STICKY_MARKER }}
