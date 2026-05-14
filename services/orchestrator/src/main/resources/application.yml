@@ -10,6 +10,12 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+    # The orchestrator shares the `temporal` Postgres database with the Temporal
+    # cluster's auto-setup, which populates `public` with executions / history_node /
+    # etc. before this Flyway runs. Baseline-on-migrate tells Flyway to treat that
+    # pre-existing state as the baseline; our V1/V2 migrations only add new tables
+    # (option_symbol_cache, audit_log) so the coexistence is safe.
+    baseline-on-migrate: true
   data:
     redis:
       host: ${REDIS_HOST:localhost}
