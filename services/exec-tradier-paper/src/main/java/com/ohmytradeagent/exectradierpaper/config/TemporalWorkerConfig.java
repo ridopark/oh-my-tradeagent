@@ -1,5 +1,6 @@
 package com.ohmytradeagent.exectradierpaper.config;
 
+import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.exectradierpaper.activities.ExecActivities;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
@@ -41,9 +42,10 @@ public class TemporalWorkerConfig {
   }
 
   @Bean
-  public Worker worker(WorkerFactory factory, ExecActivities exec) {
+  public Worker worker(
+      WorkerFactory factory, ExecActivities exec, ReconciliationExecActivity recon) {
     Worker worker = factory.newWorker(taskQueue);
-    worker.registerActivitiesImplementations(exec);
+    worker.registerActivitiesImplementations(exec, recon);
     return worker;
   }
 }

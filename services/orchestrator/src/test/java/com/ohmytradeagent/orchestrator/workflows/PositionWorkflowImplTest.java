@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
@@ -10,10 +11,13 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.ForceCloseRequest;
+import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.PremiumTick;
+import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
@@ -22,6 +26,7 @@ import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
+import io.temporal.client.WorkflowUpdateException;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
@@ -468,6 +473,105 @@ class PositionWorkflowImplTest {
     assertThat(unarmed.getSubject()).containsEntry("reason", "normal_stc");
   }
 
+  // ---------- Phase 5: force_close + risk_breach ----------
+
+  @Test
+  void forceClose_healthyPosition_acceptsAndFlattens() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-force-healthy");
+    WorkflowStub.fromTyped(stub).start(input(5));
+
+    ForceCloseResult result = stub.forceClose(forceCloseRequest("ops-1", "manual intervention"));
+    assertThat(result.getStatus()).isEqualTo(ForceCloseResult.Status.ACCEPTED);
+    assertThat(result.getExitSignalId()).startsWith("force:ops-1:");
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent req = captureKind("ForceCloseRequested");
+    assertThat(req.getSubject())
+        .containsEntry("operator_id", "ops-1")
+        .containsEntry("reason", "manual intervention");
+    // flattenRemaining re-uses EOD audit kinds; the subject's reason disambiguates downstream.
+    AuditEvent flatReq = captureKind("EodForceFlattenRequested");
+    assertThat(flatReq.getSubject()).containsEntry("reason", "force_close");
+    captureKind("EodForceFlattened");
+  }
+
+  @Test
+  void forceCloseValidator_blankOperatorId_rejects() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-force-blank-op");
+    WorkflowStub.fromTyped(stub).start(input(3));
+
+    assertThatThrownBy(() -> stub.forceClose(forceCloseRequest("", "reason ok")))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("operator_id");
+
+    // Workflow still healthy; drain to clean shutdown.
+    stub.partialExit(partialExitRequest("sig-drain", "pos-force-blank-op", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-drain", 3L, new BigDecimal("3.10"), OffsetDateTime.now()));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+  }
+
+  @Test
+  void forceCloseValidator_blankReason_rejects() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-force-blank-reason");
+    WorkflowStub.fromTyped(stub).start(input(3));
+
+    assertThatThrownBy(() -> stub.forceClose(forceCloseRequest("ops-2", "")))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("reason");
+
+    stub.partialExit(partialExitRequest("sig-drain", "pos-force-blank-reason", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-drain", 3L, new BigDecimal("3.10"), OffsetDateTime.now()));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+  }
+
+  @Test
+  void riskBreach_healthyPosition_flattens() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-risk-breach");
+    WorkflowStub.fromTyped(stub).start(input(4));
+
+    stub.riskBreach(riskBreachPayload("auto:daily_loss", "auto:daily_loss"));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent acted = captureKind("RiskBreachActed");
+    assertThat(acted.getSubject()).containsEntry("reason", "auto:daily_loss");
+    // flattenRemaining audit (re-uses EOD kinds; subject.reason disambiguates).
+    AuditEvent flatReq = captureKind("EodForceFlattenRequested");
+    assertThat(flatReq.getSubject()).containsEntry("reason", "risk_breach");
+    captureKind("EodForceFlattened");
+  }
+
+  @Test
+  void riskBreach_inFlight_cancelsThenFlattens() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-risk-breach-inflight");
+    WorkflowStub.fromTyped(stub).start(input(5));
+
+    // Queue an STC that won't be filled — exit is in flight when risk_breach arrives.
+    stub.partialExit(partialExitRequest("sig-inflight", "pos-risk-breach-inflight", 0.5));
+    waitForPlaceOrderCount(1);
+
+    stub.riskBreach(riskBreachPayload("manual:operator", "ops-3"));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    verify(exec, atLeastOnce()).cancelOrder(anyString());
+    captureKind("RiskBreachActed");
+  }
+
   // ---------- helpers ----------
 
   private PositionWorkflow newStub(String workflowId) {
@@ -490,6 +594,23 @@ class PositionWorkflowImplTest {
     in.setQty(qty);
     in.setEntryPremium(new BigDecimal("2.30"));
     return in;
+  }
+
+  private ForceCloseRequest forceCloseRequest(String operatorId, String reason) {
+    ForceCloseRequest r = new ForceCloseRequest();
+    r.setSchemaVersion(1L);
+    r.setOperatorId(operatorId);
+    r.setReason(reason);
+    return r;
+  }
+
+  private RiskBreachPayload riskBreachPayload(String reason, String actor) {
+    RiskBreachPayload p = new RiskBreachPayload();
+    p.setSchemaVersion(1L);
+    p.setReason(reason);
+    p.setActor(actor);
+    p.setOccurredAt(OffsetDateTime.now());
+    return p;
   }
 
   private PartialExitRequest partialExitRequest(String signalId, String posWfId, double fraction) {

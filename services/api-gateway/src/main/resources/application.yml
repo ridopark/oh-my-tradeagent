@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: api-gateway-svc
+  datasource:
+    url: ${API_GATEWAY_DB_URL:jdbc:postgresql://localhost:5432/temporal}
+    username: ${API_GATEWAY_DB_USER:temporal}
+    password: ${API_GATEWAY_DB_PASS:temporal}
+  jooq:
+    sql-dialect: POSTGRES
+  flyway:
+    enabled: false  # api-gateway is a read-only consumer of the orchestrator's audit_log
+
+server:
+  port: ${API_GATEWAY_PORT:8082}
+
+temporal:
+  target: ${TEMPORAL_TARGET:localhost:7233}
+  namespace: ${TEMPORAL_NAMESPACE:default}
+
+api-gateway:
+  default-tenant: ${API_GATEWAY_DEFAULT_TENANT:dev}
+  default-strategy: ${API_GATEWAY_DEFAULT_STRATEGY:copytrade-v1}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{tenant_id:-},%X{strategy_id:-}] %logger{36} - %msg%n"

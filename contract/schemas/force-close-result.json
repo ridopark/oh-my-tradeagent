@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/force-close-result.json",
+  "title": "ForceCloseResult",
+  "description": "Synchronous return value of PositionWorkflow.force_close Update (WaitPolicy=Accepted). exit_signal_id is the dedupe key inside the workflow's exit machinery; api-gateway returns it in the 202 response so the operator can correlate the eventual fill.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.ForceCloseResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "exit_signal_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ACCEPTED", "NOOP_ALREADY_CLOSED"],
+      "description": "ACCEPTED: cancel-then-marketable-sell sequence queued. NOOP_ALREADY_CLOSED: position already at remainingQty=0 (e.g. another exit just filled)."
+    },
+    "exit_signal_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Deterministic exit dedupe key. Shape: 'force:<operator_id>:<offset>'."
+    }
+  }
+}

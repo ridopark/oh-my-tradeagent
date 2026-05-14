@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/broker-open-order.json",
+  "title": "BrokerOpenOrder",
+  "description": "One open order as reported by the broker (Tradier sandbox in v0). Returned by exec.broker_list_open_orders Activity to ReconciliationWorkflow.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.BrokerOpenOrder",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "broker_order_id",
+    "client_order_id",
+    "option_symbol",
+    "side",
+    "qty",
+    "state"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "broker_order_id":  { "type": "string", "minLength": 1 },
+    "client_order_id":  { "type": "string", "minLength": 1, "description": "Required even from broker — our place_order always sets it to intent_key. Mismatch here means the broker book contains an order we did not place." },
+    "option_symbol":    { "type": "string", "minLength": 1 },
+    "side":  { "type": "string", "enum": ["BUY", "SELL"] },
+    "qty":   { "type": "integer", "minimum": 1 },
+    "state": { "type": "string", "description": "Broker-native state string (e.g., 'open', 'partially_filled'). Reconciliation does not parse this; it is audit-only." }
+  }
+}

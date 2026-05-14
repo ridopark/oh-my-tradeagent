@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/trip-killswitch-request.json",
+  "title": "TripKillSwitchRequest",
+  "description": "Update payload for KillSwitchWorkflow.trip_killswitch. Operator-issued via api-gateway POST /killswitch/trip, or auto-issued by the workflow's daily-loss heartbeat (actor=auto:daily_loss).",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.TripKillSwitchRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "reason",
+    "actor"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-form trip reason for audit (e.g., 'manual:operator_initiated', 'auto:daily_loss', 'auto:circuit_breaker')."
+    },
+    "actor": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Who tripped (e.g., 'operator:ridopark', 'auto:daily_loss')."
+    },
+    "value": {
+      "type": "number",
+      "description": "Optional numeric context for auto-trips (e.g., daily PnL when daily_loss tripped)."
+    }
+  }
+}

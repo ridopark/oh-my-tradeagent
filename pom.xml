@@ -15,6 +15,7 @@
     <module>services/orchestrator</module>
     <module>services/exec-tradier-paper</module>
     <module>services/market-data</module>
+    <module>services/api-gateway</module>
   </modules>
 
   <properties>

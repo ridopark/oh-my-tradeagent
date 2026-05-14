@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/killswitch-state.json",
+  "title": "KillSwitchState",
+  "description": "Result of KillSwitchWorkflow.killswitch_state query. Consumed by risk.check_entry (workflow-not-found and other non-Success outcomes → fail closed at the call site with KILL_SWITCH_UNAVAILABLE).",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.KillSwitchState",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tripped"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "tripped": {
+      "type": "boolean",
+      "description": "True iff the switch is currently active (trips block new entries; cool-down after reset is reported via cooling_down_until)."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Trip reason when tripped=true. Empty when never tripped or reset."
+    },
+    "actor": {
+      "type": "string",
+      "description": "Who/what tripped (e.g., 'operator:ridopark', 'auto:daily_loss')."
+    },
+    "tripped_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC trip timestamp. Null when never tripped or after a reset."
+    },
+    "cooling_down_until": {
+      "type": "string",
+      "format": "date-time",
+      "description": "After reset, new entries are blocked with KILL_SWITCH_COOLING_DOWN until this timestamp. Null when not in cool-down."
+    },
+    "trading_day": {
+      "type": "string",
+      "format": "date",
+      "description": "Current trading day the auto-trip heartbeat is evaluating (America/New_York)."
+    }
+  }
+}

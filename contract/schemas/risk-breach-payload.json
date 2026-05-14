@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/risk-breach-payload.json",
+  "title": "RiskBreachPayload",
+  "description": "Signal payload fanned out by KillSwitchWorkflow.trip_killswitch to every Running workflow under TenantStrategy. PositionWorkflow.riskBreach cancels in-flight exits + flattens remaining qty; CopytradeSignalWorkflow.riskBreach audits and short-circuits the BTO/STC path.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.RiskBreachPayload",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "reason",
+    "actor",
+    "occurred_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "actor": {
+      "type": "string",
+      "minLength": 1
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

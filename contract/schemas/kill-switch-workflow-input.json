@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/kill-switch-workflow-input.json",
+  "title": "KillSwitchWorkflowInput",
+  "description": "Input for KillSwitchWorkflow (Phase 5). One workflow per (tenant_id, strategy_id), bootstrapped on orchestrator startup. Long-running; no continueAsNew in v0 (history is small — handful of state changes per day).",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.KillSwitchWorkflowInput",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. Workers reject newer-than-build inputs."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

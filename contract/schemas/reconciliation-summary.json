@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/reconciliation-summary.json",
+  "title": "ReconciliationSummary",
+  "description": "Return value of ReconciliationWorkflow. Counts surface in the ReconciliationCompleted audit event subject; individual discrepancies are audited as separate JournalOrphan / BrokerOrphan events at detection time.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.ReconciliationSummary",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "journal_entries_checked",
+    "broker_orders_checked",
+    "journal_orphans",
+    "broker_orphans"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "journal_entries_checked": { "type": "integer", "minimum": 0 },
+    "broker_orders_checked":   { "type": "integer", "minimum": 0 },
+    "journal_orphans": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Journal rows in non-terminal state with no matching broker order (and recorded_at older than 5 min)."
+    },
+    "broker_orphans": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Broker open orders with client_order_id not in journal."
+    }
+  }
+}

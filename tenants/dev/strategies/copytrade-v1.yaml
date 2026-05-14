@@ -36,3 +36,7 @@ pending_ttl_live_secs: 30
 # Phase 4 trailing exit
 trail_on_partial: true
 trail_giveback_pct: 0.15
+
+# Phase 5 kill switch
+daily_loss_threshold: 2500.00
+reset_cooldown_secs: 60

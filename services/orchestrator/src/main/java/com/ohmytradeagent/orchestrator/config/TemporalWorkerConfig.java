@@ -2,12 +2,16 @@ package com.ohmytradeagent.orchestrator.config;
 
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
+import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
+import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
 import io.temporal.serviceclient.WorkflowServiceStubs;
@@ -61,12 +65,17 @@ public class TemporalWorkerConfig {
       RiskActivities risk,
       ContractActivities contract,
       PositionLookupActivities positionLookup,
-      MarketCalendarActivities calendar) {
+      MarketCalendarActivities calendar,
+      KillSwitchCascadeActivities cascade,
+      DailyPnlActivities dailyPnl) {
     Worker worker = factory.newWorker(taskQueue);
     worker.registerWorkflowImplementationTypes(
-        CopytradeSignalWorkflowImpl.class, PositionWorkflowImpl.class);
+        CopytradeSignalWorkflowImpl.class,
+        PositionWorkflowImpl.class,
+        KillSwitchWorkflowImpl.class,
+        ReconciliationWorkflowImpl.class);
     worker.registerActivitiesImplementations(
-        audit, strategy, risk, contract, positionLookup, calendar);
+        audit, strategy, risk, contract, positionLookup, calendar, cascade, dailyPnl);
     return worker;
   }
 }

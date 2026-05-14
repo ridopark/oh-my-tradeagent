@@ -13,6 +13,7 @@ import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
+import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
@@ -27,6 +28,7 @@ import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
@@ -341,6 +343,122 @@ class CopytradeSignalWorkflowImplTest {
     assertThat(
             all.getAllValues().stream().anyMatch(e -> "ChandelierArmRequested".equals(e.getKind())))
         .isFalse();
+  }
+
+  // ---------- Phase 5: risk_breach ----------
+
+  @Test
+  void riskBreach_btoPath_beforeFill_shortCircuitsAndCancelsEntry() {
+    StrategyConfig cfg = config();
+    cfg.setPendingTtlPaperSecs(120L); // generous TTL so we can signal before it expires
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntry(any(), any())).thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-intent-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-intent-K"));
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("rb-bto-1")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+
+    // Wait until placeOrder was called (workflow now awaiting fill) then risk_breach.
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, atLeastOnce()).placeOrder(any());
+        break;
+      } catch (AssertionError ignored) {
+        try {
+          Thread.sleep(50);
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+          break;
+        }
+      }
+    }
+
+    wf.riskBreach(riskBreach("auto:daily_loss", "auto:daily_loss"));
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    AuditEvent aborted = capture("SignalAbortedByRiskBreach");
+    assertThat(aborted.getSubject()).containsEntry("reason", "auto:daily_loss");
+    verify(exec, atLeastOnce()).cancelOrder(anyString());
+  }
+
+  @Test
+  void riskBreach_stcPath_shortCircuitsBeforeDispatch() throws Exception {
+    StrategyConfig cfg = stcConfig();
+    cfg.setPendingTtlPaperSecs(120L); // generous buffer so the STC sleep loop is still in play
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    // Cache miss — the workflow will be sleeping in the look-up loop when we signal.
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setAction(CopytradeSignalPayload.Action.STC);
+    p.setTail("half out");
+    p.setSignalId("rb-stc-1");
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("rb-stc-wf")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(p);
+
+    // Let the workflow enter the lookup loop, then signal.
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(positionLookup, atLeastOnce())
+            .findPositionWorkflowId(anyString(), anyString(), anyString());
+        break;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+    wf.riskBreach(riskBreach("auto:daily_loss", "auto:daily_loss"));
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    AuditEvent aborted = capture("SignalAbortedByRiskBreach");
+    assertThat(aborted.getSubject()).containsEntry("signal_id", "rb-stc-1");
+  }
+
+  private static RiskBreachPayload riskBreach(String reason, String actor) {
+    RiskBreachPayload r = new RiskBreachPayload();
+    r.setSchemaVersion(1L);
+    r.setReason(reason);
+    r.setActor(actor);
+    r.setOccurredAt(OffsetDateTime.now(ZoneOffset.UTC));
+    return r;
   }
 
   private com.ohmytradeagent.contract.PositionWorkflowInput positionInput() {

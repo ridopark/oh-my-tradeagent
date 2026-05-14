@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/reset-killswitch-request.json",
+  "title": "ResetKillSwitchRequest",
+  "description": "Update payload for KillSwitchWorkflow.reset_killswitch. Dual-control required: approver_id_1 and approver_id_2 must be non-empty and distinct. Validator rejects same-approver. After reset, a configurable cool-down (cfg.reset_cooldown_secs) blocks new entries with KILL_SWITCH_COOLING_DOWN.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.ResetKillSwitchRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "approver_id_1",
+    "approver_id_2"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "approver_id_1": {
+      "type": "string",
+      "minLength": 1
+    },
+    "approver_id_2": {
+      "type": "string",
+      "minLength": 1
+    },
+    "note": {
+      "type": "string",
+      "description": "Operator-supplied free-form note recorded in the KillSwitchResetApproved audit event."
+    }
+  }
+}
