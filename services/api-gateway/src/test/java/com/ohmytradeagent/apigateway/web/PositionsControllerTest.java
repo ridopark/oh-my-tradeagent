@@ -86,7 +86,7 @@ class PositionsControllerTest {
                 .header("X-Operator-Id", "ridopark")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(
-                    "{\"workflowId\":\"t-dev/s-copytrade-v1/pos/AAPL/sig-1\",\"reason\":\"risk-team-call\"}"))
+                    "{\"workflowId\":\"t-dev/s-copytrade-v1/pos/AAPL260620C00150000/sig-1\",\"reason\":\"risk-team-call\"}"))
         .andExpect(status().isAccepted())
         .andExpect(jsonPath("$.exit_signal_id").value("force:ridopark:1715703000123"))
         .andExpect(jsonPath("$.status").value("ACCEPTED"));
@@ -95,6 +95,17 @@ class PositionsControllerTest {
     verify(stub).update(eq("force_close"), eq(ForceCloseResult.class), cap.capture());
     assertThat(cap.getValue().getOperatorId()).isEqualTo("ridopark");
     assertThat(cap.getValue().getReason()).isEqualTo("risk-team-call");
+  }
+
+  @Test
+  void forceClose_workflowIdOutsideTenantStrategy_returns400() throws Exception {
+    mvc.perform(
+            post("/positions/force-close")
+                .header("X-Operator-Id", "ridopark")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    "{\"workflowId\":\"t-other/s-copytrade-v1/pos/AAPL260620C00150000/sig-1\"}"))
+        .andExpect(status().isBadRequest());
   }
 
   @Test
@@ -109,7 +120,7 @@ class PositionsControllerTest {
             post("/positions/force-close")
                 .header("X-Operator-Id", "ridopark")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"workflowId\":\"t-dev/s-copytrade-v1/pos/AAPL/sig-1\"}"))
+                .content("{\"workflowId\":\"t-dev/s-copytrade-v1/pos/AAPL260620C00150000/sig-1\"}"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.status").value("NOOP_ALREADY_CLOSED"));
   }

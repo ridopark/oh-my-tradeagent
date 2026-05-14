@@ -1,18 +1,16 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.contract.KillSwitchWorkflowInput;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionAlreadyStarted;
 import io.temporal.client.WorkflowOptions;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -51,26 +49,15 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
       log.warn("tenants dir {} not found; skipping KillSwitchWorkflow bootstrap", tenantsDir);
       return;
     }
-    List<Path> tenantDirs = listSubdirs(tenantsDir);
-    for (Path tenantDir : tenantDirs) {
-      String tenantId = tenantDir.getFileName().toString();
-      Path strategiesDir = tenantDir.resolve("strategies");
-      if (!Files.exists(strategiesDir)) {
-        continue;
-      }
-      List<Path> strategyFiles = listYamlFiles(strategiesDir);
-      for (Path file : strategyFiles) {
-        String fileName = file.getFileName().toString();
-        String strategyId = fileName.substring(0, fileName.length() - ".yaml".length());
-        startKillSwitch(tenantId, strategyId);
-      }
+    for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+      startKillSwitch(ts.tenantId(), ts.strategyId());
     }
   }
 
   private void startKillSwitch(String tenantId, String strategyId) {
-    String wfId = "t-" + tenantId + "/s-" + strategyId + "/killswitch";
+    String wfId = WorkflowIds.killswitch(tenantId, strategyId);
     Map<String, Object> sa = new HashMap<>();
-    sa.put("TenantStrategy", "t-" + tenantId + "/s-" + strategyId);
+    sa.put("TenantStrategy", WorkflowIds.tenantStrategy(tenantId, strategyId));
 
     WorkflowOptions opts =
         WorkflowOptions.newBuilder()
@@ -94,22 +81,6 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
       log.info("KillSwitchWorkflow wf_id={} already running (warm boot)", wfId);
     } catch (RuntimeException e) {
       log.error("failed to start KillSwitchWorkflow wf_id={}", wfId, e);
-    }
-  }
-
-  private static List<Path> listSubdirs(Path dir) {
-    try (Stream<Path> s = Files.list(dir)) {
-      return s.filter(Files::isDirectory).toList();
-    } catch (IOException e) {
-      throw new IllegalStateException("Failed to list " + dir, e);
-    }
-  }
-
-  private static List<Path> listYamlFiles(Path dir) {
-    try (Stream<Path> s = Files.list(dir)) {
-      return s.filter(p -> p.toString().endsWith(".yaml")).toList();
-    } catch (IOException e) {
-      throw new IllegalStateException("Failed to list " + dir, e);
     }
   }
 }

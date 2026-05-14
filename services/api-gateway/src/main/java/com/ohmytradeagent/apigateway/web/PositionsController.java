@@ -2,6 +2,7 @@ package com.ohmytradeagent.apigateway.web;
 
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import io.temporal.api.enums.v1.WorkflowExecutionStatus;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
@@ -52,7 +53,7 @@ public class PositionsController {
     String query =
         String.format(
             "TenantStrategy = '%s' AND WorkflowType = '%s' AND ExecutionStatus = '%s'",
-            WorkflowIds.tenantStrategy(tenant, strategy),
+            WorkflowIds.escapeForVisibilityQuery(WorkflowIds.tenantStrategy(tenant, strategy)),
             POSITION_WORKFLOW_TYPE,
             WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING.name());
     List<Map<String, Object>> rows =
@@ -70,7 +71,16 @@ public class PositionsController {
     if (body.workflowId() == null || body.workflowId().isBlank()) {
       throw new IllegalArgumentException("workflow_id is required");
     }
+    String tenant = ctx.tenantId(req);
+    String strategy = ctx.strategyId(req);
     String operator = ctx.operatorId(req);
+
+    String requiredPrefix = WorkflowIds.tenantStrategy(tenant, strategy) + "/";
+    if (!body.workflowId().startsWith(requiredPrefix)) {
+      throw new IllegalArgumentException(
+          "workflow_id does not match caller tenant/strategy: " + body.workflowId());
+    }
+
     ForceCloseRequest fr = new ForceCloseRequest();
     fr.setSchemaVersion(1L);
     fr.setOperatorId(operator);

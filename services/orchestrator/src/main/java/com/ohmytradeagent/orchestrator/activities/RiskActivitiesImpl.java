@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.activities;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
@@ -80,7 +81,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     }
     KillSwitchState state;
     try {
-      String wfId = "t-" + payload.getTenantId() + "/s-" + payload.getStrategyId() + "/killswitch";
+      String wfId = WorkflowIds.killswitch(payload.getTenantId(), payload.getStrategyId());
       KillSwitchWorkflow stub = workflowClient.newWorkflowStub(KillSwitchWorkflow.class, wfId);
       state = stub.killswitchState();
     } catch (Exception e) {

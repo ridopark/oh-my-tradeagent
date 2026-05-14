@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflow;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
@@ -12,15 +13,12 @@ import io.temporal.client.schedules.ScheduleIntervalSpec;
 import io.temporal.client.schedules.ScheduleOptions;
 import io.temporal.client.schedules.ScheduleSpec;
 import io.temporal.serviceclient.WorkflowServiceStubs;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -67,25 +65,16 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
       return;
     }
     ScheduleClient scheduleClient = ScheduleClient.newInstance(serviceStubs);
-    for (Path tenantDir : listSubdirs(tenantsDir)) {
-      String tenantId = tenantDir.getFileName().toString();
-      Path strategiesDir = tenantDir.resolve("strategies");
-      if (!Files.exists(strategiesDir)) {
-        continue;
-      }
-      for (Path file : listYamlFiles(strategiesDir)) {
-        String fileName = file.getFileName().toString();
-        String strategyId = fileName.substring(0, fileName.length() - ".yaml".length());
-        // v0: paper only. Live target wires in Phase 7 alongside exec-svc-tradier-live.
-        ensureSchedule(scheduleClient, tenantId, strategyId, "paper");
-      }
+    for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+      // v0: paper only. Live target wires in Phase 7 alongside exec-svc-tradier-live.
+      ensureSchedule(scheduleClient, ts.tenantId(), ts.strategyId(), "paper");
     }
   }
 
   private void ensureSchedule(
       ScheduleClient scheduleClient, String tenantId, String strategyId, String brokerTarget) {
     String scheduleId = "recon-t-" + tenantId + "-s-" + strategyId + "-" + brokerTarget;
-    String wfIdPrefix = "t-" + tenantId + "/s-" + strategyId + "/recon/" + brokerTarget + "/";
+    String wfIdPrefix = WorkflowIds.reconciliationPrefix(tenantId, strategyId, brokerTarget);
 
     ReconciliationWorkflowInput input = new ReconciliationWorkflowInput();
     input.setSchemaVersion(1L);
@@ -94,7 +83,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
     input.setBrokerTarget(ReconciliationWorkflowInput.BrokerTarget.fromValue(brokerTarget));
 
     Map<String, Object> sa = new HashMap<>();
-    sa.put("TenantStrategy", "t-" + tenantId + "/s-" + strategyId);
+    sa.put("TenantStrategy", WorkflowIds.tenantStrategy(tenantId, strategyId));
 
     WorkflowOptions wfOptions =
         WorkflowOptions.newBuilder()
@@ -127,22 +116,6 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
       log.info("Reconciliation Schedule id={} already exists (warm boot)", scheduleId);
     } catch (RuntimeException e) {
       log.error("failed to create Reconciliation Schedule id={}", scheduleId, e);
-    }
-  }
-
-  private static List<Path> listSubdirs(Path dir) {
-    try (Stream<Path> s = Files.list(dir)) {
-      return s.filter(Files::isDirectory).toList();
-    } catch (IOException e) {
-      return Collections.emptyList();
-    }
-  }
-
-  private static List<Path> listYamlFiles(Path dir) {
-    try (Stream<Path> s = Files.list(dir)) {
-      return s.filter(p -> p.toString().endsWith(".yaml")).toList();
-    } catch (IOException e) {
-      return Collections.emptyList();
     }
   }
 }

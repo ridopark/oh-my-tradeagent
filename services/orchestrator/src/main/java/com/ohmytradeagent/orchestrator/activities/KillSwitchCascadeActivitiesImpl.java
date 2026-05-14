@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.activities;
 
 import com.ohmytradeagent.contract.RiskBreachPayload;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
@@ -33,8 +34,11 @@ public class KillSwitchCascadeActivitiesImpl implements KillSwitchCascadeActivit
   @Override
   public long cascadeRiskBreach(
       String tenantId, String strategyId, String excludeWorkflowId, String reason, String actor) {
-    String tenantStrategy = "t-" + tenantId + "/s-" + strategyId;
-    String query = "TenantStrategy='" + tenantStrategy + "' AND ExecutionStatus='Running'";
+    String tenantStrategy = WorkflowIds.tenantStrategy(tenantId, strategyId);
+    String query =
+        "TenantStrategy='"
+            + WorkflowIds.escapeForVisibilityQuery(tenantStrategy)
+            + "' AND ExecutionStatus='Running'";
 
     RiskBreachPayload payload = new RiskBreachPayload();
     payload.setSchemaVersion(1L);

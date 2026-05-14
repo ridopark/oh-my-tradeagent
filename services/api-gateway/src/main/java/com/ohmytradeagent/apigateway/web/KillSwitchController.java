@@ -3,6 +3,7 @@ package com.ohmytradeagent.apigateway.web;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;

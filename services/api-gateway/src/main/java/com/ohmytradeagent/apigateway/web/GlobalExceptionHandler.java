@@ -22,6 +22,12 @@ public class GlobalExceptionHandler {
         .body(Map.of("error", "missing_header", "header", e.header()));
   }
 
+  @ExceptionHandler(IllegalArgumentException.class)
+  public ResponseEntity<Map<String, Object>> badRequest(IllegalArgumentException e) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+        .body(Map.of("error", "bad_request", "detail", String.valueOf(e.getMessage())));
+  }
+
   @ExceptionHandler(WorkflowNotFoundException.class)
   public ResponseEntity<Map<String, Object>> notFound(WorkflowNotFoundException e) {
     return ResponseEntity.status(HttpStatus.NOT_FOUND)

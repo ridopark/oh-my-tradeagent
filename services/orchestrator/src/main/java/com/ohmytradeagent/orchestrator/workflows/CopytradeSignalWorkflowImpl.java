@@ -9,6 +9,7 @@ import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
@@ -238,17 +239,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     String tenant = payload.getTenantId();
     String strategyId = payload.getStrategyId();
     String posWfId =
-        "t-"
-            + tenant
-            + "/s-"
-            + strategyId
-            + "/pos/"
-            + resolved.optionSymbol()
-            + "/"
-            + payload.getSignalId();
+        WorkflowIds.position(tenant, strategyId, resolved.optionSymbol(), payload.getSignalId());
 
     Map<String, Object> sa = new HashMap<>();
-    sa.put("TenantStrategy", "t-" + tenant + "/s-" + strategyId);
+    sa.put("TenantStrategy", WorkflowIds.tenantStrategy(tenant, strategyId));
     sa.put("ContractSymbol", resolved.optionSymbol());
 
     ChildWorkflowOptions opts =
