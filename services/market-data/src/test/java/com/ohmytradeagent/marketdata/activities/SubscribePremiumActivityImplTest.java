@@ -144,7 +144,9 @@ class SubscribePremiumActivityImplTest {
         new BigDecimal("3.10"),
         OffsetDateTime.parse("2026-05-13T17:55:00Z"));
 
-    long deadline = System.currentTimeMillis() + 10_000;
+    // 25s deadline (under the 30s @Timeout) — CI runners under load have hit 11s+ for signal
+    // propagation through TestWorkflowEnvironment; the prior 10s was too tight.
+    long deadline = System.currentTimeMillis() + 25_000;
     while (System.currentTimeMillis() < deadline && TickCapture.lastTick == null) {
       Thread.sleep(50);
     }
