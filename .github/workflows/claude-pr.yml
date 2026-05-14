@@ -115,8 +115,16 @@ jobs:
 
       - name: Install Python packages (editable)
         run: |
-          (cd contract/python && uv sync && uv pip install -e .)
-          (cd services/signal-source-discord && uv sync && uv pip install -e .)
+          # Guard each module so PRs that don't touch every service still pass.
+          for module in contract/python services/signal-source-discord; do
+            if [ -d "$module" ]; then
+              echo "::group::install $module"
+              (cd "$module" && uv sync && uv pip install -e .)
+              echo "::endgroup::"
+            else
+              echo "skipping $module (not on this branch)"
+            fi
+          done
 
       - name: Launch audit-svc (Phase 0 worker)
         run: |
