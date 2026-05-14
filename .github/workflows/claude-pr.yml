@@ -126,44 +126,36 @@ jobs:
             fi
           done
 
-      - name: Launch orchestrator-svc (Temporal worker on orchestrator-core queue)
+      - name: Launch Spring Boot service jars (Temporal workers)
         run: |
-          # Phase 2a launches orchestrator-svc; Phase 1's audit-svc placeholder is no longer
-          # the worker host. If a branch predates Phase 2a (no orchestrator-svc module yet),
-          # fall back to audit-svc so older PRs still validate.
-          if [ -f services/orchestrator/target/orchestrator-svc-0.1.0-SNAPSHOT-boot.jar ]; then
-            nohup java -jar services/orchestrator/target/orchestrator-svc-0.1.0-SNAPSHOT-boot.jar \
-              > /tmp/orchestrator-svc.log 2>&1 &
-            for _ in $(seq 1 60); do
-              grep -q "Started OrchestratorApplication" /tmp/orchestrator-svc.log && break
-              sleep 1
-            done
-            grep -q "Started OrchestratorApplication" /tmp/orchestrator-svc.log \
-              || { tail -100 /tmp/orchestrator-svc.log; exit 1; }
-          else
-            nohup java -jar services/audit/target/audit-svc-0.1.0-SNAPSHOT.jar > /tmp/audit-svc.log 2>&1 &
-            for _ in $(seq 1 60); do
-              grep -q "Started AuditApplication" /tmp/audit-svc.log && break
-              sleep 1
-            done
-            grep -q "Started AuditApplication" /tmp/audit-svc.log || { tail -50 /tmp/audit-svc.log; exit 1; }
+          # Auto-discover and launch every services/*/target/*-svc-*-boot.jar.
+          # Each Spring Boot service prints "Started <Foo>Application" on
+          # startup; we wait up to 60s per service. Adding a new service
+          # module to the build needs no edits here — drop the module in
+          # services/ and the auto-discovery picks it up.
+          shopt -s nullglob
+          jars=(services/*/target/*-svc-*-boot.jar)
+          if [ ${#jars[@]} -eq 0 ]; then
+            echo "No service jars found — branch predates Spring Boot service modules."
+            exit 0
           fi
-
-      - name: Launch exec-tradier-paper-svc (Temporal worker on broker-tradier-paper queue)
-        run: |
-          # Phase 2b adds the exec service. Skip cleanly for branches that predate it.
-          jar=services/exec-tradier-paper/target/exec-tradier-paper-svc-0.1.0-SNAPSHOT-boot.jar
-          if [ -f "$jar" ]; then
-            nohup java -jar "$jar" > /tmp/exec-tradier-paper-svc.log 2>&1 &
+          for jar in "${jars[@]}"; do
+            name=$(basename "$jar" .jar)
+            log="/tmp/${name}.log"
+            echo "::group::launch $name"
+            nohup java -jar "$jar" > "$log" 2>&1 &
             for _ in $(seq 1 60); do
-              grep -q "Started ExecTradierPaperApplication" /tmp/exec-tradier-paper-svc.log && break
+              grep -qE "Started [A-Z][A-Za-z]+Application" "$log" && break
               sleep 1
             done
-            grep -q "Started ExecTradierPaperApplication" /tmp/exec-tradier-paper-svc.log \
-              || { tail -100 /tmp/exec-tradier-paper-svc.log; exit 1; }
-          else
-            echo "exec-tradier-paper-svc jar not present on this branch — skipping"
-          fi
+            if ! grep -qE "Started [A-Z][A-Za-z]+Application" "$log"; then
+              echo "::error::$name failed to start"
+              tail -100 "$log"
+              exit 1
+            fi
+            echo "$name OK"
+            echo "::endgroup::"
+          done
 
       - name: Execute PR test plan via qa-inspector
         uses: anthropics/claude-code-action@v1
@@ -195,7 +187,5 @@ jobs:
       - name: Teardown
         if: always()
         run: |
-          pkill -f exec-tradier-paper-svc || true
-          pkill -f orchestrator-svc || true
-          pkill -f audit-svc || true
+          pkill -f -- '-svc-0.1.0-SNAPSHOT-boot.jar' || true
           docker compose -f infra/docker-compose.yml down -v || true
