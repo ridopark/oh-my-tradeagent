@@ -84,4 +84,72 @@ class RoundTripTest {
 
     assertThat(roundTripped).isEqualTo(original);
   }
+
+  @Test
+  void premiumTick_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("premium-tick.json"));
+
+    PremiumTick deserialized = mapper.readValue(json, PremiumTick.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getContractSymbol()).isEqualTo("NVDA  260516C00140000");
+    assertThat(deserialized.getPremium().doubleValue()).isEqualTo(2.95);
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
+
+  @Test
+  void armChandelierPayload_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("arm-chandelier-payload.json"));
+
+    ArmChandelierPayload deserialized = mapper.readValue(json, ArmChandelierPayload.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getTenantId()).isEqualTo("dev");
+    assertThat(deserialized.getPeakPremium().doubleValue()).isEqualTo(2.85);
+    assertThat(deserialized.getGivebackPct().doubleValue()).isEqualTo(0.15);
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
+
+  @Test
+  void subscribePremiumRequest_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("subscribe-premium-request.json"));
+
+    SubscribePremiumRequest deserialized = mapper.readValue(json, SubscribePremiumRequest.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getContractSymbol()).isEqualTo("NVDA  260516C00140000");
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
+
+  @Test
+  void subscribePremiumResult_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("subscribe-premium-result.json"));
+
+    SubscribePremiumResult deserialized = mapper.readValue(json, SubscribePremiumResult.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getSubscriptionId()).isEqualTo("sub-7f3b1d40");
+    assertThat(deserialized.getStatus()).isEqualTo(SubscribePremiumResult.Status.SUBSCRIBED);
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
 }

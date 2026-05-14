@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/subscribe-premium-result.json",
+  "title": "SubscribePremiumResult",
+  "description": "Phase 4: result of SubscribePremiumActivity.subscribePremium. status=FAILED is returned (not thrown) so the workflow can audit and proceed without trail.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.SubscribePremiumResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "subscription_id",
+    "subscribed_at",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version."
+    },
+    "subscription_id": {
+      "type": "string",
+      "description": "Opaque ID for the active subscription. Empty string when status=FAILED."
+    },
+    "subscribed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp when the subscription was created (or attempted)."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["SUBSCRIBED", "FAILED"],
+      "description": "Outcome. FAILED returns instead of throwing so the workflow can audit and continue."
+    },
+    "error": {
+      "type": "string",
+      "description": "Error message when status=FAILED."
+    }
+  }
+}

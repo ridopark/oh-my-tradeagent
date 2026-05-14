@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/arm-chandelier-payload.json",
+  "title": "ArmChandelierPayload",
+  "description": "Phase 4: signal payload to PositionWorkflow.arm_chandelier. Dispatched by CopytradeSignalWorkflow's STC branch when trail_on_partial is true. Idempotent — a second arm on an already-armed position is a silent no-op.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.ArmChandelierPayload",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "position_workflow_id",
+    "source_signal_id",
+    "peak_premium",
+    "giveback_pct"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "position_workflow_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target PositionWorkflow workflow_id."
+    },
+    "source_signal_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "signal_id of the STC line that triggered the arm. Recorded for audit forensics."
+    },
+    "peak_premium": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Initial peak premium to anchor the trail at. Typically the STC ref_premium at arm time."
+    },
+    "giveback_pct": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 0.5,
+      "description": "Trailing-stop giveback fraction. fire_threshold = peak * (1 - giveback_pct)."
+    }
+  }
+}

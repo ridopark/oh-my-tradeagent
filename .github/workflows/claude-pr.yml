@@ -165,6 +165,22 @@ jobs:
             echo "exec-tradier-paper-svc jar not present on this branch — skipping"
           fi
 
+      - name: Launch market-data-svc (Temporal worker on market-data queue)
+        run: |
+          # Phase 4 adds the market-data service. Soft-skip for older branches.
+          jar=services/market-data/target/market-data-svc-0.1.0-SNAPSHOT-boot.jar
+          if [ -f "$jar" ]; then
+            nohup java -jar "$jar" > /tmp/market-data-svc.log 2>&1 &
+            for _ in $(seq 1 60); do
+              grep -q "Started MarketDataApplication" /tmp/market-data-svc.log && break
+              sleep 1
+            done
+            grep -q "Started MarketDataApplication" /tmp/market-data-svc.log \
+              || { tail -100 /tmp/market-data-svc.log; exit 1; }
+          else
+            echo "market-data-svc jar not present on this branch — skipping"
+          fi
+
       - name: Execute PR test plan via qa-inspector
         uses: anthropics/claude-code-action@v1
         with:
@@ -195,6 +211,7 @@ jobs:
       - name: Teardown
         if: always()
         run: |
+          pkill -f market-data-svc || true
           pkill -f exec-tradier-paper-svc || true
           pkill -f orchestrator-svc || true
           pkill -f audit-svc || true

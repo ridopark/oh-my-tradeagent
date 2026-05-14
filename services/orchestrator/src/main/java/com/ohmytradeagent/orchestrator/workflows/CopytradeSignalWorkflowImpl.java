@@ -1,5 +1,6 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
+import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.OrderIntent;
@@ -47,6 +48,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private static final String KIND_EXIT_REQUESTED = "ExitRequested";
   private static final String KIND_ORPHAN_STC = "OrphanSTC";
   private static final String KIND_AVG_SKIPPED = "AvgSkipped";
+  // Phase 4: distinct from PositionWorkflow's "ChandelierArmed" — this audit is the dispatch
+  // (parent-side); the apply (child-side) emits its own ChandelierArmed when the subscribe
+  // activity succeeds. Both useful for forensics.
+  private static final String KIND_CHANDELIER_ARM_REQUESTED = "ChandelierArmRequested";
 
   private static final String REASON_TTL_EXPIRED = "ttl_expired";
   private static final String VERSION_POSITION_HANDOFF = "position-handoff";
@@ -280,6 +285,27 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
     ExternalWorkflowStub stub = Workflow.newUntypedExternalWorkflowStub(positionId);
     stub.signal("partialExit", req);
+
+    // Phase 4: arm CHANDELIER_TRAIL when the strategy opts in.
+    if (Boolean.TRUE.equals(config.getTrailOnPartial())) {
+      ArmChandelierPayload arm = new ArmChandelierPayload();
+      arm.setSchemaVersion(1L);
+      arm.setTenantId(tenant);
+      arm.setStrategyId(strategyId);
+      arm.setPositionWorkflowId(positionId);
+      arm.setSourceSignalId(payload.getSignalId());
+      arm.setPeakPremium(payload.getPrice());
+      arm.setGivebackPct(config.getTrailGivebackPct());
+      stub.signal("armChandelier", arm);
+      logAudit(
+          payload,
+          KIND_CHANDELIER_ARM_REQUESTED,
+          subject(
+              "signal_id", payload.getSignalId(),
+              "position_workflow_id", positionId,
+              "peak_premium", payload.getPrice(),
+              "giveback_pct", config.getTrailGivebackPct()));
+    }
 
     return payload.getSignalId();
   }
