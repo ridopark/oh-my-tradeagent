@@ -1,7 +1,7 @@
 schema_version: 1
 tenant_id: dev
 strategy_id: copytrade-v1
-broker_target: paper
+broker_target: alpaca-paper
 
 # Phase 2a risk gates
 author_whitelist:

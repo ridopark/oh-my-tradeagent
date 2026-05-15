@@ -3,10 +3,10 @@
 # Shared multi-stage Dockerfile for every Java service in this repo.
 #
 # Build context is the repo root. The target module is selected via
-# the SERVICE_MODULE build arg (one of: audit, orchestrator,
-# exec-tradier-paper, market-data, api-gateway). Build runs from the
-# parent POM so module-internal deps (contract-java, plus any future
-# shared libs) resolve in a single reactor pass.
+# the SERVICE_MODULE build arg (one of: audit, orchestrator, exec,
+# market-data, api-gateway). Build runs from the parent POM so
+# module-internal deps (contract-java, plus any future shared libs)
+# resolve in a single reactor pass.
 #
 # Output: a Spring Boot fat jar at /app/app.jar, run by a non-root
 # user under a slim Temurin JRE. The boot jar is selected with a
