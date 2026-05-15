@@ -77,12 +77,16 @@ public class AlpacaPaperBroker implements OptionsBroker {
             buy ? "buy" : "sell",
             buy ? "buy_to_open" : "sell_to_close");
 
+    // Order type derives from limitPrice: null → market, present → limit. This keeps the adapter
+    // honest about the wire shape — Alpaca rejects `type=limit` without a `limit_price`, so
+    // forcing both to disagree would 400 every retry until the activity schedule lapses.
+    String orderType = request.limitPrice() == null ? "market" : "limit";
     AlpacaOrderRequest body =
         new AlpacaOrderRequest(
             ORDER_CLASS_MLEG,
             request.qty(),
             request.limitPrice() == null ? null : request.limitPrice().toPlainString(),
-            "limit",
+            orderType,
             "day",
             request.clientOrderId(),
             List.of(leg));
@@ -117,15 +121,22 @@ public class AlpacaPaperBroker implements OptionsBroker {
       client.delete().uri("/v2/orders/{id}", brokerOrderId).retrieve().toBodilessEntity();
       return CancelResponse.ok();
     } catch (HttpStatusCodeException e) {
-      // Alpaca returns 422 for cancel-on-filled and similar "can't cancel from this state" cases.
-      // The OptionsBroker contract says: surface that as a soft failure with brokerReason so the
-      // workflow records last_error and moves on. Auth errors still throw (let Temporal classify).
-      if (e.getStatusCode().value() == 401) {
+      int status = e.getStatusCode().value();
+      // Auth failures are non-retryable contract problems — let Temporal classify.
+      if (status == 401) {
         throw mapError(e);
       }
+      // 5xx are transient — rethrow so Temporal retries the activity instead of silently dropping
+      // the cancel. A real Alpaca outage during STC otherwise loses the chance to flatten.
+      if (status >= 500) {
+        throw e;
+      }
+      // 4xx semantic failures (422 cancel-on-filled / order-already-cancelled / etc.) — the
+      // OptionsBroker contract surfaces these as soft failure with brokerReason so the workflow
+      // records last_error and moves on.
       String body = e.getResponseBodyAsString();
-      log.warn("Alpaca cancelOrder failed: status={} body={}", e.getStatusCode(), body);
-      return CancelResponse.failed("alpaca status " + e.getStatusCode().value() + ": " + body);
+      log.warn("Alpaca cancelOrder failed: status={} body={}", status, body);
+      return CancelResponse.failed("alpaca status " + status + ": " + body);
     }
   }
 

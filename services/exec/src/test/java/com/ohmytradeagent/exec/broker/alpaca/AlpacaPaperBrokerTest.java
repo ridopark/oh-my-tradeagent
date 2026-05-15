@@ -190,6 +190,10 @@ class AlpacaPaperBrokerTest {
     RecordedRequest recorded = server.takeRequest();
     JsonNode body = mapper.readTree(recorded.getBody().readUtf8());
     assertThat(body.has("limit_price")).isFalse();
+    // When limitPrice is null, the wire shape must be a market order — Alpaca rejects a
+    // limit-type request without a limit_price field, and the resulting 400 doesn't match any
+    // non-retryable mapping in mapError, which would loop the activity until the schedule lapses.
+    assertThat(body.get("type").asText()).isEqualTo("market");
   }
 
   @Test
@@ -217,6 +221,34 @@ class AlpacaPaperBrokerTest {
     assertThat(c.cancelled()).isFalse();
     assertThat(c.brokerReason()).contains("alpaca status 422");
     assertThat(c.brokerReason()).contains("order cannot be canceled");
+  }
+
+  @Test
+  void cancelOrder_401_throwsAuthError() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(401)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"invalid api key\"}"));
+
+    assertThatThrownBy(() -> broker.cancelOrder("alp-12345"))
+        .isInstanceOf(ApplicationFailure.class)
+        .hasMessageContaining("AuthError");
+  }
+
+  @Test
+  void cancelOrder_503_isRetryable() {
+    // Transient 5xx must propagate as HttpStatusCodeException so Temporal retries the activity
+    // instead of swallowing the cancel attempt. The OptionsBroker contract reserves CancelResponse
+    // for 4xx semantic failures only.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(503)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"service unavailable\"}"));
+
+    assertThatThrownBy(() -> broker.cancelOrder("alp-12345"))
+        .isInstanceOf(org.springframework.web.client.HttpStatusCodeException.class);
   }
 
   @Test
