@@ -26,14 +26,6 @@ import java.util.Set;
  */
 public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
 
-  // Legacy constants retained for back-compat with tests that pin to these names. Phase 2c.2
-  // derives
-  // the task queue from the broker_target value string ({@link
-  // ExecActivitiesFactory#taskQueueFor}),
-  // so these no longer steer routing — only legacy paper/live inputs map to them.
-  static final String EXEC_TASK_QUEUE_PAPER = "broker-alpaca-paper";
-  static final String EXEC_TASK_QUEUE_LIVE = "broker-alpaca-live";
-
   /** Journal entries older than this with no broker match are treated as orphans. */
   static final Duration JOURNAL_ORPHAN_STALE = Duration.ofMinutes(5);
 

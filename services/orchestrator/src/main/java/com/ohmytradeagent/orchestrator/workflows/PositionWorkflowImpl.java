@@ -75,7 +75,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   private static final BigDecimal MAX_GIVEBACK = new BigDecimal("0.5");
 
-  static final String EXEC_TASK_QUEUE_PAPER = CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_PAPER;
+  /**
+   * Phase 2c.2 default broker_target used when a {@link PositionWorkflowInput} arrives without one
+   * (e.g. minted by a pre-2c.2 CopytradeSignalWorkflow). Matches the {@code
+   * tenants/dev/strategies/copytrade-v1.yaml} default.
+   */
+  private static final String DEFAULT_BROKER_TARGET = "alpaca-paper";
+
   static final String MARKET_DATA_TASK_QUEUE = "market-data";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
@@ -88,8 +94,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   /**
    * Phase 2c.2: built lazily inside {@link #run(PositionWorkflowInput)} from {@code
-   * input.broker_target}. Pre-2c.2 inputs (broker_target absent) fall back to the legacy default
-   * {@link #EXEC_TASK_QUEUE_PAPER}, which since 2c.2 points at {@code broker-alpaca-paper}.
+   * input.broker_target}. Pre-2c.2 inputs (broker_target absent) fall back to {@link
+   * #DEFAULT_BROKER_TARGET}.
    */
   private ExecActivities exec;
 
@@ -160,13 +166,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     this.input = in;
     this.remainingQty = in.getQty();
 
-    // Phase 2c.2: route exec Activities to broker-<broker_target>. Falls back to the legacy
-    // default queue when the input was minted by a pre-2c.2 CopytradeSignalWorkflow that didn't
-    // populate broker_target.
+    // Phase 2c.2: route exec Activities to broker-<broker_target>. Falls back to the
+    // 2c.2 default broker when the input was minted by a pre-2c.2 CopytradeSignalWorkflow that
+    // didn't populate broker_target.
     String brokerTarget =
-        in.getBrokerTarget() != null
-            ? in.getBrokerTarget().value()
-            : EXEC_TASK_QUEUE_PAPER.substring(ExecActivitiesFactory.TASK_QUEUE_PREFIX.length());
+        in.getBrokerTarget() != null ? in.getBrokerTarget().value() : DEFAULT_BROKER_TARGET;
     this.exec = ExecActivitiesFactory.forTarget(brokerTarget);
 
     auditLog(

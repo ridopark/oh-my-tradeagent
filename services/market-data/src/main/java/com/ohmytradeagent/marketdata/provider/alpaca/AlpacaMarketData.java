@@ -17,6 +17,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -152,10 +153,16 @@ public class AlpacaMarketData implements MarketDataProvider {
   public Subscription subscribePremium(String occSymbol, Consumer<Tick> onTick) {
     List<Consumer<Tick>> listeners =
         bySymbol.computeIfAbsent(occSymbol, k -> new CopyOnWriteArrayList<>());
-    boolean firstForSymbol = listeners.isEmpty();
-    listeners.add(onTick);
-    if (firstForSymbol) {
-      sendSubscribe(occSymbol);
+    // Lock the per-symbol list so the isEmpty()→add→sendSubscribe compound is atomic.
+    // Without this, two concurrent first-subscribers both see isEmpty()==true and both call
+    // sendSubscribe — duplicate WS subscribes. The lock is uncontended in steady state
+    // (subscribe/unsubscribe are rare) and scoped to one symbol, so it doesn't serialize fan-out.
+    synchronized (listeners) {
+      boolean firstForSymbol = listeners.isEmpty();
+      listeners.add(onTick);
+      if (firstForSymbol) {
+        sendSubscribe(occSymbol);
+      }
     }
     return new AlpacaSubscription(occSymbol, onTick);
   }
@@ -249,7 +256,8 @@ public class AlpacaMarketData implements MarketDataProvider {
     }
   }
 
-  private void sendSubscribe(String occSymbol) {
+  /** Package-private so tests can spy on the per-symbol upstream subscribe count. */
+  void sendSubscribe(String occSymbol) {
     WebSocket socket = ensureWs();
     if (socket == null) {
       // WS not yet open; reconnect will re-send via activeSymbols snapshot.
@@ -270,18 +278,28 @@ public class AlpacaMarketData implements MarketDataProvider {
     }
   }
 
-  private static String subscribeAction(String action, String occSymbol) {
-    return "{\"action\":\""
-        + action
-        + "\",\"trades\":[\""
-        + occSymbol
-        + "\"],\"quotes\":[\""
-        + occSymbol
-        + "\"]}";
+  /**
+   * Build the Alpaca subscribe/unsubscribe action frame via Jackson so the symbol value is
+   * JSON-escaped, not concatenated. OCC symbols today are {@code [A-Z0-9 ]}-only, so the legacy
+   * concatenation produced valid JSON — but a future symbol scheme with a quote or backslash would
+   * silently corrupt the wire frame. Jackson is the safe form.
+   */
+  private String subscribeAction(String action, String occSymbol) {
+    try {
+      return mapper.writeValueAsString(
+          Map.of("action", action, "trades", List.of(occSymbol), "quotes", List.of(occSymbol)));
+    } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+      // Map.of with only String/List values never throws — this is unreachable.
+      throw new IllegalStateException("failed to serialize subscribe frame for " + occSymbol, e);
+    }
   }
 
-  /** Opens the WS if needed. Returns null when the connect is still in flight or has failed. */
-  private WebSocket ensureWs() {
+  /**
+   * Opens the WS if needed. Returns null when the connect is still in flight or has failed.
+   *
+   * <p>Package-private so tests can stub it without standing up a real WS endpoint.
+   */
+  WebSocket ensureWs() {
     WebSocket existing = ws;
     if (existing != null) {
       return existing;
@@ -317,7 +335,8 @@ public class AlpacaMarketData implements MarketDataProvider {
     }
   }
 
-  private void scheduleReconnect() {
+  /** Package-private so tests can drive the reconnect path directly. */
+  void scheduleReconnect() {
     if (!reconnectInFlight.compareAndSet(false, true)) {
       return;
     }
@@ -326,28 +345,31 @@ public class AlpacaMarketData implements MarketDataProvider {
     if (nextBackoff.compareTo(MAX_BACKOFF) > 0) {
       nextBackoff = MAX_BACKOFF;
     }
-    scheduler.schedule(
-        () -> {
-          reconnectInFlight.set(false);
-          synchronized (wsLock) {
-            ws = null;
-          }
-          WebSocket socket = ensureWs();
-          if (socket == null) {
-            return;
-          }
-          // Re-send subscribe for every symbol that still has a listener. Lossy: any tick that
-          // landed during the gap is gone. Iterate a snapshot so concurrent close()s during the
-          // resubscribe walk can't NPE.
-          for (String s : new LinkedHashSet<>(bySymbol.keySet())) {
-            List<Consumer<Tick>> listeners = bySymbol.get(s);
-            if (listeners != null && !listeners.isEmpty()) {
-              sendSubscribe(s);
-            }
-          }
-        },
-        delay.toMillis(),
-        TimeUnit.MILLISECONDS);
+    scheduler.schedule(this::runReconnect, delay.toMillis(), TimeUnit.MILLISECONDS);
+  }
+
+  /** Package-private so tests can drive the reconnect body deterministically. */
+  void runReconnect() {
+    // Null the socket BEFORE clearing the in-flight guard. If a stale WsListener.onClose
+    // fires (originating from the just-failed socket) while we're mid-reconnect, it must
+    // see reconnectInFlight==true and skip — otherwise it races us to open a second socket.
+    synchronized (wsLock) {
+      ws = null;
+    }
+    reconnectInFlight.set(false);
+    WebSocket socket = ensureWs();
+    if (socket == null) {
+      return;
+    }
+    // Re-send subscribe for every symbol that still has a listener. Lossy: any tick that
+    // landed during the gap is gone. Iterate a snapshot so concurrent close()s during the
+    // resubscribe walk can't NPE.
+    for (String s : new LinkedHashSet<>(bySymbol.keySet())) {
+      List<Consumer<Tick>> listeners = bySymbol.get(s);
+      if (listeners != null && !listeners.isEmpty()) {
+        sendSubscribe(s);
+      }
+    }
   }
 
   @PreDestroy
@@ -414,10 +436,14 @@ public class AlpacaMarketData implements MarketDataProvider {
       if (listeners == null) {
         return;
       }
-      listeners.remove(listener);
-      if (listeners.isEmpty()) {
-        bySymbol.remove(symbol);
-        sendUnsubscribe(symbol);
+      // Mirror the subscribe path: hold the per-symbol lock so a concurrent subscribe can't see
+      // empty→removed and re-create the listener list between our remove() and bySymbol.remove().
+      synchronized (listeners) {
+        listeners.remove(listener);
+        if (listeners.isEmpty()) {
+          bySymbol.remove(symbol);
+          sendUnsubscribe(symbol);
+        }
       }
     }
   }
