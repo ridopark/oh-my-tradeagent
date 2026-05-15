@@ -1,6 +1,6 @@
 # Sidecar runtime: Playwright base image (Python + Chromium + glibc deps preinstalled).
 # Replica >= 1 supported; durable dedupe is Temporal's job.
-FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.59.0-noble
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
