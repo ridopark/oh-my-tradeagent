@@ -28,8 +28,10 @@ data:
     strategy_id: copytrade-v1
     broker_target: alpaca-paper
     author_whitelist:
-      - acme_trader
-      - beta_signals
+      - TradingTheTrend
+      - Edtrader
+      - TB22
+      - beendoubleyou
     max_signal_age_secs: 1800
     max_positions: 5
     capital_weight: 0.2
