@@ -20,8 +20,11 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: bootstrap
-          # Track the server image version (30-temporal.yaml) to keep CLI surface aligned.
-          image: temporalio/admin-tools:1.27.2
+          # admin-tools tags don't track Temporal server versions directly. The 1.29.x
+          # line bundles a recent `temporal` CLI that talks to server 1.20+ via gRPC; we
+          # pin to the major.minor for reproducibility. Bump deliberately when the
+          # cluster moves.
+          image: temporalio/admin-tools:1.29
           env:
             - name: TEMPORAL_ADDRESS
               value: temporal:7233
