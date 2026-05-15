@@ -47,7 +47,10 @@ cleanup() {
 # Step 1: port-forward
 # -----------------------------------------------------------------------------
 log "establishing port-forward temporal:7233 <- ssh $HOMELAB:${LOCAL_TEMPORAL_PORT}..."
-ssh -fN -o ExitOnForwardFailure=yes \
+# `-f` daemonises after auth and runs the remote command. `-N` would
+# *discard* the remote command (OpenSSH docs), which is why this fails
+# silently with a port that never opens. Use `-f` alone.
+ssh -f -o ExitOnForwardFailure=yes \
     -L "${LOCAL_TEMPORAL_PORT}:127.0.0.1:7234" \
     "$HOMELAB" \
     "kubectl -n $NAMESPACE port-forward svc/temporal 7234:7233" &
