@@ -47,26 +47,26 @@ spec:
               value: default
             - name: STATE_DIR
               value: /app/state
-            # Pulls the channel + tenant + strategy from Secret values supplied
-            # by the operator (template in infra/k8s/secrets.template.yaml).
+            # Channel + tenant + strategy come from the `sidecar-config` Secret. Env-var
+            # names match exactly what services/signal-source-discord/ohmytradeagent_sidecar/
+            # main.py reads (TENANT_ID / STRATEGY_ID / DISCORD_CHANNEL_URL). Secret is
+            # required (not optional) so the pod fails fast at boot if the operator
+            # forgets the Secret, rather than running silently scopeless.
             - name: DISCORD_CHANNEL_URL
               valueFrom:
                 secretKeyRef:
                   name: sidecar-config
                   key: DISCORD_CHANNEL_URL
-                  optional: true
-            - name: COPYTRADE_TENANT_ID
+            - name: TENANT_ID
               valueFrom:
                 secretKeyRef:
                   name: sidecar-config
-                  key: COPYTRADE_TENANT_ID
-                  optional: true
-            - name: COPYTRADE_STRATEGY_ID
+                  key: TENANT_ID
+            - name: STRATEGY_ID
               valueFrom:
                 secretKeyRef:
                   name: sidecar-config
-                  key: COPYTRADE_STRATEGY_ID
-                  optional: true
+                  key: STRATEGY_ID
           volumeMounts:
             - name: state
               mountPath: /app/state
