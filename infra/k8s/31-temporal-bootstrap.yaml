@@ -8,6 +8,9 @@ metadata:
   name: temporal-bootstrap
   namespace: copytrade
 spec:
+  # Clean up completed Job pods after 10 minutes so they don't accumulate
+  # in the namespace across re-applies.
+  ttlSecondsAfterFinished: 600
   backoffLimit: 6
   template:
     metadata:
@@ -17,7 +20,8 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: bootstrap
-          image: temporalio/admin-tools:1.25
+          # Track the server image version (30-temporal.yaml) to keep CLI surface aligned.
+          image: temporalio/admin-tools:1.27.2
           env:
             - name: TEMPORAL_ADDRESS
               value: temporal:7233

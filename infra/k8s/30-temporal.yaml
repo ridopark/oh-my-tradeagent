@@ -120,6 +120,11 @@ spec:
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 30
           resources:
             requests:
               cpu: 50m
