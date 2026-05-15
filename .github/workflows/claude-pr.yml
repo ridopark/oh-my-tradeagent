@@ -157,7 +157,15 @@ jobs:
             echo "::endgroup::"
           done
 
+      # The Claude action consistently hangs after the SDK reports success
+      # (https://github.com/anthropics/claude-code-action/issues/865, fix PR #1084 unmerged).
+      # We bound the step at 22 min and treat it as advisory; the next step is the real gate
+      # — it grep-validates that the QA sticky comment was posted by THIS run (run-id marker)
+      # and that the verdict is positive. This decouples our job result from the upstream bug.
       - name: Execute PR test plan via qa-inspector
+        id: claude-qa
+        timeout-minutes: 22
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           prompt: |
@@ -173,7 +181,12 @@ jobs:
                - "Two replicas concurrency" → covered by `validate_phase1.py` (two TemporalEmitter clients race the same signal_id); cite that.
                - "CI jobs green" → skip; this workflow is the Claude QA pass, the static CI runs in `.github/workflows/ci.yml`.
                - Items needing credentials we don't have → skip with an explicit reason.
-            5. Write a markdown table to /tmp/qa-report.md beginning with the literal first line `${STICKY_MARKER}`:
+            5. Write a markdown table to /tmp/qa-report.md. The FIRST TWO lines must be literally:
+               ```
+               ${STICKY_MARKER}
+               <!-- run-id: ${{ github.run_id }} -->
+               ```
+               Then the report body:
                `| # | Item | Status | Evidence |`
                followed by `Findings & follow-ups` (severity-tagged) and `Verdict: READY TO MERGE | NEEDS FIXES | BLOCKED`.
             6. Post via the project helper:
@@ -183,6 +196,32 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STICKY_MARKER: ${{ env.STICKY_MARKER }}
+
+      - name: Verify QA report posted by this run
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          body=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq '.[] | select(.body | contains("<!-- claude-qa-report -->")) | .body' | tail -1)
+          if [ -z "${body}" ]; then
+            echo "::error::QA agent never posted a report sticky comment"
+            exit 1
+          fi
+          if ! grep -qF "<!-- run-id: ${{ github.run_id }} -->" <<<"${body}"; then
+            echo "::error::QA sticky comment is stale (does not match run_id=${{ github.run_id }})"
+            exit 1
+          fi
+          if grep -qiE "Verdict:.*(NEEDS FIXES|BLOCKED)" <<<"${body}"; then
+            echo "::error::QA verdict is not READY TO MERGE"
+            exit 1
+          fi
+          if ! grep -qi "Verdict:.*READY TO MERGE" <<<"${body}"; then
+            echo "::error::QA verdict line missing from report"
+            exit 1
+          fi
+          echo "QA verdict: READY TO MERGE (run_id=${{ github.run_id }})"
 
       - name: Teardown
         if: always()
