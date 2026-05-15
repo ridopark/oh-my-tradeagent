@@ -67,7 +67,14 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   /** Used when StrategyConfig.default_stc_fraction is null. */
   static final double DEFAULT_STC_FRACTION = 0.5;
 
-  static final String EXEC_TASK_QUEUE_PAPER = "broker-tradier-paper";
+  /**
+   * Legacy default task queue used when a workflow runs before {@code cfg.broker_target} is
+   * resolved (e.g. when the early reject path fires before {@code strategy.get} is called) or by
+   * tests that don't go through the factory. Phase 2c.2 routes by {@code cfg.broker_target} via
+   * {@link ExecActivitiesFactory}; this constant is retained for back-compat with the existing test
+   * scaffolding that registers a single broker worker on this queue.
+   */
+  static final String EXEC_TASK_QUEUE_PAPER = "broker-alpaca-paper";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -82,13 +89,14 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       Workflow.newActivityStub(ContractActivities.class, DEFAULT_OPTIONS);
   private final PositionLookupActivities positionLookup =
       Workflow.newActivityStub(PositionLookupActivities.class, DEFAULT_OPTIONS);
-  private final ExecActivities exec =
-      Workflow.newActivityStub(
-          ExecActivities.class,
-          ActivityOptions.newBuilder()
-              .setTaskQueue(EXEC_TASK_QUEUE_PAPER)
-              .setStartToCloseTimeout(Duration.ofSeconds(15))
-              .build());
+
+  /**
+   * Phase 2c.2: built lazily inside {@link #handleBto} / {@link #handleStc} from the loaded {@code
+   * StrategyConfig.broker_target}, so a paper BTO with {@code broker_target=alpaca-paper} routes to
+   * {@code broker-alpaca-paper}. Determinism: factory input comes from a deterministic Activity
+   * lookup, so replays rebuild the same stub.
+   */
+  private ExecActivities exec;
 
   private FillEvent fillEvent;
   private boolean riskBreachReceived;
@@ -117,6 +125,11 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     logAudit(payload, KIND_SIGNAL_RECEIVED, subject("signal_id", payload.getSignalId()));
 
     StrategyConfig config = strategy.get(payload.getTenantId(), payload.getStrategyId());
+
+    // Phase 2c.2: route exec Activities to broker-<broker_target>. The factory throws a
+    // non-retryable ApplicationFailure on invalid targets; let it propagate so the workflow
+    // fails fast (an unroutable broker_target is a config bug, not a transient error).
+    this.exec = ExecActivitiesFactory.forTarget(config.getBrokerTarget().value());
 
     switch (payload.getAction()) {
       case BTO:
@@ -207,7 +220,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       // Phase 2b workflows in flight on replay don't attempt to spawn a child.
       int v = Workflow.getVersion(VERSION_POSITION_HANDOFF, Workflow.DEFAULT_VERSION, 1);
       if (v >= 1) {
-        startPositionWorkflow(payload, resolved, fillEvent);
+        startPositionWorkflow(payload, config, resolved, fillEvent);
       }
       return payload.getSignalId();
     }
@@ -235,7 +248,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   private void startPositionWorkflow(
-      CopytradeSignalPayload payload, ContractResolveResult resolved, FillEvent fill) {
+      CopytradeSignalPayload payload,
+      StrategyConfig config,
+      ContractResolveResult resolved,
+      FillEvent fill) {
     String tenant = payload.getTenantId();
     String strategyId = payload.getStrategyId();
     String posWfId =
@@ -263,6 +279,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     posInput.setEntryPremium(
         fill.avgFillPrice() != null ? fill.avgFillPrice() : payload.getPrice());
     posInput.setSourceSignalWorkflowId(Workflow.getInfo().getWorkflowId());
+    // Phase 2c.2: carry broker_target so the child routes its exit/flatten Activities to the
+    // same broker-<value> queue as the parent's entry.
+    posInput.setBrokerTarget(
+        PositionWorkflowInput.BrokerTarget.fromValue(config.getBrokerTarget().value()));
 
     Async.function(child::run, posInput);
     // Wait until the child is durably scheduled before returning.

@@ -28,7 +28,8 @@ import org.mockito.Mockito;
 class ReconciliationWorkflowImplTest {
 
   private static final String CORE_QUEUE = "orchestrator-core";
-  private static final String EXEC_QUEUE = "broker-tradier-paper";
+  // Phase 2c.2: broker_target=alpaca-paper -> task queue broker-alpaca-paper via the factory.
+  private static final String EXEC_QUEUE = "broker-alpaca-paper";
 
   private TestWorkflowEnvironment env;
   private AuditActivities audit;
@@ -137,7 +138,7 @@ class ReconciliationWorkflowImplTest {
     in.setSchemaVersion(1L);
     in.setTenantId("dev");
     in.setStrategyId("copytrade-v1");
-    in.setBrokerTarget(ReconciliationWorkflowInput.BrokerTarget.PAPER);
+    in.setBrokerTarget(ReconciliationWorkflowInput.BrokerTarget.ALPACA_PAPER);
     ReconciliationWorkflow wf =
         env.getWorkflowClient()
             .newWorkflowStub(

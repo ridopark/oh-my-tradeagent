@@ -31,10 +31,12 @@ spec:
       containers:
         - name: exec-alpaca-paper
           # exec-svc image is provider-agnostic; the active adapter is selected
-          # at boot via BROKER_IMPL. We keep the per-broker DB env-var names
-          # (EXEC_TRADIER_PAPER_DB_*) and the Temporal task queue default for
-          # back-compat with the orchestrator until that's reworked in 2c.x.
-          # TODO(2c.x): rename env vars (EXEC_TRADIER_PAPER_DB_* -> EXEC_DB_*).
+          # at boot via BROKER_IMPL. Phase 2c.2: TEMPORAL_TASK_QUEUE now defaults
+          # to broker-alpaca-paper to match StrategyConfig.broker_target=alpaca-paper
+          # routing on the orchestrator side. DB env vars are renamed
+          # EXEC_TRADIER_PAPER_DB_* -> EXEC_DB_* (migration note: the operator must
+          # apply both names during the rollout window; the application reads
+          # EXEC_DB_* only from this PR onwards).
           image: ghcr.io/ridopark/oh-my-tradeagent-exec:latest
           imagePullPolicy: Always
           ports:
@@ -51,14 +53,16 @@ spec:
               value: temporal:7233
             - name: TEMPORAL_NAMESPACE
               value: default
-            - name: EXEC_TRADIER_PAPER_DB_URL
-              value: jdbc:postgresql://postgres:5432/exec_tradier_paper
-            - name: EXEC_TRADIER_PAPER_DB_USER
+            - name: TEMPORAL_TASK_QUEUE
+              value: broker-alpaca-paper
+            - name: EXEC_DB_URL
+              value: jdbc:postgresql://postgres:5432/exec_alpaca_paper
+            - name: EXEC_DB_USER
               valueFrom:
                 secretKeyRef:
                   name: postgres-credentials
                   key: POSTGRES_USER
-            - name: EXEC_TRADIER_PAPER_DB_PASS
+            - name: EXEC_DB_PASS
               valueFrom:
                 secretKeyRef:
                   name: postgres-credentials

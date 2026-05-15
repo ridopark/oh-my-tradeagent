@@ -22,4 +22,7 @@ EOSQL
   echo "  ensured database: $db"
 }
 
+# Phase 2c.2: alpaca-paper is the v0 default. Legacy tradier-paper DB retained so existing
+# volumes mounted from prior phases don't lose state on re-init (idempotent skip).
+create_db_if_missing exec_alpaca_paper
 create_db_if_missing exec_tradier_paper

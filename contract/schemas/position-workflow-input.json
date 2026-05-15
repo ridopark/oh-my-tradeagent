@@ -51,6 +51,22 @@
     "source_signal_workflow_id": {
       "type": "string",
       "description": "Workflow ID of the CopytradeSignalWorkflow that spawned this position. Optional; useful for cross-workflow audit correlation."
+    },
+    "broker_target": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "Phase 2c.2: broker_target carried over from the spawning CopytradeSignalWorkflow's StrategyConfig so the position's exit Activities route to the same broker task queue (broker-<value>). Optional for back-compat with pre-2c.2 replays; when absent the workflow falls back to the legacy default (broker-alpaca-paper since 2c.2)."
     }
   }
 }

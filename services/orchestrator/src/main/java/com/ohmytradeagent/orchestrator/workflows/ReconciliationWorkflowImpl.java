@@ -26,8 +26,13 @@ import java.util.Set;
  */
 public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
 
-  static final String EXEC_TASK_QUEUE_PAPER = "broker-tradier-paper";
-  static final String EXEC_TASK_QUEUE_LIVE = "broker-tradier-live";
+  // Legacy constants retained for back-compat with tests that pin to these names. Phase 2c.2
+  // derives
+  // the task queue from the broker_target value string ({@link
+  // ExecActivitiesFactory#taskQueueFor}),
+  // so these no longer steer routing — only legacy paper/live inputs map to them.
+  static final String EXEC_TASK_QUEUE_PAPER = "broker-alpaca-paper";
+  static final String EXEC_TASK_QUEUE_LIVE = "broker-alpaca-live";
 
   /** Journal entries older than this with no broker match are treated as orphans. */
   static final Duration JOURNAL_ORPHAN_STALE = Duration.ofMinutes(5);
@@ -58,7 +63,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         Workflow.newActivityStub(
             ReconciliationExecActivity.class,
             ActivityOptions.newBuilder()
-                .setTaskQueue(taskQueueFor(in.getBrokerTarget()))
+                .setTaskQueue(ExecActivitiesFactory.taskQueueFor(in.getBrokerTarget().value()))
                 .setStartToCloseTimeout(Duration.ofSeconds(30))
                 .build());
 
@@ -135,13 +140,6 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
             "journal_orphans", journalOrphans,
             "broker_orphans", brokerOrphans));
     return summary;
-  }
-
-  private static String taskQueueFor(ReconciliationWorkflowInput.BrokerTarget t) {
-    return switch (t) {
-      case PAPER -> EXEC_TASK_QUEUE_PAPER;
-      case LIVE -> EXEC_TASK_QUEUE_LIVE;
-    };
   }
 
   private void auditLog(String kind, Map<String, Object> subject) {

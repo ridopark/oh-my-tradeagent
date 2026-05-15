@@ -27,8 +27,19 @@
     },
     "broker_target": {
       "type": "string",
-      "enum": ["paper", "live"],
-      "description": "Routes journal_dump_open + broker_list_open_orders Activities to the broker task queue."
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "Routes journal_dump_open + broker_list_open_orders Activities to the broker-<value> task queue. Phase 2c.2: <provider>-<env> shape; legacy paper/live retained for back-compat."
     }
   }
 }

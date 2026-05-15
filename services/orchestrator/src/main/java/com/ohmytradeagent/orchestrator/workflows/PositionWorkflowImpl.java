@@ -85,13 +85,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       Workflow.newActivityStub(AuditActivities.class, DEFAULT_OPTIONS);
   private final MarketCalendarActivities calendar =
       Workflow.newActivityStub(MarketCalendarActivities.class, DEFAULT_OPTIONS);
-  private final ExecActivities exec =
-      Workflow.newActivityStub(
-          ExecActivities.class,
-          ActivityOptions.newBuilder()
-              .setTaskQueue(EXEC_TASK_QUEUE_PAPER)
-              .setStartToCloseTimeout(Duration.ofSeconds(15))
-              .build());
+
+  /**
+   * Phase 2c.2: built lazily inside {@link #run(PositionWorkflowInput)} from {@code
+   * input.broker_target}. Pre-2c.2 inputs (broker_target absent) fall back to the legacy default
+   * {@link #EXEC_TASK_QUEUE_PAPER}, which since 2c.2 points at {@code broker-alpaca-paper}.
+   */
+  private ExecActivities exec;
+
   private final SubscribePremiumActivity marketData =
       Workflow.newActivityStub(
           SubscribePremiumActivity.class,
@@ -158,6 +159,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   public String run(PositionWorkflowInput in) {
     this.input = in;
     this.remainingQty = in.getQty();
+
+    // Phase 2c.2: route exec Activities to broker-<broker_target>. Falls back to the legacy
+    // default queue when the input was minted by a pre-2c.2 CopytradeSignalWorkflow that didn't
+    // populate broker_target.
+    String brokerTarget =
+        in.getBrokerTarget() != null
+            ? in.getBrokerTarget().value()
+            : EXEC_TASK_QUEUE_PAPER.substring(ExecActivitiesFactory.TASK_QUEUE_PREFIX.length());
+    this.exec = ExecActivitiesFactory.forTarget(brokerTarget);
 
     auditLog(
         KIND_POSITION_ENTERED,

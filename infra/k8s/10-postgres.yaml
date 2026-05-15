@@ -22,6 +22,9 @@ data:
       echo "  ensured database: $db"
     }
 
+    # Phase 2c.2: alpaca-paper is the v0 default. Legacy tradier-paper DB retained for
+    # back-compat with volumes mounted from prior phases.
+    create_db_if_missing exec_alpaca_paper
     create_db_if_missing exec_tradier_paper
 ---
 apiVersion: v1

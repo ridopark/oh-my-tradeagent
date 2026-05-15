@@ -66,8 +66,10 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
     }
     ScheduleClient scheduleClient = ScheduleClient.newInstance(serviceStubs);
     for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
-      // v0: paper only. Live target wires in Phase 7 alongside exec-svc-tradier-live.
-      ensureSchedule(scheduleClient, ts.tenantId(), ts.strategyId(), "paper");
+      // Phase 2c.2: paper-only schedule pinned to the alpaca-paper broker queue (matches the
+      // Phase 2c.2 default for tenants/dev/strategies/copytrade-v1.yaml). Live promotions in
+      // Phase 7 add the matching <provider>-live schedule.
+      ensureSchedule(scheduleClient, ts.tenantId(), ts.strategyId(), "alpaca-paper");
     }
   }
 

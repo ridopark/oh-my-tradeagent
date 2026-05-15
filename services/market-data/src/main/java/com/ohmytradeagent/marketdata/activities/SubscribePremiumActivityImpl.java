@@ -4,23 +4,25 @@ import com.ohmytradeagent.contract.PremiumTick;
 import com.ohmytradeagent.contract.SubscribePremiumRequest;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.contract.activities.SubscribePremiumActivity;
-import com.ohmytradeagent.marketdata.stream.PremiumStreamSource;
-import com.ohmytradeagent.marketdata.stream.Subscription;
+import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
+import com.ohmytradeagent.marketdata.provider.Subscription;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * Phase 4 worker-side implementation of {@link SubscribePremiumActivity}. Subscribes a tick
- * consumer on the configured {@link PremiumStreamSource} and signals each tick into the named
- * PositionWorkflow as {@code chandelierTick}.
+ * Phase 4 / Phase 2c.2 worker-side implementation of {@link SubscribePremiumActivity}. Subscribes a
+ * tick consumer on the Spring-wired {@link MarketDataProvider} (in-memory by default; Alpaca when
+ * {@code MARKET_DATA_PROVIDER=alpaca}) and signals each tick into the named PositionWorkflow as
+ * {@code chandelierTick}.
  *
  * <p>Signal dispatch runs on a worker-owned executor to keep the stream callback (which may be
  * driven by a feed thread) decoupled from Temporal RPC latency.
@@ -33,13 +35,19 @@ public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
 
   private static final Logger log = LoggerFactory.getLogger(SubscribePremiumActivityImpl.class);
 
-  private final PremiumStreamSource source;
+  private final MarketDataProvider provider;
   private final WorkflowClient workflowClient;
   private final ExecutorService dispatcher;
 
+  /**
+   * Subscription registry keyed by subscription_id. Phase 4 had no explicit unsubscribe path beyond
+   * the workflow-not-found self-tear-down; we keep that pattern here.
+   */
+  private final ConcurrentHashMap<String, Subscription> active = new ConcurrentHashMap<>();
+
   public SubscribePremiumActivityImpl(
-      PremiumStreamSource source, WorkflowClient workflowClient, ExecutorService dispatcher) {
-    this.source = source;
+      MarketDataProvider provider, WorkflowClient workflowClient, ExecutorService dispatcher) {
+    this.provider = provider;
     this.workflowClient = workflowClient;
     this.dispatcher = dispatcher;
   }
@@ -51,14 +59,15 @@ public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
     result.setSubscribedAt(OffsetDateTime.ofInstant(Instant.now(), ZoneOffset.UTC));
     try {
       String posWfId = req.getPositionWorkflowId();
-      // Subscription id is captured lazily for the unsubscribe-on-notfound path.
       final String[] subIdHolder = new String[1];
       Subscription sub =
-          source.subscribe(
+          provider.subscribePremium(
               req.getContractSymbol(),
-              posWfId,
-              tick -> dispatcher.submit(() -> dispatchTick(posWfId, subIdHolder[0], tick)));
+              tick ->
+                  dispatcher.submit(
+                      () -> dispatchTick(posWfId, subIdHolder[0], toPremiumTick(tick))));
       subIdHolder[0] = sub.subscriptionId();
+      active.put(sub.subscriptionId(), sub);
       result.setSubscriptionId(sub.subscriptionId());
       result.setStatus(SubscribePremiumResult.Status.SUBSCRIBED);
       return result;
@@ -83,10 +92,22 @@ public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
     } catch (WorkflowNotFoundException notFound) {
       // Target workflow has closed; tear down the subscription so we stop fanning out.
       if (subscriptionId != null) {
-        source.unsubscribe(subscriptionId);
+        Subscription sub = active.remove(subscriptionId);
+        if (sub != null) {
+          sub.close();
+        }
       }
     } catch (Exception ignored) {
       // Best-effort tick dispatch — Phase 4 deliberately does not surface transient errors.
     }
+  }
+
+  private static PremiumTick toPremiumTick(com.ohmytradeagent.marketdata.provider.Tick t) {
+    PremiumTick out = new PremiumTick();
+    out.setSchemaVersion(1L);
+    out.setContractSymbol(t.occSymbol());
+    out.setPremium(t.premium());
+    out.setRetrievedAt(t.retrievedAt());
+    return out;
   }
 }

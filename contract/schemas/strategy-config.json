@@ -34,8 +34,19 @@
     },
     "broker_target": {
       "type": "string",
-      "enum": ["paper", "live"],
-      "description": "Routes Activities to paper-or-live broker task queues. Phase 2a does not place orders; field reserved for Phase 2b."
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper); the legacy paper/live values are retained for back-compat with pre-2c.2 audit fixtures."
     },
     "author_whitelist": {
       "type": "array",

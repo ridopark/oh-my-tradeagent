@@ -1,11 +1,27 @@
 spring:
   application:
     name: market-data-svc
+  # Worker-only service; spring-boot-starter-web is on the classpath for RestClient
+  # (Alpaca REST snapshot), but no HTTP listener should bind on this pod.
+  main:
+    web-application-type: none
 
 temporal:
   target: ${TEMPORAL_TARGET:localhost:7233}
   namespace: ${TEMPORAL_NAMESPACE:default}
   task-queue: ${TEMPORAL_TASK_QUEUE:market-data}
+
+# MarketDataProvider impl selector. Values: 'inmemory' (in-process fan-out used by tests
+# and dev) | 'alpaca' (HTTPS snapshot + WS premium stream). Additional providers
+# (tradier, ibkr, schwab) land as 2c.x follow-ups.
+market-data:
+  provider: ${MARKET_DATA_PROVIDER:inmemory}
+
+alpaca:
+  data-base-url: ${ALPACA_DATA_BASE_URL:https://data.alpaca.markets}
+  data-ws-url: ${ALPACA_DATA_WS_URL:wss://stream.data.alpaca.markets/v1beta1/indicative}
+  api-key-id: ${APCA_API_KEY_ID:}
+  api-secret-key: ${APCA_API_SECRET_KEY:}
 
 management:
   endpoints:

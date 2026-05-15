@@ -44,8 +44,19 @@
     },
     "broker_target": {
       "type": "string",
-      "enum": ["paper", "live"],
-      "description": "Routes the activity to the broker-paper or broker-live task queue. Phase 2b only handles 'paper'."
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "Routes the activity to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape; legacy paper/live values retained for back-compat with pre-2c.2 fixtures."
     },
     "option_symbol": {
       "type": "string",

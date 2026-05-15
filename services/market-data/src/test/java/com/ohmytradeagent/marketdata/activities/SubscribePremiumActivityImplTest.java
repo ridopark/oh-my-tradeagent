@@ -6,7 +6,7 @@ import com.ohmytradeagent.contract.PremiumTick;
 import com.ohmytradeagent.contract.SubscribePremiumRequest;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.contract.activities.SubscribePremiumActivity;
-import com.ohmytradeagent.marketdata.stream.InMemoryPremiumStreamSource;
+import com.ohmytradeagent.marketdata.provider.inmemory.InMemoryMarketData;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
@@ -86,7 +86,7 @@ class SubscribePremiumActivityImplTest {
   }
 
   private TestWorkflowEnvironment env;
-  private InMemoryPremiumStreamSource stream;
+  private InMemoryMarketData stream;
 
   @BeforeEach
   void setUp() {
@@ -97,7 +97,7 @@ class SubscribePremiumActivityImplTest {
     captureWorker.registerWorkflowImplementationTypes(
         CapturingWorkflowImpl.class, DispatchWorkflowImpl.class);
 
-    stream = new InMemoryPremiumStreamSource();
+    stream = new InMemoryMarketData();
     SubscribePremiumActivityImpl activity =
         new SubscribePremiumActivityImpl(
             stream, env.getWorkflowClient(), Executors.newSingleThreadExecutor());
