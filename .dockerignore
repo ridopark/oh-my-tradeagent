@@ -1,0 +1,49 @@
+# Keep build context small. The Maven/multi-stage builder only needs
+# poms, sources, and the contract/* tree; everything else is noise that
+# slows uploads to BuildKit and inflates cache keys.
+
+# Build outputs
+**/target/
+**/build/
+**/dist/
+**/.gradle/
+
+# Python virtualenvs / caches
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/*.egg-info/
+
+# Node (defensive; no JS today)
+**/node_modules/
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+
+# VCS
+.git/
+.gitignore
+.github/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Local state (sidecar)
+**/state/
+**/storage_state.json
+
+# Secrets / env (defense in depth — never expect these in context)
+.env
+.env.*
+**/secrets.yaml
+
+# Skill workspace (planner extracts; never needed at build time)
+_workspace/
