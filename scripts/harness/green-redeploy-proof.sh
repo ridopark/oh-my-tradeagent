@@ -47,10 +47,12 @@ cleanup() {
 # Step 1: port-forward
 # -----------------------------------------------------------------------------
 log "establishing port-forward temporal:7233 <- ssh $HOMELAB:${LOCAL_TEMPORAL_PORT}..."
-# `-f` daemonises after auth and runs the remote command. `-N` would
-# *discard* the remote command (OpenSSH docs), which is why this fails
-# silently with a port that never opens. Use `-f` alone.
-ssh -f -o ExitOnForwardFailure=yes \
+# Drop `-f` (no daemonising): with `-f` the shell's `$!` captures the pre-fork
+# ssh PID, not the post-fork daemon — `cleanup` would then `kill` the wrong
+# process and leak the tunnel across re-runs ("Address already in use"). Plain
+# `ssh ... &` keeps the process attached to this shell so `$!` is correct, and
+# the cleanup trap can stop it deterministically.
+ssh -o ExitOnForwardFailure=yes \
     -L "${LOCAL_TEMPORAL_PORT}:127.0.0.1:7234" \
     "$HOMELAB" \
     "kubectl -n $NAMESPACE port-forward svc/temporal 7234:7233" &
