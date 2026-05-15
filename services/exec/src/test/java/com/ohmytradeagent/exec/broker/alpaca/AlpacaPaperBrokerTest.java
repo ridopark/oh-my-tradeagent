@@ -239,6 +239,24 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void placeOrder_throws_InvalidRequestError_on_422_validation() {
+    // A non-duplicate 422 (e.g. unsupported time_in_force) must be non-retryable —
+    // retrying a permanently-bad request shape only burns the schedule deadline.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"time_in_force not supported for option orders\"}"));
+
+    PlaceOrderRequest req =
+        new PlaceOrderRequest("intent-422", "NVDA  260516C00140000", "BUY", 1L, new BigDecimal("2.30"));
+
+    assertThatThrownBy(() -> broker.placeOrder(req))
+        .isInstanceOf(ApplicationFailure.class)
+        .hasMessageContaining("InvalidRequestError");
+  }
+
+  @Test
   void cancelOrder_503_isRetryable() {
     // Transient 5xx must propagate as HttpStatusCodeException so Temporal retries the activity
     // instead of swallowing the cancel attempt. The OptionsBroker contract reserves CancelResponse

@@ -244,6 +244,14 @@ public class AlpacaPaperBroker implements OptionsBroker {
       return ApplicationFailure.newNonRetryableFailure(
           "Alpaca rejected order: " + message, "InvalidContractError");
     }
+    // Non-duplicate 422 reached this point — Alpaca rejected the request shape itself (e.g. bad
+    // `time_in_force`, unsupported `order_class`, malformed `legs`). These cannot resolve on retry,
+    // so map to a non-retryable InvalidRequestError. The duplicate-422 case already returned a
+    // PlaceOrderResponse earlier in placeOrder, before mapError was called.
+    if (status == 422) {
+      return ApplicationFailure.newNonRetryableFailure(
+          "Alpaca rejected order (422, non-duplicate): " + message, "InvalidRequestError");
+    }
     return e; // unchanged → Temporal retries by default
   }
 
