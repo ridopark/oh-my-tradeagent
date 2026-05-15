@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: copytrade
+spec:
+  selector:
+    app: api-gateway
+  ports:
+    - port: 8082
+      targetPort: 8082
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: copytrade
+  labels:
+    app: api-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: api-gateway
+          image: ghcr.io/ridopark/oh-my-tradeagent-api-gateway:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8082
+              name: http
+          env:
+            - name: TEMPORAL_TARGET
+              value: temporal:7233
+            - name: TEMPORAL_NAMESPACE
+              value: default
+            - name: API_GATEWAY_DB_URL
+              value: jdbc:postgresql://postgres:5432/temporal
+            - name: API_GATEWAY_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: API_GATEWAY_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: API_GATEWAY_PORT
+              value: "8082"
+            - name: API_GATEWAY_DEFAULT_TENANT
+              value: dev
+            - name: API_GATEWAY_DEFAULT_STRATEGY
+              value: copytrade-v1
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8082
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8082
+            initialDelaySeconds: 90
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi
+---
+# Operator REST. Traefik is k3s's default ingress controller; matches by host
+# header. Update the host to whatever you point at the homelab node.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-gateway
+  namespace: copytrade
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - host: copytrade.homelab.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8082

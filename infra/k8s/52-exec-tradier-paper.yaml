@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: exec-tradier-paper
+  namespace: copytrade
+spec:
+  selector:
+    app: exec-tradier-paper
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exec-tradier-paper
+  namespace: copytrade
+  labels:
+    app: exec-tradier-paper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: exec-tradier-paper
+  template:
+    metadata:
+      labels:
+        app: exec-tradier-paper
+    spec:
+      containers:
+        - name: exec-tradier-paper
+          image: ghcr.io/ridopark/oh-my-tradeagent-exec-tradier-paper:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: TEMPORAL_TARGET
+              value: temporal:7233
+            - name: TEMPORAL_NAMESPACE
+              value: default
+            - name: EXEC_TRADIER_PAPER_DB_URL
+              value: jdbc:postgresql://postgres:5432/exec_tradier_paper
+            - name: EXEC_TRADIER_PAPER_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: EXEC_TRADIER_PAPER_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            # Stays on `stub` until 5b.D wires real Tradier sandbox creds.
+            - name: BROKER_IMPL
+              value: stub
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 90
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi

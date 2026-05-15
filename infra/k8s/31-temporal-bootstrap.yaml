@@ -1,0 +1,61 @@
+# Registers the custom Search Attributes (TenantStrategy, ContractSymbol) on
+# the default namespace. Idempotent — re-running is a no-op once the SAs exist.
+# Mirrors the `temporal-bootstrap` service from infra/docker-compose.yml.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: temporal-bootstrap
+  namespace: copytrade
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: temporal-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: temporalio/admin-tools:1.25
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: temporal:7233
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "Waiting for Temporal frontend..."
+              for i in $(seq 1 60); do
+                if temporal operator cluster health >/dev/null 2>&1; then
+                  echo "Temporal reachable."
+                  break
+                fi
+                sleep 2
+              done
+
+              echo "Waiting for default namespace (auto-setup is async on cold start)..."
+              for i in $(seq 1 60); do
+                if temporal operator namespace describe default >/dev/null 2>&1; then
+                  echo "default namespace ready."
+                  break
+                fi
+                sleep 2
+              done
+
+              # Register the two custom Search Attributes referenced by the workflows.
+              # Both are Keyword type; we swallow AlreadyExists to keep this idempotent.
+              register_sa() {
+                local name="$1"
+                if temporal operator search-attribute create --namespace default --name "$name" --type Keyword 2>&1 | tee /tmp/out | grep -qi 'AlreadyExists'; then
+                  echo "  $name: already registered"
+                elif grep -qi 'success' /tmp/out; then
+                  echo "  $name: registered"
+                else
+                  cat /tmp/out
+                  exit 1
+                fi
+              }
+              register_sa TenantStrategy
+              register_sa ContractSymbol
+              echo "bootstrap complete."
