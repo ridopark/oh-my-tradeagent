@@ -52,8 +52,8 @@ jobs:
             module: orchestrator
             dockerfile: infra/docker/java-service.Dockerfile
             cache_scope: java-builder
-          - service: exec-tradier-paper
-            module: exec-tradier-paper
+          - service: exec
+            module: exec
             dockerfile: infra/docker/java-service.Dockerfile
             cache_scope: java-builder
           - service: market-data

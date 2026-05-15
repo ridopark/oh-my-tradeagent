@@ -13,7 +13,7 @@
     <module>contract/java</module>
     <module>services/audit</module>
     <module>services/orchestrator</module>
-    <module>services/exec-tradier-paper</module>
+    <module>services/exec</module>
     <module>services/market-data</module>
     <module>services/api-gateway</module>
   </modules>
@@ -32,6 +32,7 @@
     <junit-jupiter.version>5.11.4</junit-jupiter.version>
     <assertj.version>3.27.0</assertj.version>
     <testcontainers.version>1.20.6</testcontainers.version>
+    <mockwebserver.version>4.12.0</mockwebserver.version>
 
     <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
     <maven-surefire-plugin.version>3.5.2</maven-surefire-plugin.version>
@@ -105,6 +106,12 @@
         <version>${testcontainers.version}</version>
         <type>pom</type>
         <scope>import</scope>
+      </dependency>
+
+      <dependency>
+        <groupId>com.squareup.okhttp3</groupId>
+        <artifactId>mockwebserver</artifactId>
+        <version>${mockwebserver.version}</version>
       </dependency>
     </dependencies>
   </dependencyManagement>

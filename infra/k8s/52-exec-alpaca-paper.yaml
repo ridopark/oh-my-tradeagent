@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: exec-alpaca-paper
+  namespace: copytrade
+spec:
+  selector:
+    app: exec-alpaca-paper
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exec-alpaca-paper
+  namespace: copytrade
+  labels:
+    app: exec-alpaca-paper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: exec-alpaca-paper
+  template:
+    metadata:
+      labels:
+        app: exec-alpaca-paper
+    spec:
+      containers:
+        - name: exec-alpaca-paper
+          # exec-svc image is provider-agnostic; the active adapter is selected
+          # at boot via BROKER_IMPL. We keep the per-broker DB env-var names
+          # (EXEC_TRADIER_PAPER_DB_*) and the Temporal task queue default for
+          # back-compat with the orchestrator until that's reworked in 2c.x.
+          # TODO(2c.x): rename env vars (EXEC_TRADIER_PAPER_DB_* -> EXEC_DB_*).
+          image: ghcr.io/ridopark/oh-my-tradeagent-exec:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            # Alpaca paper credentials: APCA_API_KEY_ID + APCA_API_SECRET_KEY.
+            # The operator creates this Secret separately (kubectl apply
+            # -f infra/k8s/secrets.template.yaml after filling values).
+            - secretRef:
+                name: alpaca-credentials
+          env:
+            - name: TEMPORAL_TARGET
+              value: temporal:7233
+            - name: TEMPORAL_NAMESPACE
+              value: default
+            - name: EXEC_TRADIER_PAPER_DB_URL
+              value: jdbc:postgresql://postgres:5432/exec_tradier_paper
+            - name: EXEC_TRADIER_PAPER_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: EXEC_TRADIER_PAPER_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: BROKER_IMPL
+              value: alpaca-paper
+          # exec-svc is a Temporal worker only (spring.main.web-application-type=none).
+          # No HTTP listener — http-get probes would loop the pod. Worker poll loop is
+          # the implicit liveness signal.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi

@@ -1,7 +1,7 @@
 schema_version: 1
 tenant_id: dev
 strategy_id: copytrade-v1
-broker_target: paper
+broker_target: paper  # TODO(2c.x): flip to alpaca-paper when orchestrator routing is wired
 
 # Phase 2a risk gates
 author_whitelist:
