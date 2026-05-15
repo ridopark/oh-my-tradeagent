@@ -65,12 +65,13 @@ public class AlpacaPaperBroker implements OptionsBroker {
 
   @Override
   public PlaceOrderResponse placeOrder(PlaceOrderRequest request) {
+    boolean buy = isBuy(request.side());
     AlpacaOrderLeg leg =
         new AlpacaOrderLeg(
             request.optionSymbol(),
             "1",
-            mapSide(request.side()),
-            isBuy(request.side()) ? "buy_to_open" : "sell_to_close");
+            buy ? "buy" : "sell",
+            buy ? "buy_to_open" : "sell_to_close");
 
     AlpacaOrderRequest body =
         new AlpacaOrderRequest(
@@ -160,25 +161,22 @@ public class AlpacaPaperBroker implements OptionsBroker {
           "done_for_day" ->
           BrokerOrderStatus.OPEN;
       case "filled" -> BrokerOrderStatus.FILLED;
-      case "canceled", "cancelled", "expired", "replaced" -> BrokerOrderStatus.CANCELLED;
+      case "canceled", "expired", "replaced" -> BrokerOrderStatus.CANCELLED;
       case "rejected" -> BrokerOrderStatus.REJECTED;
       default -> BrokerOrderStatus.UNKNOWN;
     };
   }
 
-  private static String mapSide(String contractSide) {
-    // OrderIntent.Side values from the contract: "BUY" / "SELL". Alpaca expects lowercase.
-    return isBuy(contractSide) ? "buy" : "sell";
-  }
-
+  /**
+   * OrderIntent.Side values from the contract are uppercase {@code "BUY"} / {@code "SELL"}; Alpaca
+   * expects lowercase {@code "buy"} / {@code "sell"} on the leg.
+   */
   private static boolean isBuy(String contractSide) {
     return "BUY".equalsIgnoreCase(contractSide);
   }
 
   /**
    * Returns the existing_order_id if Alpaca's 422 body says this is a duplicate; null otherwise.
-   * Alpaca's documented field is {@code existing_order_id}; we also tolerate the {@code data} shape
-   * some endpoints use historically.
    */
   private String duplicateExistingOrderId(HttpStatusCodeException e) {
     if (e.getStatusCode().value() != 422) {
@@ -189,14 +187,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
       return null;
     }
     JsonNode existing = json.path("existing_order_id");
-    if (existing.isTextual() && !existing.asText().isBlank()) {
-      return existing.asText();
-    }
-    JsonNode data = json.path("data");
-    if (data.isTextual() && !data.asText().isBlank()) {
-      return data.asText();
-    }
-    return null;
+    return (existing.isTextual() && !existing.asText().isBlank()) ? existing.asText() : null;
   }
 
   /**
