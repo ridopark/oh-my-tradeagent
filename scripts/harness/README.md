@@ -26,7 +26,7 @@ fills, signal-age veto, contract symbol resolution, etc.). Going straight to
 
 - Homelab k3s cluster running the manifests from `infra/k8s/` (Phase 5b.B).
 - `kubectl` access on the homelab via `ssh ridopark@192.168.10.123`.
-- Local Python 3.10+ with `temporalio` installed.
+- Local Python 3.12+ (project standard) with `temporalio` installed.
 - The orchestrator Deployment runs at `replicas: 1` (the BEFORE/AFTER pod-name
   assertion in `green-redeploy-proof.sh` assumes a single pod). Phase 5b's
   manifests ship with `replicas: 1`; revisit when scaling out.
@@ -85,7 +85,7 @@ python3 scripts/harness/inject_synthetic_positions.py \
 # 3. List running PositionWorkflows.
 ssh ridopark@192.168.10.123 \
   'kubectl -n copytrade run --rm -i temporal-cli --restart=Never \
-     --image=temporalio/admin-tools:1.27.2 -- \
+     --image=temporalio/admin-tools:1.29 -- \
      temporal --address temporal:7233 workflow list \
        --query "WorkflowType=\"PositionWorkflow\" AND ExecutionStatus=\"Running\"" \
        --output json' | jq '.[].execution.workflowId'
@@ -101,18 +101,25 @@ ssh ridopark@192.168.10.123 \
 ## Cleanup
 
 The harness workflows sit Running until EOD/expiry timers fire or you cancel
-them manually:
+them manually. The `orchestrator` container is Spring Boot — no `temporal`
+CLI on board — so use a throwaway admin-tools pod the same way
+`list_running()` does:
 
 ```sh
-ssh ridopark@192.168.10.123 \
-  'kubectl -n copytrade exec deploy/orchestrator -- \
+LIST_OUT=$(ssh ridopark@192.168.10.123 \
+  'kubectl -n copytrade run --rm -i temporal-cli-list --restart=Never \
+     --image=temporalio/admin-tools:1.29 -- \
      temporal --address temporal:7233 workflow list \
-       --query "WorkflowType=\"PositionWorkflow\" AND TenantStrategy=\"t-dev/s-copytrade-v1\" AND ExecutionStatus=\"Running\""' | \
-  jq -r '.[].execution.workflowId' | \
-  xargs -I{} ssh ridopark@192.168.10.123 \
-    'kubectl -n copytrade exec deploy/orchestrator -- \
+       --query "WorkflowType=\"PositionWorkflow\" AND TenantStrategy=\"t-dev/s-copytrade-v1\" AND ExecutionStatus=\"Running\"" \
+       --output json' | jq -r '.[].execution.workflowId')
+
+for wf in $LIST_OUT; do
+  ssh ridopark@192.168.10.123 \
+    "kubectl -n copytrade run --rm -i temporal-cli-term --restart=Never \
+       --image=temporalio/admin-tools:1.29 -- \
        temporal --address temporal:7233 workflow terminate \
-         --workflow-id {} --reason "harness-cleanup"'
+         --workflow-id $wf --reason 'harness-cleanup'"
+done
 ```
 
 ## Limitations

@@ -54,14 +54,20 @@ ssh -fN -o ExitOnForwardFailure=yes \
 SSH_PID=$!
 trap "cleanup $SSH_PID" EXIT INT TERM
 
-# wait until the local port is listening
+# wait until the local port is listening; fail loud if it never opens
+PORT_READY=0
 for _ in $(seq 1 20); do
   if (echo > "/dev/tcp/127.0.0.1/${LOCAL_TEMPORAL_PORT}") 2>/dev/null; then
     log "  reachable on 127.0.0.1:${LOCAL_TEMPORAL_PORT}"
+    PORT_READY=1
     break
   fi
   sleep 1
 done
+if [ "$PORT_READY" = "0" ]; then
+  log "FAIL: port-forward never became ready on 127.0.0.1:${LOCAL_TEMPORAL_PORT} after 20s"
+  exit 1
+fi
 
 # -----------------------------------------------------------------------------
 # Step 2: spawn N PositionWorkflows
@@ -77,7 +83,7 @@ python3 "$(dirname "$0")/inject_synthetic_positions.py" \
 # -----------------------------------------------------------------------------
 list_running() {
   ssh "$HOMELAB" "kubectl -n $NAMESPACE run --rm -i temporal-cli-$$ --restart=Never \
-    --image=temporalio/admin-tools:1.27.2 -- \
+    --image=temporalio/admin-tools:1.29 -- \
     temporal --address temporal:7233 workflow list \
       --query \"WorkflowType='PositionWorkflow' AND TenantStrategy='t-$TENANT/s-$STRATEGY' AND ExecutionStatus='Running'\" \
       --output json" 2>/dev/null | jq -r '.[].execution.workflowId' | sort

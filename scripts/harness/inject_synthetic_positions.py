@@ -88,16 +88,17 @@ async def main(
     ts_key = SearchAttributeKey.for_keyword("TenantStrategy")
     cs_key = SearchAttributeKey.for_keyword("ContractSymbol")
 
-    # Compute once per script run — keeps the workflow_id stable across the
-    # N iterations of this invocation but distinct from a future re-run.
-    run_tag = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Compute once per script run — keeps both the workflow_id suffix and the
+    # source_signal_workflow_id timestamp internally consistent across the N
+    # workflows spawned by this invocation, while staying distinct from a
+    # future re-run.
+    now_utc = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    run_tag = now_utc.strftime("%Y%m%dT%H%M%SZ")
+    now = now_utc.isoformat().replace("+00:00", "Z")
 
     for i in range(count):
         occ = synthetic_occ(i)
         wf_id = workflow_id_for(tenant, strategy, occ, i, run_tag)
-        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace(
-            "+00:00", "Z"
-        )
         payload = {
             "schema_version": 1,
             "tenant_id": tenant,
