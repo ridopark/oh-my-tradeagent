@@ -55,18 +55,9 @@ spec:
             # Stays on `stub` until 5b.D wires real Tradier sandbox creds.
             - name: BROKER_IMPL
               value: stub
-          readinessProbe:
-            httpGet:
-              path: /actuator/health/readiness
-              port: 8080
-            initialDelaySeconds: 30
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /actuator/health/liveness
-              port: 8080
-            initialDelaySeconds: 90
-            periodSeconds: 30
+          # exec-tradier-paper-svc is a Temporal worker only (no spring-boot-starter-web).
+          # No HTTP listener — http-get probes would loop the pod. Worker poll loop is
+          # the implicit liveness signal.
           resources:
             requests:
               cpu: 100m

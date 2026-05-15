@@ -40,18 +40,9 @@ spec:
               value: temporal:7233
             - name: TEMPORAL_NAMESPACE
               value: default
-          readinessProbe:
-            httpGet:
-              path: /actuator/health/readiness
-              port: 8080
-            initialDelaySeconds: 20
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /actuator/health/liveness
-              port: 8080
-            initialDelaySeconds: 60
-            periodSeconds: 30
+          # market-data-svc is a Temporal worker only (no spring-boot-starter-web).
+          # No HTTP listener — http-get probes would loop the pod. Worker poll loop is
+          # the implicit liveness signal.
           resources:
             requests:
               cpu: 100m

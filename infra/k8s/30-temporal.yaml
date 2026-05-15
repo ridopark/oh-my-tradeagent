@@ -104,6 +104,10 @@ spec:
       labels:
         app: temporal-ui
     spec:
+      # k8s auto-injects $TEMPORAL_PORT=tcp://<svc-ip>:7233 from the `temporal` Service.
+      # temporal-ui treats $TEMPORAL_PORT as an integer port and crashes on parse. Disable
+      # service-link env injection for this pod so only our explicit env: entries land.
+      enableServiceLinks: false
       containers:
         - name: temporal-ui
           image: temporalio/ui:2.32.0
