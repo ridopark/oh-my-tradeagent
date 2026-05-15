@@ -45,14 +45,17 @@ spec:
 
               # Register the two custom Search Attributes referenced by the workflows.
               # Both are Keyword type; we swallow AlreadyExists to keep this idempotent.
+              # Branch on exit code (not output text) so this stays robust across
+              # admin-tools CLI version skews.
               register_sa() {
                 local name="$1"
-                if temporal operator search-attribute create --namespace default --name "$name" --type Keyword 2>&1 | tee /tmp/out | grep -qi 'AlreadyExists'; then
-                  echo "  $name: already registered"
-                elif grep -qi 'success' /tmp/out; then
+                local out
+                if out=$(temporal operator search-attribute create --namespace default --name "$name" --type Keyword 2>&1); then
                   echo "  $name: registered"
+                elif echo "$out" | grep -qi 'AlreadyExists'; then
+                  echo "  $name: already registered"
                 else
-                  cat /tmp/out
+                  echo "$out"
                   exit 1
                 fi
               }

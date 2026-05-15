@@ -21,6 +21,8 @@ node_modules/
 .env
 *.env.local
 *.key
+# k8s Secret manifests filled in from secrets.template.yaml — never commit.
+infra/k8s/*.local.yaml
 
 # IDE
 .idea/

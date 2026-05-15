@@ -65,6 +65,15 @@ spec:
               value: temporal
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+            # k8s `$(VAR)` substitution in command/args only expands variables
+            # defined in `env:` — `envFrom:` vars are not seen by the substitution
+            # pass. Promote POSTGRES_USER here so the probe commands below can
+            # reference it.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
           ports:
             - containerPort: 5432
               name: postgres
