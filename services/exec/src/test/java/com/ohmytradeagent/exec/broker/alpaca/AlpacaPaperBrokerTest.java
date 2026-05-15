@@ -249,7 +249,8 @@ class AlpacaPaperBrokerTest {
             .setBody("{\"message\":\"time_in_force not supported for option orders\"}"));
 
     PlaceOrderRequest req =
-        new PlaceOrderRequest("intent-422", "NVDA  260516C00140000", "BUY", 1L, new BigDecimal("2.30"));
+        new PlaceOrderRequest(
+            "intent-422", "NVDA  260516C00140000", "BUY", 1L, new BigDecimal("2.30"));
 
     assertThatThrownBy(() -> broker.placeOrder(req))
         .isInstanceOf(ApplicationFailure.class)
