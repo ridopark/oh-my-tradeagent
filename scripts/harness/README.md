@@ -27,13 +27,18 @@ fills, signal-age veto, contract symbol resolution, etc.). Going straight to
 - Homelab k3s cluster running the manifests from `infra/k8s/` (Phase 5b.B).
 - `kubectl` access on the homelab via `ssh ridopark@192.168.10.123`.
 - Local Python 3.10+ with `temporalio` installed.
+- The orchestrator Deployment runs at `replicas: 1` (the BEFORE/AFTER pod-name
+  assertion in `green-redeploy-proof.sh` assumes a single pod). Phase 5b's
+  manifests ship with `replicas: 1`; revisit when scaling out.
 
 Quickest setup for `temporalio`:
 
 ```sh
 python3 -m venv /tmp/copytrade-harness-venv
 source /tmp/copytrade-harness-venv/bin/activate
-pip install temporalio
+# Pin to the 1.9.x series — server is 1.27.x and the SDK 1.9.x line was the
+# last one verified compatible at the time this harness landed.
+pip install 'temporalio>=1.9,<2'
 ```
 
 ## Single-step proof

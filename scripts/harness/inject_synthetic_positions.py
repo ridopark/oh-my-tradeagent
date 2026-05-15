@@ -60,15 +60,20 @@ def synthetic_occ(i: int) -> str:
     Real OCC: <ROOT><YY><MM><DD><CALL/PUT><STRIKE*1000 padded to 8 digits>
     e.g. NVDA250516C00140000.
 
-    We use HRN<i> as the root, the next monthly expiry 2026-06-19, $100+i strike,
-    Call. Stays well outside any tradable contract so a future broker integration
-    cannot accidentally hit a real chain.
+    Root is always 6 chars (`HRNTST`) so the orchestrator's `expiryDateFromOcc`
+    parser (`substring(6, 12)` on the YYMMDD slot) sees a real-looking date and
+    arms the expiry timer — exercising the timer path the redeploy needs to
+    survive. Strike varies by index to keep each contract unique. `HRNTST` is
+    never going to be a real US options root.
     """
-    return f"HRN{i}260619C{(100 + i) * 1000:08d}"
+    return f"HRNTST260619C{(100 + i) * 1000:08d}"
 
 
-def workflow_id_for(tenant: str, strategy: str, occ: str, idx: int) -> str:
-    return f"t-{tenant}/s-{strategy}/pos/{occ}/harness-{idx}"
+def workflow_id_for(tenant: str, strategy: str, occ: str, idx: int, run_tag: str) -> str:
+    """Workflow ID embeds a run_tag so re-running the proof script does not
+    collide with workflows started by a previous (still-Running) invocation
+    under REJECT_DUPLICATE."""
+    return f"t-{tenant}/s-{strategy}/pos/{occ}/harness-{run_tag}-{idx}"
 
 
 async def main(
@@ -83,9 +88,13 @@ async def main(
     ts_key = SearchAttributeKey.for_keyword("TenantStrategy")
     cs_key = SearchAttributeKey.for_keyword("ContractSymbol")
 
+    # Compute once per script run — keeps the workflow_id stable across the
+    # N iterations of this invocation but distinct from a future re-run.
+    run_tag = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
     for i in range(count):
         occ = synthetic_occ(i)
-        wf_id = workflow_id_for(tenant, strategy, occ, i)
+        wf_id = workflow_id_for(tenant, strategy, occ, i, run_tag)
         now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace(
             "+00:00", "Z"
         )
