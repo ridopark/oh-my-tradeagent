@@ -35,12 +35,22 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+          envFrom:
+            # Alpaca paper credentials shared with exec-svc: APCA_API_KEY_ID + APCA_API_SECRET_KEY.
+            # The operator creates this Secret once (kubectl apply -f
+            # infra/k8s/secrets.template.yaml after filling values).
+            - secretRef:
+                name: alpaca-credentials
           env:
             - name: TEMPORAL_TARGET
               value: temporal:7233
             - name: TEMPORAL_NAMESPACE
               value: default
-          # market-data-svc is a Temporal worker only (no spring-boot-starter-web).
+            # Phase 2c.2: select the Alpaca market-data adapter (REST snapshot + WS premium
+            # stream). Flip to 'inmemory' to disable the live feed for triage.
+            - name: MARKET_DATA_PROVIDER
+              value: alpaca
+          # market-data-svc is a Temporal worker only (web-application-type=none).
           # No HTTP listener — http-get probes would loop the pod. Worker poll loop is
           # the implicit liveness signal.
           resources:

@@ -21,7 +21,10 @@ public class TemporalWorkerConfig {
   @Value("${temporal.namespace:default}")
   private String namespace;
 
-  @Value("${temporal.task-queue:broker-tradier-paper}")
+  // Phase 2c.2: default to broker-alpaca-paper to match the orchestrator-side routing for
+  // StrategyConfig.broker_target=alpaca-paper. Operators of other brokers override via
+  // TEMPORAL_TASK_QUEUE (see infra/k8s/52-exec-alpaca-paper.yaml for the env-driven pattern).
+  @Value("${temporal.task-queue:broker-alpaca-paper}")
   private String taskQueue;
 
   @Bean

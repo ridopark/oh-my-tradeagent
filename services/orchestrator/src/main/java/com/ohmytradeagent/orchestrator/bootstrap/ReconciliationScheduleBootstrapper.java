@@ -1,7 +1,9 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
+import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflow;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
@@ -19,6 +21,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -28,12 +31,16 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 /**
- * On Spring start, ensures one {@code ReconciliationWorkflow} Schedule per (tenant, strategy,
- * broker_target). v0 ships paper-only; live-target schedules wire on in Phase 7. The interval is 5
- * minutes per {@code PLAN.md} reconciliation flow.
+ * On Spring start, ensures one {@code ReconciliationWorkflow} Schedule per (tenant, strategy)
+ * pinned to the broker task queue derived from the strategy's own {@code broker_target}. The
+ * interval is 5 minutes per {@code PLAN.md} reconciliation flow.
  *
  * <p>{@link ScheduleAlreadyRunningException} on the create call is treated as a benign warm-boot —
  * the schedule already exists from a prior launch.
+ *
+ * <p>Phase 2c.2: previously hardcoded {@code "alpaca-paper"} for every tenant. Now reads {@code
+ * broker_target} off each {@link StrategyConfig} so a future tenant pinned to a different broker
+ * target gets a schedule on the correct task queue.
  */
 @Component
 @Profile("!test")
@@ -45,16 +52,26 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
   static final String CORE_TASK_QUEUE = "orchestrator-core";
   static final Duration INTERVAL = Duration.ofMinutes(5);
 
+  /**
+   * Mirrors {@link com.ohmytradeagent.orchestrator.workflows.ExecActivitiesFactory#VALID_TARGET} —
+   * keeping the regex local avoids reaching into the workflows package's package-private API from a
+   * bootstrapper.
+   */
+  private static final Pattern VALID_TARGET = Pattern.compile("^(paper|live|[a-z]+-(paper|live))$");
+
   private final WorkflowClient workflowClient;
   private final WorkflowServiceStubs serviceStubs;
+  private final StrategyRegistry strategyRegistry;
   private final Path tenantsDir;
 
   public ReconciliationScheduleBootstrapper(
       WorkflowClient workflowClient,
       WorkflowServiceStubs serviceStubs,
+      StrategyRegistry strategyRegistry,
       @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir) {
     this.workflowClient = workflowClient;
     this.serviceStubs = serviceStubs;
+    this.strategyRegistry = strategyRegistry;
     this.tenantsDir = Path.of(tenantsDir);
   }
 
@@ -64,10 +81,43 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
       log.warn("tenants dir {} not found; skipping Reconciliation Schedule bootstrap", tenantsDir);
       return;
     }
-    ScheduleClient scheduleClient = ScheduleClient.newInstance(serviceStubs);
+    runWith(ScheduleClient.newInstance(serviceStubs));
+  }
+
+  /**
+   * Package-private hook for tests so we can drive the bootstrapper against a mock {@link
+   * ScheduleClient} without standing up a Temporal server.
+   */
+  void runWith(ScheduleClient scheduleClient) {
     for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
-      // v0: paper only. Live target wires in Phase 7 alongside exec-svc-tradier-live.
-      ensureSchedule(scheduleClient, ts.tenantId(), ts.strategyId(), "paper");
+      String brokerTarget;
+      try {
+        StrategyConfig cfg = strategyRegistry.get(ts.tenantId(), ts.strategyId());
+        if (cfg.getBrokerTarget() == null) {
+          log.error(
+              "tenant={} strategy={}: broker_target missing in StrategyConfig; skipping schedule",
+              ts.tenantId(),
+              ts.strategyId());
+          continue;
+        }
+        brokerTarget = cfg.getBrokerTarget().value();
+      } catch (RuntimeException e) {
+        log.error(
+            "tenant={} strategy={}: failed to load StrategyConfig; skipping schedule",
+            ts.tenantId(),
+            ts.strategyId(),
+            e);
+        continue;
+      }
+      if (!VALID_TARGET.matcher(brokerTarget).matches()) {
+        log.error(
+            "tenant={} strategy={}: broker_target {} rejected by whitelist; skipping schedule",
+            ts.tenantId(),
+            ts.strategyId(),
+            brokerTarget);
+        continue;
+      }
+      ensureSchedule(scheduleClient, ts.tenantId(), ts.strategyId(), brokerTarget);
     }
   }
 

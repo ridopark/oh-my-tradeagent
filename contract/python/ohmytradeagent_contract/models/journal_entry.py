@@ -8,9 +8,7 @@ from enum import StrEnum
 from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
 
 
-class BrokerTarget(StrEnum):
-    paper = "paper"
-    live = "live"
+from ohmytradeagent_contract.types.broker_target import BrokerTarget
 
 
 class Side(StrEnum):

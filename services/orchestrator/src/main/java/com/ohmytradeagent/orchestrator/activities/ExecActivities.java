@@ -6,8 +6,10 @@ import io.temporal.activity.ActivityInterface;
 
 /**
  * Orchestrator-side stub for the exec service's @ActivityInterface. The implementation lives in
- * {@code services/exec-tradier-paper}; Temporal routes by activity name (method name) and task
- * queue (broker-tradier-paper) — no shared bytecode is required, only matching signatures.
+ * {@code services/exec}; Temporal routes by activity name (method name) and task queue (Phase 2c.2:
+ * {@code broker-<broker_target>}, e.g. {@code broker-alpaca-paper}, derived via {@link
+ * com.ohmytradeagent.orchestrator.workflows.ExecActivitiesFactory}) — no shared bytecode is
+ * required, only matching signatures.
  */
 @ActivityInterface
 public interface ExecActivities {

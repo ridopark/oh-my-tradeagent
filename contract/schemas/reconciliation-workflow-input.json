@@ -27,8 +27,19 @@
     },
     "broker_target": {
       "type": "string",
-      "enum": ["paper", "live"],
-      "description": "Routes journal_dump_open + broker_list_open_orders Activities to the broker task queue."
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "Routes journal_dump_open + broker_list_open_orders Activities to the broker-<value> task queue. Phase 2c.2: <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 records; using them for active reconciliation produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live."
     }
   }
 }

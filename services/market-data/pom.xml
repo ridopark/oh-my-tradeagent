@@ -29,6 +29,14 @@
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
 
+    <!-- RestClient + Jackson for the Alpaca market-data REST quote path. The worker has no
+         HTTP listener (spring.main.web-application-type=none), so adding the web starter only
+         pulls in spring-web and the RestClient builder. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>io.temporal</groupId>
       <artifactId>temporal-sdk</artifactId>
@@ -62,6 +70,13 @@
     <dependency>
       <groupId>org.assertj</groupId>
       <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- MockWebServer drives AlpacaMarketDataTest against the REST snapshot endpoint, same
+         pattern as exec-svc AlpacaPaperBrokerTest. -->
+    <dependency>
+      <groupId>com.squareup.okhttp3</groupId>
+      <artifactId>mockwebserver</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>

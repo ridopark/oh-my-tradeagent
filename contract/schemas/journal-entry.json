@@ -29,7 +29,21 @@
     "signal_id":  { "type": "string", "minLength": 1 },
     "tenant_id":  { "type": "string", "minLength": 1 },
     "strategy_id":{ "type": "string", "minLength": 1 },
-    "broker_target": { "type": "string", "enum": ["paper", "live"] },
+    "broker_target": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ]
+    },
     "client_order_id": { "type": "string", "minLength": 1 },
     "option_symbol":   { "type": "string", "minLength": 1 },
     "side": { "type": "string", "enum": ["BUY", "SELL"] },

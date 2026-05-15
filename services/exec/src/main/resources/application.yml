@@ -6,9 +6,15 @@ spring:
   main:
     web-application-type: none
   datasource:
-    url: ${EXEC_TRADIER_PAPER_DB_URL:jdbc:postgresql://localhost:5432/exec_tradier_paper}
-    username: ${EXEC_TRADIER_PAPER_DB_USER:temporal}
-    password: ${EXEC_TRADIER_PAPER_DB_PASS:temporal}
+    # Phase 2c.2: env vars renamed EXEC_TRADIER_PAPER_DB_* -> EXEC_DB_* (provider-agnostic).
+    # Required env var with no fallback — Spring fails fast on missing value. The journal must
+    # point at the right per-broker schema (e.g. exec_alpaca_paper vs exec_tradier_live); a silent
+    # default would point a misconfigured tradier-live / ibkr-live deployment at an alpaca-paper
+    # journal. Set EXEC_DB_URL explicitly per deployment (k8s manifest, docker-compose, or local
+    # .env).
+    url: ${EXEC_DB_URL}
+    username: ${EXEC_DB_USER:temporal}
+    password: ${EXEC_DB_PASS:temporal}
   jooq:
     sql-dialect: POSTGRES
   flyway:
@@ -18,7 +24,10 @@ spring:
 temporal:
   target: ${TEMPORAL_TARGET:localhost:7233}
   namespace: ${TEMPORAL_NAMESPACE:default}
-  task-queue: ${TEMPORAL_TASK_QUEUE:broker-tradier-paper}
+  # Phase 2c.2: default to broker-alpaca-paper (matches StrategyConfig.broker_target=alpaca-paper
+  # on the orchestrator side). Operators of other brokers (tradier-paper, alpaca-live, etc.)
+  # override via TEMPORAL_TASK_QUEUE.
+  task-queue: ${TEMPORAL_TASK_QUEUE:broker-alpaca-paper}
 
 # OptionsBroker impl selector. Values: 'stub' (in-memory) | 'alpaca-paper'
 # (HTTP client to paper-api.alpaca.markets). Additional adapters (tradier,

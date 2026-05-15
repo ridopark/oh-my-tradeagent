@@ -588,7 +588,9 @@ class CopytradeSignalWorkflowImplTest {
     c.setSchemaVersion(1L);
     c.setTenantId("dev");
     c.setStrategyId("copytrade-v1");
-    c.setBrokerTarget(StrategyConfig.BrokerTarget.PAPER);
+    // Phase 2c.2: align with the broker-alpaca-paper worker registered in setUp() — the factory
+    // routes Activities to broker-<broker_target>.
+    c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
     c.setAuthorWhitelist(Set.of("acme_trader"));
     c.setMaxSignalAgeSecs(1800L);
     c.setMaxPositions(5L);
