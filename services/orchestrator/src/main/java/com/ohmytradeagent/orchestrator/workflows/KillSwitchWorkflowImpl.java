@@ -87,6 +87,8 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
 
   @Override
   public String run(KillSwitchWorkflowInput in) {
+    // `in` is consumed by the @WorkflowInit constructor; the parameter only stays because
+    // the @WorkflowMethod signature must match KillSwitchWorkflow.run.
     this.tradingDay = calendar.todayEt();
 
     while (true) {
