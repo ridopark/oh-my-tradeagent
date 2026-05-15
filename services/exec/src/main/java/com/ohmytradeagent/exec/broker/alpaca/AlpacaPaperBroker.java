@@ -66,17 +66,21 @@ public class AlpacaPaperBroker implements OptionsBroker {
   @Override
   public PlaceOrderResponse placeOrder(PlaceOrderRequest request) {
     boolean buy = isBuy(request.side());
+    // position_intent: copytrade-v1 only emits SELL signals as exits of an existing long
+    // position, so SELL maps to "sell_to_close". A future strategy that opens short positions
+    // (sell-to-open) would need this mapping extended; the caller is responsible for that
+    // contract change.
     AlpacaOrderLeg leg =
         new AlpacaOrderLeg(
             request.optionSymbol(),
-            "1",
+            1L,
             buy ? "buy" : "sell",
             buy ? "buy_to_open" : "sell_to_close");
 
     AlpacaOrderRequest body =
         new AlpacaOrderRequest(
             ORDER_CLASS_MLEG,
-            Long.toString(request.qty()),
+            request.qty(),
             request.limitPrice() == null ? null : request.limitPrice().toPlainString(),
             "limit",
             "day",
@@ -199,25 +203,33 @@ public class AlpacaPaperBroker implements OptionsBroker {
     int status = e.getStatusCode().value();
     String body = e.getResponseBodyAsString();
     String message = extractMessage(tryParse(body), body);
-    String lower = message.toLowerCase(Locale.ROOT);
+    // Detect against the raw body too so error tokens that Alpaca returns only in the structured
+    // {"code": "..."} field (and not in the human-readable "message") are still classified.
+    String haystack =
+        ((message == null ? "" : message) + " " + (body == null ? "" : body))
+            .toLowerCase(Locale.ROOT);
 
     if (status == 401) {
       return ApplicationFailure.newNonRetryableFailure(
           "Alpaca auth rejected: " + message, "AuthError");
     }
-    if (lower.contains("insufficient_buying_power")
-        || lower.contains("insufficient buying power")) {
+    if (haystack.contains("insufficient_buying_power")
+        || haystack.contains("insufficient buying power")) {
       return ApplicationFailure.newNonRetryableFailure(
           "Alpaca rejected order: " + message, "InsufficientFundsError");
     }
     if (status >= 400
         && status < 500
-        && (lower.contains("invalid contract")
-            || lower.contains("unknown contract")
-            || lower.contains("invalid symbol")
-            || lower.contains("unknown symbol")
-            || lower.contains("contract not found")
-            || lower.contains("symbol not found"))) {
+        && (haystack.contains("invalid_contract")
+            || haystack.contains("invalid contract")
+            || haystack.contains("unknown_contract")
+            || haystack.contains("unknown contract")
+            || haystack.contains("invalid_symbol")
+            || haystack.contains("invalid symbol")
+            || haystack.contains("unknown_symbol")
+            || haystack.contains("unknown symbol")
+            || haystack.contains("contract not found")
+            || haystack.contains("symbol not found"))) {
       return ApplicationFailure.newNonRetryableFailure(
           "Alpaca rejected order: " + message, "InvalidContractError");
     }

@@ -15,6 +15,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record AlpacaOrderLeg(
     @JsonProperty("symbol") String symbol,
-    @JsonProperty("ratio_qty") String ratioQty,
+    @JsonProperty("ratio_qty") Long ratioQty,
     @JsonProperty("side") String side,
     @JsonProperty("position_intent") String positionIntent) {}

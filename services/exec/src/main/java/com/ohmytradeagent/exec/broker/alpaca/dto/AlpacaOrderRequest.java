@@ -18,7 +18,7 @@ import java.util.List;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record AlpacaOrderRequest(
     @JsonProperty("order_class") String orderClass,
-    @JsonProperty("qty") String qty,
+    @JsonProperty("qty") Long qty,
     @JsonProperty("limit_price") String limitPrice,
     @JsonProperty("type") String type,
     @JsonProperty("time_in_force") String timeInForce,

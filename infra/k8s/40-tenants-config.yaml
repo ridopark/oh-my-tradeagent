@@ -26,7 +26,7 @@ data:
     schema_version: 1
     tenant_id: dev
     strategy_id: copytrade-v1
-    broker_target: alpaca-paper
+    broker_target: paper
     author_whitelist:
       - acme_trader
       - beta_signals

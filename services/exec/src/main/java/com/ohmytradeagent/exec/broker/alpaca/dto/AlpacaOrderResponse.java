@@ -15,7 +15,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *   <li>{@code partially_filled} → OPEN (parent stays open until terminal fill)
  *   <li>{@code filled} → FILLED
  *   <li>{@code canceled} / {@code expired} / {@code replaced} → CANCELLED
- *   <li>{@code rejected} / {@code suspended} → UNKNOWN (treated as terminal-non-success)
+ *   <li>{@code rejected} → REJECTED
+ *   <li>anything else (including {@code suspended}) → UNKNOWN
  * </ul>
  */
 @JsonIgnoreProperties(ignoreUnknown = true)

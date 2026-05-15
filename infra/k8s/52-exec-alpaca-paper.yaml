@@ -34,6 +34,7 @@ spec:
           # at boot via BROKER_IMPL. We keep the per-broker DB env-var names
           # (EXEC_TRADIER_PAPER_DB_*) and the Temporal task queue default for
           # back-compat with the orchestrator until that's reworked in 2c.x.
+          # TODO(2c.x): rename env vars (EXEC_TRADIER_PAPER_DB_* -> EXEC_DB_*).
           image: ghcr.io/ridopark/oh-my-tradeagent-exec:latest
           imagePullPolicy: Always
           ports:

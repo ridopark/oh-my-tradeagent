@@ -74,7 +74,9 @@ class AlpacaPaperBrokerTest {
     JsonNode body = mapper.readTree(req.getBody().readUtf8());
     assertThat(body.get("client_order_id").asText()).isEqualTo("intent-A");
     assertThat(body.get("order_class").asText()).isEqualTo("mleg");
-    assertThat(body.get("qty").asText()).isEqualTo("1");
+    // Alpaca's live endpoint expects qty / ratio_qty as JSON integers, not strings.
+    assertThat(body.get("qty").isIntegralNumber()).isTrue();
+    assertThat(body.get("qty").asLong()).isEqualTo(1L);
     assertThat(body.get("limit_price").asText()).isEqualTo("2.30");
     assertThat(body.get("type").asText()).isEqualTo("limit");
     assertThat(body.get("time_in_force").asText()).isEqualTo("day");
@@ -84,7 +86,8 @@ class AlpacaPaperBrokerTest {
     assertThat(legs.get(0).get("symbol").asText()).isEqualTo("NVDA  260516C00140000");
     assertThat(legs.get(0).get("side").asText()).isEqualTo("buy");
     assertThat(legs.get(0).get("position_intent").asText()).isEqualTo("buy_to_open");
-    assertThat(legs.get(0).get("ratio_qty").asText()).isEqualTo("1");
+    assertThat(legs.get(0).get("ratio_qty").isIntegralNumber()).isTrue();
+    assertThat(legs.get(0).get("ratio_qty").asLong()).isEqualTo(1L);
   }
 
   @Test
@@ -135,6 +138,58 @@ class AlpacaPaperBrokerTest {
               assertThat(f.getType()).isEqualTo("InsufficientFundsError");
               assertThat(f.isNonRetryable()).isTrue();
             });
+  }
+
+  @Test
+  void placeOrder_invalidContract_throwsInvalidContractErrorNonRetryable() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(400)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"code\":\"invalid_contract\",\"message\":\"unknown symbol\"}"));
+
+    assertThatThrownBy(() -> broker.placeOrder(request("intent-A")))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("InvalidContractError");
+              assertThat(f.isNonRetryable()).isTrue();
+            });
+  }
+
+  @Test
+  void getOrderStatus_unauthorized_throwsAuthErrorNonRetryable() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(401)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"forbidden.\"}"));
+
+    assertThatThrownBy(() -> broker.getOrderStatus("alp-1"))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("AuthError");
+              assertThat(f.isNonRetryable()).isTrue();
+            });
+  }
+
+  @Test
+  void placeOrder_omitsLimitPriceWhenNull() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"alp-12345\",\"client_order_id\":\"intent-A\",\"status\":\"accepted\"}"));
+
+    PlaceOrderRequest req =
+        new PlaceOrderRequest("intent-A", "NVDA  260516C00140000", "BUY", 1L, null);
+    broker.placeOrder(req);
+
+    RecordedRequest recorded = server.takeRequest();
+    JsonNode body = mapper.readTree(recorded.getBody().readUtf8());
+    assertThat(body.has("limit_price")).isFalse();
   }
 
   @Test
