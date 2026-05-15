@@ -3,26 +3,11 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, conint, constr
 
 
-class BrokerTarget(StrEnum):
-    """
-    Routes journal_dump_open + broker_list_open_orders Activities to the broker-<value> task queue. Phase 2c.2: <provider>-<env> shape; legacy paper/live retained for back-compat.
-    """
-
-    paper = "paper"
-    live = "live"
-    alpaca_paper = "alpaca-paper"
-    alpaca_live = "alpaca-live"
-    tradier_paper = "tradier-paper"
-    tradier_live = "tradier-live"
-    ibkr_paper = "ibkr-paper"
-    ibkr_live = "ibkr-live"
-    schwab_paper = "schwab-paper"
-    schwab_live = "schwab-live"
+from ohmytradeagent_contract.types.broker_target import BrokerTarget
 
 
 class ReconciliationWorkflowInput(BaseModel):
@@ -38,5 +23,5 @@ class ReconciliationWorkflowInput(BaseModel):
     strategy_id: constr(min_length=1)
     broker_target: BrokerTarget
     """
-    Routes journal_dump_open + broker_list_open_orders Activities to the broker-<value> task queue. Phase 2c.2: <provider>-<env> shape; legacy paper/live retained for back-compat.
+    Routes journal_dump_open + broker_list_open_orders Activities to the broker-<value> task queue. Phase 2c.2: <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 records; using them for active reconciliation produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.
     """

@@ -8,21 +8,7 @@ from enum import StrEnum
 from pydantic import AwareDatetime, BaseModel, ConfigDict, PositiveFloat, conint, constr
 
 
-class BrokerTarget(StrEnum):
-    """
-    Routes the activity to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape; legacy paper/live values retained for back-compat with pre-2c.2 fixtures.
-    """
-
-    paper = "paper"
-    live = "live"
-    alpaca_paper = "alpaca-paper"
-    alpaca_live = "alpaca-live"
-    tradier_paper = "tradier-paper"
-    tradier_live = "tradier-live"
-    ibkr_paper = "ibkr-paper"
-    ibkr_live = "ibkr-live"
-    schwab_paper = "schwab-paper"
-    schwab_live = "schwab-live"
+from ohmytradeagent_contract.types.broker_target import BrokerTarget
 
 
 class Side(StrEnum):
@@ -58,7 +44,7 @@ class OrderIntent(BaseModel):
     """
     broker_target: BrokerTarget
     """
-    Routes the activity to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape; legacy paper/live values retained for back-compat with pre-2c.2 fixtures.
+    Routes the activity to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; using them for active routing produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.
     """
     option_symbol: constr(min_length=1)
     """

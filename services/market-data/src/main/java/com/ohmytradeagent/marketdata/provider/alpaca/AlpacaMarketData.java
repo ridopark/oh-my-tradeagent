@@ -438,10 +438,16 @@ public class AlpacaMarketData implements MarketDataProvider {
       }
       // Mirror the subscribe path: hold the per-symbol lock so a concurrent subscribe can't see
       // empty→removed and re-create the listener list between our remove() and bySymbol.remove().
+      //
+      // Note: lock-on-listeners-list does not by itself protect against a different thread that
+      // just inserted a brand-new list under the same key via computeIfAbsent — that thread holds
+      // a different list object and never touches our monitor. The two-arg remove(key, expected)
+      // collapses that race by deleting the entry only if the current value still matches the list
+      // we just emptied. If it's been replaced by a fresh list, leave it alone.
       synchronized (listeners) {
         listeners.remove(listener);
         if (listeners.isEmpty()) {
-          bySymbol.remove(symbol);
+          bySymbol.remove(symbol, listeners);
           sendUnsubscribe(symbol);
         }
       }

@@ -3,26 +3,11 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, PositiveFloat, conint, constr
 
 
-class BrokerTarget(StrEnum):
-    """
-    Phase 2c.2: broker_target carried over from the spawning CopytradeSignalWorkflow's StrategyConfig so the position's exit Activities route to the same broker task queue (broker-<value>). Optional for back-compat with pre-2c.2 replays; when absent the workflow falls back to the legacy default (broker-alpaca-paper since 2c.2).
-    """
-
-    paper = "paper"
-    live = "live"
-    alpaca_paper = "alpaca-paper"
-    alpaca_live = "alpaca-live"
-    tradier_paper = "tradier-paper"
-    tradier_live = "tradier-live"
-    ibkr_paper = "ibkr-paper"
-    ibkr_live = "ibkr-live"
-    schwab_paper = "schwab-paper"
-    schwab_live = "schwab-live"
+from ohmytradeagent_contract.types.broker_target import BrokerTarget
 
 
 class PositionWorkflowInput(BaseModel):
@@ -58,5 +43,5 @@ class PositionWorkflowInput(BaseModel):
     """
     broker_target: BrokerTarget | None = None
     """
-    Phase 2c.2: broker_target carried over from the spawning CopytradeSignalWorkflow's StrategyConfig so the position's exit Activities route to the same broker task queue (broker-<value>). Optional for back-compat with pre-2c.2 replays; when absent the workflow falls back to the legacy default (broker-alpaca-paper since 2c.2).
+    Phase 2c.2: broker_target carried over from the spawning CopytradeSignalWorkflow's StrategyConfig so the position's exit Activities route to the same broker task queue (broker-<value>). Optional for back-compat with pre-2c.2 replays; when absent the workflow falls back to the legacy default (broker-alpaca-paper since 2c.2). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 inputs; an active position spawned with them produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.
     """

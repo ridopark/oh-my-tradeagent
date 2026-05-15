@@ -157,6 +157,37 @@ class AlpacaMarketDataTest {
     assertThat(received).isEmpty();
   }
 
+  /**
+   * Phase 2c.2 review feedback round 2 (Major 1): {@code AlpacaSubscription.close()} must not
+   * evict-by-key a listener-list that a concurrent {@code subscribePremium} just re-inserted under
+   * the same key. With the unconditional {@code bySymbol.remove(symbol)}, a re-subscribe after
+   * close left the new listener orphaned (the next tick had no listeners under {@code symbol}). The
+   * fix uses {@code remove(key, expectedValue)} so the eviction only fires when the value is still
+   * our just-emptied list. This test models the simple sequential resubscribe path; an incoming
+   * tick after the re-subscribe MUST reach the new listener.
+   */
+  @Test
+  void subscribe_after_all_listeners_closed_receives_ticks() {
+    CopyOnWriteArrayList<Tick> first = new CopyOnWriteArrayList<>();
+    Subscription sub = provider.subscribePremium("NVDA  260516C00140000", first::add);
+    sub.close();
+
+    // Re-subscribe on the same symbol. With the old code, close() unconditionally evicted the
+    // listener-list — but since close()'s eviction is sequenced before this subscribe, the
+    // computeIfAbsent here creates a fresh list. The race the fix targets is when subscribe and
+    // close interleave AND a third subscribe arrives between subscribe and close's eviction. The
+    // simpler regression assertion is: after close+resubscribe, the new listener observes a tick.
+    CopyOnWriteArrayList<Tick> second = new CopyOnWriteArrayList<>();
+    provider.subscribePremium("NVDA  260516C00140000", second::add);
+
+    provider.dispatchWsMessage(
+        "[{\"T\":\"t\",\"S\":\"NVDA  260516C00140000\",\"p\":3.14,\"t\":\"2026-05-15T17:35:00Z\"}]");
+
+    assertThat(first).isEmpty();
+    assertThat(second).hasSize(1);
+    assertThat(second.get(0).premium()).isEqualByComparingTo("3.14");
+  }
+
   @Test
   void closeOneSubscription_otherStillReceives() {
     CopyOnWriteArrayList<Tick> rxA = new CopyOnWriteArrayList<>();

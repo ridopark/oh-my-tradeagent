@@ -20,9 +20,35 @@ class ExecActivitiesFactoryTest {
     assertThat(ExecActivitiesFactory.taskQueueFor("alpaca-paper")).isEqualTo("broker-alpaca-paper");
   }
 
+  /**
+   * Phase 2c.2 review feedback (Major 2): the bare legacy {@code paper} / {@code live} values pass
+   * the schema enum and the routing whitelist, but no worker polls {@code broker-paper} / {@code
+   * broker-live}. Accepting them at the routing layer would hang the workflow at the Activity
+   * {@code StartToCloseTimeout}. {@code taskQueueFor} must therefore fail fast with a non-retryable
+   * {@code InvalidBrokerTargetError}.
+   */
   @Test
-  void taskQueueFor_legacyPaper_stillRoutes() {
-    assertThat(ExecActivitiesFactory.taskQueueFor("paper")).isEqualTo("broker-paper");
+  void legacy_paper_value_throws_InvalidBrokerTargetError() {
+    assertThatThrownBy(() -> ExecActivitiesFactory.taskQueueFor("paper"))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("InvalidBrokerTargetError");
+              assertThat(f.isNonRetryable()).isTrue();
+              assertThat(f.getOriginalMessage()).contains("Legacy broker_target 'paper'");
+            });
+  }
+
+  @Test
+  void legacy_live_value_throws_InvalidBrokerTargetError() {
+    assertThatThrownBy(() -> ExecActivitiesFactory.taskQueueFor("live"))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("InvalidBrokerTargetError");
+              assertThat(f.isNonRetryable()).isTrue();
+              assertThat(f.getOriginalMessage()).contains("Legacy broker_target 'live'");
+            });
   }
 
   @Test

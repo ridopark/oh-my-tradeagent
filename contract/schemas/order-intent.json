@@ -56,7 +56,7 @@
         "schwab-paper",
         "schwab-live"
       ],
-      "description": "Routes the activity to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape; legacy paper/live values retained for back-compat with pre-2c.2 fixtures."
+      "description": "Routes the activity to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; using them for active routing produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live."
     },
     "option_symbol": {
       "type": "string",

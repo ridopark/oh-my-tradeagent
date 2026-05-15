@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
 
 from pydantic import (
     BaseModel,
@@ -16,21 +15,7 @@ from pydantic import (
 )
 
 
-class BrokerTarget(StrEnum):
-    """
-    Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper); the legacy paper/live values are retained for back-compat with pre-2c.2 audit fixtures.
-    """
-
-    paper = "paper"
-    live = "live"
-    alpaca_paper = "alpaca-paper"
-    alpaca_live = "alpaca-live"
-    tradier_paper = "tradier-paper"
-    tradier_live = "tradier-live"
-    ibkr_paper = "ibkr-paper"
-    ibkr_live = "ibkr-live"
-    schwab_paper = "schwab-paper"
-    schwab_live = "schwab-live"
+from ohmytradeagent_contract.types.broker_target import BrokerTarget
 
 
 class StrategyConfig(BaseModel):
@@ -49,7 +34,7 @@ class StrategyConfig(BaseModel):
     strategy_id: constr(min_length=1)
     broker_target: BrokerTarget
     """
-    Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper); the legacy paper/live values are retained for back-compat with pre-2c.2 audit fixtures.
+    Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; configuring an active strategy with them produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.
     """
     author_whitelist: list[constr(min_length=1)] = Field(..., min_length=1)
     """

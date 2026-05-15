@@ -78,8 +78,15 @@ public class InMemoryMarketData implements MarketDataProvider {
     @Override
     public void close() {
       List<Listener> listeners = bySymbol.get(symbol);
-      if (listeners != null) {
-        listeners.removeIf(l -> l.subscriptionId().equals(id));
+      if (listeners == null) {
+        return;
+      }
+      listeners.removeIf(l -> l.subscriptionId().equals(id));
+      // Mirror the Alpaca path: evict empty lists so the map doesn't grow unboundedly across
+      // subscribe/close churn. Use two-arg remove so a concurrent subscribe that inserted a
+      // fresh CopyOnWriteArrayList under the same key isn't clobbered.
+      if (listeners.isEmpty()) {
+        bySymbol.remove(symbol, listeners);
       }
     }
   }
