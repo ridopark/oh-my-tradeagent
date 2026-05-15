@@ -10,11 +10,19 @@ from pydantic import BaseModel, ConfigDict, conint, constr
 
 class BrokerTarget(StrEnum):
     """
-    Routes journal_dump_open + broker_list_open_orders Activities to the broker task queue.
+    Routes journal_dump_open + broker_list_open_orders Activities to the broker-<value> task queue. Phase 2c.2: <provider>-<env> shape; legacy paper/live retained for back-compat.
     """
 
     paper = "paper"
     live = "live"
+    alpaca_paper = "alpaca-paper"
+    alpaca_live = "alpaca-live"
+    tradier_paper = "tradier-paper"
+    tradier_live = "tradier-live"
+    ibkr_paper = "ibkr-paper"
+    ibkr_live = "ibkr-live"
+    schwab_paper = "schwab-paper"
+    schwab_live = "schwab-live"
 
 
 class ReconciliationWorkflowInput(BaseModel):
@@ -30,5 +38,5 @@ class ReconciliationWorkflowInput(BaseModel):
     strategy_id: constr(min_length=1)
     broker_target: BrokerTarget
     """
-    Routes journal_dump_open + broker_list_open_orders Activities to the broker task queue.
+    Routes journal_dump_open + broker_list_open_orders Activities to the broker-<value> task queue. Phase 2c.2: <provider>-<env> shape; legacy paper/live retained for back-compat.
     """

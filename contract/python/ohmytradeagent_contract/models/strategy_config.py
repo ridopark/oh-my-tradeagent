@@ -18,11 +18,19 @@ from pydantic import (
 
 class BrokerTarget(StrEnum):
     """
-    Routes Activities to paper-or-live broker task queues. Phase 2a does not place orders; field reserved for Phase 2b.
+    Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper); the legacy paper/live values are retained for back-compat with pre-2c.2 audit fixtures.
     """
 
     paper = "paper"
     live = "live"
+    alpaca_paper = "alpaca-paper"
+    alpaca_live = "alpaca-live"
+    tradier_paper = "tradier-paper"
+    tradier_live = "tradier-live"
+    ibkr_paper = "ibkr-paper"
+    ibkr_live = "ibkr-live"
+    schwab_paper = "schwab-paper"
+    schwab_live = "schwab-live"
 
 
 class StrategyConfig(BaseModel):
@@ -41,7 +49,7 @@ class StrategyConfig(BaseModel):
     strategy_id: constr(min_length=1)
     broker_target: BrokerTarget
     """
-    Routes Activities to paper-or-live broker task queues. Phase 2a does not place orders; field reserved for Phase 2b.
+    Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper); the legacy paper/live values are retained for back-compat with pre-2c.2 audit fixtures.
     """
     author_whitelist: list[constr(min_length=1)] = Field(..., min_length=1)
     """

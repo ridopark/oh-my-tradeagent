@@ -11,6 +11,14 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
 class BrokerTarget(StrEnum):
     paper = "paper"
     live = "live"
+    alpaca_paper = "alpaca-paper"
+    alpaca_live = "alpaca-live"
+    tradier_paper = "tradier-paper"
+    tradier_live = "tradier-live"
+    ibkr_paper = "ibkr-paper"
+    ibkr_live = "ibkr-live"
+    schwab_paper = "schwab-paper"
+    schwab_live = "schwab-live"
 
 
 class Side(StrEnum):
