@@ -33,3 +33,4 @@ infra/k8s/*.local.yaml
 
 # Skill workspace (per-phase plan extracts written by autonomous-ship)
 _workspace/
+services/signal-source-discord/state/
