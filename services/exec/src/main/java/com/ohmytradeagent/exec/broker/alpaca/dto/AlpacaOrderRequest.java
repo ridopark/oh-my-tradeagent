@@ -12,8 +12,8 @@ import java.util.List;
  * <p>For a vanilla BTO/STC of one option contract we send {@code order_class=mleg} with a single
  * {@link AlpacaOrderLeg} entry; this is the documented shape that lets the adapter generalize to
  * multi-leg later without a request-DTO swap. {@code type} is derived from {@code limitPrice}
- * nullness by the caller — {@code limit} when a price is supplied, {@code market} otherwise —
- * with {@code time_in_force=day} as the v0 default for both.
+ * nullness by the caller — {@code limit} when a price is supplied, {@code market} otherwise — with
+ * {@code time_in_force=day} as the v0 default for both.
  *
  * <p>{@code limit_price} is a {@link BigDecimal} so Jackson serializes it as a JSON number, which
  * Alpaca's live endpoint requires (the sandbox accepts strings but live does not).
