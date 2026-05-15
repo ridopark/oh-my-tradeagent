@@ -18,7 +18,6 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -134,10 +133,8 @@ public class AlpacaMarketData implements MarketDataProvider {
       }
       BigDecimal bid = bp.decimalValue();
       BigDecimal ask = ap.decimalValue();
-      BigDecimal mid =
-          bid.add(ask).divide(BigDecimal.valueOf(2), 4, java.math.RoundingMode.HALF_UP);
       OffsetDateTime ts = parseTimestamp(latestQuote.path("t").asText(""));
-      return Optional.of(new Quote(occSymbol, bid, mid, ask, ts));
+      return Optional.of(new Quote(occSymbol, bid, midPrice(bid, ask), ask, ts));
     } catch (HttpStatusCodeException e) {
       log.warn(
           "Alpaca snapshotQuote failed for {}: status={} body={}",
@@ -153,9 +150,10 @@ public class AlpacaMarketData implements MarketDataProvider {
 
   @Override
   public Subscription subscribePremium(String occSymbol, Consumer<Tick> onTick) {
-    boolean firstForSymbol =
-        bySymbol.computeIfAbsent(occSymbol, k -> new CopyOnWriteArrayList<>()).isEmpty();
-    bySymbol.get(occSymbol).add(onTick);
+    List<Consumer<Tick>> listeners =
+        bySymbol.computeIfAbsent(occSymbol, k -> new CopyOnWriteArrayList<>());
+    boolean firstForSymbol = listeners.isEmpty();
+    listeners.add(onTick);
     if (firstForSymbol) {
       sendSubscribe(occSymbol);
     }
@@ -231,13 +229,13 @@ public class AlpacaMarketData implements MarketDataProvider {
       if (!bp.isNumber() || !ap.isNumber()) {
         return null;
       }
-      BigDecimal mid =
-          bp.decimalValue()
-              .add(ap.decimalValue())
-              .divide(BigDecimal.valueOf(2), 4, java.math.RoundingMode.HALF_UP);
-      return new Tick(sym, mid, ts);
+      return new Tick(sym, midPrice(bp.decimalValue(), ap.decimalValue()), ts);
     }
     return null;
+  }
+
+  private static BigDecimal midPrice(BigDecimal bid, BigDecimal ask) {
+    return bid.add(ask).divide(BigDecimal.valueOf(2), 4, java.math.RoundingMode.HALF_UP);
   }
 
   private static OffsetDateTime parseTimestamp(String raw) {
@@ -254,15 +252,10 @@ public class AlpacaMarketData implements MarketDataProvider {
   private void sendSubscribe(String occSymbol) {
     WebSocket socket = ensureWs();
     if (socket == null) {
-      return; // WS not yet open; reconnect will re-send via activeSymbols snapshot
+      // WS not yet open; reconnect will re-send via activeSymbols snapshot.
+      return;
     }
-    String payload =
-        "{\"action\":\"subscribe\",\"trades\":[\""
-            + occSymbol
-            + "\"],\"quotes\":[\""
-            + occSymbol
-            + "\"]}";
-    socket.sendText(payload, true);
+    socket.sendText(subscribeAction("subscribe", occSymbol), true);
   }
 
   private void sendUnsubscribe(String occSymbol) {
@@ -270,17 +263,21 @@ public class AlpacaMarketData implements MarketDataProvider {
     if (socket == null) {
       return;
     }
-    String payload =
-        "{\"action\":\"unsubscribe\",\"trades\":[\""
-            + occSymbol
-            + "\"],\"quotes\":[\""
-            + occSymbol
-            + "\"]}";
     try {
-      socket.sendText(payload, true);
+      socket.sendText(subscribeAction("unsubscribe", occSymbol), true);
     } catch (RuntimeException ignored) {
       // Best-effort — the reconnect path won't resubscribe a symbol with zero listeners anyway.
     }
+  }
+
+  private static String subscribeAction(String action, String occSymbol) {
+    return "{\"action\":\""
+        + action
+        + "\",\"trades\":[\""
+        + occSymbol
+        + "\"],\"quotes\":[\""
+        + occSymbol
+        + "\"]}";
   }
 
   /** Opens the WS if needed. Returns null when the connect is still in flight or has failed. */
@@ -340,10 +337,11 @@ public class AlpacaMarketData implements MarketDataProvider {
             return;
           }
           // Re-send subscribe for every symbol that still has a listener. Lossy: any tick that
-          // landed during the gap is gone.
-          Set<String> activeSymbols = new LinkedHashSet<>(bySymbol.keySet());
-          for (String s : activeSymbols) {
-            if (!bySymbol.get(s).isEmpty()) {
+          // landed during the gap is gone. Iterate a snapshot so concurrent close()s during the
+          // resubscribe walk can't NPE.
+          for (String s : new LinkedHashSet<>(bySymbol.keySet())) {
+            List<Consumer<Tick>> listeners = bySymbol.get(s);
+            if (listeners != null && !listeners.isEmpty()) {
               sendSubscribe(s);
             }
           }

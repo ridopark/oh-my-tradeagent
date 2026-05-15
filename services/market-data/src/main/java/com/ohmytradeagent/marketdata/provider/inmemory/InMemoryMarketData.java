@@ -28,9 +28,8 @@ import org.springframework.stereotype.Component;
     matchIfMissing = true)
 public class InMemoryMarketData implements MarketDataProvider {
 
-  private record Listener(String subscriptionId, String symbol, Consumer<Tick> onTick) {}
+  private record Listener(String subscriptionId, Consumer<Tick> onTick) {}
 
-  private final ConcurrentHashMap<String, Listener> active = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, List<Listener>> bySymbol = new ConcurrentHashMap<>();
 
   @Override
@@ -44,9 +43,9 @@ public class InMemoryMarketData implements MarketDataProvider {
   @Override
   public Subscription subscribePremium(String occSymbol, Consumer<Tick> onTick) {
     String id = UUID.randomUUID().toString();
-    Listener listener = new Listener(id, occSymbol, onTick);
-    active.put(id, listener);
-    bySymbol.computeIfAbsent(occSymbol, k -> new CopyOnWriteArrayList<>()).add(listener);
+    bySymbol
+        .computeIfAbsent(occSymbol, k -> new CopyOnWriteArrayList<>())
+        .add(new Listener(id, onTick));
     return new InMemorySubscription(id, occSymbol);
   }
 
@@ -78,10 +77,6 @@ public class InMemoryMarketData implements MarketDataProvider {
 
     @Override
     public void close() {
-      Listener removed = active.remove(id);
-      if (removed == null) {
-        return;
-      }
       List<Listener> listeners = bySymbol.get(symbol);
       if (listeners != null) {
         listeners.removeIf(l -> l.subscriptionId().equals(id));
