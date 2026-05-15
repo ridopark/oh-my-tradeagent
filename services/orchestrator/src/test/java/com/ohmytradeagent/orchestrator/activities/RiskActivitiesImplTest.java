@@ -1,11 +1,18 @@
 package com.ohmytradeagent.orchestrator.activities;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
+import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
+import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
+import io.temporal.client.WorkflowClient;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
@@ -22,13 +29,20 @@ class RiskActivitiesImplTest {
 
   private Clock clock;
   private long openCount;
+  private WorkflowClient workflowClient;
+  private KillSwitchWorkflow killSwitchStub;
   private RiskActivitiesImpl risk;
 
   @BeforeEach
   void setUp() {
     clock = Clock.fixed(FIXED_NOW, ZoneOffset.UTC);
     openCount = 0L;
-    risk = new RiskActivitiesImpl((tenant, strategy) -> openCount, clock);
+    workflowClient = mock(WorkflowClient.class);
+    killSwitchStub = mock(KillSwitchWorkflow.class);
+    when(workflowClient.newWorkflowStub(eq(KillSwitchWorkflow.class), anyString()))
+        .thenReturn(killSwitchStub);
+    when(killSwitchStub.killswitchState()).thenReturn(notTrippedState());
+    risk = new RiskActivitiesImpl((tenant, strategy) -> openCount, clock, workflowClient);
   }
 
   @Test
@@ -96,6 +110,68 @@ class RiskActivitiesImplTest {
     RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
 
     assertThat(d.allowed()).isTrue();
+  }
+
+  @Test
+  void rejects_killSwitchTripped() {
+    KillSwitchState tripped = notTrippedState();
+    tripped.setTripped(true);
+    tripped.setReason("auto:daily_loss");
+    tripped.setActor("auto:daily_loss");
+    when(killSwitchStub.killswitchState()).thenReturn(tripped);
+
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_TRIPPED);
+    assertThat(d.detail()).contains("auto:daily_loss");
+  }
+
+  @Test
+  void rejects_killSwitchCoolingDown() {
+    KillSwitchState cooling = notTrippedState();
+    cooling.setTripped(false);
+    cooling.setCoolingDownUntil(
+        OffsetDateTime.ofInstant(FIXED_NOW.plusSeconds(30), ZoneOffset.UTC));
+    when(killSwitchStub.killswitchState()).thenReturn(cooling);
+
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_COOLING_DOWN);
+  }
+
+  @Test
+  void approves_killSwitchCooldownElapsed() {
+    KillSwitchState elapsed = notTrippedState();
+    elapsed.setTripped(false);
+    // cooling_down_until in the past - should be ignored.
+    elapsed.setCoolingDownUntil(
+        OffsetDateTime.ofInstant(FIXED_NOW.minusSeconds(30), ZoneOffset.UTC));
+    when(killSwitchStub.killswitchState()).thenReturn(elapsed);
+
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+
+    assertThat(d.allowed()).isTrue();
+  }
+
+  @Test
+  void rejects_killSwitchQueryThrows_failsClosed() {
+    when(killSwitchStub.killswitchState()).thenThrow(new RuntimeException("query rejected"));
+
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_UNAVAILABLE);
+  }
+
+  private static KillSwitchState notTrippedState() {
+    KillSwitchState s = new KillSwitchState();
+    s.setSchemaVersion(1L);
+    s.setTripped(false);
+    s.setReason("");
+    s.setActor("");
+    return s;
   }
 
   private CopytradeSignalPayload payload(String author, Instant postedAt) {

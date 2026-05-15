@@ -1,5 +1,8 @@
 package com.ohmytradeagent.exectradierpaper.broker;
 
+import com.ohmytradeagent.contract.BrokerOpenOrder;
+import java.util.List;
+
 /**
  * Broker port. Implementations (Tradier sandbox, Tradier live, IBKR, Alpaca, ...) plug in via
  * Spring profiles. The contract callers depend on:
@@ -25,4 +28,13 @@ public interface OptionsBroker {
   CancelResponse cancelOrder(String brokerOrderId);
 
   BrokerOrderStatus getOrderStatus(String brokerOrderId);
+
+  /**
+   * Phase 5 reconciliation: list currently-open broker orders. Default returns an empty list so the
+   * Phase 5 reconciliation workflow degrades cleanly against brokers that don't expose this yet
+   * (the in-memory {@link StubBroker}, or Tradier whose HTTP adapter is deferred).
+   */
+  default List<BrokerOpenOrder> listOpenOrders() {
+    return List.of();
+  }
 }

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/journal-entry.json",
+  "title": "JournalEntry",
+  "description": "Snapshot of one OrderIntentJournal row, returned by exec.journal_dump_open Activity to ReconciliationWorkflow. Only non-terminal entries (RECORDED, SUBMITTED) are dumped.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.JournalEntry",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "intent_key",
+    "signal_id",
+    "tenant_id",
+    "strategy_id",
+    "broker_target",
+    "client_order_id",
+    "option_symbol",
+    "side",
+    "qty",
+    "state",
+    "recorded_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "intent_key": { "type": "string", "minLength": 1 },
+    "signal_id":  { "type": "string", "minLength": 1 },
+    "tenant_id":  { "type": "string", "minLength": 1 },
+    "strategy_id":{ "type": "string", "minLength": 1 },
+    "broker_target": { "type": "string", "enum": ["paper", "live"] },
+    "client_order_id": { "type": "string", "minLength": 1 },
+    "option_symbol":   { "type": "string", "minLength": 1 },
+    "side": { "type": "string", "enum": ["BUY", "SELL"] },
+    "qty":  { "type": "integer", "minimum": 1 },
+    "state": { "type": "string", "enum": ["RECORDED", "SUBMITTED", "FILLED", "CANCELLED", "EXPIRED", "ERRORED"] },
+    "broker_order_id": { "type": "string" },
+    "recorded_at": { "type": "string", "format": "date-time" },
+    "submitted_at": { "type": "string", "format": "date-time" }
+  }
+}

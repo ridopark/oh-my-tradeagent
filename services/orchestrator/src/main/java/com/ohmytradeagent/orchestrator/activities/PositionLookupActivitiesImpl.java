@@ -1,5 +1,6 @@
 package com.ohmytradeagent.orchestrator.activities;
 
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import io.temporal.api.enums.v1.WorkflowExecutionStatus;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
@@ -35,10 +36,9 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
 
   static String visibilityQuery(String tenantId, String strategyId, String occ) {
     return String.format(
-        "TenantStrategy = 't-%s/s-%s' AND ContractSymbol = '%s' AND ExecutionStatus = '%s' AND WorkflowType = '%s'",
-        tenantId,
-        strategyId,
-        occ,
+        "TenantStrategy = '%s' AND ContractSymbol = '%s' AND ExecutionStatus = '%s' AND WorkflowType = '%s'",
+        WorkflowIds.escapeForVisibilityQuery(WorkflowIds.tenantStrategy(tenantId, strategyId)),
+        WorkflowIds.escapeForVisibilityQuery(occ),
         WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING.name(),
         WORKFLOW_TYPE);
   }

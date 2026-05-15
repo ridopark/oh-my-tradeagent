@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/force-close-request.json",
+  "title": "ForceCloseRequest",
+  "description": "Update payload for PositionWorkflow.force_close. Validator checks operator_id is non-empty. Handler cancels any in-flight exit, then places a marketable-to-bid SELL for the full remaining qty (no floor in v0/paper). If remainingQty == 0 after cancel-ack, the handler audits ForceCloseNoop and returns. WaitPolicy=Accepted: HTTP 202 returns immediately with the new exit_signal_id; operator polls position_state for completion.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.ForceCloseRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operator_id",
+    "reason"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "operator_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-form operator-supplied reason recorded on ForceCloseRequested audit event."
+    }
+  }
+}

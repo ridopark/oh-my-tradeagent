@@ -6,9 +6,11 @@ import static org.jooq.impl.DSL.table;
 import com.ohmytradeagent.contract.OrderIntent;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Optional;
 import org.jooq.DSLContext;
 import org.jooq.Record;
+import org.jooq.Result;
 import org.jooq.Table;
 import org.springframework.stereotype.Component;
 
@@ -72,6 +74,19 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public List<JournaledOrder> listOpenByTenantStrategy(String tenantId, String strategyId) {
+    Result<?> rows =
+        dsl.selectFrom(TABLE)
+            .where(field("tenant_id", String.class).eq(tenantId))
+            .and(field("strategy_id", String.class).eq(strategyId))
+            .and(
+                field("state", String.class)
+                    .in(OrderState.RECORDED.name(), OrderState.SUBMITTED.name()))
+            .fetch();
+    return rows.stream().map(JooqOrderIntentJournal::mapRow).toList();
+  }
+
+  @Override
   public boolean markSubmittedIfRecorded(String intentKey, String brokerOrderId) {
     OffsetDateTime now = OffsetDateTime.now();
     int updated =
@@ -120,7 +135,7 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
         .execute();
   }
 
-  private JournaledOrder mapRow(Record r) {
+  private static JournaledOrder mapRow(Record r) {
     return new JournaledOrder(
         r.get("intent_key", String.class),
         r.get("signal_id", String.class),

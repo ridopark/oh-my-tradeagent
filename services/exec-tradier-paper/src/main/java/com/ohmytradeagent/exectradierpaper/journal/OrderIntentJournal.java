@@ -1,6 +1,7 @@
 package com.ohmytradeagent.exectradierpaper.journal;
 
 import com.ohmytradeagent.contract.OrderIntent;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -18,6 +19,12 @@ public interface OrderIntentJournal {
   boolean upsertIntent(OrderIntent intent);
 
   Optional<JournaledOrder> findByIntentKey(String intentKey);
+
+  /**
+   * List non-terminal (RECORDED + SUBMITTED) journal entries scoped to one (tenant, strategy).
+   * Powers Phase 5 reconciliation.
+   */
+  List<JournaledOrder> listOpenByTenantStrategy(String tenantId, String strategyId);
 
   /**
    * Conditional state-machine transition: flips RECORDED → SUBMITTED only if the current state is

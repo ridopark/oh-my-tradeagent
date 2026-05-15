@@ -24,4 +24,13 @@ public interface MarketCalendarActivities {
    * can treat "no expiry timer" uniformly.
    */
   Duration durationUntilExpiryCloseEt(LocalDate expiry);
+
+  /**
+   * Whether the US equity options market is currently open. Phase 5 KISS: Monday-Friday 09:30-16:00
+   * America/New_York. Holidays and half-days land with the full MarketCalendar in Phase 6.
+   */
+  boolean isMarketOpen();
+
+  /** Today's date in America/New_York. */
+  LocalDate todayEt();
 }

@@ -73,4 +73,48 @@ class MarketCalendarActivitiesImplTest {
 
     assertThat(d).isEqualTo(Duration.ZERO);
   }
+
+  @Test
+  void isMarketOpen_weekdayDuringSession_returnsTrue() {
+    // 2026-05-14 is a Thursday
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 10, 0));
+
+    assertThat(svc.isMarketOpen()).isTrue();
+  }
+
+  @Test
+  void isMarketOpen_weekdayBeforeOpen_returnsFalse() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 9, 0));
+
+    assertThat(svc.isMarketOpen()).isFalse();
+  }
+
+  @Test
+  void isMarketOpen_weekdayAfterClose_returnsFalse() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 16, 0));
+
+    assertThat(svc.isMarketOpen()).isFalse();
+  }
+
+  @Test
+  void isMarketOpen_saturday_returnsFalse() {
+    // 2026-05-16 is a Saturday
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 16, 11, 0));
+
+    assertThat(svc.isMarketOpen()).isFalse();
+  }
+
+  @Test
+  void todayEt_returnsLocalDateInEt() {
+    // 2026-05-14 21:00 UTC is 2026-05-14 17:00 ET (DST in effect: UTC-4)
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(
+            Clock.fixed(Instant.parse("2026-05-14T21:00:00Z"), ZoneOffset.UTC));
+
+    assertThat(svc.todayEt()).isEqualTo(LocalDate.of(2026, 5, 14));
+  }
 }

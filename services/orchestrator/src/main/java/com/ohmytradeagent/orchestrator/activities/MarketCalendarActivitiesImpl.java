@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.activities;
 
 import java.time.Clock;
+import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -14,6 +15,8 @@ public class MarketCalendarActivitiesImpl implements MarketCalendarActivities {
   static final ZoneId ET = ZoneId.of("America/New_York");
   static final LocalTime EOD_TIME = LocalTime.of(15, 55);
   static final LocalTime EXPIRY_CLOSE_TIME = LocalTime.of(15, 30);
+  static final LocalTime MARKET_OPEN_TIME = LocalTime.of(9, 30);
+  static final LocalTime MARKET_CLOSE_TIME = LocalTime.of(16, 0);
 
   private final Clock clock;
 
@@ -42,5 +45,21 @@ public class MarketCalendarActivitiesImpl implements MarketCalendarActivities {
       return Duration.ZERO;
     }
     return Duration.between(now, close);
+  }
+
+  @Override
+  public boolean isMarketOpen() {
+    ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
+    DayOfWeek dow = now.getDayOfWeek();
+    if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) {
+      return false;
+    }
+    LocalTime t = now.toLocalTime();
+    return !t.isBefore(MARKET_OPEN_TIME) && t.isBefore(MARKET_CLOSE_TIME);
+  }
+
+  @Override
+  public LocalDate todayEt() {
+    return ZonedDateTime.now(clock).withZoneSameInstant(ET).toLocalDate();
   }
 }

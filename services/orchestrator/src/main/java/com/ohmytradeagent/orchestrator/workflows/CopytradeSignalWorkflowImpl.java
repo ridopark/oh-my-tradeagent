@@ -7,7 +7,9 @@ import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
+import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
@@ -52,9 +54,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // (parent-side); the apply (child-side) emits its own ChandelierArmed when the subscribe
   // activity succeeds. Both useful for forensics.
   private static final String KIND_CHANDELIER_ARM_REQUESTED = "ChandelierArmRequested";
+  // Phase 5: kill-switch cascade short-circuit audit.
+  private static final String KIND_SIGNAL_ABORTED_BY_RISK_BREACH = "SignalAbortedByRiskBreach";
 
   private static final String REASON_TTL_EXPIRED = "ttl_expired";
   private static final String VERSION_POSITION_HANDOFF = "position-handoff";
+  private static final String VERSION_RISK_BREACH = "risk-breach-v1";
 
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
@@ -86,10 +91,25 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               .build());
 
   private FillEvent fillEvent;
+  private boolean riskBreachReceived;
+  private String riskBreachReason;
+  private String riskBreachActor;
 
   @Override
   public void onFill(FillEvent event) {
     this.fillEvent = event;
+  }
+
+  @Override
+  public void riskBreach(RiskBreachPayload payload) {
+    int v = Workflow.getVersion(VERSION_RISK_BREACH, Workflow.DEFAULT_VERSION, 1);
+    if (v == Workflow.DEFAULT_VERSION) {
+      return;
+    }
+    // Signal handlers only set flags; the main path checks them at await/dispatch points.
+    this.riskBreachReceived = true;
+    this.riskBreachReason = payload.getReason();
+    this.riskBreachActor = payload.getActor();
   }
 
   @Override
@@ -156,7 +176,20 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "broker_target", config.getBrokerTarget().value()));
 
     long ttlSecs = pendingTtlSecs(config);
-    boolean filled = Workflow.await(Duration.ofSeconds(ttlSecs), () -> fillEvent != null);
+    // Phase 5: also wake on risk_breach so the cascade can short-circuit the BTO.
+    boolean filled =
+        Workflow.await(Duration.ofSeconds(ttlSecs), () -> fillEvent != null || riskBreachReceived);
+
+    if (riskBreachReceived && fillEvent == null) {
+      // Cascade arrived before fill — cancel the pending entry order best-effort.
+      auditRiskBreachAbort(payload, "bto_pre_fill", intentKey);
+      try {
+        exec.cancelOrder(intentKey);
+      } catch (RuntimeException ignored) {
+        // Best-effort: reconciliation closes any orphan broker order.
+      }
+      return payload.getSignalId();
+    }
 
     if (filled) {
       logAudit(
@@ -183,22 +216,33 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     return payload.getSignalId();
   }
 
+  private void auditRiskBreachAbort(
+      CopytradeSignalPayload payload, String stage, String intentKey) {
+    Map<String, Object> s =
+        subject(
+            "signal_id",
+            payload.getSignalId(),
+            "stage",
+            stage,
+            "reason",
+            riskBreachReason == null ? "" : riskBreachReason,
+            "actor",
+            riskBreachActor == null ? "" : riskBreachActor);
+    if (intentKey != null) {
+      s.put("intent_key", intentKey);
+    }
+    logAudit(payload, KIND_SIGNAL_ABORTED_BY_RISK_BREACH, s);
+  }
+
   private void startPositionWorkflow(
       CopytradeSignalPayload payload, ContractResolveResult resolved, FillEvent fill) {
     String tenant = payload.getTenantId();
     String strategyId = payload.getStrategyId();
     String posWfId =
-        "t-"
-            + tenant
-            + "/s-"
-            + strategyId
-            + "/pos/"
-            + resolved.optionSymbol()
-            + "/"
-            + payload.getSignalId();
+        WorkflowIds.position(tenant, strategyId, resolved.optionSymbol(), payload.getSignalId());
 
     Map<String, Object> sa = new HashMap<>();
-    sa.put("TenantStrategy", "t-" + tenant + "/s-" + strategyId);
+    sa.put("TenantStrategy", WorkflowIds.tenantStrategy(tenant, strategyId));
     sa.put("ContractSymbol", resolved.optionSymbol());
 
     ChildWorkflowOptions opts =
@@ -228,6 +272,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   private String handleStc(CopytradeSignalPayload payload, StrategyConfig config) {
+    if (riskBreachReceived) {
+      auditRiskBreachAbort(payload, "stc_pre_resolve", null);
+      return payload.getSignalId();
+    }
     ContractResolveResult resolved = contract.resolve(ContractResolveInput.from(payload));
     String tenant = payload.getTenantId();
     String strategyId = payload.getStrategyId();
@@ -237,10 +285,18 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     int maxAttempts = (int) Math.max(1L, bufferSecs / 10L);
     String positionId = positionLookup.findPositionWorkflowId(tenant, strategyId, occ);
     int attempts = 0;
-    while (positionId == null && attempts < maxAttempts) {
-      Workflow.sleep(Duration.ofSeconds(10));
+    while (positionId == null && attempts < maxAttempts && !riskBreachReceived) {
+      // Use await-with-timeout so a co-arriving risk_breach signal wakes the loop early.
+      Workflow.await(Duration.ofSeconds(10), () -> riskBreachReceived);
+      if (riskBreachReceived) {
+        break;
+      }
       positionId = positionLookup.findPositionWorkflowId(tenant, strategyId, occ);
       attempts++;
+    }
+    if (riskBreachReceived) {
+      auditRiskBreachAbort(payload, "stc_pre_dispatch", null);
+      return payload.getSignalId();
     }
     if (positionId == null) {
       logAudit(

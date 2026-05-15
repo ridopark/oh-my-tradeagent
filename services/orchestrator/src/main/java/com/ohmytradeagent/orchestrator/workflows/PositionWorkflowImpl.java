@@ -2,11 +2,14 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.ForceCloseRequest;
+import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.PremiumTick;
+import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.SubscribePremiumRequest;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
@@ -60,7 +63,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String KIND_CHANDELIER_SUBSCRIPTION_FAILED = "ChandelierSubscriptionFailed";
   private static final String KIND_CHANDELIER_UNARMED_BY_EXIT = "ChandelierUnarmedByExit";
 
+  // Phase 5 audit kinds
+  private static final String KIND_RISK_BREACH_RECEIVED = "RiskBreachReceived";
+  private static final String KIND_RISK_BREACH_ACTED = "RiskBreachActed";
+  private static final String KIND_FORCE_CLOSE_REQUESTED = "ForceCloseRequested";
+  private static final String KIND_FORCE_CLOSE_NOOP = "ForceCloseNoop";
+
   private static final String VERSION_CHANDELIER = "chandelier-v1";
+  private static final String VERSION_RISK_BREACH = "risk-breach-v1";
+  private static final String VERSION_FORCE_CLOSE = "force-close-v1";
 
   private static final BigDecimal MAX_GIVEBACK = new BigDecimal("0.5");
 
@@ -133,6 +144,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   /** Set when the workflow's own close logic flattens. Drives the un-armed-by-exit audit. */
   private String closeReason;
 
+  // Phase 5: buffered risk-breach + force-close directives. Same pattern as
+  // pendingExits/pendingArms
+  // — signal/Update handlers only enqueue; the main loop drains and acts. Keeps Updates fast
+  // (handler returns after enqueue) and keeps handlers free of activity calls (deterministic).
+  private final ArrayDeque<RiskBreachPayload> pendingRiskBreaches = new ArrayDeque<>();
+  private final ArrayDeque<ForceCloseDirective> pendingForceCloses = new ArrayDeque<>();
+
+  /** Internal directive emitted by the force_close Update handler into the main loop. */
+  private record ForceCloseDirective(String operatorId, String reason, String exitSignalId) {}
+
   @Override
   public String run(PositionWorkflowInput in) {
     this.input = in;
@@ -176,12 +197,26 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               !pendingExits.isEmpty()
                   || !pendingArms.isEmpty()
                   || !pendingTicks.isEmpty()
+                  || !pendingRiskBreaches.isEmpty()
+                  || !pendingForceCloses.isEmpty()
                   || chandelierFireRequested
                   || eodFired
                   || expiryFired
                   || remainingQty == 0);
       if (eodFired || expiryFired || remainingQty == 0) {
         break;
+      }
+      // Phase 5: risk_breach + force_close take priority over the normal exit pipeline so
+      // operator intent and kill-switch cascades are not blocked behind a queued STC.
+      if (!pendingRiskBreaches.isEmpty()) {
+        RiskBreachPayload rb = pendingRiskBreaches.poll();
+        processRiskBreach(rb);
+        continue; // flattenRemaining drained remainingQty -> next iteration exits.
+      }
+      if (!pendingForceCloses.isEmpty()) {
+        ForceCloseDirective fc = pendingForceCloses.poll();
+        processForceClose(fc);
+        continue;
       }
       // Drain arms first so a co-arriving tick sees armed=true.
       while (!pendingArms.isEmpty()) {
@@ -228,6 +263,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   @Override
   public void partialExit(PartialExitRequest req) {
+    // Temporal can dispatch signals before the @WorkflowMethod body has executed (the constructor
+    // ran, but `run(input)` hasn't reached `this.input = in` yet). In that race, `input` is null
+    // and
+    // every auditLog call below would NPE. Buffer the signal; the main loop drains pendingExits
+    // after init and applies the validation/audit logic uniformly via processOne.
+    if (input == null) {
+      pendingExits.add(req);
+      return;
+    }
     // Phase 3 latent-bug fix: if the position is already drained, surface a clear audit instead of
     // recording a "duplicate_signal_id" muddle.
     if (remainingQty <= 0) {
@@ -287,6 +331,113 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
     // Buffer only — main loop drains AFTER arms so a co-arriving arm+tick pair fires correctly.
     pendingTicks.add(tick);
+  }
+
+  @Override
+  public void riskBreach(RiskBreachPayload payload) {
+    int v = Workflow.getVersion(VERSION_RISK_BREACH, Workflow.DEFAULT_VERSION, 1);
+    if (v == Workflow.DEFAULT_VERSION) {
+      return;
+    }
+    pendingRiskBreaches.add(payload);
+    // auditLog dereferences `input` — only safe once run() has assigned it. Skip the
+    // "received" audit on the signal-before-run race; processRiskBreach still emits ActedOn
+    // in the main loop after init.
+    if (input != null) {
+      auditLog(
+          KIND_RISK_BREACH_RECEIVED,
+          subject("reason", payload.getReason(), "actor", payload.getActor()));
+    }
+  }
+
+  @Override
+  public void forceCloseValidator(ForceCloseRequest request) {
+    if (request == null) {
+      throw new IllegalArgumentException("request_required");
+    }
+    if (request.getOperatorId() == null || request.getOperatorId().isBlank()) {
+      throw new IllegalArgumentException("operator_id_required");
+    }
+    if (request.getReason() == null || request.getReason().isBlank()) {
+      throw new IllegalArgumentException("reason_required");
+    }
+  }
+
+  @Override
+  public ForceCloseResult forceClose(ForceCloseRequest request) {
+    int v = Workflow.getVersion(VERSION_FORCE_CLOSE, Workflow.DEFAULT_VERSION, 1);
+    if (v == Workflow.DEFAULT_VERSION) {
+      // Pre-v1 replay: surface a no-op so the caller still gets a structured response. Not
+      // expected on fresh starts since this Update is only added in Phase 5.
+      ForceCloseResult r = new ForceCloseResult();
+      r.setSchemaVersion(1L);
+      r.setStatus(ForceCloseResult.Status.NOOP_ALREADY_CLOSED);
+      r.setExitSignalId("force:noop:legacy");
+      return r;
+    }
+    String exitSignalId = "force:" + request.getOperatorId() + ":" + Workflow.currentTimeMillis();
+    ForceCloseResult result = new ForceCloseResult();
+    result.setSchemaVersion(1L);
+    result.setExitSignalId(exitSignalId);
+
+    // Update can land before run() body executes; buffer the directive so the main loop processes
+    // it after init. ACCEPTED is the right semantic — the operator's exit_signal_id is the dedupe
+    // key, and the actual flatten happens once the workflow is fully initialized.
+    if (input == null) {
+      pendingForceCloses.add(
+          new ForceCloseDirective(request.getOperatorId(), request.getReason(), exitSignalId));
+      result.setStatus(ForceCloseResult.Status.ACCEPTED);
+      return result;
+    }
+
+    if (remainingQty <= 0) {
+      auditLog(
+          KIND_FORCE_CLOSE_NOOP,
+          subject(
+              "operator_id", request.getOperatorId(),
+              "reason", request.getReason(),
+              "exit_signal_id", exitSignalId));
+      result.setStatus(ForceCloseResult.Status.NOOP_ALREADY_CLOSED);
+      return result;
+    }
+
+    auditLog(
+        KIND_FORCE_CLOSE_REQUESTED,
+        subject(
+            "operator_id",
+            request.getOperatorId(),
+            "reason",
+            request.getReason(),
+            "exit_signal_id",
+            exitSignalId,
+            "remaining_qty",
+            remainingQty));
+    pendingForceCloses.add(
+        new ForceCloseDirective(request.getOperatorId(), request.getReason(), exitSignalId));
+    result.setStatus(ForceCloseResult.Status.ACCEPTED);
+    return result;
+  }
+
+  /**
+   * Main-loop risk-breach processor. Re-uses {@link #flattenRemaining(String)} so cancel-then-sell
+   * semantics match EOD/expiry; emits a RiskBreachActed audit before the flatten so dashboards see
+   * the cause-of-flatten before the EodForceFlatten* events.
+   */
+  private void processRiskBreach(RiskBreachPayload payload) {
+    auditLog(
+        KIND_RISK_BREACH_ACTED,
+        subject(
+            "reason", payload.getReason(),
+            "actor", payload.getActor(),
+            "remaining_qty", remainingQty));
+    closeReason = "risk_breach";
+    flattenRemaining("risk_breach");
+  }
+
+  /** Main-loop force-close processor. Cancel-then-flatten via the shared flatten helper. */
+  private void processForceClose(ForceCloseDirective d) {
+    closeReason = "force_close";
+    flattenRemaining("force_close");
   }
 
   /** Main-loop tick processor: drops ticks while unarmed, ratchets the peak, latches on breach. */
@@ -428,7 +579,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     OrderIntentResult placed = exec.placeOrder(intent);
     currentInFlightBrokerOrderId = placed.getBrokerOrderId();
 
-    Workflow.await(() -> lastFillEvent != null || eodFired || expiryFired);
+    Workflow.await(
+        () ->
+            lastFillEvent != null
+                || eodFired
+                || expiryFired
+                || !pendingRiskBreaches.isEmpty()
+                || !pendingForceCloses.isEmpty());
 
     if (lastFillEvent != null) {
       long filled = lastFillEvent.filledQty();
@@ -443,7 +600,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               "remaining_qty_after",
               remainingQty,
               "broker_order_id",
-              lastFillEvent.brokerOrderId()));
+              lastFillEvent.brokerOrderId(),
+              "avg_fill_price",
+              lastFillEvent.avgFillPrice()));
       exitInFlight = false;
       currentInFlightBrokerOrderId = null;
       currentInFlightSignalId = null;

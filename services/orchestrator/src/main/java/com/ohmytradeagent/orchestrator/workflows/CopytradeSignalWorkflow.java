@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
+import com.ohmytradeagent.contract.RiskBreachPayload;
 import io.temporal.workflow.SignalMethod;
 import io.temporal.workflow.WorkflowInterface;
 import io.temporal.workflow.WorkflowMethod;
@@ -19,4 +20,12 @@ public interface CopytradeSignalWorkflow {
    */
   @SignalMethod
   void onFill(FillEvent event);
+
+  /**
+   * Phase 5: kill-switch cascade. Sets an internal flag that short-circuits the BTO await + STC
+   * dispatch paths. Cannot unilaterally abort an in-flight Activity; reconciliation closes any
+   * orphan broker order.
+   */
+  @SignalMethod
+  void riskBreach(RiskBreachPayload payload);
 }
