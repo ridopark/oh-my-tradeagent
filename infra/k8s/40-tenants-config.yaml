@@ -1,0 +1,55 @@
+# Tenants config mounted into orchestrator-svc at /etc/copytrade/tenants/.
+# Kept here verbatim so a kubectl apply is the single source of truth in
+# the cluster. The dev tenant + copytrade-v1 strategy live in tenants/ at
+# the repo root; we re-emit them as a ConfigMap rather than baking into the
+# image (config changes only require a kubectl apply + pod restart).
+#
+# k8s ConfigMap keys forbid `/`, so we keep flat keys here and reconstruct
+# the directory layout (`dev/tenant.yaml`, `dev/strategies/copytrade-v1.yaml`)
+# via the `items:` projection in 51-orchestrator.yaml.
+#
+# CI guardrail (follow-up): a small script could diff this ConfigMap's
+# contents against tenants/dev/* and fail PRs that drift.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenants-config
+  namespace: copytrade
+data:
+  tenant.yaml: |
+    tenant_id: dev
+    display_name: Local development tenant
+    strategies:
+      - copytrade-v1
+  copytrade-v1.yaml: |
+    schema_version: 1
+    tenant_id: dev
+    strategy_id: copytrade-v1
+    broker_target: paper
+    author_whitelist:
+      - acme_trader
+      - beta_signals
+    max_signal_age_secs: 1800
+    max_positions: 5
+    capital_weight: 0.2
+    min_contracts: 1
+    max_contracts: 5
+    skip_avg: true
+    default_stc_fraction: 0.5
+    partial_fractions:
+      out: 1.0
+      "all out": 1.0
+      close: 1.0
+      half: 0.5
+      "half out": 0.5
+      partial: 0.5
+      third: 0.33
+      "two thirds": 0.67
+      trim: 0.25
+    pending_ttl_paper_secs: 90
+    pending_ttl_live_secs: 30
+    trail_on_partial: true
+    trail_giveback_pct: 0.15
+    daily_loss_threshold: 2500.00
+    reset_cooldown_secs: 60

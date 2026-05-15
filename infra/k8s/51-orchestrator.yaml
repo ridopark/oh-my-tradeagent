@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: copytrade
+spec:
+  selector:
+    app: orchestrator
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: copytrade
+  labels:
+    app: orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+    spec:
+      containers:
+        - name: orchestrator
+          image: ghcr.io/ridopark/oh-my-tradeagent-orchestrator:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: TEMPORAL_TARGET
+              value: temporal:7233
+            - name: TEMPORAL_NAMESPACE
+              value: default
+            - name: ORCHESTRATOR_DB_URL
+              value: jdbc:postgresql://postgres:5432/temporal
+            - name: ORCHESTRATOR_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: ORCHESTRATOR_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: ORCHESTRATOR_TENANTS_DIR
+              value: /etc/copytrade/tenants
+            - name: ORCHESTRATOR_CAPITAL_PER_STRATEGY
+              value: "100000"
+          volumeMounts:
+            - name: tenants
+              mountPath: /etc/copytrade/tenants
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 90
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 1.5Gi
+      volumes:
+        - name: tenants
+          configMap:
+            name: tenants-config
+            # k8s ConfigMap keys can't contain `/`, so we store flat keys in the
+            # ConfigMap (see 40-tenants-config.yaml) and rebuild the nested
+            # tenants/<id>/strategies/<id>.yaml layout the orchestrator walks.
+            items:
+              - key: tenant.yaml
+                path: dev/tenant.yaml
+              - key: copytrade-v1.yaml
+                path: dev/strategies/copytrade-v1.yaml

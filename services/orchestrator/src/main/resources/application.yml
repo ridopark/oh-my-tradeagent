@@ -36,3 +36,9 @@ management:
     web:
       exposure:
         include: health,info,prometheus
+  endpoint:
+    health:
+      # Surfaces /actuator/health/{liveness,readiness} regardless of Spring Boot's
+      # k8s auto-detection heuristic. The k3s manifests probe those paths.
+      probes:
+        enabled: true

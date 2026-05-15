@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit
+  namespace: copytrade
+spec:
+  selector:
+    app: audit
+  ports:
+    - port: 8081
+      targetPort: 8081
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit
+  namespace: copytrade
+  labels:
+    app: audit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit
+  template:
+    metadata:
+      labels:
+        app: audit
+    spec:
+      containers:
+        - name: audit
+          image: ghcr.io/ridopark/oh-my-tradeagent-audit:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8081
+              name: http
+          env:
+            - name: TEMPORAL_TARGET
+              value: temporal:7233
+            - name: TEMPORAL_NAMESPACE
+              value: default
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi

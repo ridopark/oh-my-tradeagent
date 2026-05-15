@@ -1,0 +1,115 @@
+# Single-instance Postgres for v0. Backs both Temporal cluster state and the
+# orchestrator/exec-svc/audit/api-gateway schemas. Persistent volume comes from
+# k3s default local-path provisioner — that pins data to the node, which is
+# fine for the single-node homelab cluster.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: copytrade
+data:
+  01-create-databases.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    create_db_if_missing() {
+      local db="$1"
+      psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" -d postgres <<-EOSQL
+        SELECT 'CREATE DATABASE $db OWNER $POSTGRES_USER'
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '$db')\gexec
+    EOSQL
+      echo "  ensured database: $db"
+    }
+
+    create_db_if_missing exec_tradier_paper
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: copytrade
+spec:
+  clusterIP: None  # headless — gives StatefulSet a stable DNS record
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: copytrade
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          envFrom:
+            - secretRef:
+                name: postgres-credentials
+          env:
+            - name: POSTGRES_DB
+              value: temporal
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # k8s `$(VAR)` substitution in command/args only expands variables
+            # defined in `env:` — `envFrom:` vars are not seen by the substitution
+            # pass. Promote POSTGRES_USER here so the probe commands below can
+            # reference it.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 1Gi
+      volumes:
+        - name: init
+          configMap:
+            name: postgres-init
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 10Gi

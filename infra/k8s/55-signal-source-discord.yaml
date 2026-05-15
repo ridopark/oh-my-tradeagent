@@ -1,0 +1,95 @@
+# Discord sidecar. Needs a persistent volume for Playwright's `storage_state.json`
+# (login cookies) and the heartbeat file the healthcheck reads. The volume is
+# initially empty — the bootstrap container (services/signal-source-discord/
+# Dockerfile entry) writes storage_state.json after a one-time interactive
+# Discord login, which is the manual step on the runbook for 5b.D.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: signal-source-discord-state
+  namespace: copytrade
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signal-source-discord
+  namespace: copytrade
+  labels:
+    app: signal-source-discord
+spec:
+  # In-memory dedupe LRU is cost-only; durable dedupe is Temporal's job (see
+  # PRD.md §14). Replica >= 1 is safe; v0 ships at 1 to keep storage_state.json
+  # write coordination trivial.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: signal-source-discord
+  template:
+    metadata:
+      labels:
+        app: signal-source-discord
+    spec:
+      containers:
+        - name: sidecar
+          image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
+          imagePullPolicy: Always
+          env:
+            - name: TEMPORAL_TARGET
+              value: temporal:7233
+            - name: TEMPORAL_NAMESPACE
+              value: default
+            - name: STATE_DIR
+              value: /app/state
+            # Pulls the channel + tenant + strategy from Secret values supplied
+            # by the operator (template in infra/k8s/secrets.template.yaml).
+            - name: DISCORD_CHANNEL_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sidecar-config
+                  key: DISCORD_CHANNEL_URL
+                  optional: true
+            - name: COPYTRADE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: sidecar-config
+                  key: COPYTRADE_TENANT_ID
+                  optional: true
+            - name: COPYTRADE_STRATEGY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: sidecar-config
+                  key: COPYTRADE_STRATEGY_ID
+                  optional: true
+          volumeMounts:
+            - name: state
+              mountPath: /app/state
+          # Healthcheck comes from the Dockerfile's HEALTHCHECK directive;
+          # k8s ignores that and uses these probes. Heartbeat-file freshness
+          # mirrors the same contract: file present + mtime within 120s.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /app/state/heartbeat && test $(( $(date +%s) - $(stat -c %Y /app/state/heartbeat) )) -lt 120
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: signal-source-discord-state

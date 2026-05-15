@@ -13,6 +13,10 @@ management:
   endpoint:
     health:
       show-details: when_authorized
+      # Surfaces /actuator/health/{liveness,readiness} regardless of Spring Boot's
+      # k8s auto-detection heuristic. The k3s manifests probe those paths.
+      probes:
+        enabled: true
 
 temporal:
   target: ${TEMPORAL_TARGET:localhost:7233}
