@@ -14,6 +14,7 @@ import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.Workflow;
+import io.temporal.workflow.WorkflowInit;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
@@ -64,7 +65,7 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
       Workflow.newActivityStub(KillSwitchCascadeActivities.class, CASCADE_OPTIONS);
 
   // State
-  private KillSwitchWorkflowInput input;
+  private final KillSwitchWorkflowInput input;
   private boolean tripped;
   private String reason = "";
   private String actor = "";
@@ -72,13 +73,22 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   private OffsetDateTime coolingDownUntil;
   private LocalDate tradingDay;
 
-  @Override
-  public String run(KillSwitchWorkflowInput in) {
+  // Assigning input via @WorkflowInit (runs before any Signal/Update handler) closes a race where
+  // a fast caller could submit `trip`/`reset` before the @WorkflowMethod body executed and reach
+  // auditEvent() with input == null.
+  @WorkflowInit
+  public KillSwitchWorkflowImpl(KillSwitchWorkflowInput in) {
     if (in.getSchemaVersion() == null || in.getSchemaVersion() > 1L) {
       throw new IllegalArgumentException(
           "KillSwitchWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
     this.input = in;
+  }
+
+  @Override
+  public String run(KillSwitchWorkflowInput in) {
+    // `in` is consumed by the @WorkflowInit constructor; the parameter only stays because
+    // the @WorkflowMethod signature must match KillSwitchWorkflow.run.
     this.tradingDay = calendar.todayEt();
 
     while (true) {
