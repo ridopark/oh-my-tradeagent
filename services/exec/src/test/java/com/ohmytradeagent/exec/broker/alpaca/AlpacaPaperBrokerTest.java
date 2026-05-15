@@ -77,7 +77,9 @@ class AlpacaPaperBrokerTest {
     // Alpaca's live endpoint expects qty / ratio_qty as JSON integers, not strings.
     assertThat(body.get("qty").isIntegralNumber()).isTrue();
     assertThat(body.get("qty").asLong()).isEqualTo(1L);
-    assertThat(body.get("limit_price").asText()).isEqualTo("2.30");
+    // Alpaca's live endpoint requires limit_price as a JSON number — string form is sandbox-only.
+    assertThat(body.get("limit_price").isNumber()).isTrue();
+    assertThat(body.get("limit_price").decimalValue()).isEqualByComparingTo("2.30");
     assertThat(body.get("type").asText()).isEqualTo("limit");
     assertThat(body.get("time_in_force").asText()).isEqualTo("day");
     JsonNode legs = body.get("legs");

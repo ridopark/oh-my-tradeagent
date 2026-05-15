@@ -85,7 +85,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
         new AlpacaOrderRequest(
             ORDER_CLASS_MLEG,
             request.qty(),
-            request.limitPrice() == null ? null : request.limitPrice().toPlainString(),
+            request.limitPrice(),
             orderType,
             "day",
             request.clientOrderId(),
