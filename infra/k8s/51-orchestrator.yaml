@@ -64,18 +64,13 @@ spec:
             - name: tenants
               mountPath: /etc/copytrade/tenants
               readOnly: true
-          readinessProbe:
-            httpGet:
-              path: /actuator/health/readiness
-              port: 8080
-            initialDelaySeconds: 30
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /actuator/health/liveness
-              port: 8080
-            initialDelaySeconds: 90
-            periodSeconds: 30
+          # orchestrator-svc is a pure Temporal worker (no spring-boot-starter-web in its
+          # pom — see services/orchestrator/pom.xml comment). No HTTP listener on :8080,
+          # so http-get probes would always fail with "connection refused" and trigger a
+          # restart loop. The Temporal worker poll loop is the implicit liveness signal —
+          # if the JVM is alive, the worker is polling. Adding spring-boot-starter-web so
+          # /actuator/health works is the v0 follow-up (tracked separately); for now,
+          # default-Ready-on-Running is correct.
           resources:
             requests:
               cpu: 200m

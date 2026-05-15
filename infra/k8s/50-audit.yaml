@@ -40,18 +40,12 @@ spec:
               value: temporal:7233
             - name: TEMPORAL_NAMESPACE
               value: default
-          readinessProbe:
-            httpGet:
-              path: /actuator/health/readiness
-              port: 8081
-            initialDelaySeconds: 20
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /actuator/health/liveness
-              port: 8081
-            initialDelaySeconds: 60
-            periodSeconds: 30
+          # audit-svc has no spring-boot-starter-web today (skeleton from Phase 0b — the
+          # audit_log writes actually happen via orchestrator's AuditActivitiesImpl).
+          # No HTTP listener, so http-get probes would loop the pod. The JVM exits as
+          # soon as main() returns because there's no worker keeping it alive — a real
+          # follow-up will add a Temporal worker registration (or remove this Deployment
+          # if audit stays purely an Activity on the orchestrator side).
           resources:
             requests:
               cpu: 100m

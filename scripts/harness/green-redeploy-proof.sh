@@ -108,7 +108,7 @@ BEFORE_POD=$(orchestrator_pod_name)
 echo "$BEFORE_LIST" | sed 's/^/  /'
 log "  pod=$BEFORE_POD restartCount=$BEFORE_RESTARTS"
 
-BEFORE_COUNT=$(echo "$BEFORE_LIST" | grep -c . || echo 0)
+BEFORE_COUNT=$(echo "$BEFORE_LIST" | { grep -c . || true; })
 if [ "$BEFORE_COUNT" -lt "$COUNT" ]; then
   log "FAIL: only $BEFORE_COUNT PositionWorkflows running, expected >= $COUNT"
   exit 1
@@ -156,7 +156,7 @@ if [ "$BEFORE_POD" = "$AFTER_POD" ]; then
 fi
 
 log "checking new pod logs for NonDeterministicException..."
-NDE=$(ssh "$HOMELAB" "kubectl -n $NAMESPACE logs $AFTER_POD --tail=500 | grep -c 'NonDeterministicException' || echo 0")
+NDE=$(ssh "$HOMELAB" "kubectl -n $NAMESPACE logs $AFTER_POD --tail=500 | { grep -c 'NonDeterministicException' || true; }")
 if [ "$NDE" -gt 0 ]; then
   log "FAIL: orchestrator pod logs contain NonDeterministicException ($NDE occurrences)"
   exit 1
