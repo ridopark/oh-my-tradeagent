@@ -4,9 +4,11 @@
 
 # Build outputs
 **/target/
+/target/
 **/build/
 **/dist/
 **/.gradle/
+*.log
 
 # Python virtualenvs / caches
 **/.venv/
@@ -47,3 +49,8 @@ Thumbs.db
 
 # Skill workspace (planner extracts; never needed at build time)
 _workspace/
+
+# Documentation / non-runtime data — never referenced by the image build
+docs/
+tenants/
+references/

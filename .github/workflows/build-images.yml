@@ -41,24 +41,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Java services share a single buildx cache scope so the contract-java compile
+          # done by `mvn -am` is paid once across the matrix instead of 5x. Sidecar uses
+          # a separate scope because its layer set is unrelated.
           - service: audit
             module: audit
             dockerfile: infra/docker/java-service.Dockerfile
+            cache_scope: java-builder
           - service: orchestrator
             module: orchestrator
             dockerfile: infra/docker/java-service.Dockerfile
+            cache_scope: java-builder
           - service: exec-tradier-paper
             module: exec-tradier-paper
             dockerfile: infra/docker/java-service.Dockerfile
+            cache_scope: java-builder
           - service: market-data
             module: market-data
             dockerfile: infra/docker/java-service.Dockerfile
+            cache_scope: java-builder
           - service: api-gateway
             module: api-gateway
             dockerfile: infra/docker/java-service.Dockerfile
+            cache_scope: java-builder
           - service: signal-source-discord
             module: ""
             dockerfile: services/signal-source-discord/Dockerfile
+            cache_scope: signal-source-discord
     steps:
       - uses: actions/checkout@v4
 
@@ -95,5 +104,5 @@ jobs:
           tags: |
             ${{ steps.refs.outputs.tag_latest }}
             ${{ steps.refs.outputs.tag_sha }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
