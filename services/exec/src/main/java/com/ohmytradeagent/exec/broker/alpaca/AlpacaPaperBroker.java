@@ -7,11 +7,9 @@ import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
-import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderLeg;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderRequest;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderResponse;
 import io.temporal.failure.ApplicationFailure;
-import java.util.List;
 import java.util.Locale;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,17 +41,19 @@ import org.springframework.web.client.RestClient;
  *       under its default policy
  * </ul>
  *
- * <p>Wire-shape note (single-leg BTO): Alpaca's Options API accepts a single-leg order using {@code
- * order_class=mleg} with one entry in {@code legs}. Per
- * https://docs.alpaca.markets/reference/postoptionorder. If a future Alpaca change forces a flat
- * single-leg shape (no {@code legs} array), this is the place to switch.
+ * <p>Wire-shape note (single-leg BTO/STC): the request is a flat object — {@code symbol}, {@code
+ * qty}, {@code side}, {@code position_intent} at the order level, no {@code order_class} and no
+ * {@code legs[]} array. Per https://docs.alpaca.markets/reference/postoptionorder. An earlier
+ * version of this adapter sent {@code order_class=mleg} with a single-entry {@code legs[]}; Alpaca
+ * rejected it with {@code "mleg orders must have at least 2 legs and at most 4 legs"} — {@code
+ * mleg} is reserved for genuine multi-leg strategies. When multi-leg support is added later, that
+ * path can re-introduce {@code order_class=mleg} on a sibling request DTO.
  */
 @Component
 @ConditionalOnProperty(name = "broker.impl", havingValue = "alpaca-paper")
 public class AlpacaPaperBroker implements OptionsBroker {
 
   private static final Logger log = LoggerFactory.getLogger(AlpacaPaperBroker.class);
-  private static final String ORDER_CLASS_MLEG = "mleg";
 
   private final RestClient client;
   private final ObjectMapper mapper;
@@ -70,26 +70,21 @@ public class AlpacaPaperBroker implements OptionsBroker {
     // position, so SELL maps to "sell_to_close". A future strategy that opens short positions
     // (sell-to-open) would need this mapping extended; the caller is responsible for that
     // contract change.
-    AlpacaOrderLeg leg =
-        new AlpacaOrderLeg(
-            request.optionSymbol(),
-            1L,
-            buy ? "buy" : "sell",
-            buy ? "buy_to_open" : "sell_to_close");
-
+    //
     // Order type derives from limitPrice: null → market, present → limit. This keeps the adapter
     // honest about the wire shape — Alpaca rejects `type=limit` without a `limit_price`, so
     // forcing both to disagree would 400 every retry until the activity schedule lapses.
     String orderType = request.limitPrice() == null ? "market" : "limit";
     AlpacaOrderRequest body =
         new AlpacaOrderRequest(
-            ORDER_CLASS_MLEG,
+            request.optionSymbol(),
             request.qty(),
-            request.limitPrice(),
+            buy ? "buy" : "sell",
             orderType,
             "day",
-            request.clientOrderId(),
-            List.of(leg));
+            buy ? "buy_to_open" : "sell_to_close",
+            request.limitPrice(),
+            request.clientOrderId());
 
     try {
       AlpacaOrderResponse resp =

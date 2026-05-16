@@ -73,23 +73,21 @@ class AlpacaPaperBrokerTest {
 
     JsonNode body = mapper.readTree(req.getBody().readUtf8());
     assertThat(body.get("client_order_id").asText()).isEqualTo("intent-A");
-    assertThat(body.get("order_class").asText()).isEqualTo("mleg");
-    // Alpaca's live endpoint expects qty / ratio_qty as JSON integers, not strings.
+    assertThat(body.get("symbol").asText()).isEqualTo("NVDA  260516C00140000");
+    // Alpaca's live endpoint expects qty as a JSON integer, not a string.
     assertThat(body.get("qty").isIntegralNumber()).isTrue();
     assertThat(body.get("qty").asLong()).isEqualTo(1L);
+    assertThat(body.get("side").asText()).isEqualTo("buy");
+    assertThat(body.get("position_intent").asText()).isEqualTo("buy_to_open");
+    assertThat(body.get("type").asText()).isEqualTo("limit");
+    assertThat(body.get("time_in_force").asText()).isEqualTo("day");
     // Alpaca's live endpoint requires limit_price as a JSON number — string form is sandbox-only.
     assertThat(body.get("limit_price").isNumber()).isTrue();
     assertThat(body.get("limit_price").decimalValue()).isEqualByComparingTo("2.30");
-    assertThat(body.get("type").asText()).isEqualTo("limit");
-    assertThat(body.get("time_in_force").asText()).isEqualTo("day");
-    JsonNode legs = body.get("legs");
-    assertThat(legs.isArray()).isTrue();
-    assertThat(legs.size()).isEqualTo(1);
-    assertThat(legs.get(0).get("symbol").asText()).isEqualTo("NVDA  260516C00140000");
-    assertThat(legs.get(0).get("side").asText()).isEqualTo("buy");
-    assertThat(legs.get(0).get("position_intent").asText()).isEqualTo("buy_to_open");
-    assertThat(legs.get(0).get("ratio_qty").isIntegralNumber()).isTrue();
-    assertThat(legs.get(0).get("ratio_qty").asLong()).isEqualTo(1L);
+    // Single-leg orders must NOT carry order_class=mleg or a legs[] array — Alpaca's mleg
+    // endpoint rejects anything with fewer than 2 legs.
+    assertThat(body.has("order_class")).isFalse();
+    assertThat(body.has("legs")).isFalse();
   }
 
   @Test
