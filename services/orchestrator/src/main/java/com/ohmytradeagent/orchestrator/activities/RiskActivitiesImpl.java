@@ -9,16 +9,18 @@ import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
+import com.ohmytradeagent.orchestrator.domain.Sizing;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
 import io.temporal.client.WorkflowClient;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -38,9 +40,6 @@ import org.springframework.stereotype.Component;
 public class RiskActivitiesImpl implements RiskActivities {
 
   static final Duration FUTURE_DATE_TOLERANCE = Duration.ofSeconds(5);
-
-  /** Standard option contract multiplier (premium dollars per contract = price * 100). */
-  static final BigDecimal OPTIONS_CONTRACT_MULTIPLIER = new BigDecimal("100");
 
   private final PositionCounter positionCounter;
   private final Clock clock;
@@ -63,11 +62,11 @@ public class RiskActivitiesImpl implements RiskActivities {
         positionCounter,
         clock,
         workflowClient,
-        noOpPortfolioSnapshot(),
+        RiskCollaboratorDefaults.permissivePortfolioSnapshot(),
         SectorResolver.CONFIG_BACKED,
-        noOpDailyTradeCounter(),
-        noOpDrawdownSampler(),
-        noOpPreTradeCheck());
+        RiskCollaboratorDefaults.zeroDailyTradeCounter(),
+        RiskCollaboratorDefaults.zeroDrawdownSampler(),
+        RiskCollaboratorDefaults.permissivePreTradeCheck());
   }
 
   @Autowired
@@ -124,86 +123,80 @@ public class RiskActivitiesImpl implements RiskActivities {
 
     // Issue #6 portfolio-level gates. Each is config-gated so a strategy that opts out keeps the
     // pre-Issue-#6 behavior. Order matters only for which reason wins when multiple gates fail;
-    // the order below mirrors the recommendation list in issue #6.
-    RiskDecision portfolioDecision = checkPortfolioGates(payload, config);
-    if (portfolioDecision != null) {
-      return portfolioDecision;
-    }
-
-    return RiskDecision.approved();
+    // the order below mirrors the recommendation list in issue #6. Positions are fetched once and
+    // shared across the gates that need them (production impl is a Temporal Visibility query).
+    PortfolioContext ctx = new PortfolioContext(payload, config);
+    return Stream.<Supplier<RiskDecision>>of(
+            () -> checkNotionalCap(ctx),
+            () -> checkSameUnderlyingCount(ctx),
+            () -> checkSectorConcentration(ctx),
+            () -> checkDailyTradeCount(ctx),
+            () -> checkDrawdownVelocity(ctx),
+            () -> checkPreTradeCheck(ctx))
+        .map(Supplier::get)
+        .filter(Objects::nonNull)
+        .findFirst()
+        .orElseGet(RiskDecision::approved);
   }
 
-  private RiskDecision checkPortfolioGates(CopytradeSignalPayload payload, StrategyConfig config) {
-    RiskDecision d;
+  /**
+   * Per-call cache for the portfolio gates. Holds the open-position list (fetched lazily so a
+   * deployment that disables all position-aware gates skips the Visibility query entirely) plus the
+   * resolved entry notional, which several gates need.
+   */
+  private final class PortfolioContext {
+    final CopytradeSignalPayload payload;
+    final StrategyConfig config;
+    private List<PortfolioSnapshot.OpenPosition> openPositions;
 
-    d = checkNotionalCap(payload, config);
-    if (d != null) {
-      return d;
+    PortfolioContext(CopytradeSignalPayload payload, StrategyConfig config) {
+      this.payload = payload;
+      this.config = config;
     }
 
-    d = checkSameUnderlyingCount(payload, config);
-    if (d != null) {
-      return d;
+    List<PortfolioSnapshot.OpenPosition> openPositions() {
+      if (openPositions == null) {
+        List<PortfolioSnapshot.OpenPosition> positions =
+            portfolioSnapshot.openPositions(payload.getTenantId(), payload.getStrategyId());
+        openPositions = positions == null ? List.of() : positions;
+      }
+      return openPositions;
     }
-
-    d = checkSectorConcentration(payload, config);
-    if (d != null) {
-      return d;
-    }
-
-    d = checkDailyTradeCount(payload, config);
-    if (d != null) {
-      return d;
-    }
-
-    d = checkDrawdownVelocity(payload, config);
-    if (d != null) {
-      return d;
-    }
-
-    d = checkPreTradeCheck(payload, config);
-    if (d != null) {
-      return d;
-    }
-    return null;
   }
 
   /**
    * notional_cap_pct_of_equity: reject when (sum_open_notional + new_notional) > cap_pct * equity.
-   * New entry notional uses the same options multiplier as Sizing (qty * price * 100). Equity == 0
-   * fails closed so a missing/unavailable equity source can't accidentally pass an unbounded cap.
+   * Equity == 0 fails closed so a missing/unavailable equity source can't accidentally pass an
+   * unbounded cap.
    */
-  private RiskDecision checkNotionalCap(CopytradeSignalPayload payload, StrategyConfig config) {
-    BigDecimal capPct = config.getNotionalCapPctOfEquity();
+  private RiskDecision checkNotionalCap(PortfolioContext ctx) {
+    BigDecimal capPct = ctx.config.getNotionalCapPctOfEquity();
     if (capPct == null) {
       return null;
     }
     BigDecimal equity =
-        portfolioSnapshot.accountEquity(payload.getTenantId(), payload.getStrategyId());
+        portfolioSnapshot.accountEquity(ctx.payload.getTenantId(), ctx.payload.getStrategyId());
     if (equity == null || equity.signum() <= 0) {
       return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
     }
     BigDecimal cap = equity.multiply(capPct);
-    BigDecimal openSum = sumOpenNotional(payload);
-    BigDecimal newNotional = entryNotional(payload);
-    BigDecimal projected = openSum.add(newNotional);
+    BigDecimal projected = sumOpenNotional(ctx).add(entryNotional(ctx.payload));
     if (projected.compareTo(cap) > 0) {
       return RiskDecision.rejected(
           RejectionReason.NOTIONAL_CAP_EXCEEDED,
-          "notional=" + stripTrailingZeros(projected) + " cap=" + stripTrailingZeros(cap));
+          "notional=" + projected.toPlainString() + " cap=" + cap.toPlainString());
     }
     return null;
   }
 
-  private RiskDecision checkSameUnderlyingCount(
-      CopytradeSignalPayload payload, StrategyConfig config) {
-    Long cap = config.getSameUnderlyingCount();
+  private RiskDecision checkSameUnderlyingCount(PortfolioContext ctx) {
+    Long cap = ctx.config.getSameUnderlyingCount();
     if (cap == null) {
       return null;
     }
-    String ticker = payload.getTicker();
+    String ticker = ctx.payload.getTicker();
     long matching =
-        openPositionsFor(payload).stream()
+        ctx.openPositions().stream()
             .filter(p -> Objects.equals(p.underlyingTicker(), ticker))
             .count();
     if (matching >= cap) {
@@ -219,19 +212,18 @@ public class RiskActivitiesImpl implements RiskActivities {
    * {@link SectorResolver#UNKNOWN_SECTOR} and are exempt — this keeps a strategy without a
    * sector_overrides map from accidentally rejecting every entry.
    */
-  private RiskDecision checkSectorConcentration(
-      CopytradeSignalPayload payload, StrategyConfig config) {
-    Long cap = config.getSectorConcentrationCap();
+  private RiskDecision checkSectorConcentration(PortfolioContext ctx) {
+    Long cap = ctx.config.getSectorConcentrationCap();
     if (cap == null) {
       return null;
     }
-    String sector = sectorResolver.resolve(payload.getTicker(), config);
+    String sector = sectorResolver.resolve(ctx.payload.getTicker(), ctx.config);
     if (SectorResolver.UNKNOWN_SECTOR.equals(sector)) {
       return null;
     }
     long matching =
-        openPositionsFor(payload).stream()
-            .map(p -> sectorResolver.resolve(p.underlyingTicker(), config))
+        ctx.openPositions().stream()
+            .map(p -> sectorResolver.resolve(p.underlyingTicker(), ctx.config))
             .filter(sector::equals)
             .count();
     if (matching >= cap) {
@@ -242,13 +234,14 @@ public class RiskActivitiesImpl implements RiskActivities {
     return null;
   }
 
-  private RiskDecision checkDailyTradeCount(CopytradeSignalPayload payload, StrategyConfig config) {
-    Long cap = config.getDailyTradeCount();
+  private RiskDecision checkDailyTradeCount(PortfolioContext ctx) {
+    Long cap = ctx.config.getDailyTradeCount();
     if (cap == null) {
       return null;
     }
     LocalDate today = OffsetDateTime.now(clock).toLocalDate();
-    long count = dailyTradeCounter.count(payload.getTenantId(), payload.getStrategyId(), today);
+    long count =
+        dailyTradeCounter.count(ctx.payload.getTenantId(), ctx.payload.getStrategyId(), today);
     if (count >= cap) {
       return RiskDecision.rejected(
           RejectionReason.DAILY_TRADE_COUNT_EXCEEDED, "count=" + count + " max=" + cap);
@@ -256,15 +249,14 @@ public class RiskActivitiesImpl implements RiskActivities {
     return null;
   }
 
-  private RiskDecision checkDrawdownVelocity(
-      CopytradeSignalPayload payload, StrategyConfig config) {
-    BigDecimal threshold = config.getDrawdownVelocityThreshold();
+  private RiskDecision checkDrawdownVelocity(PortfolioContext ctx) {
+    BigDecimal threshold = ctx.config.getDrawdownVelocityThreshold();
     if (threshold == null) {
       return null;
     }
     BigDecimal rate =
         drawdownVelocitySampler.sampleLossRatePerMinute(
-            payload.getTenantId(), payload.getStrategyId());
+            ctx.payload.getTenantId(), ctx.payload.getStrategyId());
     if (rate == null) {
       // Fail closed on a missing sample so a broken sampler can't quietly skip the gate.
       return RiskDecision.rejected(RejectionReason.DRAWDOWN_VELOCITY_EXCEEDED, "rate_unavailable");
@@ -272,7 +264,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     if (rate.compareTo(threshold) >= 0) {
       return RiskDecision.rejected(
           RejectionReason.DRAWDOWN_VELOCITY_EXCEEDED,
-          "rate=" + stripTrailingZeros(rate) + " max=" + stripTrailingZeros(threshold));
+          "rate=" + rate.toPlainString() + " max=" + threshold.toPlainString());
     }
     return null;
   }
@@ -283,14 +275,14 @@ public class RiskActivitiesImpl implements RiskActivities {
    * comparison uses the same options notional formula as the notional-cap gate so the values are
    * apples-to-apples.
    */
-  private RiskDecision checkPreTradeCheck(CopytradeSignalPayload payload, StrategyConfig config) {
-    if (!Boolean.TRUE.equals(config.getPreTradeCheckEnabled())) {
+  private RiskDecision checkPreTradeCheck(PortfolioContext ctx) {
+    if (!Boolean.TRUE.equals(ctx.config.getPreTradeCheckEnabled())) {
       return null;
     }
-    BigDecimal notional = entryNotional(payload);
+    BigDecimal notional = entryNotional(ctx.payload);
     PreTradeCheckResult result;
     try {
-      result = preTradeCheckActivity.preTradeCheck(toRequest(payload, config, notional));
+      result = preTradeCheckActivity.preTradeCheck(toRequest(ctx, notional));
     } catch (Exception e) {
       return RiskDecision.rejected(
           RejectionReason.PRE_TRADE_CHECK_FAILED, e.getClass().getSimpleName());
@@ -305,12 +297,10 @@ public class RiskActivitiesImpl implements RiskActivities {
     }
     BigDecimal buyingPower = result.getBuyingPower();
     if (buyingPower == null || buyingPower.compareTo(notional) < 0) {
+      BigDecimal bp = buyingPower == null ? BigDecimal.ZERO : buyingPower;
       return RiskDecision.rejected(
           RejectionReason.PRE_TRADE_CHECK_FAILED,
-          "buying_power="
-              + stripTrailingZeros(buyingPower == null ? BigDecimal.ZERO : buyingPower)
-              + " required="
-              + stripTrailingZeros(notional));
+          "buying_power=" + bp.toPlainString() + " required=" + notional.toPlainString());
     }
     if (result.getPdtStatus() == PreTradeCheckResult.PdtStatus.BLOCKED) {
       return RiskDecision.rejected(RejectionReason.PRE_TRADE_CHECK_FAILED, "pdt=BLOCKED");
@@ -321,69 +311,41 @@ public class RiskActivitiesImpl implements RiskActivities {
     return null;
   }
 
-  private PreTradeCheckRequest toRequest(
-      CopytradeSignalPayload payload, StrategyConfig config, BigDecimal notional) {
+  private PreTradeCheckRequest toRequest(PortfolioContext ctx, BigDecimal notional) {
     PreTradeCheckRequest r = new PreTradeCheckRequest();
     r.setSchemaVersion(1L);
-    r.setTenantId(payload.getTenantId());
-    r.setStrategyId(payload.getStrategyId());
+    r.setTenantId(ctx.payload.getTenantId());
+    r.setStrategyId(ctx.payload.getStrategyId());
     r.setBrokerTarget(
-        PreTradeCheckRequest.BrokerTarget.fromValue(config.getBrokerTarget().value()));
-    // OCC symbol resolution happens later in the workflow; for the pre-trade gate we send the
-    // ticker prefix that broker adapters can resolve themselves. Field shape is stable for the
-    // future-state once OCC is resolved before the gate.
-    r.setOptionSymbol(payload.getTicker());
+        PreTradeCheckRequest.BrokerTarget.fromValue(ctx.config.getBrokerTarget().value()));
+    // OCC symbol resolution happens later in the workflow; the broker adapter resolves the
+    // ticker prefix itself. Field shape is stable for the future state where OCC is resolved
+    // before the gate.
+    r.setOptionSymbol(ctx.payload.getTicker());
     r.setSide(PreTradeCheckRequest.Side.BUY);
-    r.setQty(Math.max(1L, sizeOneContractFallback(config)));
+    Long minContracts = ctx.config.getMinContracts();
+    r.setQty(minContracts == null ? 1L : Math.max(1L, minContracts));
     r.setEstimatedNotional(notional);
-    r.setCorrelationId(payload.getSignalId());
+    r.setCorrelationId(ctx.payload.getSignalId());
     return r;
   }
 
-  /**
-   * Pre-resolve sizing pulls in a multi-input dependency we don't have here; for the gate we use
-   * {@code min_contracts} as the lower bound and let the broker decide whether the requested side
-   * fits. This matches the {@code Sizing.computeContracts} clamp floor.
-   */
-  private long sizeOneContractFallback(StrategyConfig config) {
-    return config.getMinContracts() == null ? 1L : config.getMinContracts();
-  }
-
-  private BigDecimal sumOpenNotional(CopytradeSignalPayload payload) {
-    return openPositionsFor(payload).stream()
+  private static BigDecimal sumOpenNotional(PortfolioContext ctx) {
+    return ctx.openPositions().stream()
         .map(PortfolioSnapshot.OpenPosition::openNotional)
         .filter(Objects::nonNull)
         .reduce(BigDecimal.ZERO, BigDecimal::add);
   }
 
-  private List<PortfolioSnapshot.OpenPosition> openPositionsFor(CopytradeSignalPayload payload) {
-    List<PortfolioSnapshot.OpenPosition> positions =
-        portfolioSnapshot.openPositions(payload.getTenantId(), payload.getStrategyId());
-    return positions == null ? List.of() : positions;
-  }
-
-  private BigDecimal entryNotional(CopytradeSignalPayload payload) {
+  /**
+   * Per-contract premium dollars. The risk gate runs before final qty is computed by the workflow's
+   * {@link Sizing#computeContracts}, so we use a 1-contract floor — a conservative under-estimate
+   * that keeps the gate from rejecting a borderline entry the workflow would have sized down. The
+   * gate's job is to catch run-away notional, not the single-contract baseline.
+   */
+  private static BigDecimal entryNotional(CopytradeSignalPayload payload) {
     BigDecimal price = payload.getPrice() == null ? BigDecimal.ZERO : payload.getPrice();
-    // Per-contract premium dollars. The risk gate runs before final qty is computed by the
-    // workflow's Sizing.computeContracts, so we use a 1-contract floor (matches min_contracts
-    // clamp in Sizing). This is a conservative under-estimate that keeps the gate from rejecting
-    // a borderline entry the workflow would have sized down; the gate is meant to catch run-away
-    // notional, not the single-contract baseline.
-    return price.multiply(OPTIONS_CONTRACT_MULTIPLIER);
-  }
-
-  private static String stripTrailingZeros(BigDecimal v) {
-    if (v == null) {
-      return "0";
-    }
-    // setScale guards against `0E-8` style scientific output from BigDecimal arithmetic on
-    // values that strip to exact zero (BigDecimal.ZERO.stripTrailingZeros().toPlainString() →
-    // "0", but `new BigDecimal("0.0000").stripTrailingZeros().toPlainString()` → "0E-4").
-    BigDecimal s = v.setScale(8, RoundingMode.HALF_UP).stripTrailingZeros();
-    if (s.scale() < 0) {
-      s = s.setScale(0, RoundingMode.UNNECESSARY);
-    }
-    return s.toPlainString();
+    return price.multiply(Sizing.CONTRACT_MULTIPLIER);
   }
 
   /**
@@ -447,41 +409,5 @@ public class RiskActivitiesImpl implements RiskActivities {
           RejectionReason.KILL_SWITCH_COOLING_DOWN, "until=" + cd.toString());
     }
     return null;
-  }
-
-  // ----- no-op factories for the back-compat 3-arg constructor -----
-
-  private static PortfolioSnapshot noOpPortfolioSnapshot() {
-    return new PortfolioSnapshot() {
-      @Override
-      public List<OpenPosition> openPositions(String tenantId, String strategyId) {
-        return List.of();
-      }
-
-      @Override
-      public BigDecimal accountEquity(String tenantId, String strategyId) {
-        return BigDecimal.ZERO;
-      }
-    };
-  }
-
-  private static DailyTradeCounter noOpDailyTradeCounter() {
-    return (tenant, strategy, day) -> 0L;
-  }
-
-  private static DrawdownVelocitySampler noOpDrawdownSampler() {
-    return (tenant, strategy) -> BigDecimal.ZERO;
-  }
-
-  private static PreTradeCheckActivity noOpPreTradeCheck() {
-    return req -> {
-      PreTradeCheckResult r = new PreTradeCheckResult();
-      r.setSchemaVersion(1L);
-      r.setAllowed(true);
-      r.setBuyingPower(new BigDecimal("1000000000"));
-      r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
-      r.setMarginSufficient(true);
-      return r;
-    };
   }
 }
