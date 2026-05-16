@@ -127,10 +127,8 @@ class YamlStrategyRegistryTest {
     YamlStrategyRegistry registry = new YamlStrategyRegistry(tenantsDir.toString());
     StrategyConfig cfg = registry.get("dev", "copytrade-v1");
 
-    assertThat(cfg.getMaxSlippageAbs())
-        .isEqualByComparingTo(new java.math.BigDecimal("0.05"));
-    assertThat(cfg.getMaxSlippagePct())
-        .isEqualByComparingTo(new java.math.BigDecimal("0.03"));
+    assertThat(cfg.getMaxSlippageAbs()).isEqualByComparingTo(new java.math.BigDecimal("0.05"));
+    assertThat(cfg.getMaxSlippagePct()).isEqualByComparingTo(new java.math.BigDecimal("0.03"));
     assertThat(cfg.getRepegAfterMs()).isEqualTo(500L);
   }
 
