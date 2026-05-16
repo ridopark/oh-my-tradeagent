@@ -75,9 +75,14 @@ public class AlpacaPaperBroker implements OptionsBroker {
     // honest about the wire shape — Alpaca rejects `type=limit` without a `limit_price`, so
     // forcing both to disagree would 400 every retry until the activity schedule lapses.
     String orderType = request.limitPrice() == null ? "market" : "limit";
+    // Alpaca rejects the canonical 21-char padded OSI symbol ("SPY   260619C00500000")
+    // with `asset ... not found`. Their asset DB stores symbols in the unpadded form
+    // ("SPY260619C00500000"). Strip the root padding before sending so the journal
+    // can keep the canonical form while the wire matches Alpaca's expectations.
+    String alpacaSymbol = request.optionSymbol().replace(" ", "");
     AlpacaOrderRequest body =
         new AlpacaOrderRequest(
-            request.optionSymbol(),
+            alpacaSymbol,
             request.qty(),
             buy ? "buy" : "sell",
             orderType,

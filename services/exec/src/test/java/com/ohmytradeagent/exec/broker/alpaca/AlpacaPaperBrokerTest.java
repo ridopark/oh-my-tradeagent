@@ -73,7 +73,10 @@ class AlpacaPaperBrokerTest {
 
     JsonNode body = mapper.readTree(req.getBody().readUtf8());
     assertThat(body.get("client_order_id").asText()).isEqualTo("intent-A");
-    assertThat(body.get("symbol").asText()).isEqualTo("NVDA  260516C00140000");
+    // Alpaca's asset DB stores option symbols UNPADDED. The OptionsBroker contract carries
+    // the canonical 21-char OSI form ("NVDA  260516C00140000"), the adapter strips root
+    // padding before sending. Reverse: a padded symbol on the wire would be `not found`.
+    assertThat(body.get("symbol").asText()).isEqualTo("NVDA260516C00140000");
     // Alpaca's live endpoint expects qty as a JSON integer, not a string.
     assertThat(body.get("qty").isIntegralNumber()).isTrue();
     assertThat(body.get("qty").asLong()).isEqualTo(1L);
