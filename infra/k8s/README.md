@@ -12,14 +12,15 @@ infra/k8s/
 ├── 30-temporal.yaml                 # auto-setup Deployment + Web UI (deprecated — see 5b.E)
 ├── 31-temporal-bootstrap.yaml       # Job: registers SAs on the local Temporal (deprecated — see 5b.E)
 ├── 40-tenants-config.yaml           # ConfigMap mounted into orchestrator
-├── 50-audit.yaml                    # audit-svc
-├── 51-orchestrator.yaml             # orchestrator-svc (+ tenants ConfigMap mount)
+├── 51-orchestrator.yaml             # orchestrator-svc (+ tenants ConfigMap mount; AuditActivitiesImpl lives here)
 ├── 52-exec-tradier-paper.yaml       # broker worker (stub broker until 5b.D)
 ├── 53-market-data.yaml              # market-data-svc
 ├── 54-api-gateway.yaml              # api-gateway-svc + Traefik Ingress
 ├── 55-signal-source-discord.yaml    # Python sidecar (+ PVC for storage_state.json)
-├── secrets.template.yaml            # Secret templates (NOT applied as-is)
 └── README.md                        # this file
+
+# (Secret templates live one level up at infra/secrets-template/ so a
+# `kubectl apply -f infra/k8s/` glob cannot accidentally clobber live secrets.)
 ```
 
 ## Temporal cluster topology (Phase 5b.E)
@@ -47,11 +48,12 @@ registers the `TenantStrategy` + `ContractSymbol` Search Attributes. Idempotent.
 
 2. **Copy + fill secret templates.**
    ```sh
-   cp infra/k8s/secrets.template.yaml infra/k8s/secrets.local.yaml
-   # edit infra/k8s/secrets.local.yaml — change the postgres password if
+   cp infra/secrets-template/secrets.template.yaml infra/secrets-template/secrets.local.yaml
+   # edit infra/secrets-template/secrets.local.yaml — change the postgres password if
    # the cluster is reachable beyond the LAN; the Tradier + sidecar
    # blocks can stay placeholder until 5b.D wires the real cutover.
    ```
+   The template lives outside `infra/k8s/` on purpose — a `kubectl apply -f infra/k8s/` glob must never overwrite live secrets with REPLACE_ME placeholders.
 
 3. **Bootstrap the `copytrade` Temporal namespace on the shared cluster** (5b.E):
    ```sh
@@ -62,13 +64,17 @@ registers the `TenantStrategy` + `ContractSymbol` Search Attributes. Idempotent.
 
 4. **Apply, in order:**
    ```sh
-   # From the workstation (or copy infra/k8s/ to the node first):
+   # Secrets first (from infra/secrets-template/, NOT from infra/k8s/):
+   scp infra/secrets-template/secrets.local.yaml ridopark@192.168.10.123:/tmp/secrets.local.yaml
+   ssh ridopark@192.168.10.123 'kubectl apply -f /tmp/secrets.local.yaml && rm /tmp/secrets.local.yaml'
+
+   # Then the rest of the manifests:
    scp -r infra/k8s ridopark@192.168.10.123:~/copytrade-k8s
-   ssh ridopark@192.168.10.123 'kubectl apply -f copytrade-k8s/secrets.local.yaml \
-                                && kubectl apply -f copytrade-k8s/'
+   ssh ridopark@192.168.10.123 'kubectl apply -f copytrade-k8s/'
    ```
    `kubectl apply -f <dir>` applies files in alphabetical order, which matches
-   the `00-` / `10-` / ... prefixes.
+   the `00-` / `10-` / ... prefixes. The secret template lives outside `infra/k8s/`
+   so this glob-apply cannot clobber live secrets with placeholders.
 
 5. **Verify rollout.**
    ```sh
