@@ -130,6 +130,7 @@ def test_strategy_config_round_trips() -> None:
     assert model.max_slippage_pct == 0.05
     assert model.repeg_after_ms == 5000
 
+    # StrategyConfig has many optional fields — drop None values to compare against the fixture.
     serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
     assert serialized == original
 
