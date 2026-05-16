@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/pre-trade-check-result.json",
+  "title": "PreTradeCheckResult",
+  "description": "Issue #6 portfolio-level gate output. Returned by exec-svc's pre_trade_check Activity. The risk-svc gate fails closed when allowed=false, when buying_power < estimated_notional, when pdt_status='BLOCKED', or when margin_sufficient=false. Broker adapters that do not yet expose a real pre-trade endpoint return allowed=true with sentinel buying_power/pdt fields so the field shape stays stable while implementation backfills land per-provider.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.PreTradeCheckResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "allowed",
+    "buying_power",
+    "pdt_status",
+    "margin_sufficient"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "allowed": {
+      "type": "boolean",
+      "description": "Top-level decision from the broker. If false, the risk gate rejects regardless of the field-level signals. Brokers that cannot decide return true and rely on the field-level checks."
+    },
+    "buying_power": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Account buying power in dollars at the moment of the check. risk-svc rejects when buying_power < estimated_notional."
+    },
+    "pdt_status": {
+      "type": "string",
+      "enum": ["OK", "FLAGGED", "BLOCKED"],
+      "description": "Pattern Day Trader status. OK = entries allowed; FLAGGED = warning only (logged, not gated); BLOCKED = day-trade buying power exhausted, risk-svc rejects."
+    },
+    "margin_sufficient": {
+      "type": "boolean",
+      "description": "Whether the broker reports enough margin for the requested side+qty+notional. risk-svc rejects when false."
+    },
+    "reject_reason": {
+      "type": "string",
+      "description": "Optional human-readable reason supplied by the broker when allowed=false or any field-level check fails. Surfaced in audit_log subject for forensics."
+    }
+  }
+}

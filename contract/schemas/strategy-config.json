@@ -171,6 +171,45 @@
       "type": "integer",
       "minimum": 0,
       "description": "Phase 5: cool-down window (seconds) blocking new entries after a kill-switch reset. risk.check_entry rejects with KILL_SWITCH_COOLING_DOWN until cooling_down_until elapses. Closes the post-reset signal-backlog stampede vector."
+    },
+    "notional_cap_pct_of_equity": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "Issue #6 portfolio-level gate: max combined open-position notional + this signal's notional, expressed as a fraction of account equity. Reject with NOTIONAL_CAP_EXCEEDED when (sum_open_notional + new_notional) > notional_cap_pct_of_equity * equity. Opt-in: null disables the gate. Complements max_positions, which only bounds the count of concurrent positions, not their total dollar exposure."
+    },
+    "same_underlying_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue #6 portfolio-level gate: max concurrent positions on the same underlying ticker. Reject with SAME_UNDERLYING_LIMIT when count(open positions whose underlying == payload.ticker) >= same_underlying_count. Opt-in: null disables the gate. Prevents stacking convicted-author BTOs onto a single stock during high-vol windows."
+    },
+    "sector_concentration_cap": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue #6 portfolio-level gate: max concurrent positions whose underlying maps to the same sector as payload.ticker. Reject with SECTOR_CONCENTRATION_EXCEEDED when count(open positions in payload.ticker's sector) >= sector_concentration_cap. Sector mapping comes from sector_overrides; unmapped tickers are treated as sector 'unknown' and exempt from the cap. Opt-in: null disables the gate."
+    },
+    "sector_overrides": {
+      "type": "object",
+      "existingJavaType": "java.util.Map<String, String>",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Issue #6: ticker → sector string mapping consulted by sector_concentration_cap. Unmapped tickers resolve to 'unknown' and are exempt from the sector gate. Per-strategy overrides keep the deployable config small while letting risk-tight strategies opt in to a curated map."
+    },
+    "daily_trade_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue #6 portfolio-level gate: max accepted BTO entries per UTC trading day. Reject with DAILY_TRADE_COUNT_EXCEEDED when today's count (from audit log: SignalAccepted with action=BTO) >= daily_trade_count. Opt-in: null disables the gate. Anti-overtrading circuit-breaker for volatile sessions."
+    },
+    "drawdown_velocity_threshold": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Issue #6 portfolio-level gate: per-minute MTM loss rate (absolute dollars/minute) at which new entries are blocked. Reject with DRAWDOWN_VELOCITY_EXCEEDED when sampled loss rate over the trailing minute >= drawdown_velocity_threshold. Opt-in: null disables the gate. Intraday rate-of-loss circuit breaker complementing daily_loss_threshold (which is a cumulative bound)."
+    },
+    "pre_trade_check_enabled": {
+      "type": "boolean",
+      "description": "Issue #6 portfolio-level gate: if true, risk.check_entry calls the exec-svc pre_trade_check Activity before approving entry. The Activity returns buying_power, pdt_status, and margin_sufficiency. Reject with PRE_TRADE_CHECK_FAILED when buying_power < new_notional, pdt_status is BLOCKED, or margin_sufficiency is false. Opt-in: null/false disables the gate."
     }
   }
 }
