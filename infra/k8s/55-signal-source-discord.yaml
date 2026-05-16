@@ -41,10 +41,11 @@ spec:
           image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
           imagePullPolicy: Always
           env:
+            # Phase 5b.E: shared Temporal at temporal/temporal-frontend, Temporal-level ns `copytrade`.
             - name: TEMPORAL_TARGET
-              value: temporal:7233
+              value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE
-              value: default
+              value: copytrade
             - name: STATE_DIR
               value: /app/state
             # Channel + tenant + strategy come from the `sidecar-config` Secret. Env-var

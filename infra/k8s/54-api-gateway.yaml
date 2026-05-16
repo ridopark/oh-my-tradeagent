@@ -36,10 +36,11 @@ spec:
             - containerPort: 8082
               name: http
           env:
+            # Phase 5b.E: shared Temporal at temporal/temporal-frontend, Temporal-level ns `copytrade`.
             - name: TEMPORAL_TARGET
-              value: temporal:7233
+              value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE
-              value: default
+              value: copytrade
             - name: API_GATEWAY_DB_URL
               value: jdbc:postgresql://postgres:5432/temporal
             - name: API_GATEWAY_DB_USER

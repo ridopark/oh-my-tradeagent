@@ -28,7 +28,14 @@ set -euo pipefail
 
 COUNT="${COUNT:-3}"
 HOMELAB="${HOMELAB:-ridopark@192.168.10.123}"
+# k8s namespace where the copy-trade Deployments live (orchestrator, exec, etc.).
 NAMESPACE="${NAMESPACE:-copytrade}"
+# Phase 5b.E: Temporal frontend is now in a different k8s namespace
+# (`temporal/temporal-frontend`) and copy-trade workflows live on its
+# Temporal-level namespace `copytrade`.
+TEMPORAL_K8S_NAMESPACE="${TEMPORAL_K8S_NAMESPACE:-temporal}"
+TEMPORAL_SVC="${TEMPORAL_SVC:-temporal-frontend}"
+TEMPORAL_NAMESPACE="${TEMPORAL_NAMESPACE:-copytrade}"
 TENANT="${TENANT:-dev}"
 STRATEGY="${STRATEGY:-copytrade-v1}"
 LOCAL_TEMPORAL_PORT=7234   # avoid clashing with a local docker-compose Temporal on 7233
@@ -46,7 +53,7 @@ cleanup() {
 # -----------------------------------------------------------------------------
 # Step 1: port-forward
 # -----------------------------------------------------------------------------
-log "establishing port-forward temporal:7233 <- ssh $HOMELAB:${LOCAL_TEMPORAL_PORT}..."
+log "establishing port-forward ${TEMPORAL_SVC}:7233 (k8s ns=${TEMPORAL_K8S_NAMESPACE}) <- ssh $HOMELAB:${LOCAL_TEMPORAL_PORT}..."
 # Drop `-f` (no daemonising): with `-f` the shell's `$!` captures the pre-fork
 # ssh PID, not the post-fork daemon — `cleanup` would then `kill` the wrong
 # process and leak the tunnel across re-runs ("Address already in use"). Plain
@@ -55,7 +62,7 @@ log "establishing port-forward temporal:7233 <- ssh $HOMELAB:${LOCAL_TEMPORAL_PO
 ssh -o ExitOnForwardFailure=yes \
     -L "${LOCAL_TEMPORAL_PORT}:127.0.0.1:7234" \
     "$HOMELAB" \
-    "kubectl -n $NAMESPACE port-forward svc/temporal 7234:7233" &
+    "kubectl -n ${TEMPORAL_K8S_NAMESPACE} port-forward svc/${TEMPORAL_SVC} 7234:7233" &
 SSH_PID=$!
 trap "cleanup $SSH_PID" EXIT INT TERM
 
@@ -81,15 +88,19 @@ log "spawning $COUNT PositionWorkflows via the harness..."
 python3 "$(dirname "$0")/inject_synthetic_positions.py" \
   --count "$COUNT" \
   --temporal-host "127.0.0.1:${LOCAL_TEMPORAL_PORT}" \
+  --namespace "$TEMPORAL_NAMESPACE" \
   --tenant "$TENANT" --strategy "$STRATEGY"
 
 # -----------------------------------------------------------------------------
 # Step 3: snapshot BEFORE
 # -----------------------------------------------------------------------------
 list_running() {
-  ssh "$HOMELAB" "kubectl -n $NAMESPACE run --rm -i temporal-cli-$$ --restart=Never \
+  # Phase 5b.E: query the shared cluster's frontend (in k8s ns `temporal`) on the
+  # Temporal-level `copytrade` namespace. We schedule the admin-tools pod in the
+  # `temporal` k8s namespace so `temporal-frontend` resolves over short-name DNS.
+  ssh "$HOMELAB" "kubectl -n ${TEMPORAL_K8S_NAMESPACE} run --rm -i temporal-cli-$$ --restart=Never \
     --image=temporalio/admin-tools:1.29 -- \
-    temporal --address temporal:7233 workflow list \
+    temporal --address ${TEMPORAL_SVC}:7233 --namespace ${TEMPORAL_NAMESPACE} workflow list \
       --query \"WorkflowType='PositionWorkflow' AND TenantStrategy='t-$TENANT/s-$STRATEGY' AND ExecutionStatus='Running'\" \
       --output json" 2>/dev/null | jq -r '.[].execution.workflowId' | sort
 }

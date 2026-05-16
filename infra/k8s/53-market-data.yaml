@@ -42,10 +42,11 @@ spec:
             - secretRef:
                 name: alpaca-credentials
           env:
+            # Phase 5b.E: shared Temporal at temporal/temporal-frontend, Temporal-level ns `copytrade`.
             - name: TEMPORAL_TARGET
-              value: temporal:7233
+              value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE
-              value: default
+              value: copytrade
             # Phase 2c.2: select the Alpaca market-data adapter (REST snapshot + WS premium
             # stream). Flip to 'inmemory' to disable the live feed for triage.
             - name: MARKET_DATA_PROVIDER
