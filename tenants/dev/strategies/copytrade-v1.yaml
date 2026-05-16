@@ -5,8 +5,10 @@ broker_target: alpaca-paper  # Phase 2c.2: routes to broker-alpaca-paper task qu
 
 # Phase 2a risk gates
 author_whitelist:
-  - acme_trader
-  - beta_signals
+  - TradingTheTrend
+  - Edtrader
+  - TB22
+  - beendoubleyou
 max_signal_age_secs: 1800
 max_positions: 5
 
