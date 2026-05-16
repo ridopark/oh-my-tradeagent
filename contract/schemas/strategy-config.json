@@ -136,6 +136,22 @@
       "minimum": 1,
       "description": "Phase 2b/3: BTO entry order TTL for live broker target."
     },
+    "max_slippage_abs": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Issue #4: Absolute slippage cap (dollars per contract premium) added to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_pct via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation."
+    },
+    "max_slippage_pct": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "Issue #4: Fractional slippage cap (e.g. 0.05 = 5%) applied to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_abs via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation."
+    },
+    "repeg_after_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue #4: Milliseconds the BTO limit sits at its initial price before a single re-peg toward the slippage-capped ceiling, after which the order is cancelled if still unfilled. Symmetric STC behavior: re-peg aggressively toward bid as the BTO-TTL window elapses. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation."
+    },
     "trail_on_partial": {
       "type": "boolean",
       "description": "Phase 4: arm CHANDELIER_TRAIL on first partial exit."

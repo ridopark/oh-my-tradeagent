@@ -194,9 +194,21 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
      qty        = clamp(floor(allocation / (payload.price * 100)),
                         cfg.min_contracts, cfg.max_contracts)
   6. intent_key = workflow_id + ":entry"
+     # Issue #4: BTO pricing ladder. The initial limit is capped by BOTH a
+     # fractional and an absolute slippage allowance, and never crosses
+     # through the current ask. Verbatim formula from the issue:
+     #   limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct))
+     # (cfg.max_slippage_abs / cfg.max_slippage_pct are the configured
+     # values for max_slippage_abs / max_slippage_pct above.) If either
+     # cap is unset on the StrategyConfig, the corresponding term in the
+     # min() is dropped (i.e. that side of the ladder is absent). With
+     # both unset, the legacy behavior `limit = payload.price OR
+     # marketable_mid` applies.
      broker_order_id = exec.place_order(
        intent_key, contract, BUY, qty,
-       limit=payload.price or marketable_mid)               [broker-<target> queue]
+       limit=min(ask,
+                 payload.price + cfg.max_slippage_abs,
+                 payload.price * (1 + cfg.max_slippage_pct)))   [broker-<target> queue]
        exec-svc internally:
          a. journal.record_intent(intent_key, ...)
          b. broker.place_order(client_order_id=intent_key, ...)
@@ -205,7 +217,14 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
        id="t-<tenant>/s-<strategy>/btottl/<signal_id>",
        ttl_secs=cfg.pending_ttl_{paper|live}_secs,
        parent_workflow_id=this)
-  8. workflow.await(fill_received OR ttl_expired)
+  8. workflow.await(fill_received OR repeg_due OR ttl_expired)
+     # Issue #4: single re-peg policy. After cfg.repeg_after_ms (default
+     # unset → no re-peg), if still unfilled, cancel the current limit and
+     # re-submit ONCE at the slippage-capped ceiling
+     # (min(ask, payload.price + cfg.max_slippage_abs,
+     #      payload.price * (1 + cfg.max_slippage_pct))).
+     # After that single re-peg the next gate is ttl_expired only —
+     # there is no second re-peg in v0.
   9a. on fill:
         start_child PositionWorkflow(
           id="t-<tenant>/s-<strategy>/pos/<OCC>/<signal_id>",   # entry_signal_id disambiguates re-BTO
@@ -216,9 +235,17 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
         # Cache OCC -> workflow_id in Redis (TTL = 1 trading day) for hot-path STC lookup.
         redis.setex(f"pos:t-<t>/s-<s>:<OCC>", 86400, position_workflow_id)
         audit.log(EntryFilled); return
-  9b. on TTL expiry:
+  9b. on TTL expiry (unfilled-limit failure, Issue #4):
         exec.cancel_order(broker_order_id)
-        audit.log(EntryExpired); return
+        # Unfilled BTO is a failure event, NOT a silent timeout:
+        #   - audit.log(EntryExpired, {reason: "bto_unfilled", limit, ask,
+        #              payload_price, max_slippage_abs, max_slippage_pct,
+        #              repeg_count})
+        #   - signal_workflow(killswitch_workflow_id, "bto_unfilled",
+        #              {signal_id, contract, payload_price, ask_at_expiry})
+        # so operators see the timeout in the audit stream and the kill
+        # switch can count consecutive unfilled BTOs.
+        return
 ```
 
 ### STC flow
@@ -269,9 +296,35 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
     exit_in_flight = true
     qty_to_close = ceil(remaining_qty * fraction)
     intent_key = f"{workflow_id}:exit:{signal_id}"
+    # Issue #4: STC pricing ladder. Verbatim from the issue:
+    #   limit = max(bid, ref_premium - giveback)
+    # where `giveback` is sourced from cfg.trail_giveback_pct *
+    # ref_premium (re-using the Phase 4 trailing-stop knob as the STC
+    # giveback when no separate field is configured). The max() guard
+    # protects against `ref_premium < current bid` — the silent edge-loss
+    # case from Issue #4: if the author's quoted exit is below the live
+    # bid, we MUST anchor to bid rather than throw away free premium.
+    giveback = ref_premium * (cfg.trail_giveback_pct or 0)
     exec.place_order(intent_key, contract, SELL_TO_CLOSE, qty_to_close,
-                     limit=ref_premium or marketable)
-    await fill_received
+                     limit=max(bid, ref_premium - giveback))
+    # Re-peg policy mirrors BTO: the STC limit re-pegs aggressively
+    # toward bid as the BTO-TTL window elapses (i.e. as the configured
+    # exit window approaches expiry, the limit walks from
+    # max(bid, ref_premium - giveback) down toward bid in steps every
+    # cfg.repeg_after_ms). v0 ships a single re-peg; a multi-step walk
+    # is out of scope.
+    await fill_received OR exit_ttl_expired
+    if exit_ttl_expired (unfilled-limit failure, Issue #4):
+       exec.cancel_order(broker_order_id)
+       # Same failure-event treatment as BTO:
+       #   - audit.log(ExitExpired, {reason: "stc_unfilled", limit, bid,
+       #              ref_premium, giveback, repeg_count})
+       #   - signal_workflow(killswitch_workflow_id, "stc_unfilled",
+       #              {signal_id, contract, ref_premium, bid_at_expiry})
+       # so operators see late/missing exits in the audit stream rather
+       # than as a silent no-op.
+       exit_in_flight = false
+       return
     remaining_qty -= filled_qty
     exit_in_flight = false
     if remaining_qty / original_qty < 0.005:

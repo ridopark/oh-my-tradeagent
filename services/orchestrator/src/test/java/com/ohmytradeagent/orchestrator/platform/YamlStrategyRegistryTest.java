@@ -93,4 +93,77 @@ class YamlStrategyRegistryTest {
         .isEqualByComparingTo(new java.math.BigDecimal("0.25"));
     assertThat(cfg.getPendingTtlPaperSecs()).isEqualTo(90L);
   }
+
+  @Test
+  void loadsIssue4SlippageAndRepegFields(@TempDir Path tenantsDir) throws Exception {
+    // Issue #4: BTO/STC pricing ladder configuration surface.
+    // The three new optional fields (max_slippage_abs, max_slippage_pct,
+    // repeg_after_ms) must round-trip through YAML loading without breaking
+    // the pre-existing required-field schema. Defaults (omitted) are tested
+    // in loadsConfigFromTenantsDir above: the loader must not reject configs
+    // that lack these fields.
+    Path file = tenantsDir.resolve("dev/strategies/copytrade-v1.yaml");
+    Files.createDirectories(file.getParent());
+    Files.writeString(
+        file,
+        """
+        schema_version: 1
+        tenant_id: dev
+        strategy_id: copytrade-v1
+        broker_target: paper
+        author_whitelist:
+          - acme_trader
+        max_signal_age_bto_secs: 30
+        max_signal_age_stc_secs: 60
+        max_positions: 5
+        capital_weight: 0.2
+        min_contracts: 1
+        max_contracts: 5
+        max_slippage_abs: 0.05
+        max_slippage_pct: 0.03
+        repeg_after_ms: 500
+        """);
+
+    YamlStrategyRegistry registry = new YamlStrategyRegistry(tenantsDir.toString());
+    StrategyConfig cfg = registry.get("dev", "copytrade-v1");
+
+    assertThat(cfg.getMaxSlippageAbs())
+        .isEqualByComparingTo(new java.math.BigDecimal("0.05"));
+    assertThat(cfg.getMaxSlippagePct())
+        .isEqualByComparingTo(new java.math.BigDecimal("0.03"));
+    assertThat(cfg.getRepegAfterMs()).isEqualTo(500L);
+  }
+
+  @Test
+  void issue4FieldsAreOptional_omittedConfigLoads(@TempDir Path tenantsDir) throws Exception {
+    // Backward-compatibility guard: a pre-Issue-#4 config (none of the three
+    // new fields set) must continue to load with all three getters returning
+    // null. This is the additive-defaults guarantee from the plan's
+    // Done-when #5 guardrail.
+    Path file = tenantsDir.resolve("dev/strategies/copytrade-v1.yaml");
+    Files.createDirectories(file.getParent());
+    Files.writeString(
+        file,
+        """
+        schema_version: 1
+        tenant_id: dev
+        strategy_id: copytrade-v1
+        broker_target: paper
+        author_whitelist:
+          - acme_trader
+        max_signal_age_bto_secs: 30
+        max_signal_age_stc_secs: 60
+        max_positions: 5
+        capital_weight: 0.2
+        min_contracts: 1
+        max_contracts: 5
+        """);
+
+    YamlStrategyRegistry registry = new YamlStrategyRegistry(tenantsDir.toString());
+    StrategyConfig cfg = registry.get("dev", "copytrade-v1");
+
+    assertThat(cfg.getMaxSlippageAbs()).isNull();
+    assertThat(cfg.getMaxSlippagePct()).isNull();
+    assertThat(cfg.getRepegAfterMs()).isNull();
+  }
 }
