@@ -110,7 +110,7 @@ class StrategyConfig(BaseModel):
     """
     trail_giveback_pct: confloat(le=0.5, gt=0.0) | None = None
     """
-    Phase 4: trailing-stop giveback fraction once armed.
+    Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured.
     """
     daily_loss_threshold: PositiveFloat | None = None
     """

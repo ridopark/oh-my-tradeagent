@@ -160,7 +160,7 @@
       "type": "number",
       "exclusiveMinimum": 0,
       "maximum": 0.5,
-      "description": "Phase 4: trailing-stop giveback fraction once armed."
+      "description": "Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured."
     },
     "daily_loss_threshold": {
       "type": "number",
