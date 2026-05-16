@@ -81,17 +81,10 @@ public class RiskActivitiesImpl implements RiskActivities {
    * already make any wide window visible in the diff.
    */
   private long resolveMaxSignalAgeSecs(CopytradeSignalPayload payload, StrategyConfig config) {
-    Long perSide;
-    switch (payload.getAction()) {
-      case STC:
-        perSide = config.getMaxSignalAgeStcSecs();
-        break;
-      case BTO:
-      case AVG:
-      default:
-        perSide = config.getMaxSignalAgeBtoSecs();
-        break;
-    }
+    Long perSide =
+        payload.getAction() == CopytradeSignalPayload.Action.STC
+            ? config.getMaxSignalAgeStcSecs()
+            : config.getMaxSignalAgeBtoSecs();
     if (perSide != null) {
       return perSide;
     }
