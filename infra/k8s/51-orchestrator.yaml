@@ -36,10 +36,9 @@ spec:
             - containerPort: 8080
               name: http
           env:
-            # Phase 5b.E: consolidated onto the shared temporal/temporal-frontend
-            # cluster under Temporal namespace `copytrade`. ReconciliationScheduleBootstrapper
-            # is idempotent — on first start against the new namespace it re-creates the
-            # `recon-t-dev-s-copytrade-v1-alpaca-paper` Schedule.
+            # Phase 5b.E: shared Temporal at temporal/temporal-frontend, Temporal-level ns `copytrade`.
+            # ReconciliationScheduleBootstrapper re-creates recon-t-dev-s-copytrade-v1-alpaca-paper
+            # on first start against the new namespace (idempotent).
             - name: TEMPORAL_TARGET
               value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE

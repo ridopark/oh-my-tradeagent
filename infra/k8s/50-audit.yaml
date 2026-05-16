@@ -36,12 +36,7 @@ spec:
             - containerPort: 8081
               name: http
           env:
-            # Phase 5b.E: consolidated onto the shared temporal/temporal-frontend
-            # cluster under Temporal namespace `copytrade`. The in-`copytrade`
-            # Temporal Deployment (30-temporal.yaml) and bootstrap Job
-            # (31-temporal-bootstrap.yaml) are retained in-repo for now and torn
-            # down by the operator after the consolidation smoke passes — see
-            # docs/ops/temporal-consolidation-teardown.md.
+            # Phase 5b.E: shared Temporal at temporal/temporal-frontend, Temporal-level ns `copytrade`.
             - name: TEMPORAL_TARGET
               value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE

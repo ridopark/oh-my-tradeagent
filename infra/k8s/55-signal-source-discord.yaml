@@ -41,8 +41,7 @@ spec:
           image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
           imagePullPolicy: Always
           env:
-            # Phase 5b.E: consolidated onto the shared temporal/temporal-frontend
-            # cluster under Temporal namespace `copytrade`.
+            # Phase 5b.E: shared Temporal at temporal/temporal-frontend, Temporal-level ns `copytrade`.
             - name: TEMPORAL_TARGET
               value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE
