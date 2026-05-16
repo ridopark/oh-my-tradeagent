@@ -41,8 +41,7 @@ class YamlStrategyRegistryTest {
     // Issue #3: per-side signal-age defaults.
     assertThat(cfg.getMaxSignalAgeBtoSecs()).isEqualTo(30L);
     assertThat(cfg.getMaxSignalAgeStcSecs()).isEqualTo(60L);
-    assertThat(cfg.getBtoPriceMoveRejectPct().compareTo(new java.math.BigDecimal("0.10")))
-        .isZero();
+    assertThat(cfg.getBtoPriceMoveRejectPct().compareTo(new java.math.BigDecimal("0.10"))).isZero();
     assertThat(cfg.getMaxPositions()).isEqualTo(5L);
     assertThat(cfg.getCapitalWeight().compareTo(new java.math.BigDecimal("0.2"))).isZero();
     assertThat(cfg.getSkipAvg()).isTrue();
