@@ -13,5 +13,5 @@ scrape_configs:
       - targets:
           - temporal:8000
 
-  # audit-svc and future services will be added here as they expose
-  # /actuator/prometheus on a stable port reachable from this compose network.
+  # Additional services will be added here as they expose /actuator/prometheus
+  # on a stable port reachable from this compose network.

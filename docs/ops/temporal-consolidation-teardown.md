@@ -40,6 +40,12 @@ scp -r infra/k8s ridopark@192.168.10.123:~/copytrade-k8s
 ssh ridopark@192.168.10.123 'kubectl apply -f copytrade-k8s/'
 ```
 
+Note: the secret template lives at `infra/secrets-template/secrets.template.yaml`
+on purpose — it is **not** in `infra/k8s/`, so the glob-apply above cannot
+overwrite live secrets with `REPLACE_ME` placeholders. If you need to
+(re-)apply real secrets, do that as a separate `kubectl apply -f` of your
+filled-in `secrets.local.yaml`.
+
 Wait until the workers reconnect to the new target:
 
 ```sh

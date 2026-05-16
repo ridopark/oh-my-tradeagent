@@ -44,10 +44,6 @@ jobs:
           # Java services share a single buildx cache scope so the contract-java compile
           # done by `mvn -am` is paid once across the matrix instead of 5x. Sidecar uses
           # a separate scope because its layer set is unrelated.
-          - service: audit
-            module: audit
-            dockerfile: infra/docker/java-service.Dockerfile
-            cache_scope: java-builder
           - service: orchestrator
             module: orchestrator
             dockerfile: infra/docker/java-service.Dockerfile

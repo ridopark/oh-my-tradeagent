@@ -11,7 +11,6 @@
 
   <modules>
     <module>contract/java</module>
-    <module>services/audit</module>
     <module>services/orchestrator</module>
     <module>services/exec</module>
     <module>services/market-data</module>
