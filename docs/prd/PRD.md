@@ -36,7 +36,7 @@ The system is **durable** (Temporal replays workflows after crashes), **idempote
 6. As an operator, I want the first STC partial on a position to optionally arm a CHANDELIER_TRAIL on the remaining quantity, so that I capture more on runners without depending on the author posting every exit.
 7. As an operator, I want a per-`(tenant, strategy)` kill switch that I can trip manually or that auto-trips on daily realized loss ≥ threshold, so that I have one button for "halt now."
 8. As an operator, I want every open position force-closed by 15:55 ET (or 15:30 ET on 0DTE expiry) regardless of author activity, so that I never carry uncontrolled risk into close.
-9. As an operator, I want the system to refuse any signal older than `max_signal_age_secs` (default 1800), so that a sidecar restart doesn't replay stale posts.
+9. As an operator, I want the system to refuse any signal older than its per-side cap — `max_signal_age_bto_secs` (default 30) for BTO/AVG and `max_signal_age_stc_secs` (default 60) for STC — so that a sidecar restart doesn't replay stale posts and so that BTO doesn't fill into adverse selection on 0DTE / near-term contracts whose premium can move 50-80% in 30 minutes. Any value above 120s on either field is an explicit per-strategy override. Issue #3 (Phase 2a hardening) replaced the previous unified `max_signal_age_secs` (default 1800) with these per-side defaults; the legacy field remains in the contract only for backward-compatible deserialization of older audit records.
 10. As an operator, I want every parsed signal, risk decision, order intent, broker order, fill, and exit recorded in a tenant-scoped audit log, so that I can review or prove what the bot did.
 11. As an operator, I want to query any running `PositionWorkflow` for current state (size, avg cost, in-flight exits, last signal), so that I can audit decisions in real time.
 12. As an operator, I want to force-close a specific position via a `force_close` Update on its `PositionWorkflow`, so that I can override the bot without taking it offline.
@@ -99,7 +99,7 @@ Longest-keyword-first matching so "all out" wins over "out". Table is per-strate
 **TenantRegistry / StrategyRegistry / SecretsResolver / QuotaTracker / CapitalAllocator / AuditLogger** — scoped to copy-trade's needs:
 
 - `TenantRegistry.get(tenant_id) -> TenantConfig`
-- `StrategyRegistry.get(tenant_id, strategy_id) -> StrategyConfig { author_whitelist, partial_fractions, default_stc_fraction, max_positions, pending_ttl_paper_secs, pending_ttl_live_secs, trail_on_partial, trail_giveback_pct, max_signal_age_secs, broker_target, contracts_per_signal }`
+- `StrategyRegistry.get(tenant_id, strategy_id) -> StrategyConfig { author_whitelist, partial_fractions, default_stc_fraction, max_positions, pending_ttl_paper_secs, pending_ttl_live_secs, trail_on_partial, trail_giveback_pct, max_signal_age_bto_secs, max_signal_age_stc_secs, bto_price_move_reject_pct, broker_target, contracts_per_signal }`
 - `SecretsResolver.resolve(tenant_id, secret_name) -> Secret`
 - `QuotaTracker.try_consume(tenant_id, resource, amount) -> Allowed | Throttled`
 - `CapitalAllocator.allocate(tenant_id, balance) -> Map<StrategyId, AllocatedCapital>` (static `capital_weight` for v0)
@@ -148,7 +148,7 @@ A good test exercises **external behavior, not implementation details**.
 |---|---|
 | **Parser** (Python, sidecar) | 40+ fixtures ported from reference `test_parser.py`; adversarial inputs (whitespace, case, missing @, extra tokens, multi-line); year wrap-around on `M/D` without year. |
 | **Signal dedupe** | Temporal `WorkflowIDReusePolicy=REJECT` on duplicate `signal_id` returns `WorkflowExecutionAlreadyStartedFailure`; first start succeeds and audits. Same `signal_id` reposted after sidecar restart still dedupes. |
-| **Risk gates** | Each gate accepts conforming proposals and rejects breaching ones; combined firing returns highest-priority reason; author not in whitelist returns `Rejected{reason='author_not_allowed'}`; signal older than `max_signal_age_secs` rejected. |
+| **Risk gates** | Each gate accepts conforming proposals and rejects breaching ones; combined firing returns highest-priority reason; author not in whitelist returns `Rejected{reason='author_not_allowed'}`; BTO/AVG older than `max_signal_age_bto_secs` and STC older than `max_signal_age_stc_secs` rejected with `SIGNAL_TOO_OLD`; BTO whose live bid/ask (mid) has moved more than `bto_price_move_reject_pct` from `payload.price` since `posted_at` rejected with `BTO_PRICE_MOVED` regardless of age (Issue #3 secondary gate; market-data quote fetch lands separately). |
 | **OrderIntentJournal** | `record_intent` + simulated crash before `place_with_intent` → reconciliation surfaces orphan; `record_intent` + successful submit + crash + restart → same `idempotency_key` does not double-submit. |
 | **PositionWorkflow lifecycle** | BTO fill → position open; STC partial signal → partial close + remaining qty correct; second STC → full close when remaining < 0.5%; EOD timer at 15:55 ET force-closes; option-expiry timer force-closes 0DTE positions at 15:30 ET. |
 | **CHANDELIER_TRAIL arm + fire** | First partial STC arms with `peak_premium = author_ref`; injected quote tick at `peak * (1 - giveback_pct)` fires full exit. |

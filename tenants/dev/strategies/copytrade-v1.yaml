@@ -9,7 +9,17 @@ author_whitelist:
   - Edtrader
   - TB22
   - beendoubleyou
-max_signal_age_secs: 1800
+# Issue #3: per-side signal-age defaults. The legacy unified `max_signal_age_secs`
+# (1800s) produced systematic adverse selection on options. BTO tolerates ~30s
+# before premium has moved enough to invalidate the entry; STC tolerates ~60s
+# because late exits are safer than late entries. Any value above 120s here is
+# an explicit per-strategy override and should be reviewed.
+max_signal_age_bto_secs: 30
+max_signal_age_stc_secs: 60
+# Issue #3: BTO secondary price-move gate (documented; market-data wiring lands
+# separately). Rejects BTO when bid/ask (mid) has moved more than this fraction
+# from payload.price since posted_at, regardless of age.
+bto_price_move_reject_pct: 0.10
 max_positions: 5
 
 # Phase 2a sizing

@@ -64,12 +64,92 @@ class RiskActivitiesImplTest {
 
   @Test
   void rejects_signalOlderThanMaxAge() {
-    Instant tooOld = FIXED_NOW.minusSeconds(2000);
+    // Issue #3: with the new BTO default of 30s, any signal older than 30s should be rejected.
+    Instant tooOld = FIXED_NOW.minusSeconds(45);
 
     RiskDecision d = risk.checkEntry(payload("acme_trader", tooOld), config());
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.SIGNAL_TOO_OLD);
+    assertThat(d.detail()).contains("max=30");
+  }
+
+  @Test
+  void btoUsesBtoAgeDefault_rejectsAt31s() {
+    // Issue #3: BTO side uses max_signal_age_bto_secs (30s default). 31s old → rejected.
+    Instant aged = FIXED_NOW.minusSeconds(31);
+
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", aged), config());
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.SIGNAL_TOO_OLD);
+    assertThat(d.detail()).contains("max=30");
+  }
+
+  @Test
+  void btoUsesBtoAgeDefault_acceptsAt30s() {
+    // Issue #3: 30s old is at the boundary — accepted (gate is `> max`, not `>=`).
+    Instant atBoundary = FIXED_NOW.minusSeconds(30);
+
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", atBoundary), config());
+
+    assertThat(d.allowed()).isTrue();
+  }
+
+  @Test
+  void stcUsesStcAgeDefault_acceptsAt45sWhereBtoWouldReject() {
+    // Issue #3: STC uses max_signal_age_stc_secs (60s default), so 45s is accepted on STC
+    // even though BTO at 45s would reject. This is the per-side asymmetry.
+    Instant aged = FIXED_NOW.minusSeconds(45);
+
+    RiskDecision d = risk.checkEntry(stcPayload("acme_trader", aged), config());
+
+    assertThat(d.allowed()).isTrue();
+  }
+
+  @Test
+  void stcUsesStcAgeDefault_rejectsAt61s() {
+    // Issue #3: STC rejects beyond its own 60s ceiling.
+    Instant aged = FIXED_NOW.minusSeconds(61);
+
+    RiskDecision d = risk.checkEntry(stcPayload("acme_trader", aged), config());
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.SIGNAL_TOO_OLD);
+    assertThat(d.detail()).contains("max=60");
+  }
+
+  @Test
+  void explicitOverrideAbove120s_isHonored() {
+    // Issue #3: strategies that need a wider window can explicitly set values above 120s.
+    // The override is honored at runtime; "explicit" is enforced at the configuration layer
+    // (per-side fields are required in the schema, so any value > 120s in YAML is reviewable).
+    StrategyConfig c = config();
+    c.setMaxSignalAgeBtoSecs(300L); // explicit override well above the 120s threshold
+
+    // 250s old, beyond the default 30s but inside the explicit 300s window.
+    Instant aged = FIXED_NOW.minusSeconds(250);
+
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", aged), c);
+
+    assertThat(d.allowed()).isTrue();
+  }
+
+  @Test
+  void legacyMaxSignalAgeSecs_isUsedOnlyWhenPerSideFieldsAreUnset() {
+    // Issue #3 back-compat: older fixtures may carry only `max_signal_age_secs`. When the
+    // per-side fields are null, the deprecated field is consulted. This guards against
+    // breaking old audit/journal records that still carry the legacy shape.
+    StrategyConfig c = config();
+    c.setMaxSignalAgeBtoSecs(null);
+    c.setMaxSignalAgeStcSecs(null);
+    c.setMaxSignalAgeSecs(1800L);
+
+    Instant aged = FIXED_NOW.minusSeconds(900);
+
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", aged), c);
+
+    assertThat(d.allowed()).isTrue();
   }
 
   @Test
@@ -175,6 +255,19 @@ class RiskActivitiesImplTest {
   }
 
   private CopytradeSignalPayload payload(String author, Instant postedAt) {
+    return btoPayload(author, postedAt);
+  }
+
+  private CopytradeSignalPayload btoPayload(String author, Instant postedAt) {
+    return signalPayload(author, postedAt, CopytradeSignalPayload.Action.BTO);
+  }
+
+  private CopytradeSignalPayload stcPayload(String author, Instant postedAt) {
+    return signalPayload(author, postedAt, CopytradeSignalPayload.Action.STC);
+  }
+
+  private CopytradeSignalPayload signalPayload(
+      String author, Instant postedAt, CopytradeSignalPayload.Action action) {
     CopytradeSignalPayload p = new CopytradeSignalPayload();
     p.setSchemaVersion(1L);
     p.setTenantId("dev");
@@ -183,13 +276,13 @@ class RiskActivitiesImplTest {
     p.setMessageId("111");
     p.setAuthor(author);
     p.setPostedAt(OffsetDateTime.ofInstant(postedAt, ZoneOffset.UTC));
-    p.setAction(CopytradeSignalPayload.Action.BTO);
+    p.setAction(action);
     p.setTicker("NVDA");
     p.setExpiry(LocalDate.of(2026, 5, 16));
     p.setStrike(new BigDecimal("140"));
     p.setRight(CopytradeSignalPayload.Right.C);
     p.setPrice(new BigDecimal("2.30"));
-    p.setRawLine("BTO NVDA 5/16 140C @ 2.30");
+    p.setRawLine(action.name() + " NVDA 5/16 140C @ 2.30");
     return p;
   }
 
@@ -200,7 +293,10 @@ class RiskActivitiesImplTest {
     c.setStrategyId("copytrade-v1");
     c.setBrokerTarget(StrategyConfig.BrokerTarget.PAPER);
     c.setAuthorWhitelist(Set.of("acme_trader", "beta_signals"));
-    c.setMaxSignalAgeSecs(1800L);
+    // Issue #3: per-side defaults replace the legacy 1800s default.
+    c.setMaxSignalAgeBtoSecs(30L);
+    c.setMaxSignalAgeStcSecs(60L);
+    c.setBtoPriceMoveRejectPct(new BigDecimal("0.10"));
     c.setMaxPositions(5L);
     c.setCapitalWeight(new BigDecimal("0.2"));
     c.setMinContracts(1L);

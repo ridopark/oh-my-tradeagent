@@ -24,7 +24,9 @@ class YamlStrategyRegistryTest {
         broker_target: paper
         author_whitelist:
           - acme_trader
-        max_signal_age_secs: 1800
+        max_signal_age_bto_secs: 30
+        max_signal_age_stc_secs: 60
+        bto_price_move_reject_pct: 0.10
         max_positions: 5
         capital_weight: 0.2
         min_contracts: 1
@@ -36,7 +38,11 @@ class YamlStrategyRegistryTest {
     StrategyConfig cfg = registry.get("dev", "copytrade-v1");
 
     assertThat(cfg.getAuthorWhitelist()).containsExactly("acme_trader");
-    assertThat(cfg.getMaxSignalAgeSecs()).isEqualTo(1800L);
+    // Issue #3: per-side signal-age defaults.
+    assertThat(cfg.getMaxSignalAgeBtoSecs()).isEqualTo(30L);
+    assertThat(cfg.getMaxSignalAgeStcSecs()).isEqualTo(60L);
+    assertThat(cfg.getBtoPriceMoveRejectPct().compareTo(new java.math.BigDecimal("0.10")))
+        .isZero();
     assertThat(cfg.getMaxPositions()).isEqualTo(5L);
     assertThat(cfg.getCapitalWeight().compareTo(new java.math.BigDecimal("0.2"))).isZero();
     assertThat(cfg.getSkipAvg()).isTrue();
@@ -64,7 +70,8 @@ class YamlStrategyRegistryTest {
         broker_target: paper
         author_whitelist:
           - acme_trader
-        max_signal_age_secs: 1800
+        max_signal_age_bto_secs: 30
+        max_signal_age_stc_secs: 60
         max_positions: 5
         capital_weight: 0.2
         min_contracts: 1

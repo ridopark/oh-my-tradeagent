@@ -11,7 +11,7 @@ A Temporal-orchestrated microservice system that mirrors options trades from a v
 - **Asset class**: US options only for v0 (BTO/STC on single-leg calls and puts). No equities, no multi-leg, no futures/FX/crypto.
 - **Source**: one Discord channel per `(tenant, strategy)` deployment; pluggable source contract is a future enhancement.
 - **Strategy horizon**: intraday-to-day-trade. All positions must be flat by EOD timer (15:55 ET default; 15:30 ET for 0DTE expiry-day positions).
-- **Data freshness**: signal age veto rejects any post older than `max_signal_age_secs` (default 1800). Broker quotes carry `retrieved_at`; quotes older than 5s for active contracts are refused at the Activity boundary.
+- **Data freshness**: signal age veto rejects any post older than the per-side cap — `max_signal_age_bto_secs` (default 30s, BTO/AVG) and `max_signal_age_stc_secs` (default 60s, STC). Any value above 120s on either field is an explicit per-strategy override that should be reviewed. Issue #3 replaced the previous unified `max_signal_age_secs` (default 1800s) because a 30-min acceptance window on 0DTE / near-term options produces systematic adverse selection. A second-stage `BTO_PRICE_MOVED` gate also rejects BTO when live bid/ask (mid) has moved more than `bto_price_move_reject_pct` (default 10%) from `payload.price` since `posted_at` regardless of age (documented spec; market-data quote-fetch wiring lands separately). Broker quotes carry `retrieved_at`; quotes older than 5s for active contracts are refused at the Activity boundary.
 - **Paper trading first.** Live broker keys gated behind manual promotion (Phase 7).
 - **Multi-tenant isolation.** Every Activity payload, workflow input, audit event scoped by `(tenant_id, strategy_id)`. Workflow IDs prefixed `t-<tenant>/s-<strategy>/...`. CI guardrails enforce.
 - **Determinism in workflow code.** No language-time clocks, no random, no I/O. CI AST scan enforces.
@@ -179,7 +179,8 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
   2. cfg = platform.strategy_get(tenant, strategy)          [platform queue]
   3. decision = risk.check_entry(payload, cfg)              [in-process activity]
        - author in cfg.author_whitelist
-       - age = now - payload.posted_at ≤ cfg.max_signal_age_secs
+       - age = now - payload.posted_at ≤ (BTO/AVG: cfg.max_signal_age_bto_secs; STC: cfg.max_signal_age_stc_secs)
+       - (BTO only, Issue #3 secondary gate, doc-spec) |live_mid - payload.price| / payload.price ≤ cfg.bto_price_move_reject_pct  → else SIGNAL_REJECTED{BTO_PRICE_MOVED}
        - killswitch.query("killswitch_state").tripped == false  (workflow-not-found → fail-closed)
        - count_running_position_workflows: listWorkflowExecutions(
            WorkflowType='PositionWorkflow' AND

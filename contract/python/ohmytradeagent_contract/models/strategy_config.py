@@ -40,9 +40,21 @@ class StrategyConfig(BaseModel):
     """
     Discord author IDs whose signals are admitted. Risk gate AUTHOR_NOT_WHITELISTED on miss.
     """
-    max_signal_age_secs: conint(ge=1, le=3600)
+    max_signal_age_bto_secs: conint(ge=1, le=3600)
     """
-    Reject signals older than this. Risk gate SIGNAL_TOO_OLD on exceed.
+    Reject BTO signals older than this. Risk gate SIGNAL_TOO_OLD on exceed. Issue #3 (Phase 2a hardening): the prior unified 1800s default produced systematic adverse selection on options — 0DTE / near-term premium can move 50-80% in 30 minutes during open, FOMC, or earnings windows. Defaults: 30s for BTO. Any value above 120s is an explicit per-strategy override and signals an unusual risk posture.
+    """
+    max_signal_age_stc_secs: conint(ge=1, le=3600)
+    """
+    Reject STC signals older than this. Risk gate SIGNAL_TOO_OLD on exceed. Issue #3 (Phase 2a hardening): STC tolerates a larger window than BTO because exiting late is generally safer than entering late, but a 1800s default still permits adverse selection on partial fills. Defaults: 60s for STC. Any value above 120s is an explicit per-strategy override.
+    """
+    bto_price_move_reject_pct: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Issue #3 (Phase 2a hardening): BTO secondary price-move gate. Reject BTO when bid/ask (mid) has moved more than this fraction from payload.price since posted_at, regardless of signal age. Default 0.10 (10%). Documented gate spec: actual quote fetch + rejection wiring lands with market-data integration; this field is the configuration surface for the gate and the corresponding RejectionReason is BTO_PRICE_MOVED.
+    """
+    max_signal_age_secs: conint(ge=1, le=3600) | None = None
+    """
+    DEPRECATED (Issue #3): replaced by max_signal_age_bto_secs + max_signal_age_stc_secs. Retained as optional for backward-compatible deserialization of older audit/journal records only; do not set on new strategies. The per-side defaults always take precedence in RiskActivities.
     """
     max_positions: conint(ge=1, le=100)
     """
