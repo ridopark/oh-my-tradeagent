@@ -49,13 +49,16 @@ pip install 'temporalio>=1.9,<2'
 
 Reads from env vars (all optional):
 
-| Var       | Default                            | Purpose                                  |
-|-----------|------------------------------------|------------------------------------------|
-| COUNT     | `3`                                | Number of PositionWorkflows to spawn     |
-| HOMELAB   | `ridopark@192.168.10.123`          | SSH target for kubectl operations        |
-| NAMESPACE | `copytrade`                        | k8s namespace                            |
-| TENANT    | `dev`                              | tenant_id for the test workflows         |
-| STRATEGY  | `copytrade-v1`                     | strategy_id for the test workflows       |
+| Var                    | Default                            | Purpose                                                        |
+|------------------------|------------------------------------|----------------------------------------------------------------|
+| COUNT                  | `3`                                | Number of PositionWorkflows to spawn                           |
+| HOMELAB                | `ridopark@192.168.10.123`          | SSH target for kubectl operations                              |
+| NAMESPACE              | `copytrade`                        | k8s namespace where the copy-trade Deployments live            |
+| TEMPORAL_K8S_NAMESPACE | `temporal`                         | k8s namespace where the shared Temporal frontend runs (5b.E)   |
+| TEMPORAL_SVC           | `temporal-frontend`                | Temporal frontend Service name on the shared cluster (5b.E)    |
+| TEMPORAL_NAMESPACE     | `copytrade`                        | Temporal-level namespace for copy-trade workflows (5b.E)       |
+| TENANT                 | `dev`                              | tenant_id for the test workflows                               |
+| STRATEGY               | `copytrade-v1`                     | strategy_id for the test workflows                             |
 
 What the script asserts:
 
@@ -74,23 +77,25 @@ recognizes the deploy evidence.
 If the full script fails, run the steps by hand:
 
 ```sh
-# 1. Port-forward Temporal from the cluster.
+# 1. Port-forward Temporal from the cluster. After 5b.E the frontend lives
+#    in the `temporal` k8s namespace under Service `temporal-frontend`.
 ssh -L 7234:127.0.0.1:7234 ridopark@192.168.10.123 \
-  'kubectl -n copytrade port-forward svc/temporal 7234:7233' &
+  'kubectl -n temporal port-forward svc/temporal-frontend 7234:7233' &
 
 # 2. Spawn 3 workflows.
 python3 scripts/harness/inject_synthetic_positions.py \
-  --count 3 --temporal-host 127.0.0.1:7234
+  --count 3 --temporal-host 127.0.0.1:7234 --namespace copytrade
 
 # 3. List running PositionWorkflows.
 ssh ridopark@192.168.10.123 \
-  'kubectl -n copytrade run --rm -i temporal-cli --restart=Never \
+  'kubectl -n temporal run --rm -i temporal-cli --restart=Never \
      --image=temporalio/admin-tools:1.29 -- \
-     temporal --address temporal:7233 workflow list \
+     temporal --address temporal-frontend:7233 --namespace copytrade workflow list \
        --query "WorkflowType=\"PositionWorkflow\" AND ExecutionStatus=\"Running\"" \
        --output json' | jq '.[].execution.workflowId'
 
-# 4. Trigger restart manually.
+# 4. Trigger restart manually. (orchestrator-svc Deployment is still in
+#    the copytrade k8s namespace; only the Temporal pods moved.)
 ssh ridopark@192.168.10.123 \
   'kubectl -n copytrade rollout restart deployment/orchestrator && \
    kubectl -n copytrade rollout status deployment/orchestrator --timeout=180s'
@@ -107,17 +112,17 @@ CLI on board — so use a throwaway admin-tools pod the same way
 
 ```sh
 LIST_OUT=$(ssh ridopark@192.168.10.123 \
-  'kubectl -n copytrade run --rm -i temporal-cli-list --restart=Never \
+  'kubectl -n temporal run --rm -i temporal-cli-list --restart=Never \
      --image=temporalio/admin-tools:1.29 -- \
-     temporal --address temporal:7233 workflow list \
+     temporal --address temporal-frontend:7233 --namespace copytrade workflow list \
        --query "WorkflowType=\"PositionWorkflow\" AND TenantStrategy=\"t-dev/s-copytrade-v1\" AND ExecutionStatus=\"Running\"" \
        --output json' | jq -r '.[].execution.workflowId')
 
 for wf in $LIST_OUT; do
   ssh ridopark@192.168.10.123 \
-    "kubectl -n copytrade run --rm -i temporal-cli-term --restart=Never \
+    "kubectl -n temporal run --rm -i temporal-cli-term --restart=Never \
        --image=temporalio/admin-tools:1.29 -- \
-       temporal --address temporal:7233 workflow terminate \
+       temporal --address temporal-frontend:7233 --namespace copytrade workflow terminate \
          --workflow-id $wf --reason 'harness-cleanup'"
 done
 ```

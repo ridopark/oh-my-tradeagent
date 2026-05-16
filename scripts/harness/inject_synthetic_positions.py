@@ -9,9 +9,11 @@ checks / contract resolver / broker stack. Simpler scaffolding, narrower
 target for the proof.
 
 Usage:
-    # Default 3 workflows against a port-forwarded homelab cluster:
-    #   kubectl -n copytrade port-forward svc/temporal 7233:7233 &
-    python scripts/harness/inject_synthetic_positions.py --count 3
+    # Default 3 workflows against a port-forwarded homelab cluster.
+    # Phase 5b.E: copy-trade workflows now live on the shared temporal cluster
+    # under Temporal namespace `copytrade`, so port-forward from `temporal` ns:
+    #   kubectl -n temporal port-forward svc/temporal-frontend 7233:7233 &
+    python scripts/harness/inject_synthetic_positions.py --count 3 --namespace copytrade
 
     # Specific cluster + tenant + strategy:
     python scripts/harness/inject_synthetic_positions.py \\
@@ -135,7 +137,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--count", type=int, default=3)
     parser.add_argument("--temporal-host", default="localhost:7233")
-    parser.add_argument("--namespace", default="default")
+    parser.add_argument("--namespace", default="copytrade")
     parser.add_argument("--tenant", default="dev")
     parser.add_argument("--strategy", default="copytrade-v1")
     args = parser.parse_args()

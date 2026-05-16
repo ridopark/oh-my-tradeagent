@@ -1,5 +1,11 @@
 # Temporal frontend (auto-setup variant: creates schemas in Postgres on first
 # boot, idempotent thereafter) + Web UI. Image versions track infra/docker-compose.yml.
+#
+# DEPRECATED (Phase 5b.E): copy-trade services are now repointed at the shared
+# `temporal/temporal-frontend` cluster under Temporal namespace `copytrade`.
+# This file is retained in-repo until the operator runs the teardown runbook
+# (docs/ops/temporal-consolidation-teardown.md). A follow-up PR will delete
+# this file once the consolidation has bedded in.
 
 apiVersion: v1
 kind: Service

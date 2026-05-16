@@ -49,10 +49,12 @@ spec:
             - secretRef:
                 name: alpaca-credentials
           env:
+            # Phase 5b.E: consolidated onto the shared temporal/temporal-frontend
+            # cluster under Temporal namespace `copytrade`.
             - name: TEMPORAL_TARGET
-              value: temporal:7233
+              value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE
-              value: default
+              value: copytrade
             - name: TEMPORAL_TASK_QUEUE
               value: broker-alpaca-paper
             - name: EXEC_DB_URL

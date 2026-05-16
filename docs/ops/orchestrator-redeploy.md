@@ -27,10 +27,11 @@ kubectl -n copytrade exec deploy/orchestrator -- \
 # Count running PositionWorkflows from Temporal (via the api-gateway):
 curl -s http://copytrade.homelab.local/positions | jq '.positions | length'
 
-# Or via temporal CLI from the bootstrap image:
-kubectl -n copytrade run --rm -it temporal-cli --restart=Never \
-  --image=temporalio/admin-tools:1.25 -- \
-  temporal --address temporal:7233 workflow list \
+# Or via temporal CLI from the admin-tools image. Phase 5b.E: schedule the
+# probe in the `temporal` k8s namespace where the shared frontend lives.
+kubectl -n temporal run --rm -it temporal-cli --restart=Never \
+  --image=temporalio/admin-tools:1.29 -- \
+  temporal --address temporal-frontend:7233 --namespace copytrade workflow list \
     --query "WorkflowType='PositionWorkflow' AND ExecutionStatus='Running'" \
     --limit 20
 ```
@@ -105,9 +106,10 @@ affected workflows back to the last good WFT — see Temporal docs.
 - All `PositionWorkflow`s that were running before the deploy still complete cleanly (no
   `NonDeterministicException` in the orchestrator pod logs).
 - `/actuator/health/readiness` returns 200 within 30s of the new pod starting.
-- `temporal operator search-attribute list` still shows `TenantStrategy` and
-  `ContractSymbol` — the bootstrap Job is idempotent but worth confirming after any
-  cluster-wide change.
+- `temporal operator search-attribute list --namespace copytrade` (run from a
+  pod in the `temporal` k8s ns) still shows `TenantStrategy` and `ContractSymbol`
+  — `scripts/ops/temporal-copytrade-namespace-bootstrap.sh` is idempotent but
+  worth confirming after any cluster-wide change.
 - Audit log shows a `KillSwitchReset` event with two distinct approver IDs (if the drain
   path was used).
 

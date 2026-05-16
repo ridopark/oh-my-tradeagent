@@ -9,8 +9,8 @@ infra/k8s/
 ├── 00-namespace.yaml                # `copytrade` namespace
 ├── 10-postgres.yaml                 # StatefulSet + init SQL ConfigMap
 ├── 20-redis.yaml                    # Deployment + Service
-├── 30-temporal.yaml                 # auto-setup Deployment + Web UI
-├── 31-temporal-bootstrap.yaml       # Job: registers TenantStrategy + ContractSymbol SAs
+├── 30-temporal.yaml                 # auto-setup Deployment + Web UI (deprecated — see 5b.E)
+├── 31-temporal-bootstrap.yaml       # Job: registers SAs on the local Temporal (deprecated — see 5b.E)
 ├── 40-tenants-config.yaml           # ConfigMap mounted into orchestrator
 ├── 50-audit.yaml                    # audit-svc
 ├── 51-orchestrator.yaml             # orchestrator-svc (+ tenants ConfigMap mount)
@@ -21,6 +21,25 @@ infra/k8s/
 ├── secrets.template.yaml            # Secret templates (NOT applied as-is)
 └── README.md                        # this file
 ```
+
+## Temporal cluster topology (Phase 5b.E)
+
+Copy-trade services connect to the shared homelab Temporal cluster at
+`temporal-frontend.temporal.svc.cluster.local:7233`, Temporal-level namespace
+`copytrade`. The in-`copytrade` Temporal Deployment (`30-temporal.yaml`) and
+bootstrap Job (`31-temporal-bootstrap.yaml`) are retained in-repo until the
+operator runs the teardown runbook
+([docs/ops/temporal-consolidation-teardown.md](../../docs/ops/temporal-consolidation-teardown.md));
+after that they should be deleted from the repo in a follow-up PR.
+
+**Before applying the manifests for the first time on a fresh cluster**, run:
+
+```sh
+./scripts/ops/temporal-copytrade-namespace-bootstrap.sh
+```
+
+This creates the `copytrade` Temporal namespace on the shared cluster and
+registers the `TenantStrategy` + `ContractSymbol` Search Attributes. Idempotent.
 
 ## First-time deploy
 
@@ -34,7 +53,14 @@ infra/k8s/
    # blocks can stay placeholder until 5b.D wires the real cutover.
    ```
 
-3. **Apply, in order:**
+3. **Bootstrap the `copytrade` Temporal namespace on the shared cluster** (5b.E):
+   ```sh
+   ./scripts/ops/temporal-copytrade-namespace-bootstrap.sh
+   ```
+   Required before any copy-trade worker starts — the workers fail to register
+   if the Temporal namespace doesn't exist or the Search Attributes are missing.
+
+4. **Apply, in order:**
    ```sh
    # From the workstation (or copy infra/k8s/ to the node first):
    scp -r infra/k8s ridopark@192.168.10.123:~/copytrade-k8s
@@ -44,14 +70,16 @@ infra/k8s/
    `kubectl apply -f <dir>` applies files in alphabetical order, which matches
    the `00-` / `10-` / ... prefixes.
 
-4. **Verify rollout.**
+5. **Verify rollout.**
    ```sh
    kubectl -n copytrade get pods
-   kubectl -n copytrade logs job/temporal-bootstrap
+   # Phase 5b.E: the in-`copytrade` temporal-bootstrap Job is deprecated; the
+   # equivalent namespace + SA registration on the shared cluster is done by
+   # ./scripts/ops/temporal-copytrade-namespace-bootstrap.sh (run in step 3).
    kubectl -n copytrade exec deploy/orchestrator -- curl -sf http://localhost:8080/actuator/health
    ```
 
-5. **Discord one-time login** (5b.D will document this more carefully):
+6. **Discord one-time login** (5b.D will document this more carefully):
    ```sh
    kubectl -n copytrade exec -it deploy/signal-source-discord -- \
      python -m ohmytradeagent_sidecar.bootstrap

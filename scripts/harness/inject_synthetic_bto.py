@@ -7,8 +7,16 @@ needing to post to the watched channel. Risk gates still apply: the author
 on the synthetic payload must be on the strategy's `author_whitelist`.
 
 Usage:
+    # Phase 5b.E: copy-trade workflows now live on the shared temporal cluster
+    # under Temporal namespace `copytrade`. Port-forward the frontend from the
+    # `temporal` k8s namespace and target it, e.g.:
+    #
+    #   ssh -L 7234:127.0.0.1:7234 ridopark@192.168.10.123 \
+    #     'kubectl -n temporal port-forward svc/temporal-frontend 7234:7233' &
+    #
     python scripts/harness/inject_synthetic_bto.py \
-        --temporal-host 10.43.38.226:7233 \
+        --temporal-host 127.0.0.1:7234 \
+        --namespace copytrade \
         --author TradingTheTrend \
         --ticker NVDA --expiry 2026-06-19 --strike 100 --right C --price 2.30
 """
@@ -72,8 +80,10 @@ async def main(args) -> None:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--temporal-host", default="10.43.38.226:7233")
-    p.add_argument("--namespace", default="default")
+    # Default targets a local port-forward (see module docstring). The old in-
+    # `copytrade` Temporal ClusterIP (10.43.38.226:7233) was removed in 5b.E.
+    p.add_argument("--temporal-host", default="127.0.0.1:7234")
+    p.add_argument("--namespace", default="copytrade")
     p.add_argument("--tenant", default="dev")
     p.add_argument("--strategy", default="copytrade-v1")
     p.add_argument("--author", required=True,

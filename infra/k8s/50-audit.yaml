@@ -36,10 +36,16 @@ spec:
             - containerPort: 8081
               name: http
           env:
+            # Phase 5b.E: consolidated onto the shared temporal/temporal-frontend
+            # cluster under Temporal namespace `copytrade`. The in-`copytrade`
+            # Temporal Deployment (30-temporal.yaml) and bootstrap Job
+            # (31-temporal-bootstrap.yaml) are retained in-repo for now and torn
+            # down by the operator after the consolidation smoke passes — see
+            # docs/ops/temporal-consolidation-teardown.md.
             - name: TEMPORAL_TARGET
-              value: temporal:7233
+              value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE
-              value: default
+              value: copytrade
           # audit-svc has no spring-boot-starter-web today (skeleton from Phase 0b — the
           # audit_log writes actually happen via orchestrator's AuditActivitiesImpl).
           # No HTTP listener, so http-get probes would loop the pod. The JVM exits as

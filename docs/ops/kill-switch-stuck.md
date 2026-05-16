@@ -27,10 +27,11 @@ ssh ridopark@192.168.10.123
 # Query the kill switch state via the api-gateway (recommended path):
 curl -s http://copytrade.homelab.local/killswitch/state | jq
 
-# Or directly via Temporal:
-kubectl -n copytrade run --rm -it temporal-cli --restart=Never \
-  --image=temporalio/admin-tools:1.25 -- \
-  temporal workflow query --address temporal:7233 \
+# Or directly via Temporal (5b.E: frontend lives in `temporal` k8s ns under
+# Temporal namespace `copytrade`):
+kubectl -n temporal run --rm -it temporal-cli --restart=Never \
+  --image=temporalio/admin-tools:1.29 -- \
+  temporal workflow query --address temporal-frontend:7233 --namespace copytrade \
     --workflow-id "t-dev/s-copytrade-v1/killswitch" \
     --type killswitchState
 
@@ -45,10 +46,10 @@ isn't Running, no risk check passes. Re-bootstrap via the same path the cluster 
 first deploy.
 
 ```sh
-# Start the workflow:
-kubectl -n copytrade run --rm -it temporal-cli --restart=Never \
-  --image=temporalio/admin-tools:1.25 -- \
-  temporal workflow start --address temporal:7233 \
+# Start the workflow (5b.E: shared cluster, copytrade Temporal namespace):
+kubectl -n temporal run --rm -it temporal-cli --restart=Never \
+  --image=temporalio/admin-tools:1.29 -- \
+  temporal workflow start --address temporal-frontend:7233 --namespace copytrade \
     --workflow-id "t-dev/s-copytrade-v1/killswitch" \
     --workflow-type KillSwitchWorkflow \
     --task-queue orchestrator-core \
@@ -99,8 +100,10 @@ Rare. Symptom: `/killswitch/reset` returns 200 but the next state query still sh
 Investigate by reading the workflow history:
 
 ```sh
-temporal workflow show --address temporal:7233 \
-  --workflow-id "t-dev/s-copytrade-v1/killswitch" --output table | tail -50
+kubectl -n temporal run --rm -it temporal-cli --restart=Never \
+  --image=temporalio/admin-tools:1.29 -- \
+  temporal workflow show --address temporal-frontend:7233 --namespace copytrade \
+    --workflow-id "t-dev/s-copytrade-v1/killswitch" --output table | tail -50
 ```
 
 If you see the auto-trip cascade re-firing on every heartbeat, the underlying loss state

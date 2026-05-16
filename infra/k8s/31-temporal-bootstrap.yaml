@@ -1,6 +1,13 @@
 # Registers the custom Search Attributes (TenantStrategy, ContractSymbol) on
 # the default namespace. Idempotent — re-running is a no-op once the SAs exist.
 # Mirrors the `temporal-bootstrap` service from infra/docker-compose.yml.
+#
+# DEPRECATED (Phase 5b.E): SAs are now registered on the shared cluster's
+# `copytrade` Temporal namespace via
+# `scripts/ops/temporal-copytrade-namespace-bootstrap.sh`. This Job is retained
+# in-repo until the operator runs the teardown runbook
+# (docs/ops/temporal-consolidation-teardown.md). A follow-up PR will delete
+# this file once the consolidation has bedded in.
 
 apiVersion: batch/v1
 kind: Job

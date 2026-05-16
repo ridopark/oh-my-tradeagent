@@ -36,10 +36,14 @@ spec:
             - containerPort: 8080
               name: http
           env:
+            # Phase 5b.E: consolidated onto the shared temporal/temporal-frontend
+            # cluster under Temporal namespace `copytrade`. ReconciliationScheduleBootstrapper
+            # is idempotent — on first start against the new namespace it re-creates the
+            # `recon-t-dev-s-copytrade-v1-alpaca-paper` Schedule.
             - name: TEMPORAL_TARGET
-              value: temporal:7233
+              value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE
-              value: default
+              value: copytrade
             - name: ORCHESTRATOR_DB_URL
               value: jdbc:postgresql://postgres:5432/temporal
             - name: ORCHESTRATOR_DB_USER
