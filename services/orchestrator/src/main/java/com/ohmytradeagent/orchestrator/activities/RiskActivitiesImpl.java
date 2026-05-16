@@ -50,9 +50,11 @@ public class RiskActivitiesImpl implements RiskActivities {
           RejectionReason.INVALID_TIMESTAMP, "future_skew_secs=" + skew.toSeconds());
     }
 
+    long maxAgeSecs = resolveMaxSignalAgeSecs(payload, config);
     long ageSecs = Duration.between(postedAt, now).getSeconds();
-    if (ageSecs > config.getMaxSignalAgeSecs()) {
-      return RiskDecision.rejected(RejectionReason.SIGNAL_TOO_OLD, "age_secs=" + ageSecs);
+    if (ageSecs > maxAgeSecs) {
+      return RiskDecision.rejected(
+          RejectionReason.SIGNAL_TOO_OLD, "age_secs=" + ageSecs + " max=" + maxAgeSecs);
     }
 
     RiskDecision killSwitchDecision = checkKillSwitch(payload, now);
@@ -66,6 +68,34 @@ public class RiskActivitiesImpl implements RiskActivities {
     }
 
     return RiskDecision.approved();
+  }
+
+  /**
+   * Issue #3: pick the per-side signal-age ceiling. BTO and AVG (treated as a buy-to-open variant
+   * by the rest of the pipeline) use {@code max_signal_age_bto_secs}; STC uses {@code
+   * max_signal_age_stc_secs}. The deprecated {@code max_signal_age_secs} is consulted only as a
+   * last resort for back-compat with old fixtures/audit records. The schema's per-side fields are
+   * required, so any value set in YAML is by definition an explicit per-strategy override; the
+   * "explicit override above 120s" policy from Issue #3 is enforced at the configuration layer
+   * (YAML review) rather than at runtime, because the schema cap of 3600s + the required field
+   * already make any wide window visible in the diff.
+   */
+  private long resolveMaxSignalAgeSecs(CopytradeSignalPayload payload, StrategyConfig config) {
+    Long perSide =
+        payload.getAction() == CopytradeSignalPayload.Action.STC
+            ? config.getMaxSignalAgeStcSecs()
+            : config.getMaxSignalAgeBtoSecs();
+    if (perSide != null) {
+      return perSide;
+    }
+    // Back-compat: only reached if per-side fields are absent (older fixtures).
+    Long legacy = config.getMaxSignalAgeSecs();
+    if (legacy != null) {
+      return legacy;
+    }
+    // Defensive: both unset is a config error; fall back to the documented BTO default
+    // rather than NPE in the hot path.
+    return 30L;
   }
 
   /**

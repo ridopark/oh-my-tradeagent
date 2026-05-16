@@ -592,7 +592,10 @@ class CopytradeSignalWorkflowImplTest {
     // routes Activities to broker-<broker_target>.
     c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
     c.setAuthorWhitelist(Set.of("acme_trader"));
-    c.setMaxSignalAgeSecs(1800L);
+    // Issue #3: per-side signal-age defaults replace the legacy 1800s default. The workflow
+    // test uses generous windows so age never trips the gate in these mocked scenarios.
+    c.setMaxSignalAgeBtoSecs(3600L);
+    c.setMaxSignalAgeStcSecs(3600L);
     c.setMaxPositions(5L);
     c.setCapitalWeight(new BigDecimal("0.2"));
     c.setMinContracts(1L);
