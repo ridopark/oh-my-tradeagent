@@ -20,6 +20,7 @@ from ohmytradeagent_contract.models.copytrade_signal_payload import (
 )
 from ohmytradeagent_contract.models.partial_exit_request import PartialExitRequest
 from ohmytradeagent_contract.models.premium_tick import PremiumTick
+from ohmytradeagent_contract.models.strategy_config import StrategyConfig
 from ohmytradeagent_contract.models.subscribe_premium_request import SubscribePremiumRequest
 from ohmytradeagent_contract.models.subscribe_premium_result import (
     Status,
@@ -114,6 +115,23 @@ def test_subscribe_premium_request_round_trips() -> None:
     assert model.contract_symbol == "NVDA  260516C00140000"
 
     serialized = json.loads(model.model_dump_json(by_alias=True))
+    assert serialized == original
+
+
+def test_strategy_config_round_trips() -> None:
+    original = _load("strategy-config-copytrade-v1.json")
+
+    model = StrategyConfig.model_validate(original)
+
+    assert model.schema_version == 1
+    assert model.tenant_id == "dev"
+    assert model.strategy_id == "copytrade-v1"
+    assert model.max_slippage_abs == 0.05
+    assert model.max_slippage_pct == 0.05
+    assert model.repeg_after_ms == 5000
+
+    # StrategyConfig has many optional fields — drop None values to compare against the fixture.
+    serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
     assert serialized == original
 
 

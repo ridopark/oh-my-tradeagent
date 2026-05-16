@@ -6,10 +6,13 @@
   "author_whitelist": ["acme_trader", "beta_signals"],
   "max_signal_age_bto_secs": 30,
   "max_signal_age_stc_secs": 60,
-  "bto_price_move_reject_pct": 0.10,
+  "bto_price_move_reject_pct": 0.1,
   "max_positions": 5,
   "capital_weight": 0.2,
   "min_contracts": 1,
   "max_contracts": 5,
-  "skip_avg": true
+  "skip_avg": true,
+  "max_slippage_abs": 0.05,
+  "max_slippage_pct": 0.05,
+  "repeg_after_ms": 5000
 }

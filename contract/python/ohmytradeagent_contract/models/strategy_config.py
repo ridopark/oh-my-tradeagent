@@ -92,13 +92,25 @@ class StrategyConfig(BaseModel):
     """
     Phase 2b/3: BTO entry order TTL for live broker target.
     """
+    max_slippage_abs: PositiveFloat | None = None
+    """
+    Issue #4: Absolute slippage cap (dollars per contract premium) added to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_pct via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation.
+    """
+    max_slippage_pct: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Issue #4: Fractional slippage cap (e.g. 0.05 = 5%) applied to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_abs via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation.
+    """
+    repeg_after_ms: conint(ge=1) | None = None
+    """
+    Issue #4: Milliseconds the BTO limit sits at its initial price before a single re-peg toward the slippage-capped ceiling, after which the order is cancelled if still unfilled. Symmetric STC behavior: re-peg aggressively toward bid as the BTO-TTL window elapses. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation.
+    """
     trail_on_partial: bool | None = None
     """
     Phase 4: arm CHANDELIER_TRAIL on first partial exit.
     """
     trail_giveback_pct: confloat(le=0.5, gt=0.0) | None = None
     """
-    Phase 4: trailing-stop giveback fraction once armed.
+    Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured.
     """
     daily_loss_threshold: PositiveFloat | None = None
     """
