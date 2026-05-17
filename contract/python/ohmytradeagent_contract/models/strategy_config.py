@@ -112,6 +112,14 @@ class StrategyConfig(BaseModel):
     """
     Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured.
     """
+    trail_debounce_ticks: conint(ge=1) | None = None
+    """
+    Issue #14 (Phase 4 chandelier-trail debounce): require N consecutive ticks with mid below `peak_premium * (1 - trail_giveback_pct)` before firing the trail exit. A single sub-threshold print (bad NBBO, halted side) MUST NOT trigger an exit on options where premium can flicker tens of percent between adjacent ticks. Default 2 when null. PositionWorkflow.chandelier_tick handler resets the streak on any tick at-or-above the threshold.
+    """
+    trail_disarm_minutes_before_close: conint(ge=0) | None = None
+    """
+    Issue #14 (Phase 4 chandelier-trail EOD disarm): disarm the trail in the final N minutes before market close so the EOD timer handles the exit instead. Past this disarm window theta giveback dominates real momentum and the trail becomes a noise-driven flush. Default 30 when null. PositionWorkflow.chandelier_tick checks `now >= market_close - trail_disarm_minutes_before_close minutes` on every tick.
+    """
     daily_loss_threshold: PositiveFloat | None = None
     """
     Phase 5: KillSwitchWorkflow auto-trip threshold (absolute dollars) on realized cumulative daily loss for (tenant, strategy). Auto-trip fires when realizedPnL <= -daily_loss_threshold. Phase 5 ships realized-only PnL composition (sum of EntryFilled/ExitFilled premia from audit_log); MTM on open positions lands in Phase 5b.
