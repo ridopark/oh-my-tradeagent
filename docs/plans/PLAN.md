@@ -214,8 +214,31 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
        ticker, expiry, strike, right, cfg.broker_target)
        → OCC symbol, bid, ask, mid (cached in option_symbol_cache)
   5. allocation = capital_allocator.for_strategy(tenant, strategy) * cfg.capital_weight
-     qty        = clamp(floor(allocation / (payload.price * 100)),
-                        cfg.min_contracts, cfg.max_contracts)
+     # Issue #17: source price from the contract-resolver's freshly-fetched
+     # ask (or mid clamped to ask) — NOT payload.price, which is the
+     # author's stated premium and is 5-30s stale by the time we size.
+     # On a cheap-then-spiking name, two signals an hour apart could
+     # both pass at clamp=max while the second represents 3x the dollar
+     # risk; on a high-IV ticker, clamping to min could silently over-
+     # size a single-contract trade whose notional dwarfs the allocation.
+     sizing_price = min(contract.mid, contract.ask) if contract.mid else contract.ask
+     qty          = clamp(floor(allocation / (sizing_price * 100)),
+                          cfg.min_contracts, cfg.max_contracts)
+     # Issue #17: per-signal hard dollar cap. When the clamp pinned us
+     # to min AND that minimum's notional still exceeds the operator-
+     # configured per-signal cap, reject rather than silently over-size.
+     if cfg.max_notional_per_signal is not None \
+         and qty == cfg.min_contracts \
+         and cfg.min_contracts * sizing_price * 100 > cfg.max_notional_per_signal:
+       audit.log(SignalRejected, NOTIONAL_PER_SIGNAL_EXCEEDED); return
+     # Issue #17: per-day deployed dollar cap. Sum today's accepted BTO
+     # notional from audit_log (qty * fill_premium * 100); reject when
+     # adding this signal's notional would push past the cap.
+     if cfg.max_daily_notional_deployed is not None:
+       new_notional = qty * sizing_price * 100
+       today_deployed = audit_log.sum_today_bto_notional(tenant, strategy)
+       if today_deployed + new_notional > cfg.max_daily_notional_deployed:
+         audit.log(SignalRejected, DAILY_NOTIONAL_DEPLOYED_EXCEEDED); return
   6. intent_key = workflow_id + ":entry"
      # Issue #4: BTO pricing ladder. The initial limit is capped by BOTH a
      # fractional and an absolute slippage allowance, and never crosses
@@ -780,7 +803,7 @@ Python pieces (`contract/python`, `services/signal-source-discord`) are not Mave
 5. **PositionWorkflow versioning policy.** `Workflow.getVersion` at every change-point, vs blue/green orchestrator deploys waiting for positions to drain. Different tradeoffs; both supported by Temporal.
 6. **Audit-log retention.** Per-tenant configurable or single platform default; 30 / 90 / 365 days.
 7. **Quota policy defaults.** Initial values for broker calls/min, concurrent positions, concurrent workflows per tenant.
-8. **Sizing policy v0.** **Resolved (2026-05-13): capital-weight from Phase 2** with floor + cap. Formula: `allocation = capital_per_strategy * cfg.capital_weight; qty = clamp(floor(allocation / (price * 100)), cfg.min_contracts, cfg.max_contracts)`. Defaults for paper: `min_contracts=1`, `max_contracts=5`. `CapitalAllocator` from Phase 0b is already on the path; deferring to Phase 6 was rejected because static `contracts_per_signal=1` skews capital footprint ~10× across signal price ranges (correctness, not polish). `strategy-config.json` schema gains `capital_weight`, `min_contracts`, `max_contracts`.
+8. **Sizing policy v0.** **Resolved (2026-05-13): capital-weight from Phase 2** with floor + cap. Formula: `allocation = capital_per_strategy * cfg.capital_weight; qty = clamp(floor(allocation / (price * 100)), cfg.min_contracts, cfg.max_contracts)`. Defaults for paper: `min_contracts=1`, `max_contracts=5`. `CapitalAllocator` from Phase 0b is already on the path; deferring to Phase 6 was rejected because static `contracts_per_signal=1` skews capital footprint ~10× across signal price ranges (correctness, not polish). `strategy-config.json` schema gains `capital_weight`, `min_contracts`, `max_contracts`. **Revised (Issue #17, quant-analyst review):** `price` in the sizing formula is the contract-resolver's freshly-fetched `ask` (or `mid` clamped to `ask`), NOT `payload.price` — the author-stated premium is 5-30s stale and exposes the bot to premium-spike over-leverage. Two new opt-in hard dollar caps land alongside: `max_notional_per_signal` (reject with `NOTIONAL_PER_SIGNAL_EXCEEDED` when `clamp(floor(...), min, max) == min` AND `min * price * 100 > max_notional_per_signal` — rather than silently over-sizing) and `max_daily_notional_deployed` (reject with `DAILY_NOTIONAL_DEPLOYED_EXCEEDED` when today's cumulative BTO notional + new notional would exceed the cap). `strategy-config.json` schema gains both fields; runtime sizing wiring lands separately.
 9. **OCC-symbol generation source of truth.** **Resolved (2026-05-13): deterministic generation + broker `lookup` cross-check, cached.** `contract-resolver-svc` builds the canonical OCC symbol from `(ticker, expiry, strike, right)`, verifies via broker `lookup` (catches corporate-action suffixes like `AAPL1`), and caches the mapping in Postgres `option_symbol_cache` until next expiry. On generated-vs-broker mismatch: `audit.log(SymbolDriftDetected, {generated, broker_returned})`, use broker's symbol for the order, populate cache.
 10. **AVG handling.** Reference skips by default (`skip_avg=true`). Same here unless overridden per strategy.
 11. **Same-author re-BTO on a held contract.** **Resolved (2026-05-13): each entry gets its own `PositionWorkflow`.** Workflow ID is `t-<t>/s-<s>/pos/<OCC>/<entry_signal_id>` (entry_signal_id disambiguates so `REJECT_DUPLICATE` does not block a same-day re-BTO on a contract that previously closed). STC dispatch finds the active position via `TenantStrategy + ContractSymbol + ExecutionStatus=Running` Visibility query (Redis-cached for hot path). If multiple positions are open on the same OCC, STC signals the oldest by start time. Mirrors the reference's Pending/Open separation.
