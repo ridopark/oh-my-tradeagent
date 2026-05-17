@@ -409,6 +409,23 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
 
 ### Kill switch flow
 
+The auto-trip evaluator combines two independent loss signals so options
+positions cannot bleed 80% mark-to-market between fills without halting:
+
+- **Realized PnL** — `platform.daily_pnl(tenant, strategy, day)` against
+  `cfg.daily_loss_threshold` (sum of EntryFilled/ExitFilled premia from
+  audit_log; cumulative since session open).
+- **Unrealized MTM** — `market-data-svc.daily_unrealized_pnl(tenant,
+  strategy, day)` against `cfg.daily_unrealized_loss_threshold`. Computed
+  as Σ (current_premium − entry_premium) × qty × 100 across open
+  PositionWorkflows, refreshed by the market-data feed; the timer below
+  re-evaluates every 60s during market hours.
+
+Auto-trip fires on the **more conservative** of the two signals — i.e.,
+whichever threshold breaches first triggers the cascade. Each threshold
+is independently configurable; setting either to null disables that arm
+of the trigger. At least one must be set in production.
+
 ```
 One-time bootstrap per (tenant, strategy):
    start KillSwitchWorkflow("t-<tenant>/s-<strategy>/killswitch",
@@ -428,14 +445,28 @@ KillSwitchWorkflow (long-running, NOT a daily Schedule — survives DST/holidays
           continueAsNew(state)
           return
        continue
-    pnl = platform.daily_pnl(tenant, strategy, state.trading_day)
-    if pnl < -cfg.daily_loss_threshold:
-       self.update("trip_killswitch", {reason="auto:daily_loss", value=pnl})
+
+    # Realized arm — closed P&L bound (cumulative, since session open).
+    realized = platform.daily_pnl(tenant, strategy, state.trading_day)
+    if cfg.daily_loss_threshold is not null and realized < -cfg.daily_loss_threshold:
+       self.update("trip_killswitch",
+                   {reason="auto:daily_realized_loss", value=realized})
+       continue
+
+    # Unrealized arm — MTM drawdown across open PositionWorkflows. Without
+    # this, held options can lose 80% MTM (the dominant failure mode for
+    # 0DTE / earnings) before any realized exit fires.
+    unrealized = market_data.daily_unrealized_pnl(tenant, strategy,
+                                                  state.trading_day)
+    if cfg.daily_unrealized_loss_threshold is not null and \
+       unrealized < -cfg.daily_unrealized_loss_threshold:
+       self.update("trip_killswitch",
+                   {reason="auto:daily_unrealized_loss", value=unrealized})
 
   trip_killswitch Update handler:
     if not state.tripped:
        state.tripped = true; state.reason = ...; state.tripped_at = workflow.now()
-       audit.log(KillSwitchTripped)
+       audit.log(KillSwitchTripped, {reason, realized_pnl, unrealized_pnl})
        # Cascade via Search Attribute, not workflow-ID prefix
        for wf in listWorkflowExecutions(
             TenantStrategy='t-<tenant>/s-<strategy>' AND
@@ -445,7 +476,54 @@ KillSwitchWorkflow (long-running, NOT a daily Schedule — survives DST/holidays
 
 risk.check_entry reads state via KillSwitchWorkflow.query("killswitch_state").
 On workflow-not-found (e.g. cluster restart before bootstrap), the `risk.check_entry` Activity fails CLOSED — entries rejected with `kill_switch_unavailable` until the workflow is started.
+
+If market-data-svc is unavailable (`daily_unrealized_pnl` raises or
+returns null), the unrealized arm fails CLOSED for the affected
+evaluation cycle — the workflow logs an `audit.log(KillSwitchDegraded,
+{reason:"market_data_unavailable"})` event and continues evaluating the
+realized arm, while `risk.check_entry` rejects new entries with
+`kill_switch_unavailable` until market-data recovers. Silent suppression
+of the unrealized arm is never permitted.
 ```
+
+#### Reset SOP
+
+A tripped kill switch is an explicit safety state. Resetting it requires
+**dual-control** human approval — no single operator and no automated
+process may reset it.
+
+- **Who authorizes.** Two distinct operators with the `killswitch:reset`
+  role in `platform-svc`'s RBAC. The primary requests the reset; the
+  secondary independently approves. The two operator identities MUST be
+  distinct — same-user resets are rejected by `reset_killswitch` (see
+  Phase 5 — Issue #21).
+- **Evidence required.** Before requesting the reset the primary
+  operator attaches: (1) the original trip's `KillSwitchTripped` audit
+  event ID, (2) a written root-cause statement (free text, captured on
+  the request), (3) a link or doc reference describing the remediation
+  (closed positions, broker reconciliation completed, market-data feed
+  restored, etc.), and (4) the resumption decision (continue trading
+  vs. drain to flat). All four fields are required by the api-gateway
+  `POST /killswitch/reset` request body; missing fields produce a 400.
+- **Dual-control approval flow.** Primary calls `POST /killswitch/reset`
+  with the evidence above; the request enters a `pending_secondary`
+  state. Secondary calls `POST /killswitch/reset/approve` referencing
+  the pending request ID. The `reset_killswitch` Update fires only when
+  both approvals are recorded with distinct operator identities; if the
+  secondary identity matches the primary's, the Update is rejected and
+  the pending state is dropped. Pending requests expire after 30 minutes
+  with an `audit.log(KillSwitchResetExpired)` event.
+- **Audit event.** On successful reset the workflow writes a
+  `KillSwitchResetApproved` audit event whose `subject` carries
+  `{trip_event_id, root_cause, remediation_ref, resumption_decision,
+  approver_primary, approver_secondary, requested_at, approved_at}`.
+  Both approver identities are persisted in the event — never collapsed
+  into a single field — so post-hoc audit can verify dual-control was
+  actually enforced rather than logged after the fact.
+- **Post-reset behaviour.** `cfg.reset_cooldown_secs` (if configured)
+  blocks new entries with `KILL_SWITCH_COOLING_DOWN` for the cooldown
+  window after a successful reset, closing the signal-backlog stampede
+  vector.
 
 ## Cross-cutting concerns
 
