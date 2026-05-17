@@ -24,7 +24,7 @@ class PremiumTick(BaseModel):
     """
     premium: PositiveFloat
     """
-    Premium per contract, dollars. Source-of-truth field for the chandelier trail comparison.
+    Premium per contract, dollars. Source-of-truth field for the chandelier trail comparison. For chandelier-trail comparisons, market-data-svc fills this with the mid (bid+ask)/2 smoothed over a 5-10s window, not the last-trade price.
     """
     retrieved_at: AwareDatetime
     """

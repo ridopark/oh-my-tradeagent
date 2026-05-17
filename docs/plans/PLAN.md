@@ -395,15 +395,16 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
     if now >= market_close - cfg.trail_disarm_minutes_before_close minutes:
        trailing_armed = false
        return
-    # peak = running max of MID over a 5-10s sliding window (single-tick
-    # filter). market-data-svc smooths and provides `tick.mid` already
-    # filtered; PositionWorkflow only retains the running max.
-    if tick.mid > peak_premium: peak_premium = tick.mid
+    # market-data-svc populates tick.premium with the mid (bid+ask)/2
+    # smoothed over a 5-10s window — last-trade is stale on thin options.
+    # PositionWorkflow only retains the running max here; it does not
+    # recompute the mid.
+    if tick.premium > peak_premium: peak_premium = tick.premium
     # Issue #14: fire requires cfg.trail_debounce_ticks consecutive ticks
     # (default 2) below `peak_premium * (1 - giveback)` so a single bad
     # print cannot trigger an exit. A tick at-or-above threshold resets
     # the streak.
-    if tick.mid < peak_premium * (1 - giveback):
+    if tick.premium < peak_premium * (1 - giveback):
        sub_threshold_streak += 1
        if sub_threshold_streak >= (cfg.trail_debounce_ticks or 2):
           # Issue #14: on fire, route MARKETABLE-TO-BID (limit = bid,
