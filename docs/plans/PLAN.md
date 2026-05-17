@@ -324,12 +324,62 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
    │
    ▼
 [PositionWorkflow] (already running)
+  # Workflow state (initialized at start from PositionWorkflowInput):
+  #   original_qty   = input.qty                # immutable; broker int
+  #   remaining_qty  = input.qty                # broker-visible int
+  #   remaining_frac = 1.0                      # Issue #16: float ground truth
+  #                                              # for cumulative-partials math
   signal handler partial_exit:
     if signal_id in processed_exit_signal_ids: return     # idempotent
     if exit_in_flight: audit.log(ExitRejected); return
     processed_exit_signal_ids.add(signal_id)
     exit_in_flight = true
-    qty_to_close = ceil(remaining_qty * fraction)
+    # Issue #16 (quant-analyst review): the prior `ceil(remaining_qty *
+    # fraction)` quantization biased every partial UP and silently
+    # destroyed author intent on small qtys —
+    # e.g. with original_qty=3 and three successive "half out" signals,
+    # ceil(3*0.5)=2 → remaining_qty=1, ceil(1*0.5)=1 → remaining_qty=0
+    # (FLAT after three halves, when the author meant ~0.5^3 ≈ 12.5%
+    # remaining). The runner-holding intent the PRD claims to enforce
+    # was inverted. Fix: track `remaining_frac` (float, ground truth
+    # for math) alongside `remaining_qty` (integer for the broker),
+    # apply `fraction` to `remaining_frac`, and convert to a broker qty
+    # only at submit time via `round` (banker's-rounding-acceptable;
+    # NOT ceil). The min-qty branch governs the `remaining_qty <= 1`
+    # case where rounding can no longer represent partials honestly.
+    exit_frac      = remaining_frac * fraction          # float, ground truth
+    target_frac    = remaining_frac - exit_frac         # what we'd hold after
+    qty_to_close   = round(exit_frac * original_qty)    # broker int at submit
+    # Issue #16: min-partial branch. When remaining_qty <= 1 the integer
+    # broker quantum can't honor a partial — rounding either flattens
+    # (`ceil`-equivalent) or no-ops (`floor`-equivalent). Defer to a
+    # config switch rather than silently picking one:
+    #   - cfg.min_partial_qty_behavior == "skip":      log + return (do
+    #     NOT submit an exit; let the runner ride to the trail/EOD).
+    #   - cfg.min_partial_qty_behavior == "full_close": close the last
+    #     contract now (closes runner-holding window in exchange for
+    #     guaranteed-honored author exit). Default: "skip".
+    if remaining_qty <= 1:
+       if cfg.min_partial_qty_behavior == "full_close":
+          qty_to_close = remaining_qty           # close the last contract
+          target_frac  = 0.0
+       else:                                      # "skip" (default)
+          audit.log(PartialSkippedMinQty,
+                    {signal_id, remaining_qty, remaining_frac, fraction})
+          exit_in_flight = false
+          return
+    # Issue #16: rounding can also produce qty_to_close == 0 when
+    # remaining_qty > 1 but the fraction is tiny (e.g. 0.05 of 2 → 0.1
+    # → round to 0). Treat that as a no-op partial (NOT a full close):
+    # the float ground truth still updates so subsequent partials can
+    # accumulate, but no broker order is submitted this round.
+    if qty_to_close == 0:
+       audit.log(PartialNoOpRounded,
+                 {signal_id, remaining_qty, remaining_frac, fraction,
+                  exit_frac})
+       remaining_frac = target_frac               # ground truth still moves
+       exit_in_flight = false
+       return
     intent_key = f"{workflow_id}:exit:{signal_id}"
     # Issue #4: STC pricing ladder. Verbatim from the issue:
     #   limit = max(bid, ref_premium - giveback)
@@ -365,9 +415,16 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
        # than as a silent no-op.
        exit_in_flight = false
        return
-    remaining_qty -= filled_qty
-    exit_in_flight = false
-    if remaining_qty / original_qty < 0.005:
+    remaining_qty  -= filled_qty
+    # Issue #16: keep remaining_frac in sync with the actual broker fill,
+    # not the pre-submit `target_frac` we computed above — partial fills
+    # are real and the float ground truth must reflect what the broker
+    # actually closed, otherwise rounding drift accumulates over many
+    # partials. `remaining_frac` is clamped to [0, 1] for the EOD/full-
+    # close completion check below.
+    remaining_frac  = max(0.0, remaining_qty / original_qty)
+    exit_in_flight  = false
+    if remaining_frac < 0.005:
        complete_workflow
 
   signal handler arm_chandelier:
@@ -417,6 +474,58 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
     else:
        sub_threshold_streak = 0
 ```
+
+### Cumulative-partials math (Issue #16, quant-analyst review)
+
+`StrategyConfig` declares **`min_partial_qty_behavior`** (allowed values:
+`skip` | `full_close`; **default `skip`**). The field governs the
+`partial_exit` branch when `remaining_qty <= 1`, where the integer broker
+quantum can no longer represent a partial honestly.
+
+- `skip` (default) — log `PartialSkippedMinQty` and let the runner ride
+  to the trail / EOD timer. Preserves the runner-holding intent the PRD
+  was built around; the cost is that the very-last contract may not
+  honor a late author exit signal.
+- `full_close` — close the last contract on the partial signal. Trades
+  the runner-holding window for guaranteed honoring of author exits.
+
+**Worked example (verifies the bias is gone for `qty=3`)**
+
+Old math (`ceil(remaining_qty * fraction)`) — author posts three
+successive "half out" signals:
+
+| Step | remaining_qty | fraction | qty_to_close | remaining_qty after | author intent | bias |
+|---|---|---|---|---|---|---|
+| 0 | 3 | — | — | 3 | 100% held | — |
+| 1 | 3 | 0.50 | `ceil(1.5) = 2` | 1 | ~50% (1.5) held | rounded UP |
+| 2 | 1 | 0.50 | `ceil(0.5) = 1` | 0 | ~25% (0.75) held | flattened |
+| 3 | 0 | 0.50 | (no position) | 0 | ~12.5% (0.375) held | inverted |
+
+After three halves the bot is FLAT; the author intended ~12.5%
+remaining. The runner is destroyed.
+
+New math (`remaining_frac` float ground truth, `round` at submit, with
+default `min_partial_qty_behavior: skip`):
+
+| Step | remaining_frac | fraction | exit_frac | qty_to_close (= `round(exit_frac * 3)`) | remaining_qty after | remaining_frac after |
+|---|---|---|---|---|---|---|
+| 0 | 1.000 | — | — | — | 3 | 1.000 |
+| 1 | 1.000 | 0.50 | 0.500 | `round(1.5) = 2` (or `2` via banker's-round) | 1 | 0.333 (= 1/3 after fill) |
+| 2 | 0.333 | 0.50 | 0.167 | min-qty branch fires (`remaining_qty == 1`, `skip`): NO order, return | 1 | 0.333 |
+| 3 | 0.333 | 0.50 | 0.167 | min-qty branch fires: NO order, return | 1 | 0.333 |
+
+The runner (1 contract, ~33% of original) survives all three "half out"
+signals. The chandelier trail or EOD timer eventually flattens it.
+
+With `min_partial_qty_behavior: full_close`, step 2 instead closes the
+last contract and the workflow completes — explicit, configured,
+auditable, and never the silent `ceil` flattening of the old math.
+
+> Note: `round(1.5)` under banker's rounding is `2`, matching the
+> half-up convention most operators expect; either policy is acceptable
+> here because both honor the runner-holding invariant for `qty >= 2`,
+> which is where the rounding matters. Languages without banker's
+> rounding should use `Math.round(x)` (half-up) explicitly.
 
 ### Reconciliation flow
 
