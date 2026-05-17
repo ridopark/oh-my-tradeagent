@@ -121,6 +121,26 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(d.allowed()).isTrue();
   }
 
+  @Test
+  void notionalCap_failsClosed_whenEquityZeroOrUnavailable() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+
+    // Case 1: equity == null (snapshot source unavailable) → fail closed.
+    when(portfolioSnapshot.accountEquity(anyString(), anyString())).thenReturn(null);
+    RiskDecision dNull = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    assertThat(dNull.allowed()).isFalse();
+    assertThat(dNull.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
+    assertThat(dNull.detail()).contains("equity_unavailable");
+
+    // Case 2: equity == 0 (degenerate snapshot) → fail closed.
+    when(portfolioSnapshot.accountEquity(anyString(), anyString())).thenReturn(BigDecimal.ZERO);
+    RiskDecision dZero = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    assertThat(dZero.allowed()).isFalse();
+    assertThat(dZero.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
+    assertThat(dZero.detail()).contains("equity_unavailable");
+  }
+
   // ----- same_underlying_count -----
 
   @Test
@@ -304,6 +324,17 @@ class RiskActivitiesPortfolioGatesTest {
         .thenReturn(new BigDecimal("99999"));
     RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
     assertThat(d.allowed()).isTrue();
+  }
+
+  @Test
+  void drawdownVelocity_failsClosed_whenSamplerReturnsNull() {
+    StrategyConfig c = config();
+    c.setDrawdownVelocityThreshold(new BigDecimal("100"));
+    when(drawdownSampler.sampleLossRatePerMinute(anyString(), anyString())).thenReturn(null);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.DRAWDOWN_VELOCITY_EXCEEDED);
+    assertThat(d.detail()).contains("rate_unavailable");
   }
 
   // ----- pre_trade_check -----

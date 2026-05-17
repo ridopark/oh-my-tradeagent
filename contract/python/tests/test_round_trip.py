@@ -19,6 +19,14 @@ from ohmytradeagent_contract.models.copytrade_signal_payload import (
     Right,
 )
 from ohmytradeagent_contract.models.partial_exit_request import PartialExitRequest
+from ohmytradeagent_contract.models.pre_trade_check_request import (
+    PreTradeCheckRequest,
+    Side,
+)
+from ohmytradeagent_contract.models.pre_trade_check_result import (
+    PdtStatus,
+    PreTradeCheckResult,
+)
 from ohmytradeagent_contract.models.premium_tick import PremiumTick
 from ohmytradeagent_contract.models.strategy_config import StrategyConfig
 from ohmytradeagent_contract.models.subscribe_premium_request import SubscribePremiumRequest
@@ -26,6 +34,7 @@ from ohmytradeagent_contract.models.subscribe_premium_result import (
     Status,
     SubscribePremiumResult,
 )
+from ohmytradeagent_contract.types.broker_target import BrokerTarget
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -145,5 +154,38 @@ def test_subscribe_premium_result_round_trips() -> None:
     assert model.status == Status.subscribed
 
     # error is an optional field — drop None values to compare against the fixture.
+    serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert serialized == original
+
+
+def test_pre_trade_check_request_round_trips() -> None:
+    original = _load("pre-trade-check-request.json")
+
+    model = PreTradeCheckRequest.model_validate(original)
+
+    assert model.schema_version == 1
+    assert model.tenant_id == "dev"
+    assert model.strategy_id == "copytrade-v1"
+    assert model.broker_target == BrokerTarget.paper
+    assert model.side == Side.buy
+    assert model.qty == 1
+    assert model.estimated_notional == 230.0
+
+    serialized = json.loads(model.model_dump_json(by_alias=True))
+    assert serialized == original
+
+
+def test_pre_trade_check_result_round_trips() -> None:
+    original = _load("pre-trade-check-result.json")
+
+    model = PreTradeCheckResult.model_validate(original)
+
+    assert model.schema_version == 1
+    assert model.allowed is True
+    assert model.buying_power == 50000.0
+    assert model.pdt_status == PdtStatus.ok
+    assert model.margin_sufficient is True
+
+    # reject_reason is an optional field — drop None values to compare against the fixture.
     serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
     assert serialized == original

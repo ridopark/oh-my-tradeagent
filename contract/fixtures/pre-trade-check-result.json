@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "allowed": true,
+  "buying_power": 50000.0,
+  "pdt_status": "OK",
+  "margin_sufficient": true
+}
