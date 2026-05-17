@@ -214,7 +214,7 @@ The strongest argument is broker fit: IBKR's TWS API is canonically Java + C++, 
 - Reconciliation cadence: 5 min default; live options may want 60s.
 - Market-data dependency for v0: defer CHANDELIER_TRAIL to Phase 4 (no market-data on critical path Phases 2-3) or include from Phase 3?
 - `PositionWorkflow` versioning policy: `Workflow.getVersion` at every change-point, vs blue/green orchestrator deploys waiting for positions to drain.
-- Audit-log retention: per-tenant configurable or platform default; 30/90/365 days.
+- Audit-log retention: 7-year policy of record (issue #22 — WORM years 0-2, immutable-by-grant years 3-7) lives in [`docs/ops/audit-retention.md`](../ops/audit-retention.md), backed by the schema + role grants in `services/orchestrator/src/main/resources/db/migration/V3__audit_immutability.sql`. Per-tenant overrides above the platform floor remain a future possibility.
 - Quota policy defaults: initial values for broker calls/min, concurrent positions, concurrent workflows per tenant.
 - Sizing policy v0: static `contracts_per_signal` per strategy, or capital-weight-derived (`qty = floor(allocation / (price * 100))`). Static is simpler; capital-weight is closer to the reference.
 - OCC-symbol generation source of truth: build from `(ticker, expiry, strike, right)` deterministically in the orchestrator's in-process `contract.resolve` Activity, vs query broker. Recommend deterministic + cross-check against broker's list-contracts endpoint.
