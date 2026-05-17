@@ -112,6 +112,10 @@ affected workflows back to the last good WFT — see Temporal docs.
   worth confirming after any cluster-wide change.
 - Audit log shows a `KillSwitchReset` event with two distinct approver IDs (if the drain
   path was used).
+- If the redeploy included an audit-log schema migration, confirm the orchestrator login
+  role still has membership in `orchestrator_app` (see
+  [`docs/ops/audit-retention.md`](audit-retention.md) §4 "DB role posture"). Without it,
+  audit INSERTs will fail post-rollout.
 
 ## Why this exists
 
