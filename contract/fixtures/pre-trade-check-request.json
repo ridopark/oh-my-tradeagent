@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "copytrade-v1",
+  "broker_target": "paper",
+  "option_symbol": "NVDA  260516C00140000",
+  "side": "BUY",
+  "qty": 1,
+  "estimated_notional": 230.0,
+  "correlation_id": "1234567890123456789:0"
+}

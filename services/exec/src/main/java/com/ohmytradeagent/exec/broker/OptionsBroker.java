@@ -1,6 +1,9 @@
 package com.ohmytradeagent.exec.broker;
 
 import com.ohmytradeagent.contract.BrokerOpenOrder;
+import com.ohmytradeagent.contract.PreTradeCheckRequest;
+import com.ohmytradeagent.contract.PreTradeCheckResult;
+import java.math.BigDecimal;
 import java.util.List;
 
 /**
@@ -37,5 +40,25 @@ public interface OptionsBroker {
    */
   default List<BrokerOpenOrder> listOpenOrders() {
     return List.of();
+  }
+
+  /**
+   * Issue #6 portfolio-level gate. Default returns a permissive result: {@code allowed=true},
+   * sentinel buying-power above any realistic notional, PDT OK, margin sufficient. Brokers that
+   * expose a real pre-trade endpoint (Alpaca account/buying-power, Tradier balances) override this
+   * to query their venue.
+   *
+   * <p>The orchestrator's risk gate is also opt-in via {@code
+   * StrategyConfig.pre_trade_check_enabled}, so a deployment running the default impl never
+   * surprises a strategy that didn't enable the gate.
+   */
+  default PreTradeCheckResult preTradeCheck(PreTradeCheckRequest request) {
+    PreTradeCheckResult r = new PreTradeCheckResult();
+    r.setSchemaVersion(1L);
+    r.setAllowed(true);
+    r.setBuyingPower(new BigDecimal("1000000000"));
+    r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+    r.setMarginSufficient(true);
+    return r;
   }
 }

@@ -13,7 +13,12 @@ import java.math.RoundingMode;
  */
 public final class Sizing {
 
-  private static final BigDecimal CONTRACT_MULTIPLIER = BigDecimal.valueOf(100);
+  /**
+   * Standard option contract multiplier (premium dollars per contract = price * 100). Public so
+   * risk-svc gates (notional cap, pre-trade-check notional estimate) can share the same constant
+   * rather than redeclare it.
+   */
+  public static final BigDecimal CONTRACT_MULTIPLIER = BigDecimal.valueOf(100);
 
   private Sizing() {}
 

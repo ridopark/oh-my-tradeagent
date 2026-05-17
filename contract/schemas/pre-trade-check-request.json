@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/pre-trade-check-request.json",
+  "title": "PreTradeCheckRequest",
+  "description": "Issue #6 portfolio-level gate input. The risk-svc dispatches this to exec-svc's pre_trade_check Activity before approving entry; exec-svc forwards it to the broker port (buying_power / day-trade / margin endpoints) and returns PreTradeCheckResult. Scoped to (tenant_id, strategy_id) so multi-tenant routing in exec-svc stays uniform with placeOrder.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.PreTradeCheckRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "broker_target",
+    "option_symbol",
+    "side",
+    "qty",
+    "estimated_notional"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "broker_target": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "Routes the pre-trade-check Activity to the broker-<value> task queue, mirroring OrderIntent.broker_target."
+    },
+    "option_symbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OCC option symbol the gate is evaluating. Included so broker adapters can ask their venue for symbol-specific buying-power or margin requirements when supported."
+    },
+    "side": {
+      "type": "string",
+      "enum": ["BUY", "SELL"],
+      "description": "BUY for BTO entries; SELL is reserved for future hardening of STC paths (currently STC bypasses the entry gate). Broker adapters only need BUY semantics in this PR."
+    },
+    "qty": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Contracts requested."
+    },
+    "estimated_notional": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Dollar notional the risk gate computed (qty * payload.price * 100 for options). Broker adapters compare this to buying_power."
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Optional cross-event correlation key (typically signal_id)."
+    }
+  }
+}

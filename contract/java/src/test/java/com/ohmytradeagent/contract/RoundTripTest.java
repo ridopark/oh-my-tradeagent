@@ -152,4 +152,42 @@ class RoundTripTest {
 
     assertThat(roundTripped).isEqualTo(original);
   }
+
+  @Test
+  void preTradeCheckRequest_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("pre-trade-check-request.json"));
+
+    PreTradeCheckRequest deserialized = mapper.readValue(json, PreTradeCheckRequest.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getTenantId()).isEqualTo("dev");
+    assertThat(deserialized.getStrategyId()).isEqualTo("copytrade-v1");
+    assertThat(deserialized.getBrokerTarget()).isEqualTo(PreTradeCheckRequest.BrokerTarget.PAPER);
+    assertThat(deserialized.getSide()).isEqualTo(PreTradeCheckRequest.Side.BUY);
+    assertThat(deserialized.getQty()).isEqualTo(1L);
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
+
+  @Test
+  void preTradeCheckResult_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("pre-trade-check-result.json"));
+
+    PreTradeCheckResult deserialized = mapper.readValue(json, PreTradeCheckResult.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getAllowed()).isTrue();
+    assertThat(deserialized.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.OK);
+    assertThat(deserialized.getMarginSufficient()).isTrue();
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
 }

@@ -1,5 +1,6 @@
 package com.ohmytradeagent.exec.config;
 
+import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.exec.activities.ExecActivities;
 import io.temporal.client.WorkflowClient;
@@ -46,9 +47,12 @@ public class TemporalWorkerConfig {
 
   @Bean
   public Worker worker(
-      WorkerFactory factory, ExecActivities exec, ReconciliationExecActivity recon) {
+      WorkerFactory factory,
+      ExecActivities exec,
+      ReconciliationExecActivity recon,
+      PreTradeCheckActivity preTradeCheck) {
     Worker worker = factory.newWorker(taskQueue);
-    worker.registerActivitiesImplementations(exec, recon);
+    worker.registerActivitiesImplementations(exec, recon, preTradeCheck);
     return worker;
   }
 }
