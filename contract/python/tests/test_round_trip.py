@@ -253,3 +253,32 @@ def test_strategy_config_force_close_bad_format_rejected() -> None:
         with pytest.raises(ValidationError) as exc_info:
             StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, "force_close_0dte_et": bad})
         assert "force_close_0dte_et" in str(exc_info.value)
+
+
+def test_strategy_config_notional_cap_fields_round_trip() -> None:
+    """Issue #17: both per-signal and per-day notional caps parse, round-trip, and absent is fine."""
+    data = {
+        **_STRATEGY_CONFIG_BASE,
+        "max_notional_per_signal": 2500.0,
+        "max_daily_notional_deployed": 25000.0,
+    }
+    model = StrategyConfig.model_validate(data)
+    assert model.max_notional_per_signal == 2500.0
+    assert model.max_daily_notional_deployed == 25000.0
+    reloaded = StrategyConfig.model_validate_json(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert reloaded.max_notional_per_signal == 2500.0
+    assert reloaded.max_daily_notional_deployed == 25000.0
+
+    # Absent case (the existing copytrade-v1 fixture) must still validate cleanly — both fields are opt-in.
+    absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
+    assert absent.max_notional_per_signal is None
+    assert absent.max_daily_notional_deployed is None
+
+
+def test_strategy_config_notional_cap_non_positive_rejected() -> None:
+    """Issue #17: both caps require exclusiveMinimum 0 — zero and negative must be rejected."""
+    for field in ("max_notional_per_signal", "max_daily_notional_deployed"):
+        for bad in (0, -1, -1000.0):
+            with pytest.raises(ValidationError) as exc_info:
+                StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, field: bad})
+            assert field in str(exc_info.value)
