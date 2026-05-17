@@ -11,10 +11,7 @@ target, and (4) the DB role posture that backs the policy at the engine layer.
 
 The schema and role grants land in `V3__audit_immutability.sql`. The runtime
 hash-chain writer and the daily Merkle root job are staged follow-ups behind
-that schema — this doc is the design they will implement against. The policy
-binding (retention period, WORM target, dual-control disposal) is **in force
-today** because the schema and grant changes are themselves the immutability
-floor.
+that schema — this doc is the design they will implement against. The policy binding is established today at the schema layer. Full engine-level enforcement (the role grant) requires a dedicated non-superuser login role — tracked as an open follow-up in §6.
 
 ## 1. Retention period
 
@@ -60,6 +57,8 @@ The `V3` migration adds two nullable columns:
         || correlation_id      (utf-8, "" if null)
         || subject_canonical   (RFC 8785 JCS-canonicalized JSON, utf-8)
       )
+
+When `prev_hash IS NULL` (the first row in a chain), substitute 32 zero bytes (`\x00 × 32`) in the concatenation before hashing. This pins the canonical byte form for chain-head rows so independent verifiers compute identical `row_hash` values; the choice cannot be revisited later without invalidating every chain head ever written.
 
 The chain writer runs **inside the same transaction that inserts the
 audit row**. It reads the previous `row_hash` for that
