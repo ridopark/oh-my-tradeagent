@@ -133,6 +133,8 @@ implementation follow-up).
 
 ## 4. DB role posture
 
+> ⚠️ **WARNING — superuser bypass.** If the orchestrator login role is a Postgres superuser (this includes the default `temporal` role provisioned by Temporal auto-setup, which is a schema owner with superuser-equivalent privileges), the `GRANT orchestrator_app TO <role>` step has no effect. PostgreSQL superusers bypass all object-privilege checks unconditionally, so the `REVOKE UPDATE, DELETE, TRUNCATE` from `orchestrator_app` does not constrain them. The immutability constraint is only enforced once the service connects as a non-superuser, non-owner login role whose only group membership is `orchestrator_app`. See follow-up #84 for the deliverable that provisions this role.
+
 `V3__audit_immutability.sql` creates an `orchestrator_app` Postgres
 role (NOLOGIN) and:
 
@@ -198,3 +200,4 @@ longer in the hot store.
 - Promote this policy to a registered-firm posture if/when the entity
   registers as a broker-dealer (SEC 17a-4 then becomes a direct
   obligation, not a reference).
+- **Testcontainers IT for `orchestrator_app` enforcement** — assert that a non-superuser login role with `orchestrator_app` membership receives `ERROR: permission denied` (`SQLSTATE 42501`) on `DELETE` / `UPDATE` of `audit_log`. Tracked in #85.

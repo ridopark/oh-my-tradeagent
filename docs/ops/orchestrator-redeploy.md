@@ -116,6 +116,7 @@ affected workflows back to the last good WFT — see Temporal docs.
   role still has membership in `orchestrator_app` (see
   [`docs/ops/audit-retention.md`](audit-retention.md) §4 "DB role posture"). Without it,
   audit INSERTs will fail post-rollout.
+  > ⚠️ The role grant alone is not sufficient if the orchestrator login role is a Postgres superuser. See `docs/ops/audit-retention.md §4` for the verification procedure that confirms the immutability constraint is engaged.
 
 ## Why this exists
 
