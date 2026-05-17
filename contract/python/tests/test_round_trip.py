@@ -225,3 +225,31 @@ def test_strategy_config_trail_debounce_ticks_zero_rejected() -> None:
     with pytest.raises(ValidationError) as exc_info:
         StrategyConfig.model_validate(data)
     assert "trail_debounce_ticks" in str(exc_info.value)
+
+
+def test_strategy_config_force_close_fields_round_trip() -> None:
+    """Issue #15: both force-close HH:MM ET overrides parse, round-trip, and absent is fine."""
+    data = {
+        **_STRATEGY_CONFIG_BASE,
+        "force_close_0dte_et": "14:45",
+        "force_close_eod_et": "15:45",
+    }
+    model = StrategyConfig.model_validate(data)
+    assert model.force_close_0dte_et == "14:45"
+    assert model.force_close_eod_et == "15:45"
+    reloaded = StrategyConfig.model_validate_json(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert reloaded.force_close_0dte_et == "14:45"
+    assert reloaded.force_close_eod_et == "15:45"
+
+    # Absent case (the existing copytrade-v1 fixture) must still validate cleanly.
+    absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
+    assert absent.force_close_0dte_et is None
+    assert absent.force_close_eod_et is None
+
+
+def test_strategy_config_force_close_bad_format_rejected() -> None:
+    """Issue #15: HH:MM regex rejects malformed times (no second-component, no 25:00)."""
+    for bad in ("15:0", "25:00", "15:60", "1500", "noon"):
+        with pytest.raises(ValidationError) as exc_info:
+            StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, "force_close_0dte_et": bad})
+        assert "force_close_0dte_et" in str(exc_info.value)

@@ -220,6 +220,16 @@
     "pre_trade_check_enabled": {
       "type": "boolean",
       "description": "Issue #6 portfolio-level gate: if true, risk.check_entry calls the exec-svc pre_trade_check Activity before approving entry. The Activity returns buying_power, pdt_status, and margin_sufficiency. Reject with PRE_TRADE_CHECK_FAILED when buying_power < new_notional, pdt_status is BLOCKED, or margin_sufficiency is false. Opt-in: null/false disables the gate."
+    },
+    "force_close_0dte_et": {
+      "type": "string",
+      "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+      "description": "Issue #15 (quant-analyst review): wall-clock time (HH:MM in US/Eastern) at which PositionWorkflow force-flats 0DTE expiry-day positions. Default 15:00 ET when null; use 14:45 ET for SPX/NDX-style names whose ATM/ITM gamma/theta and bid collapse earlier than the SPY/QQQ regime. The prior 15:30 ET default pulled exits into the gamma/theta/liquidity collapse zone — by 15:50 ET half the remaining premium was paid just to cross the spread, and pin risk on ITM contracts was real. The bot will NEVER hold an ITM 0DTE option past 15:30 ET regardless of author activity; this field only governs the earlier voluntary force-flat. A hard 15:25 ET cancel-all-resting-orders sweep also runs unconditionally. Spec-only field in this PR; PositionWorkflow timer wiring lands separately."
+    },
+    "force_close_eod_et": {
+      "type": "string",
+      "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+      "description": "Issue #15 (quant-analyst review): wall-clock time (HH:MM in US/Eastern) at which PositionWorkflow force-flats non-0DTE positions for the EOD sweep. Default 15:45 ET when null. The prior 15:55 ET default left only 5 minutes of book depth before close for liquidation; 15:45 ET preserves a 15-minute window of reasonable spreads. Spec-only field in this PR; PositionWorkflow timer wiring lands separately."
     }
   }
 }
