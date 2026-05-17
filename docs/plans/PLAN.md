@@ -411,6 +411,7 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
           # passive `limit = ref_premium` used in author-driven STC
           # (the patient ladder is wrong when the trail just tripped —
           # asymmetric urgency: protect the gain before further giveback).
+          trailing_armed = false   # guard against re-entry before fill lands
           trigger_full_exit("chandelier_trail", order_style="marketable_to_bid")
     else:
        sub_threshold_streak = 0
