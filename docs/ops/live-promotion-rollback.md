@@ -235,9 +235,10 @@ approvers must:
    passed within 30 days.
 4. Record the sign-off via the same `/killswitch/reset`-style dual-control endpoint
    used for live `force_close` and `reset_killswitch` (Phase 5 dual-control pattern).
-   The audit event is `LivePromotionApproved` with both `approver_id_1` and
-   `approver_id_2` populated; single-approver requests reject with
-   `approvers_must_differ`.
+   The audit event is `LivePromotionApproved` (new in Phase 7 — wired alongside the
+   `*-live` adapter rollout) with both `approver_id_1` and `approver_id_2` populated;
+   single-approver requests reject with `approvers_must_differ`, matching the existing
+   Phase 5 contract.
 
 Once `LivePromotionApproved` is in the audit log with two distinct IDs, the operator
 flips `broker_target` to `<provider>-live` per the promotion procedure (mirror image of
