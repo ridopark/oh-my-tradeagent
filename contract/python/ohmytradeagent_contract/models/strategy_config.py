@@ -174,3 +174,15 @@ class StrategyConfig(BaseModel):
     """
     Issue #17 (quant-analyst review): hard per-day dollar cap on cumulative entry notional deployed (sum of qty * fill_premium * 100 for SignalAccepted BTO entries today, UTC trading day). Reject new BTO entries with DAILY_NOTIONAL_DEPLOYED_EXCEEDED when today_deployed + new_notional > max_daily_notional_deployed. Complements max_notional_per_signal (per-signal bound) by capping total daily capital at risk against premium-spike over-leverage across many signals. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.
     """
+    max_spread_pct: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Issue #19 (quant-analyst review): max admissible bid/ask spread as a fraction of mid at BTO submit time, enforced at contract-resolver-svc against the freshly-fetched NBBO quote. Reject BTO with BTO_SPREAD_TOO_WIDE when (ask - bid) / mid > max_spread_pct (where mid = (ask + bid) / 2). The companion BTO_BID_ZERO rejection always fires unconditionally when bid == 0 regardless of this threshold — a no-bid option cannot be exited except by exercise and must never be entered. Opt-in: null disables the spread gate (BTO_BID_ZERO still enforced). Spec-only field in this PR; runtime wiring lands separately.
+    """
+    earnings_window_hours: conint(ge=0) | None = None
+    """
+    Issue #19 (quant-analyst review): veto entries whose holding window straddles an earnings release within N hours of payload.posted_at (lookahead) or payload.expiry (lookback). Reject BTO with EARNINGS_WINDOW_BLOCKED when the underlying has a scheduled earnings event inside [now, now + earnings_window_hours] OR inside [expiry - earnings_window_hours, expiry]. Closes the IV-crush failure mode between BTO and STC. Opt-in: null/0 disables the gate. Spec-only field in this PR; runtime wiring (earnings calendar source, exec-svc lookup) lands separately.
+    """
+    halt_check_enabled: bool | None = None
+    """
+    Issue #19 (quant-analyst review): if true, gates the future market-data-svc underlying-halt subscription that PositionWorkflow consumes to force-flat affected positions. When the underlying enters an LULD pause the option bid collapses to zero and the position becomes unexitable except by exercise; PositionWorkflow will force-flat with UNDERLYING_HALTED on receipt of the halt signal so the position closes the moment the halt clears. Opt-in: null/false disables the subscription. Spec-only field in this PR; market-data-svc halt subscription + PositionWorkflow handler land separately.
+    """
