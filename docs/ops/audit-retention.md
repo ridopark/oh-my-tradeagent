@@ -73,6 +73,8 @@ The `V3` migration adds two nullable columns:
 
 When `prev_hash IS NULL` (the first row in a chain), substitute 32 zero bytes (`\x00 × 32`) in the concatenation before hashing. This pins the canonical byte form for chain-head rows so independent verifiers compute identical `row_hash` values; the choice cannot be revisited later without invalidating every chain head ever written.
 
+For the three nullable UTF-8 fields (`actor`, `workflow_id`, `correlation_id`), `NULL` is serialized identically to the empty string — `len=0` followed by zero content bytes. The two states are not distinguishable in the canonical form; if a future event ever needs to differentiate "field not present" from "field is empty", introduce a distinct sentinel (e.g. a non-empty marker string) for one of the cases. The schema currently treats them as semantically equivalent.
+
 The chain writer runs **inside the same transaction that inserts the
 audit row**. It reads the previous `row_hash` for that
 `(tenant_id, strategy_id)` chain `FOR UPDATE`, hashes the new row, and

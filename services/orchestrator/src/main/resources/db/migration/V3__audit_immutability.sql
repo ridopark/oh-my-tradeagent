@@ -31,3 +31,4 @@ $$;
 
 REVOKE UPDATE, DELETE, TRUNCATE ON audit_log FROM orchestrator_app;
 GRANT  SELECT, INSERT                ON audit_log TO   orchestrator_app;
+GRANT USAGE ON SEQUENCE audit_log_id_seq TO orchestrator_app;
