@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from ohmytradeagent_contract.models.arm_chandelier_payload import ArmChandelierPayload
 from ohmytradeagent_contract.models.audit_event import AuditEvent
 from ohmytradeagent_contract.models.copytrade_signal_payload import (
@@ -189,3 +192,36 @@ def test_pre_trade_check_result_round_trips() -> None:
     # reject_reason is an optional field — drop None values to compare against the fixture.
     serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
     assert serialized == original
+
+
+_STRATEGY_CONFIG_BASE = {
+    "schema_version": 1,
+    "tenant_id": "dev",
+    "strategy_id": "copytrade-v1",
+    "broker_target": "paper",
+    "author_whitelist": ["acme_trader"],
+    "max_signal_age_bto_secs": 30,
+    "max_signal_age_stc_secs": 60,
+    "max_positions": 5,
+    "capital_weight": 0.2,
+    "min_contracts": 1,
+    "max_contracts": 5,
+}
+
+
+def test_strategy_config_trail_fields_positive() -> None:
+    data = {**_STRATEGY_CONFIG_BASE, "trail_debounce_ticks": 1, "trail_disarm_minutes_before_close": 0}
+    model = StrategyConfig.model_validate(data)
+    assert model.trail_debounce_ticks == 1
+    assert model.trail_disarm_minutes_before_close == 0
+    # round-trip: both fields survive serialise → parse
+    reloaded = StrategyConfig.model_validate_json(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert reloaded.trail_debounce_ticks == 1
+    assert reloaded.trail_disarm_minutes_before_close == 0
+
+
+def test_strategy_config_trail_debounce_ticks_zero_rejected() -> None:
+    data = {**_STRATEGY_CONFIG_BASE, "trail_debounce_ticks": 0}
+    with pytest.raises(ValidationError) as exc_info:
+        StrategyConfig.model_validate(data)
+    assert "trail_debounce_ticks" in str(exc_info.value)

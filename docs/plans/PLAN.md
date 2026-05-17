@@ -372,16 +372,50 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
 
   signal handler arm_chandelier:
     if trailing_armed: return
-    peak_premium = payload.peak_premium
+    # Issue #14 (quant-analyst review): `peak` is the running max of the
+    # mid (NOT last trade, NOT bid — last trade is stale on thin options
+    # and bid is the firing reference, not the high-water reference)
+    # over a 5-10 second window so a single bad print cannot bias it.
+    # `payload.peak_premium` from the partial-exit moment seeds the
+    # window; subsequent ticks roll it forward.
+    peak_premium = payload.peak_premium       # mid at arm-time (window seed)
     giveback     = payload.giveback_pct
+    sub_threshold_streak = 0                  # debounce counter; see chandelier_tick
     trailing_armed = true
     market_data.subscribe_premium(contract)   # async; fires chandelier_tick signals
 
   signal handler chandelier_tick:
     if not trailing_armed: return
+    # Issue #14 (quant-analyst review): disarm in the final
+    # cfg.trail_disarm_minutes_before_close minutes (default 30) before
+    # market close — by then theta giveback dominates real momentum and
+    # the trail becomes a noise-driven flush. The EOD timer at 15:55 ET
+    # handles the exit instead. Disarming silently is intentional: once
+    # disarmed, ticks keep flowing (cheap) but never fire.
+    if now >= market_close - cfg.trail_disarm_minutes_before_close minutes:
+       trailing_armed = false
+       return
+    # market-data-svc populates tick.premium with the mid (bid+ask)/2
+    # smoothed over a 5-10s window — last-trade is stale on thin options.
+    # PositionWorkflow only retains the running max here; it does not
+    # recompute the mid.
     if tick.premium > peak_premium: peak_premium = tick.premium
+    # Issue #14: fire requires cfg.trail_debounce_ticks consecutive ticks
+    # (default 2) below `peak_premium * (1 - giveback)` so a single bad
+    # print cannot trigger an exit. A tick at-or-above threshold resets
+    # the streak.
     if tick.premium < peak_premium * (1 - giveback):
-       trigger_full_exit("chandelier_trail")
+       sub_threshold_streak += 1
+       if sub_threshold_streak >= (cfg.trail_debounce_ticks or 2):
+          # Issue #14: on fire, route MARKETABLE-TO-BID (limit = bid,
+          # crossing the spread to take liquidity NOW) rather than the
+          # passive `limit = ref_premium` used in author-driven STC
+          # (the patient ladder is wrong when the trail just tripped —
+          # asymmetric urgency: protect the gain before further giveback).
+          trailing_armed = false   # guard against re-entry before fill lands
+          trigger_full_exit("chandelier_trail", order_style="marketable_to_bid")
+    else:
+       sub_threshold_streak = 0
 ```
 
 ### Reconciliation flow
@@ -621,7 +655,7 @@ Python pieces (`contract/python`, `services/signal-source-discord`) are not Mave
 | **2b. Exec paper (no exits yet)** | `exec-svc` skeleton with `OrderIntentJournal` (jOOQ + Postgres), `OptionsBroker` port, `StubBroker` adapter, `place_order` / `cancel_order` / `get_order_status` Activity contract. Full BTO path wired in `CopytradeSignalWorkflow`; BTO TTL handled inline (no separate timer workflow yet). Originally shipped as `exec-tradier-paper-svc`; renamed/generalized in Phase 2c. | A vetted BTO produces a paper option order with no duplicates under simulated `orchestrator-svc` crash + restart between journal write and broker call. Journal idempotency tests run in CI against `Testcontainers` Postgres. |
 | **2c. Broker adapter pattern + Alpaca paper** | Generalize `exec-tradier-paper-svc` → `exec-svc` (provider-agnostic image). Add `OptionsBroker` adapters under `broker/<provider>/`: ship `alpaca/AlpacaPaperBroker` (REST → `paper-api.alpaca.markets`) as the first real adapter. Parallel `MarketDataProvider` port + `alpaca/AlpacaMarketData` (REST quote + WebSocket stream) in `market-data-svc`. `broker_target` config key shape becomes `<provider>-<env>` (e.g. `alpaca-paper`). Tradier / IBKR / Schwab adapters land as follow-ups (2c.x). | A paper BTO under tenant `dev` with `broker_target=alpaca-paper` produces a real order at Alpaca paper sandbox with the journaled `client_order_id`; STC partial via `arm_chandelier` arms a real Alpaca WS premium stream and fires `chandelier_tick` when the premium gives back `trail_giveback_pct`. Per-adapter contract tests run in CI against mocked HTTP backends. |
 | **3. PositionWorkflow + STC exits + BTO TTL** | `PositionWorkflow` (Java) with `partial_exit` signal handler, EOD/expiry timers, signal-id dedupe set, in-flight exit guard. `BTOEntryTimerWorkflow`. `CopytradeSignalWorkflow` STC branch with `KeywordPartialMatcher` + Redis-cached OCC→workflow_id lookup with Visibility fallback + signal dispatch. `ContractSymbol` SA set on every `PositionWorkflow`. | One paper position: BTO → filled (PositionWorkflow starts; cache populated) → STC "half out" → 50% closes → STC "out" → remainder closes → workflow completes. `TestWorkflowEnvironment` E2E test green. EOD timer at simulated 15:55 ET force-flattens. STC dispatched after orchestrator restart (cache cold) still finds the position via Visibility. |
-| **4. Trailing exit (CHANDELIER_TRAIL)** | `market-data-svc` streaming option quotes via broker WS; `subscribe_premium` Activity that fires `chandelier_tick` Signals into `PositionWorkflow`. `PositionWorkflow.arm_chandelier` handler + tick evaluation. First-partial-arms logic in STC flow. | After arm via simulated STC, an injected quote sequence reaching peak then giving back `cfg.trail_giveback_pct` triggers a full exit. |
+| **4. Trailing exit (CHANDELIER_TRAIL)** | `market-data-svc` streaming option quotes via broker WS; `subscribe_premium` Activity that fires `chandelier_tick` Signals into `PositionWorkflow`. `PositionWorkflow.arm_chandelier` handler + tick evaluation. First-partial-arms logic in STC flow. Issue #14 (quant-analyst review): `peak` is the running max of the mid over a 5-10s window (single-tick filter), fire requires `cfg.trail_debounce_ticks` (default 2) consecutive sub-threshold ticks, on fire the order is marketable-to-bid (not the patient `limit=ref_premium` used in author-driven STC), and the trail disarms in the final `cfg.trail_disarm_minutes_before_close` (default 30) minutes before close so the EOD timer handles the exit. | After arm via simulated STC, an injected quote sequence reaching peak then giving back `cfg.trail_giveback_pct` over `cfg.trail_debounce_ticks` consecutive ticks triggers a marketable-to-bid full exit; a single bad print does NOT trigger; a tick sequence arriving inside the disarm window does NOT trigger. |
 | **5. Kill switch + reconciliation + api-gateway** | `KillSwitchWorkflow` (long-running, `continueAsNew` daily) with `trip_killswitch` / `reset_killswitch` Updates, `risk_breach` cascade via `listWorkflowExecutions(TenantStrategy=...)` + `signalWorkflow`. Auto-trip activity on daily-loss threshold. `risk.check_entry` fails closed on missing kill-switch workflow. `ReconciliationWorkflow` (Temporal Schedule every 5 min + startup). `api-gateway` with `GET /positions`, `POST /killswitch/trip`, `POST /positions/:id/force-close`, `GET /audit`. | Tripping killswitch via REST halts new entries and force-closes open positions within 5s. Recon catches a manually-induced journal-broker mismatch and surfaces it via audit. Restarting Temporal cluster without the kill-switch workflow blocks all new entries with `kill_switch_unavailable`. |
 | **5b. Production topology + ops** | k8s manifests (or Nomad / docker-swarm, TBD); CI/CD pipeline (image build + push + deploy gates); on-call runbooks for `orchestrator-redeploy`, `discord-session-expired`, `temporal-cluster-down`, `kill-switch-stuck`, `journal-broker-mismatch`; secret-rotation policy (Vault transit / AWS-SM versioning); audit-log retention policy. Blue/green or drain-then-pin redeploy support for orchestrator-svc with running `PositionWorkflow`s. | A green redeploy of orchestrator-svc with 3+ running `PositionWorkflow`s completes with zero workflow stalls; runbook drills pass for at least 3 of the 5 documented incidents. |
 | **5b.E. Consolidate Temporal cluster** | The homelab currently runs two independent Temporal clusters: `temporal/temporal-frontend` (shared, used by the `apps/cookbook-agentic-loop` workload) and `copytrade/temporal` (spun up by 5b.A for copy-trade only). Consolidate onto the shared cluster: register a Temporal namespace `copytrade` on `temporal/temporal-frontend`, repoint copy-trade services (`orchestrator-svc`, `exec-svc-*`, `audit-svc`, `market-data-svc`, `api-gateway`, `signal-source-discord`) via `TEMPORAL_TARGET=temporal-frontend.temporal.svc.cluster.local:7233` + `TEMPORAL_NAMESPACE=copytrade`, migrate the reconciliation Schedule, drain in-flight workflows, then tear down the in-`copytrade` Temporal Deployment/StatefulSet + its Postgres database. Adds Ingress for the consolidated UI (already at `http://temporal.192.168.10.123.nip.io`, just dropdown-switch to namespace `copytrade`). Bootstrap of the `copytrade` Temporal namespace (re-registering `TenantStrategy` + `ContractSymbol` Search Attributes) is captured in a script under `scripts/ops/`. | A synthetic BTO routed via `scripts/harness/inject_synthetic_bto.py` lands a workflow on `temporal/temporal-frontend` namespace `copytrade` and completes through PlaceOrder against Alpaca paper. `kubectl -n copytrade get statefulset` shows no `temporal-*` resources. `temporal operator search-attribute list --namespace copytrade` shows both custom SAs. The reconciliation Schedule fires from the consolidated cluster within 5 minutes of cutover. |
