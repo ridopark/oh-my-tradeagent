@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, conint, constr
 
 
 class AuditEvent(BaseModel):
@@ -30,13 +30,32 @@ class AuditEvent(BaseModel):
     """
     RFC3339 UTC timestamp set by the originator of the event (broker for fills, sidecar for posted, workflow for decided).
     """
-    kind: constr(min_length=1)
+    kind: constr(min_length=1) = Field(
+        ...,
+        examples=[
+            "SignalReceived",
+            "SignalAccepted",
+            "SignalRejected",
+            "EntryFilled",
+            "EntryExpired",
+            "ExitRequested",
+            "KillSwitchTripped",
+            "KillSwitchResetApproved",
+            "KillSwitchResetExpired",
+            "KillSwitchDegraded",
+            "ReconciliationCompleted",
+            "JournalOrphan",
+            "BrokerOrphan",
+            "OrphanSTC",
+            "SymbolDriftDetected",
+        ],
+    )
     """
-    Event kind tag (e.g., SignalReceived, SignalAccepted, SignalRejected, EntryFilled, EntryExpired, ExitRequested, KillSwitchTripped, KillSwitchResetApproved, ReconciliationCompleted, JournalOrphan, BrokerOrphan, OrphanSTC, SymbolDriftDetected).
+    Event kind tag. Known kinds: SignalReceived, SignalAccepted, SignalRejected, EntryFilled, EntryExpired, ExitRequested, KillSwitchTripped, KillSwitchResetApproved, KillSwitchResetExpired, KillSwitchDegraded, ReconciliationCompleted, JournalOrphan, BrokerOrphan, OrphanSTC, SymbolDriftDetected. KillSwitchResetApproved (issue #7) is emitted by KillSwitchWorkflow.reset_killswitch only after dual-control approval; its subject MUST include trip_event_id, root_cause, remediation_ref, resumption_decision, approver_primary, approver_secondary, requested_at, approved_at — with approver_primary != approver_secondary. See PLAN.md 'Kill switch flow / Reset SOP' for the full SOP.
     """
     subject: dict[str, Any]
     """
-    Free-form structured payload for the event. Schema-by-kind to be formalized as the system grows; v0 uses ad-hoc shape.
+    Free-form structured payload for the event. Schema-by-kind to be formalized as the system grows; v0 uses ad-hoc shape. For kind=KillSwitchResetApproved the subject is constrained by convention to {trip_event_id, root_cause, remediation_ref, resumption_decision, approver_primary, approver_secondary, requested_at, approved_at}; the JSON Schema keeps additionalProperties=true for forward compatibility, but the dual-control approver fields MUST both be present and distinct.
     """
     actor: str | None = None
     """
