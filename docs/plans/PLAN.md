@@ -153,10 +153,13 @@ Each Update has two stages: a synchronous **Validator** (must be deterministic, 
 
 | Update | Target | Validator | WaitPolicy (default) | Handler effect | In-flight handling |
 |---|---|---|---|---|---|
-| `force_close` | `PositionWorkflow` | Caller is authorized operator | `Completed` (HTTP 200 with final order id) | Sets `force_exit=true`; cancels any in-flight exit, places marketable-to-bid for full remaining qty | If `exit_in_flight`, cancel current order then place force-exit; new exits/STCs rejected until force completes |
+| `force_close` | `PositionWorkflow` | Caller is authorized operator; dual-control approver IDs distinct (Issue #21) | `Completed` (HTTP 200 with final order id) | Sets `force_exit=true`; cancels any in-flight exit, places marketable-to-bid for full remaining qty; writes `ForceCloseApproved` audit event with both approver IDs | If `exit_in_flight`, cancel current order then place force-exit; new exits/STCs rejected until force completes |
 | `adjust_trail` | `PositionWorkflow` | New giveback pct in `(0, 0.5]`; trail armed | `Accepted` | Updates `giveback_pct` for subsequent `chandelier_tick` evals | No interaction with in-flight orders |
 | `trip_killswitch` | `KillSwitchWorkflow` | Caller is authorized; not already tripped | `Accepted` (HTTP 202 immediately; cascade is async) | Sets `tripped=true`; fan-out `risk_breach` signals to all running workflows for `(tenant, strategy)` via `TenantStrategy` SA query | New `CopytradeSignalWorkflow`s fail-closed on `killswitch_state` query |
+| `pause_entries` | `KillSwitchWorkflow` | Caller is authorized; not already paused; killswitch not tripped | `Accepted` | Sets `entries_paused=true`; new `CopytradeSignalWorkflow`s fail-closed on `killswitch_state.entries_paused` query with reason `ENTRIES_PAUSED`; existing `PositionWorkflow`s continue running (STC, trail, EOD timers unaffected) | None — running positions unaffected by design |
 | `reset_killswitch` | `KillSwitchWorkflow` | Caller is authorized; `tripped == true`; dual-control approver IDs distinct (Phase 5 — Issue #21) | `Completed` | Sets `tripped=false`; writes `KillSwitchResetApproved` audit event with both approver IDs | None |
+
+The `force_close` dual-control requirement applies to **live** broker targets only (any `*-live` adapter); paper / `*-paper` adapters remain single-operator for ops-drill ergonomics.
 
 ## End-to-end flows
 
@@ -652,44 +655,95 @@ realized arm, while `risk.check_entry` rejects new entries with
 of the unrealized arm is never permitted.
 ```
 
-#### Reset SOP
+#### Dual-control SOP (reset + live force-close)
 
-A tripped kill switch is an explicit safety state. Resetting it requires
-**dual-control** human approval — no single operator and no automated
-process may reset it.
+A tripped kill switch is an explicit safety state. Resetting it
+requires **dual-control** human approval — no single operator and no
+automated process may reset it. The same dual-control gate applies to
+`force_close` on a `PositionWorkflow` whose `broker_target` is a
+live adapter (`*-live`); paper / `*-paper` `force_close` remains
+single-operator for ops-drill ergonomics.
 
-- **Who authorizes.** Two distinct operators with the `killswitch:reset`
-  role in `platform-svc`'s RBAC. The primary requests the reset; the
-  secondary independently approves. The two operator identities MUST be
-  distinct — same-user resets are rejected by `reset_killswitch` (see
-  Phase 5 — Issue #21).
-- **Evidence required.** Before requesting the reset the primary
-  operator attaches: (1) the original trip's `KillSwitchTripped` audit
-  event ID, (2) a written root-cause statement (free text, captured on
-  the request), (3) a link or doc reference describing the remediation
-  (closed positions, broker reconciliation completed, market-data feed
-  restored, etc.), and (4) the resumption decision (continue trading
-  vs. drain to flat). All four fields are required by the api-gateway
-  `POST /killswitch/reset` request body; missing fields produce a 400.
-- **Dual-control approval flow.** Primary calls `POST /killswitch/reset`
-  with the evidence above; the request enters a `pending_secondary`
-  state. Secondary calls `POST /killswitch/reset/approve` referencing
-  the pending request ID. The `reset_killswitch` Update fires only when
-  both approvals are recorded with distinct operator identities; if the
-  secondary identity matches the primary's, the Update is rejected and
-  the pending state is dropped. Pending requests expire after 30 minutes
-  with an `audit.log(KillSwitchResetExpired)` event.
-- **Audit event.** On successful reset the workflow writes a
+- **Who authorizes.** Two distinct operators with the appropriate
+  role in `platform-svc`'s RBAC — `killswitch:reset` for
+  `reset_killswitch`, `position:force-close-live` for live
+  `force_close`. The primary requests the action; the secondary
+  independently approves. The two operator identities MUST be distinct
+  — same-user requests are rejected at the `reset_killswitch` /
+  `force_close` Update validator (Issue #21).
+- **Evidence required (reset).** Before requesting the reset the
+  primary operator attaches: (1) the original trip's
+  `KillSwitchTripped` audit event ID, (2) a written root-cause
+  statement (free text, captured on the request), (3) a link or doc
+  reference describing the remediation (closed positions, broker
+  reconciliation completed, market-data feed restored, etc.), and (4)
+  the resumption decision (continue trading vs. drain to flat). All
+  four fields are required by the api-gateway `POST /killswitch/reset`
+  request body; missing fields produce a 400.
+- **Evidence required (live force-close).** Before requesting a live
+  `force_close` the primary operator attaches: (1) the `position_workflow_id`
+  being closed, (2) a written reason (free text, captured on the
+  request). The api-gateway `POST /positions/:id/force-close` request
+  body requires both; missing fields produce a 400.
+- **Dual-control approval flow.** Two api-gateway endpoint pairs
+  enforce the same two-step request/approve handshake:
+  - **Reset:** Primary calls `POST /killswitch/reset` with the
+    evidence above; the request enters a `pending_secondary` state.
+    Secondary calls `POST /killswitch/reset/approve` referencing the
+    pending request ID. The `reset_killswitch` Update fires only when
+    both approvals are recorded with distinct operator identities; if
+    the secondary identity matches the primary's, the Update is
+    rejected and the pending state is dropped. Pending requests expire
+    after 30 minutes with an `audit.log(KillSwitchResetExpired)` event.
+  - **Live force-close:** Primary calls
+    `POST /positions/:id/force-close` with the evidence above; the
+    request enters a `pending_secondary` state. Secondary calls
+    `POST /positions/:id/force-close/approve` referencing the pending
+    request ID. The `force_close` Update fires only when both
+    approvals are recorded with distinct operator identities; if the
+    secondary identity matches the primary's, the Update is rejected
+    and the pending state is dropped. Pending requests expire after 30
+    minutes with an `audit.log(ForceCloseExpired)` event.
+- **Audit event (reset).** On successful reset the workflow writes a
   `KillSwitchResetApproved` audit event whose `subject` carries
   `{trip_event_id, root_cause, remediation_ref, resumption_decision,
   approver_primary, approver_secondary, requested_at, approved_at}`.
   Both approver identities are persisted in the event — never collapsed
   into a single field — so post-hoc audit can verify dual-control was
   actually enforced rather than logged after the fact.
+- **Audit event (live force-close).** On successful live `force_close`
+  the workflow writes a `ForceCloseApproved` audit event whose
+  `subject` carries `{position_workflow_id, reason, approver_primary,
+  approver_secondary, requested_at, approved_at}`. Both approver
+  identities are persisted in the event — never collapsed into a
+  single field.
+- **Audit event (pause entries).** On successful `pause_entries` the
+  workflow writes an `EntriesPaused` audit event whose `subject`
+  carries `{tenant, strategy, paused_by, paused_at}`. Single-operator
+  by design (no dual-control required to pause), but both the operator
+  identity and timestamp are required.
 - **Post-reset behaviour.** `cfg.reset_cooldown_secs` (if configured)
   blocks new entries with `KILL_SWITCH_COOLING_DOWN` for the cooldown
   window after a successful reset, closing the signal-backlog stampede
   vector.
+
+**Acceptance criteria (Issue #21 binding contract).** The override
+surface specified in this section MUST satisfy all three of:
+- `pause_entries` Update on `KillSwitchWorkflow`.
+- Dual-control approval flow in `api-gateway`.
+- `KillSwitchResetApproved` and `ForceCloseApproved` audit events
+  include both approver IDs.
+
+**Deferred to follow-up issues** (each filed separately; numbers TBD):
+(a) `KillSwitchWorkflow.pause_entries` Update Java implementation +
+`killswitch_state` query schema bump to expose `entries_paused`; (b)
+`api-gateway` dual-control endpoint pairs (reset + live force-close)
+and pending-request store (Redis or in-workflow state) with 30-minute
+expiry timers; (c) `ForceCloseApproved` / `EntriesPaused` audit event
+schemas + emitters wired into `audit-svc`; (d) RBAC role
+`position:force-close-live` distinct from `position:force-close-paper`
+in `platform-svc`. Each future issue carries its own TDD plan since
+all four touch trading-critical code paths.
 
 ## Cross-cutting concerns
 
@@ -793,7 +847,7 @@ Python pieces (`contract/python`, `services/signal-source-discord`) are not Mave
 | **2c. Broker adapter pattern + Alpaca paper** | Generalize `exec-tradier-paper-svc` → `exec-svc` (provider-agnostic image). Add `OptionsBroker` adapters under `broker/<provider>/`: ship `alpaca/AlpacaPaperBroker` (REST → `paper-api.alpaca.markets`) as the first real adapter. Parallel `MarketDataProvider` port + `alpaca/AlpacaMarketData` (REST quote + WebSocket stream) in `market-data-svc`. `broker_target` config key shape becomes `<provider>-<env>` (e.g. `alpaca-paper`). Tradier / IBKR / Schwab adapters land as follow-ups (2c.x). | A paper BTO under tenant `dev` with `broker_target=alpaca-paper` produces a real order at Alpaca paper sandbox with the journaled `client_order_id`; STC partial via `arm_chandelier` arms a real Alpaca WS premium stream and fires `chandelier_tick` when the premium gives back `trail_giveback_pct`. Per-adapter contract tests run in CI against mocked HTTP backends. |
 | **3. PositionWorkflow + STC exits + BTO TTL** | `PositionWorkflow` (Java) with `partial_exit` signal handler, EOD/expiry timers, signal-id dedupe set, in-flight exit guard. `BTOEntryTimerWorkflow`. `CopytradeSignalWorkflow` STC branch with `KeywordPartialMatcher` + Redis-cached OCC→workflow_id lookup with Visibility fallback + signal dispatch. `ContractSymbol` SA set on every `PositionWorkflow`. | One paper position: BTO → filled (PositionWorkflow starts; cache populated) → STC "half out" → 50% closes → STC "out" → remainder closes → workflow completes. `TestWorkflowEnvironment` E2E test green. EOD timer at simulated 15:55 ET force-flattens. STC dispatched after orchestrator restart (cache cold) still finds the position via Visibility. |
 | **4. Trailing exit (CHANDELIER_TRAIL)** | `market-data-svc` streaming option quotes via broker WS; `subscribe_premium` Activity that fires `chandelier_tick` Signals into `PositionWorkflow`. `PositionWorkflow.arm_chandelier` handler + tick evaluation. First-partial-arms logic in STC flow. Issue #14 (quant-analyst review): `peak` is the running max of the mid over a 5-10s window (single-tick filter), fire requires `cfg.trail_debounce_ticks` (default 2) consecutive sub-threshold ticks, on fire the order is marketable-to-bid (not the patient `limit=ref_premium` used in author-driven STC), and the trail disarms in the final `cfg.trail_disarm_minutes_before_close` (default 30) minutes before close so the EOD timer handles the exit. | After arm via simulated STC, an injected quote sequence reaching peak then giving back `cfg.trail_giveback_pct` over `cfg.trail_debounce_ticks` consecutive ticks triggers a marketable-to-bid full exit; a single bad print does NOT trigger; a tick sequence arriving inside the disarm window does NOT trigger. |
-| **5. Kill switch + reconciliation + api-gateway** | `KillSwitchWorkflow` (long-running, `continueAsNew` daily) with `trip_killswitch` / `reset_killswitch` Updates, `risk_breach` cascade via `listWorkflowExecutions(TenantStrategy=...)` + `signalWorkflow`. Auto-trip activity on daily-loss threshold. `risk.check_entry` fails closed on missing kill-switch workflow. `ReconciliationWorkflow` (Temporal Schedule every 5 min + startup). `api-gateway` with `GET /positions`, `POST /killswitch/trip`, `POST /positions/:id/force-close`, `GET /audit`. | Tripping killswitch via REST halts new entries and force-closes open positions within 5s. Recon catches a manually-induced journal-broker mismatch and surfaces it via audit. Restarting Temporal cluster without the kill-switch workflow blocks all new entries with `kill_switch_unavailable`. |
+| **5. Kill switch + reconciliation + api-gateway** | `KillSwitchWorkflow` (long-running, `continueAsNew` daily) with `trip_killswitch` / `reset_killswitch` Updates, `risk_breach` cascade via `listWorkflowExecutions(TenantStrategy=...)` + `signalWorkflow`. Auto-trip activity on daily-loss threshold. `risk.check_entry` fails closed on missing kill-switch workflow. `ReconciliationWorkflow` (Temporal Schedule every 5 min + startup). `api-gateway` with `GET /positions`, `POST /killswitch/trip`, `POST /positions/:id/force-close`, `GET /audit`. `pause_entries` Update on `KillSwitchWorkflow`; dual-control approval flow in `api-gateway` covering both `reset_killswitch` and live `force_close`; audit events `EntriesPaused` / `KillSwitchResetApproved` / `ForceCloseApproved` include both approver IDs where dual-control applies. | Tripping killswitch via REST halts new entries and force-closes open positions within 5s. Recon catches a manually-induced journal-broker mismatch and surfaces it via audit. Restarting Temporal cluster without the kill-switch workflow blocks all new entries with `kill_switch_unavailable`. Pausing entries via REST blocks new BTOs with `ENTRIES_PAUSED` while leaving running positions untouched; single-operator `reset_killswitch` or live `force_close` requests are rejected and emit no state change; dual-approver requests with distinct identities succeed and produce audit events containing both IDs. |
 | **5b. Production topology + ops** | k8s manifests (or Nomad / docker-swarm, TBD); CI/CD pipeline (image build + push + deploy gates); on-call runbooks for `orchestrator-redeploy`, `discord-session-expired`, `temporal-cluster-down`, `kill-switch-stuck`, `journal-broker-mismatch`; secret-rotation policy (Vault transit / AWS-SM versioning); audit-log retention policy. Blue/green or drain-then-pin redeploy support for orchestrator-svc with running `PositionWorkflow`s. | A green redeploy of orchestrator-svc with 3+ running `PositionWorkflow`s completes with zero workflow stalls; runbook drills pass for at least 3 of the 5 documented incidents. |
 | **5b.E. Consolidate Temporal cluster** | The homelab currently runs two independent Temporal clusters: `temporal/temporal-frontend` (shared, used by the `apps/cookbook-agentic-loop` workload) and `copytrade/temporal` (spun up by 5b.A for copy-trade only). Consolidate onto the shared cluster: register a Temporal namespace `copytrade` on `temporal/temporal-frontend`, repoint copy-trade services (`orchestrator-svc`, `exec-svc-*`, `audit-svc`, `market-data-svc`, `api-gateway`, `signal-source-discord`) via `TEMPORAL_TARGET=temporal-frontend.temporal.svc.cluster.local:7233` + `TEMPORAL_NAMESPACE=copytrade`, migrate the reconciliation Schedule, drain in-flight workflows, then tear down the in-`copytrade` Temporal Deployment/StatefulSet + its Postgres database. Adds Ingress for the consolidated UI (already at `http://temporal.192.168.10.123.nip.io`, just dropdown-switch to namespace `copytrade`). Bootstrap of the `copytrade` Temporal namespace (re-registering `TenantStrategy` + `ContractSymbol` Search Attributes) is captured in a script under `scripts/ops/`. | A synthetic BTO routed via `scripts/harness/inject_synthetic_bto.py` lands a workflow on `temporal/temporal-frontend` namespace `copytrade` and completes through PlaceOrder against Alpaca paper. `kubectl -n copytrade get statefulset` shows no `temporal-*` resources. `temporal operator search-attribute list --namespace copytrade` shows both custom SAs. The reconciliation Schedule fires from the consolidated cluster within 5 minutes of cutover. |
 | **6. Multi-tenant production** | `SecretsResolver` Vault / AWS-SM adapter. `QuotaTracker` Redis enforcement at scale (real broker call counters, per-tenant concurrent-position caps). Per-tenant audit-log queries. Second tenant onboarded via `tenants/<id>/`. CI guardrail expanded to enforce tenant scoping on every Activity. **One-tenant-per-`exec-svc` worker pool (Issue #20):** `exec-svc` is deployed once per tenant (per `<provider>-<env>` pair), with its worker pool bound to that single `tenant_id`; cross-tenant blast radius is bounded by deployment topology rather than by code review alone. **IP/Advisers Act gate (blocker before second tenant; Issue #5):** before onboarding any tenant beyond `dev` (or any non-personal use), the following must be on file: (a) written, signed redistribution license from the Discord author covering the trade signals being consumed; (b) securities counsel review of investment-adviser registration triggers (state-level Advisers Act, federal IA-39, available exemptions) with a written opinion on whether the operating entity must register; (c) documented entity structure and the disclosures shown to tenants. **Legal/license workstream owner:** TBD (must be assigned before this gate clears). **Securities counsel:** TBD (must be selected and engaged before this gate clears). | A second tenant runs side-by-side on isolated broker creds and isolated audit; quota exhaustion produces clean `QuotaExceededError` halts; cross-tenant queries return empty. **AND (Issue #20):** Postgres RLS enabled on all tenant-scoped tables (a cross-tenant `SELECT` executed under tenant A's DB role against tenant B's row is refused by the database, not filtered by the application); `TenantContext` middleware in Java common module is wired into every Activity entry point and a deliberate cross-tenant query in an Activity trips the assertion and emits a `tenant_context_violation` audit event; `exec-svc` deployed with one tenant per worker pool (one Deployment per tenant per `<provider>-<env>`, worker pool bound to a single `tenant_id`). **AND** the IP/Advisers Act gate above is closed: signed redistribution license filed, counsel opinion on file, owner + counsel recorded in this row (replacing the TBD placeholders), entity structure + tenant disclosures documented. |
