@@ -45,18 +45,31 @@ The `V3` migration adds two nullable columns:
 - `row_hash BYTEA` — SHA-256 of a canonical serialization of this row,
   including `prev_hash`. Canonical form:
 
-      sha256(
-        prev_hash
-        || tenant_id           (utf-8)
-        || strategy_id         (utf-8)
-        || event_id            (16 bytes)
-        || occurred_at         (epoch micros, big-endian 8 bytes)
-        || kind                (utf-8)
-        || actor               (utf-8, "" if null)
-        || workflow_id         (utf-8, "" if null)
-        || correlation_id      (utf-8, "" if null)
-        || subject_canonical   (RFC 8785 JCS-canonicalized JSON, utf-8)
+      row_hash = sha256(
+          prev_hash                                            // 32 bytes (or \x00 × 32 if NULL — chain head)
+       || schema_version                                       // 4 bytes  (big-endian uint32, audit_log.schema_version)
+       || len(tenant_id_utf8)            || tenant_id_utf8     // 4 + N bytes
+       || len(strategy_id_utf8)          || strategy_id_utf8   // 4 + N bytes
+       || event_id                                             // 16 bytes (UUID big-endian)
+       || occurred_at_unix_micros                              // 8 bytes  (big-endian int64; Unix epoch 1970-01-01 UTC, microseconds)
+       || len(kind_utf8)                 || kind_utf8          // 4 + N bytes
+       || len(actor_utf8)                || actor_utf8         // 4 + N bytes  ("" allowed; len=0)
+       || len(workflow_id_utf8)          || workflow_id_utf8   // 4 + N bytes  ("" allowed; len=0)
+       || len(correlation_id_utf8)       || correlation_id_utf8 // 4 + N bytes  ("" allowed; len=0)
+       || len(subject_canonical_bytes)   || subject_canonical_bytes // 4 + N bytes  (RFC 8785 JCS of the subject JSONB, UTF-8)
       )
+
+  Where:
+  - All `len(...)` fields are 4-byte big-endian unsigned int32 of the byte length of the UTF-8 encoding (or RFC 8785 canonical form for `subject_canonical_bytes`).
+  - `occurred_at_unix_micros` is `EXTRACT(EPOCH FROM occurred_at)::numeric * 1_000_000` rounded to int64, using **Unix epoch (1970-01-01 UTC)**, not the Postgres internal epoch (2000-01-01).
+  - `schema_version` is a fixed-width int so no length prefix is needed. It is included so a privileged actor cannot alter the audit row's schema marker without invalidating the chain.
+  - `subject_canonical_bytes` is a **derived** value computed in-memory by the chain writer from the canonicalized `subject` JSONB before insert. It is NOT a stored column.
+
+**Why length prefixes?** Concatenating variable-length fields without delimiters is ambiguous: `tenant_id="ab" || strategy_id="cd"` produces the same byte sequence as `tenant_id="a" || strategy_id="bcd"`. Prefixing each variable-length field with its 4-byte byte-length eliminates all such collisions.
+
+**Why Unix epoch (1970-01-01 UTC)?** Unix epoch is the universal reference for `java.time.Instant`, Python `datetime.timestamp()`, and Postgres `EXTRACT(EPOCH FROM ...)`. Using Postgres's internal epoch (2000-01-01) would require an offset correction in every non-Postgres verifier, which is a latent interoperability bug.
+
+**Why `subject_canonical_bytes` is derived, not stored?** The chain writer canonicalizes the `subject` JSONB in-memory (RFC 8785 JCS) and hashes the result. The canonicalized bytes are not persisted as a separate column. A verifier may read back the stored `subject` JSONB and re-canonicalize it to reproduce the same bytes; the in-memory path at insert time is the reference.
 
 When `prev_hash IS NULL` (the first row in a chain), substitute 32 zero bytes (`\x00 × 32`) in the concatenation before hashing. This pins the canonical byte form for chain-head rows so independent verifiers compute identical `row_hash` values; the choice cannot be revisited later without invalidating every chain head ever written.
 
