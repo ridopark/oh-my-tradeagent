@@ -48,6 +48,15 @@ orchestrator:
   capital:
     per-strategy: ${ORCHESTRATOR_CAPITAL_PER_STRATEGY:100000}
 
+# Issue #85: audit-log per-row SHA-256 hash chain. When enabled, AuditActivitiesImpl
+# performs a transactional `SELECT row_hash ... FOR UPDATE` on the prior chain head
+# per (tenant_id, strategy_id) and persists prev_hash + row_hash on every INSERT.
+# Disable (set to false) for single-knob rollback if a hashing bug surfaces in
+# production — new rows then carry NULL hash columns (V3 schema permits it).
+audit:
+  chain-writer:
+    enabled: ${AUDIT_CHAIN_WRITER_ENABLED:true}
+
 management:
   endpoints:
     web:
