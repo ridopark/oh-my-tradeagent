@@ -40,7 +40,7 @@ class PreTradeCheckRequest(BaseModel):
     """
     option_symbol: constr(min_length=1)
     """
-    OCC option symbol the gate is evaluating. Included so broker adapters can ask their venue for symbol-specific buying-power or margin requirements when supported.
+    Full OCC option symbol (e.g. 'AAPL250117C00150000') the gate is evaluating, resolved upstream by ContractActivities.resolve from CopytradeSignalPayload.(ticker, expiry, strike, right). Distinct from the raw underlying ticker on the signal payload. Included so broker adapters can ask their venue for symbol-specific buying-power or margin requirements when supported.
     """
     side: Side
     """

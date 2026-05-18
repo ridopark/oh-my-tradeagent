@@ -30,7 +30,7 @@ class Right(StrEnum):
 
 class CopytradeSignalPayload(BaseModel):
     """
-    Parsed Discord BTO/STC/AVG line emitted by signal-source-discord and consumed by CopytradeSignalWorkflow. Reference: docs/plans/PLAN.md, oh-my-opentrade/backend/internal/domain/copytrade.go.
+    Parsed Discord BTO/STC/AVG line emitted by signal-source-discord and consumed by CopytradeSignalWorkflow. Carries the underlying ticker plus the (expiry, strike, right) tuple — NOT the resolved OCC option symbol. OCC resolution (e.g. 'AAPL250117C00150000') is performed downstream by ContractActivities.resolve and surfaces on OrderIntent.option_symbol / PreTradeCheckRequest.option_symbol. Reference: docs/plans/PLAN.md, oh-my-opentrade/backend/internal/domain/copytrade.go.
     """
 
     model_config = ConfigDict(
@@ -70,7 +70,7 @@ class CopytradeSignalPayload(BaseModel):
     """
     ticker: constr(pattern=r"^[A-Z]{1,6}$")
     """
-    Underlying equity symbol; uppercase, no exchange suffix.
+    Underlying equity ticker (e.g. 'AAPL'); uppercase, no exchange suffix. This is the RAW underlying — not an OCC option symbol. The full OCC symbol (e.g. 'AAPL250117C00150000') is composed downstream by ContractActivities.resolve from (ticker, expiry, strike, right) and lands on OrderIntent.option_symbol before exec.
     """
     expiry: date
     """

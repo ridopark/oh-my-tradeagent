@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://oh-my-tradeagent/schemas/copytrade-signal-payload.json",
   "title": "CopytradeSignalPayload",
-  "description": "Parsed Discord BTO/STC/AVG line emitted by signal-source-discord and consumed by CopytradeSignalWorkflow. Reference: docs/plans/PLAN.md, oh-my-opentrade/backend/internal/domain/copytrade.go.",
+  "description": "Parsed Discord BTO/STC/AVG line emitted by signal-source-discord and consumed by CopytradeSignalWorkflow. Carries the underlying ticker plus the (expiry, strike, right) tuple — NOT the resolved OCC option symbol. OCC resolution (e.g. 'AAPL250117C00150000') is performed downstream by ContractActivities.resolve and surfaces on OrderIntent.option_symbol / PreTradeCheckRequest.option_symbol. Reference: docs/plans/PLAN.md, oh-my-opentrade/backend/internal/domain/copytrade.go.",
   "type": "object",
   "javaType": "com.ohmytradeagent.contract.CopytradeSignalPayload",
   "additionalProperties": false,
@@ -66,7 +66,7 @@
     "ticker": {
       "type": "string",
       "pattern": "^[A-Z]{1,6}$",
-      "description": "Underlying equity symbol; uppercase, no exchange suffix."
+      "description": "Underlying equity ticker (e.g. 'AAPL'); uppercase, no exchange suffix. This is the RAW underlying — not an OCC option symbol. The full OCC symbol (e.g. 'AAPL250117C00150000') is composed downstream by ContractActivities.resolve from (ticker, expiry, strike, right) and lands on OrderIntent.option_symbol before exec."
     },
     "expiry": {
       "type": "string",
