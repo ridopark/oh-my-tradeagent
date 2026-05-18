@@ -48,7 +48,7 @@ class OrderIntent(BaseModel):
     """
     option_symbol: constr(min_length=1)
     """
-    OCC option symbol (resolved by ContractActivities.resolve).
+    Full OCC option symbol (e.g. 'AAPL250117C00150000'), resolved by ContractActivities.resolve from CopytradeSignalPayload.(ticker, expiry, strike, right). Distinct from the raw underlying ticker carried on the upstream signal payload.
     """
     side: Side
     """
