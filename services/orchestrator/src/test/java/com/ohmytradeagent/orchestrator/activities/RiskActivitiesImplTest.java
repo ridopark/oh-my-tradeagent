@@ -47,7 +47,7 @@ class RiskActivitiesImplTest {
 
   @Test
   void approves_freshWhitelistedSignalUnderCap() {
-    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
 
     assertThat(d.allowed()).isTrue();
     assertThat(d.reason()).isNull();
@@ -55,7 +55,7 @@ class RiskActivitiesImplTest {
 
   @Test
   void rejects_unknownAuthor() {
-    RiskDecision d = risk.checkEntry(payload("stranger", FIXED_NOW), config());
+    RiskDecision d = risk.checkEntry(payload("stranger", FIXED_NOW), config(), null);
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.AUTHOR_NOT_WHITELISTED);
@@ -67,7 +67,7 @@ class RiskActivitiesImplTest {
     // Issue #3: with the new BTO default of 30s, any signal older than 30s should be rejected.
     Instant tooOld = FIXED_NOW.minusSeconds(45);
 
-    RiskDecision d = risk.checkEntry(payload("acme_trader", tooOld), config());
+    RiskDecision d = risk.checkEntry(payload("acme_trader", tooOld), config(), null);
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.SIGNAL_TOO_OLD);
@@ -79,7 +79,7 @@ class RiskActivitiesImplTest {
     // Issue #3: BTO side uses max_signal_age_bto_secs (30s default). 31s old → rejected.
     Instant aged = FIXED_NOW.minusSeconds(31);
 
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", aged), config());
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", aged), config(), null);
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.SIGNAL_TOO_OLD);
@@ -91,7 +91,7 @@ class RiskActivitiesImplTest {
     // Issue #3: 30s old is at the boundary — accepted (gate is `> max`, not `>=`).
     Instant atBoundary = FIXED_NOW.minusSeconds(30);
 
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", atBoundary), config());
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", atBoundary), config(), null);
 
     assertThat(d.allowed()).isTrue();
   }
@@ -102,7 +102,7 @@ class RiskActivitiesImplTest {
     // even though BTO at 45s would reject. This is the per-side asymmetry.
     Instant aged = FIXED_NOW.minusSeconds(45);
 
-    RiskDecision d = risk.checkEntry(stcPayload("acme_trader", aged), config());
+    RiskDecision d = risk.checkEntry(stcPayload("acme_trader", aged), config(), null);
 
     assertThat(d.allowed()).isTrue();
   }
@@ -112,7 +112,7 @@ class RiskActivitiesImplTest {
     // Issue #3: STC rejects beyond its own 60s ceiling.
     Instant aged = FIXED_NOW.minusSeconds(61);
 
-    RiskDecision d = risk.checkEntry(stcPayload("acme_trader", aged), config());
+    RiskDecision d = risk.checkEntry(stcPayload("acme_trader", aged), config(), null);
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.SIGNAL_TOO_OLD);
@@ -130,7 +130,7 @@ class RiskActivitiesImplTest {
     // 250s old, beyond the default 30s but inside the explicit 300s window.
     Instant aged = FIXED_NOW.minusSeconds(250);
 
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", aged), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", aged), c, null);
 
     assertThat(d.allowed()).isTrue();
   }
@@ -147,7 +147,7 @@ class RiskActivitiesImplTest {
 
     Instant aged = FIXED_NOW.minusSeconds(900);
 
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", aged), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", aged), c, null);
 
     assertThat(d.allowed()).isTrue();
   }
@@ -156,7 +156,7 @@ class RiskActivitiesImplTest {
   void rejects_futureDatedSignalBeyondTolerance() {
     Instant future = FIXED_NOW.plusSeconds(60);
 
-    RiskDecision d = risk.checkEntry(payload("acme_trader", future), config());
+    RiskDecision d = risk.checkEntry(payload("acme_trader", future), config(), null);
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.INVALID_TIMESTAMP);
@@ -167,7 +167,7 @@ class RiskActivitiesImplTest {
   void approves_futureDatedSignalWithinTolerance() {
     Instant slightlyFuture = FIXED_NOW.plusSeconds(2);
 
-    RiskDecision d = risk.checkEntry(payload("acme_trader", slightlyFuture), config());
+    RiskDecision d = risk.checkEntry(payload("acme_trader", slightlyFuture), config(), null);
 
     assertThat(d.allowed()).isTrue();
   }
@@ -176,7 +176,7 @@ class RiskActivitiesImplTest {
   void rejects_maxPositionsExceeded() {
     openCount = 5L;
 
-    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.MAX_POSITIONS_EXCEEDED);
@@ -187,7 +187,7 @@ class RiskActivitiesImplTest {
   void approves_atMaxPositionsMinusOne() {
     openCount = 4L;
 
-    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
 
     assertThat(d.allowed()).isTrue();
   }
@@ -200,7 +200,7 @@ class RiskActivitiesImplTest {
     tripped.setActor("auto:daily_loss");
     when(killSwitchStub.killswitchState()).thenReturn(tripped);
 
-    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_TRIPPED);
@@ -215,7 +215,7 @@ class RiskActivitiesImplTest {
         OffsetDateTime.ofInstant(FIXED_NOW.plusSeconds(30), ZoneOffset.UTC));
     when(killSwitchStub.killswitchState()).thenReturn(cooling);
 
-    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_COOLING_DOWN);
@@ -230,7 +230,7 @@ class RiskActivitiesImplTest {
         OffsetDateTime.ofInstant(FIXED_NOW.minusSeconds(30), ZoneOffset.UTC));
     when(killSwitchStub.killswitchState()).thenReturn(elapsed);
 
-    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
 
     assertThat(d.allowed()).isTrue();
   }
@@ -239,7 +239,7 @@ class RiskActivitiesImplTest {
   void rejects_killSwitchQueryThrows_failsClosed() {
     when(killSwitchStub.killswitchState()).thenThrow(new RuntimeException("query rejected"));
 
-    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config());
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_UNAVAILABLE);

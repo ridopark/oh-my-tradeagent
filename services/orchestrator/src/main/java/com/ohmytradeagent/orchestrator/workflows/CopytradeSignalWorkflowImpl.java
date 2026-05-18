@@ -7,8 +7,11 @@ import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
+import com.ohmytradeagent.contract.PreTradeCheckRequest;
+import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
@@ -23,6 +26,7 @@ import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.api.enums.v1.ParentClosePolicy;
+import io.temporal.common.RetryOptions;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.ExternalWorkflowStub;
@@ -144,7 +148,15 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   private String handleBto(CopytradeSignalPayload payload, StrategyConfig config) {
-    RiskDecision decision = risk.checkEntry(payload, config);
+    // Skip the assertion round-trip when the gate is off; the Activity itself short-circuits but
+    // the dispatch cost is paid regardless.
+    if (Boolean.TRUE.equals(config.getPreTradeCheckEnabled())) {
+      risk.assertPreTradeCheckRoutable(config);
+    }
+
+    PreTradeCheckResult preTradeResult = dispatchPreTradeCheck(payload, config);
+
+    RiskDecision decision = risk.checkEntry(payload, config, preTradeResult);
     if (!decision.allowed()) {
       Map<String, Object> rejectSubject =
           subject(
@@ -442,6 +454,79 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "broker_order_id", placed.getBrokerOrderId(),
             "ttl_secs", ttlSecs,
             "outcome", "EXPIRED"));
+  }
+
+  /**
+   * Dispatches the cross-service {@code PreTradeCheckActivity}. Returns {@code null} when the gate
+   * is disabled — the downstream {@code checkPreTradeCheck} branch short-circuits in that case.
+   *
+   * <p>Fail-closed semantics: any exception (after Temporal's own retries) is converted to a
+   * sentinel {@link PreTradeCheckResult} with {@code allowed=false} and {@code
+   * rejectReason="dispatch_failed:<ExceptionSimpleName>"}. {@code RiskActivitiesImpl.checkEntry}
+   * then surfaces {@code PRE_TRADE_CHECK_FAILED} via the existing {@code allowed=false} branch.
+   *
+   * <p>Determinism: the request is built from {@code payload + config + Sizing.CONTRACT_MULTIPLIER}
+   * only — no clock reads, no random IDs (the correlation id is the deterministic {@code
+   * signalId}). Safe to call inside the workflow body.
+   */
+  private PreTradeCheckResult dispatchPreTradeCheck(
+      CopytradeSignalPayload payload, StrategyConfig config) {
+    if (!Boolean.TRUE.equals(config.getPreTradeCheckEnabled())) {
+      return null;
+    }
+    if (config.getBrokerTarget() == null) {
+      PreTradeCheckResult sentinel = new PreTradeCheckResult();
+      sentinel.setSchemaVersion(1L);
+      sentinel.setAllowed(false);
+      sentinel.setRejectReason("dispatch_failed:NullBrokerTarget");
+      return sentinel;
+    }
+    // Bound retries so a persistently-failing pre-trade endpoint surfaces as the dispatch-failed
+    // sentinel within the workflow's TTL window rather than retrying forever. 3 attempts mirrors
+    // the kill-switch read tolerance — enough to absorb a transient broker hiccup, short enough
+    // that a real outage fails closed quickly.
+    PreTradeCheckActivity preTradeStub =
+        Workflow.newActivityStub(
+            PreTradeCheckActivity.class,
+            ActivityOptions.newBuilder()
+                .setTaskQueue(ExecActivitiesFactory.taskQueueFor(config.getBrokerTarget().value()))
+                .setStartToCloseTimeout(Duration.ofSeconds(15))
+                .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
+                .build());
+    PreTradeCheckRequest request = buildPreTradeCheckRequest(payload, config);
+    try {
+      return preTradeStub.preTradeCheck(request);
+    } catch (Exception e) {
+      PreTradeCheckResult sentinel = new PreTradeCheckResult();
+      sentinel.setSchemaVersion(1L);
+      sentinel.setAllowed(false);
+      sentinel.setRejectReason("dispatch_failed:" + e.getClass().getSimpleName());
+      return sentinel;
+    }
+  }
+
+  /**
+   * Builds the {@link PreTradeCheckRequest} the workflow dispatches to exec-svc. {@code
+   * estimated_notional} is the 1-contract floor (the workflow sizes down later if needed) and
+   * {@code correlation_id} is the deterministic {@code signal_id} so audit traces stitch
+   * end-to-end.
+   */
+  private static PreTradeCheckRequest buildPreTradeCheckRequest(
+      CopytradeSignalPayload payload, StrategyConfig config) {
+    PreTradeCheckRequest r = new PreTradeCheckRequest();
+    r.setSchemaVersion(1L);
+    r.setTenantId(payload.getTenantId());
+    r.setStrategyId(payload.getStrategyId());
+    r.setBrokerTarget(
+        PreTradeCheckRequest.BrokerTarget.fromValue(config.getBrokerTarget().value()));
+    r.setOptionSymbol(payload.getTicker());
+    r.setSide(PreTradeCheckRequest.Side.BUY);
+    Long minContracts = config.getMinContracts();
+    r.setQty(minContracts == null ? 1L : Math.max(1L, minContracts));
+    BigDecimal price = payload.getPrice() == null ? BigDecimal.ZERO : payload.getPrice();
+    r.setEstimatedNotional(price.multiply(Sizing.CONTRACT_MULTIPLIER));
+    r.setCorrelationId(payload.getSignalId());
+    return r;
   }
 
   private long pendingTtlSecs(StrategyConfig config) {

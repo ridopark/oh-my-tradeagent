@@ -2,7 +2,6 @@ package com.ohmytradeagent.orchestrator.activities;
 
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.KillSwitchState;
-import com.ohmytradeagent.contract.PreTradeCheckRequest;
 import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
@@ -12,6 +11,7 @@ import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
 import io.temporal.client.WorkflowClient;
+import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
@@ -90,7 +90,8 @@ public class RiskActivitiesImpl implements RiskActivities {
   }
 
   @Override
-  public RiskDecision checkEntry(CopytradeSignalPayload payload, StrategyConfig config) {
+  public RiskDecision checkEntry(
+      CopytradeSignalPayload payload, StrategyConfig config, PreTradeCheckResult preTradeResult) {
     if (!config.getAuthorWhitelist().contains(payload.getAuthor())) {
       return RiskDecision.rejected(
           RejectionReason.AUTHOR_NOT_WHITELISTED, "author=" + payload.getAuthor());
@@ -125,7 +126,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     // pre-Issue-#6 behavior. Order matters only for which reason wins when multiple gates fail;
     // the order below mirrors the recommendation list in issue #6. Positions are fetched once and
     // shared across the gates that need them (production impl is a Temporal Visibility query).
-    PortfolioContext ctx = new PortfolioContext(payload, config);
+    PortfolioContext ctx = new PortfolioContext(payload, config, preTradeResult);
     return Stream.<Supplier<RiskDecision>>of(
             () -> checkNotionalCap(ctx),
             () -> checkSameUnderlyingCount(ctx),
@@ -147,11 +148,14 @@ public class RiskActivitiesImpl implements RiskActivities {
   private final class PortfolioContext {
     final CopytradeSignalPayload payload;
     final StrategyConfig config;
+    final PreTradeCheckResult preTradeResult;
     private List<PortfolioSnapshot.OpenPosition> openPositions;
 
-    PortfolioContext(CopytradeSignalPayload payload, StrategyConfig config) {
+    PortfolioContext(
+        CopytradeSignalPayload payload, StrategyConfig config, PreTradeCheckResult preTradeResult) {
       this.payload = payload;
       this.config = config;
+      this.preTradeResult = preTradeResult;
     }
 
     List<PortfolioSnapshot.OpenPosition> openPositions() {
@@ -270,23 +274,19 @@ public class RiskActivitiesImpl implements RiskActivities {
   }
 
   /**
-   * pre_trade_check: delegate to exec-svc Activity, fail closed on any exception, and reject on
-   * allowed=false / insufficient buying power / PDT BLOCKED / margin insufficient. Buying-power
-   * comparison uses the same options notional formula as the notional-cap gate so the values are
-   * apples-to-apples.
+   * pre_trade_check: consume the workflow-supplied {@link PreTradeCheckResult} and reject on
+   * allowed=false / insufficient buying power / PDT BLOCKED / margin insufficient. A sentinel
+   * {@code rejectReason="dispatch_failed:..."} -> {@link RejectionReason#PRE_TRADE_CHECK_FAILED}
+   * mapping preserves fail-closed semantics when the workflow cannot reach the activity.
+   *
+   * <p>Buying-power comparison uses the same options notional formula as the notional-cap gate so
+   * the values are apples-to-apples.
    */
   private RiskDecision checkPreTradeCheck(PortfolioContext ctx) {
     if (!Boolean.TRUE.equals(ctx.config.getPreTradeCheckEnabled())) {
       return null;
     }
-    BigDecimal notional = entryNotional(ctx.payload);
-    PreTradeCheckResult result;
-    try {
-      result = preTradeCheckActivity.preTradeCheck(toRequest(ctx, notional));
-    } catch (Exception e) {
-      return RiskDecision.rejected(
-          RejectionReason.PRE_TRADE_CHECK_FAILED, e.getClass().getSimpleName());
-    }
+    PreTradeCheckResult result = ctx.preTradeResult;
     if (result == null) {
       return RiskDecision.rejected(RejectionReason.PRE_TRADE_CHECK_FAILED, "null_result");
     }
@@ -295,6 +295,7 @@ public class RiskActivitiesImpl implements RiskActivities {
       return RiskDecision.rejected(
           RejectionReason.PRE_TRADE_CHECK_FAILED, "allowed=false reason=" + reason);
     }
+    BigDecimal notional = entryNotional(ctx.payload);
     BigDecimal buyingPower = result.getBuyingPower();
     if (buyingPower == null || buyingPower.compareTo(notional) < 0) {
       BigDecimal bp = buyingPower == null ? BigDecimal.ZERO : buyingPower;
@@ -311,23 +312,21 @@ public class RiskActivitiesImpl implements RiskActivities {
     return null;
   }
 
-  private PreTradeCheckRequest toRequest(PortfolioContext ctx, BigDecimal notional) {
-    PreTradeCheckRequest r = new PreTradeCheckRequest();
-    r.setSchemaVersion(1L);
-    r.setTenantId(ctx.payload.getTenantId());
-    r.setStrategyId(ctx.payload.getStrategyId());
-    r.setBrokerTarget(
-        PreTradeCheckRequest.BrokerTarget.fromValue(ctx.config.getBrokerTarget().value()));
-    // OCC symbol resolution happens later in the workflow; the broker adapter resolves the
-    // ticker prefix itself. Field shape is stable for the future state where OCC is resolved
-    // before the gate.
-    r.setOptionSymbol(ctx.payload.getTicker());
-    r.setSide(PreTradeCheckRequest.Side.BUY);
-    Long minContracts = ctx.config.getMinContracts();
-    r.setQty(minContracts == null ? 1L : Math.max(1L, minContracts));
-    r.setEstimatedNotional(notional);
-    r.setCorrelationId(ctx.payload.getSignalId());
-    return r;
+  /** Uses {@code instanceof PermissiveDefaultPreTradeCheck} to detect the no-op default bean. */
+  @Override
+  public void assertPreTradeCheckRoutable(StrategyConfig config) {
+    if (!Boolean.TRUE.equals(config.getPreTradeCheckEnabled())) {
+      return;
+    }
+    if (preTradeCheckActivity instanceof PermissiveDefaultPreTradeCheck) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "pre_trade_check enabled for tenant="
+              + config.getTenantId()
+              + " strategy="
+              + config.getStrategyId()
+              + " but only the permissive default PreTradeCheckActivity bean is wired",
+          "PreTradeCheckMisconfigured");
+    }
   }
 
   private static BigDecimal sumOpenNotional(PortfolioContext ctx) {

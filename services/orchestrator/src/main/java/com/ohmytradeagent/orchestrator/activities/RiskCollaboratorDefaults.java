@@ -1,5 +1,6 @@
 package com.ohmytradeagent.orchestrator.activities;
 
+import com.ohmytradeagent.contract.PreTradeCheckRequest;
 import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import java.math.BigDecimal;
@@ -46,7 +47,16 @@ public final class RiskCollaboratorDefaults {
   }
 
   public static PreTradeCheckActivity permissivePreTradeCheck() {
-    return req -> {
+    return new PermissiveDefaultPreTradeCheckActivity();
+  }
+
+  /**
+   * Named class (not lambda) so it can implement the {@link PermissiveDefaultPreTradeCheck} marker.
+   */
+  private static final class PermissiveDefaultPreTradeCheckActivity
+      implements PreTradeCheckActivity, PermissiveDefaultPreTradeCheck {
+    @Override
+    public PreTradeCheckResult preTradeCheck(PreTradeCheckRequest request) {
       PreTradeCheckResult r = new PreTradeCheckResult();
       r.setSchemaVersion(1L);
       r.setAllowed(true);
@@ -54,6 +64,6 @@ public final class RiskCollaboratorDefaults {
       r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
       r.setMarginSufficient(true);
       return r;
-    };
+    }
   }
 }
