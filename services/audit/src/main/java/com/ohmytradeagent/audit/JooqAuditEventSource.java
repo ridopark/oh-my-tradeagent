@@ -69,8 +69,8 @@ public class JooqAuditEventSource implements AuditEventSource {
       e.setStrategyId((String) r.get("strategy_id"));
       Object eid = r.get("event_id");
       e.setEventId(eid == null ? null : eid.toString());
-      Timestamp ts = (Timestamp) r.get("occurred_at");
-      e.setOccurredAt(ts == null ? null : ts.toInstant().atOffset(ZoneOffset.UTC));
+      OffsetDateTime ts = r.get("occurred_at", OffsetDateTime.class);
+      e.setOccurredAt(ts == null ? null : ts.withOffsetSameInstant(ZoneOffset.UTC));
       e.setKind((String) r.get("kind"));
       e.setActor((String) r.get("actor"));
       e.setWorkflowId((String) r.get("workflow_id"));
