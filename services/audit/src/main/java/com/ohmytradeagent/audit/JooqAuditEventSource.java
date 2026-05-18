@@ -52,7 +52,7 @@ public class JooqAuditEventSource implements AuditEventSource {
                 + "actor, workflow_id, correlation_id, subject "
                 + "FROM audit_log "
                 + "WHERE tenant_id = ? AND strategy_id = ? "
-                + "AND occurred_at >= ? AND occurred_at < ? "
+                + "AND occurred_at >= ?::timestamptz AND occurred_at < ?::timestamptz "
                 + "ORDER BY occurred_at ASC, id ASC",
             tenantId,
             strategyId,
