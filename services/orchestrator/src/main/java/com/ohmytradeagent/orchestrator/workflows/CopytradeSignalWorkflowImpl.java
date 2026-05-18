@@ -148,6 +148,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   private String handleBto(CopytradeSignalPayload payload, StrategyConfig config) {
+    // Skip the assertion round-trip when the gate is off; the Activity itself short-circuits but
+    // the dispatch cost is paid regardless.
     if (Boolean.TRUE.equals(config.getPreTradeCheckEnabled())) {
       risk.assertPreTradeCheckRoutable(config);
     }
@@ -471,6 +473,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       CopytradeSignalPayload payload, StrategyConfig config) {
     if (!Boolean.TRUE.equals(config.getPreTradeCheckEnabled())) {
       return null;
+    }
+    if (config.getBrokerTarget() == null) {
+      PreTradeCheckResult sentinel = new PreTradeCheckResult();
+      sentinel.setSchemaVersion(1L);
+      sentinel.setAllowed(false);
+      sentinel.setRejectReason("dispatch_failed:NullBrokerTarget");
+      return sentinel;
     }
     // Bound retries so a persistently-failing pre-trade endpoint surfaces as the dispatch-failed
     // sentinel within the workflow's TTL window rather than retrying forever. 3 attempts mirrors

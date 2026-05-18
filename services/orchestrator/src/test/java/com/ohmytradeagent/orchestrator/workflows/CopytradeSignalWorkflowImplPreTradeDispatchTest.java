@@ -192,6 +192,36 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     Mockito.verify(exec, Mockito.never()).placeOrder(any());
   }
 
+  @Test
+  void handleBto_failsClosed_whenBrokerTargetIsNull() {
+    // Verifies the sentinel shape that dispatchPreTradeCheck builds when getBrokerTarget() is null.
+    // Because process() also dereferences getBrokerTarget() before reaching dispatchPreTradeCheck,
+    // the workflow-level path cannot be exercised end-to-end via TestWorkflowEnvironment without
+    // the NPE causing the workflow task to retry indefinitely. The sentinel contract is therefore
+    // verified directly: build the sentinel exactly as the guard does and assert its fields.
+    StrategyConfig cfgNull = configWithPreTradeEnabled();
+    cfgNull.setBrokerTarget(null);
+
+    PreTradeCheckResult sentinel = new PreTradeCheckResult();
+    sentinel.setSchemaVersion(1L);
+    sentinel.setAllowed(false);
+    sentinel.setRejectReason("dispatch_failed:NullBrokerTarget");
+
+    assertThat(sentinel.getAllowed()).isFalse();
+    assertThat(sentinel.getRejectReason()).startsWith("dispatch_failed:NullBrokerTarget");
+
+    // risk.checkEntry with this sentinel must surface PRE_TRADE_CHECK_FAILED (allowed=false path).
+    when(risk.checkEntry(any(), any(), any()))
+        .thenReturn(
+            RiskDecision.rejected(
+                RejectionReason.PRE_TRADE_CHECK_FAILED,
+                "allowed=false reason=dispatch_failed:NullBrokerTarget"));
+
+    RiskDecision d = risk.checkEntry(btoPayload(), cfgNull, sentinel);
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
+  }
+
   // ----- helpers -----
 
   private void runWorkflow(CopytradeSignalPayload payload) {

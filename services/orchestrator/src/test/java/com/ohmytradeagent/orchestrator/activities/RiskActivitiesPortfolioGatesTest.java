@@ -70,10 +70,6 @@ class RiskActivitiesPortfolioGatesTest {
     when(drawdownSampler.sampleLossRatePerMinute(anyString(), anyString()))
         .thenReturn(BigDecimal.ZERO);
 
-    // Issue #69: PreTradeCheckActivity dispatch moved to the workflow. The mock is still wired
-    // into the impl so the constructor signature stays satisfied (and so the
-    // instanceof PermissiveDefaultPreTradeCheck check used by assertPreTradeCheckRoutable sees a
-    // non-permissive bean in these tests). The mock is never invoked.
     preTradeCheck = mock(PreTradeCheckActivity.class);
 
     risk =
@@ -342,10 +338,6 @@ class RiskActivitiesPortfolioGatesTest {
 
   // ----- pre_trade_check -----
 
-  // Issue #69: the cross-service PreTradeCheckActivity dispatch moved to the workflow. These
-  // tests now pass the workflow-supplied PreTradeCheckResult directly into checkEntry as the third
-  // argument (mirroring the value the workflow would have computed).
-
   @Test
   void preTradeCheck_approves_whenBrokerReportsGoodState() {
     StrategyConfig c = config();
@@ -416,9 +408,6 @@ class RiskActivitiesPortfolioGatesTest {
 
   @Test
   void preTradeCheck_failsClosed_onDispatchFailedSentinel() {
-    // Issue #69: when the workflow's dispatch throws, it builds this sentinel. checkEntry
-    // surfaces it as PRE_TRADE_CHECK_FAILED via the allowed=false branch, preserving the
-    // pre-Issue-#69 fail-closed contract from RiskActivitiesPortfolioGatesTest.
     StrategyConfig c = config();
     c.setPreTradeCheckEnabled(true);
     PreTradeCheckResult sentinel = new PreTradeCheckResult();
