@@ -120,7 +120,13 @@ ssh ridopark@192.168.10.123 \
 
 # The Postgres StatefulSet (10-postgres.yaml) is shared with the
 # orchestrator + api-gateway databases — DO NOT delete it. Only drop the
-# two Temporal-specific databases inside it:
+# two Temporal-specific databases inside it.
+#
+# Since issue #56 item 9, orchestrator-svc and api-gateway own a dedicated
+# `orchestrator` Postgres database (audit_log + option_symbol_cache live
+# there), so `DROP DATABASE temporal` no longer destroys their data — it
+# only touches Temporal's own auto-setup tables. That's what makes this
+# step safe to re-run.
 ssh ridopark@192.168.10.123 \
   'kubectl -n copytrade exec -it sts/postgres -- psql -U temporal -c "DROP DATABASE temporal;"'
 ssh ridopark@192.168.10.123 \

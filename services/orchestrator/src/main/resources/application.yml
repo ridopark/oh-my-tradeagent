@@ -2,7 +2,7 @@ spring:
   application:
     name: orchestrator-svc
   datasource:
-    url: ${ORCHESTRATOR_DB_URL:jdbc:postgresql://localhost:5432/temporal}
+    url: ${ORCHESTRATOR_DB_URL:jdbc:postgresql://localhost:5432/orchestrator}
     username: ${ORCHESTRATOR_DB_USER:temporal}
     password: ${ORCHESTRATOR_DB_PASS:temporal}
   jooq:
@@ -10,15 +10,17 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
-    # The orchestrator shares the `temporal` Postgres database with the Temporal
-    # cluster's auto-setup, which populates `public` with executions / history_node /
-    # etc. before this Flyway runs. Baseline-on-migrate tells Flyway to treat that
-    # pre-existing state as the baseline; our V1/V2 migrations only add new tables
-    # (option_symbol_cache, audit_log) so the coexistence is safe.
+    # The orchestrator owns a dedicated `orchestrator` Postgres database (issue #56
+    # item 9). It used to share the `temporal` DB with Temporal's auto-setup, which
+    # made `DROP DATABASE temporal` in the temporal-consolidation teardown runbook
+    # destroy `audit_log` and `option_symbol_cache`. The dedicated DB is empty on
+    # fresh deploys, but baseline-on-migrate is retained for back-compat with
+    # already-deployed clusters that pre-date item 9 (they keep the schema where
+    # Temporal had populated `public`, until they cut over to a fresh DB).
     baseline-on-migrate: true
-    # baseline-version: 0 ensures V1__option_symbol_cache.sql runs on fresh deploys
-    # where Temporal pre-populates `public`. Without this, Flyway defaults the
-    # baseline to v1 and silently skips V1 (issue #56 item 3).
+    # baseline-version: 0 was originally needed to keep V1 from being skipped on
+    # the shared-with-Temporal DB (issue #56 item 3). It's harmless on the new
+    # dedicated DB (empty `public`) and still correct for fresh deploys.
     baseline-version: 0
   data:
     redis:

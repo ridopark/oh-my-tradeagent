@@ -41,8 +41,11 @@ spec:
               value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE
               value: copytrade
+            # Issue #56 item 9: api-gateway reads `audit_log` from the dedicated
+            # `orchestrator` database the orchestrator-svc writes it to. Must stay
+            # co-located, otherwise AuditController returns empty results.
             - name: API_GATEWAY_DB_URL
-              value: jdbc:postgresql://postgres:5432/temporal
+              value: jdbc:postgresql://postgres:5432/orchestrator
             - name: API_GATEWAY_DB_USER
               valueFrom:
                 secretKeyRef:

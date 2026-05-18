@@ -22,6 +22,11 @@ data:
       echo "  ensured database: $db"
     }
 
+    # Issue #56 item 9: dedicated `orchestrator` DB for audit_log +
+    # option_symbol_cache (separate from Temporal's `temporal` DB, which the
+    # StatefulSet env below still auto-creates for Temporal's own auto-setup).
+    create_db_if_missing orchestrator
+
     # Phase 2c.2 onward: one database per <provider>-<env> whitelisted in the
     # strategy-config contract schema (contract/schemas/strategy-config.json
     # broker_target enum), excluding the two legacy bare paper/live values
