@@ -64,26 +64,38 @@ public final class AuditEventKinds {
           "ExitQueued");
 
   /**
-   * Kinds that terminally close a position. Every open lifecycle (one with an {@link #ENTRY_KINDS}
-   * event) must have exactly one of these inside the verifier's date range, or it is reported as
-   * {@code MissingTerminalClose}.
+   * "Hard" terminal kinds that must follow a real entry. A hard close without a preceding {@link
+   * #ENTRY_KINDS} event is reported as {@code OrphanCloseWithoutEntry}.
    */
-  public static final Set<String> TERMINAL_CLOSE_KINDS =
+  public static final Set<String> HARD_TERMINAL_CLOSE_KINDS =
       Set.of(
           "PositionClosed",
           "EodForceFlattened",
           "ExpiryForceFlattened",
-          // EntryExpired: the entry leg expired before fill, so no position was opened —
-          // also terminal for the lifecycle keyed by this correlation_id.
-          "EntryExpired",
-          // OrderCancelled / OrderCancelFailed: the entry never made it to PositionEntered;
-          // the lifecycle terminates on the cancel. (CopytradeSignalWorkflowImpl emits these.)
-          "OrderCancelled",
-          // The signal was rejected before any broker activity; no lifecycle opens but we still
-          // honor the kind as a terminal so re-derivation does not flag a phantom open.
-          "SignalRejected",
-          // Risk-breach forced an abort before the entry filled.
           "SignalAbortedByRiskBreach");
+
+  /**
+   * "Soft" terminal kinds that legitimately close a lifecycle that never opened — pre-fill
+   * rejections, expiries, and cancels. {@code SignalRejected} fires before any broker activity;
+   * {@code EntryExpired} fires when the entry leg's TTL elapses without a fill; {@code
+   * OrderCancelled} fires when the order is cancelled before fill.
+   */
+  public static final Set<String> SOFT_TERMINAL_CLOSE_KINDS =
+      Set.of("EntryExpired", "OrderCancelled", "SignalRejected");
+
+  /**
+   * Every kind that terminates a lifecycle. An open lifecycle (one with an {@link #ENTRY_KINDS}
+   * event) must have at least one of these inside the verifier's date range, or it is reported as
+   * {@code MissingTerminalClose}.
+   */
+  public static final Set<String> TERMINAL_CLOSE_KINDS =
+      unionOf(HARD_TERMINAL_CLOSE_KINDS, SOFT_TERMINAL_CLOSE_KINDS);
+
+  private static Set<String> unionOf(Set<String> a, Set<String> b) {
+    java.util.Set<String> out = new java.util.HashSet<>(a);
+    out.addAll(b);
+    return Set.copyOf(out);
+  }
 
   /**
    * Complete enumeration of every audit kind the orchestrator may emit, drawn from the {@code

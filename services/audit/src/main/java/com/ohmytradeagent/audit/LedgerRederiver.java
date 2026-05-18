@@ -2,6 +2,7 @@ package com.ohmytradeagent.audit;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -79,26 +80,17 @@ public final class LedgerRederiver {
 
   private static void checkLifecycle(
       String correlationId, List<AuditEvent> events, List<Divergence> findings) {
-    // Stable sort by occurred_at; same-instant events retain input order.
     events.sort(
-        (a, b) -> {
-          if (a.getOccurredAt() == null && b.getOccurredAt() == null) {
-            return 0;
-          }
-          if (a.getOccurredAt() == null) {
-            return -1;
-          }
-          if (b.getOccurredAt() == null) {
-            return 1;
-          }
-          return a.getOccurredAt().toInstant().compareTo(b.getOccurredAt().toInstant());
-        });
+        Comparator.comparing(
+            AuditEvent::getOccurredAt,
+            Comparator.nullsFirst(Comparator.comparing(java.time.OffsetDateTime::toInstant))));
 
     boolean opened = false;
-    boolean closed = false;
+    boolean hardClosed = false;
+    boolean anyClosed = false;
+    String firstHardCloseEventId = null;
     int pendingExitRequests = 0;
     int exitFills = 0;
-    String earliestCloseEventId = null;
 
     for (AuditEvent ev : events) {
       String kind = ev.getKind();
@@ -108,29 +100,25 @@ public final class LedgerRederiver {
         pendingExitRequests++;
       } else if (AuditEventKinds.PARTIAL_EXIT_FILL_KINDS.contains(kind)) {
         exitFills++;
-      } else if (AuditEventKinds.TERMINAL_CLOSE_KINDS.contains(kind)) {
-        if (!closed) {
-          earliestCloseEventId = ev.getEventId();
+      } else if (AuditEventKinds.HARD_TERMINAL_CLOSE_KINDS.contains(kind)) {
+        if (!hardClosed) {
+          firstHardCloseEventId = ev.getEventId();
         }
-        closed = true;
+        hardClosed = true;
+        anyClosed = true;
+      } else if (AuditEventKinds.SOFT_TERMINAL_CLOSE_KINDS.contains(kind)) {
+        anyClosed = true;
       }
     }
 
-    if (closed && !opened) {
-      // Terminal-close kinds like SignalRejected / EntryExpired / OrderCancelled
-      // legitimately terminate without an entry — those are explicitly listed in
-      // TERMINAL_CLOSE_KINDS and do NOT require a prior ENTRY_KINDS event. So this
-      // branch only fires for the *other* terminal kinds (PositionClosed, *Flattened,
-      // SignalAbortedByRiskBreach) appearing without an entry, which IS a divergence.
-      if (isHardClose(earliestCloseEventId, events)) {
-        findings.add(
-            new Divergence(
-                Divergence.Kind.ORPHAN_CLOSE_WITHOUT_ENTRY,
-                correlationId,
-                "close_event_id=" + earliestCloseEventId));
-      }
+    if (hardClosed && !opened) {
+      findings.add(
+          new Divergence(
+              Divergence.Kind.ORPHAN_CLOSE_WITHOUT_ENTRY,
+              correlationId,
+              "close_event_id=" + firstHardCloseEventId));
     }
-    if (opened && !closed) {
+    if (opened && !anyClosed) {
       findings.add(
           new Divergence(
               Divergence.Kind.MISSING_TERMINAL_CLOSE,
@@ -144,26 +132,5 @@ public final class LedgerRederiver {
               correlationId,
               "exit_requests=" + pendingExitRequests + " exit_fills=" + exitFills));
     }
-  }
-
-  /**
-   * Returns true if the event identified by {@code eventId} is a "hard" close kind that requires a
-   * prior entry. The legitimately-entry-less terminal kinds (rejection, expiry, cancellation) do
-   * not require an entry; PositionClosed / *Flattened / SignalAbortedByRiskBreach do.
-   */
-  private static boolean isHardClose(String eventId, List<AuditEvent> events) {
-    if (eventId == null) {
-      return false;
-    }
-    for (AuditEvent ev : events) {
-      if (eventId.equals(ev.getEventId())) {
-        String k = ev.getKind();
-        return "PositionClosed".equals(k)
-            || "EodForceFlattened".equals(k)
-            || "ExpiryForceFlattened".equals(k)
-            || "SignalAbortedByRiskBreach".equals(k);
-      }
-    }
-    return false;
   }
 }
