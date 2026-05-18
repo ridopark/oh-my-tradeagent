@@ -23,8 +23,10 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>Issue #85: when {@code audit.chain-writer.enabled=true} (default), populates the per-row
  * SHA-256 hash chain ({@code prev_hash}, {@code row_hash}) per {@code docs/ops/audit-retention.md
- * §2}. The chain serializes per {@code (tenant_id, strategy_id)} via a {@code SELECT row_hash ...
- * FOR UPDATE} on the prior chain head inside the same transaction as the {@code INSERT}.
+ * §2}. The chain serializes per {@code (tenant_id, strategy_id)} via a {@code
+ * pg_advisory_xact_lock} keyed by {@code hashtext(tenant_id || '::' || strategy_id)} — preserves
+ * the V3 immutability REVOKE (which excludes UPDATE, required by FOR UPDATE) while still
+ * serializing concurrent inserts to the same chain.
  *
  * <p>When the flag is {@code false}, the writer falls back to the pre-#85 INSERT path so ops can
  * disable the chain without a redeploy if a hashing bug surfaces in production. New rows carry
@@ -78,14 +80,20 @@ public class AuditActivitiesImpl implements AuditActivities {
       byte[] prevHashColumn = null;
       byte[] rowHashColumn = null;
       if (chainWriterEnabled && chainWriter != null) {
-        // Lock + read the prior chain head for this (tenant_id, strategy_id). The FOR UPDATE
-        // serializes writers per chain — audit insert volume is bounded by signal volume, so the
-        // serialization cost is acceptable (see docs/ops/audit-retention.md §2).
+        // Acquire a transaction-scoped advisory lock keyed by (tenant_id, strategy_id) to
+        // serialize concurrent chain writers without requiring UPDATE privilege on audit_log.
+        // The V3 immutability REVOKE removes UPDATE from orchestrator_runtime, which PostgreSQL
+        // also requires for FOR UPDATE — advisory locks carry no table privilege requirement.
+        // The lock auto-releases at end of transaction (see docs/ops/audit-retention.md §2).
+        dsl.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(? || '::' || ?)::bigint)",
+            event.getTenantId(),
+            event.getStrategyId());
         Record priorRecord =
             dsl.fetchOne(
                 "SELECT row_hash FROM audit_log "
                     + "WHERE tenant_id = ? AND strategy_id = ? "
-                    + "ORDER BY id DESC LIMIT 1 FOR UPDATE",
+                    + "ORDER BY id DESC LIMIT 1",
                 event.getTenantId(),
                 event.getStrategyId());
         byte[] priorRowHash = priorRecord == null ? null : priorRecord.get(0, byte[].class);

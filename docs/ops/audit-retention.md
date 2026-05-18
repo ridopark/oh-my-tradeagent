@@ -80,11 +80,14 @@ When `prev_hash IS NULL` (the first row in a chain), substitute 32 zero bytes (`
 For the three nullable UTF-8 fields (`actor`, `workflow_id`, `correlation_id`), `NULL` is serialized identically to the empty string — `len=0` followed by zero content bytes. The two states are not distinguishable in the canonical form; if a future event ever needs to differentiate "field not present" from "field is empty", introduce a distinct sentinel (e.g. a non-empty marker string) for one of the cases. The schema currently treats them as semantically equivalent.
 
 The chain writer runs **inside the same transaction that inserts the
-audit row**. It reads the previous `row_hash` for that
-`(tenant_id, strategy_id)` chain `FOR UPDATE`, hashes the new row, and
-writes both columns in one statement. This serializes writes per chain,
-which is acceptable because audit insert volume is bounded by signal
-volume (orders of magnitude under per-row hashing cost).
+audit row**. Per-(tenant_id, strategy_id) chain serialization uses
+`pg_advisory_xact_lock(hashtext(tenant_id || '::' || strategy_id)::bigint)` —
+preserves V3 immutability REVOKE while still serializing concurrent inserts.
+The lock auto-releases at end of transaction. It then reads the previous
+`row_hash` for that chain, hashes the new row, and writes both columns in
+one statement. This serializes writes per chain, which is acceptable because
+audit insert volume is bounded by signal volume (orders of magnitude under
+per-row hashing cost).
 
 Nullable columns are the bridge: until the writer is enabled, new rows
 carry `NULL` and the chain is dormant. The writer flip is a code change,
@@ -248,8 +251,8 @@ longer in the hot store.
 
 ## 6. Open follow-ups (tracked in #22 lineage)
 
-- ~~Implement the per-row hash-chain writer (transactional, FOR UPDATE
-  on the prior chain head, populates `prev_hash` and `row_hash`).~~
+- ~~Implement the per-row hash-chain writer (transactional,
+  `pg_advisory_xact_lock` for per-chain serialization, populates `prev_hash` and `row_hash`).~~
   **Resolved by #85**: see `services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator/activities/AuditLogChainWriter.java`
   and the integration test
   `services/orchestrator/src/test/java/com/ohmytradeagent/orchestrator/activities/AuditLogChainWriterIT.java`

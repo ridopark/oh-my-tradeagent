@@ -76,9 +76,8 @@ class AuditLogChainWriterIT {
     runtimeConn =
         DriverManager.getConnection(
             postgres.getJdbcUrl(), "orchestrator_runtime", RUNTIME_PASSWORD);
-    // Auto-commit OFF so @Transactional semantics are observable: the FOR UPDATE on the prior
-    // chain head must hold the lock until the INSERT commits. We commit explicitly after each
-    // event below.
+    // Auto-commit OFF so @Transactional semantics are observable: the advisory lock on the prior
+    // chain head must hold until the INSERT commits. We commit explicitly after each event below.
     runtimeConn.setAutoCommit(false);
 
     om = new ObjectMapper().registerModule(new JavaTimeModule());
