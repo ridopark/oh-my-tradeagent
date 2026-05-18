@@ -169,9 +169,17 @@ incident review. Capture these into the incident ticket:
 # 1. The trip event that started the rollback:
 curl -s 'http://copytrade.homelab.local/audit?tenant=<t>&strategy=<s>&kind=KillSwitchTripped&limit=1' | jq '.events[0]'
 
-# 2. The config flip (PLAN.md Phase 6's audit-tenancy work emits a TenantConfigChanged
-#    event on configmap reload — capture it here):
+# 2. The config flip. TenantConfigChangedEmitter (issue #88) emits exactly one
+#    TenantConfigChanged event per changed (tenant, strategy) on the orchestrator-svc
+#    boot that follows a configmap edit + rolling restart. Verify the subject identifies
+#    the keys that changed and pins the trigger:
 curl -s 'http://copytrade.homelab.local/audit?tenant=<t>&strategy=<s>&kind=TenantConfigChanged&limit=1' | jq '.events[0]'
+# Expect:
+#   .subject.changed_keys[]   # non-empty array of YAML keys that differ between snapshots
+#   .subject.source           # == "configmap-reload"
+#   .subject.old_values       # map of prior values (redacted-key entries omit the value)
+#   .subject.new_values       # map of current values (same redaction rule)
+#   .subject.loaded_at        # RFC3339 timestamp of the boot-time load that produced the diff
 
 # 3. Recon-clean evidence (two consecutive ReconciliationCompleted with discrepancies: 0):
 curl -s 'http://copytrade.homelab.local/audit?tenant=<t>&strategy=<s>&kind=ReconciliationCompleted&limit=2' | jq '.events[].attributes.discrepancies'
