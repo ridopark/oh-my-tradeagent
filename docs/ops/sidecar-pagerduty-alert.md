@@ -95,7 +95,7 @@ groups:
             The sidecar heartbeat file mtime is {{ $value }}s old (threshold: 60s).
             Likely causes: Discord polling slowdown, Playwright DOM-shape change,
             session about to expire, or the polling loop deadlocked.
-          runbook_url: "https://github.com/JonBuhTrader/oh-my-tradeagent/blob/main/docs/ops/discord-session-expired.md"
+          runbook_url: "https://github.com/ridopark/oh-my-tradeagent/blob/main/docs/ops/discord-session-expired.md"
 
       # Page: heartbeat 120s+ stale. This matches the livenessProbe
       # failureThreshold (3 * 30s = 90s effective grace, with 60s initialDelay
@@ -117,8 +117,8 @@ groups:
             New Discord posts are NOT being relayed to Temporal. Trade signals
             are being dropped. Check the session-cutover runbook first
             (faster recovery if a secondary storage_state.json is staged).
-          runbook_url: "https://github.com/JonBuhTrader/oh-my-tradeagent/blob/main/docs/ops/sidecar-session-cutover.md"
-          fallback_runbook_url: "https://github.com/JonBuhTrader/oh-my-tradeagent/blob/main/docs/ops/discord-session-expired.md"
+          runbook_url: "https://github.com/ridopark/oh-my-tradeagent/blob/main/docs/ops/sidecar-session-cutover.md"
+          fallback_runbook_url: "https://github.com/ridopark/oh-my-tradeagent/blob/main/docs/ops/discord-session-expired.md"
 ```
 
 ### Why these thresholds

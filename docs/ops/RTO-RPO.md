@@ -3,7 +3,7 @@
 ## Why this exists
 
 Issue #24 (risk-manager review): the copy-trade stack runs single-node on the homelab k3s
-cluster at `ssh ridopark@192.168.10.123`, with single Temporal cluster, single Postgres,
+cluster at `ssh ridopark@<homelab-node>`, with single Temporal cluster, single Postgres,
 single Discord sidecar session, and one broker connection per `(tenant, broker_env)`. None
 of those SPOFs had documented Recovery Time Objective (RTO) or Recovery Point Objective
 (RPO) targets, so on-call had no quantified guidance for "is this recovery on track?" vs

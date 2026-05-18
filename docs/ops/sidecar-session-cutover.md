@@ -43,17 +43,23 @@ primary's last successful boot, it's worthless.
 **How to stage a fresh secondary:**
 
 ```sh
-ssh ridopark@192.168.10.123
+ssh ridopark@<homelab-node>
 
 # 1. Scale the sidecar to zero so the PVC isn't being read concurrently.
 kubectl -n copytrade scale deployment/signal-source-discord --replicas=0
 
-# 2. Run the bootstrap container with STATE_DIR pointed at a side path that
-#    writes to a different filename. Use the existing bootstrap path documented
-#    in discord-session-expired.md, but set STATE_FILE to the secondary name.
-#    The bootstrap script honours STATE_FILE if exported (see
-#    services/signal-source-discord/ohmytradeagent_sidecar/bootstrap.py for the
-#    contract — if it doesn't, the rename in step 3 covers the gap).
+# 1b. Snapshot the primary before bootstrap runs, so it can be restored if the
+#     bootstrap write clobbers it (bootstrap.py resolves STATE_DIR/storage_state.json
+#     to the PVC root — same physical path as the live primary).
+kubectl -n copytrade run --rm -it pvc-shell \
+  --image=busybox \
+  --restart=Never \
+  --overrides='{"spec":{"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"signal-source-discord-state"}}],"containers":[{"name":"pvc-shell","image":"busybox","volumeMounts":[{"name":"state","mountPath":"/app/state"}]}]}}' \
+  -- sh -c 'cp /app/state/storage_state.json /app/state/storage_state.primary.bak.json'
+
+# 2. Run the bootstrap container with STATE_DIR pointed at the PVC root.
+#    bootstrap.py writes STATE_DIR/storage_state.json; the rename in step 3
+#    promotes that file to the secondary slot.
 kubectl -n copytrade run --rm -it sidecar-bootstrap-secondary \
   --image=ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest \
   --restart=Never \
@@ -64,17 +70,18 @@ kubectl -n copytrade run --rm -it sidecar-bootstrap-secondary \
   -- python -m ohmytradeagent_sidecar.bootstrap
 
 # 3. Complete 2FA in the visible browser window. Then rename the resulting
-#    storage_state.json into the secondary path on the live PVC. The simplest
-#    way is to mount the PVC into a short-lived shell pod:
+#    storage_state.json into the secondary path and restore the primary from
+#    the backup taken in step 1b:
 kubectl -n copytrade run --rm -it pvc-shell \
   --image=busybox \
   --restart=Never \
   --overrides='{"spec":{"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"signal-source-discord-state"}}],"containers":[{"name":"pvc-shell","image":"busybox","volumeMounts":[{"name":"state","mountPath":"/app/state"}]}]}}' \
-  -- sh -c 'mv /app/state/storage_state.json /app/state/storage_state.secondary.json && ls -la /app/state/'
+  -- sh -c 'mv /app/state/storage_state.json /app/state/storage_state.secondary.json && \
+            mv /app/state/storage_state.primary.bak.json /app/state/storage_state.json && \
+            ls -la /app/state/'
 
-# 4. Scale the sidecar back up. The primary storage_state.json is still in
-#    place from before step 1; it was never overwritten by the bootstrap
-#    container in step 2 (we wrote to STATE_DIR=/app/state-secondary).
+# 4. Scale the sidecar back up. The primary storage_state.json has been
+#    restored from the backup taken in step 1b.
 kubectl -n copytrade scale deployment/signal-source-discord --replicas=1
 kubectl -n copytrade rollout status deployment/signal-source-discord --timeout=120s
 
@@ -92,13 +99,18 @@ The PagerDuty page (see `sidecar-pagerduty-alert.md`) wakes you with a "sidecar
 heartbeat stale" alert. Before cutting over, verify a fresh secondary exists:
 
 ```sh
-ssh ridopark@192.168.10.123
+ssh ridopark@<homelab-node>
 
 # Check the secondary's mtime — must be < 7 days old to be useful.
-kubectl -n copytrade exec deploy/signal-source-discord -- \
-  sh -c 'test -f /app/state/storage_state.secondary.json && \
-         echo "age=$(( ($(date +%s) - $(stat -c %Y /app/state/storage_state.secondary.json)) / 86400 ))d" || \
-         echo "missing"'
+# Uses a short-lived pvc-shell pod so the check works even when the sidecar
+# is in CrashLoopBackOff (exec against a restart-looping pod fails).
+kubectl -n copytrade run --rm -it pvc-shell \
+  --image=busybox \
+  --restart=Never \
+  --overrides='{"spec":{"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"signal-source-discord-state"}}],"containers":[{"name":"pvc-shell","image":"busybox","volumeMounts":[{"name":"state","mountPath":"/app/state"}]}]}}' \
+  -- sh -c 'test -f /app/state/storage_state.secondary.json && \
+            echo "age=$(( ($(date +%s) - $(stat -c %Y /app/state/storage_state.secondary.json)) / 86400 ))d" || \
+            echo "missing"'
 ```
 
 Decision matrix:
@@ -106,7 +118,7 @@ Decision matrix:
 | Secondary state | Action |
 |---|---|
 | Present, age < 7 days | Cutover (this runbook). |
-| Present, age >= 7 days | Risky — secondary cookies may also be expired. Try cutover first; if it fails within 90s, fall back to re-bootstrap. |
+| Present, age >= 7 days | Risky — secondary cookies may also be expired. Try cutover first; if it fails within 120s, fall back to re-bootstrap. |
 | Missing | Re-bootstrap path (`discord-session-expired.md`). |
 
 ## Immediate action — cutover
@@ -115,7 +127,7 @@ The cutover swaps the secondary into the primary slot in place. Total wall
 time should be < 60 seconds.
 
 ```sh
-ssh ridopark@192.168.10.123
+ssh ridopark@<homelab-node>
 
 # 1. Scale the sidecar to zero so the PVC isn't being read.
 kubectl -n copytrade scale deployment/signal-source-discord --replicas=0
@@ -167,7 +179,7 @@ Once (a)-(c) all pass, the cutover is successful. Update operator notes:
 
 ## Rollback
 
-If the cutover failed (post-cutover checks (a)-(c) didn't all pass within 90
+If the cutover failed (post-cutover checks (a)-(c) didn't all pass within 120
 seconds), the secondary cookies were probably also dead. Restore the primary
 and fall back to re-bootstrap:
 
