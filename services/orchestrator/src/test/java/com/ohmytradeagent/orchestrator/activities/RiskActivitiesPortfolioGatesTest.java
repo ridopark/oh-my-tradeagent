@@ -414,11 +414,19 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void preTradeCheck_disabled_whenConfigFalseOrNull() {
     StrategyConfig c = config();
-    c.setPreTradeCheckEnabled(false);
+    // Stub throws so any accidental invocation surfaces as a test failure for both branches.
     when(preTradeCheck.preTradeCheck(any()))
         .thenThrow(new RuntimeException("should not be called"));
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
-    assertThat(d.allowed()).isTrue();
+
+    // Case 1: enabled == false → gate short-circuits, entry approved.
+    c.setPreTradeCheckEnabled(false);
+    RiskDecision dFalse = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    assertThat(dFalse.allowed()).isTrue();
+
+    // Case 2: enabled == null → gate short-circuits (null treated as disabled), entry approved.
+    c.setPreTradeCheckEnabled(null);
+    RiskDecision dNull = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    assertThat(dNull.allowed()).isTrue();
   }
 
   // ----- helpers -----
