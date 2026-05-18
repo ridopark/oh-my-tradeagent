@@ -35,7 +35,13 @@ $$;
 GRANT orchestrator_app TO orchestrator_runtime;
 
 -- DB-level connect + schema-level usage so the role can resolve tables.
-GRANT CONNECT ON DATABASE orchestrator TO orchestrator_runtime;
+-- Use dynamic SQL so this migration is portable across production (DB name "orchestrator"),
+-- Testcontainers (random DB name), and local dev environments.
+DO $$
+BEGIN
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO orchestrator_runtime', current_database());
+END
+$$;
 GRANT USAGE   ON SCHEMA   public       TO orchestrator_runtime;
 
 -- option_symbol_cache (V1) is mutable — ContractActivitiesImpl performs
