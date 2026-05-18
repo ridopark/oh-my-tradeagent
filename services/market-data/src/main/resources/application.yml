@@ -16,12 +16,11 @@ temporal:
 # (tradier, ibkr, schwab) land as 2c.x follow-ups.
 market-data:
   provider: ${MARKET_DATA_PROVIDER:inmemory}
-
-alpaca:
-  data-base-url: ${ALPACA_DATA_BASE_URL:https://data.alpaca.markets}
-  data-ws-url: ${ALPACA_DATA_WS_URL:wss://stream.data.alpaca.markets/v1beta1/indicative}
-  api-key-id: ${APCA_API_KEY_ID:}
-  api-secret-key: ${APCA_API_SECRET_KEY:}
+  alpaca:
+    data-base-url: ${ALPACA_DATA_BASE_URL:https://data.alpaca.markets}
+    data-ws-url: ${ALPACA_DATA_WS_URL:wss://stream.data.alpaca.markets/v1beta1/indicative}
+    api-key-id: ${APCA_API_KEY_ID:}
+    api-secret-key: ${APCA_API_SECRET_KEY:}
 
 management:
   endpoints:

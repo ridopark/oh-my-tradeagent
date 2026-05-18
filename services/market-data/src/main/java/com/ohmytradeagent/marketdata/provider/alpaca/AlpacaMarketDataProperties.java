@@ -12,6 +12,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param dataWsUrl WebSocket URL for the options stream (e.g. {@code
  *     wss://stream.data.alpaca.markets/v1beta1/indicative})
  */
-@ConfigurationProperties(prefix = "alpaca")
+@ConfigurationProperties(prefix = "market-data.alpaca")
 public record AlpacaMarketDataProperties(
     String dataBaseUrl, String dataWsUrl, String apiKeyId, String apiSecretKey) {}

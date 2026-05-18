@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
@@ -13,7 +14,10 @@ import com.ohmytradeagent.contract.ReconciliationSummary;
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.time.OffsetDateTime;
@@ -117,6 +121,34 @@ class ReconciliationWorkflowImplTest {
         .containsEntry("broker_order_id", "brk-stranger")
         .containsEntry("client_order_id", "client-stranger")
         .containsEntry("option_symbol", "OCC-stranger");
+  }
+
+  @Test
+  void runWithNullBrokerTargetRaisesInvalidBrokerTargetError() {
+    // Phase 2c.2 review polish (#50 item 1): a null broker_target on the workflow input must
+    // surface as a non-retryable InvalidBrokerTargetError (via the factory's null/blank guard)
+    // instead of NPEing inside the workflow body.
+    ReconciliationWorkflowInput in = new ReconciliationWorkflowInput();
+    in.setSchemaVersion(1L);
+    in.setTenantId("dev");
+    in.setStrategyId("copytrade-v1");
+    // broker_target deliberately left null.
+    ReconciliationWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                ReconciliationWorkflow.class,
+                WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+    WorkflowStub.fromTyped(wf).start(in);
+
+    assertThatThrownBy(() -> WorkflowStub.fromTyped(wf).getResult(ReconciliationSummary.class))
+        .isInstanceOf(WorkflowFailedException.class)
+        .hasCauseInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> {
+              ApplicationFailure af = (ApplicationFailure) t.getCause();
+              assertThat(af.getType()).isEqualTo("InvalidBrokerTargetError");
+              assertThat(af.isNonRetryable()).isTrue();
+            });
   }
 
   @Test
