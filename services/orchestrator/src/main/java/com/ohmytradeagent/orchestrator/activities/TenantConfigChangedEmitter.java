@@ -20,6 +20,7 @@ import java.util.TreeSet;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
@@ -80,6 +81,11 @@ public class TenantConfigChangedEmitter implements ApplicationRunner {
   private final Path tenantsDir;
   private final Set<String> redactedKeys;
 
+  // @Autowired disambiguates which constructor Spring should use for DI. The class also exposes a
+  // package-private test-only constructor below; with two candidate constructors and no @Autowired,
+  // Spring 6 falls back to looking for a no-arg constructor and crashes on boot with
+  // BeanInstantiationException → orchestrator CrashLoopBackOff.
+  @Autowired
   public TenantConfigChangedEmitter(
       AuditActivities audit,
       StrategyRegistry strategyRegistry,
