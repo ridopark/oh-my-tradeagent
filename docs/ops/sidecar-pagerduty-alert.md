@@ -81,8 +81,11 @@ groups:
       # Warn: heartbeat 60s+ stale. The sidecar is probably fine but the
       # operator should look — Discord may be slow, or the polling loop may
       # be drifting.
+      # absent() arm fires when the metric series is missing entirely (e.g. pod
+      # in CrashLoop/OOMKilled before it ever exports the gauge). Multiplied by
+      # 999 so the value is non-zero and alert annotations show a sentinel value.
       - alert: SidecarHeartbeatStaleWarn
-        expr: signal_source_heartbeat_age_seconds > 60
+        expr: (signal_source_heartbeat_age_seconds > 60) or (absent(signal_source_heartbeat_age_seconds) * 999)
         for: 30s
         labels:
           severity: warning
@@ -101,8 +104,10 @@ groups:
       # failureThreshold (3 * 30s = 90s effective grace, with 60s initialDelay
       # = 120s wall time before restart). Pages the operator so they see the
       # incident BEFORE k8s starts a restart loop they then have to debug.
+      # absent() arm fires when the metric series is missing entirely (e.g. pod
+      # in CrashLoop/OOMKilled before it ever exports the gauge).
       - alert: SidecarHeartbeatStalePage
-        expr: signal_source_heartbeat_age_seconds > 120
+        expr: (signal_source_heartbeat_age_seconds > 120) or absent(signal_source_heartbeat_age_seconds)
         for: 30s
         labels:
           severity: critical

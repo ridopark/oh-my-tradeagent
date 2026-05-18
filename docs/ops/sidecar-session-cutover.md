@@ -68,6 +68,17 @@ kubectl -n copytrade run --rm -it sidecar-bootstrap-secondary \
   --env="DISPLAY=$DISPLAY" \
   --overrides='{"spec":{"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"signal-source-discord-state"}},{"name":"x11","hostPath":{"path":"/tmp/.X11-unix"}}],"containers":[{"name":"sidecar-bootstrap-secondary","volumeMounts":[{"name":"state","mountPath":"/app/state-secondary"},{"name":"x11","mountPath":"/tmp/.X11-unix"}]}]}}' \
   -- python -m ohmytradeagent_sidecar.bootstrap
+# Note: $DISPLAY expands locally on the SSH client. Use `ssh -X ridopark@<homelab-node>`
+# for X11 forwarding, or replace with --env="DISPLAY=:0" for the homelab local display.
+
+# 2b. Assert that bootstrap.py wrote a new file (must be newer than the .bak).
+#     Fails fast if the bootstrap run didn't produce output before proceeding.
+kubectl -n copytrade run --rm -it pvc-shell \
+  --image=busybox \
+  --restart=Never \
+  --overrides='{"spec":{"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"signal-source-discord-state"}}],"containers":[{"name":"pvc-shell","image":"busybox","volumeMounts":[{"name":"state","mountPath":"/app/state"}]}]}}' \
+  -- sh -c 'test /app/state/storage_state.json -nt /app/state/storage_state.primary.bak.json \
+            && echo "bootstrap OK" || { echo "ERROR: bootstrap did not write a new file"; exit 1; }'
 
 # 3. Complete 2FA in the visible browser window. Then rename the resulting
 #    storage_state.json into the secondary path and restore the primary from
@@ -120,6 +131,8 @@ Decision matrix:
 | Present, age < 7 days | Cutover (this runbook). |
 | Present, age >= 7 days | Risky — secondary cookies may also be expired. Try cutover first; if it fails within 120s, fall back to re-bootstrap. |
 | Missing | Re-bootstrap path (`discord-session-expired.md`). |
+
+Note: cutover (pre-staging path) requires scaling the sidecar to zero for ~2-5 min. Operators doing a planned mid-day refresh should communicate the outage window in advance.
 
 ## Immediate action — cutover
 
