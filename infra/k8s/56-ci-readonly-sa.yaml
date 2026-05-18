@@ -1,6 +1,7 @@
 # Read-only ServiceAccount used by the CI k8s drift-check workflow
 # (.github/workflows/k8s-drift.yml). The workflow runs `kubectl diff -f
 # infra/k8s/` against the live homelab cluster from a self-hosted runner;
+# smoke-test edit (2026-05-18) — close this PR without merging.
 # binding the runner's kubeconfig to this SA (verbs: get, list, watch only)
 # means the workflow physically cannot mutate cluster state even if the
 # diff logic were buggy.
