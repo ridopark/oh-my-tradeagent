@@ -66,7 +66,6 @@ class TenantConfigChangedIT {
     adminConn =
         DriverManager.getConnection(
             postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
-    adminConn.setAutoCommit(false);
     try (Statement st = adminConn.createStatement()) {
       st.execute("ALTER ROLE orchestrator_runtime PASSWORD '" + RUNTIME_PASSWORD + "'");
     }
@@ -92,11 +91,13 @@ class TenantConfigChangedIT {
   void brokerTargetFlip_persistsExactlyOneEventWithChainHashes(@TempDir Path root)
       throws Exception {
     // Clean any prior IT residue under (dev, copytrade-v1) to keep the chain head deterministic.
+    adminConn.setAutoCommit(false);
     try (Statement st = adminConn.createStatement()) {
       st.executeUpdate(
           "DELETE FROM audit_log WHERE tenant_id = 'dev' AND strategy_id = 'copytrade-v1'");
     }
     adminConn.commit();
+    adminConn.setAutoCommit(true);
 
     Path tenantsDir = root.resolve("tenants");
     writeStrategyYaml(tenantsDir, "dev", "copytrade-v1");
