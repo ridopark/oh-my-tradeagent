@@ -16,6 +16,10 @@ spring:
     # pre-existing state as the baseline; our V1/V2 migrations only add new tables
     # (option_symbol_cache, audit_log) so the coexistence is safe.
     baseline-on-migrate: true
+    # baseline-version: 0 ensures V1__option_symbol_cache.sql runs on fresh deploys
+    # where Temporal pre-populates `public`. Without this, Flyway defaults the
+    # baseline to v1 and silently skips V1 (issue #56 item 3).
+    baseline-version: 0
   data:
     redis:
       host: ${REDIS_HOST:localhost}
