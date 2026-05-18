@@ -10,6 +10,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -53,7 +54,12 @@ import org.springframework.stereotype.Component;
 public class AuditLogChainWriter {
 
   /** 32 zero bytes substituted for a {@code NULL prev_hash} (chain head). */
-  public static final byte[] PREV_HASH_CHAIN_HEAD = new byte[32];
+  private static final byte[] PREV_HASH_CHAIN_HEAD = new byte[32];
+
+  /** Returns a defensive copy of the 32-zero-byte chain-head sentinel. */
+  public static byte[] prevHashChainHead() {
+    return PREV_HASH_CHAIN_HEAD.clone();
+  }
 
   private final ObjectMapper objectMapper;
 
@@ -129,7 +135,8 @@ public class AuditLogChainWriter {
 
   /** UTC Unix-epoch microseconds for the given event timestamp. */
   static long unixMicros(OffsetDateTime ts) {
-    return ts.toInstant().getEpochSecond() * 1_000_000L + ts.toInstant().getNano() / 1000L;
+    Instant i = ts.toInstant();
+    return i.getEpochSecond() * 1_000_000L + i.getNano() / 1000L;
   }
 
   private static byte[] uuidBytes(UUID uuid) {
@@ -233,8 +240,7 @@ public class AuditLogChainWriter {
       sb.append(s);
       return;
     }
-    // Fallback (binary, POJO) — shouldn't occur for orchestrator subjects.
-    sb.append(node.toString());
+    throw new IllegalArgumentException("unsupported JCS node type: " + node.getNodeType());
   }
 
   private static void writeCanonicalObject(StringBuilder sb, ObjectNode obj) {

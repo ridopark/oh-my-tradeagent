@@ -79,7 +79,7 @@ public class AuditActivitiesImpl implements AuditActivities {
 
       byte[] prevHashColumn = null;
       byte[] rowHashColumn = null;
-      if (chainWriterEnabled && chainWriter != null) {
+      if (chainWriterEnabled) {
         // Acquire a transaction-scoped advisory lock keyed by (tenant_id, strategy_id) to
         // serialize concurrent chain writers without requiring UPDATE privilege on audit_log.
         // The V3 immutability REVOKE removes UPDATE from orchestrator_runtime, which PostgreSQL
