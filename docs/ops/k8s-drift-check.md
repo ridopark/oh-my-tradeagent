@@ -26,15 +26,16 @@ kubectl apply -f infra/k8s/56-ci-readonly-sa.yaml
 ```
 
 Creates `ServiceAccount/ci-drift-checker` in namespace `copytrade`, a
-`ClusterRole` with `[get, list, watch]` verbs, and the binding. The SA
+namespace-scoped `Role` + `RoleBinding` for all namespaced kinds, and a
+minimal `ClusterRole` + `ClusterRoleBinding` for `namespaces` only. The SA
 cannot mutate cluster state — `kubectl diff` only needs read.
 
 Verify:
 
 ```sh
 kubectl -n copytrade get sa ci-drift-checker
-kubectl get clusterrole ci-drift-checker-readonly
-kubectl get clusterrolebinding ci-drift-checker-readonly
+kubectl -n copytrade get role,rolebinding ci-drift-checker-readonly
+kubectl get clusterrole,clusterrolebinding ci-drift-checker-readonly-cluster
 ```
 
 ### 2. Generate a long-lived kubeconfig for the SA
@@ -156,6 +157,23 @@ kubectl delete -f infra/k8s/56-ci-readonly-sa.yaml
 kubectl -n copytrade delete secret ci-drift-checker-token
 # Deregister the self-hosted runner from Settings → Actions → Runners.
 ```
+
+### Security trade-offs
+
+The SA's long-lived bearer token grants `namespaces` read cluster-wide (needed
+for `kubectl diff` to walk namespace-scoped objects), but **cannot read any
+Secret or ConfigMap outside the `copytrade` namespace**. If the token were
+exfiltrated, the blast radius is limited to read access on `copytrade`-namespaced
+resources plus the ability to enumerate namespace names cluster-wide.
+
+This is a deliberate scope reduction from an earlier cluster-wide `ClusterRole`
+that granted `secrets` read across every namespace (including `kube-system`),
+which was flagged as a major security finding during the PR #134 review.
+
+Short-lived tokens via `kubectl create token ci-drift-checker --duration=1h`
+are a future hardening option. They were deferred to keep CI kubeconfig
+plumbing simple — a long-lived token Secret avoids the need for a runner-side
+token-refresh mechanism.
 
 ## Why advisory-only
 

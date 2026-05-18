@@ -5,11 +5,20 @@
 # means the workflow physically cannot mutate cluster state even if the
 # diff logic were buggy.
 #
-# Resource list mirrors the kinds declared by manifests 00-55:
-#   namespaces, configmaps, secrets, deployments, services,
-#   statefulsets, jobs, cronjobs.
-# Add new groups here when manifests start touching new kinds; otherwise
-# `kubectl diff` will succeed silently but skip the new objects.
+# RBAC is split into two scopes (PR #134 review — namespace-scoping):
+#
+#   1. Role + RoleBinding in namespace `copytrade` — covers every namespaced
+#      kind that manifests 00-55 declare: configmaps, secrets, services,
+#      deployments, statefulsets, jobs, cronjobs, ingresses.
+#      The SA token cannot read Secrets outside `copytrade` even if exfiltrated.
+#
+#   2. ClusterRole + ClusterRoleBinding — grants `namespaces` only (cluster-
+#      scoped kind). `kubectl diff` must enumerate namespaces to locate target
+#      objects; no other cluster-wide read is needed.
+#
+# Add new namespaced kinds to the Role (not the ClusterRole) when manifests
+# start touching new kinds; otherwise `kubectl diff` will succeed silently
+# but skip the new objects.
 #
 # One-time setup (see docs/ops/k8s-drift-check.md):
 #   kubectl apply -f infra/k8s/56-ci-readonly-sa.yaml
@@ -25,21 +34,20 @@ metadata:
     app.kubernetes.io/part-of: oh-my-tradeagent
     app.kubernetes.io/component: ci-readonly
 ---
+# Namespaced Role — covers every kind declared by infra/k8s/ manifests that
+# lives inside the copytrade namespace. Grants are bounded to this namespace.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: ci-drift-checker-readonly
+  namespace: copytrade
   labels:
     app.kubernetes.io/part-of: oh-my-tradeagent
     app.kubernetes.io/component: ci-readonly
 rules:
-  # Core API group: namespaces, configmaps, secrets, services.
-  # secrets is included so `kubectl diff` against secrets manifests (if
-  # any future PR re-adds them under infra/k8s/) does not skip them
-  # silently; values stay redacted in the diff output by default.
+  # Core API group: configmaps, secrets, services.
   - apiGroups: [""]
     resources:
-      - namespaces
       - configmaps
       - secrets
       - services
@@ -56,23 +64,56 @@ rules:
       - jobs
       - cronjobs
     verbs: [get, list, watch]
-  # networking: Ingress (54-api-gateway).
+  # networking: Ingress is namespaced (54-api-gateway).
   - apiGroups: ["networking.k8s.io"]
     resources:
       - ingresses
     verbs: [get, list, watch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: ci-drift-checker-readonly
+  namespace: copytrade
+  labels:
+    app.kubernetes.io/part-of: oh-my-tradeagent
+    app.kubernetes.io/component: ci-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ci-drift-checker-readonly
+subjects:
+  - kind: ServiceAccount
+    name: ci-drift-checker
+    namespace: copytrade
+---
+# ClusterRole — grants only `namespaces` (a cluster-scoped kind). `kubectl diff`
+# must list namespaces to locate target objects; this is the only cluster-wide
+# read the workflow needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ci-drift-checker-readonly-cluster
+  labels:
+    app.kubernetes.io/part-of: oh-my-tradeagent
+    app.kubernetes.io/component: ci-readonly
+rules:
+  - apiGroups: [""]
+    resources:
+      - namespaces
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ci-drift-checker-readonly-cluster
   labels:
     app.kubernetes.io/part-of: oh-my-tradeagent
     app.kubernetes.io/component: ci-readonly
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: ci-drift-checker-readonly
+  name: ci-drift-checker-readonly-cluster
 subjects:
   - kind: ServiceAccount
     name: ci-drift-checker
