@@ -50,9 +50,12 @@ class KillSwitchWorkflowImplTest {
   private DailyPnlActivities pnl;
   private KillSwitchCascadeActivities cascade;
   private LivePromotionActivities livePromotion;
+  private long originalHistoryLengthWatermark;
 
   @BeforeEach
   void setUp() {
+    // Capture the production watermark so tests that mutate it can restore it in @AfterEach.
+    originalHistoryLengthWatermark = KillSwitchWorkflowImpl.historyLengthWatermark;
     env = TestWorkflowEnvironment.newInstance();
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(KillSwitchWorkflowImpl.class);
@@ -79,6 +82,7 @@ class KillSwitchWorkflowImplTest {
 
   @AfterEach
   void tearDown() {
+    KillSwitchWorkflowImpl.historyLengthWatermark = originalHistoryLengthWatermark;
     env.close();
   }
 
@@ -217,6 +221,55 @@ class KillSwitchWorkflowImplTest {
             anyString(),
             eq("auto:daily_loss"),
             eq("auto:daily_loss"));
+  }
+
+  @Test
+  void heartbeatLoop_continuesAsNew_carryingTrippedStateAcross() {
+    // Lower the production watermark so a small number of heartbeat ticks crosses it inside the
+    // TestWorkflowEnvironment. Production keeps the 10_000-event default; the test only mutates
+    // the in-process field for its own lifetime (restored in @AfterEach).
+    KillSwitchWorkflowImpl.historyLengthWatermark = 50L;
+
+    String workflowId = "t-dev/s-copytrade-v1/killswitch-can";
+    KillSwitchWorkflow stub = newStub(workflowId);
+    WorkflowStub typed = WorkflowStub.fromTyped(stub);
+    typed.start(input());
+    String runIdBeforeCarry = typed.getExecution().getRunId();
+
+    // Trip before the continueAsNew boundary so we can assert the state carries across.
+    stub.trip(tripRequest("manual:before_can", "operator:test"));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    // Drive enough heartbeat ticks for history-length to exceed the (lowered) watermark. Each
+    // tick adds several events (timer + activity schedule/complete + workflow task); 30 ticks is
+    // ample headroom above 50 events and still completes well inside the per-phase 60s budget
+    // because TestWorkflowEnvironment skips real time.
+    env.sleep(Duration.ofMinutes(30));
+
+    // After the continueAsNew boundary, queries on the workflow id reach the *new* run. If the
+    // tripped flag is false here, state did not carry forward — that is the failure mode this
+    // test is guarding against.
+    KillSwitchWorkflow stubAfter =
+        env.getWorkflowClient().newWorkflowStub(KillSwitchWorkflow.class, workflowId);
+    KillSwitchState after = stubAfter.killswitchState();
+    assertThat(after.getTripped()).isTrue();
+    assertThat(after.getReason()).isEqualTo("manual:before_can");
+    assertThat(after.getActor()).isEqualTo("operator:test");
+
+    // Confirm the workflow actually crossed the continueAsNew boundary (the run id rotated).
+    // Without this assertion the test could pass even if continueAsNew never fired (the original
+    // run would still hold tripped=true). describe() returns the current run id for the
+    // workflow id from Temporal's visibility tables.
+    String runIdAfterCarry =
+        env.getWorkflowClient()
+            .newUntypedWorkflowStub(workflowId)
+            .describe()
+            .getExecution()
+            .getRunId();
+    assertThat(runIdAfterCarry).isNotEqualTo(runIdBeforeCarry);
+
+    // Audit activities continue to be invoked in the new run (calendar.todayEt fires each tick).
+    verify(audit, atLeastOnce()).log(any());
   }
 
   @Test

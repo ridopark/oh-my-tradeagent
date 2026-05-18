@@ -50,6 +50,19 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   /** Fallback cooldown when the strategy config does not set {@code reset_cooldown_secs}. */
   static final long DEFAULT_RESET_COOLDOWN_SECS = 60L;
 
+  /**
+   * History-event watermark for {@link Workflow#continueAsNew(Object...)}. Set at ~5x safety margin
+   * below the Temporal frontend default ~51,200 cap and ~10x above the per-trading-day event count
+   * the heartbeat loop emits, so the workflow continues-as-new approximately daily and never
+   * mid-bar. Carries forward {@code tripped}, {@code reason}, {@code actor}, {@code trippedAt},
+   * {@code coolingDownUntil}, and {@code tradingDay} via the v2 {@link KillSwitchWorkflowInput}
+   * fields so state survives the run-id rotation. Issue #124.
+   *
+   * <p>Package-private and non-final so tests can lower the threshold via reflection — keeps the
+   * production code from gaining a configuration knob that has no operational use (KISS).
+   */
+  static long historyLengthWatermark = 10_000L;
+
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
   private static final ActivityOptions CASCADE_OPTIONS =
@@ -82,18 +95,41 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   // auditEvent() with input == null.
   @WorkflowInit
   public KillSwitchWorkflowImpl(KillSwitchWorkflowInput in) {
-    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 1L) {
+    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 2L) {
       throw new IllegalArgumentException(
           "KillSwitchWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
     this.input = in;
+    // Hydrate carry-forward state from a prior run's continueAsNew. Fresh bootstrap inputs
+    // (KillSwitchBootstrapper) leave every optional field null, so we keep the existing defaults.
+    if (Boolean.TRUE.equals(in.getTripped())) {
+      this.tripped = true;
+    }
+    if (in.getReason() != null) {
+      this.reason = in.getReason();
+    }
+    if (in.getActor() != null) {
+      this.actor = in.getActor();
+    }
+    if (in.getTrippedAt() != null) {
+      this.trippedAt = in.getTrippedAt();
+    }
+    if (in.getCoolingDownUntil() != null) {
+      this.coolingDownUntil = in.getCoolingDownUntil();
+    }
+    if (in.getTradingDay() != null) {
+      this.tradingDay = in.getTradingDay();
+    }
   }
 
   @Override
   public String run(KillSwitchWorkflowInput in) {
     // `in` is consumed by the @WorkflowInit constructor; the parameter only stays because
     // the @WorkflowMethod signature must match KillSwitchWorkflow.run.
-    this.tradingDay = calendar.todayEt();
+    if (this.tradingDay == null) {
+      // Fresh bootstrap. Carry-forward runs already have tradingDay hydrated from `in`.
+      this.tradingDay = calendar.todayEt();
+    }
 
     while (true) {
       Workflow.sleep(HEARTBEAT_INTERVAL);
@@ -105,7 +141,40 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
             KIND_KILL_SWITCH_HEARTBEAT_ERROR,
             subject("error", e.getMessage(), "trading_day", tradingDay));
       }
+      // Drain-and-continueAsNew once history crosses the watermark. Placed *after* heartbeat() so
+      // the just-scheduled activity completion is the last event in the old history, and *outside*
+      // the try/catch above so the DestroyWorkflowThreadError that continueAsNew throws propagates
+      // to Temporal as it expects. Issue #124.
+      if (Workflow.getInfo().getHistoryLength() > historyLengthWatermark) {
+        Workflow.continueAsNew(buildCarryForwardInput());
+        // continueAsNew throws DestroyWorkflowThreadError — anything below this line is
+        // unreachable.
+      }
     }
+  }
+
+  /**
+   * Builds a v2 {@link KillSwitchWorkflowInput} populated with current state for {@link
+   * Workflow#continueAsNew(Object...)}. Tenant/strategy ids carry over from {@link #input}; the
+   * carry-forward fields snapshot the workflow's mutable state at the boundary. The next run's
+   * {@code @WorkflowInit} hydrates them back into the same field names.
+   */
+  private KillSwitchWorkflowInput buildCarryForwardInput() {
+    KillSwitchWorkflowInput carry = new KillSwitchWorkflowInput();
+    carry.setSchemaVersion(2L);
+    carry.setTenantId(input.getTenantId());
+    carry.setStrategyId(input.getStrategyId());
+    carry.setTripped(tripped);
+    if (reason != null && !reason.isEmpty()) {
+      carry.setReason(reason);
+    }
+    if (actor != null && !actor.isEmpty()) {
+      carry.setActor(actor);
+    }
+    carry.setTrippedAt(trippedAt);
+    carry.setCoolingDownUntil(coolingDownUntil);
+    carry.setTradingDay(tradingDay);
+    return carry;
   }
 
   /**
