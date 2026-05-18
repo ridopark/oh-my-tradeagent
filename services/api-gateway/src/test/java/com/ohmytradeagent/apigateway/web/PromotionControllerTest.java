@@ -85,6 +85,26 @@ class PromotionControllerTest {
   }
 
   @Test
+  void approveRejectsBlankBrokerTargetWith400() throws Exception {
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/promotion/approve")
+                .header("X-Operator-Id", "alice")
+                .header("X-Approver-Id-2", "bob")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    "{\"tenant_id\":\"t-dev\",\"strategy_id\":\"s-1\",\"broker_target\":\"\",\"note\":\"x\"}"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.status()
+                .isBadRequest())
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.detail")
+                .value(org.hamcrest.Matchers.containsString("broker_target_required")));
+
+    verify(stub, never()).update(any(String.class), any(Class.class), any());
+  }
+
+  @Test
   void approve_sameApprover_returns400() throws Exception {
     // Same-approver pre-validation runs at the gateway, mapping directly through
     // GlobalExceptionHandler.IllegalArgumentException → HTTP 400. No Update fires.

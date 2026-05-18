@@ -56,6 +56,9 @@ public class PromotionController {
     String strategy = ctx.strategyId(req);
     PromotionPayload payload = body == null ? new PromotionPayload(null, null) : body;
     String brokerTarget = payload.brokerTarget();
+    if (brokerTarget == null || brokerTarget.isBlank()) {
+      throw new IllegalArgumentException("broker_target_required");
+    }
     String note = payload.note();
 
     String wfId = WorkflowIds.killswitch(tenant, strategy);
