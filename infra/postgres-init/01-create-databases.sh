@@ -22,7 +22,17 @@ EOSQL
   echo "  ensured database: $db"
 }
 
-# Phase 2c.2: alpaca-paper is the v0 default. Legacy tradier-paper DB retained so existing
-# volumes mounted from prior phases don't lose state on re-init (idempotent skip).
+# Phase 2c.2 onward: one database per <provider>-<env> whitelisted in the
+# strategy-config contract schema (contract/schemas/strategy-config.json
+# broker_target enum), excluding the two legacy bare paper/live values (no
+# worker polls those queues, so no DB is needed). Idempotent (NOT EXISTS
+# guard) so re-running this script on an upgraded cluster is safe — though
+# /docker-entrypoint-initdb.d only fires on a fresh data volume.
 create_db_if_missing exec_alpaca_paper
+create_db_if_missing exec_alpaca_live
 create_db_if_missing exec_tradier_paper
+create_db_if_missing exec_tradier_live
+create_db_if_missing exec_ibkr_paper
+create_db_if_missing exec_ibkr_live
+create_db_if_missing exec_schwab_paper
+create_db_if_missing exec_schwab_live
