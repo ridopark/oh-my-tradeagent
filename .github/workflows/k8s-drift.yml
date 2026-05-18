@@ -25,9 +25,14 @@ name: k8s drift check (advisory)
 # Read-only safety: the SA bound to KUBECONFIG_READONLY has verbs
 # [get, list, watch] only — `kubectl diff` cannot mutate, even by
 # accident. See infra/k8s/56-ci-readonly-sa.yaml.
+#
+# Public-repo safety: three layered defenses make a self-hosted runner
+# safe here — `pull_request_target` trigger, required-reviewer
+# environment, no PR-supplied script execution. Threat model and
+# rationale in docs/ops/k8s-drift-check.md#public-repo-workflow-safety.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
     paths:
       - "infra/k8s/**"
@@ -76,9 +81,21 @@ jobs:
     if: needs.preflight.outputs.enabled == 'true'
     # LAN-only runner — see docs/ops/k8s-drift-check.md for registration.
     runs-on: [self-hosted, homelab]
+    # Required-reviewer gate — see docs/ops/k8s-drift-check.md step 3.
+    environment: production-drift-check
     timeout-minutes: 10
     steps:
+      # pull_request_target defaults to checking out the base ref (main).
+      # We explicitly check out the PR head's commit SHA so kubectl diff
+      # operates on the PR's manifest content. Pinning by SHA (not ref)
+      # prevents TOCTOU if the PR is force-pushed between trigger and
+      # execution. persist-credentials: false ensures the elevated
+      # GITHUB_TOKEN from pull_request_target context is not left on
+      # disk where a subsequent step could leak it.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
 
       - name: Write read-only kubeconfig
         env:
