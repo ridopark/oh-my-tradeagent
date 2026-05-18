@@ -97,13 +97,13 @@ registers the `TenantStrategy` + `ContractSymbol` Search Attributes. Idempotent.
 
 Two layers, both run before merge:
 
-1. **CI client-side gate** (automatic, GitHub Actions). The `k8s-dryrun` job in
-   `.github/workflows/ci.yml` runs `kubectl apply --dry-run=client -f infra/k8s/`
-   on any PR whose diff touches `infra/k8s/**` (kubectl pinned to k3s 1.35.4
-   to match the homelab). Catches schema regressions and basic resource
-   structure without contacting a cluster. Does NOT exercise admission
-   webhooks or namespace-bound references (Secrets/ConfigMaps) — that's what
-   layer 2 is for.
+1. **CI client-side gate** (automatic, GitHub Actions). The `k8s (kubeconform)`
+   job in `.github/workflows/ci.yml` runs `kubeconform v0.6.7 -strict -recursive`
+   on any PR whose diff touches `infra/k8s/**`. kubeconform validates against
+   Kubernetes 1.35.0 schemas (matches homelab k3s line) using offline JSON schemas
+   — no cluster or API server needed. Catches schema regressions and basic resource
+   structure. Does NOT exercise admission webhooks or namespace-bound references
+   (Secrets/ConfigMaps) — that's what layer 2 is for.
 2. **Operator server-side gate** (manual, before merge of a non-trivial
    manifest change). Open a tunnel or run from a workstation with the
    homelab's kubeconfig copied (`~/.kube/config-homelab`):

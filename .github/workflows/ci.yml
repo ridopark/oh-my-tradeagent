@@ -8,7 +8,7 @@ on:
 
 jobs:
   k8s-dryrun:
-    name: k8s (kubectl --dry-run=client)
+    name: k8s (kubeconform)
     runs-on: ubuntu-latest
     # Job always starts, but the actual install/dry-run steps gate on
     # `infra/k8s/**` or this workflow file changing in the PR diff.
@@ -44,6 +44,7 @@ jobs:
         run: |
           curl -sSLo kubeconform.tar.gz \
             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  kubeconform.tar.gz" | sha256sum -c
           tar -xzf kubeconform.tar.gz kubeconform
           sudo mv kubeconform /usr/local/bin/
 
@@ -54,8 +55,8 @@ jobs:
         # (e.g. missing Secrets). The homelab `--dry-run=server` step in
         # infra/k8s/README.md remains the pre-merge cluster-level gate.
         run: |
-          kubeconform -strict -kubernetes-version 1.32.0 \
-            -summary infra/k8s/*.yaml
+          kubeconform -strict -kubernetes-version 1.35.0 \
+            -summary -recursive infra/k8s/
 
   java:
     name: Java (mvn verify + spotless)
