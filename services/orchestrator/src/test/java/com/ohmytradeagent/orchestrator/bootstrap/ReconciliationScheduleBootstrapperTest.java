@@ -82,8 +82,8 @@ class ReconciliationScheduleBootstrapperTest {
 
     ScheduleClient scheduleClient = mock(ScheduleClient.class);
     // listSchedules() is invoked per-strategy by the new reap pass; return an empty stream each
-    // time so the reap pass is a no-op. Note: Mockito returns null by default for Stream-returning
-    // mocks and the reap helper would NPE without this stub.
+    // time so the reap pass is a no-op. Stream is AutoCloseable so the try-with-resources in
+    // reapStaleSchedules() closes it; the stub must return a non-null stream.
     when(scheduleClient.listSchedules()).thenReturn(Stream.empty(), Stream.empty());
     WorkflowClient workflowClient = mock(WorkflowClient.class);
     WorkflowServiceStubs stubs = mock(WorkflowServiceStubs.class);

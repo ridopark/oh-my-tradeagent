@@ -135,8 +135,8 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
    * #ensureSchedule}. The trailing dash prevents tenant-prefix collisions (e.g. {@code dev} vs
    * {@code dev-other}).
    *
-   * <p>A "schedule not found" race (two replicas reaping simultaneously) is downgraded to an info
-   * log; any other {@link RuntimeException} from the SDK is logged and the iteration continues so a
+   * <p>A "schedule not found" race (two replicas reaping simultaneously) is logged at warn level;
+   * any other {@link RuntimeException} from the SDK is logged and the iteration continues so a
    * single stale schedule can't take down the whole bootstrap pass.
    *
    * <p>Package-private so unit tests can drive it directly against a mock {@link ScheduleClient}.
@@ -144,34 +144,32 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
   void reapStaleSchedules(
       ScheduleClient scheduleClient, String tenantId, String strategyId, String desiredScheduleId) {
     String prefix = "recon-t-" + tenantId + "-s-" + strategyId + "-";
-    Stream<ScheduleListDescription> listed = scheduleClient.listSchedules();
-    if (listed == null) {
-      return;
+    try (Stream<ScheduleListDescription> listed = scheduleClient.listSchedules()) {
+      listed
+          .filter(d -> d.getScheduleId().startsWith(prefix))
+          .filter(d -> !d.getScheduleId().equals(desiredScheduleId))
+          .forEach(
+              d -> {
+                String staleId = d.getScheduleId();
+                try {
+                  ScheduleHandle handle = scheduleClient.getHandle(staleId);
+                  handle.delete();
+                  log.info(
+                      "reaped stale Reconciliation Schedule id={} (desired={}) tenant={} strategy={}",
+                      staleId,
+                      desiredScheduleId,
+                      tenantId,
+                      strategyId);
+                } catch (RuntimeException e) {
+                  log.warn(
+                      "could not reap stale Reconciliation Schedule id={} (desired={}); peer race"
+                          + " or already removed: {}",
+                      staleId,
+                      desiredScheduleId,
+                      e.toString());
+                }
+              });
     }
-    listed
-        .filter(d -> d.getScheduleId().startsWith(prefix))
-        .filter(d -> !d.getScheduleId().equals(desiredScheduleId))
-        .forEach(
-            d -> {
-              String staleId = d.getScheduleId();
-              try {
-                ScheduleHandle handle = scheduleClient.getHandle(staleId);
-                handle.delete();
-                log.info(
-                    "reaped stale Reconciliation Schedule id={} (desired={}) tenant={} strategy={}",
-                    staleId,
-                    desiredScheduleId,
-                    tenantId,
-                    strategyId);
-              } catch (RuntimeException e) {
-                log.warn(
-                    "could not reap stale Reconciliation Schedule id={} (desired={}); peer race"
-                        + " or already removed: {}",
-                    staleId,
-                    desiredScheduleId,
-                    e.toString());
-              }
-            });
   }
 
   private void ensureSchedule(
