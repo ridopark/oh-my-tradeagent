@@ -102,11 +102,12 @@ public class AuditActivitiesImpl implements AuditActivities {
           rowHashColumn = chainWriter.computeRowHash(event, priorRowHash);
           prevHashColumn =
               priorRowHash; // SQL NULL at chain head; 32-zero substitution is hashing-only
-        } catch (RuntimeException e) {
-          // Chain corruption: don't lose the audit event. Insert with NULL hash columns,
-          // matching the disabled-path behavior. Log at WARN for alerting.
+        } catch (IllegalArgumentException | IllegalStateException e) {
+          // Chain-writer logic failure (hash compute / serialization).
+          // The audit event WILL still INSERT below with NULL hashes (matching disabled-path).
           log.warn(
-              "chain-restart-after-failure: chain-writer failed; inserting audit_log with NULL hashes (tenant={}, strategy={})",
+              "chain-restart-after-failure: chain-writer failed for event={} (tenant={}, strategy={}); inserting audit_log with NULL hashes",
+              event.getEventId(),
               event.getTenantId(),
               event.getStrategyId(),
               e);
