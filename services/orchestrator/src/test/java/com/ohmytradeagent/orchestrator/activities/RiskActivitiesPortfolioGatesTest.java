@@ -70,8 +70,11 @@ class RiskActivitiesPortfolioGatesTest {
     when(drawdownSampler.sampleLossRatePerMinute(anyString(), anyString()))
         .thenReturn(BigDecimal.ZERO);
 
+    // Issue #69: PreTradeCheckActivity dispatch moved to the workflow. The mock is still wired
+    // into the impl so the constructor signature stays satisfied (and so the
+    // instanceof PermissiveDefaultPreTradeCheck check used by assertPreTradeCheckRoutable sees a
+    // non-permissive bean in these tests). The mock is never invoked.
     preTradeCheck = mock(PreTradeCheckActivity.class);
-    when(preTradeCheck.preTradeCheck(any())).thenReturn(approvedPreTradeCheck());
 
     risk =
         new RiskActivitiesImpl(
@@ -94,7 +97,7 @@ class RiskActivitiesPortfolioGatesTest {
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("20000"))));
     // new entry: 1 ctr * 2.30 * 100 = 230 notional. 20000 + 230 << 50000 → approve.
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -105,7 +108,7 @@ class RiskActivitiesPortfolioGatesTest {
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("49900"))));
     // new entry notional: 1 * 2.30 * 100 = 230. 49900 + 230 = 50130 > 50000 → reject.
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
     assertThat(d.detail()).contains("notional=");
@@ -117,7 +120,7 @@ class RiskActivitiesPortfolioGatesTest {
     c.setNotionalCapPctOfEquity(null);
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("9999999"))));
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -128,14 +131,14 @@ class RiskActivitiesPortfolioGatesTest {
 
     // Case 1: equity == null (snapshot source unavailable) → fail closed.
     when(portfolioSnapshot.accountEquity(anyString(), anyString())).thenReturn(null);
-    RiskDecision dNull = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision dNull = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(dNull.allowed()).isFalse();
     assertThat(dNull.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
     assertThat(dNull.detail()).contains("equity_unavailable");
 
     // Case 2: equity == 0 (degenerate snapshot) → fail closed.
     when(portfolioSnapshot.accountEquity(anyString(), anyString())).thenReturn(BigDecimal.ZERO);
-    RiskDecision dZero = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision dZero = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(dZero.allowed()).isFalse();
     assertThat(dZero.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
     assertThat(dZero.detail()).contains("equity_unavailable");
@@ -150,7 +153,7 @@ class RiskActivitiesPortfolioGatesTest {
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("NVDA", new BigDecimal("1000"))));
     // payload ticker is NVDA → 1 existing NVDA < 2 cap → approve.
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -164,7 +167,7 @@ class RiskActivitiesPortfolioGatesTest {
                 new PortfolioSnapshot.OpenPosition("NVDA", new BigDecimal("1000")),
                 new PortfolioSnapshot.OpenPosition("NVDA", new BigDecimal("1000"))));
     // 2 existing NVDA >= 2 cap → reject.
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.SAME_UNDERLYING_LIMIT);
     assertThat(d.detail()).contains("ticker=NVDA");
@@ -180,7 +183,7 @@ class RiskActivitiesPortfolioGatesTest {
                 new PortfolioSnapshot.OpenPosition("NVDA", new BigDecimal("1000")),
                 new PortfolioSnapshot.OpenPosition("NVDA", new BigDecimal("1000")),
                 new PortfolioSnapshot.OpenPosition("NVDA", new BigDecimal("1000"))));
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -201,7 +204,7 @@ class RiskActivitiesPortfolioGatesTest {
                 new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("1000")),
                 new PortfolioSnapshot.OpenPosition("XLF", new BigDecimal("1000"))));
     // payload ticker NVDA → tech. existing tech = AAPL only = 1 < 3 → approve.
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -220,7 +223,7 @@ class RiskActivitiesPortfolioGatesTest {
                 new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("1000")),
                 new PortfolioSnapshot.OpenPosition("MSFT", new BigDecimal("1000"))));
     // payload ticker NVDA → tech. existing tech = AAPL+MSFT = 2 >= 2 cap → reject.
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.SECTOR_CONCENTRATION_EXCEEDED);
     assertThat(d.detail()).contains("sector=tech");
@@ -237,7 +240,7 @@ class RiskActivitiesPortfolioGatesTest {
             List.of(
                 new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("1000")),
                 new PortfolioSnapshot.OpenPosition("MSFT", new BigDecimal("1000"))));
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -255,7 +258,7 @@ class RiskActivitiesPortfolioGatesTest {
                 new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("1000")),
                 new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("1000")),
                 new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("1000"))));
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -266,7 +269,7 @@ class RiskActivitiesPortfolioGatesTest {
     StrategyConfig c = config();
     c.setDailyTradeCount(10L);
     when(dailyTradeCounter.count(anyString(), anyString(), any())).thenReturn(9L);
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -275,7 +278,7 @@ class RiskActivitiesPortfolioGatesTest {
     StrategyConfig c = config();
     c.setDailyTradeCount(10L);
     when(dailyTradeCounter.count(anyString(), anyString(), any())).thenReturn(10L);
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.DAILY_TRADE_COUNT_EXCEEDED);
     assertThat(d.detail()).contains("count=10");
@@ -287,7 +290,7 @@ class RiskActivitiesPortfolioGatesTest {
     StrategyConfig c = config();
     c.setDailyTradeCount(null);
     when(dailyTradeCounter.count(anyString(), anyString(), any())).thenReturn(9_999L);
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -299,7 +302,7 @@ class RiskActivitiesPortfolioGatesTest {
     c.setDrawdownVelocityThreshold(new BigDecimal("100")); // 100 $/min
     when(drawdownSampler.sampleLossRatePerMinute(anyString(), anyString()))
         .thenReturn(new BigDecimal("50"));
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -309,7 +312,7 @@ class RiskActivitiesPortfolioGatesTest {
     c.setDrawdownVelocityThreshold(new BigDecimal("100"));
     when(drawdownSampler.sampleLossRatePerMinute(anyString(), anyString()))
         .thenReturn(new BigDecimal("150"));
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.DRAWDOWN_VELOCITY_EXCEEDED);
     assertThat(d.detail()).contains("rate=150");
@@ -322,7 +325,7 @@ class RiskActivitiesPortfolioGatesTest {
     c.setDrawdownVelocityThreshold(null);
     when(drawdownSampler.sampleLossRatePerMinute(anyString(), anyString()))
         .thenReturn(new BigDecimal("99999"));
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -331,7 +334,7 @@ class RiskActivitiesPortfolioGatesTest {
     StrategyConfig c = config();
     c.setDrawdownVelocityThreshold(new BigDecimal("100"));
     when(drawdownSampler.sampleLossRatePerMinute(anyString(), anyString())).thenReturn(null);
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.DRAWDOWN_VELOCITY_EXCEEDED);
     assertThat(d.detail()).contains("rate_unavailable");
@@ -339,12 +342,16 @@ class RiskActivitiesPortfolioGatesTest {
 
   // ----- pre_trade_check -----
 
+  // Issue #69: the cross-service PreTradeCheckActivity dispatch moved to the workflow. These
+  // tests now pass the workflow-supplied PreTradeCheckResult directly into checkEntry as the third
+  // argument (mirroring the value the workflow would have computed).
+
   @Test
   void preTradeCheck_approves_whenBrokerReportsGoodState() {
     StrategyConfig c = config();
     c.setPreTradeCheckEnabled(true);
-    when(preTradeCheck.preTradeCheck(any())).thenReturn(approvedPreTradeCheck());
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d =
+        risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, approvedPreTradeCheck());
     assertThat(d.allowed()).isTrue();
   }
 
@@ -355,8 +362,7 @@ class RiskActivitiesPortfolioGatesTest {
     PreTradeCheckResult res = approvedPreTradeCheck();
     res.setAllowed(false);
     res.setRejectReason("broker: account closed");
-    when(preTradeCheck.preTradeCheck(any())).thenReturn(res);
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, res);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
     assertThat(d.detail()).contains("allowed=false");
@@ -368,8 +374,7 @@ class RiskActivitiesPortfolioGatesTest {
     c.setPreTradeCheckEnabled(true);
     PreTradeCheckResult res = approvedPreTradeCheck();
     res.setBuyingPower(new BigDecimal("10")); // far below 1 ctr * 2.30 * 100 = 230 notional
-    when(preTradeCheck.preTradeCheck(any())).thenReturn(res);
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, res);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
     assertThat(d.detail()).contains("buying_power=");
@@ -381,8 +386,7 @@ class RiskActivitiesPortfolioGatesTest {
     c.setPreTradeCheckEnabled(true);
     PreTradeCheckResult res = approvedPreTradeCheck();
     res.setPdtStatus(PreTradeCheckResult.PdtStatus.BLOCKED);
-    when(preTradeCheck.preTradeCheck(any())).thenReturn(res);
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, res);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
     assertThat(d.detail()).contains("pdt=BLOCKED");
@@ -394,38 +398,51 @@ class RiskActivitiesPortfolioGatesTest {
     c.setPreTradeCheckEnabled(true);
     PreTradeCheckResult res = approvedPreTradeCheck();
     res.setMarginSufficient(false);
-    when(preTradeCheck.preTradeCheck(any())).thenReturn(res);
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, res);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
     assertThat(d.detail()).contains("margin=");
   }
 
   @Test
-  void preTradeCheck_failsClosed_onActivityException() {
+  void preTradeCheck_rejects_whenNullResult() {
     StrategyConfig c = config();
     c.setPreTradeCheckEnabled(true);
-    when(preTradeCheck.preTradeCheck(any())).thenThrow(new RuntimeException("svc timeout"));
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
+    assertThat(d.detail()).contains("null_result");
+  }
+
+  @Test
+  void preTradeCheck_failsClosed_onDispatchFailedSentinel() {
+    // Issue #69: when the workflow's dispatch throws, it builds this sentinel. checkEntry
+    // surfaces it as PRE_TRADE_CHECK_FAILED via the allowed=false branch, preserving the
+    // pre-Issue-#69 fail-closed contract from RiskActivitiesPortfolioGatesTest.
+    StrategyConfig c = config();
+    c.setPreTradeCheckEnabled(true);
+    PreTradeCheckResult sentinel = new PreTradeCheckResult();
+    sentinel.setSchemaVersion(1L);
+    sentinel.setAllowed(false);
+    sentinel.setRejectReason("dispatch_failed:RuntimeException");
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, sentinel);
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
+    assertThat(d.detail()).contains("dispatch_failed:");
   }
 
   @Test
   void preTradeCheck_disabled_whenConfigFalseOrNull() {
     StrategyConfig c = config();
-    // Stub throws so any accidental invocation surfaces as a test failure for both branches.
-    when(preTradeCheck.preTradeCheck(any()))
-        .thenThrow(new RuntimeException("should not be called"));
 
-    // Case 1: enabled == false → gate short-circuits, entry approved.
+    // Case 1: enabled == false → gate short-circuits, entry approved (regardless of result arg).
     c.setPreTradeCheckEnabled(false);
-    RiskDecision dFalse = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision dFalse = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(dFalse.allowed()).isTrue();
 
     // Case 2: enabled == null → gate short-circuits (null treated as disabled), entry approved.
     c.setPreTradeCheckEnabled(null);
-    RiskDecision dNull = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c);
+    RiskDecision dNull = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(dNull.allowed()).isTrue();
   }
 
