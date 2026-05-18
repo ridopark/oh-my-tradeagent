@@ -1,0 +1,183 @@
+name: Deploy to homelab
+
+# Rolls one or more service Deployments on the homelab k3s cluster so they
+# re-pull the `:latest` image pushed by `build-images.yml`. All manifests in
+# `infra/k8s/` pin `:latest` with `imagePullPolicy: Always`, so a plain
+# `kubectl apply` is a no-op on an unchanged manifest — only a pod restart
+# (`kubectl rollout restart`) triggers the re-pull. This workflow is that
+# restart.
+#
+# Two trigger paths:
+#   - workflow_run: auto-chained off a successful "Build and push images"
+#     run on main. Every merge to main surfaces a deploy waiting on
+#     reviewer approval — no need to remember to redeploy after merge.
+#   - workflow_dispatch: manual redeploy from the Actions tab. Pick one
+#     service or `all`. Use for rolling restart on config change, or to
+#     replay after a failed previous deploy.
+#
+# Both paths require:
+#   - Self-hosted runner with label `homelab` (shared with k8s-drift).
+#   - Repo variable `DEPLOY_ENABLED=true` (operator flips after setup).
+#   - Repo secret `KUBECONFIG_DEPLOY` populated with a write-capable
+#     kubeconfig for the `copytrade` namespace.
+#   - GitHub Environment `production-homelab` configured with a required
+#     reviewer (= you). The approval prompt blocks the deploy job until
+#     you click Approve in the Actions UI.
+#
+# One-time operator setup (do once, leave alone):
+#   1. Register the self-hosted runner with labels `self-hosted,homelab`
+#      if it isn't already (the k8s-drift workflow reuses it — see
+#      docs/ops/k8s-drift-check.md for runner setup).
+#   2. Settings → Environments → New environment: `production-homelab`.
+#      Under "Required reviewers" add yourself. (Optional: restrict to
+#      `main` branch.)
+#   3. Settings → Secrets and variables → Actions → Secrets:
+#      add `KUBECONFIG_DEPLOY` with the contents of a write-capable
+#      kubeconfig (typically the operator's `~/.kube/config-homelab`).
+#   4. Settings → Secrets and variables → Actions → Variables:
+#      add `DEPLOY_ENABLED=true`. Until you flip this, the workflow
+#      exits early with a friendly skip notice so the introducing PR
+#      doesn't fail on its own merge.
+#
+# Verification after deploy:
+#   Rollout-status exit code is the source of truth — the job fails if any
+#   new pod doesn't reach Ready within 180s. For service-specific signals
+#   (e.g. confirming the new orchestrator meters appear on
+#   `/actuator/prometheus`), run the per-PR test-plan checks manually
+#   against the cluster — those are not gated here on purpose, to keep the
+#   deploy workflow's responsibility narrow (image → rolled out, Ready).
+
+on:
+  workflow_run:
+    workflows: ["Build and push images"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Which service to redeploy"
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - orchestrator
+          - exec-alpaca-paper
+          - market-data
+          - api-gateway
+          - signal-source-discord
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-homelab
+  cancel-in-progress: false
+
+env:
+  NAMESPACE: copytrade
+  # Authoritative service list for the deploy matrix. The workflow_dispatch
+  # `inputs.service.options:` block above must stay in sync — GitHub Actions
+  # requires `choice` options to be a literal YAML list, so single-sourcing
+  # both lists is not possible.
+  #
+  # Naming note: `service: exec` in `build-images.yml`'s matrix builds the
+  # `oh-my-tradeagent-exec` image which the `exec-alpaca-paper` Deployment
+  # pulls. Build-name ≠ Deployment-name is intentional — see
+  # `infra/k8s/52-exec-alpaca-paper.yaml`.
+  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord"
+
+jobs:
+  preflight:
+    name: Preflight (gate on operator setup + upstream success)
+    runs-on: ubuntu-latest
+    # Skip the entire workflow if the auto-trigger fired off a failed build.
+    # (workflow_dispatch always proceeds to the gate check below.)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Check DEPLOY_ENABLED + KUBECONFIG_DEPLOY presence
+        id: gate
+        env:
+          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
+          KUBECONFIG_PRESENT: ${{ secrets.KUBECONFIG_DEPLOY != '' }}
+        run: |
+          if [ "${DEPLOY_ENABLED}" != "true" ]; then
+            echo "::notice::DEPLOY_ENABLED is not 'true' — skipping deploy. Set repo variable DEPLOY_ENABLED=true after first-time setup."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${KUBECONFIG_PRESENT}" != "true" ]; then
+            echo "::notice::KUBECONFIG_DEPLOY secret is empty — skipping deploy."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build deploy matrix
+        id: matrix
+        # All inputs handed through `env:` so the script is pure shell — no
+        # mixing of GitHub-expression and shell-expression contexts. On
+        # workflow_run, DISPATCH_SERVICE is empty string; the `:-all` default
+        # makes that case explicit instead of relying on short-circuit luck.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SERVICE: ${{ github.event.inputs.service }}
+        run: |
+          SERVICE="${DISPATCH_SERVICE:-all}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$SERVICE" != "all" ]; then
+            matrix=$(jq -nc --arg s "$SERVICE" '{service: [$s]}')
+          else
+            matrix=$(jq -nc --arg s "$SERVICES" '{service: ($s | split(" "))}')
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Computed deploy matrix: $matrix"
+
+  deploy:
+    name: Roll ${{ matrix.service }}
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
+    # LAN-only runner — shares the `homelab` label with k8s-drift.
+    runs-on: [self-hosted, homelab]
+    # Required-reviewer gate. The job blocks on approval before any
+    # `kubectl` runs — secrets are not even injected until approval lands.
+    environment: production-homelab
+    timeout-minutes: 10
+    strategy:
+      # One service failure shouldn't cancel the others — they're independent
+      # rolling restarts and we'd rather see partial success than nothing.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
+    steps:
+      - name: Write deploy kubeconfig
+        env:
+          KUBECONFIG_DEPLOY: ${{ secrets.KUBECONFIG_DEPLOY }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/.kube"
+          printf '%s' "$KUBECONFIG_DEPLOY" > "$RUNNER_TEMP/.kube/config"
+          chmod 600 "$RUNNER_TEMP/.kube/config"
+          echo "KUBECONFIG=$RUNNER_TEMP/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Rollout restart deployment/${{ matrix.service }}
+        run: |
+          kubectl -n "$NAMESPACE" rollout restart deployment/${{ matrix.service }}
+
+      - name: Wait for rollout
+        # `kubectl rollout status` exits non-zero on timeout, so this step
+        # IS the verification — if a new pod fails its probes (or fails to
+        # pull :latest) the job fails here.
+        run: |
+          kubectl -n "$NAMESPACE" rollout status deployment/${{ matrix.service }} --timeout=180s
+
+      - name: Show running pods + image digests
+        # Best-effort visibility into what's actually live now. Never blocks
+        # the job — `|| true` so a label-scheme tweak elsewhere doesn't
+        # break the deploy.
+        run: |
+          kubectl -n "$NAMESPACE" get pods -l app=${{ matrix.service }} \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[*].imageID}{"\n"}{end}' \
+            || true
