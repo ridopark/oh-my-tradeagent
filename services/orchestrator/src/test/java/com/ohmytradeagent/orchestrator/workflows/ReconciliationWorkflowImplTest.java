@@ -2,8 +2,11 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -14,6 +17,7 @@ import com.ohmytradeagent.contract.ReconciliationSummary;
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -38,6 +42,7 @@ class ReconciliationWorkflowImplTest {
   private TestWorkflowEnvironment env;
   private AuditActivities audit;
   private ReconciliationExecActivity exec;
+  private ReconciliationMetricsActivities metrics;
 
   @BeforeEach
   void setUp() {
@@ -46,7 +51,8 @@ class ReconciliationWorkflowImplTest {
     coreWorker.registerWorkflowImplementationTypes(ReconciliationWorkflowImpl.class);
     audit = Mockito.mock(AuditActivities.class);
     exec = Mockito.mock(ReconciliationExecActivity.class);
-    coreWorker.registerActivitiesImplementations(audit);
+    metrics = Mockito.mock(ReconciliationMetricsActivities.class);
+    coreWorker.registerActivitiesImplementations(audit, metrics);
     Worker brokerWorker = env.newWorker(EXEC_QUEUE);
     brokerWorker.registerActivitiesImplementations(exec);
     env.start();
@@ -161,6 +167,67 @@ class ReconciliationWorkflowImplTest {
     assertThat(summary.getBrokerOrdersChecked()).isEqualTo(0L);
     assertThat(summary.getJournalOrphans()).isEqualTo(0L);
     assertThat(summary.getBrokerOrphans()).isEqualTo(0L);
+  }
+
+  @Test
+  void metricsActivityFailure_workflowStillReturnsSummary_andEmitsAuditFallback() {
+    // Issue #89 / PR #129 review: the metrics Activity is non-fatal — a metrics outage must NOT
+    // fail the cycle. Per docs/ops/reconciliation-metrics.md the gate operator falls back to the
+    // audit-log SQL on the ReconciliationMetricsRecordFailed event, so the audit must carry
+    // non-null error_class + error_message for the failure to be diagnosable.
+    OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
+    when(exec.journalDumpOpen(anyString(), anyString()))
+        .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    Mockito.doThrow(new RuntimeException("meter registry exploded"))
+        .when(metrics)
+        .recordCycle(anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong());
+
+    ReconciliationSummary summary = runWorkflow();
+
+    // (a) workflow still returns its summary normally despite the metrics outage.
+    assertThat(summary.getJournalOrphans()).isEqualTo(1L);
+    assertThat(summary.getBrokerOrphans()).isEqualTo(0L);
+    assertThat(summary.getJournalEntriesChecked()).isEqualTo(1L);
+
+    // (b) the ReconciliationMetricsRecordFailed audit fallback is emitted with non-null
+    // error_class + error_message so the gate operator's SQL fallback is diagnosable.
+    AuditEvent failed = captureKind("ReconciliationMetricsRecordFailed");
+    assertThat(failed.getSubject()).containsEntry("broker_target", "alpaca-paper");
+    assertThat(((Number) failed.getSubject().get("discrepancies")).longValue()).isEqualTo(1L);
+    assertThat(((Number) failed.getSubject().get("intents_reconciled")).longValue()).isEqualTo(1L);
+    assertThat((String) failed.getSubject().get("error_class")).isNotBlank();
+    assertThat((String) failed.getSubject().get("error_message")).isNotBlank();
+  }
+
+  @Test
+  void metricsActivity_invokedExactlyOnce_withJournalAndOrphanCounts() {
+    // Issue #89: workflow must call ReconciliationMetricsActivities.recordCycle exactly once per
+    // cycle, with discrepancies = journalOrphans + brokerOrphans and intentsReconciled =
+    // journal.size().
+    OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
+    when(exec.journalDumpOpen(anyString(), anyString()))
+        .thenReturn(
+            List.of(
+                journal("intent-1", "OCC-1", OffsetDateTime.now(ZoneOffset.UTC)),
+                journal("intent-orphan", "OCC-orphan", old)));
+    when(exec.brokerListOpenOrders())
+        .thenReturn(
+            List.of(
+                broker("brk-1", "intent-1", "OCC-1"),
+                broker("brk-stranger", "client-stranger", "OCC-stranger")));
+
+    runWorkflow();
+
+    // journal.size() = 2, journalOrphans = 1 (the stale entry), brokerOrphans = 1 (the stranger).
+    verify(metrics, times(1))
+        .recordCycle(
+            eq("dev"),
+            eq("copytrade-v1"),
+            eq("alpaca-paper"),
+            anyLong(),
+            /* discrepancies= */ eq(2L),
+            /* intentsReconciled= */ eq(2L));
   }
 
   // ---------- helpers ----------

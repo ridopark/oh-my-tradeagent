@@ -7,6 +7,7 @@ import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
+import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
@@ -69,7 +70,8 @@ public class TemporalWorkerConfig {
       MarketCalendarActivities calendar,
       KillSwitchCascadeActivities cascade,
       DailyPnlActivities dailyPnl,
-      LivePromotionActivities livePromotion) {
+      LivePromotionActivities livePromotion,
+      ReconciliationMetricsActivities reconciliationMetrics) {
     Worker worker = factory.newWorker(taskQueue);
     worker.registerWorkflowImplementationTypes(
         CopytradeSignalWorkflowImpl.class,
@@ -85,7 +87,8 @@ public class TemporalWorkerConfig {
         calendar,
         cascade,
         dailyPnl,
-        livePromotion);
+        livePromotion,
+        reconciliationMetrics);
     return worker;
   }
 }
