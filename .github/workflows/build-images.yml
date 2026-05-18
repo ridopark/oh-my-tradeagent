@@ -48,6 +48,10 @@ jobs:
             module: orchestrator
             dockerfile: infra/docker/java-service.Dockerfile
             cache_scope: java-builder
+          - service: audit
+            module: audit
+            dockerfile: infra/docker/java-service.Dockerfile
+            cache_scope: java-builder
           - service: exec
             module: exec
             dockerfile: infra/docker/java-service.Dockerfile

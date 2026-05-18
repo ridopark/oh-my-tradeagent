@@ -1,0 +1,96 @@
+---
+# Issue #90 — daily audit-completeness verifier. Re-derives the position ledger from typed
+# audit_log events for the previous UTC day and exits non-zero on any divergence. The CronJob's
+# run history is the "20 consecutive green days" surface the Phase 7 gate operator reads off
+# without spelunking the source.
+#
+# Schedule: 02:00 UTC daily. The orchestrator's EOD force-flatten fires at 15:55 ET and the daily
+# PnL composition runs shortly after; 02:00 UTC gives every same-day event time to land before
+# the verifier scans [yesterday-00:00 UTC, today-00:00 UTC).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: audit-completeness-check
+  namespace: copytrade
+  labels:
+    app: audit-completeness-check
+spec:
+  schedule: "0 2 * * *"
+  # Keep the last 20 runs in the CronJob history so the gate operator can read "20 consecutive
+  # green days" directly via `kubectl get jobs -l app=audit-completeness-check`. The default
+  # successfulJobsHistoryLimit is 3 — explicitly widening it here is the visibility deliverable.
+  successfulJobsHistoryLimit: 20
+  failedJobsHistoryLimit: 20
+  # Do not stack a second run if yesterday's hasn't finished — divergence findings need to be
+  # triaged by the operator, not papered over by the next run.
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app: audit-completeness-check
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: audit-completeness-check
+              image: ghcr.io/ridopark/oh-my-tradeagent-audit:latest
+              imagePullPolicy: Always
+              args:
+                - "--tenant=$(TENANT)"
+                - "--strategy=$(STRATEGY)"
+                # FROM/TO are populated by an init shim below — Kubernetes doesn't evaluate
+                # $(date) inside container env, so the dates are emitted by the entrypoint shim
+                # ahead of the JVM start. The pattern below is a placeholder; the shim rewrites
+                # via JAVA_OPTS_FROM/_TO.
+                - "--from=$(FROM)"
+                - "--to=$(TO)"
+              env:
+                - name: TENANT
+                  value: dev
+                - name: STRATEGY
+                  value: copytrade-v1
+                # Compute yesterday/today UTC at container start. UTC dates so the window aligns
+                # with audit_log.occurred_at which is stored TIMESTAMPTZ.
+                - name: FROM
+                  value: "" # populated below via command override
+                - name: TO
+                  value: ""
+                - name: SPRING_DATASOURCE_URL
+                  value: jdbc:postgresql://postgres:5432/orchestrator
+                # Read-only path — the audit-svc CronJob shares the orchestrator_runtime role
+                # (which has SELECT on audit_log per V3 GRANTs). It never writes audit_log.
+                - name: SPRING_DATASOURCE_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-credentials
+                      key: ORCHESTRATOR_RUNTIME_USER
+                - name: SPRING_DATASOURCE_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-credentials
+                      key: ORCHESTRATOR_RUNTIME_PASSWORD
+              # Use sh to compute FROM/TO at run time, then exec into the spring-boot jar.
+              # The Dockerfile sets ENTRYPOINT to the jar; overriding command/args here keeps
+              # the date computation in the manifest where it's auditable.
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  FROM=$(date -u -d 'yesterday' '+%Y-%m-%d')
+                  TO=$(date -u '+%Y-%m-%d')
+                  echo "audit-completeness-check window=[${FROM}, ${TO})"
+                  exec java -jar /app/app.jar \
+                    --tenant="${TENANT}" \
+                    --strategy="${STRATEGY}" \
+                    --from="${FROM}" \
+                    --to="${TO}"
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
