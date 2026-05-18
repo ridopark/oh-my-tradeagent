@@ -24,9 +24,11 @@ until this procedure has been drilled end-to-end and the drill evidence is on fi
   adapter that recon did not auto-resolve within one full cycle.
 - `/killswitch/state` shows `tripped: true` from an auto-trip on daily-loss threshold
   while the live adapter is active.
-- Reconciliation latency p99 (Prometheus `reconciliation_lag_seconds{quantile="0.99"}`,
-  or the audit-derived equivalent if Prometheus isn't wired yet) breaches the 60s
-  Phase 7 ceiling for two consecutive 5-min windows.
+- Reconciliation latency p99 breaches the 60s Phase 7 ceiling for two consecutive
+  5-min windows. See [`docs/ops/reconciliation-metrics.md`](reconciliation-metrics.md)
+  for the PromQL query (`histogram_quantile(0.99, ... reconciliation_lag_seconds_bucket ...)`)
+  and the audit-log SQL fallback that produces the same number when Prometheus isn't
+  wired yet.
 - Operator on-call escalation: live fill quality is materially worse than the shadow-live
   baseline (slippage > 2x the shadow-live observed median, or repeated PFOF-routing
   artifacts visible in fill prices).

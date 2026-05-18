@@ -7,7 +7,9 @@ import com.ohmytradeagent.contract.ReconciliationSummary;
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.common.RetryOptions;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
 import java.time.Instant;
@@ -34,12 +36,28 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   private static final String KIND_RECON_COMPLETED = "ReconciliationCompleted";
   private static final String KIND_JOURNAL_ORPHAN = "JournalOrphan";
   private static final String KIND_BROKER_ORPHAN = "BrokerOrphan";
+  private static final String KIND_METRICS_RECORD_FAILED = "ReconciliationMetricsRecordFailed";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
 
+  /**
+   * Issue #89: metrics Activity must be non-fatal — a metrics outage cannot break the Phase 7 gate
+   * signal source. 5s start-to-close + maximumAttempts=1 keeps it out of the critical path; on
+   * failure the workflow swallows + audit-logs {@code ReconciliationMetricsRecordFailed} and still
+   * returns its {@code ReconciliationSummary}.
+   */
+  private static final ActivityOptions METRICS_OPTIONS =
+      ActivityOptions.newBuilder()
+          .setStartToCloseTimeout(Duration.ofSeconds(5))
+          .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
+          .build();
+
   private final AuditActivities audit =
       Workflow.newActivityStub(AuditActivities.class, DEFAULT_OPTIONS);
+
+  private final ReconciliationMetricsActivities metrics =
+      Workflow.newActivityStub(ReconciliationMetricsActivities.class, METRICS_OPTIONS);
 
   private ReconciliationWorkflowInput input;
 
@@ -50,6 +68,11 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
           "ReconciliationWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
     this.input = in;
+
+    // Issue #89: capture cycle start time (Workflow.currentTimeMillis is deterministic-safe)
+    // immediately after the schema-version check so the lag duration covers the entire workflow
+    // body — journal dump, broker list, orphan classification, audit emission.
+    long cycleStartMillis = Workflow.currentTimeMillis();
 
     // Phase 2c.2 review polish (#50 item 1): a null broker_target on the workflow input violates
     // the schema but can arrive on a hand-crafted replay or test fixture. Hand it to the factory
@@ -137,6 +160,33 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
             "broker_orders_checked", summary.getBrokerOrdersChecked(),
             "journal_orphans", journalOrphans,
             "broker_orphans", brokerOrphans));
+
+    // Issue #89: record per-cycle Micrometer metrics for the Phase 7 live-promotion gate.
+    // Wrapped in try/catch so a metrics outage cannot fail a reconciliation cycle — the gate
+    // operator can fall back to the audit-log-derived SQL documented in
+    // docs/ops/reconciliation-metrics.md.
+    long lagMillis = Workflow.currentTimeMillis() - cycleStartMillis;
+    long discrepancies = journalOrphans + brokerOrphans;
+    long intentsReconciled = journal.size();
+    try {
+      metrics.recordCycle(
+          in.getTenantId(),
+          in.getStrategyId(),
+          brokerTarget,
+          lagMillis,
+          discrepancies,
+          intentsReconciled);
+    } catch (RuntimeException e) {
+      auditLog(
+          KIND_METRICS_RECORD_FAILED,
+          subject(
+              "broker_target", brokerTarget,
+              "lag_millis", lagMillis,
+              "discrepancies", discrepancies,
+              "intents_reconciled", intentsReconciled,
+              "error_class", e.getClass().getName(),
+              "error_message", e.getMessage()));
+    }
     return summary;
   }
 
