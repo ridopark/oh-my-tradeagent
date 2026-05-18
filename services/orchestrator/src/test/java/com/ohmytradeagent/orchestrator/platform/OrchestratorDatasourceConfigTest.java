@@ -55,7 +55,6 @@ class OrchestratorDatasourceConfigTest {
     assertThat(flywayUser).isEqualTo("temporal");
   }
 
-  @SuppressWarnings("unchecked")
   private static String loadDatasourceUrl() {
     return stripPlaceholder(loadSpringValue("datasource", "url"));
   }
