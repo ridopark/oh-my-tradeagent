@@ -1,0 +1,20 @@
+# audit-svc default config. The CronJob deployment overrides spring.datasource.* via
+# SPRING_DATASOURCE_URL / SPRING_DATASOURCE_USERNAME / SPRING_DATASOURCE_PASSWORD env vars; the
+# values below are placeholders for local runs without a database (the IT brings its own
+# Testcontainers Postgres and overrides them programmatically).
+spring:
+  application:
+    name: audit-svc
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/orchestrator}
+    username: ${SPRING_DATASOURCE_USERNAME:orchestrator}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+  # The audit-svc is a read-only consumer of the orchestrator's audit_log; it does not own the
+  # Flyway migrations. Disable Flyway so this jar can never accidentally mutate the schema.
+  flyway:
+    enabled: false
+
+logging:
+  level:
+    root: WARN
+    com.ohmytradeagent.audit: INFO
