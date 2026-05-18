@@ -43,9 +43,12 @@ import asyncio
 import datetime as dt
 import sys
 
+from ohmytradeagent_contract.search_attributes import (
+    CONTRACT_SYMBOL_KEY,
+    TENANT_STRATEGY_KEY,
+)
 from temporalio.client import Client
 from temporalio.common import (
-    SearchAttributeKey,
     SearchAttributePair,
     TypedSearchAttributes,
     WorkflowIDReusePolicy,
@@ -87,9 +90,6 @@ async def main(
 ) -> None:
     client = await Client.connect(target, namespace=namespace)
 
-    ts_key = SearchAttributeKey.for_keyword("TenantStrategy")
-    cs_key = SearchAttributeKey.for_keyword("ContractSymbol")
-
     # Compute once per script run — keeps both the workflow_id suffix and the
     # source_signal_workflow_id timestamp internally consistent across the N
     # workflows spawned by this invocation, while staying distinct from a
@@ -113,8 +113,8 @@ async def main(
         }
         sa = TypedSearchAttributes(
             [
-                SearchAttributePair(ts_key, f"t-{tenant}/s-{strategy}"),
-                SearchAttributePair(cs_key, occ),
+                SearchAttributePair(TENANT_STRATEGY_KEY, f"t-{tenant}/s-{strategy}"),
+                SearchAttributePair(CONTRACT_SYMBOL_KEY, occ),
             ]
         )
         await client.start_workflow(

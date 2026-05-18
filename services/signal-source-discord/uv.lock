@@ -94,10 +94,14 @@ version = "0.1.0"
 source = { directory = "../../contract/python" }
 dependencies = [
     { name = "pydantic" },
+    { name = "temporalio" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.9,<3" }]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.9,<3" },
+    { name = "temporalio", specifier = ">=1.9,<2" },
+]
 
 [package.metadata.requires-dev]
 dev = [
