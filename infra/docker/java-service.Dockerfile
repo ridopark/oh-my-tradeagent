@@ -9,11 +9,9 @@
 # resolve in a single reactor pass.
 #
 # Output: a Spring Boot fat jar at /app/app.jar, run by a non-root
-# user under a slim Temurin JRE. The boot jar is selected with a
-# "if -boot.jar exists prefer it, else use the single *.jar" rule
-# because services use the spring-boot-maven-plugin classifier
-# inconsistently (audit replaces the original jar; others ship a
-# -boot classifier). Standardizing the classifier is a follow-up.
+# user under a slim Temurin JRE. All services use the default
+# spring-boot-maven-plugin repackage convention (no classifier), so
+# the single jar in target/ is the executable fat jar.
 
 ARG MAVEN_IMAGE=maven:3.9-eclipse-temurin-21
 ARG JRE_IMAGE=eclipse-temurin:21-jre-jammy
@@ -34,11 +32,7 @@ RUN useradd --system --uid 10001 --user-group --no-create-home --shell /usr/sbin
 WORKDIR /app
 COPY --from=builder /workspace/services/${SERVICE_MODULE}/target/*.jar /tmp/jars/
 RUN set -eux; \
-    if ls /tmp/jars/*-boot.jar >/dev/null 2>&1; then \
-        cp /tmp/jars/*-boot.jar /app/app.jar; \
-    else \
-        cp /tmp/jars/*.jar /app/app.jar; \
-    fi; \
+    cp /tmp/jars/*.jar /app/app.jar; \
     rm -rf /tmp/jars; \
     chown app:app /app/app.jar
 USER 10001
