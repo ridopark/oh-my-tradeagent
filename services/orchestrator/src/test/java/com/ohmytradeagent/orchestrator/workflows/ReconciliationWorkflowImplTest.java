@@ -170,6 +170,37 @@ class ReconciliationWorkflowImplTest {
   }
 
   @Test
+  void metricsActivityFailure_workflowStillReturnsSummary_andEmitsAuditFallback() {
+    // Issue #89 / PR #129 review: the metrics Activity is non-fatal — a metrics outage must NOT
+    // fail the cycle. Per docs/ops/reconciliation-metrics.md the gate operator falls back to the
+    // audit-log SQL on the ReconciliationMetricsRecordFailed event, so the audit must carry
+    // non-null error_class + error_message for the failure to be diagnosable.
+    OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
+    when(exec.journalDumpOpen(anyString(), anyString()))
+        .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    Mockito.doThrow(new RuntimeException("meter registry exploded"))
+        .when(metrics)
+        .recordCycle(anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong());
+
+    ReconciliationSummary summary = runWorkflow();
+
+    // (a) workflow still returns its summary normally despite the metrics outage.
+    assertThat(summary.getJournalOrphans()).isEqualTo(1L);
+    assertThat(summary.getBrokerOrphans()).isEqualTo(0L);
+    assertThat(summary.getJournalEntriesChecked()).isEqualTo(1L);
+
+    // (b) the ReconciliationMetricsRecordFailed audit fallback is emitted with non-null
+    // error_class + error_message so the gate operator's SQL fallback is diagnosable.
+    AuditEvent failed = captureKind("ReconciliationMetricsRecordFailed");
+    assertThat(failed.getSubject()).containsEntry("broker_target", "alpaca-paper");
+    assertThat(((Number) failed.getSubject().get("discrepancies")).longValue()).isEqualTo(1L);
+    assertThat(((Number) failed.getSubject().get("intents_reconciled")).longValue()).isEqualTo(1L);
+    assertThat((String) failed.getSubject().get("error_class")).isNotBlank();
+    assertThat((String) failed.getSubject().get("error_message")).isNotBlank();
+  }
+
+  @Test
   void metricsActivity_invokedExactlyOnce_withJournalAndOrphanCounts() {
     // Issue #89: workflow must call ReconciliationMetricsActivities.recordCycle exactly once per
     // cycle, with discrepancies = journalOrphans + brokerOrphans and intentsReconciled =
