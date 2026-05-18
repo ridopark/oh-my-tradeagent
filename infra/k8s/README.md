@@ -98,7 +98,7 @@ registers the `TenantStrategy` + `ContractSymbol` Search Attributes. Idempotent.
 Two layers, both run before merge:
 
 1. **CI client-side gate** (automatic, GitHub Actions). The `k8s (kubeconform)`
-   job in `.github/workflows/ci.yml` runs `kubeconform v0.6.7 -strict -recursive`
+   job in `.github/workflows/ci.yml` runs `kubeconform v0.6.7 -strict`
    on any PR whose diff touches `infra/k8s/**`. kubeconform validates against
    Kubernetes 1.35.0 schemas (matches homelab k3s line) using offline JSON schemas
    — no cluster or API server needed. Catches schema regressions and basic resource
