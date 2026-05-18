@@ -84,7 +84,7 @@ public class PromotionController {
             "strategy_id",
             strategy,
             "broker_target",
-            brokerTarget == null ? "" : brokerTarget));
+            brokerTarget));
   }
 
   public record PromotionPayload(

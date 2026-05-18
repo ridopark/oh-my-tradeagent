@@ -202,6 +202,24 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   }
 
   @Override
+  public void recordLivePromotionValidator(LivePromotionApprovalRequest request) {
+    if (request.getTenantId() == null || request.getTenantId().isBlank()) {
+      throw new IllegalArgumentException("tenant_id_required");
+    }
+    if (request.getStrategyId() == null || request.getStrategyId().isBlank()) {
+      throw new IllegalArgumentException("strategy_id_required");
+    }
+    if (request.getBrokerTarget() == null || request.getBrokerTarget().isBlank()) {
+      throw new IllegalArgumentException("broker_target_required");
+    }
+    String a1 = request.getApproverId1();
+    String a2 = request.getApproverId2();
+    if (a1 == null || a1.isBlank() || a2 == null || a2.isBlank() || a1.equals(a2)) {
+      throw new IllegalArgumentException("approvers_must_differ");
+    }
+  }
+
+  @Override
   public void recordLivePromotion(LivePromotionApprovalRequest request) {
     // Validation + audit emission live in the Activity. The workflow Update is a thin pass-through
     // so the api-gateway can reach the orchestrator over Temporal without depending on the

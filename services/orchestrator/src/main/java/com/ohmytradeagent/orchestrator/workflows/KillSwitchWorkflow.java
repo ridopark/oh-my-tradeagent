@@ -51,6 +51,9 @@ public interface KillSwitchWorkflow {
    * shipped audit-chain writer. Validator rejection ({@code approvers_must_differ}) surfaces to the
    * caller as an Update rejection. No kill-switch state is mutated.
    */
+  @UpdateValidatorMethod(updateName = "record_live_promotion")
+  void recordLivePromotionValidator(LivePromotionApprovalRequest request);
+
   @UpdateMethod(name = "record_live_promotion")
   void recordLivePromotion(LivePromotionApprovalRequest request);
 
