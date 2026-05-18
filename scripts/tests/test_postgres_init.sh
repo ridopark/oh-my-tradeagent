@@ -73,18 +73,4 @@ assert_file_matches_expected() {
 assert_file_matches_expected "infra/k8s/10-postgres.yaml" "$K8S_FILE"
 assert_file_matches_expected "infra/postgres-init/01-create-databases.sh" "$COMPOSE_FILE"
 
-# Cross-check: the two files must agree byte-for-byte on the database list (already
-# proven transitively via both matching EXPECTED, but assert it explicitly so a
-# regression that drifts both files in the same wrong way isn't silently allowed
-# in the future if EXPECTED itself were ever updated incorrectly).
-K8S_LIST=$(extract_dbs "$K8S_FILE")
-COMPOSE_LIST=$(extract_dbs "$COMPOSE_FILE")
-if [ "$K8S_LIST" != "$COMPOSE_LIST" ]; then
-  echo "k8s list:" >&2
-  echo "$K8S_LIST" >&2
-  echo "compose list:" >&2
-  echo "$COMPOSE_LIST" >&2
-  fail "the two init-script artifacts disagree on the database list"
-fi
-
-echo "OK: both init-script artifacts agree and match the canonical 8-element list"
+echo "OK: both init-script artifacts match the canonical 8-element list"
