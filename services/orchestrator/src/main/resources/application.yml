@@ -3,13 +3,24 @@ spring:
     name: orchestrator-svc
   datasource:
     url: ${ORCHESTRATOR_DB_URL:jdbc:postgresql://localhost:5432/orchestrator}
-    username: ${ORCHESTRATOR_DB_USER:temporal}
-    password: ${ORCHESTRATOR_DB_PASS:temporal}
+    # Issue #84: the application-runtime path connects as the least-privileged
+    # `orchestrator_runtime` role, which inherits `orchestrator_app` and is therefore
+    # bound by the V3 REVOKE UPDATE,DELETE,TRUNCATE on `audit_log`. Postgres superusers
+    # (the prior `temporal` default) bypass that REVOKE — see docs/ops/audit-retention.md §4.
+    # Flyway keeps its privileged creds via spring.flyway.user/password below.
+    username: ${ORCHESTRATOR_DB_USER:orchestrator_runtime}
+    password: ${ORCHESTRATOR_DB_PASS:orchestrator_runtime}
   jooq:
     sql-dialect: POSTGRES
   flyway:
     enabled: true
     locations: classpath:db/migration
+    # Issue #84: Flyway migrations need DDL+GRANT privileges (CREATE ROLE, GRANT) that
+    # `orchestrator_runtime` deliberately lacks. The override below keeps Flyway connected
+    # as the schema owner / superuser-class `temporal` role while the application
+    # DataSource above flips to the constrained runtime role.
+    user: ${ORCHESTRATOR_FLYWAY_USER:temporal}
+    password: ${ORCHESTRATOR_FLYWAY_PASS:temporal}
     # The orchestrator owns a dedicated `orchestrator` Postgres database (issue #56
     # item 9). It used to share the `temporal` DB with Temporal's auto-setup, which
     # made `DROP DATABASE temporal` in the temporal-consolidation teardown runbook

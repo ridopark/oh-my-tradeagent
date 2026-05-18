@@ -9,9 +9,13 @@ This doc is the written retention and tamper-evidence policy for the orchestrato
 job design that gives append-only enforcement actual teeth, (3) the WORM pin
 target, and (4) the DB role posture that backs the policy at the engine layer.
 
-The schema and role grants land in `V3__audit_immutability.sql`. The runtime
+The schema and role grants land in `V3__audit_immutability.sql`. The dedicated
+non-superuser login role that binds those grants at runtime lands in
+`V4__orchestrator_runtime_role.sql` (issue #84 — resolved). The runtime
 hash-chain writer and the daily Merkle root job are staged follow-ups behind
-that schema — this doc is the design they will implement against. The policy binding is established today at the schema layer. Full engine-level enforcement (the role grant) requires a dedicated non-superuser login role — tracked as an open follow-up in §6.
+that schema — this doc is the design they will implement against. The policy
+binding is established today at both the schema layer (V3) and the runtime-role
+layer (V4).
 
 ## 1. Retention period
 
@@ -148,7 +152,16 @@ implementation follow-up).
 
 ## 4. DB role posture
 
-> ⚠️ **WARNING — superuser bypass.** If the orchestrator login role is a Postgres superuser (this includes the default `temporal` role provisioned by Temporal auto-setup, which is a schema owner with superuser-equivalent privileges), the `GRANT orchestrator_app TO <role>` step has no effect. PostgreSQL superusers bypass all object-privilege checks unconditionally, so the `REVOKE UPDATE, DELETE, TRUNCATE` from `orchestrator_app` does not constrain them. The immutability constraint is only enforced once the service connects as a non-superuser, non-owner login role whose only group membership is `orchestrator_app`. See follow-up #84 for the deliverable that provisions this role.
+> **Resolved by #84 (V4__orchestrator_runtime_role.sql).** Earlier drafts of this
+> section warned that PostgreSQL superusers bypass the V3 grant posture
+> unconditionally — the `temporal` role provisioned by Temporal auto-setup is
+> schema-owner / superuser-class, so `GRANT orchestrator_app TO temporal` had
+> no enforcement effect. V4 provisions a dedicated non-superuser login role,
+> `orchestrator_runtime`, with `LOGIN INHERIT` and no `SUPERUSER` / `CREATEDB`
+> / `CREATEROLE` / `BYPASSRLS` attributes. The application DataSource
+> (`ORCHESTRATOR_DB_USER`) now connects as that role, while `spring.flyway.user`
+> keeps `temporal` for DDL/GRANT migration time only. See `infra/k8s/51-orchestrator.yaml`
+> for the env-var split and the §6 follow-up bullet now closed.
 
 `V3__audit_immutability.sql` creates an `orchestrator_app` Postgres
 role (NOLOGIN) and:
@@ -156,17 +169,22 @@ role (NOLOGIN) and:
 - `REVOKE UPDATE, DELETE, TRUNCATE ON audit_log FROM orchestrator_app;`
 - `GRANT  SELECT, INSERT             ON audit_log TO   orchestrator_app;`
 
-In deployment, the actual login role used by the orchestrator service
-(currently `temporal`, per
-`services/orchestrator/src/main/resources/application.yml` —
-`ORCHESTRATOR_DB_USER:temporal`) must be GRANTed membership in
-`orchestrator_app`:
+`V4__orchestrator_runtime_role.sql` (issue #84) then provisions the dedicated
+login role and grants it `orchestrator_app` membership:
 
-    GRANT orchestrator_app TO temporal;
+    CREATE ROLE orchestrator_runtime LOGIN INHERIT PASSWORD '__SET_BY_OPERATOR__';
+    GRANT orchestrator_app TO orchestrator_runtime;
+    GRANT CONNECT ON DATABASE orchestrator TO orchestrator_runtime;
+    GRANT USAGE   ON SCHEMA   public       TO orchestrator_runtime;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON option_symbol_cache TO orchestrator_runtime;
 
-After that grant, a compromised orchestrator service cannot mutate or
-delete audit rows even with full DB credentials, because the role it
-inherits lacks those grants. The Postgres engine refuses the operation.
+With V4 applied and the application DataSource connecting as
+`orchestrator_runtime` (per `services/orchestrator/src/main/resources/application.yml`
+`ORCHESTRATOR_DB_USER:orchestrator_runtime`), a compromised orchestrator service
+cannot mutate or delete audit rows even with full DB credentials — the role it
+authenticates as has no `UPDATE`/`DELETE`/`TRUNCATE` on `audit_log`. The
+Postgres engine refuses the operation with `ERROR: permission denied for table
+audit_log` (`SQLSTATE 42501`).
 
 **What this does NOT cover:**
 
@@ -215,4 +233,5 @@ longer in the hot store.
 - Promote this policy to a registered-firm posture if/when the entity
   registers as a broker-dealer (SEC 17a-4 then becomes a direct
   obligation, not a reference).
-- **Testcontainers IT for `orchestrator_app` enforcement** — assert that a non-superuser login role with `orchestrator_app` membership receives `ERROR: permission denied` (`SQLSTATE 42501`) on `DELETE` / `UPDATE` of `audit_log`. Tracked in #85.
+- ~~**Testcontainers IT for `orchestrator_app` enforcement** — assert that a non-superuser login role with `orchestrator_app` membership receives `ERROR: permission denied` (`SQLSTATE 42501`) on `DELETE` / `UPDATE` of `audit_log`.~~ **Resolved by #84**: see `services/orchestrator/src/test/java/com/ohmytradeagent/orchestrator/platform/OrchestratorRuntimeRoleIT.java` (RUN_DB_ITS-gated) — covers INSERT happy path + UPDATE/DELETE/TRUNCATE deny paths with `SQLSTATE 42501` assertions.
+- ~~**Dedicated non-superuser login role for the orchestrator runtime path** (so the V3 REVOKE actually binds).~~ **Resolved by #84**: `V4__orchestrator_runtime_role.sql` provisions `orchestrator_runtime` (LOGIN INHERIT, no SUPERUSER / CREATEDB / CREATEROLE / BYPASSRLS) and `application.yml` flips `ORCHESTRATOR_DB_USER` default to it. Flyway keeps `temporal` via `spring.flyway.user` for DDL/GRANT migrations.

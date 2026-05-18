@@ -48,12 +48,30 @@ spec:
             # the `temporal` DB to itself via its auto-setup initContainer.
             - name: ORCHESTRATOR_DB_URL
               value: jdbc:postgresql://postgres:5432/orchestrator
+            # Issue #84: runtime path connects as the constrained `orchestrator_runtime`
+            # role so the V3 REVOKE UPDATE,DELETE,TRUNCATE on `audit_log` binds at the
+            # engine layer. Flyway keeps the elevated `temporal` creds below for
+            # DDL/GRANT migrations. See docs/ops/audit-retention.md §4.
             - name: ORCHESTRATOR_DB_USER
               valueFrom:
                 secretKeyRef:
                   name: postgres-credentials
-                  key: POSTGRES_USER
+                  key: ORCHESTRATOR_RUNTIME_USER
             - name: ORCHESTRATOR_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: ORCHESTRATOR_RUNTIME_PASSWORD
+            # Issue #84: Flyway needs DDL+GRANT privileges (CREATE ROLE, GRANT) which
+            # `orchestrator_runtime` deliberately lacks. These two env vars feed
+            # spring.flyway.user / spring.flyway.password and keep migrations running
+            # as the superuser-class `temporal` role.
+            - name: ORCHESTRATOR_FLYWAY_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: ORCHESTRATOR_FLYWAY_PASS
               valueFrom:
                 secretKeyRef:
                   name: postgres-credentials
