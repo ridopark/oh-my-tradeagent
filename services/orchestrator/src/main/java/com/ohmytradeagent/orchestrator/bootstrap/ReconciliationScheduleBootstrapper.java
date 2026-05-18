@@ -164,7 +164,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
                     tenantId,
                     strategyId);
               } catch (RuntimeException e) {
-                log.info(
+                log.warn(
                     "could not reap stale Reconciliation Schedule id={} (desired={}); peer race"
                         + " or already removed: {}",
                     staleId,

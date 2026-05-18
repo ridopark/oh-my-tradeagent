@@ -1,13 +1,19 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import io.temporal.client.WorkflowClient;
@@ -24,9 +30,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 
 /**
  * Phase 2c.2 review feedback (Major 3): {@link ReconciliationScheduleBootstrapper} must derive the
@@ -39,6 +48,23 @@ import org.mockito.ArgumentCaptor;
  * exactly one schedule on the current broker queue.
  */
 class ReconciliationScheduleBootstrapperTest {
+
+  private ListAppender<ILoggingEvent> logAppender;
+
+  @BeforeEach
+  void attachLogAppender() {
+    Logger logger = (Logger) LoggerFactory.getLogger(ReconciliationScheduleBootstrapper.class);
+    logAppender = new ListAppender<>();
+    logAppender.start();
+    logger.addAppender(logAppender);
+  }
+
+  @AfterEach
+  void detachLogAppender() {
+    Logger logger = (Logger) LoggerFactory.getLogger(ReconciliationScheduleBootstrapper.class);
+    logger.detachAppender(logAppender);
+    logAppender.stop();
+  }
 
   @Test
   void usesBrokerTargetFromStrategyConfig(@TempDir Path tenantsDir) throws Exception {
@@ -247,6 +273,49 @@ class ReconciliationScheduleBootstrapperTest {
     verify(scheduleClient, times(0)).getHandle(any());
     verify(scheduleClient, times(0))
         .createSchedule(any(String.class), any(Schedule.class), any(ScheduleOptions.class));
+  }
+
+  @Test
+  void continuesAndCreatesScheduleWhenReapDeleteThrows(@TempDir Path tenantsDir) throws Exception {
+    writeYaml(tenantsDir, "t-dev", "s-copytrade-v1");
+
+    StrategyRegistry registry = mock(StrategyRegistry.class);
+    when(registry.get("t-dev", "s-copytrade-v1"))
+        .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.ALPACA_PAPER));
+
+    String staleId = "recon-t-t-dev-s-s-copytrade-v1-tradier-paper";
+    String desiredId = "recon-t-t-dev-s-s-copytrade-v1-alpaca-paper";
+
+    ScheduleListDescription stale = mock(ScheduleListDescription.class);
+    when(stale.getScheduleId()).thenReturn(staleId);
+
+    ScheduleHandle staleHandle = mock(ScheduleHandle.class);
+    doThrow(new RuntimeException("simulated SDK error")).when(staleHandle).delete();
+
+    ScheduleClient scheduleClient = mock(ScheduleClient.class);
+    when(scheduleClient.listSchedules()).thenReturn(Stream.of(stale));
+    when(scheduleClient.getHandle(staleId)).thenReturn(staleHandle);
+
+    WorkflowClient workflowClient = mock(WorkflowClient.class);
+    WorkflowServiceStubs stubs = mock(WorkflowServiceStubs.class);
+
+    ReconciliationScheduleBootstrapper bootstrapper =
+        new ReconciliationScheduleBootstrapper(
+            workflowClient, stubs, registry, tenantsDir.toString());
+
+    assertThatCode(() -> bootstrapper.runWith(scheduleClient)).doesNotThrowAnyException();
+
+    verify(scheduleClient, times(1))
+        .createSchedule(eq(desiredId), any(Schedule.class), any(ScheduleOptions.class));
+
+    boolean warnEmitted =
+        logAppender.list.stream()
+            .anyMatch(
+                e ->
+                    e.getLevel() == Level.WARN
+                        && e.getFormattedMessage()
+                            .startsWith("could not reap stale Reconciliation Schedule"));
+    assertThat(warnEmitted).isTrue();
   }
 
   private static StrategyConfig strategyConfig(StrategyConfig.BrokerTarget target) {
