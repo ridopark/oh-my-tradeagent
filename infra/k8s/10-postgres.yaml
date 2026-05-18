@@ -84,10 +84,12 @@ spec:
               value: temporal
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
-            # k8s `$(VAR)` substitution in command/args only expands variables
-            # defined in `env:` — `envFrom:` vars are not seen by the substitution
-            # pass. Promote POSTGRES_USER here so the probe commands below can
-            # reference it.
+            # POSTGRES_USER is promoted from `envFrom:` so the probes below can
+            # read it via shell expansion. (Kubernetes `$(VAR)` substitution in
+            # probe `exec.command` arrays is unreliable across distributions —
+            # on k3s it expanded to empty, which made pg_isready fall back to
+            # the kubelet's effective uid and spam `role "root" does not exist`
+            # FATALs at the probe period. A `sh -c` wrapper sidesteps that.)
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
@@ -103,12 +105,12 @@ spec:
               mountPath: /docker-entrypoint-initdb.d
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\""]
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\""]
             initialDelaySeconds: 30
             periodSeconds: 30
           resources:
