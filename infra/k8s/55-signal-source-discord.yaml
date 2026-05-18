@@ -3,6 +3,15 @@
 # initially empty — the bootstrap container (services/signal-source-discord/
 # Dockerfile entry) writes storage_state.json after a one-time interactive
 # Discord login, which is the manual step on the runbook for 5b.D.
+#
+# Session-cutover: this PVC is also expected to hold a pre-staged secondary
+# /app/state/storage_state.secondary.json for the 60s RTO hot-swap path
+# documented in docs/ops/sidecar-session-cutover.md. The secondary is refreshed
+# weekly by the operator; without it, recovery from a mid-day Discord session
+# expiry falls back to the X-server/2FA re-bootstrap path in
+# docs/ops/discord-session-expired.md (RTO measured in minutes-to-hours).
+# Heartbeat-staleness alert spec lives at docs/ops/sidecar-pagerduty-alert.md;
+# the actual Alertmanager wiring is deferred to Phase 6.
 
 apiVersion: v1
 kind: PersistentVolumeClaim

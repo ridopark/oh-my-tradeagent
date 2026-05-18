@@ -2,6 +2,23 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alertmanager wiring is NOT live in v0 — Alertmanager itself is not deployed.
+# The schema below + the alert rules referenced under rule_files: are specified
+# in docs/ops/sidecar-pagerduty-alert.md. Uncomment + deploy Alertmanager + drop
+# the rule files in place (see infra/prometheus/rules/ — directory does not
+# exist in v0; create it as part of the Phase 6 wiring) to activate. The
+# in-flight Phase 6 issue tracks this; until then, sidecar staleness is caught
+# only by the in-pod livenessProbe restart (see infra/k8s/55-signal-source-discord.yaml).
+#
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]
+#
+# rule_files:
+#   - /etc/prometheus/rules/signal-source-discord.yml   # spec in docs/ops/sidecar-pagerduty-alert.md
+#   # Add additional rule files here as more alerts land in Phase 6.
+
 scrape_configs:
   - job_name: prometheus
     static_configs:
