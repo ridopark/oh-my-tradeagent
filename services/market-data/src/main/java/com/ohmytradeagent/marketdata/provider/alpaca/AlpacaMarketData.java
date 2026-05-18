@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpStatusCodeException;
@@ -73,6 +74,7 @@ public class AlpacaMarketData implements MarketDataProvider {
   private final AtomicBoolean reconnectInFlight = new AtomicBoolean(false);
   private volatile Duration nextBackoff = Duration.ofSeconds(1);
 
+  @Autowired
   public AlpacaMarketData(
       RestClient alpacaMarketDataRestClient,
       ObjectMapper objectMapper,
