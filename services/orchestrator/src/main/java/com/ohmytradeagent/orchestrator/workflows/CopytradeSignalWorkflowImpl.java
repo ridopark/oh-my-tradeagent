@@ -74,7 +74,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    * {@link ExecActivitiesFactory}; this constant is retained for back-compat with the existing test
    * scaffolding that registers a single broker worker on this queue.
    */
-  static final String EXEC_TASK_QUEUE_PAPER = "broker-alpaca-paper";
+  static final String EXEC_TASK_QUEUE_ALPACA_PAPER = "broker-alpaca-paper";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();

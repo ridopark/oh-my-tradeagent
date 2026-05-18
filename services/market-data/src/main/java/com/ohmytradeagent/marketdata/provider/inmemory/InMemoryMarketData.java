@@ -49,7 +49,13 @@ public class InMemoryMarketData implements MarketDataProvider {
     return new InMemorySubscription(id, occSymbol);
   }
 
-  /** Test-only fan-out hook. Production paths receive ticks from the real provider's wire feed. */
+  /**
+   * Test-only fan-out hook.
+   *
+   * <p>Visible for testing only — production paths receive ticks from the real provider's wire
+   * feed. The repo doesn't carry a {@code @VisibleForTesting} annotation (no Guava on the
+   * classpath), so this Javadoc is the marker. Do not call from non-test code.
+   */
   public void pushTickForTest(String occSymbol, BigDecimal premium, OffsetDateTime retrievedAt) {
     List<Listener> listeners = bySymbol.get(occSymbol);
     if (listeners == null || listeners.isEmpty()) {

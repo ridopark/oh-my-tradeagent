@@ -24,9 +24,11 @@ import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateException;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
@@ -68,7 +70,7 @@ class PositionWorkflowImplTest {
     when(marketData.subscribePremium(any())).thenReturn(subscribedResult());
 
     coreWorker.registerActivitiesImplementations(audit, calendar);
-    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_PAPER);
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
     brokerWorker.registerActivitiesImplementations(exec);
     Worker mdWorker = env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
     mdWorker.registerActivitiesImplementations(marketData);
@@ -570,6 +572,69 @@ class PositionWorkflowImplTest {
 
     verify(exec, atLeastOnce()).cancelOrder(anyString());
     captureKind("RiskBreachActed");
+  }
+
+  // ---------- Phase 2c.2: broker_target routing on PositionWorkflowInput ----------
+
+  @Test
+  void runWithBrokerTargetRoutesToBrokerQueue() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-bt-alpaca");
+    PositionWorkflowInput in = input(3);
+    in.setBrokerTarget(PositionWorkflowInput.BrokerTarget.ALPACA_PAPER);
+    WorkflowStub.fromTyped(stub).start(in);
+
+    // Drain via a partial close so the workflow actually dispatches exec.placeOrder. The
+    // exec mock is registered on the broker-alpaca-paper worker; a successful call confirms
+    // the workflow routed Activities to that task queue.
+    stub.partialExit(partialExitRequest("sig-bt-alpaca", "pos-bt-alpaca", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-bt-1", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    verify(exec, times(1)).placeOrder(any());
+  }
+
+  @Test
+  void runWithoutBrokerTargetFallsBackToDefault() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-bt-default");
+    // input() helper does not set broker_target — exercises the pre-2c.2 replay path that
+    // falls back to DEFAULT_BROKER_TARGET = "alpaca-paper".
+    WorkflowStub.fromTyped(stub).start(input(2));
+
+    stub.partialExit(partialExitRequest("sig-bt-default", "pos-bt-default", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(new FillEvent("brk-bt-2", 2L, new BigDecimal("3.05"), OffsetDateTime.now()));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    verify(exec, times(1)).placeOrder(any());
+  }
+
+  @Test
+  void runWithInvalidBrokerTargetRaisesInvalidBrokerTargetError() {
+    // The PositionWorkflowInput.BrokerTarget enum admits "paper" / "live" for back-compat
+    // deserialization of pre-2c.2 audit records, but no worker polls broker-paper /
+    // broker-live. ExecActivitiesFactory.taskQueueFor must fail fast with a non-retryable
+    // InvalidBrokerTargetError instead of hanging on a StartToCloseTimeout.
+    PositionWorkflow stub = newStub("pos-bt-legacy");
+    PositionWorkflowInput in = input(3);
+    in.setBrokerTarget(PositionWorkflowInput.BrokerTarget.PAPER);
+    WorkflowStub.fromTyped(stub).start(in);
+
+    assertThatThrownBy(() -> WorkflowStub.fromTyped(stub).getResult(String.class))
+        .isInstanceOf(WorkflowFailedException.class)
+        .hasCauseInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> {
+              ApplicationFailure af = (ApplicationFailure) t.getCause();
+              assertThat(af.getType()).isEqualTo("InvalidBrokerTargetError");
+              assertThat(af.isNonRetryable()).isTrue();
+            });
   }
 
   // ---------- helpers ----------

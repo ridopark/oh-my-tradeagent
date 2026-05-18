@@ -4,6 +4,7 @@ import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.workflows.BrokerTargetValidator;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflow;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
@@ -21,7 +22,6 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -51,13 +51,6 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
 
   static final String CORE_TASK_QUEUE = "orchestrator-core";
   static final Duration INTERVAL = Duration.ofMinutes(5);
-
-  /**
-   * Mirrors {@link com.ohmytradeagent.orchestrator.workflows.ExecActivitiesFactory#VALID_TARGET} —
-   * keeping the regex local avoids reaching into the workflows package's package-private API from a
-   * bootstrapper.
-   */
-  private static final Pattern VALID_TARGET = Pattern.compile("^(paper|live|[a-z]+-(paper|live))$");
 
   private final WorkflowClient workflowClient;
   private final WorkflowServiceStubs serviceStubs;
@@ -109,7 +102,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
             e);
         continue;
       }
-      if (!VALID_TARGET.matcher(brokerTarget).matches()) {
+      if (!BrokerTargetValidator.isValid(brokerTarget)) {
         log.error(
             "tenant={} strategy={}: broker_target {} rejected by whitelist; skipping schedule",
             ts.tenantId(),

@@ -86,7 +86,7 @@ class CopytradeSignalWorkflowImplTest {
     coreWorker.registerActivitiesImplementations(
         audit, strategy, risk, contract, positionLookup, calendar);
     // ExecActivities lives on the exec-svc task queue; register a separate worker.
-    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_PAPER);
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
     brokerWorker.registerActivitiesImplementations(exec);
     Worker mdWorker = env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
     mdWorker.registerActivitiesImplementations(marketData);

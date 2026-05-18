@@ -6,7 +6,6 @@ import io.temporal.failure.ApplicationFailure;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
 import java.util.Set;
-import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,14 +29,6 @@ final class ExecActivitiesFactory {
   private static final Logger log = LoggerFactory.getLogger(ExecActivitiesFactory.class);
 
   static final String TASK_QUEUE_PREFIX = "broker-";
-
-  /**
-   * One of: {@code paper}, {@code live}, or {@code <provider>-<env>} where provider is lowercase
-   * letters and env is {@code paper} or {@code live}. This matches the contract schema's
-   * broker_target enum exactly. NOTE: passing the schema does not guarantee a worker queue exists —
-   * see {@link #LEGACY_BARE_TARGETS}.
-   */
-  static final Pattern VALID_TARGET = Pattern.compile("^(paper|live|[a-z]+-(paper|live))$");
 
   /**
    * Values that the schema admits for back-compat with pre-2c.2 audit records but that no worker
@@ -71,7 +62,7 @@ final class ExecActivitiesFactory {
       throw ApplicationFailure.newNonRetryableFailure(
           "broker_target is required but was null/blank", "InvalidBrokerTargetError");
     }
-    if (!VALID_TARGET.matcher(brokerTarget).matches()) {
+    if (!BrokerTargetValidator.isValid(brokerTarget)) {
       throw ApplicationFailure.newNonRetryableFailure(
           "broker_target rejected by whitelist: " + brokerTarget, "InvalidBrokerTargetError");
     }

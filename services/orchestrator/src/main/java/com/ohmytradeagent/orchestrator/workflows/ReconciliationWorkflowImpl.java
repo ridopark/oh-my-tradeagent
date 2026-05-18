@@ -51,15 +51,21 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     }
     this.input = in;
 
+    // Phase 2c.2 review polish (#50 item 1): a null broker_target on the workflow input violates
+    // the schema but can arrive on a hand-crafted replay or test fixture. Hand it to the factory
+    // unwrapped — the factory's existing null/blank check raises a non-retryable
+    // InvalidBrokerTargetError instead of NPEing inside the workflow body.
+    String brokerTarget = in.getBrokerTarget() == null ? null : in.getBrokerTarget().value();
+
     ReconciliationExecActivity exec =
         Workflow.newActivityStub(
             ReconciliationExecActivity.class,
             ActivityOptions.newBuilder()
-                .setTaskQueue(ExecActivitiesFactory.taskQueueFor(in.getBrokerTarget().value()))
+                .setTaskQueue(ExecActivitiesFactory.taskQueueFor(brokerTarget))
                 .setStartToCloseTimeout(Duration.ofSeconds(30))
                 .build());
 
-    auditLog(KIND_RECON_STARTED, subject("broker_target", in.getBrokerTarget().value()));
+    auditLog(KIND_RECON_STARTED, subject("broker_target", brokerTarget));
 
     List<JournalEntry> journal = exec.journalDumpOpen(in.getTenantId(), in.getStrategyId());
     List<BrokerOpenOrder> brokerOpen = exec.brokerListOpenOrders();
@@ -126,7 +132,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     auditLog(
         KIND_RECON_COMPLETED,
         subject(
-            "broker_target", in.getBrokerTarget().value(),
+            "broker_target", brokerTarget,
             "journal_entries_checked", summary.getJournalEntriesChecked(),
             "broker_orders_checked", summary.getBrokerOrdersChecked(),
             "journal_orphans", journalOrphans,
