@@ -95,15 +95,26 @@ registers the `TenantStrategy` + `ContractSymbol` Search Attributes. Idempotent.
 
 ## Dry-run validation (PR-time)
 
-Open a tunnel or run from a workstation with the homelab's kubeconfig copied
-(`~/.kube/config-homelab`):
+Two layers, both run before merge:
 
-```sh
-KUBECONFIG=~/.kube/config-homelab kubectl apply --dry-run=server -f infra/k8s/
-```
+1. **CI client-side gate** (automatic, GitHub Actions). The `k8s-dryrun` job in
+   `.github/workflows/ci.yml` runs `kubectl apply --dry-run=client -f infra/k8s/`
+   on any PR whose diff touches `infra/k8s/**` (kubectl pinned to k3s 1.35.4
+   to match the homelab). Catches schema regressions and basic resource
+   structure without contacting a cluster. Does NOT exercise admission
+   webhooks or namespace-bound references (Secrets/ConfigMaps) — that's what
+   layer 2 is for.
+2. **Operator server-side gate** (manual, before merge of a non-trivial
+   manifest change). Open a tunnel or run from a workstation with the
+   homelab's kubeconfig copied (`~/.kube/config-homelab`):
 
-`--dry-run=server` round-trips through the API server, which validates schemas,
-admission, and references (e.g. Secret/ConfigMap names) without mutating state.
+   ```sh
+   KUBECONFIG=~/.kube/config-homelab kubectl apply --dry-run=server -f infra/k8s/
+   ```
+
+   `--dry-run=server` round-trips through the API server, which validates
+   schemas, admission, and references (e.g. Secret/ConfigMap names) without
+   mutating state.
 
 ## What's NOT in 5b.B (deferred)
 

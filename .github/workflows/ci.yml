@@ -7,6 +7,49 @@ on:
     branches: [main]
 
 jobs:
+  k8s-dryrun:
+    name: k8s (kubectl --dry-run=client)
+    runs-on: ubuntu-latest
+    # Job always starts, but the actual install/dry-run steps gate on
+    # `infra/k8s/**` or this workflow file changing in the PR diff.
+    # Catches schema regressions before the homelab `--dry-run=server`
+    # step documented in infra/k8s/README.md. Does NOT replicate
+    # admission webhooks — see issue #44.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect infra/k8s/** changes
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          head_sha="${{ github.event.pull_request.head.sha }}"
+          if git diff --name-only "$base_sha" "$head_sha" \
+              | grep -E '^(infra/k8s/|\.github/workflows/ci\.yml$)' >/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install kubectl (pinned to k3s 1.35.4)
+        if: steps.changed.outputs.run == 'true'
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.35.4
+
+      - name: kubectl apply --dry-run=client -f infra/k8s/
+        if: steps.changed.outputs.run == 'true'
+        # Client-side schema validation only — does not contact a cluster,
+        # so it won't catch admission webhooks or namespace-bound refs
+        # (e.g. missing Secrets). The homelab `--dry-run=server` step in
+        # infra/k8s/README.md remains the pre-merge cluster-level gate.
+        run: kubectl apply --dry-run=client -f infra/k8s/
+
   java:
     name: Java (mvn verify + spotless)
     runs-on: ubuntu-latest
