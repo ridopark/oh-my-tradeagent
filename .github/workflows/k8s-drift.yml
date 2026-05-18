@@ -1,0 +1,147 @@
+name: k8s drift check (advisory)
+
+# Runs `kubectl diff -f infra/k8s/` against the live homelab k3s cluster
+# whenever a PR touches `infra/k8s/**`, and posts the diff as a sticky
+# PR comment. Advisory only — never blocks merge.
+#
+# Why this exists: kubeconform (in ci.yml) catches schema regressions but
+# does NOT compare to live cluster state. This workflow closes that loop
+# so reviewers see drift before merging. Implements Option 1 (advisory
+# comment) from issue #133; Options 2 (blocking check) and 3 (GitOps)
+# are deferred.
+#
+# Cluster reachability: requires a self-hosted runner with LAN access to
+# the homelab (label `homelab`) plus a read-only kubeconfig in the
+# `KUBECONFIG_READONLY` secret. Setup is one-time and documented in
+# docs/ops/k8s-drift-check.md.
+#
+# Gate: the operator flips repo variable `K8S_DRIFT_CHECK_ENABLED=true`
+# only after the runner is registered AND the secret is populated. Until
+# then the job exits early with a friendly skip message so the workflow
+# does not fail on its own introducing PR (no runner yet, no secret yet).
+# The job also defends against an empty secret value in case the var
+# gets flipped prematurely.
+#
+# Read-only safety: the SA bound to KUBECONFIG_READONLY has verbs
+# [get, list, watch] only — `kubectl diff` cannot mutate, even by
+# accident. See infra/k8s/56-ci-readonly-sa.yaml.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "infra/k8s/**"
+      - ".github/workflows/k8s-drift.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: k8s-drift-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Preflight runs on GitHub-hosted infra so we can decide whether to
+  # dispatch the actual diff job to the (possibly-unregistered) self-hosted
+  # runner. This avoids "no runner available" failures on PRs that land
+  # before the operator finishes one-time setup.
+  preflight:
+    name: Preflight (gate on operator setup)
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    steps:
+      - name: Check K8S_DRIFT_CHECK_ENABLED + KUBECONFIG_READONLY presence
+        id: gate
+        env:
+          K8S_DRIFT_CHECK_ENABLED: ${{ vars.K8S_DRIFT_CHECK_ENABLED }}
+          KUBECONFIG_PRESENT: ${{ secrets.KUBECONFIG_READONLY != '' }}
+        run: |
+          if [ "${K8S_DRIFT_CHECK_ENABLED}" != "true" ]; then
+            echo "::notice::K8S_DRIFT_CHECK_ENABLED is not 'true' — skipping drift check. See docs/ops/k8s-drift-check.md to enable."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${KUBECONFIG_PRESENT}" != "true" ]; then
+            echo "::notice::KUBECONFIG_READONLY secret is empty — skipping drift check. See docs/ops/k8s-drift-check.md."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+  drift:
+    name: kubectl diff vs. live cluster
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
+    # LAN-only runner — see docs/ops/k8s-drift-check.md for registration.
+    runs-on: [self-hosted, homelab]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write read-only kubeconfig
+        env:
+          KUBECONFIG_READONLY: ${{ secrets.KUBECONFIG_READONLY }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/.kube"
+          printf '%s' "$KUBECONFIG_READONLY" > "$RUNNER_TEMP/.kube/config"
+          chmod 600 "$RUNNER_TEMP/.kube/config"
+          echo "KUBECONFIG=$RUNNER_TEMP/.kube/config" >> "$GITHUB_ENV"
+
+      - name: kubectl diff -f infra/k8s/
+        id: diff
+        # `kubectl diff` exits 1 when differences exist (documented quirk
+        # called out in issue #133). `|| true` keeps the step green; the
+        # captured stdout drives the PR comment regardless.
+        run: |
+          set +e
+          kubectl diff -f infra/k8s/ > "$RUNNER_TEMP/drift.txt" 2>&1
+          rc=$?
+          set -e
+          echo "kubectl diff exit code: $rc"
+          if [ $rc -gt 1 ]; then
+            # rc=0 → no diff, rc=1 → diff present (both expected).
+            # rc>1 → real error (network, auth, etc.) — surface it in the
+            # comment body but still post and succeed (advisory).
+            echo "kubectl diff returned $rc — treating as error in comment body."
+          fi
+          # Truncate to keep PR comment under GitHub's 65k limit.
+          # 60k leaves room for the markdown wrapper + marker.
+          head -c 60000 "$RUNNER_TEMP/drift.txt" > "$RUNNER_TEMP/drift.trimmed.txt"
+          if [ "$(wc -c < "$RUNNER_TEMP/drift.txt")" -gt 60000 ]; then
+            printf '\n\n... (output truncated at 60000 bytes; run kubectl diff -f infra/k8s/ locally for the full report)\n' \
+              >> "$RUNNER_TEMP/drift.trimmed.txt"
+          fi
+
+      - name: Post / update PR comment
+        uses: actions/github-script@v7
+        env:
+          DRIFT_FILE: ${{ runner.temp }}/drift.trimmed.txt
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- k8s-drift-report -->';
+            const driftRaw = fs.readFileSync(process.env.DRIFT_FILE, 'utf8').trim();
+            const body = driftRaw.length === 0
+              ? `${marker}\n### k8s drift check (advisory)\n\nNo drift detected against live cluster.`
+              : `${marker}\n### k8s drift check (advisory)\n\n<details><summary>kubectl diff -f infra/k8s/</summary>\n\n\`\`\`diff\n${driftRaw}\n\`\`\`\n\n</details>\n\n_Advisory only — does not block merge. See \`docs/ops/k8s-drift-check.md\`._`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            // Find prior comment by marker so re-runs replace instead of stack.
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const prior = comments.find(c => c.body && c.body.startsWith(marker));
+
+            if (prior) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: prior.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body,
+              });
+            }
