@@ -32,8 +32,7 @@ FROM ${JRE_IMAGE}
 ARG SERVICE_MODULE
 RUN useradd --system --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin app
 WORKDIR /app
-COPY --from=builder /workspace/services/${SERVICE_MODULE}/target/*-boot.jar /app/app.jar
-RUN chown app:app /app/app.jar
+COPY --chown=app:app --from=builder /workspace/services/${SERVICE_MODULE}/target/*-boot.jar /app/app.jar
 USER 10001
 EXPOSE 8080
 ENTRYPOINT ["java", "-XX:+ExitOnOutOfMemoryError", "-jar", "/app/app.jar"]
