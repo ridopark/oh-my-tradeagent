@@ -13,6 +13,8 @@ help:
 # Install the contract regen-drift pre-commit hook. Issue #68 — catches
 # the 'edited schema, forgot to re-run regen.sh' mistake locally instead
 # of in CI. CI still enforces the same check as the source of truth.
+# Note: re-running `make hooks` overwrites any existing .git/hooks/pre-commit;
+# reviewers should inspect the hook diff before re-installing on shared checkouts.
 hooks:
 	@git_dir="$$(git rev-parse --git-common-dir)"; \
 	  src="contract/python/git-hooks/pre-commit"; \

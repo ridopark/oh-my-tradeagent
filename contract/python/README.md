@@ -61,7 +61,7 @@ push" to "commit fails locally".
 make hooks
 
 # Edit a schema without regenerating — commit should FAIL
-sed -i 's/"title": "/"title": "X/' contract/schemas/audit-event.json
+sed -i.bak 's/"title": "/"title": "X/' contract/schemas/audit-event.json
 git add contract/schemas/audit-event.json
 git commit -m "smoke: schema edit without regen"   # fails with drift error
 
@@ -69,4 +69,7 @@ git commit -m "smoke: schema edit without regen"   # fails with drift error
 bash contract/python/regen.sh
 git add contract/python/ohmytradeagent_contract/models
 git commit -m "smoke: schema edit with regen"      # passes
+
+# Cleanup: revert the test edit
+git checkout -- contract/schemas/audit-event.json
 ```

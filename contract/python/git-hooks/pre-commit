@@ -11,6 +11,11 @@
 # Install: `make hooks` (copies this file into `.git/hooks/pre-commit`).
 # Bypass:  `git commit --no-verify` (only when you know what you're doing).
 #
+# Known limitation: this hook reads the full working tree (not the staged index),
+# so unstaged schema edits adjacent to staged ones can cause a false-positive drift
+# failure. Acceptable for a DX shortcut; revert any unstaged schema work before
+# committing to avoid spurious blocks.
+#
 # Issue: https://github.com/JonBuhTrader/oh-my-tradeagent/issues/68
 set -euo pipefail
 
@@ -33,9 +38,10 @@ echo "[pre-commit] schema edit detected — running ${REGEN_SCRIPT}" >&2
 
 # Run regen from the repo root so paths inside the script resolve normally.
 cd "$REPO_ROOT"
-if ! bash "$REGEN_SCRIPT" >/tmp/regen-precommit.log 2>&1; then
-  echo "[pre-commit] regen.sh failed — see /tmp/regen-precommit.log" >&2
-  tail -n 20 /tmp/regen-precommit.log >&2 || true
+LOG=$(mktemp -t regen-precommit.XXXXXX.log)
+if ! bash "$REGEN_SCRIPT" >"$LOG" 2>&1; then
+  echo "[pre-commit] regen.sh failed — see $LOG" >&2
+  tail -n 20 "$LOG" >&2 || true
   exit 1
 fi
 
