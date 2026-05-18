@@ -66,6 +66,7 @@ class TenantConfigChangedIT {
     adminConn =
         DriverManager.getConnection(
             postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+    adminConn.setAutoCommit(false);
     try (Statement st = adminConn.createStatement()) {
       st.execute("ALTER ROLE orchestrator_runtime PASSWORD '" + RUNTIME_PASSWORD + "'");
     }
