@@ -12,7 +12,9 @@ import io.temporal.client.schedules.Schedule;
 import io.temporal.client.schedules.ScheduleActionStartWorkflow;
 import io.temporal.client.schedules.ScheduleAlreadyRunningException;
 import io.temporal.client.schedules.ScheduleClient;
+import io.temporal.client.schedules.ScheduleHandle;
 import io.temporal.client.schedules.ScheduleIntervalSpec;
+import io.temporal.client.schedules.ScheduleListDescription;
 import io.temporal.client.schedules.ScheduleOptions;
 import io.temporal.client.schedules.ScheduleSpec;
 import io.temporal.serviceclient.WorkflowServiceStubs;
@@ -22,6 +24,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -41,6 +44,14 @@ import org.springframework.stereotype.Component;
  * <p>Phase 2c.2: previously hardcoded {@code "alpaca-paper"} for every tenant. Now reads {@code
  * broker_target} off each {@link StrategyConfig} so a future tenant pinned to a different broker
  * target gets a schedule on the correct task queue.
+ *
+ * <p>Issue #56 (final item): before creating a schedule, reap any pre-existing schedule for the
+ * same {@code (tenantId, strategyId)} pair whose ID encodes a different {@code broker_target} from
+ * the current config. This closes a drift bug where a {@code broker_target} rename (e.g. {@code
+ * paper} → {@code alpaca-paper}) would leave the old schedule running on the prior broker queue,
+ * effectively reconciling each strategy twice per interval. Reap is fail-closed: if the
+ * StrategyConfig can't be loaded or is whitelist-invalid, the bootstrapper skips the reap pass for
+ * that iteration to avoid blind deletes while the configuration is in an unknown state.
  */
 @Component
 @Profile("!test")
@@ -110,7 +121,53 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
             brokerTarget);
         continue;
       }
+      String desiredScheduleId =
+          "recon-t-" + ts.tenantId() + "-s-" + ts.strategyId() + "-" + brokerTarget;
+      reapStaleSchedules(scheduleClient, ts.tenantId(), ts.strategyId(), desiredScheduleId);
       ensureSchedule(scheduleClient, ts.tenantId(), ts.strategyId(), brokerTarget);
+    }
+  }
+
+  /**
+   * Deletes any existing Temporal schedule for {@code (tenantId, strategyId)} whose ID encodes a
+   * different {@code broker_target} than the desired one. Match key is the prefix {@code
+   * "recon-t-<tenantId>-s-<strategyId>-"} — the schedule-ID grammar built in {@link
+   * #ensureSchedule}. The trailing dash prevents tenant-prefix collisions (e.g. {@code dev} vs
+   * {@code dev-other}).
+   *
+   * <p>A "schedule not found" race (two replicas reaping simultaneously) is logged at warn level;
+   * any other {@link RuntimeException} from the SDK is logged and the iteration continues so a
+   * single stale schedule can't take down the whole bootstrap pass.
+   *
+   * <p>Package-private so unit tests can drive it directly against a mock {@link ScheduleClient}.
+   */
+  void reapStaleSchedules(
+      ScheduleClient scheduleClient, String tenantId, String strategyId, String desiredScheduleId) {
+    String prefix = "recon-t-" + tenantId + "-s-" + strategyId + "-";
+    try (Stream<ScheduleListDescription> listed = scheduleClient.listSchedules()) {
+      listed
+          .filter(d -> d.getScheduleId().startsWith(prefix))
+          .filter(d -> !d.getScheduleId().equals(desiredScheduleId))
+          .forEach(
+              d -> {
+                String staleId = d.getScheduleId();
+                try {
+                  ScheduleHandle handle = scheduleClient.getHandle(staleId);
+                  handle.delete();
+                  log.info(
+                      "reaped stale Reconciliation Schedule id={} (desired={}) tenant={} strategy={}",
+                      staleId,
+                      desiredScheduleId,
+                      tenantId,
+                      strategyId);
+                } catch (RuntimeException e) {
+                  log.warn(
+                      "could not reap stale Reconciliation Schedule id={} (desired={}); peer race or already removed",
+                      staleId,
+                      desiredScheduleId,
+                      e);
+                }
+              });
     }
   }
 

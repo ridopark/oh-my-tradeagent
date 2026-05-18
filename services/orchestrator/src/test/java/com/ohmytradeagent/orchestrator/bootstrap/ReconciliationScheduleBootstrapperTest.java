@@ -1,35 +1,70 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.schedules.Schedule;
 import io.temporal.client.schedules.ScheduleActionStartWorkflow;
+import io.temporal.client.schedules.ScheduleAlreadyRunningException;
 import io.temporal.client.schedules.ScheduleClient;
+import io.temporal.client.schedules.ScheduleHandle;
+import io.temporal.client.schedules.ScheduleListDescription;
 import io.temporal.client.schedules.ScheduleOptions;
 import io.temporal.serviceclient.WorkflowServiceStubs;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 
 /**
  * Phase 2c.2 review feedback (Major 3): {@link ReconciliationScheduleBootstrapper} must derive the
  * task queue from each strategy's own {@code broker_target}, not a hardcoded {@code "alpaca-paper"}
  * constant. Two tenants pinned to different brokers must get two schedules on the matching task
  * queues.
+ *
+ * <p>Issue #56 (final item): after a {@code broker_target} rename, lingering Temporal schedules
+ * from the prior broker target must be reaped so each {@code (tenant, strategy)} ends up with
+ * exactly one schedule on the current broker queue.
  */
 class ReconciliationScheduleBootstrapperTest {
+
+  private ListAppender<ILoggingEvent> logAppender;
+
+  @BeforeEach
+  void attachLogAppender() {
+    Logger logger = (Logger) LoggerFactory.getLogger(ReconciliationScheduleBootstrapper.class);
+    logAppender = new ListAppender<>();
+    logAppender.start();
+    logger.addAppender(logAppender);
+  }
+
+  @AfterEach
+  void detachLogAppender() {
+    Logger logger = (Logger) LoggerFactory.getLogger(ReconciliationScheduleBootstrapper.class);
+    logger.detachAppender(logAppender);
+    logAppender.stop();
+  }
 
   @Test
   void usesBrokerTargetFromStrategyConfig(@TempDir Path tenantsDir) throws Exception {
@@ -46,6 +81,10 @@ class ReconciliationScheduleBootstrapperTest {
         .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.TRADIER_PAPER));
 
     ScheduleClient scheduleClient = mock(ScheduleClient.class);
+    // listSchedules() is invoked per-strategy by the new reap pass; return an empty stream each
+    // time so the reap pass is a no-op. Stream is AutoCloseable so the try-with-resources in
+    // reapStaleSchedules() closes it; the stub must return a non-null stream.
+    when(scheduleClient.listSchedules()).thenReturn(Stream.empty(), Stream.empty());
     WorkflowClient workflowClient = mock(WorkflowClient.class);
     WorkflowServiceStubs stubs = mock(WorkflowServiceStubs.class);
 
@@ -103,6 +142,180 @@ class ReconciliationScheduleBootstrapperTest {
 
     verify(scheduleClient, times(0))
         .createSchedule(any(String.class), any(Schedule.class), any(ScheduleOptions.class));
+    // Reap pass is short-circuited by the existing fail-closed guard.
+    verify(scheduleClient, times(0)).listSchedules();
+    verify(scheduleClient, times(0)).getHandle(any());
+  }
+
+  @Test
+  void reapsStaleScheduleWhenBrokerTargetChanges(@TempDir Path tenantsDir) throws Exception {
+    writeYaml(tenantsDir, "t-dev", "s-copytrade-v1");
+
+    StrategyRegistry registry = mock(StrategyRegistry.class);
+    when(registry.get("t-dev", "s-copytrade-v1"))
+        .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.ALPACA_PAPER));
+
+    String staleId = "recon-t-t-dev-s-s-copytrade-v1-tradier-paper";
+    String desiredId = "recon-t-t-dev-s-s-copytrade-v1-alpaca-paper";
+
+    ScheduleListDescription stale = mock(ScheduleListDescription.class);
+    when(stale.getScheduleId()).thenReturn(staleId);
+
+    ScheduleClient scheduleClient = mock(ScheduleClient.class);
+    when(scheduleClient.listSchedules()).thenReturn(Stream.of(stale));
+
+    ScheduleHandle staleHandle = mock(ScheduleHandle.class);
+    when(scheduleClient.getHandle(staleId)).thenReturn(staleHandle);
+
+    WorkflowClient workflowClient = mock(WorkflowClient.class);
+    WorkflowServiceStubs stubs = mock(WorkflowServiceStubs.class);
+
+    ReconciliationScheduleBootstrapper bootstrapper =
+        new ReconciliationScheduleBootstrapper(
+            workflowClient, stubs, registry, tenantsDir.toString());
+    bootstrapper.runWith(scheduleClient);
+
+    verify(scheduleClient).listSchedules();
+    verify(scheduleClient).getHandle(staleId);
+    verify(staleHandle, times(1)).delete();
+    verify(scheduleClient, times(1))
+        .createSchedule(eq(desiredId), any(Schedule.class), any(ScheduleOptions.class));
+  }
+
+  @Test
+  void doesNotReapMatchingSchedule(@TempDir Path tenantsDir) throws Exception {
+    writeYaml(tenantsDir, "t-dev", "s-copytrade-v1");
+
+    StrategyRegistry registry = mock(StrategyRegistry.class);
+    when(registry.get("t-dev", "s-copytrade-v1"))
+        .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.ALPACA_PAPER));
+
+    String desiredId = "recon-t-t-dev-s-s-copytrade-v1-alpaca-paper";
+
+    ScheduleListDescription desired = mock(ScheduleListDescription.class);
+    when(desired.getScheduleId()).thenReturn(desiredId);
+
+    ScheduleClient scheduleClient = mock(ScheduleClient.class);
+    when(scheduleClient.listSchedules()).thenReturn(Stream.of(desired));
+    // Warm-boot: createSchedule throws ScheduleAlreadyRunningException, which the bootstrapper
+    // swallows as an info log.
+    when(scheduleClient.createSchedule(
+            eq(desiredId), any(Schedule.class), any(ScheduleOptions.class)))
+        .thenThrow(new ScheduleAlreadyRunningException(new RuntimeException("already running")));
+
+    WorkflowClient workflowClient = mock(WorkflowClient.class);
+    WorkflowServiceStubs stubs = mock(WorkflowServiceStubs.class);
+
+    ReconciliationScheduleBootstrapper bootstrapper =
+        new ReconciliationScheduleBootstrapper(
+            workflowClient, stubs, registry, tenantsDir.toString());
+    bootstrapper.runWith(scheduleClient);
+
+    verify(scheduleClient, times(0)).getHandle(any());
+    verify(scheduleClient, times(1))
+        .createSchedule(eq(desiredId), any(Schedule.class), any(ScheduleOptions.class));
+  }
+
+  @Test
+  void doesNotReapOtherTenantsOrStrategies(@TempDir Path tenantsDir) throws Exception {
+    writeYaml(tenantsDir, "t-dev", "s-copytrade-v1");
+
+    StrategyRegistry registry = mock(StrategyRegistry.class);
+    when(registry.get("t-dev", "s-copytrade-v1"))
+        .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.ALPACA_PAPER));
+
+    String desiredId = "recon-t-t-dev-s-s-copytrade-v1-alpaca-paper";
+
+    ScheduleListDescription otherTenant = mock(ScheduleListDescription.class);
+    when(otherTenant.getScheduleId()).thenReturn("recon-t-other-s-s-copytrade-v1-tradier-paper");
+    ScheduleListDescription otherStrategy = mock(ScheduleListDescription.class);
+    when(otherStrategy.getScheduleId()).thenReturn("recon-t-t-dev-s-s-other-strat-tradier-paper");
+    ScheduleListDescription killSwitch = mock(ScheduleListDescription.class);
+    when(killSwitch.getScheduleId()).thenReturn("t-t-dev/s-s-copytrade-v1/killswitch");
+
+    ScheduleClient scheduleClient = mock(ScheduleClient.class);
+    when(scheduleClient.listSchedules())
+        .thenReturn(Stream.of(otherTenant, otherStrategy, killSwitch));
+
+    WorkflowClient workflowClient = mock(WorkflowClient.class);
+    WorkflowServiceStubs stubs = mock(WorkflowServiceStubs.class);
+
+    ReconciliationScheduleBootstrapper bootstrapper =
+        new ReconciliationScheduleBootstrapper(
+            workflowClient, stubs, registry, tenantsDir.toString());
+    bootstrapper.runWith(scheduleClient);
+
+    verify(scheduleClient, times(0)).getHandle(any());
+    verify(scheduleClient, times(1))
+        .createSchedule(eq(desiredId), any(Schedule.class), any(ScheduleOptions.class));
+  }
+
+  @Test
+  void reapSkippedWhenStrategyConfigInvalid(@TempDir Path tenantsDir) throws Exception {
+    writeYaml(tenantsDir, "t-dev", "s-copytrade-v1");
+
+    StrategyConfig cfg = new StrategyConfig();
+    // broker_target not set — fail-closed: reap pass must be skipped.
+
+    StrategyRegistry registry = mock(StrategyRegistry.class);
+    when(registry.get("t-dev", "s-copytrade-v1")).thenReturn(cfg);
+
+    ScheduleClient scheduleClient = mock(ScheduleClient.class);
+    WorkflowClient workflowClient = mock(WorkflowClient.class);
+    WorkflowServiceStubs stubs = mock(WorkflowServiceStubs.class);
+
+    ReconciliationScheduleBootstrapper bootstrapper =
+        new ReconciliationScheduleBootstrapper(
+            workflowClient, stubs, registry, tenantsDir.toString());
+    bootstrapper.runWith(scheduleClient);
+
+    verify(scheduleClient, times(0)).listSchedules();
+    verify(scheduleClient, times(0)).getHandle(any());
+    verify(scheduleClient, times(0))
+        .createSchedule(any(String.class), any(Schedule.class), any(ScheduleOptions.class));
+  }
+
+  @Test
+  void continuesAndCreatesScheduleWhenReapDeleteThrows(@TempDir Path tenantsDir) throws Exception {
+    writeYaml(tenantsDir, "t-dev", "s-copytrade-v1");
+
+    StrategyRegistry registry = mock(StrategyRegistry.class);
+    when(registry.get("t-dev", "s-copytrade-v1"))
+        .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.ALPACA_PAPER));
+
+    String staleId = "recon-t-t-dev-s-s-copytrade-v1-tradier-paper";
+    String desiredId = "recon-t-t-dev-s-s-copytrade-v1-alpaca-paper";
+
+    ScheduleListDescription stale = mock(ScheduleListDescription.class);
+    when(stale.getScheduleId()).thenReturn(staleId);
+
+    ScheduleHandle staleHandle = mock(ScheduleHandle.class);
+    doThrow(new RuntimeException("simulated SDK error")).when(staleHandle).delete();
+
+    ScheduleClient scheduleClient = mock(ScheduleClient.class);
+    when(scheduleClient.listSchedules()).thenReturn(Stream.of(stale));
+    when(scheduleClient.getHandle(staleId)).thenReturn(staleHandle);
+
+    WorkflowClient workflowClient = mock(WorkflowClient.class);
+    WorkflowServiceStubs stubs = mock(WorkflowServiceStubs.class);
+
+    ReconciliationScheduleBootstrapper bootstrapper =
+        new ReconciliationScheduleBootstrapper(
+            workflowClient, stubs, registry, tenantsDir.toString());
+
+    assertThatCode(() -> bootstrapper.runWith(scheduleClient)).doesNotThrowAnyException();
+
+    verify(scheduleClient, times(1))
+        .createSchedule(eq(desiredId), any(Schedule.class), any(ScheduleOptions.class));
+
+    boolean warnEmitted =
+        logAppender.list.stream()
+            .anyMatch(
+                e ->
+                    e.getLevel() == Level.WARN
+                        && e.getFormattedMessage()
+                            .startsWith("could not reap stale Reconciliation Schedule"));
+    assertThat(warnEmitted).isTrue();
   }
 
   private static StrategyConfig strategyConfig(StrategyConfig.BrokerTarget target) {
