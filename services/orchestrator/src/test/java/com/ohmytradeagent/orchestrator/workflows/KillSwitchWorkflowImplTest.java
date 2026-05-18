@@ -14,12 +14,14 @@ import static org.mockito.Mockito.when;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.KillSwitchWorkflowInput;
+import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
+import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import io.temporal.client.WorkflowOptions;
@@ -47,6 +49,7 @@ class KillSwitchWorkflowImplTest {
   private StrategyActivities strategy;
   private DailyPnlActivities pnl;
   private KillSwitchCascadeActivities cascade;
+  private LivePromotionActivities livePromotion;
 
   @BeforeEach
   void setUp() {
@@ -59,6 +62,7 @@ class KillSwitchWorkflowImplTest {
     strategy = Mockito.mock(StrategyActivities.class);
     pnl = Mockito.mock(DailyPnlActivities.class);
     cascade = Mockito.mock(KillSwitchCascadeActivities.class);
+    livePromotion = Mockito.mock(LivePromotionActivities.class);
 
     // Defaults: market closed (no auto-trip), today=2026-05-14.
     when(calendar.isMarketOpen()).thenReturn(false);
@@ -68,7 +72,8 @@ class KillSwitchWorkflowImplTest {
     when(cascade.cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString()))
         .thenReturn(0L);
 
-    coreWorker.registerActivitiesImplementations(audit, calendar, strategy, pnl, cascade);
+    coreWorker.registerActivitiesImplementations(
+        audit, calendar, strategy, pnl, cascade, livePromotion);
     env.start();
   }
 
@@ -214,6 +219,43 @@ class KillSwitchWorkflowImplTest {
             eq("auto:daily_loss"));
   }
 
+  @Test
+  void recordLivePromotionValidator_blankTenantId_rejected() {
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-lp-tenant");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    LivePromotionApprovalRequest req = livePromotionRequest("alice", "bob", "tradier-live");
+    req.setTenantId("");
+
+    assertThatThrownBy(() -> stub.recordLivePromotion(req))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("tenant_id_required");
+  }
+
+  @Test
+  void recordLivePromotionValidator_sameApprovers_rejected() {
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-lp-same");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    LivePromotionApprovalRequest req = livePromotionRequest("alice", "alice", "tradier-live");
+
+    assertThatThrownBy(() -> stub.recordLivePromotion(req))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("approvers_must_differ");
+  }
+
+  @Test
+  void recordLivePromotionValidator_blankBrokerTarget_rejected() {
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-lp-broker");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    LivePromotionApprovalRequest req = livePromotionRequest("alice", "bob", "");
+
+    assertThatThrownBy(() -> stub.recordLivePromotion(req))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("broker_target_required");
+  }
+
   // ---------- helpers ----------
 
   private KillSwitchWorkflow newStub(String workflowId) {
@@ -266,6 +308,18 @@ class KillSwitchWorkflowImplTest {
     c.setDailyLossThreshold(new BigDecimal("2500.00"));
     c.setResetCooldownSecs(60L);
     return c;
+  }
+
+  private static LivePromotionApprovalRequest livePromotionRequest(
+      String a1, String a2, String brokerTarget) {
+    LivePromotionApprovalRequest r = new LivePromotionApprovalRequest();
+    r.setSchemaVersion(1L);
+    r.setTenantId("dev");
+    r.setStrategyId("copytrade-v1");
+    r.setApproverId1(a1);
+    r.setApproverId2(a2);
+    r.setBrokerTarget(brokerTarget);
+    return r;
   }
 
   private AuditEvent captureKind(String kind) {

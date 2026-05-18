@@ -42,7 +42,7 @@
     "kind": {
       "type": "string",
       "minLength": 1,
-      "description": "Event kind tag. Known kinds: SignalReceived, SignalAccepted, SignalRejected, EntryFilled, EntryExpired, ExitRequested, KillSwitchTripped, KillSwitchResetApproved, KillSwitchResetExpired, KillSwitchDegraded, ReconciliationCompleted, JournalOrphan, BrokerOrphan, OrphanSTC, SymbolDriftDetected. KillSwitchResetApproved (issue #7) is emitted by KillSwitchWorkflow.reset_killswitch only after dual-control approval; its subject MUST include trip_event_id, root_cause, remediation_ref, resumption_decision, approver_primary, approver_secondary, requested_at, approved_at — with approver_primary != approver_secondary. See PLAN.md 'Kill switch flow / Reset SOP' for the full SOP.",
+      "description": "Event kind tag. Known kinds: SignalReceived, SignalAccepted, SignalRejected, EntryFilled, EntryExpired, ExitRequested, KillSwitchTripped, KillSwitchResetApproved, KillSwitchResetExpired, KillSwitchDegraded, LivePromotionApproved, ReconciliationCompleted, JournalOrphan, BrokerOrphan, OrphanSTC, SymbolDriftDetected. KillSwitchResetApproved (issue #7) is emitted by KillSwitchWorkflow.reset_killswitch only after dual-control approval; its subject MUST include trip_event_id, root_cause, remediation_ref, resumption_decision, approver_primary, approver_secondary, requested_at, approved_at — with approver_primary != approver_secondary. LivePromotionApproved (issue #87) is emitted by the LivePromotionActivities.approve Activity after dual-control validation; its subject MUST include approver_id_1, approver_id_2, tenant_id, strategy_id, broker_target, requested_at, approved_at (optional note) — with approver_id_1 != approver_id_2 (validator rejects same-approver with error code approvers_must_differ). See docs/ops/live-promotion-rollback.md §Sign-off recording for the full SOP.",
       "examples": [
         "SignalReceived",
         "SignalAccepted",
@@ -54,6 +54,7 @@
         "KillSwitchResetApproved",
         "KillSwitchResetExpired",
         "KillSwitchDegraded",
+        "LivePromotionApproved",
         "ReconciliationCompleted",
         "JournalOrphan",
         "BrokerOrphan",
@@ -63,7 +64,7 @@
     },
     "subject": {
       "type": "object",
-      "description": "Free-form structured payload for the event. Schema-by-kind to be formalized as the system grows; v0 uses ad-hoc shape. For kind=KillSwitchResetApproved the subject is constrained by convention to {trip_event_id, root_cause, remediation_ref, resumption_decision, approver_primary, approver_secondary, requested_at, approved_at}; the JSON Schema keeps additionalProperties=true for forward compatibility, but the dual-control approver fields MUST both be present and distinct.",
+      "description": "Free-form structured payload for the event. Schema-by-kind to be formalized as the system grows; v0 uses ad-hoc shape. For kind=KillSwitchResetApproved the subject is constrained by convention to {trip_event_id, root_cause, remediation_ref, resumption_decision, approver_primary, approver_secondary, requested_at, approved_at}; the JSON Schema keeps additionalProperties=true for forward compatibility, but the dual-control approver fields MUST both be present and distinct. For kind=LivePromotionApproved the subject is constrained by convention to {approver_id_1, approver_id_2, tenant_id, strategy_id, broker_target, requested_at, approved_at, optional note}; both approver IDs MUST be present and distinct (same-approver requests reject with error code approvers_must_differ before any audit event is emitted).",
       "existingJavaType": "java.util.Map<String, Object>",
       "additionalProperties": true
     },

@@ -233,12 +233,22 @@ approvers must:
    P0/P1, discrepancy rate < 0.1%, recon lag p99 < 60s, audit completeness 100%).
 3. Confirm the most recent **kill-switch drill** (per `docs/ops/kill-switch-stuck.md`)
    passed within 30 days.
-4. Record the sign-off via the same `/killswitch/reset`-style dual-control endpoint
-   used for live `force_close` and `reset_killswitch` (Phase 5 dual-control pattern).
-   The audit event is `LivePromotionApproved` (new in Phase 7 — wired alongside the
-   `*-live` adapter rollout) with both `approver_id_1` and `approver_id_2` populated;
-   single-approver requests reject with `approvers_must_differ`, matching the existing
-   Phase 5 contract.
+4. Record the sign-off via the dedicated dual-control endpoint
+   `POST /promotion/approve` (mirror of `/killswitch/reset`, issue #87). The audit event
+   is `LivePromotionApproved`, written via the orchestrator's `LivePromotionActivities`
+   Activity through the hash-chain writer (PR #117); both `approver_id_1` and
+   `approver_id_2` are required and must be distinct — single-approver and same-ID
+   requests reject with `approvers_must_differ` and no audit row is written.
+
+   Verify the sign-off purely by audit-log query (no out-of-band state):
+
+   ```sh
+   curl -s "http://copytrade.homelab.local/audit?kind=LivePromotionApproved" \
+     -H "X-Tenant-Id: <t>" -H "X-Strategy-Id: <s>" | jq '.items[0].subject'
+   # Must return a row whose subject carries two distinct approver_id_* values
+   # inside the gate window. If the row is absent, the gate has NOT cleared —
+   # do not flip broker_target.
+   ```
 
 Once `LivePromotionApproved` is in the audit log with two distinct IDs, the operator
 flips `broker_target` to `<provider>-live` per the promotion procedure (mirror image of
