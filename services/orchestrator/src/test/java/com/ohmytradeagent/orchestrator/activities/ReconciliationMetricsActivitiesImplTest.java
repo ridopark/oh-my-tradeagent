@@ -8,9 +8,7 @@ import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -115,10 +113,6 @@ class ReconciliationMetricsActivitiesImplTest {
   }
 
   private static void assertTagsPresent(Iterable<Tag> tags) {
-    Set<String> keys =
-        java.util.stream.StreamSupport.stream(tags.spliterator(), false)
-            .map(Tag::getKey)
-            .collect(Collectors.toSet());
-    assertThat(keys).contains("tenant", "strategy", "broker_target");
+    assertThat(tags).extracting(Tag::getKey).contains("tenant", "strategy", "broker_target");
   }
 }
