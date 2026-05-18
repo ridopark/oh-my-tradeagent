@@ -93,6 +93,12 @@ KUBECONFIG=/tmp/kubeconfig-ci-drift-checker.yaml kubectl auth can-i delete confi
 
 ### 3. Configure the `production-drift-check` deployment environment
 
+> Canonical source for this environment name is the `environment:` key in
+> `.github/workflows/k8s-drift.yml`. If you rename it there, update every
+> `production-drift-check` reference in this file too (the section
+> heading, the verify command, the rollback command, and the
+> Public-repo workflow safety subsection).
+
 The workflow's `drift:` job declares `environment: production-drift-check`.
 On a public repo with a self-hosted runner, this environment's
 required-reviewer rule is the human gate that prevents fork PRs from
@@ -104,12 +110,10 @@ pause.
 2. Name it exactly `production-drift-check` (must match the workflow).
 3. Under **Deployment protection rules**, check **Required reviewers**
    and add yourself (the operator). Leave the wait timer at 0.
-4. **Leave "Prevent self-review" UNCHECKED.** You author most PRs in this
-   repo; if self-review is prevented, every one of your own PRs that
-   touches `infra/k8s/**` will pause forever waiting for a different
-   reviewer. With self-review allowed, you click "Approve and deploy"
-   on your own PR (one-click), and fork PRs still require your explicit
-   approval before the diff job runs.
+4. **Leave "Prevent self-review" UNCHECKED.** You are the sole reviewer
+   on this repo — checking it would deadlock your own `infra/k8s/**`
+   PRs. Fork PRs still require your explicit approval regardless of
+   this setting.
 5. Leave **Deployment branches** unrestricted — `pull_request_target`
    workflows always run from `main`, so branch restrictions add nothing.
 6. Save.

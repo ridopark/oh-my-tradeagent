@@ -26,19 +26,10 @@ name: k8s drift check (advisory)
 # [get, list, watch] only — `kubectl diff` cannot mutate, even by
 # accident. See infra/k8s/56-ci-readonly-sa.yaml.
 #
-# Public-repo safety (this repo is public): the trigger is
-# `pull_request_target`, NOT `pull_request`. This makes GitHub execute
-# THIS workflow file as it exists on `main`, never the PR-head's
-# version — so a malicious fork PR cannot modify the workflow body
-# (remove the preflight gate, add curl-pipe-bash, etc.) to compromise
-# the self-hosted runner. The `drift:` job below then explicitly
-# checks out the PR head's `infra/k8s/` content for kubectl diff, but
-# no step ever executes PR-supplied scripts. kubectl diff parses YAML
-# as data only — there is no code-execution path from manifest
-# content. Layered on top, the `drift:` job sits inside an environment
-# (`production-drift-check`) configured in repo Settings with the
-# operator as a required reviewer, so every fork-PR diff job pauses
-# for manual approval before the runner fires.
+# Public-repo safety: three layered defenses make a self-hosted runner
+# safe here — `pull_request_target` trigger, required-reviewer
+# environment, no PR-supplied script execution. Threat model and
+# rationale in docs/ops/k8s-drift-check.md#public-repo-workflow-safety.
 
 on:
   pull_request_target:
@@ -90,10 +81,7 @@ jobs:
     if: needs.preflight.outputs.enabled == 'true'
     # LAN-only runner — see docs/ops/k8s-drift-check.md for registration.
     runs-on: [self-hosted, homelab]
-    # Required-reviewer gate (see workflow header). The environment is
-    # declared in repo Settings → Environments → production-drift-check
-    # with the operator as required reviewer. Every fork-PR diff job
-    # pauses here until manually approved before the runner fires.
+    # Required-reviewer gate — see docs/ops/k8s-drift-check.md step 3.
     environment: production-drift-check
     timeout-minutes: 10
     steps:
