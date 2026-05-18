@@ -36,19 +36,26 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install kubectl (pinned to k3s 1.35.4)
+      - name: Install kubeconform
         if: steps.changed.outputs.run == 'true'
-        uses: azure/setup-kubectl@v4
-        with:
-          version: v1.35.4
+        # kubeconform validates manifests against offline JSON schemas — no
+        # API server needed. Replaces kubectl apply --dry-run=client which
+        # requires a live discovery endpoint even with --validate=false.
+        run: |
+          curl -sSLo kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf kubeconform.tar.gz kubeconform
+          sudo mv kubeconform /usr/local/bin/
 
-      - name: kubectl apply --dry-run=client -f infra/k8s/
+      - name: kubeconform -strict infra/k8s/
         if: steps.changed.outputs.run == 'true'
         # Client-side schema validation only — does not contact a cluster,
         # so it won't catch admission webhooks or namespace-bound refs
         # (e.g. missing Secrets). The homelab `--dry-run=server` step in
         # infra/k8s/README.md remains the pre-merge cluster-level gate.
-        run: kubectl apply --dry-run=client --validate=false -f infra/k8s/
+        run: |
+          kubeconform -strict -kubernetes-version 1.32.0 \
+            -summary infra/k8s/*.yaml
 
   java:
     name: Java (mvn verify + spotless)
