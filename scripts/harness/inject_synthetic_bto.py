@@ -28,9 +28,9 @@ import datetime as dt
 import sys
 import uuid
 
+from ohmytradeagent_contract.search_attributes import TENANT_STRATEGY_KEY
 from temporalio.client import Client
 from temporalio.common import (
-    SearchAttributeKey,
     SearchAttributePair,
     TypedSearchAttributes,
     WorkflowIDReusePolicy,
@@ -61,9 +61,8 @@ async def main(args) -> None:
         "raw_line": f"BTO {args.ticker} {args.expiry} {int(args.strike)}{args.right} @ {args.price} [harness]",
     }
 
-    ts_key = SearchAttributeKey.for_keyword("TenantStrategy")
     sa = TypedSearchAttributes(
-        [SearchAttributePair(ts_key, f"t-{args.tenant}/s-{args.strategy}")]
+        [SearchAttributePair(TENANT_STRATEGY_KEY, f"t-{args.tenant}/s-{args.strategy}")]
     )
 
     await client.start_workflow(

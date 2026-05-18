@@ -5,6 +5,11 @@ description = "Generated pydantic models from contract/schemas/*.json"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9,<3",
+    # `ohmytradeagent_contract.search_attributes` constructs
+    # `temporalio.common.SearchAttributeKey` instances at import time so the
+    # sidecar + harness can share a single source of truth for the custom SA
+    # names. Pinned to the same 1.9.x line the sidecar uses.
+    "temporalio>=1.9,<2",
 ]
 
 [dependency-groups]

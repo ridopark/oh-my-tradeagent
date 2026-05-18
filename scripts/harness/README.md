@@ -31,7 +31,10 @@ fills, signal-age veto, contract symbol resolution, etc.). Going straight to
   assertion in `green-redeploy-proof.sh` assumes a single pod). Phase 5b's
   manifests ship with `replicas: 1`; revisit when scaling out.
 
-Quickest setup for `temporalio`:
+Quickest setup for `temporalio` + the shared contract package (the harness
+scripts now import `SearchAttributeKey` constants from
+`ohmytradeagent_contract.search_attributes` to keep the SA names in sync with
+the sidecar — see issue #45):
 
 ```sh
 python3 -m venv /tmp/copytrade-harness-venv
@@ -39,6 +42,7 @@ source /tmp/copytrade-harness-venv/bin/activate
 # Pin to the 1.9.x series — server is 1.27.x and the SDK 1.9.x line was the
 # last one verified compatible at the time this harness landed.
 pip install 'temporalio>=1.9,<2'
+pip install -e contract/python
 ```
 
 ## Single-step proof

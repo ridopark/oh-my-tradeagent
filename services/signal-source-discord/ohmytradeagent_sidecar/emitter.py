@@ -18,9 +18,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ohmytradeagent_contract.models.copytrade_signal_payload import CopytradeSignalPayload
+from ohmytradeagent_contract.search_attributes import TENANT_STRATEGY_KEY
 from temporalio.client import Client
 from temporalio.common import (
-    SearchAttributeKey,
     SearchAttributePair,
     TypedSearchAttributes,
     WorkflowIDReusePolicy,
@@ -61,8 +61,6 @@ class Emitter(Protocol):
 class TemporalEmitter:
     """Production emitter: routes parsed signals to the Temporal cluster."""
 
-    _TENANT_STRATEGY_KEY = SearchAttributeKey.for_keyword("TenantStrategy")
-
     def __init__(self, client: Client, task_queue: str) -> None:
         self._client = client
         self._task_queue = task_queue
@@ -80,7 +78,7 @@ class TemporalEmitter:
     async def emit(self, payload: CopytradeSignalPayload) -> EmitResult:
         wf_id = workflow_id_for(payload)
         sa = TypedSearchAttributes(
-            [SearchAttributePair(self._TENANT_STRATEGY_KEY, tenant_strategy_sa(payload))]
+            [SearchAttributePair(TENANT_STRATEGY_KEY, tenant_strategy_sa(payload))]
         )
         # The payload is a pydantic model; temporalio serializes it via its
         # default DataConverter into JSON whose field names match the contract
