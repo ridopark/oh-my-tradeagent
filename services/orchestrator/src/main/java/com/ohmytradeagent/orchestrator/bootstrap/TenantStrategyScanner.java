@@ -15,13 +15,13 @@ import java.util.stream.Stream;
  * <p>Fails fast on I/O error — a corrupted tenants tree should surface at boot, not be silently
  * ignored.
  */
-final class TenantStrategyScanner {
+public final class TenantStrategyScanner {
 
   private static final String YAML_SUFFIX = ".yaml";
 
   private TenantStrategyScanner() {}
 
-  static List<TenantStrategy> scan(Path tenantsDir) {
+  public static List<TenantStrategy> scan(Path tenantsDir) {
     List<TenantStrategy> out = new ArrayList<>();
     for (Path tenantDir : listSubdirs(tenantsDir)) {
       String tenantId = tenantDir.getFileName().toString();
@@ -54,5 +54,5 @@ final class TenantStrategyScanner {
     }
   }
 
-  record TenantStrategy(String tenantId, String strategyId) {}
+  public record TenantStrategy(String tenantId, String strategyId) {}
 }

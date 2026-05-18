@@ -82,12 +82,22 @@ spec:
               value: "6379"
             - name: ORCHESTRATOR_TENANTS_DIR
               value: /etc/copytrade/tenants
+            # Issue #88: TenantConfigChangedEmitter writes a per-(tenant, strategy) JSON
+            # diff cache so the next boot can detect configmap edits. The configmap
+            # projection above is read-only, so the snapshot lives on a separate
+            # emptyDir volume mounted at a distinct writable path. Resets on pod
+            # replacement (acceptable per the plan — the audit log is the source of
+            # truth, not the snapshot).
+            - name: ORCHESTRATOR_SNAPSHOT_DIR
+              value: /var/lib/copytrade/snapshot
             - name: ORCHESTRATOR_CAPITAL_PER_STRATEGY
               value: "100000"
           volumeMounts:
             - name: tenants
               mountPath: /etc/copytrade/tenants
               readOnly: true
+            - name: tenants-snapshot
+              mountPath: /var/lib/copytrade/snapshot
           # orchestrator-svc is a pure Temporal worker (no spring-boot-starter-web in its
           # pom — see services/orchestrator/pom.xml comment). No HTTP listener on :8080,
           # so http-get probes would always fail with "connection refused" and trigger a
@@ -114,3 +124,10 @@ spec:
                 path: dev/tenant.yaml
               - key: copytrade-v1.yaml
                 path: dev/strategies/copytrade-v1.yaml
+        # Issue #88: emptyDir for TenantConfigChangedEmitter's snapshot file
+        # (one JSON per (tenant, strategy)). Persists across in-pod restarts,
+        # resets on pod replacement — re-arms one false-negative on first boot
+        # post-replacement, acceptable since the audit log remains source of
+        # truth for incident review.
+        - name: tenants-snapshot
+          emptyDir: {}
