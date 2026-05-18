@@ -85,21 +85,33 @@ public class AuditActivitiesImpl implements AuditActivities {
         // The V3 immutability REVOKE removes UPDATE from orchestrator_runtime, which PostgreSQL
         // also requires for FOR UPDATE — advisory locks carry no table privilege requirement.
         // The lock auto-releases at end of transaction (see docs/ops/audit-retention.md §2).
-        dsl.execute(
-            "SELECT pg_advisory_xact_lock(hashtext(? || '::' || ?)::bigint)",
-            event.getTenantId(),
-            event.getStrategyId());
-        Record priorRecord =
-            dsl.fetchOne(
-                "SELECT row_hash FROM audit_log "
-                    + "WHERE tenant_id = ? AND strategy_id = ? "
-                    + "ORDER BY id DESC LIMIT 1",
-                event.getTenantId(),
-                event.getStrategyId());
-        byte[] priorRowHash = priorRecord == null ? null : priorRecord.get(0, byte[].class);
-        rowHashColumn = chainWriter.computeRowHash(event, priorRowHash);
-        prevHashColumn =
-            priorRowHash; // SQL NULL at chain head; 32-zero substitution is hashing-only
+        try {
+          dsl.execute(
+              "SELECT pg_advisory_xact_lock(hashtext(?)::int4, hashtext(?)::int4)",
+              event.getTenantId(),
+              event.getStrategyId());
+          Record priorRecord =
+              dsl.fetchOne(
+                  "SELECT row_hash FROM audit_log "
+                      + "WHERE tenant_id = ? AND strategy_id = ? "
+                      + "ORDER BY id DESC LIMIT 1",
+                  event.getTenantId(),
+                  event.getStrategyId());
+          byte[] priorRowHash = priorRecord == null ? null : priorRecord.get(0, byte[].class);
+          rowHashColumn = chainWriter.computeRowHash(event, priorRowHash);
+          prevHashColumn =
+              priorRowHash; // SQL NULL at chain head; 32-zero substitution is hashing-only
+        } catch (RuntimeException e) {
+          // Chain corruption: don't lose the audit event. Insert with NULL hash columns,
+          // matching the disabled-path behavior. Log at WARN for alerting.
+          log.warn(
+              "chain-writer failed; inserting audit_log with NULL hashes (tenant={}, strategy={})",
+              event.getTenantId(),
+              event.getStrategyId(),
+              e);
+          prevHashColumn = null;
+          rowHashColumn = null;
+        }
       }
 
       dsl.execute(

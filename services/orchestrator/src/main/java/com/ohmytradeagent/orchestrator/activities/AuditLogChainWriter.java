@@ -24,8 +24,10 @@ import org.springframework.stereotype.Component;
 /**
  * Issue #85: pure-Java hash-chain writer for {@code audit_log}. Computes {@code (prev_hash,
  * row_hash)} per the canonical form pinned in {@code docs/ops/audit-retention.md §2}. No DB
- * coupling — callers are responsible for the {@code SELECT ... FOR UPDATE} on the prior chain head
- * and for persisting the returned bytes via the production {@code INSERT}.
+ * coupling — callers serialize per-(tenant_id, strategy_id) chain inserts via {@code
+ * pg_advisory_xact_lock(hashtext(tenant_id)::int4, hashtext(strategy_id)::int4)} (V3 immutability
+ * REVOKE blocks SELECT FOR UPDATE which requires UPDATE privilege). The advisory lock auto-releases
+ * at transaction commit. Callers persist the returned bytes via the production {@code INSERT}.
  *
  * <p>Canonical form (binary, big-endian):
  *
