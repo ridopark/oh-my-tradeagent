@@ -2,13 +2,16 @@ spring:
   application:
     name: api-gateway-svc
   datasource:
-    url: ${API_GATEWAY_DB_URL:jdbc:postgresql://localhost:5432/temporal}
+    url: ${API_GATEWAY_DB_URL:jdbc:postgresql://localhost:5432/orchestrator}
     username: ${API_GATEWAY_DB_USER:temporal}
     password: ${API_GATEWAY_DB_PASS:temporal}
   jooq:
     sql-dialect: POSTGRES
   flyway:
-    enabled: false  # api-gateway is a read-only consumer of the orchestrator's audit_log
+    # api-gateway is a read-only consumer of the orchestrator's audit_log; the
+    # orchestrator-svc owns the schema in the dedicated `orchestrator` DB (issue
+    # #56 item 9), so api-gateway does not run migrations of its own.
+    enabled: false
 
 server:
   port: ${API_GATEWAY_PORT:8082}

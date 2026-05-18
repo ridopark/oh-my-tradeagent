@@ -43,8 +43,11 @@ spec:
               value: temporal-frontend.temporal.svc.cluster.local:7233
             - name: TEMPORAL_NAMESPACE
               value: copytrade
+            # Issue #56 item 9: orchestrator-svc owns a dedicated `orchestrator`
+            # database (audit_log + option_symbol_cache live here). Temporal keeps
+            # the `temporal` DB to itself via its auto-setup initContainer.
             - name: ORCHESTRATOR_DB_URL
-              value: jdbc:postgresql://postgres:5432/temporal
+              value: jdbc:postgresql://postgres:5432/orchestrator
             - name: ORCHESTRATOR_DB_USER
               valueFrom:
                 secretKeyRef:
