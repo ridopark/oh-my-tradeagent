@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Pre-commit hook: enforce that schema edits include regenerated pydantic models.
+#
+# If any staged file lives under `contract/schemas/`, run
+# `contract/python/regen.sh` and fail the commit when the regenerated
+# `contract/python/ohmytradeagent_contract/models/` tree drifts from
+# what is staged. Mirrors the CI job
+# `Python (pydantic round-trip + regen drift)` so drift is caught locally
+# instead of after push.
+#
+# Install: `make hooks` (copies this file into `.git/hooks/pre-commit`).
+# Bypass:  `git commit --no-verify` (only when you know what you're doing).
+#
+# Known limitation: this hook reads the full working tree (not the staged index),
+# so unstaged schema edits adjacent to staged ones can cause a false-positive drift
+# failure. Acceptable for a DX shortcut; revert any unstaged schema work before
+# committing to avoid spurious blocks.
+#
+# Issue: https://github.com/JonBuhTrader/oh-my-tradeagent/issues/68
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCHEMA_PREFIX="contract/schemas/"
+MODELS_DIR="contract/python/ohmytradeagent_contract/models"
+REGEN_SCRIPT="contract/python/regen.sh"
+
+# Collect the list of staged files (added/copied/modified/renamed only;
+# deletions don't trigger regen — datamodel-codegen will pick up the
+# removal on its own next run).
+staged_files=$(git diff --cached --name-only --diff-filter=ACMR)
+
+# Fast path: no schema edits → nothing to enforce.
+if ! grep -q "^${SCHEMA_PREFIX}" <<<"$staged_files"; then
+  exit 0
+fi
+
+echo "[pre-commit] schema edit detected — running ${REGEN_SCRIPT}" >&2
+
+# Run regen from the repo root so paths inside the script resolve normally.
+cd "$REPO_ROOT"
+LOG=$(mktemp -t regen-precommit.XXXXXX.log)
+if ! bash "$REGEN_SCRIPT" >"$LOG" 2>&1; then
+  echo "[pre-commit] regen.sh failed — see $LOG" >&2
+  tail -n 20 "$LOG" >&2 || true
+  exit 1
+fi
+
+# After regen, check whether the working tree's models tree matches what's
+# staged. `git diff` (no --cached) compares working tree to the index; if
+# regen produced output that differs from what the developer staged, this
+# returns non-zero.
+if ! git diff --quiet -- "$MODELS_DIR"; then
+  echo "" >&2
+  echo "[pre-commit] ERROR: generated pydantic models drifted from schemas." >&2
+  echo "[pre-commit] You edited files under ${SCHEMA_PREFIX} but the staged" >&2
+  echo "[pre-commit] models in ${MODELS_DIR} do not match a fresh regen." >&2
+  echo "" >&2
+  echo "  Fix:  bash ${REGEN_SCRIPT} && git add ${MODELS_DIR} && git commit" >&2
+  echo "" >&2
+  echo "[pre-commit] Drift summary (first 40 lines):" >&2
+  git --no-pager diff --stat -- "$MODELS_DIR" >&2 || true
+  exit 1
+fi
+
+echo "[pre-commit] regen drift check passed" >&2
+exit 0
