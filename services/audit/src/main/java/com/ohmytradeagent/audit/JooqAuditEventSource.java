@@ -3,7 +3,6 @@ package com.ohmytradeagent.audit;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.contract.AuditEvent;
-import java.sql.Timestamp;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -57,8 +56,8 @@ public class JooqAuditEventSource implements AuditEventSource {
                 + "ORDER BY occurred_at ASC, id ASC",
             tenantId,
             strategyId,
-            Timestamp.from(fromInclusive.toInstant()),
-            Timestamp.from(toExclusive.toInstant()));
+            fromInclusive,
+            toExclusive);
 
     List<AuditEvent> events = new ArrayList<>(rows.size());
     for (Record r : rows) {

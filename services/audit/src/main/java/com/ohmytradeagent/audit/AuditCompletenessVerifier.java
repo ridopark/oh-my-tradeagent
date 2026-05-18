@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
 
 /**
  * Issue #90 verifier core. Pulls a window of audit events via {@link AuditEventSource}, runs {@link
@@ -20,6 +21,7 @@ import org.slf4j.LoggerFactory;
  * the documented "20 consecutive green days" semantics: a market-closed day with zero activity
  * should not break the streak.
  */
+@Component
 public final class AuditCompletenessVerifier {
 
   private static final Logger log = LoggerFactory.getLogger(AuditCompletenessVerifier.class);
