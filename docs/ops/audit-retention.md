@@ -81,9 +81,9 @@ For the three nullable UTF-8 fields (`actor`, `workflow_id`, `correlation_id`), 
 
 The chain writer runs **inside the same transaction that inserts the
 audit row**. Per-(tenant_id, strategy_id) chain serialization uses
-`pg_advisory_xact_lock(hashtext(tenant_id || '::' || strategy_id)::bigint)` —
+`pg_advisory_xact_lock(hashtext(tenant_id)::int4, hashtext(strategy_id)::int4)` — two-arg form; 2^64 distinct key tuples; auto-releases at transaction commit —
 preserves V3 immutability REVOKE while still serializing concurrent inserts.
-The lock auto-releases at end of transaction. It then reads the previous
+It then reads the previous
 `row_hash` for that chain, hashes the new row, and writes both columns in
 one statement. This serializes writes per chain, which is acceptable because
 audit insert volume is bounded by signal volume (orders of magnitude under

@@ -49,11 +49,12 @@ orchestrator:
     per-strategy: ${ORCHESTRATOR_CAPITAL_PER_STRATEGY:100000}
 
 # Issue #85: audit-log per-row SHA-256 hash chain. When enabled, AuditActivitiesImpl
-# takes a `pg_advisory_xact_lock(hashtext(tenant_id || '::' || strategy_id)::bigint)`
-# to serialize concurrent inserts to the same (tenant, strategy) chain. The lock
-# auto-releases at transaction commit. Plain SELECT (no FOR UPDATE) reads the prior
-# chain head; V3 immutability REVOKE blocks SELECT FOR UPDATE which would require
-# UPDATE privilege. Persists prev_hash + row_hash on every INSERT.
+# takes a `pg_advisory_xact_lock(hashtext(tenant_id)::int4, hashtext(strategy_id)::int4)`
+# — two-arg form; 2^64 distinct key tuples; auto-releases at transaction commit —
+# to serialize concurrent inserts to the same (tenant, strategy) chain.
+# Plain SELECT (no FOR UPDATE) reads the prior chain head; V3 immutability REVOKE
+# blocks SELECT FOR UPDATE which would require UPDATE privilege.
+# Persists prev_hash + row_hash on every INSERT.
 # Disable (set to false) for single-knob rollback if a hashing bug surfaces in
 # production — new rows then carry NULL hash columns (V3 schema permits it).
 audit:

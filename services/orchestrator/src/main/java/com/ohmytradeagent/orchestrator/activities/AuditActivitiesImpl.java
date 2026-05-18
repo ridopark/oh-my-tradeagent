@@ -23,10 +23,11 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>Issue #85: when {@code audit.chain-writer.enabled=true} (default), populates the per-row
  * SHA-256 hash chain ({@code prev_hash}, {@code row_hash}) per {@code docs/ops/audit-retention.md
- * §2}. The chain serializes per {@code (tenant_id, strategy_id)} via a {@code
- * pg_advisory_xact_lock} keyed by {@code hashtext(tenant_id || '::' || strategy_id)} — preserves
- * the V3 immutability REVOKE (which excludes UPDATE, required by FOR UPDATE) while still
- * serializing concurrent inserts to the same chain.
+ * §2}. The chain serializes per {@code (tenant_id, strategy_id)} via {@code
+ * pg_advisory_xact_lock(hashtext(tenant_id)::int4, hashtext(strategy_id)::int4)} — two-arg form;
+ * 2^64 distinct key tuples; auto-releases at transaction commit — preserves the V3 immutability
+ * REVOKE (which excludes UPDATE, required by FOR UPDATE) while still serializing concurrent inserts
+ * to the same chain.
  *
  * <p>When the flag is {@code false}, the writer falls back to the pre-#85 INSERT path so ops can
  * disable the chain without a redeploy if a hashing bug surfaces in production. New rows carry
@@ -105,7 +106,7 @@ public class AuditActivitiesImpl implements AuditActivities {
           // Chain corruption: don't lose the audit event. Insert with NULL hash columns,
           // matching the disabled-path behavior. Log at WARN for alerting.
           log.warn(
-              "chain-writer failed; inserting audit_log with NULL hashes (tenant={}, strategy={})",
+              "chain-restart-after-failure: chain-writer failed; inserting audit_log with NULL hashes (tenant={}, strategy={})",
               event.getTenantId(),
               event.getStrategyId(),
               e);
