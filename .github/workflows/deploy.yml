@@ -74,6 +74,19 @@ concurrency:
   group: deploy-homelab
   cancel-in-progress: false
 
+env:
+  NAMESPACE: copytrade
+  # Authoritative service list for the deploy matrix. The workflow_dispatch
+  # `inputs.service.options:` block above must stay in sync — GitHub Actions
+  # requires `choice` options to be a literal YAML list, so single-sourcing
+  # both lists is not possible.
+  #
+  # Naming note: `service: exec` in `build-images.yml`'s matrix builds the
+  # `oh-my-tradeagent-exec` image which the `exec-alpaca-paper` Deployment
+  # pulls. Build-name ≠ Deployment-name is intentional — see
+  # `infra/k8s/52-exec-alpaca-paper.yaml`.
+  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord"
+
 jobs:
   preflight:
     name: Preflight (gate on operator setup + upstream success)
@@ -107,13 +120,19 @@ jobs:
 
       - name: Build deploy matrix
         id: matrix
+        # All inputs handed through `env:` so the script is pure shell — no
+        # mixing of GitHub-expression and shell-expression contexts. On
+        # workflow_run, DISPATCH_SERVICE is empty string; the `:-all` default
+        # makes that case explicit instead of relying on short-circuit luck.
         env:
+          EVENT_NAME: ${{ github.event_name }}
           DISPATCH_SERVICE: ${{ github.event.inputs.service }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${DISPATCH_SERVICE}" != "all" ]; then
-            matrix="{\"service\":[\"${DISPATCH_SERVICE}\"]}"
+          SERVICE="${DISPATCH_SERVICE:-all}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$SERVICE" != "all" ]; then
+            matrix=$(jq -nc --arg s "$SERVICE" '{service: [$s]}')
           else
-            matrix='{"service":["orchestrator","exec-alpaca-paper","market-data","api-gateway","signal-source-discord"]}'
+            matrix=$(jq -nc --arg s "$SERVICES" '{service: ($s | split(" "))}')
           fi
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "Computed deploy matrix: $matrix"
@@ -145,20 +164,20 @@ jobs:
 
       - name: Rollout restart deployment/${{ matrix.service }}
         run: |
-          kubectl -n copytrade rollout restart deployment/${{ matrix.service }}
+          kubectl -n "$NAMESPACE" rollout restart deployment/${{ matrix.service }}
 
       - name: Wait for rollout
         # `kubectl rollout status` exits non-zero on timeout, so this step
         # IS the verification — if a new pod fails its probes (or fails to
         # pull :latest) the job fails here.
         run: |
-          kubectl -n copytrade rollout status deployment/${{ matrix.service }} --timeout=180s
+          kubectl -n "$NAMESPACE" rollout status deployment/${{ matrix.service }} --timeout=180s
 
       - name: Show running pods + image digests
         # Best-effort visibility into what's actually live now. Never blocks
         # the job — `|| true` so a label-scheme tweak elsewhere doesn't
         # break the deploy.
         run: |
-          kubectl -n copytrade get pods -l app=${{ matrix.service }} \
+          kubectl -n "$NAMESPACE" get pods -l app=${{ matrix.service }} \
             -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[*].imageID}{"\n"}{end}' \
             || true
