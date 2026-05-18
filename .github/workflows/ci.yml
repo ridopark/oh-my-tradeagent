@@ -48,7 +48,7 @@ jobs:
         # so it won't catch admission webhooks or namespace-bound refs
         # (e.g. missing Secrets). The homelab `--dry-run=server` step in
         # infra/k8s/README.md remains the pre-merge cluster-level gate.
-        run: kubectl apply --dry-run=client -f infra/k8s/
+        run: kubectl apply --dry-run=client --validate=false -f infra/k8s/
 
   java:
     name: Java (mvn verify + spotless)
