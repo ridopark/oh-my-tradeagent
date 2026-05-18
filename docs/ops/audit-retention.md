@@ -80,11 +80,14 @@ When `prev_hash IS NULL` (the first row in a chain), substitute 32 zero bytes (`
 For the three nullable UTF-8 fields (`actor`, `workflow_id`, `correlation_id`), `NULL` is serialized identically to the empty string — `len=0` followed by zero content bytes. The two states are not distinguishable in the canonical form; if a future event ever needs to differentiate "field not present" from "field is empty", introduce a distinct sentinel (e.g. a non-empty marker string) for one of the cases. The schema currently treats them as semantically equivalent.
 
 The chain writer runs **inside the same transaction that inserts the
-audit row**. It reads the previous `row_hash` for that
-`(tenant_id, strategy_id)` chain `FOR UPDATE`, hashes the new row, and
-writes both columns in one statement. This serializes writes per chain,
-which is acceptable because audit insert volume is bounded by signal
-volume (orders of magnitude under per-row hashing cost).
+audit row**. Per-(tenant_id, strategy_id) chain serialization uses
+`pg_advisory_xact_lock(hashtext(tenant_id)::int4, hashtext(strategy_id)::int4)` — two-arg form; 2^64 distinct key tuples; auto-releases at transaction commit —
+preserves V3 immutability REVOKE while still serializing concurrent inserts.
+It then reads the previous
+`row_hash` for that chain, hashes the new row, and writes both columns in
+one statement. This serializes writes per chain, which is acceptable because
+audit insert volume is bounded by signal volume (orders of magnitude under
+per-row hashing cost).
 
 Nullable columns are the bridge: until the writer is enabled, new rows
 carry `NULL` and the chain is dormant. The writer flip is a code change,
@@ -98,8 +101,29 @@ strategy_id)` chain, it:
 
 1. Selects all rows where `occurred_at` is in the prior UTC day,
    ordered by `id ASC`.
-2. Builds a Merkle tree over the rows' `row_hash` values (SHA-256,
-   duplicate-last-on-odd standard).
+2. Builds a Merkle tree over the rows' `row_hash` values using the
+   **Bitcoin-style duplicate-last-on-odd** convention:
+   - `SHA-256(node || node)` for an unpaired right child at any level
+     (the rightmost leaf duplicates itself when the level has odd
+     cardinality).
+   - The same SHA-256 hash function for both leaf and internal nodes
+     — no domain-separation prefix bytes (no `0x00` / `0x01` leaf-vs-
+     internal tags as in RFC 6962).
+   - 32-byte big-endian SHA-256 outputs at every level; the root is the
+     final 32 bytes when the level collapses to one node.
+   - Rationale for picking Bitcoin-style over RFC 6962: the rest of
+     §2 already references "duplicate-last-on-odd", and RFC 6962
+     explicitly forbids duplication (its leaf/internal prefix bytes
+     make collisions impossible without it). Renaming the convention
+     to RFC 6962 would require rewriting the chain-head substitution
+     rule and the leaf serialization in this section. Bitcoin-style
+     stays internally consistent and is widely understood.
+   - The executable reference for this convention lives in
+     `services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator/activities/AuditMerkleRoot.java`
+     and is pinned by the golden vectors in
+     `services/orchestrator/src/test/resources/audit-log/golden-vectors.json`
+     (`merkle_root_3_leaves` is the load-bearing odd-node case;
+     `merkle_root_4_leaves` is the even-case cross-check).
 3. Emits the root as a `merkle_root` row in a new sibling table
    (`audit_merkle_root`, schema TBD in the follow-up migration — covers
    `tenant_id, strategy_id, period_date, root_hash, first_row_id,
@@ -111,7 +135,12 @@ Verifying the chain at any point: walk forward from any anchored
 `row_hash`, recompute each subsequent `row_hash` from the row's
 serialization + the previous `row_hash`, compare against the stored
 `row_hash`. Verifying a day's Merkle root: rebuild the tree from the
-day's rows, compare against the pinned root.
+day's rows under the Bitcoin-style duplicate-last-on-odd convention
+above, compare against the pinned root. The chain-writer's canonical
+form is pinned by `AuditLogChainWriter` and the same golden-vector
+fixture (`rows` array with `expected_row_hash_hex` for the four chain
+links, covering the `NULL prev_hash` chain-head form and the
+`NULL ≡ empty` rule for the nullable UTF-8 fields).
 
 ## 3. WORM pin target
 
@@ -222,9 +251,19 @@ longer in the hot store.
 
 ## 6. Open follow-ups (tracked in #22 lineage)
 
-- Implement the per-row hash-chain writer (transactional, FOR UPDATE
-  on the prior chain head, populates `prev_hash` and `row_hash`).
+- ~~Implement the per-row hash-chain writer (transactional,
+  `pg_advisory_xact_lock` for per-chain serialization, populates `prev_hash` and `row_hash`).~~
+  **Resolved by #85**: see `services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator/activities/AuditLogChainWriter.java`
+  and the integration test
+  `services/orchestrator/src/test/java/com/ohmytradeagent/orchestrator/activities/AuditLogChainWriterIT.java`
+  (RUN_DB_ITS-gated). Chain writer is feature-flagged at
+  `audit.chain-writer.enabled` (default `true`); the unit test
+  `AuditLogChainWriterTest` pins the canonical hash form against the
+  golden-vector fixture.
 - Implement the daily Merkle root job + `audit_merkle_root` table.
+  Bitcoin-style duplicate-last-on-odd convention is pinned in §2 and
+  the `AuditMerkleRoot` helper today; only the scheduler + table
+  remain.
 - Wire the S3 Object Lock bucket (+ IAM, + retention configuration).
 - Wire the RFC 3161 timestamping fallback.
 - Author the dual-control disposal runbook

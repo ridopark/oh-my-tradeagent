@@ -1,0 +1,103 @@
+{
+  "description": "Issue #85: deterministic golden vectors for AuditLogChainWriter and AuditMerkleRoot. Pins the canonical hash form from docs/ops/audit-retention.md §2 and the Bitcoin-style duplicate-last-on-odd Merkle convention. Four chained rows for tenant=dev, strategy=copytrade-v1.",
+  "chain": {
+    "tenant_id": "dev",
+    "strategy_id": "copytrade-v1"
+  },
+  "rows": [
+    {
+      "note": "Chain head: prior_row_hash is NULL → writer substitutes 32 zero bytes. actor is JSON null → serialized as len=0. Simple subject.",
+      "prior_row_hash_hex": null,
+      "event": {
+        "schema_version": 1,
+        "tenant_id": "dev",
+        "strategy_id": "copytrade-v1",
+        "event_id": "00000000-0000-4000-8000-000000000001",
+        "occurred_at": "2026-05-18T07:00:00Z",
+        "kind": "SignalReceived",
+        "actor": null,
+        "workflow_id": "copytrade-signal-001",
+        "correlation_id": "sig-001",
+        "subject": {
+          "qty": 1,
+          "side": "BTO"
+        }
+      },
+      "expected_row_hash_hex": "2cfe0ef34fee034fcee578606ab56c3a0e75027118278abb4ec03f742030eed4"
+    },
+    {
+      "note": "Chains from row 0. actor is empty string \"\" — MUST hash identically to row 0's NULL actor under the NULL≡empty rule. Subject has nested object with keys in non-sorted insertion order; JCS must re-sort to {a,b}.",
+      "prior_row_hash_hex": "2cfe0ef34fee034fcee578606ab56c3a0e75027118278abb4ec03f742030eed4",
+      "event": {
+        "schema_version": 1,
+        "tenant_id": "dev",
+        "strategy_id": "copytrade-v1",
+        "event_id": "00000000-0000-4000-8000-000000000002",
+        "occurred_at": "2026-05-18T07:00:01Z",
+        "kind": "SignalAccepted",
+        "actor": "",
+        "workflow_id": "copytrade-signal-001",
+        "correlation_id": "sig-001",
+        "subject": {
+          "b": "second",
+          "a": "first"
+        }
+      },
+      "expected_row_hash_hex": "b43f5fa785a6464c491d7e3bb4c90c0700d1ee7a7f1345048af0815e0bd0328c"
+    },
+    {
+      "note": "Chains from row 1. Non-trivial subject with mixed insertion order, nested object, and an array. Tests RFC 8785 JCS key ordering (UTF-16 code-unit).",
+      "prior_row_hash_hex": "b43f5fa785a6464c491d7e3bb4c90c0700d1ee7a7f1345048af0815e0bd0328c",
+      "event": {
+        "schema_version": 1,
+        "tenant_id": "dev",
+        "strategy_id": "copytrade-v1",
+        "event_id": "00000000-0000-4000-8000-000000000003",
+        "occurred_at": "2026-05-18T07:00:02Z",
+        "kind": "EntryFilled",
+        "actor": "workflow:CopytradeSignalWorkflow",
+        "workflow_id": "copytrade-signal-001",
+        "correlation_id": "sig-001",
+        "subject": {
+          "zz_last": [1, 2, 3],
+          "aa_first": {
+            "y_nested": "y",
+            "x_nested": "x"
+          },
+          "mid": 42
+        }
+      },
+      "expected_row_hash_hex": "22a45b55080dfd8cd72a2b13781c3c168b58d479000b5f3efe102c9ce5d7d27c"
+    },
+    {
+      "note": "Chains from row 2. Operator-actor event. Simple subject. Forces the test corpus to cover four chain links (issue requirement: >= 4 deterministic rows).",
+      "prior_row_hash_hex": "22a45b55080dfd8cd72a2b13781c3c168b58d479000b5f3efe102c9ce5d7d27c",
+      "event": {
+        "schema_version": 1,
+        "tenant_id": "dev",
+        "strategy_id": "copytrade-v1",
+        "event_id": "00000000-0000-4000-8000-000000000004",
+        "occurred_at": "2026-05-18T07:00:03Z",
+        "kind": "KillSwitchTripped",
+        "actor": "operator:ridopark",
+        "workflow_id": null,
+        "correlation_id": null,
+        "subject": {
+          "reason": "manual-test-trip",
+          "trip_event_id": "00000000-0000-4000-8000-000000000003"
+        }
+      },
+      "expected_row_hash_hex": "117c2274d1a6b3a8db884490ac680135463aa8360227da9069cbfe8978f2d3e0"
+    }
+  ],
+  "merkle_root_3_leaves": {
+    "note": "Bitcoin-style duplicate-last-on-odd Merkle root over the first 3 rows' row_hash values. The 3-leaf size forces the odd-node rule to fire: at level 0, pair(row0,row1)+pair(row2,row2). At level 1, pair(L,R). Pins the convention named in docs/ops/audit-retention.md §2.",
+    "leaf_row_indices": [0, 1, 2],
+    "expected_root_hex": "1be4458677145d448d58985d5c4144154e434df98971c2b0ec46d24ead57e872"
+  },
+  "merkle_root_4_leaves": {
+    "note": "Even-leaf Merkle root over all 4 rows (cross-check; not load-bearing for the odd-node convention but useful as a parity test against any third-party verifier).",
+    "leaf_row_indices": [0, 1, 2, 3],
+    "expected_root_hex": "11b6598e816ac7c913d2d646aa3fe0546ce819a1d375d5d10785106a40c9fd54"
+  }
+}
