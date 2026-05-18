@@ -3,20 +3,46 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from datetime import date
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
 
 
 class KillSwitchWorkflowInput(BaseModel):
     """
-    Input for KillSwitchWorkflow (Phase 5). One workflow per (tenant_id, strategy_id), bootstrapped on orchestrator startup. Long-running; no continueAsNew in v0 (history is small — handful of state changes per day).
+    Input for KillSwitchWorkflow (Phase 5). One workflow per (tenant_id, strategy_id), bootstrapped on orchestrator startup. Long-running; the workflow now invokes continueAsNew once history-length crosses a watermark (issue #124) and carries the optional state fields below across the boundary. Fresh bootstrap inputs omit the carry-forward fields; replayed continueAsNew inputs populate them.
     """
 
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: conint(ge=1, le=2)
     """
-    DTO contract version. Workers reject newer-than-build inputs.
+    DTO contract version. v1 = bootstrap-only input; v2 adds optional carry-forward fields produced by continueAsNew. Workers reject newer-than-build inputs.
     """
     tenant_id: constr(min_length=1)
     strategy_id: constr(min_length=1)
+    tripped: bool | None = None
+    """
+    Carry-forward state from a prior run. Absent on fresh bootstrap. Default false.
+    """
+    reason: str | None = None
+    """
+    Carry-forward trip reason from a prior run. Absent on fresh bootstrap.
+    """
+    actor: str | None = None
+    """
+    Carry-forward trip actor from a prior run. Absent on fresh bootstrap.
+    """
+    tripped_at: AwareDatetime | None = None
+    """
+    Carry-forward trip timestamp from a prior run. Absent on fresh bootstrap.
+    """
+    cooling_down_until: AwareDatetime | None = None
+    """
+    Carry-forward reset cooldown deadline from a prior run. Absent on fresh bootstrap.
+    """
+    trading_day: date | None = None
+    """
+    Carry-forward trading day from a prior run. Absent on fresh bootstrap; next heartbeat refreshes via calendar.todayEt().
+    """

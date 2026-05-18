@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://oh-my-tradeagent/schemas/kill-switch-workflow-input.json",
   "title": "KillSwitchWorkflowInput",
-  "description": "Input for KillSwitchWorkflow (Phase 5). One workflow per (tenant_id, strategy_id), bootstrapped on orchestrator startup. Long-running; no continueAsNew in v0 (history is small — handful of state changes per day).",
+  "description": "Input for KillSwitchWorkflow (Phase 5). One workflow per (tenant_id, strategy_id), bootstrapped on orchestrator startup. Long-running; the workflow now invokes continueAsNew once history-length crosses a watermark (issue #124) and carries the optional state fields below across the boundary. Fresh bootstrap inputs omit the carry-forward fields; replayed continueAsNew inputs populate them.",
   "type": "object",
   "javaType": "com.ohmytradeagent.contract.KillSwitchWorkflowInput",
   "additionalProperties": false,
@@ -15,7 +15,8 @@
     "schema_version": {
       "type": "integer",
       "minimum": 1,
-      "description": "DTO contract version. Workers reject newer-than-build inputs."
+      "maximum": 2,
+      "description": "DTO contract version. v1 = bootstrap-only input; v2 adds optional carry-forward fields produced by continueAsNew. Workers reject newer-than-build inputs."
     },
     "tenant_id": {
       "type": "string",
@@ -24,6 +25,33 @@
     "strategy_id": {
       "type": "string",
       "minLength": 1
+    },
+    "tripped": {
+      "type": "boolean",
+      "description": "Carry-forward state from a prior run. Absent on fresh bootstrap. Default false."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Carry-forward trip reason from a prior run. Absent on fresh bootstrap."
+    },
+    "actor": {
+      "type": "string",
+      "description": "Carry-forward trip actor from a prior run. Absent on fresh bootstrap."
+    },
+    "tripped_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Carry-forward trip timestamp from a prior run. Absent on fresh bootstrap."
+    },
+    "cooling_down_until": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Carry-forward reset cooldown deadline from a prior run. Absent on fresh bootstrap."
+    },
+    "trading_day": {
+      "type": "string",
+      "format": "date",
+      "description": "Carry-forward trading day from a prior run. Absent on fresh bootstrap; next heartbeat refreshes via calendar.todayEt()."
     }
   }
 }
