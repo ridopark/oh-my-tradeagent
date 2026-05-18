@@ -162,11 +162,10 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
                       strategyId);
                 } catch (RuntimeException e) {
                   log.warn(
-                      "could not reap stale Reconciliation Schedule id={} (desired={}); peer race"
-                          + " or already removed: {}",
+                      "could not reap stale Reconciliation Schedule id={} (desired={}); peer race or already removed",
                       staleId,
                       desiredScheduleId,
-                      e.toString());
+                      e);
                 }
               });
     }
