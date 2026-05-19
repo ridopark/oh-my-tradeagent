@@ -457,6 +457,94 @@ class AuditLogChainWriterIT {
   }
 
   /**
+   * Issue #120: explicit single-threaded assertion that the {@code pg_advisory_xact_lock} acquired
+   * by {@code log()} auto-releases at transaction commit. PR #160 (issue #119) proved this
+   * implicitly via 4-thread / 60-row contention — if the lock did not auto-release, that test would
+   * deadlock within seconds. Issue #120 asks for the same property expressed as a deterministic,
+   * single-threaded "call log() twice in sequence; both must complete in well under the lock
+   * timeout" assertion so the regression surface is visible without relying on the concurrency
+   * stress test to detect it.
+   *
+   * <p>If a future change removes {@code @Transactional} from {@code AuditActivitiesImpl.log()},
+   * the advisory lock would have no transaction to attach to (so no commit boundary to release at),
+   * and the second sequential call on the same {@code (tenant, strategy)} key tuple within the same
+   * pooled connection would block on its own un-released lock. The 5-second budget below is a
+   * generous liveness floor — uncontended advisory-lock acquisition is sub-millisecond in practice
+   * — so even a 5-second budget exposes a hang without flaking under normal CI load.
+   *
+   * <p>Asserts (a) both inserts persisted (two rows visible via admin read-back), (b) the second
+   * row's {@code prev_hash} equals the first row's {@code row_hash} (chain link proves
+   * serialization across the two sequential calls), and (c) elapsed wall-clock across the two calls
+   * is below the liveness budget.
+   */
+  @Test
+  @Order(5)
+  void advisoryLockAutoReleasesAcrossSequentialLogCalls() throws Exception {
+    AuditEvent first =
+        newEvent(
+            "SequentialLockReleaseTestEvent",
+            "operator:ridopark",
+            "wf-sequential-1",
+            "corr-sequential-1",
+            java.util.Map.of("seq", 1));
+    AuditEvent second =
+        newEvent(
+            "SequentialLockReleaseTestEvent",
+            "operator:ridopark",
+            "wf-sequential-2",
+            "corr-sequential-2",
+            java.util.Map.of("seq", 2));
+
+    long startNanos = System.nanoTime();
+    activities.log(first);
+    activities.log(second);
+    long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000L;
+
+    // (c) Liveness floor — uncontended advisory-lock acquisition is sub-millisecond. A 5-second
+    // bound is generous enough to absorb normal CI jitter but small enough that a hang (e.g.
+    // un-released lock from a missing @Transactional boundary) is visible as a test failure
+    // rather than as a 60-second JUnit timeout.
+    assertThat(elapsedMillis)
+        .as(
+            "two sequential log() calls must complete inside the liveness budget;"
+                + " elapsed=%dms — if this fails, the advisory lock probably did not auto-release"
+                + " (check @Transactional on AuditActivitiesImpl.log())",
+            elapsedMillis)
+        .isLessThan(5_000L);
+
+    // (a) + (b): read back both rows ordered by id ASC and assert chain linkage.
+    try (PreparedStatement ps =
+        adminConn.prepareStatement(
+            "SELECT event_id, prev_hash, row_hash FROM audit_log "
+                + "WHERE tenant_id = ? AND strategy_id = ? ORDER BY id ASC")) {
+      ps.setString(1, "dev");
+      ps.setString(2, "copytrade-v1");
+      try (var rs = ps.executeQuery()) {
+        assertThat(rs.next()).as("first sequential row must persist").isTrue();
+        byte[] firstRowHash = rs.getBytes("row_hash");
+        byte[] firstPrevHash = rs.getBytes("prev_hash");
+        assertThat(firstRowHash).as("first row must have populated row_hash").isNotNull();
+        assertThat(firstPrevHash)
+            .as("first row must have SQL NULL prev_hash (chain head)")
+            .isNull();
+
+        assertThat(rs.next()).as("second sequential row must persist").isTrue();
+        byte[] secondRowHash = rs.getBytes("row_hash");
+        byte[] secondPrevHash = rs.getBytes("prev_hash");
+        assertThat(secondRowHash).as("second row must have populated row_hash").isNotNull();
+        // (b) Chain link: prev_hash of row 2 must equal row_hash of row 1. This proves the second
+        // call's chain-writer read the first row from the chain — i.e. the first transaction
+        // committed and released the advisory lock before the second call entered the lock.
+        assertThat(secondPrevHash)
+            .as("second row prev_hash must equal first row row_hash (chain link)")
+            .isEqualTo(firstRowHash);
+
+        assertThat(rs.next()).as("only two sequential rows must persist").isFalse();
+      }
+    }
+  }
+
+  /**
    * Build a fresh AuditEvent on the (tenant=dev, strategy=copytrade-v1) chain. Each call mints a
    * new UUIDv4 event_id and stamps occurred_at=now() so callers don't collide on the event_id
    * UNIQUE constraint or on @{@code id ASC} ordering even when called from concurrent threads.
