@@ -41,6 +41,75 @@ kubectl -n copytrade exec statefulset/postgres -- \
        -c "SELECT intent_key, state, submitted_at, broker_order_id FROM order_intent_journal WHERE state IN ('Submitted','Pending') ORDER BY submitted_at DESC LIMIT 20;"
 ```
 
+## Path 4: position-no-workflow (issue #165 Phase 3)
+
+The broker is holding an option position with no running `PositionWorkflow` to manage it.
+Most common cause: a cancel-on-filled race between `CopytradeSignalWorkflow.handleTtlExpired`
+and a broker fill that orphaned the position before Phase 1/2 of the issue #165 fix landed.
+After Phases 1+2 the BTO workflow itself recovers the orphan in-band; this recon path
+catches anything that still slips through (e.g. orchestrator died after place + before
+`startPositionWorkflow`, or pre-fix histories that were already in-flight at deploy time).
+
+**v1 is detect-only.** Auto-adoption (recon spawning the missing `PositionWorkflow`) is
+deferred — the operator must inspect and decide.
+
+### Symptoms
+
+- Audit log shows `PositionOrphan` events with `option_symbol`, `qty`, and (when the journal
+  has a FILLED row for that OCC) `expected_workflow_id` + `journal_entry_signal_id` +
+  `journal_status: "filled"`.
+- When the journal has no FILLED row for the OCC, the audit instead carries
+  `journal_status: "missing"` and `expected_workflow_id: null`. This is a stronger orphan
+  signal: the broker holds shares we can't trace back to any FILLED journal record.
+- `ReconciliationCompleted.position_orphans > 0`.
+
+### Detection
+
+```sh
+ssh ridopark@192.168.10.123
+
+# Latest PositionOrphan events for the tenant:
+curl -s 'http://copytrade.homelab.local/audit?tenant=dev&strategy=copytrade-v1&kind=PositionOrphan&limit=10' | jq
+
+# Confirm the broker still holds the position:
+# (Alpaca paper UI, or via the exec sidecar's broker debug endpoint when wired in Phase 7.)
+```
+
+### Remediation
+
+Decide between two paths. **Do not auto-adopt blindly** — replaying an entry against a
+stale `entry_premium` can flip an MFE/MAE trail in unintended directions.
+
+1. **Adopt the orphan by spawning a `PositionWorkflow` manually.** When the journal has a
+   recent FILLED row (`journal_status: "filled"`) and the operator wants to keep managing the
+   position via copytrade exits:
+   ```sh
+   # Pull the entry_premium + qty from the audit's journal_entry_signal_id and the broker's
+   # avg_entry_price. Then start a PositionWorkflow with the expected workflow id:
+   temporal workflow start \
+     --workflow-id "<expected_workflow_id from the PositionOrphan audit subject>" \
+     --workflow-type PositionWorkflow \
+     --task-queue orchestrator-core \
+     --search-attribute 'TenantStrategy="t-dev/s-copytrade-v1"' \
+     --search-attribute 'ContractSymbol="<OCC>"' \
+     --input '<PositionWorkflowInput JSON: tenant, strategy, occ, qty, entry_premium, etc.>'
+   ```
+   The `expected_workflow_id` is reproducible from `WorkflowIds.position(tenant, strategy,
+   occ, entry_signal_id)` — copy it verbatim from the audit subject.
+2. **Flatten the position at the broker.** When the journal has no FILLED row
+   (`journal_status: "missing"`), or the operator does not want copytrade to manage this
+   particular position, manually exit at the broker UI. The next recon cycle will observe
+   zero positions and `position_orphans` will return to 0.
+
+### Follow-up
+
+- A separate issue tracks **auto-adoption** (recon spawning the missing `PositionWorkflow`
+  with `qty` from the broker and `entry_premium` from the most recent FILLED journal row).
+  Held back from v1 to avoid auto-replaying entries during an outage.
+- The Phase 1+2 BTO-side fix (`CopytradeSignalWorkflow.handleTtlExpired` recovering the
+  orphan when `exec.cancelOrder` returns `state=FILLED`) is the primary safety net; this
+  recon path is the back-stop.
+
 ## Path 1: journal-no-broker
 
 A journal entry is `Submitted` but the broker doesn't see it. Likely causes:

@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.broker.alpaca;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
@@ -10,11 +11,15 @@ import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderRequest;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderResponse;
+import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaPositionResponse;
 import io.temporal.failure.ApplicationFailure;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
@@ -198,6 +203,72 @@ public class AlpacaPaperBroker implements OptionsBroker {
       return "42210000".equals(code.asText());
     }
     return false;
+  }
+
+  @Override
+  public List<BrokerPosition> listOpenPositions() {
+    // Issue #165 Phase 3. /v2/positions returns ALL positions (equity + options). Filter to
+    // option positions on the asset_class discriminator and drop short positions (the v0
+    // BrokerPosition contract only models LONG; SHORT/inverse positions are not produced by
+    // copytrade, so receiving one is a misconfiguration we surface via a warn log).
+    List<AlpacaPositionResponse> raw;
+    try {
+      raw =
+          client
+              .get()
+              .uri("/v2/positions")
+              .retrieve()
+              .body(new ParameterizedTypeReference<List<AlpacaPositionResponse>>() {});
+    } catch (HttpStatusCodeException e) {
+      throw mapError(e);
+    }
+    if (raw == null) {
+      return List.of();
+    }
+    List<BrokerPosition> out = new ArrayList<>(raw.size());
+    for (AlpacaPositionResponse pos : raw) {
+      if (pos.assetClass() == null || !"us_option".equals(pos.assetClass())) {
+        continue;
+      }
+      if (pos.side() == null || !"long".equalsIgnoreCase(pos.side())) {
+        log.warn(
+            "Alpaca /v2/positions returned non-long option position symbol={} side={} qty={} — "
+                + "v0 BrokerPosition only models LONG; skipping. Investigate if recurring.",
+            pos.symbol(),
+            pos.side(),
+            pos.qty());
+        continue;
+      }
+      long qty;
+      try {
+        // Alpaca returns qty as a JSON string. The side filter above already ensures LONG, so
+        // Math.abs guards against a paper-account anomaly where the integer is signed.
+        qty = Math.abs(Long.parseLong(pos.qty()));
+      } catch (NumberFormatException nfe) {
+        log.warn(
+            "Alpaca /v2/positions returned unparseable qty symbol={} qty={}; skipping",
+            pos.symbol(),
+            pos.qty());
+        continue;
+      }
+      if (qty < 1) {
+        continue;
+      }
+      BrokerPosition bp = new BrokerPosition();
+      bp.setSchemaVersion(1L);
+      // Alpaca returns option symbols already in unpadded OCC form (no root padding); the
+      // BrokerPosition contract specifies "broker-native form" so we forward as-is. The
+      // ReconciliationWorkflow reconciles against the journal's canonical (padded) form by
+      // round-tripping through OptionSymbolCache — out of scope for this loop.
+      bp.setOptionSymbol(pos.symbol());
+      bp.setQty(qty);
+      bp.setSide(BrokerPosition.Side.LONG);
+      if (pos.avgEntryPrice() != null) {
+        bp.setAvgEntryPrice(pos.avgEntryPrice());
+      }
+      out.add(bp);
+    }
+    return out;
   }
 
   @Override

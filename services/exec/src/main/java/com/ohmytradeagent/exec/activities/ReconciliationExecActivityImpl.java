@@ -49,9 +49,11 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
 
   @Override
   public List<JournalEntry> journalListFilledByOcc(String tenantId, String strategyId, String occ) {
-    // RED placeholder: returns empty until GREEN wires up
-    // OrderIntentJournal.listFilledByOccLatest(tenantId, strategyId, occ).
-    return List.of();
+    return journal
+        .findLatestFilledByOcc(tenantId, strategyId, occ)
+        .map(ReconciliationExecActivityImpl::toContract)
+        .map(List::of)
+        .orElse(List.of());
   }
 
   private static JournalEntry toContract(JournaledOrder row) {
