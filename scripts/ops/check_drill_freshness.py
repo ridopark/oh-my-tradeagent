@@ -64,7 +64,6 @@ class DrillEntry:
 
 def _split_row(line: str) -> list[str]:
     """Split a markdown table row into cell values (trimmed)."""
-    # Strip a leading and trailing pipe if present, then split.
     inner = line.strip()
     if inner.startswith("|"):
         inner = inner[1:]
@@ -116,18 +115,19 @@ def parse_drill_log(path: pathlib.Path) -> list[DrillEntry]:
                 saw_separator = False
             continue
 
-        # We're inside the target table.
         if not saw_separator:
             if _is_separator_row(cells):
                 saw_separator = True
-            # Either the separator or a malformed pre-separator row — skip.
+            # A non-separator pipe row before the separator is malformed; skip it
+            # rather than treating it as data so a stray pipe in the column-key
+            # row of an adjacent doc table can't poison a real entry.
             continue
 
-        # Data row.
         if len(cells) != len(EXPECTED_COLUMNS):
             continue
         if any(cell.startswith("<") and cell.endswith(">") for cell in cells):
-            # Template placeholder row — not a real drill entry.
+            # Template placeholder row inside the entries table — must not
+            # satisfy the gate even if dated within the freshness window.
             continue
         try:
             date_val = dt.date.fromisoformat(cells[0])
