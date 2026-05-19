@@ -204,16 +204,15 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
 
   /**
    * Issue #115: pins the {@code scheduleToCloseTimeout = 60s} envelope on the {@code
-   * PreTradeCheckActivity} stub. With {@code startToCloseTimeout=15s} × {@code maxAttempts=3} =
-   * 45s of pure run time plus exponential-backoff jitter, the wall-clock total can drift past 45s
+   * PreTradeCheckActivity} stub. With {@code startToCloseTimeout=15s} × {@code maxAttempts=3} = 45s
+   * of pure run time plus exponential-backoff jitter, the wall-clock total can drift past 45s
    * before the fail-closed sentinel is produced. The schedule-to-close cap makes the worst-case
    * dispatch latency explicit and predictable vs the workflow TTL.
    *
    * <p>The assertion uses Temporal's {@link TestWorkflowEnvironment#currentTimeMillis()} virtual
-   * clock — wall-clock sleeps would make this non-deterministic. We capture the virtual time
-   * before {@code start()} and after {@code wf.process()} returns; the elapsed virtual time must
-   * stay within the schedule-to-close envelope, proving the activity is not retrying past the
-   * cap.
+   * clock — wall-clock sleeps would make this non-deterministic. We capture the virtual time before
+   * {@code start()} and after {@code wf.process()} returns; the elapsed virtual time must stay
+   * within the schedule-to-close envelope, proving the activity is not retrying past the cap.
    */
   @Test
   void handleBto_failsClosed_withinScheduleToCloseEnvelope_whenPreTradeCheckActivityAlwaysThrows() {
