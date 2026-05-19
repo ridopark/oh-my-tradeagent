@@ -31,6 +31,7 @@ import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDate;
@@ -220,6 +221,63 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     RiskDecision d = risk.checkEntry(btoPayload(), cfgNull, sentinel);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
+  }
+
+  /**
+   * Issue #112: Verifies the {@code Workflow.getVersion("pre-trade-dispatch-v2", ...)} gate added
+   * to {@link CopytradeSignalWorkflowImpl#handleBto} so that pre-#111 in-flight executions can
+   * replay deterministically.
+   *
+   * <p>This test exercises the {@code v >= 1} branch — which is the only branch {@link
+   * TestWorkflowEnvironment} can reach for a fresh workflow, since the test env always reports
+   * {@code getVersion(...) == 1}. The legacy {@code v == DEFAULT_VERSION} branch (single {@code
+   * checkEntry(payload, config, null)} call) is exercised only by replays of histories that began
+   * before the patch was deployed and is not covered by a recorded-history {@code WorkflowReplayer}
+   * fixture in this PR (explicit out-of-scope per the issue plan; the deterministic if/else
+   * structure plus code review is the gate for the legacy branch).
+   *
+   * <p>The marker-string assertion below pins the contract: changing {@code
+   * VERSION_PRE_TRADE_DISPATCH} after the patch is deployed would re-introduce the nondeterminism
+   * the gate was added to prevent.
+   */
+  @Test
+  void handleBto_versionGate_v1_dispatchesPreTradeAndPassesNonNullResultToCheckEntry()
+      throws Exception {
+    Field marker = CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_PRE_TRADE_DISPATCH");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("pre-trade-dispatch-v2");
+
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntry(any(), eq(cfg), any())).thenReturn(RiskDecision.approved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setMarginSufficient(true);
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-K"));
+    env.start();
+
+    runWorkflow(btoPayload());
+
+    // v=1 branch contract: assertPreTradeCheckRoutable fires AND checkEntry receives a non-null
+    // PreTradeCheckResult (i.e. dispatchPreTradeCheck ran). The legacy v=DEFAULT_VERSION branch
+    // would have skipped both and called checkEntry(..., null) instead.
+    verify(risk, Mockito.times(1)).assertPreTradeCheckRoutable(cfg);
+    ArgumentCaptor<PreTradeCheckResult> resultCaptor =
+        ArgumentCaptor.forClass(PreTradeCheckResult.class);
+    verify(risk).checkEntry(any(), eq(cfg), resultCaptor.capture());
+    assertThat(resultCaptor.getValue()).isNotNull();
   }
 
   // ----- helpers -----
