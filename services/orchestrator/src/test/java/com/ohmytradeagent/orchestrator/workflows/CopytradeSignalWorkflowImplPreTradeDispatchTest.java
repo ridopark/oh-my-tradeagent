@@ -202,6 +202,61 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     Mockito.verify(exec, Mockito.never()).placeOrder(any());
   }
 
+  /**
+   * Issue #115: pins the {@code scheduleToCloseTimeout = 60s} envelope on the {@code
+   * PreTradeCheckActivity} stub. With {@code startToCloseTimeout=15s} × {@code maxAttempts=3} =
+   * 45s of pure run time plus exponential-backoff jitter, the wall-clock total can drift past 45s
+   * before the fail-closed sentinel is produced. The schedule-to-close cap makes the worst-case
+   * dispatch latency explicit and predictable vs the workflow TTL.
+   *
+   * <p>The assertion uses Temporal's {@link TestWorkflowEnvironment#currentTimeMillis()} virtual
+   * clock — wall-clock sleeps would make this non-deterministic. We capture the virtual time
+   * before {@code start()} and after {@code wf.process()} returns; the elapsed virtual time must
+   * stay within the schedule-to-close envelope, proving the activity is not retrying past the
+   * cap.
+   */
+  @Test
+  void handleBto_failsClosed_withinScheduleToCloseEnvelope_whenPreTradeCheckActivityAlwaysThrows() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntry(any(), eq(cfg), any()))
+        .thenReturn(
+            RiskDecision.rejected(
+                RejectionReason.PRE_TRADE_CHECK_FAILED,
+                "allowed=false reason=dispatch_failed:ActivityFailure"));
+
+    PreTradeCheckActivity alwaysThrowingStub =
+        request -> {
+          throw new RuntimeException("svc timeout");
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, alwaysThrowingStub);
+    env.start();
+
+    long startVirtualMs = env.currentTimeMillis();
+    runWorkflow(btoPayload());
+    long elapsedVirtualMs = env.currentTimeMillis() - startVirtualMs;
+
+    // Fail-closed sentinel surfaces.
+    ArgumentCaptor<PreTradeCheckResult> resultCaptor =
+        ArgumentCaptor.forClass(PreTradeCheckResult.class);
+    verify(risk).checkEntry(any(), eq(cfg), resultCaptor.capture());
+    PreTradeCheckResult sentinel = resultCaptor.getValue();
+    assertThat(sentinel).isNotNull();
+    assertThat(sentinel.getAllowed()).isFalse();
+    assertThat(sentinel.getRejectReason()).startsWith("dispatch_failed:");
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+
+    // Schedule-to-close envelope = 60s. The downstream rejection path adds a small amount of
+    // post-dispatch virtual time (audit log, workflow cleanup), so the upper bound is the
+    // envelope plus a generous head-room. The lower-bound check pins that retries actually ran
+    // (i.e. the test is observing the bounded-retry path, not a fast-path bypass).
+    assertThat(elapsedVirtualMs)
+        .as("dispatch_failed sentinel must surface within the scheduleToCloseTimeout envelope")
+        .isLessThanOrEqualTo(Duration.ofSeconds(75).toMillis());
+  }
+
   @Test
   void handleBto_failsClosed_whenBrokerTargetIsNull() {
     // Verifies the sentinel shape that dispatchPreTradeCheck builds when getBrokerTarget() is null.

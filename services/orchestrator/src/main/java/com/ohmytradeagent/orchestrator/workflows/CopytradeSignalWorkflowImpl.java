@@ -500,12 +500,18 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // sentinel within the workflow's TTL window rather than retrying forever. 3 attempts mirrors
     // the kill-switch read tolerance — enough to absorb a transient broker hiccup, short enough
     // that a real outage fails closed quickly.
+    //
+    // Schedule-to-close envelope: start-to-close (15s) × maxAttempts (3) = 45s of pure run time,
+    // plus exponential-backoff jitter between attempts can push the wall-clock total past 45s
+    // before the sentinel is produced. A literal 60s schedule-to-close caps the worst case so
+    // the fail-closed latency is explicit and predictable vs the workflow TTL (issue #115).
     PreTradeCheckActivity preTradeStub =
         Workflow.newActivityStub(
             PreTradeCheckActivity.class,
             ActivityOptions.newBuilder()
                 .setTaskQueue(ExecActivitiesFactory.taskQueueFor(config.getBrokerTarget().value()))
                 .setStartToCloseTimeout(Duration.ofSeconds(15))
+                .setScheduleToCloseTimeout(Duration.ofSeconds(60))
                 .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
                 .build());
     PreTradeCheckRequest request = buildPreTradeCheckRequest(payload, config);
