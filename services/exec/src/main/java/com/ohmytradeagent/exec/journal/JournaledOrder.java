@@ -3,6 +3,12 @@ package com.ohmytradeagent.exec.journal;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 
+/**
+ * Snapshot of one {@code order_intent_journal} row.
+ *
+ * <p>Issue #165: {@code filledQty}, {@code avgFillPrice}, and {@code filledAt} are populated only
+ * for FILLED rows. For all other states they are {@code null}.
+ */
 public record JournaledOrder(
     String intentKey,
     String signalId,
@@ -21,4 +27,7 @@ public record JournaledOrder(
     OffsetDateTime lastStateAt,
     OffsetDateTime cancelAttemptedAt,
     String lastError,
+    Long filledQty,
+    BigDecimal avgFillPrice,
+    OffsetDateTime filledAt,
     long version) {}

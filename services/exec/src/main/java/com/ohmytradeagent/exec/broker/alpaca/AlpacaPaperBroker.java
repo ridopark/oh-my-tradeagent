@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.broker.alpaca;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
@@ -136,8 +137,67 @@ public class AlpacaPaperBroker implements OptionsBroker {
       // records last_error and moves on.
       String body = e.getResponseBodyAsString();
       log.warn("Alpaca cancelOrder failed: status={} body={}", status, body);
-      return CancelResponse.failed("alpaca status " + status + ": " + body);
+      String brokerReason = "alpaca status " + status + ": " + body;
+      // Issue #165: classify the cancel-on-filled race so the activity can reconcile the journal
+      // to FILLED via getFillDetail instead of leaving the position orphaned with state=SUBMITTED.
+      // Alpaca signals this with code 42210000 and/or a message containing the substring
+      // `already in "filled"`. Match either so a future broker-side wording tweak still triggers
+      // the path.
+      if (status == 422 && isAlreadyFilledSentinel(body)) {
+        return CancelResponse.alreadyFilled(brokerReason);
+      }
+      return CancelResponse.failed(brokerReason);
     }
+  }
+
+  @Override
+  public BrokerFillDetail getFillDetail(String brokerOrderId) {
+    AlpacaOrderResponse resp;
+    try {
+      resp =
+          client
+              .get()
+              .uri("/v2/orders/{id}", brokerOrderId)
+              .retrieve()
+              .body(AlpacaOrderResponse.class);
+    } catch (HttpStatusCodeException e) {
+      throw mapError(e);
+    }
+    if (resp == null
+        || resp.filledQty() == null
+        || resp.filledAvgPrice() == null
+        || resp.filledAt() == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca getFillDetail returned incomplete fill detail for " + brokerOrderId,
+          "BrokerProtocolError");
+    }
+    return new BrokerFillDetail(resp.filledQty(), resp.filledAvgPrice(), resp.filledAt());
+  }
+
+  /**
+   * Returns true if the 422 body carries either Alpaca's structured cancel-on-filled code
+   * (42210000) or the human-readable substring {@code already in "filled"}. Issue #165.
+   */
+  private boolean isAlreadyFilledSentinel(String body) {
+    if (body == null || body.isBlank()) {
+      return false;
+    }
+    String lower = body.toLowerCase(Locale.ROOT);
+    if (lower.contains("already in \"filled\"") || lower.contains("already in 'filled'")) {
+      return true;
+    }
+    JsonNode json = tryParse(body);
+    if (json == null) {
+      return false;
+    }
+    JsonNode code = json.path("code");
+    if (code.isInt() || code.isLong()) {
+      return code.asLong() == 42210000L;
+    }
+    if (code.isTextual()) {
+      return "42210000".equals(code.asText());
+    }
+    return false;
   }
 
   @Override

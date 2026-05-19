@@ -135,6 +135,27 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
         .execute();
   }
 
+  @Override
+  public boolean markFilled(
+      String intentKey, long filledQty, BigDecimal avgFillPrice, OffsetDateTime filledAt) {
+    OffsetDateTime now = OffsetDateTime.now();
+    int updated =
+        dsl.update(TABLE)
+            .set(field("state"), OrderState.FILLED.name())
+            .set(field("filled_qty"), filledQty)
+            .set(field("avg_fill_price"), avgFillPrice)
+            .set(field("filled_at"), filledAt)
+            .setNull(field("last_error"))
+            .set(field("last_state_at"), now)
+            .set(field("version"), field("version", Long.class).plus(1))
+            .where(field("intent_key", String.class).eq(intentKey))
+            .and(
+                field("state", String.class)
+                    .in(OrderState.RECORDED.name(), OrderState.SUBMITTED.name()))
+            .execute();
+    return updated == 1;
+  }
+
   private static JournaledOrder mapRow(Record r) {
     return new JournaledOrder(
         r.get("intent_key", String.class),
@@ -154,6 +175,9 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
         r.get("last_state_at", OffsetDateTime.class),
         r.get("cancel_attempted_at", OffsetDateTime.class),
         r.get("last_error", String.class),
+        r.get("filled_qty", Long.class),
+        r.get("avg_fill_price", BigDecimal.class),
+        r.get("filled_at", OffsetDateTime.class),
         r.get("version", Long.class));
   }
 }
