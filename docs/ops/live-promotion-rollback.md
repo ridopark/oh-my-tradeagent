@@ -216,9 +216,14 @@ no real risk:
 4. Re-flip `broker_target` back to `<provider>-live` and confirm shadow-live resumes
    normally (this proves the rollback is reversible — promotion is not a one-way door
    in the drill).
-5. Log the drill in `docs/ops/drill-log.md` (or wherever the kill-switch drill log
-   lives once Phase 5b's drill cadence is wired) with date, operator, and the captured
-   audit evidence.
+5. Log the drill in [`docs/ops/drill-log.md`](drill-log.md) with the row format
+   documented in that file (date, drill_type=`rollback`, tenant, strategy, adapter,
+   operator, audit_refs, result). Copy the entry template from the
+   "Entry template" section there. The Phase 7 freshness check
+   ([`scripts/ops/check_drill_freshness.py`](../../scripts/ops/check_drill_freshness.py))
+   reads this same log and rejects the promotion gate if either the kill-switch or
+   the rollback drill type is missing a passing entry within 30 days for the target
+   `<provider>-live` adapter.
 
 Drill **passes** if and only if:
 
@@ -243,7 +248,22 @@ approvers must:
    P0/P1, discrepancy rate < 0.1%, recon lag p99 < 60s, audit completeness 100%).
 3. Confirm the most recent **kill-switch drill** (per `docs/ops/kill-switch-stuck.md`)
    passed within 30 days.
-4. Record the sign-off via the dedicated dual-control endpoint
+4. **Hard precondition — drill-freshness check.** Before issuing the
+   dual-control `LivePromotionApproved`, run
+   [`scripts/ops/check_drill_freshness.py`](../../scripts/ops/check_drill_freshness.py)
+   against [`docs/ops/drill-log.md`](drill-log.md) for the target adapter. The
+   script enforces Phase 7 gate criteria (f) and (h) mechanically — it exits 0
+   only when both the kill-switch and rollback drill types have a passing
+   entry within the last 30 days for `<provider>-live`. **Do not proceed if
+   the script exits non-zero**; re-run the stale drill type, log it, and
+   re-check.
+
+   ```sh
+   python3 scripts/ops/check_drill_freshness.py --target-adapter <provider>-live
+   # exit 0 → freshness contract satisfied; proceed to step 5
+   # exit non-zero → stderr names the stale drill type; halt the gate
+   ```
+5. Record the sign-off via the dedicated dual-control endpoint
    `POST /promotion/approve` (mirror of `/killswitch/reset`, issue #87). The audit event
    is `LivePromotionApproved`, written via the orchestrator's `LivePromotionActivities`
    Activity through the hash-chain writer (PR #117); both `approver_id_1` and

@@ -131,6 +131,18 @@ curl -X POST http://copytrade.homelab.local/killswitch/trip \
   `contract.resolve` (visible in audit log).
 - `KillSwitchWorkflow` is `Running` (not `Completed` / `Failed`).
 
+## Drill log
+
+Every kill-switch drill run must be recorded in
+[`docs/ops/drill-log.md`](drill-log.md) (copy the row from its
+"Entry template" section). The Phase 7 live-promotion gate requires
+a passing kill-switch drill within the last 30 days for the target
+`<provider>-live` adapter (gate criterion (f)); freshness is enforced
+mechanically by
+[`scripts/ops/check_drill_freshness.py`](../../scripts/ops/check_drill_freshness.py),
+which parses the drill log and exits non-zero when the kill-switch
+entry is stale or missing.
+
 ## Why this exists
 
 The kill switch is the operator's "halt now" button — and the only path through which
