@@ -74,10 +74,9 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     // body — journal dump, broker list, orphan classification, audit emission.
     long cycleStartMillis = Workflow.currentTimeMillis();
 
-    // Phase 2c.2 review polish (#50 item 1): a null broker_target on the workflow input violates
-    // the schema but can arrive on a hand-crafted replay or test fixture. Hand it to the factory
-    // unwrapped — the factory's existing null/blank check raises a non-retryable
-    // InvalidBrokerTargetError instead of NPEing inside the workflow body.
+    // Unwrap broker_target defensively: schema forbids null, but hand-crafted replays / test
+    // fixtures can still arrive null. Pass it through so the factory's null/blank check raises
+    // a non-retryable InvalidBrokerTargetError instead of NPEing inside the workflow body.
     String brokerTarget = in.getBrokerTarget() == null ? null : in.getBrokerTarget().value();
 
     ReconciliationExecActivity exec =
