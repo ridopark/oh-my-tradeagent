@@ -229,19 +229,42 @@ public class AuditLogChainWriter {
       if (Double.isNaN(d) || Double.isInfinite(d)) {
         throw new IllegalArgumentException("JCS forbids NaN/Infinity in canonical form: " + d);
       }
+      // ECMA-262 ToString(-0) is "0" but Java's Double.toString(-0.0) is "-0.0"; emit "0" to keep
+      // canonical form ECMA-conformant.
+      if (d == 0.0) {
+        sb.append('0');
+        return;
+      }
       // ECMA-262 ToString never emits a trailing ".0" for integer-valued doubles, while Java's
       // Double.toString does (e.g. 1.0). Strip the ".0" suffix to match the JCS expectation for
-      // integer-valued doubles. For non-integer doubles we accept Java's representation as a
-      // reasonable approximation of ECMA-262 ToString — the orchestrator subject does not
-      // currently emit floats requiring the full step-by-step ECMA spec, and any future caller
-      // depending on exact float canonicalization should provide pre-canonicalized strings.
+      // integer-valued doubles.
       String s = Double.toString(d);
       if (s.endsWith(".0")) {
         s = s.substring(0, s.length() - 2);
+        sb.append(s);
+        return;
+      }
+      // RFC 8785 §3.2.2.3: the lower bound matches JLS Double.toString's decimal-vs-scientific
+      // cutoff at 1e-3 exactly (below it Java emits "1.0E-4" while ECMA-262 stays decimal
+      // "0.0001"). The upper bound is 1e21 per ECMA-262's own decimal threshold. Java emits
+      // scientific notation for |d| >= 1e7, so values in [1e7, 1e21) are accepted but produce
+      // Java-flavoured "1.7E9" instead of ECMA's "1700000000". That gap is tolerated because
+      // existing audit subjects pass timestamp doubles (epoch-with-nanos ~1.7e9) and the chain
+      // is internally consistent — verifiers re-run the same encoder. Tightening the upper
+      // bound would break in-flight audit subjects; deferred to a follow-up if/when an external
+      // verifier is added.
+      double abs = Math.abs(d);
+      if (abs < 1e-3 || abs >= 1e21) {
+        throw new IllegalArgumentException(
+            "JCS non-integer double outside ECMA-262 safe range [1e-3, 1e21): " + d);
       }
       sb.append(s);
       return;
     }
+    // Supported JsonNodeType allowlist: OBJECT, ARRAY, STRING, BOOLEAN, NUMBER, NULL.
+    // Intentionally rejected: BINARY, MISSING, POJO — any future schema change adding one of
+    // these subject value types must update both this allowlist and the canonical-form doc
+    // (docs/ops/audit-retention.md §2) in lockstep so the on-disk audit chain remains verifiable.
     throw new IllegalArgumentException("unsupported JCS node type: " + node.getNodeType());
   }
 
@@ -294,6 +317,25 @@ public class AuditLogChainWriter {
         default:
           if (c < 0x20) {
             sb.append(String.format("\\u%04x", (int) c));
+          } else if (c >= 0xD800 && c <= 0xDFFF) {
+            // Issue #118: lone surrogate. A high surrogate (D800-DBFF) is "paired" only when
+            // immediately followed by a low surrogate (DC00-DFFF); anything else is malformed
+            // UTF-16 and would corrupt UTF-8 if emitted literally. Valid pairs are passed
+            // through untouched so legitimate non-BMP characters round-trip as their UTF-8
+            // bytes; only the lone code unit is escaped.
+            boolean isHighSurrogate = c >= 0xD800 && c <= 0xDBFF;
+            boolean hasLowFollower =
+                isHighSurrogate
+                    && i + 1 < s.length()
+                    && s.charAt(i + 1) >= 0xDC00
+                    && s.charAt(i + 1) <= 0xDFFF;
+            if (hasLowFollower) {
+              sb.append(c);
+              sb.append(s.charAt(i + 1));
+              i++;
+            } else {
+              sb.append(String.format("\\u%04x", (int) c));
+            }
           } else {
             sb.append(c);
           }
