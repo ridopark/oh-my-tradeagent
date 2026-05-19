@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/broker-position.json",
+  "title": "BrokerPosition",
+  "description": "A broker-held position returned by ReconciliationExecActivity.brokerListOpenPositions. Used by Phase 3 reconciliation to detect filled positions with no corresponding running PositionWorkflow (issue #165).",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.BrokerPosition",
+  "additionalProperties": false,
+  "required": ["schema_version", "option_symbol", "qty", "side"],
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "option_symbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OCC-formatted symbol, broker-native form (Alpaca: no padding)."
+    },
+    "qty": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Long contract count. Negative qty is out of scope for v0 — copytrade only opens long positions."
+    },
+    "side": {
+      "type": "string",
+      "enum": ["LONG"],
+      "description": "Phase 3 v0 supports LONG only; SHORT/inverse positions are not produced by copytrade."
+    },
+    "avg_entry_price": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Optional avg entry price from broker. May be omitted if broker doesn't carry it."
+    }
+  }
+}

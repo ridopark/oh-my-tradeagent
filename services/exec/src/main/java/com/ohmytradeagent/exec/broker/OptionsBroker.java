@@ -1,6 +1,7 @@
 package com.ohmytradeagent.exec.broker;
 
 import com.ohmytradeagent.contract.BrokerOpenOrder;
+import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.PreTradeCheckRequest;
 import com.ohmytradeagent.contract.PreTradeCheckResult;
 import java.math.BigDecimal;
@@ -59,6 +60,18 @@ public interface OptionsBroker {
    * listing endpoint is deferred).
    */
   default List<BrokerOpenOrder> listOpenOrders() {
+    return List.of();
+  }
+
+  /**
+   * Issue #165 Phase 3: list option positions currently held at the broker. Used by reconciliation
+   * to detect filled-but-no-workflow orphans (a broker position that the orchestrator never spawned
+   * a {@code PositionWorkflow} for). Implementations MUST filter to option positions (e.g. Alpaca
+   * {@code asset_class="us_option"}) and exclude any equity holdings — a copytrade strategy does
+   * not manage equity. Default returns an empty list so brokers without an implementation degrade
+   * cleanly (the Phase 3 recon loop just observes zero positions).
+   */
+  default List<BrokerPosition> listOpenPositions() {
     return List.of();
   }
 

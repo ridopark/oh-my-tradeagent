@@ -12,11 +12,13 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.BrokerOpenOrder;
+import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.JournalEntry;
 import com.ohmytradeagent.contract.ReconciliationSummary;
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
@@ -24,6 +26,7 @@ import io.temporal.client.WorkflowStub;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -43,6 +46,7 @@ class ReconciliationWorkflowImplTest {
   private AuditActivities audit;
   private ReconciliationExecActivity exec;
   private ReconciliationMetricsActivities metrics;
+  private PositionLookupActivities positionLookup;
 
   @BeforeEach
   void setUp() {
@@ -52,7 +56,8 @@ class ReconciliationWorkflowImplTest {
     audit = Mockito.mock(AuditActivities.class);
     exec = Mockito.mock(ReconciliationExecActivity.class);
     metrics = Mockito.mock(ReconciliationMetricsActivities.class);
-    coreWorker.registerActivitiesImplementations(audit, metrics);
+    positionLookup = Mockito.mock(PositionLookupActivities.class);
+    coreWorker.registerActivitiesImplementations(audit, metrics, positionLookup);
     Worker brokerWorker = env.newWorker(EXEC_QUEUE);
     brokerWorker.registerActivitiesImplementations(exec);
     env.start();
@@ -230,6 +235,81 @@ class ReconciliationWorkflowImplTest {
             /* intentsReconciled= */ eq(2L));
   }
 
+  @Test
+  void run_brokerPositionWithNoRunningWorkflow_emitsPositionOrphan() {
+    // Issue #165 Phase 3: a broker-held position with no running PositionWorkflow must surface
+    // as a PositionOrphan audit + a position_orphans count on the summary. Workflow id is rebuilt
+    // from the most recent FILLED journal entry for the OCC.
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq("SPY   260519C00737000")))
+        .thenReturn(
+            List.of(
+                filledJournal("intent-1", "chat-1506342699765338194:0", "SPY   260519C00737000")));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+
+    AuditEvent orphan = captureKind("PositionOrphan");
+    assertThat(orphan.getSubject())
+        .containsEntry("option_symbol", "SPY   260519C00737000")
+        .containsEntry("journal_status", "filled")
+        .containsEntry("journal_entry_signal_id", "chat-1506342699765338194:0")
+        .containsEntry(
+            "expected_workflow_id",
+            "t-dev/s-copytrade-v1/pos/SPY   260519C00737000/chat-1506342699765338194:0");
+    assertThat(((Number) orphan.getSubject().get("qty")).longValue()).isEqualTo(5L);
+
+    AuditEvent completed = captureKind("ReconciliationCompleted");
+    assertThat(((Number) completed.getSubject().get("position_orphans")).longValue()).isEqualTo(1L);
+  }
+
+  @Test
+  void run_brokerPositionWithRunningWorkflow_noOrphan() {
+    // Workflow already running for this position → no PositionOrphan audit, count stays at 0.
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq("SPY   260519C00737000")))
+        .thenReturn(
+            List.of(
+                filledJournal("intent-1", "chat-1506342699765338194:0", "SPY   260519C00737000")));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    Mockito.verify(audit, Mockito.never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+  }
+
+  @Test
+  void run_brokerPositionMissingJournalEntry_emitsPositionOrphanMissing() {
+    // Broker holds a position with no FILLED journal record → strongest orphan signal, emit a
+    // PositionOrphan with expected_workflow_id=null + journal_status=missing.
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+
+    AuditEvent orphan = captureKind("PositionOrphan");
+    assertThat(orphan.getSubject())
+        .containsEntry("option_symbol", "SPY   260519C00737000")
+        .containsEntry("journal_status", "missing")
+        .containsEntry("expected_workflow_id", null);
+    assertThat(((Number) orphan.getSubject().get("qty")).longValue()).isEqualTo(5L);
+  }
+
   // ---------- helpers ----------
 
   private ReconciliationSummary runWorkflow() {
@@ -261,6 +341,33 @@ class ReconciliationWorkflowImplTest {
     j.setState(JournalEntry.State.RECORDED);
     j.setRecordedAt(recordedAt);
     return j;
+  }
+
+  private JournalEntry filledJournal(String intentKey, String signalId, String occ) {
+    JournalEntry j = new JournalEntry();
+    j.setSchemaVersion(1L);
+    j.setIntentKey(intentKey);
+    j.setSignalId(signalId);
+    j.setTenantId("dev");
+    j.setStrategyId("copytrade-v1");
+    j.setBrokerTarget(JournalEntry.BrokerTarget.ALPACA_PAPER);
+    j.setClientOrderId(intentKey);
+    j.setOptionSymbol(occ);
+    j.setSide(JournalEntry.Side.BUY);
+    j.setQty(5L);
+    j.setState(JournalEntry.State.FILLED);
+    j.setRecordedAt(OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5));
+    return j;
+  }
+
+  private BrokerPosition brokerPosition(String occ, long qty, BigDecimal avgEntryPrice) {
+    BrokerPosition p = new BrokerPosition();
+    p.setSchemaVersion(1L);
+    p.setOptionSymbol(occ);
+    p.setQty(qty);
+    p.setSide(BrokerPosition.Side.LONG);
+    p.setAvgEntryPrice(avgEntryPrice);
+    return p;
   }
 
   private BrokerOpenOrder broker(String brokerOrderId, String clientOrderId, String occ) {
