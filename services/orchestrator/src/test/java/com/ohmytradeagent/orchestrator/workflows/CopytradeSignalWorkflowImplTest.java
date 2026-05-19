@@ -28,6 +28,7 @@ import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
+import io.temporal.api.enums.v1.IndexedValueType;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.testing.TestWorkflowEnvironment;
@@ -65,10 +66,8 @@ class CopytradeSignalWorkflowImplTest {
     env = TestWorkflowEnvironment.newInstance();
     // Register the custom search attributes startPositionWorkflow sets on the child workflow.
     // Production registers these at cluster bootstrap; the test server requires per-test setup.
-    env.registerSearchAttribute(
-        "TenantStrategy", io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
-    env.registerSearchAttribute(
-        "ContractSymbol", io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+    env.registerSearchAttribute("TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+    env.registerSearchAttribute("ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(
         CopytradeSignalWorkflowImpl.class, PositionWorkflowImpl.class);
