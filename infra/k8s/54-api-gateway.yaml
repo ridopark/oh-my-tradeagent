@@ -28,6 +28,55 @@ spec:
       labels:
         app: api-gateway
     spec:
+      # Issue #108: first-deploy readiness gate. api-gateway's AuditController
+      # reads `audit_log` from the `orchestrator` Postgres DB, but on a clean
+      # cluster boot it can race orchestrator-svc's Flyway V2 migration that
+      # creates the table — returning empty results until V2 lands. Block Ready
+      # here until `audit_log` exists in the orchestrator DB. Reuses the
+      # existing postgres-credentials secret (POSTGRES_USER / POSTGRES_PASSWORD,
+      # same keys orchestrator-svc's Flyway uses), so no new secrets, no new
+      # ServiceAccount, no new RBAC. The `postgres:16` image is already pulled
+      # by the postgres StatefulSet — initContainer reuse keeps cluster image
+      # footprint unchanged. Loop polls every 3s with no upper bound so the
+      # pod stays Init:0/1 until orchestrator-svc finishes migrating.
+      initContainers:
+        - name: wait-for-audit-log
+          image: postgres:16
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: orchestrator
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "wait-for-audit-log: polling orchestrator.audit_log existence"
+              until [ "$(psql -tA -c "SELECT to_regclass('public.audit_log') IS NOT NULL")" = "t" ]; do
+                echo "  audit_log not yet present (orchestrator-svc Flyway V2 pending); retrying in 3s"
+                sleep 3
+              done
+              echo "wait-for-audit-log: audit_log table present; api-gateway may proceed"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
       containers:
         - name: api-gateway
           image: ghcr.io/ridopark/oh-my-tradeagent-api-gateway:latest
