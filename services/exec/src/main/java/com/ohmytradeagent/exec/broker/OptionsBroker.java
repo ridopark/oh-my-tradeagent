@@ -28,9 +28,29 @@ public interface OptionsBroker {
 
   PlaceOrderResponse placeOrder(PlaceOrderRequest request);
 
+  /**
+   * Attempt to cancel the order at the broker. Returns a 3-state outcome:
+   *
+   * <ul>
+   *   <li>{@link CancelResponse.Outcome#CANCELLED} — broker confirmed the cancel.
+   *   <li>{@link CancelResponse.Outcome#FAILED} — non-fill rejection (validation / unknown id /
+   *       transient 4xx). Caller records the broker reason on the journal row.
+   *   <li>{@link CancelResponse.Outcome#ALREADY_FILLED} — issue #165: broker rejected the cancel
+   *       because the order had already filled. Caller fetches {@link #getFillDetail(String)} and
+   *       reconciles the journal to FILLED.
+   * </ul>
+   */
   CancelResponse cancelOrder(String brokerOrderId);
 
   BrokerOrderStatus getOrderStatus(String brokerOrderId);
+
+  /**
+   * Issue #165: fetch broker-confirmed fill detail (qty, avg price, fill time) for an order the
+   * broker reports as already-filled. Only called from the cancel-on-filled reconciliation path —
+   * implementations should treat a non-filled or partially-filled response as a protocol error (the
+   * caller has already seen the broker classify the order as filled).
+   */
+  BrokerFillDetail getFillDetail(String brokerOrderId);
 
   /**
    * Phase 5 reconciliation: list currently-open broker orders. Default returns an empty list so the

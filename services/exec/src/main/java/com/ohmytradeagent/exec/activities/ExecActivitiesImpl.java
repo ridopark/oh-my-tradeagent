@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.activities;
 
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
+import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
@@ -100,10 +101,17 @@ public class ExecActivitiesImpl implements ExecActivities {
 
     journal.markCancelAttempted(intentKey);
     CancelResponse cancel = broker.cancelOrder(row.brokerOrderId());
-    if (cancel.cancelled()) {
-      journal.markCancelled(intentKey);
-    } else {
-      journal.markCancelFailed(intentKey, cancel.brokerReason());
+    switch (cancel.outcome()) {
+      case CANCELLED -> journal.markCancelled(intentKey);
+      case FAILED -> journal.markCancelFailed(intentKey, cancel.brokerReason());
+      case ALREADY_FILLED -> {
+        // Issue #165: the broker filled the order while the cancel was in flight. Pull the
+        // broker-confirmed fill detail and reconcile the journal to FILLED so the orchestrator
+        // can spawn the missing PositionWorkflow instead of orphaning the position. A repeat
+        // call lands as a no-op (markFilled is conditional on RECORDED/SUBMITTED state).
+        BrokerFillDetail fill = broker.getFillDetail(row.brokerOrderId());
+        journal.markFilled(intentKey, fill.filledQty(), fill.avgFillPrice(), fill.filledAt());
+      }
     }
     return journal.findByIntentKey(intentKey).map(ExecActivitiesImpl::result).orElseThrow();
   }

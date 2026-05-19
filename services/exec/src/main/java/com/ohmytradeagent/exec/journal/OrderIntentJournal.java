@@ -1,6 +1,8 @@
 package com.ohmytradeagent.exec.journal;
 
 import com.ohmytradeagent.contract.OrderIntent;
+import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -47,4 +49,13 @@ public interface OrderIntentJournal {
    * runbook follow-up.
    */
   void markCancelFailed(String intentKey, String brokerReason);
+
+  /**
+   * Records a broker-confirmed fill discovered during a cancel attempt (cancel-on-filled race) or
+   * via reconciliation. Transitions state to FILLED and records fill detail. Conditional on current
+   * state in (RECORDED, SUBMITTED) so a repeat call is a no-op; returns true iff the row was
+   * updated.
+   */
+  boolean markFilled(
+      String intentKey, long filledQty, BigDecimal avgFillPrice, OffsetDateTime filledAt);
 }
