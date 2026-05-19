@@ -231,17 +231,33 @@ public class AuditLogChainWriter {
       }
       // ECMA-262 ToString never emits a trailing ".0" for integer-valued doubles, while Java's
       // Double.toString does (e.g. 1.0). Strip the ".0" suffix to match the JCS expectation for
-      // integer-valued doubles. For non-integer doubles we accept Java's representation as a
-      // reasonable approximation of ECMA-262 ToString — the orchestrator subject does not
-      // currently emit floats requiring the full step-by-step ECMA spec, and any future caller
-      // depending on exact float canonicalization should provide pre-canonicalized strings.
+      // integer-valued doubles.
       String s = Double.toString(d);
       if (s.endsWith(".0")) {
         s = s.substring(0, s.length() - 2);
+        sb.append(s);
+        return;
+      }
+      // Issue #118 / RFC 8785 §3.2.2.3: for non-integer doubles, Double.toString and ECMA-262
+      // ToString agree on the decimal-literal form only within abs(d) ∈ [5e-7, 1e21). Outside
+      // that range Java emits an uppercase 'E' exponent missing the mandatory '+' sign
+      // (e.g. "1.0E-8" vs ECMA-262 "0.00000001" or "1e-8"), so the canonical bytes would diverge
+      // from a conformant JCS implementation. Rather than re-implementing the full ECMA-262
+      // formatter (issue #118 explicitly offers the runtime guard as an acceptable alternative),
+      // reject divergent values at write time so an out-of-range subject surfaces as a loud
+      // failure rather than a silent canonical-form drift.
+      double abs = Math.abs(d);
+      if (abs < 5e-7 || abs >= 1e21) {
+        throw new IllegalArgumentException(
+            "JCS non-integer double outside ECMA-262 safe range [5e-7, 1e21): " + d);
       }
       sb.append(s);
       return;
     }
+    // Supported JsonNodeType allowlist: OBJECT, ARRAY, STRING, BOOLEAN, NUMBER, NULL.
+    // Intentionally rejected: BINARY, MISSING, POJO — any future schema change adding one of
+    // these subject value types must update both this allowlist and the canonical-form doc
+    // (docs/ops/audit-retention.md §2) in lockstep so the on-disk audit chain remains verifiable.
     throw new IllegalArgumentException("unsupported JCS node type: " + node.getNodeType());
   }
 
@@ -294,6 +310,25 @@ public class AuditLogChainWriter {
         default:
           if (c < 0x20) {
             sb.append(String.format("\\u%04x", (int) c));
+          } else if (c >= 0xD800 && c <= 0xDFFF) {
+            // Issue #118: lone surrogate. A high surrogate (D800-DBFF) is "paired" only when
+            // immediately followed by a low surrogate (DC00-DFFF); anything else is malformed
+            // UTF-16 and would corrupt UTF-8 if emitted literally. Valid pairs are passed
+            // through untouched so legitimate non-BMP characters round-trip as their UTF-8
+            // bytes; only the lone code unit is escaped.
+            boolean isHighSurrogate = c >= 0xD800 && c <= 0xDBFF;
+            boolean hasLowFollower =
+                isHighSurrogate
+                    && i + 1 < s.length()
+                    && s.charAt(i + 1) >= 0xDC00
+                    && s.charAt(i + 1) <= 0xDFFF;
+            if (hasLowFollower) {
+              sb.append(c);
+              sb.append(s.charAt(i + 1));
+              i++;
+            } else {
+              sb.append(String.format("\\u%04x", (int) c));
+            }
           } else {
             sb.append(c);
           }

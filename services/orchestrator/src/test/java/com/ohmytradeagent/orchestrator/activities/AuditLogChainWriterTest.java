@@ -8,8 +8,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ohmytradeagent.contract.AuditEvent;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -146,6 +149,74 @@ class AuditLogChainWriterTest {
     AuditEvent ev = buildSyntheticEvent();
     assertThatThrownBy(() -> writer.computeRowHash(ev, new byte[31]))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  // ----- Issue #118: deferred JCS canonical-encoding edge cases -----
+
+  @Test
+  void canonicalSubjectRejectsFloatOutsideSafeRange() {
+    // Plan #118 item 1: doubles whose ECMA-262 ToString diverges from Double.toString must be
+    // rejected at runtime. 5e-8 sits below the [5e-7, 1e21) safe range; 1e21 sits at the upper
+    // bound (exclusive). Both must throw IllegalArgumentException with a stable message token.
+    AuditEvent belowLow = buildSyntheticEvent();
+    belowLow.setSubject(Map.of("x", 5e-8));
+    assertThatThrownBy(() -> writer.computeRowHash(belowLow, null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("outside ECMA-262 safe range");
+
+    AuditEvent atHigh = buildSyntheticEvent();
+    atHigh.setSubject(Map.of("x", 1e21));
+    assertThatThrownBy(() -> writer.computeRowHash(atHigh, null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("outside ECMA-262 safe range");
+  }
+
+  @Test
+  void canonicalSubjectAcceptsFloatInsideSafeRange() {
+    // Plan #118 item 1: 1.5 is a clean non-integer double inside the safe range. The writer must
+    // hash it without exception and the hash must be deterministic across invocations.
+    AuditEvent ev = buildSyntheticEvent();
+    ev.setSubject(Map.of("x", 1.5));
+    byte[] first = writer.computeRowHash(ev, null);
+    byte[] second = writer.computeRowHash(ev, null);
+    assertThat(AuditLogChainWriter.hex(first))
+        .as("safe-range float canonicalization must be deterministic")
+        .isEqualTo(AuditLogChainWriter.hex(second));
+  }
+
+  @Test
+  void canonicalStringEscapesLoneSurrogates() {
+    // Plan #118 item 2: lone surrogate (U+D800) must emit the six-character JSON escape \uD800
+    // rather than copy the malformed UTF-16 code unit literally (which would corrupt UTF-8).
+    byte[] loneOut = writer.canonicalSubjectBytes(Map.of("k", "\uD800"));
+    String loneStr = new String(loneOut, StandardCharsets.UTF_8);
+    assertThat(loneStr.toLowerCase(java.util.Locale.ROOT))
+        .as("lone high surrogate must be emitted as the JSON escape \\uD800")
+        .contains("\\ud800");
+
+    // Valid surrogate pair (U+1D11E MUSICAL SYMBOL G CLEF) must round-trip as literal UTF-8 —
+    // not escape-encoded — so legitimate non-BMP characters survive canonicalization.
+    String gClef = new String(Character.toChars(0x1D11E));
+    byte[] pairOut = writer.canonicalSubjectBytes(Map.of("k", gClef));
+    String pairStr = new String(pairOut, StandardCharsets.UTF_8);
+    assertThat(pairStr).as("valid surrogate pair must round-trip as literal UTF-8").contains(gClef);
+    assertThat(pairStr.toLowerCase(java.util.Locale.ROOT))
+        .as("valid surrogate pair must not be escape-encoded")
+        .doesNotContain("\\ud83d")
+        .doesNotContain("\\ud834");
+  }
+
+  @Test
+  void canonicalRejectsBinaryNode() {
+    // Plan #118 item 3: BinaryNode is intentionally rejected. Pin the existing throw behaviour
+    // so a future allowlist expansion is a deliberate, test-visible change. Jackson's
+    // valueToTree(byte[]) yields a BinaryNode, which is exactly what the orchestrator's
+    // canonicalSubjectBytes path would hit if a future caller stuffed bytes into the subject map.
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("blob", new byte[] {1, 2, 3});
+    assertThatThrownBy(() -> writer.canonicalSubjectBytes(subject))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("unsupported JCS node type");
   }
 
   private static List<byte[]> leavesFromFixture(JsonNode merkleNode) {
