@@ -494,11 +494,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       return null;
     }
     if (config.getBrokerTarget() == null) {
-      PreTradeCheckResult sentinel = new PreTradeCheckResult();
-      sentinel.setSchemaVersion(1L);
-      sentinel.setAllowed(false);
-      sentinel.setRejectReason("dispatch_failed:NullBrokerTarget");
-      return sentinel;
+      return PreTradeCheckSentinels.dispatchFailed("NullBrokerTarget");
     }
     // Bound retries so a persistently-failing pre-trade endpoint surfaces as the dispatch-failed
     // sentinel within the workflow's TTL window rather than retrying forever. 3 attempts mirrors
@@ -516,11 +512,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     try {
       return preTradeStub.preTradeCheck(request);
     } catch (Exception e) {
-      PreTradeCheckResult sentinel = new PreTradeCheckResult();
-      sentinel.setSchemaVersion(1L);
-      sentinel.setAllowed(false);
-      sentinel.setRejectReason("dispatch_failed:" + e.getClass().getSimpleName());
-      return sentinel;
+      return PreTradeCheckSentinels.dispatchFailed(e.getClass().getSimpleName());
     }
   }
 

@@ -198,8 +198,9 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     // Verifies the sentinel shape that dispatchPreTradeCheck builds when getBrokerTarget() is null.
     // Because process() also dereferences getBrokerTarget() before reaching dispatchPreTradeCheck,
     // the workflow-level path cannot be exercised end-to-end via TestWorkflowEnvironment without
-    // the NPE causing the workflow task to retry indefinitely. The sentinel contract is therefore
-    // verified directly: build the sentinel exactly as the guard does and assert its fields.
+    // the NPE causing the workflow task to retry indefinitely. The direct unit coverage of the
+    // sentinel-building helper lives in PreTradeCheckSentinelsTest (issue #113); this test keeps
+    // the end-to-end intent assertion (sentinel + risk.checkEntry -> PRE_TRADE_CHECK_FAILED).
     StrategyConfig cfgNull = configWithPreTradeEnabled();
     cfgNull.setBrokerTarget(null);
 
