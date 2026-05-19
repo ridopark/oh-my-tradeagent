@@ -7,12 +7,14 @@ import static org.jooq.impl.DSL.table;
 
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
+import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import com.ohmytradeagent.exec.broker.stub.StubBroker;
 import com.ohmytradeagent.exec.journal.JooqOrderIntentJournal;
+import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderState;
 import java.math.BigDecimal;
 import java.sql.DriverManager;
@@ -195,6 +197,29 @@ class ExecActivitiesImplIT {
     assertThat(result.getLastError()).isEqualTo("order already filled");
   }
 
+  @Test
+  void cancelOrder_brokerAlreadyFilled_journalTransitionsToFilled() {
+    // Issue #165: when the broker reports the order is already filled (cancel-on-filled
+    // race), the activity must reconcile the journal to FILLED with broker-confirmed
+    // filled_qty / avg_fill_price / filled_at, clearing lastError. Previously this path
+    // left the row in SUBMITTED with last_error set, which silently orphaned positions.
+    OrderIntent intent = intent("intent-A");
+    exec.placeOrder(intent);
+    OffsetDateTime filledAt = OffsetDateTime.parse("2026-05-19T17:08:11Z");
+    broker.setAlreadyFilled("stub-intent-A", 5L, new BigDecimal("0.84"), filledAt);
+
+    OrderIntentResult result = exec.cancelOrder("intent-A");
+
+    assertThat(result.getState()).isEqualTo(OrderIntentResult.State.FILLED);
+    assertThat(result.getLastError()).isNull();
+
+    JournaledOrder row = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(row.state()).isEqualTo(OrderState.FILLED);
+    assertThat(row.filledQty()).isEqualTo(5L);
+    assertThat(row.avgFillPrice()).isEqualByComparingTo(new BigDecimal("0.84"));
+    assertThat(row.filledAt()).isEqualTo(filledAt);
+  }
+
   private long journalRowCount(String intentKey) {
     return dsl.select(count())
         .from(table("order_intent_journal"))
@@ -268,8 +293,18 @@ class ExecActivitiesImplIT {
       return delegate.getOrderStatus(brokerOrderId);
     }
 
+    @Override
+    public BrokerFillDetail getFillDetail(String brokerOrderId) {
+      return delegate.getFillDetail(brokerOrderId);
+    }
+
     void forceStatusForTest(String brokerOrderId, BrokerOrderStatus status) {
       delegate.forceStatusForTest(brokerOrderId, status);
+    }
+
+    void setAlreadyFilled(
+        String brokerOrderId, long qty, BigDecimal avgPx, OffsetDateTime filledAt) {
+      delegate.setAlreadyFilled(brokerOrderId, qty, avgPx, filledAt);
     }
   }
 }

@@ -129,6 +129,50 @@ class JooqOrderIntentJournalIT {
   }
 
   @Test
+  void markFilled_flipsState() {
+    // Issue #165: markFilled transitions SUBMITTED → FILLED and records the
+    // broker-confirmed fill detail discovered during a cancel-on-filled race.
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "stub-intent-A");
+    // Simulate a prior cancel attempt having recorded a transient last_error —
+    // markFilled must clear it once the broker confirms the fill.
+    journal.markCancelFailed("intent-A", "transient broker hiccup");
+    OffsetDateTime filledAt = OffsetDateTime.parse("2026-05-19T17:08:11Z");
+
+    boolean updated = journal.markFilled("intent-A", 5L, new BigDecimal("0.84"), filledAt);
+
+    assertThat(updated).isTrue();
+    JournaledOrder row = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(row.state()).isEqualTo(OrderState.FILLED);
+    assertThat(row.filledQty()).isEqualTo(5L);
+    assertThat(row.avgFillPrice()).isEqualByComparingTo(new BigDecimal("0.84"));
+    assertThat(row.filledAt()).isEqualTo(filledAt);
+    assertThat(row.lastError()).isNull();
+  }
+
+  @Test
+  void markFilled_onTerminalState_noOp() {
+    // Issue #165: a repeat call on a row already in a terminal state must be a no-op
+    // (returns false) — the journal already reflects the final outcome.
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "stub-intent-A");
+    journal.markCancelled("intent-A");
+    JournaledOrder before = journal.findByIntentKey("intent-A").orElseThrow();
+
+    boolean updated =
+        journal.markFilled(
+            "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+
+    assertThat(updated).isFalse();
+    JournaledOrder after = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(after.state()).isEqualTo(OrderState.CANCELLED);
+    assertThat(after.filledQty()).isNull();
+    assertThat(after.avgFillPrice()).isNull();
+    assertThat(after.filledAt()).isNull();
+    assertThat(after.version()).isEqualTo(before.version());
+  }
+
+  @Test
   void findByIntentKey_missing_returnsEmpty() {
     assertThat(journal.findByIntentKey("nope")).isEmpty();
   }
