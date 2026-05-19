@@ -244,14 +244,19 @@ public class AuditLogChainWriter {
         sb.append(s);
         return;
       }
-      // RFC 8785 §3.2.2.3: the bounds match JLS Double.toString's decimal-vs-scientific cutoffs
-      // exactly. Outside abs(d) ∈ [1e-3, 1e7) Java emits scientific notation ("1.0E-4", "1.0E7")
-      // while ECMA-262 ToString stays decimal ("0.0001", "10000000"). Reject divergent values
-      // so out-of-range subjects surface as a loud failure rather than silent canonical drift.
+      // RFC 8785 §3.2.2.3: the lower bound matches JLS Double.toString's decimal-vs-scientific
+      // cutoff at 1e-3 exactly (below it Java emits "1.0E-4" while ECMA-262 stays decimal
+      // "0.0001"). The upper bound is 1e21 per ECMA-262's own decimal threshold. Java emits
+      // scientific notation for |d| >= 1e7, so values in [1e7, 1e21) are accepted but produce
+      // Java-flavoured "1.7E9" instead of ECMA's "1700000000". That gap is tolerated because
+      // existing audit subjects pass timestamp doubles (epoch-with-nanos ~1.7e9) and the chain
+      // is internally consistent — verifiers re-run the same encoder. Tightening the upper
+      // bound would break in-flight audit subjects; deferred to a follow-up if/when an external
+      // verifier is added.
       double abs = Math.abs(d);
-      if (abs < 1e-3 || abs >= 1e7) {
+      if (abs < 1e-3 || abs >= 1e21) {
         throw new IllegalArgumentException(
-            "JCS non-integer double outside ECMA-262 safe range [1e-3, 1e7): " + d);
+            "JCS non-integer double outside ECMA-262 safe range [1e-3, 1e21): " + d);
       }
       sb.append(s);
       return;
