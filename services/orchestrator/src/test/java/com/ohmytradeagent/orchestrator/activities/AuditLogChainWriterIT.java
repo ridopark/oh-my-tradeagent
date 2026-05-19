@@ -35,7 +35,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Primary;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
@@ -94,7 +93,6 @@ class AuditLogChainWriterIT {
   static class AuditITConfig {
 
     @Bean
-    @Primary
     ObjectMapper objectMapper() {
       // Match the production ObjectMapper shape (JavaTimeModule registered) so OffsetDateTime
       // round-trips on the AuditEvent deserialize path.
@@ -181,7 +179,7 @@ class AuditLogChainWriterIT {
   @AfterAll
   static void closeAdminConnection() throws Exception {
     if (adminConn != null) adminConn.close();
-    if (postgres != null) postgres.stop();
+    postgres.stop();
   }
 
   /**
@@ -340,19 +338,13 @@ class AuditLogChainWriterIT {
             CompletableFuture.runAsync(
                 () -> {
                   for (int m = 0; m < eventsPerThread; m++) {
-                    AuditEvent ev = new AuditEvent();
-                    ev.setSchemaVersion(1L);
-                    ev.setTenantId("dev");
-                    ev.setStrategyId("copytrade-v1");
-                    // UUIDv4 — globally unique so the event_id UNIQUE constraint is satisfied
-                    // regardless of which thread inserts which event.
-                    ev.setEventId(UUID.randomUUID().toString());
-                    ev.setOccurredAt(java.time.OffsetDateTime.now());
-                    ev.setKind("ConcurrentTestEvent");
-                    ev.setActor("thread-" + threadIdx);
-                    ev.setWorkflowId("wf-concurrent-" + threadIdx);
-                    ev.setCorrelationId("corr-concurrent-" + threadIdx + "-" + m);
-                    ev.setSubject(java.util.Map.of("thread", threadIdx, "seq", m));
+                    AuditEvent ev =
+                        newEvent(
+                            "ConcurrentTestEvent",
+                            "thread-" + threadIdx,
+                            "wf-concurrent-" + threadIdx,
+                            "corr-concurrent-" + threadIdx + "-" + m,
+                            java.util.Map.of("thread", threadIdx, "seq", m));
                     activities.log(ev);
                   }
                 },
@@ -436,18 +428,14 @@ class AuditLogChainWriterIT {
     AuditActivitiesImpl disabledActivities =
         new AuditActivitiesImpl(dsl, om, chainWriter, /* chainWriterEnabled= */ false);
 
-    AuditEvent ev = new AuditEvent();
-    ev.setSchemaVersion(1L);
-    ev.setTenantId("dev");
-    ev.setStrategyId("copytrade-v1");
-    UUID eventId = UUID.randomUUID();
-    ev.setEventId(eventId.toString());
-    ev.setOccurredAt(java.time.OffsetDateTime.now());
-    ev.setKind("DisabledFlagTestEvent");
-    ev.setActor("operator:ridopark");
-    ev.setWorkflowId("wf-disabled");
-    ev.setCorrelationId("corr-disabled");
-    ev.setSubject(java.util.Map.of("disabled", true));
+    AuditEvent ev =
+        newEvent(
+            "DisabledFlagTestEvent",
+            "operator:ridopark",
+            "wf-disabled",
+            "corr-disabled",
+            java.util.Map.of("disabled", true));
+    UUID eventId = UUID.fromString(ev.getEventId());
 
     disabledActivities.log(ev);
 
@@ -466,5 +454,30 @@ class AuditLogChainWriterIT {
             .isNull();
       }
     }
+  }
+
+  /**
+   * Build a fresh AuditEvent on the (tenant=dev, strategy=copytrade-v1) chain. Each call mints a
+   * new UUIDv4 event_id and stamps occurred_at=now() so callers don't collide on the event_id
+   * UNIQUE constraint or on @{@code id ASC} ordering even when called from concurrent threads.
+   */
+  private static AuditEvent newEvent(
+      String kind,
+      String actor,
+      String workflowId,
+      String correlationId,
+      java.util.Map<String, Object> subject) {
+    AuditEvent ev = new AuditEvent();
+    ev.setSchemaVersion(1L);
+    ev.setTenantId("dev");
+    ev.setStrategyId("copytrade-v1");
+    ev.setEventId(UUID.randomUUID().toString());
+    ev.setOccurredAt(java.time.OffsetDateTime.now());
+    ev.setKind(kind);
+    ev.setActor(actor);
+    ev.setWorkflowId(workflowId);
+    ev.setCorrelationId(correlationId);
+    ev.setSubject(subject);
+    return ev;
   }
 }
