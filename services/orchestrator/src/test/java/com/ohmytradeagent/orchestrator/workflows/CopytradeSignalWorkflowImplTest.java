@@ -16,6 +16,7 @@ import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
@@ -214,25 +215,19 @@ class CopytradeSignalWorkflowImplTest {
     setupApprovedMocks();
     when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-1"));
     // No onFill signal -> TTL fires -> cancelOrder runs -> broker reports already filled.
-    OrderIntentResult cancelFilled = new OrderIntentResult();
-    cancelFilled.setSchemaVersion(1L);
-    cancelFilled.setIntentKey("intent-K");
-    cancelFilled.setBrokerOrderId("brk-1");
+    OrderIntentResult cancelFilled = submittedResult("intent-K", "brk-1");
     cancelFilled.setState(OrderIntentResult.State.FILLED);
-    cancelFilled.setLastStateAt(OffsetDateTime.now());
-    cancelFilled.setLastError(null);
     cancelFilled.setFilledQty(5L);
     cancelFilled.setAvgFillPrice(new BigDecimal("0.84"));
     when(exec.cancelOrder(anyString())).thenReturn(cancelFilled);
 
-    String parentId = "rec-bto-1";
     CopytradeSignalWorkflow wf =
         env.getWorkflowClient()
             .newWorkflowStub(
                 CopytradeSignalWorkflow.class,
                 WorkflowOptions.newBuilder()
                     .setTaskQueue(CORE_QUEUE)
-                    .setWorkflowId(parentId)
+                    .setWorkflowId("rec-bto-1")
                     .build());
     WorkflowStub.fromTyped(wf).start(btoPayload());
     WorkflowStub.fromTyped(wf).getResult(String.class);
@@ -263,9 +258,7 @@ class CopytradeSignalWorkflowImplTest {
 
     // Subsequent STC on the same OCC: positionLookup now serves the cached id, so STC
     // dispatches ExitRequested (partialExit) — no OrphanSTC.
-    String posWfId =
-        com.ohmytradeagent.contract.identity.WorkflowIds.position(
-            "dev", "copytrade-v1", "NVDA  260516C00140000", "111:0");
+    String posWfId = WorkflowIds.position("dev", "copytrade-v1", "NVDA  260516C00140000", "111:0");
     when(positionLookup.findPositionWorkflowId("dev", "copytrade-v1", "NVDA  260516C00140000"))
         .thenReturn(posWfId);
 
@@ -279,9 +272,9 @@ class CopytradeSignalWorkflowImplTest {
     assertThat(exit.getSubject())
         .containsEntry("signal_id", "111:1")
         .containsEntry("position_workflow_id", posWfId);
-    ArgumentCaptor<AuditEvent> all2 = ArgumentCaptor.forClass(AuditEvent.class);
-    verify(audit, atLeastOnce()).log(all2.capture());
-    assertThat(all2.getAllValues().stream().anyMatch(e -> "OrphanSTC".equals(e.getKind())))
+    ArgumentCaptor<AuditEvent> eventsAfterStc = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(eventsAfterStc.capture());
+    assertThat(eventsAfterStc.getAllValues().stream().anyMatch(e -> "OrphanSTC".equals(e.getKind())))
         .isFalse();
   }
 
