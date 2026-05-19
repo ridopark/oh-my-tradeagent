@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
@@ -307,6 +308,38 @@ class KillSwitchWorkflowImplTest {
     assertThatThrownBy(() -> stub.recordLivePromotion(req))
         .isInstanceOf(WorkflowUpdateException.class)
         .hasStackTraceContaining("broker_target_required");
+  }
+
+  @Test
+  void recordLivePromotion_distinctApprovers_invokesActivityWithRequest() {
+    // Round-3 reviewer ask (issue #122): the workflow code path for record_live_promotion is a
+    // pass-through — validator passes, the (mocked) LivePromotionActivities.approve(...) is
+    // invoked exactly once with the request propagated verbatim, and the workflow itself emits
+    // no LivePromotionApproved audit event (that responsibility belongs to the Activity, which
+    // is mocked here so no audit event of that kind ever fires).
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-lp-happy");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    LivePromotionApprovalRequest req = livePromotionRequest("alice", "bob", "tradier-live");
+    req.setNote("phase-7 gate signoff drill");
+
+    stub.recordLivePromotion(req);
+
+    ArgumentCaptor<LivePromotionApprovalRequest> captor =
+        ArgumentCaptor.forClass(LivePromotionApprovalRequest.class);
+    verify(livePromotion, times(1)).approve(captor.capture());
+    LivePromotionApprovalRequest captured = captor.getValue();
+    assertThat(captured.getApproverId1()).isEqualTo("alice");
+    assertThat(captured.getApproverId2()).isEqualTo("bob");
+    assertThat(captured.getTenantId()).isEqualTo("dev");
+    assertThat(captured.getStrategyId()).isEqualTo("copytrade-v1");
+    assertThat(captured.getBrokerTarget()).isEqualTo("tradier-live");
+    assertThat(captured.getNote()).isEqualTo("phase-7 gate signoff drill");
+
+    // Heartbeat-related audit events from the running workflow are fine; only the kill-switch
+    // workflow code emitting a LivePromotionApproved event is forbidden — that lives in the
+    // Activity (mocked here, so it never fires).
+    verify(audit, never()).log(argThat(e -> "LivePromotionApproved".equals(e.getKind())));
   }
 
   // ---------- helpers ----------
