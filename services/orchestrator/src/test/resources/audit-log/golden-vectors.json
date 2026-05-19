@@ -90,6 +90,11 @@
       "expected_row_hash_hex": "117c2274d1a6b3a8db884490ac680135463aa8360227da9069cbfe8978f2d3e0"
     }
   ],
+  "merkle_root_1_leaf": {
+    "note": "Issue #119: degenerate 1-leaf case. The Merkle root of a single-leaf list MUST equal that leaf's hash unchanged — no SHA-256 round is applied. Pins that AuditMerkleRoot.root([leaf]) is the identity at zero-level depth, so a future refactor that prematurely hashes the leaf (e.g. emitting sha256(leaf||leaf)) fails this test loudly. leaf_row_indices=[0] reuses row 0's row_hash directly.",
+    "leaf_row_indices": [0],
+    "expected_root_hex": "2cfe0ef34fee034fcee578606ab56c3a0e75027118278abb4ec03f742030eed4"
+  },
   "merkle_root_3_leaves": {
     "note": "Bitcoin-style duplicate-last-on-odd Merkle root over the first 3 rows' row_hash values. The 3-leaf size forces the odd-node rule to fire: at level 0, pair(row0,row1)+pair(row2,row2). At level 1, pair(L,R). Pins the convention named in docs/ops/audit-retention.md §2.",
     "leaf_row_indices": [0, 1, 2],
@@ -99,5 +104,10 @@
     "note": "Even-leaf Merkle root over all 4 rows (cross-check; not load-bearing for the odd-node convention but useful as a parity test against any third-party verifier).",
     "leaf_row_indices": [0, 1, 2, 3],
     "expected_root_hex": "11b6598e816ac7c913d2d646aa3fe0546ce819a1d375d5d10785106a40c9fd54"
+  },
+  "merkle_root_5_leaves": {
+    "note": "Issue #119: 5-leaf case forces the duplicate-last-on-odd rule to fire at TWO consecutive levels: at level 0, 5 nodes → pair(row0,row1)+pair(row2,row3)+pair(row0_dup,row0_dup) = 3 nodes (odd-node fired at index 4); at level 1, 3 nodes → pair(L0,L1)+pair(L2,L2_dup) = 2 nodes (odd-node fired again at index 2); at level 2, 2 nodes → root. leaf_row_indices=[0,1,2,3,0] reuses the existing 4 chain rows + duplicates row 0 as the fifth leaf so the fixture remains self-contained against the existing 4-row chain (no new chain rows needed). The expected_root_hex was computed by running production AuditMerkleRoot.root(...) against this leaf list.",
+    "leaf_row_indices": [0, 1, 2, 3, 0],
+    "expected_root_hex": "dd992ea2d7f3791a67fe9b003ea64ab0d69368a5821ccf5d18cfea2689428b09"
   }
 }
