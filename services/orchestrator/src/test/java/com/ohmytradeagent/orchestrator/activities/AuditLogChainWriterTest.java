@@ -171,9 +171,8 @@ class AuditLogChainWriterTest {
 
   @Test
   void canonicalSubjectAcceptsFloatInsideSafeRange() {
-    // Anchors near-lower-bound and near-upper-bound canonical bytes so any future bound tweak
-    // or Double.toString drift surfaces as a loud test failure rather than silent canonical
-    // divergence.
+    // Anchors near-lower-bound canonical bytes (0.0015) so a Double.toString drift at the 1e-3
+    // cutoff surfaces as a loud test failure rather than silent canonical divergence.
     AuditEvent ev = buildSyntheticEvent();
     ev.setSubject(Map.of("x", 1.5));
     byte[] first = writer.computeRowHash(ev, null);
