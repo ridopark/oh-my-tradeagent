@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
@@ -12,6 +13,7 @@ import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import io.temporal.failure.ApplicationFailure;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -224,6 +226,71 @@ class AlpacaPaperBrokerTest {
     assertThat(c.cancelled()).isFalse();
     assertThat(c.brokerReason()).contains("alpaca status 422");
     assertThat(c.brokerReason()).contains("order cannot be canceled");
+  }
+
+  @Test
+  void cancelOrder_brokerReturns422AlreadyFilled_classifiedAsAlreadyFilled() {
+    // Issue #165: Alpaca returns 422 with code=42210000 (and a message containing the
+    // substring `already in "filled"`) when a cancel races a fill. The OptionsBroker
+    // contract must classify this as ALREADY_FILLED so the activity reconciles the
+    // journal to FILLED via getFillDetail instead of recording a generic cancel-failed
+    // last_error (which orphans the position downstream).
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"code\":42210000,\"message\":\"order is already in \\\"filled\\\" state\"}"));
+
+    CancelResponse c = broker.cancelOrder("alp-12345");
+
+    assertThat(c.outcome()).isEqualTo(CancelResponse.Outcome.ALREADY_FILLED);
+    assertThat(c.cancelled()).isFalse();
+    assertThat(c.brokerReason()).containsIgnoringCase("already in");
+    assertThat(c.brokerReason()).contains("alpaca status 422");
+  }
+
+  @Test
+  void cancelOrder_brokerReturns422OtherCode_classifiedAsFailed() {
+    // Regression guard: a 422 carrying a different Alpaca code (or no fill-race
+    // sentinel substring) must remain a FAILED cancel — we only promote the
+    // specific cancel-on-filled sentinel to ALREADY_FILLED.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"code\":42210001,\"message\":\"order cannot be canceled\"}"));
+
+    CancelResponse c = broker.cancelOrder("alp-12345");
+
+    assertThat(c.outcome()).isEqualTo(CancelResponse.Outcome.FAILED);
+    assertThat(c.cancelled()).isFalse();
+    assertThat(c.brokerReason()).contains("alpaca status 422");
+  }
+
+  @Test
+  void getFillDetail_brokerReturnsFilledOrder_returnsParsedDetail() throws Exception {
+    // Issue #165: when cancel races a fill, the activity calls getFillDetail to
+    // capture broker-confirmed filled_qty / avg_fill_price / filled_at and reconcile
+    // the journal row to FILLED.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"alp-12345\",\"client_order_id\":\"intent-A\",\"status\":\"filled\","
+                    + "\"filled_qty\":\"5\",\"filled_avg_price\":\"0.84\","
+                    + "\"filled_at\":\"2026-05-19T17:08:11Z\"}"));
+
+    BrokerFillDetail detail = broker.getFillDetail("alp-12345");
+
+    assertThat(detail.filledQty()).isEqualTo(5L);
+    assertThat(detail.avgFillPrice()).isEqualByComparingTo(new BigDecimal("0.84"));
+    assertThat(detail.filledAt()).isEqualTo(OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getPath()).isEqualTo("/v2/orders/alp-12345");
   }
 
   @Test
