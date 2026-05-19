@@ -106,6 +106,29 @@ ssh ridopark@192.168.10.123 \
 
 Expect a non-null `lastActionTime` within the last 5 minutes.
 
+## 3a. Pre-cutover for existing clusters
+
+If the target cluster pre-dates PR #106 (i.e. the Postgres PV already
+exists from before the orchestrator DB split landed), the dedicated
+`orchestrator` database does **not** yet exist on disk. `postgres-init`
+only fires on a fresh PV (see comment at `infra/k8s/10-postgres.yaml:35`:
+"`/docker-entrypoint-initdb.d` only fires on a fresh data volume"), so
+the `create_db_if_missing orchestrator` line in `10-postgres.yaml` will
+not be re-executed on an upgrade. Without this manual step,
+`orchestrator-svc` (and `api-gateway`, which shares the same datasource
+per section 4 below) will fail to boot with a Postgres DataSource error
+on the first `kubectl apply` of the PR-5b.E manifests.
+
+Run this **once**, before re-deploying `orchestrator-svc` /
+`api-gateway` against an existing cluster:
+
+```sh
+kubectl exec -n copytrade postgres-0 -- psql -U postgres -c 'CREATE DATABASE orchestrator OWNER temporal;'
+```
+
+Fresh clusters can skip this step — `postgres-init` will create the
+`orchestrator` database automatically on first boot of the StatefulSet.
+
 ## 4. Tear down the in-`copytrade` Temporal stack
 
 Only proceed once steps 2 and 3 have passed.
