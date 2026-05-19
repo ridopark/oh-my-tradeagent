@@ -177,6 +177,54 @@ class JooqOrderIntentJournalIT {
     assertThat(journal.findByIntentKey("nope")).isEmpty();
   }
 
+  @Test
+  void findLatestFilledByOcc_returnsMostRecentFilled() {
+    // Issue #165 Phase 3: recon walks broker-held positions and looks up the most recent FILLED
+    // journal row per OCC to rebuild the expected PositionWorkflow id. The partial index from
+    // V3 (tenant_id, strategy_id, option_symbol, filled_at DESC) WHERE state='FILLED' makes this
+    // a constant-time scan.
+    String occ = "SPY   260519C00737000";
+    journal.upsertIntent(intentWithOcc("intent-old", "sig-old", occ));
+    journal.markSubmittedIfRecorded("intent-old", "stub-old");
+    journal.markFilled(
+        "intent-old", 3L, new BigDecimal("0.50"), OffsetDateTime.parse("2026-05-19T15:00:00Z"));
+
+    journal.upsertIntent(intentWithOcc("intent-new", "sig-new", occ));
+    journal.markSubmittedIfRecorded("intent-new", "stub-new");
+    journal.markFilled(
+        "intent-new", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+
+    JournaledOrder latest = journal.findLatestFilledByOcc("dev", "copytrade-v1", occ).orElseThrow();
+    assertThat(latest.intentKey()).isEqualTo("intent-new");
+    assertThat(latest.signalId()).isEqualTo("sig-new");
+    assertThat(latest.filledQty()).isEqualTo(5L);
+  }
+
+  @Test
+  void findLatestFilledByOcc_noFilledForOcc_returnsEmpty() {
+    // OCC has no FILLED row → recon emits a PositionOrphan with journal_status="missing".
+    journal.upsertIntent(intentWithOcc("intent-other", "sig-other", "NVDA  260516C00140000"));
+
+    assertThat(journal.findLatestFilledByOcc("dev", "copytrade-v1", "SPY   260519C00737000"))
+        .isEmpty();
+  }
+
+  @Test
+  void findLatestFilledByOcc_filtersTenantAndStrategy() {
+    // The partial index leaf order requires (tenant_id, strategy_id, option_symbol) — a FILLED
+    // entry under a different tenant must not leak across.
+    String occ = "SPY   260519C00737000";
+    OrderIntent foreign = intentWithOcc("intent-foreign", "sig-foreign", occ);
+    foreign.setTenantId("other-tenant");
+    journal.upsertIntent(foreign);
+    journal.markSubmittedIfRecorded("intent-foreign", "stub-foreign");
+    journal.markFilled(
+        "intent-foreign", 9L, new BigDecimal("1.20"), OffsetDateTime.parse("2026-05-19T17:00:00Z"));
+
+    assertThat(journal.findLatestFilledByOcc("dev", "copytrade-v1", occ)).isEmpty();
+    assertThat(journal.findLatestFilledByOcc("other-tenant", "copytrade-v1", occ)).isPresent();
+  }
+
   private OrderIntent intent(String key) {
     OrderIntent i = new OrderIntent();
     i.setSchemaVersion(1L);
@@ -190,6 +238,13 @@ class JooqOrderIntentJournalIT {
     i.setQty(1L);
     i.setLimitPrice(new BigDecimal("2.30"));
     i.setRecordedAt(OffsetDateTime.parse("2026-05-13T17:22:31Z"));
+    return i;
+  }
+
+  private OrderIntent intentWithOcc(String key, String signalId, String occ) {
+    OrderIntent i = intent(key);
+    i.setSignalId(signalId);
+    i.setOptionSymbol(occ);
     return i;
   }
 }

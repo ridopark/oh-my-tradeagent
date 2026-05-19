@@ -29,6 +29,17 @@ public interface OrderIntentJournal {
   List<JournaledOrder> listOpenByTenantStrategy(String tenantId, String strategyId);
 
   /**
+   * Issue #165 Phase 3: return at most one row for the most recent FILLED entry on this {@code
+   * (tenant, strategy, option_symbol)} tuple, ordered by {@code filled_at DESC}. Used by
+   * reconciliation to map a broker-held position back to the {@code entry_signal_id} that
+   * determines the expected {@code PositionWorkflow} id. Returns {@link Optional#empty()} when no
+   * FILLED row exists for that OCC — recon treats this as a stronger orphan signal ({@code
+   * journal_status=missing}). Backed by the V3 partial index {@code
+   * order_intent_journal_filled_at_idx} so this is a constant-time lookup.
+   */
+  Optional<JournaledOrder> findLatestFilledByOcc(String tenantId, String strategyId, String occ);
+
+  /**
    * Conditional state-machine transition: flips RECORDED → SUBMITTED only if the current state is
    * still RECORDED. Returns true iff the row was updated; a false return means another concurrent
    * attempt already set SUBMITTED (or the row is in a terminal state) — caller short-circuits.

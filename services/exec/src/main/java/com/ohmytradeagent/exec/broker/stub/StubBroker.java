@@ -1,5 +1,6 @@
 package com.ohmytradeagent.exec.broker.stub;
 
+import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
@@ -9,6 +10,7 @@ import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -29,6 +31,9 @@ public class StubBroker implements OptionsBroker {
   // Issue #165: seeded by setAlreadyFilled to drive the cancel-on-filled IT path. cancelOrder and
   // getFillDetail both consult this map so the activity can reconcile the journal to FILLED.
   private final Map<String, BrokerFillDetail> alreadyFilledFillDetail = new ConcurrentHashMap<>();
+  // Issue #165 Phase 3: seeded by setOpenPosition to drive recon orphan-position tests.
+  // Keyed on option_symbol (OCC) — Alpaca exposes one position per (account, symbol).
+  private final Map<String, BrokerPosition> openPositions = new ConcurrentHashMap<>();
 
   @Override
   public PlaceOrderResponse placeOrder(PlaceOrderRequest request) {
@@ -71,9 +76,28 @@ public class StubBroker implements OptionsBroker {
     return detail;
   }
 
+  @Override
+  public List<BrokerPosition> listOpenPositions() {
+    return List.copyOf(openPositions.values());
+  }
+
   /** Test seam: force a status (e.g., FILLED) to exercise the cancel-on-filled path. */
   public void forceStatusForTest(String brokerOrderId, BrokerOrderStatus status) {
     statusByBrokerOrderId.put(brokerOrderId, status);
+  }
+
+  /**
+   * Issue #165 Phase 3 test seam: seed a broker-held position keyed by OCC. Used by recon ITs to
+   * exercise the PositionOrphan detection path deterministically.
+   */
+  public void setOpenPosition(String occ, long qty, BigDecimal avgEntryPrice) {
+    BrokerPosition bp = new BrokerPosition();
+    bp.setSchemaVersion(1L);
+    bp.setOptionSymbol(occ);
+    bp.setQty(qty);
+    bp.setSide(BrokerPosition.Side.LONG);
+    bp.setAvgEntryPrice(avgEntryPrice);
+    openPositions.put(occ, bp);
   }
 
   /**

@@ -1,13 +1,20 @@
 package com.ohmytradeagent.orchestrator.activities;
 
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
+import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.api.enums.v1.WorkflowExecutionStatus;
+import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionRequest;
+import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionResponse;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -18,6 +25,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class PositionLookupActivitiesImpl implements PositionLookupActivities {
+
+  private static final Logger log = LoggerFactory.getLogger(PositionLookupActivitiesImpl.class);
 
   static final Duration CACHE_TTL = Duration.ofSeconds(86400);
   static final String WORKFLOW_TYPE = "PositionWorkflow";
@@ -71,8 +80,34 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
 
   @Override
   public boolean isPositionWorkflowRunning(String workflowId) {
-    // RED placeholder: returns false until GREEN wires up the describeWorkflowExecution probe.
-    return false;
+    // Issue #165 Phase 3: probe Temporal directly for the latest execution status of this id.
+    // Visibility lags behind the durable history (eventually consistent), so describe is the
+    // only signal the recon loop can trust on a per-cycle basis.
+    String namespace = workflowClient.getOptions().getNamespace();
+    DescribeWorkflowExecutionRequest req =
+        DescribeWorkflowExecutionRequest.newBuilder()
+            .setNamespace(namespace)
+            .setExecution(WorkflowExecution.newBuilder().setWorkflowId(workflowId).build())
+            .build();
+    try {
+      DescribeWorkflowExecutionResponse resp =
+          workflowClient.getWorkflowServiceStubs().blockingStub().describeWorkflowExecution(req);
+      WorkflowExecutionStatus status = resp.getWorkflowExecutionInfo().getStatus();
+      return status == WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING;
+    } catch (StatusRuntimeException e) {
+      if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
+        return false;
+      }
+      log.warn(
+          "describeWorkflowExecution failed during isPositionWorkflowRunning probe wf_id={}"
+              + " status={}",
+          workflowId,
+          e.getStatus(),
+          e);
+      // Conservative: treat unknown as "not running" so recon emits a PositionOrphan rather than
+      // silently dropping a possibly-orphan signal. Operator's runbook covers the false-positive.
+      return false;
+    }
   }
 
   private static Comparator<Instant> instantNullsLast() {

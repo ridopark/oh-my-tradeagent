@@ -87,6 +87,24 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public Optional<JournaledOrder> findLatestFilledByOcc(
+      String tenantId, String strategyId, String occ) {
+    // Backed by V3 partial index (tenant_id, strategy_id, option_symbol, filled_at DESC)
+    // WHERE state='FILLED'. The ORDER BY column matches the index leaf order so this is an
+    // index-only descending scan limited to one row.
+    Record row =
+        dsl.selectFrom(TABLE)
+            .where(field("tenant_id", String.class).eq(tenantId))
+            .and(field("strategy_id", String.class).eq(strategyId))
+            .and(field("option_symbol", String.class).eq(occ))
+            .and(field("state", String.class).eq(OrderState.FILLED.name()))
+            .orderBy(field("filled_at", OffsetDateTime.class).desc())
+            .limit(1)
+            .fetchOne();
+    return row == null ? Optional.empty() : Optional.of(mapRow(row));
+  }
+
+  @Override
   public boolean markSubmittedIfRecorded(String intentKey, String brokerOrderId) {
     OffsetDateTime now = OffsetDateTime.now();
     int updated =

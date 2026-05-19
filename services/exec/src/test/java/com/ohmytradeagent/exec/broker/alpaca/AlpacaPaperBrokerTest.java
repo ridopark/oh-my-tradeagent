@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
@@ -14,6 +15,7 @@ import io.temporal.failure.ApplicationFailure;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -370,6 +372,50 @@ class AlpacaPaperBrokerTest {
             .setBody("{\"message\":\"order not found\"}"));
 
     assertThat(broker.getOrderStatus("alp-ghost")).isEqualTo(BrokerOrderStatus.UNKNOWN);
+  }
+
+  @Test
+  void listOpenPositions_filtersOptionsAndParsesQty() throws Exception {
+    // Issue #165 Phase 3: /v2/positions returns a flat array mixing equity + option holdings.
+    // Filter to asset_class="us_option", drop short positions (v0 BrokerPosition only models
+    // LONG), and parse qty/avg_entry_price from the string form Alpaca emits.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"symbol\":\"AAPL\",\"asset_class\":\"us_equity\",\"qty\":\"100\","
+                    + "\"side\":\"long\",\"avg_entry_price\":\"190.50\"},"
+                    + "{\"symbol\":\"SPY260519C00737000\",\"asset_class\":\"us_option\","
+                    + "\"qty\":\"5\",\"side\":\"long\",\"avg_entry_price\":\"0.84\"},"
+                    + "{\"symbol\":\"NVDA260516P00100000\",\"asset_class\":\"us_option\","
+                    + "\"qty\":\"-2\",\"side\":\"short\",\"avg_entry_price\":\"1.10\"}]"));
+
+    List<BrokerPosition> positions = broker.listOpenPositions();
+
+    assertThat(positions).hasSize(1);
+    BrokerPosition pos = positions.get(0);
+    assertThat(pos.getOptionSymbol()).isEqualTo("SPY260519C00737000");
+    assertThat(pos.getQty()).isEqualTo(5L);
+    assertThat(pos.getSide()).isEqualTo(BrokerPosition.Side.LONG);
+    assertThat(pos.getAvgEntryPrice()).isEqualByComparingTo(new BigDecimal("0.84"));
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getPath()).isEqualTo("/v2/positions");
+  }
+
+  @Test
+  void listOpenPositions_emptyArray_returnsEmptyList() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("[]"));
+
+    List<BrokerPosition> positions = broker.listOpenPositions();
+
+    assertThat(positions).isEmpty();
   }
 
   private void enqueueStatus(String alpacaStatus) {

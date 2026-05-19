@@ -2,11 +2,14 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.BrokerOpenOrder;
+import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.JournalEntry;
 import com.ohmytradeagent.contract.ReconciliationSummary;
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
@@ -36,6 +39,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   private static final String KIND_RECON_COMPLETED = "ReconciliationCompleted";
   private static final String KIND_JOURNAL_ORPHAN = "JournalOrphan";
   private static final String KIND_BROKER_ORPHAN = "BrokerOrphan";
+  // Issue #165 Phase 3: broker holds a position with no running PositionWorkflow.
+  private static final String KIND_POSITION_ORPHAN = "PositionOrphan";
   private static final String KIND_METRICS_RECORD_FAILED = "ReconciliationMetricsRecordFailed";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
@@ -58,6 +63,11 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
 
   private final ReconciliationMetricsActivities metrics =
       Workflow.newActivityStub(ReconciliationMetricsActivities.class, METRICS_OPTIONS);
+
+  // Issue #165 Phase 3: orchestrator-local probe — workflowClient access is only available on the
+  // orchestrator-svc worker, so the stub uses default options (core task queue).
+  private final PositionLookupActivities positionLookup =
+      Workflow.newActivityStub(PositionLookupActivities.class, DEFAULT_OPTIONS);
 
   private ReconciliationWorkflowInput input;
 
@@ -144,12 +154,61 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       brokerOrphans++;
     }
 
+    // Issue #165 Phase 3: broker-held positions with no running PositionWorkflow. The orchestrator
+    // never spawned (or already lost) the workflow that should be managing this OCC — most often
+    // because a cancel-on-filled race orphaned the position before Phase 1/2 landed, or because a
+    // CopytradeSignalWorkflow died after place + before startPositionWorkflow. Detect-only: v1
+    // emits a PositionOrphan + count and stops there; auto-adoption is a follow-up.
+    List<BrokerPosition> brokerPositions =
+        exec.brokerListOpenPositions(in.getTenantId(), in.getStrategyId());
+    long positionOrphans = 0;
+    for (BrokerPosition p : brokerPositions) {
+      List<JournalEntry> filled =
+          exec.journalListFilledByOcc(in.getTenantId(), in.getStrategyId(), p.getOptionSymbol());
+      if (filled.isEmpty()) {
+        // No FILLED journal row for this OCC — stronger orphan signal. We can't rebuild the
+        // expected PositionWorkflow id because there is no entry_signal_id to anchor it on.
+        auditLog(
+            KIND_POSITION_ORPHAN,
+            subject(
+                "option_symbol",
+                p.getOptionSymbol(),
+                "qty",
+                p.getQty(),
+                "expected_workflow_id",
+                null,
+                "journal_status",
+                "missing"));
+        positionOrphans++;
+        continue;
+      }
+      JournalEntry recentFilled = filled.get(0);
+      String expectedWfId =
+          WorkflowIds.position(
+              in.getTenantId(),
+              in.getStrategyId(),
+              p.getOptionSymbol(),
+              recentFilled.getSignalId());
+      if (!positionLookup.isPositionWorkflowRunning(expectedWfId)) {
+        auditLog(
+            KIND_POSITION_ORPHAN,
+            subject(
+                "option_symbol", p.getOptionSymbol(),
+                "qty", p.getQty(),
+                "expected_workflow_id", expectedWfId,
+                "journal_entry_signal_id", recentFilled.getSignalId(),
+                "journal_status", "filled"));
+        positionOrphans++;
+      }
+    }
+
     ReconciliationSummary summary = new ReconciliationSummary();
     summary.setSchemaVersion(1L);
     summary.setJournalEntriesChecked((long) journal.size());
     summary.setBrokerOrdersChecked((long) brokerOpen.size());
     summary.setJournalOrphans(journalOrphans);
     summary.setBrokerOrphans(brokerOrphans);
+    summary.setPositionOrphans(positionOrphans);
 
     auditLog(
         KIND_RECON_COMPLETED,
@@ -158,14 +217,15 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
             "journal_entries_checked", summary.getJournalEntriesChecked(),
             "broker_orders_checked", summary.getBrokerOrdersChecked(),
             "journal_orphans", journalOrphans,
-            "broker_orphans", brokerOrphans));
+            "broker_orphans", brokerOrphans,
+            "position_orphans", positionOrphans));
 
     // Issue #89: record per-cycle Micrometer metrics for the Phase 7 live-promotion gate.
     // Wrapped in try/catch so a metrics outage cannot fail a reconciliation cycle — the gate
     // operator can fall back to the audit-log-derived SQL documented in
     // docs/ops/reconciliation-metrics.md.
     long lagMillis = Workflow.currentTimeMillis() - cycleStartMillis;
-    long discrepancies = journalOrphans + brokerOrphans;
+    long discrepancies = journalOrphans + brokerOrphans + positionOrphans;
     long intentsReconciled = journal.size();
     try {
       metrics.recordCycle(
