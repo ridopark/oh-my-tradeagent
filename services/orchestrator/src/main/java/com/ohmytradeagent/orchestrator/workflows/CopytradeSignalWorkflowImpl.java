@@ -64,6 +64,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private static final String REASON_TTL_EXPIRED = "ttl_expired";
   private static final String VERSION_POSITION_HANDOFF = "position-handoff";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
+  // Issue #112: Gate the 3-activity pre-trade dispatch (assertPreTradeCheckRoutable →
+  // dispatchPreTradeCheck → checkEntry(payload, config, preTradeResult)) introduced in PR #111.
+  // Pre-#111 in-flight CopytradeSignalWorkflow executions had a single checkEntry(payload, config)
+  // call; the v=DEFAULT_VERSION branch preserves that shape via the 3-arg overload with null
+  // preTradeResult so replays of legacy histories remain deterministic. Retires the deploy-time
+  // drain mitigation documented in #111.
+  private static final String VERSION_PRE_TRADE_DISPATCH = "pre-trade-dispatch-v2";
 
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
@@ -148,15 +155,27 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   private String handleBto(CopytradeSignalPayload payload, StrategyConfig config) {
-    // Skip the assertion round-trip when the gate is off; the Activity itself short-circuits but
-    // the dispatch cost is paid regardless.
-    if (Boolean.TRUE.equals(config.getPreTradeCheckEnabled())) {
-      risk.assertPreTradeCheckRoutable(config);
+    // Issue #112: Version gate retires the PR #111 deploy-time-drain mitigation. Pre-#111
+    // in-flight workflows replay through the v=DEFAULT_VERSION branch (single checkEntry with
+    // null preTradeResult); new executions take v>=1 and run the full assert → dispatch →
+    // checkEntry sequence.
+    int preTradeDispatchVersion =
+        Workflow.getVersion(VERSION_PRE_TRADE_DISPATCH, Workflow.DEFAULT_VERSION, 1);
+    RiskDecision decision;
+    if (preTradeDispatchVersion == Workflow.DEFAULT_VERSION) {
+      // Legacy pre-#111 path: single checkEntry call with null preTradeResult. Reachable only by
+      // CopytradeSignalWorkflow executions that began before the pre-trade-dispatch-v2 patch was
+      // deployed. New executions take the v>=1 branch.
+      decision = risk.checkEntry(payload, config, null);
+    } else {
+      // Skip the assertion round-trip when the gate is off; the Activity itself short-circuits but
+      // the dispatch cost is paid regardless.
+      if (Boolean.TRUE.equals(config.getPreTradeCheckEnabled())) {
+        risk.assertPreTradeCheckRoutable(config);
+      }
+      PreTradeCheckResult preTradeResult = dispatchPreTradeCheck(payload, config);
+      decision = risk.checkEntry(payload, config, preTradeResult);
     }
-
-    PreTradeCheckResult preTradeResult = dispatchPreTradeCheck(payload, config);
-
-    RiskDecision decision = risk.checkEntry(payload, config, preTradeResult);
     if (!decision.allowed()) {
       Map<String, Object> rejectSubject =
           subject(
