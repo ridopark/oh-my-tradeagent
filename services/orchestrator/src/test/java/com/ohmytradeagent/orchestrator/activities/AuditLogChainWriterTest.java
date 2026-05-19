@@ -155,26 +155,36 @@ class AuditLogChainWriterTest {
 
   @Test
   void canonicalSubjectRejectsFloatOutsideSafeRange() {
-    // Plan #118 item 1: doubles whose ECMA-262 ToString diverges from Double.toString must be
-    // rejected at runtime. 5e-8 sits below the [5e-7, 1e21) safe range; 1e21 sits at the upper
-    // bound (exclusive). Both must throw IllegalArgumentException with a stable message token.
+    // Plan #118 item 1: doubles whose ECMA-262 ToString diverges from Java's Double.toString must
+    // be rejected. The bounds match JLS Double.toString's decimal-vs-scientific cutoffs: 1e-4
+    // (just below 1e-3) and 1e7 (the inclusive upper cutoff) both render as Java scientific
+    // notation that diverges from ECMA-262 decimal form. 1e21 is the original PR's anchor and
+    // remains rejected.
     AuditEvent belowLow = buildSyntheticEvent();
-    belowLow.setSubject(Map.of("x", 5e-8));
+    belowLow.setSubject(Map.of("x", 1e-4));
     assertThatThrownBy(() -> writer.computeRowHash(belowLow, null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("outside ECMA-262 safe range");
 
-    AuditEvent atHigh = buildSyntheticEvent();
-    atHigh.setSubject(Map.of("x", 1e21));
-    assertThatThrownBy(() -> writer.computeRowHash(atHigh, null))
+    AuditEvent atUpper = buildSyntheticEvent();
+    atUpper.setSubject(Map.of("x", 1e7));
+    assertThatThrownBy(() -> writer.computeRowHash(atUpper, null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("outside ECMA-262 safe range");
+
+    AuditEvent farAbove = buildSyntheticEvent();
+    farAbove.setSubject(Map.of("x", 1e21));
+    assertThatThrownBy(() -> writer.computeRowHash(farAbove, null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("outside ECMA-262 safe range");
   }
 
   @Test
   void canonicalSubjectAcceptsFloatInsideSafeRange() {
-    // Plan #118 item 1: 1.5 is a clean non-integer double inside the safe range. The writer must
-    // hash it without exception and the hash must be deterministic across invocations.
+    // Plan #118 item 1: 1.5 is a clean non-integer double well inside [1e-3, 1e7). Also pin the
+    // lower-bound neighbourhood (0.0015) and a near-upper-bound value (1.5e6) with canonical-
+    // string assertions so any future bound tweak surfaces as a test failure rather than silent
+    // canonical drift.
     AuditEvent ev = buildSyntheticEvent();
     ev.setSubject(Map.of("x", 1.5));
     byte[] first = writer.computeRowHash(ev, null);
@@ -182,6 +192,30 @@ class AuditLogChainWriterTest {
     assertThat(AuditLogChainWriter.hex(first))
         .as("safe-range float canonicalization must be deterministic")
         .isEqualTo(AuditLogChainWriter.hex(second));
+
+    // Anchor the canonical bytes for near-lower-bound and near-upper-bound values. If Java's
+    // Double.toString output ever drifts from these forms for these values, the test fails loudly
+    // and the bounds need re-deriving.
+    byte[] nearLow = writer.canonicalSubjectBytes(Map.of("x", 0.0015));
+    assertThat(new String(nearLow, StandardCharsets.UTF_8))
+        .as("0.0015 must canonicalize as ECMA-262 decimal form")
+        .isEqualTo("{\"x\":0.0015}");
+
+    byte[] nearHigh = writer.canonicalSubjectBytes(Map.of("x", 1500000.5));
+    assertThat(new String(nearHigh, StandardCharsets.UTF_8))
+        .as("1500000.5 must canonicalize as ECMA-262 decimal form")
+        .isEqualTo("{\"x\":1500000.5}");
+  }
+
+  @Test
+  void canonicalSubjectRendersNegativeZeroAsZero() {
+    // Plan #118 nit: ECMA-262 ToString(-0) is "0" but Double.toString(-0.0) is "-0.0". The
+    // canonical encoder must emit "0" to stay ECMA-262 conformant. The endsWith(".0") strip
+    // alone would have produced "-0", still divergent — the dedicated zero guard fires first.
+    byte[] out = writer.canonicalSubjectBytes(Map.of("x", -0.0));
+    assertThat(new String(out, StandardCharsets.UTF_8))
+        .as("-0.0 must canonicalize as ECMA-262 \"0\"")
+        .isEqualTo("{\"x\":0}");
   }
 
   @Test
@@ -193,6 +227,13 @@ class AuditLogChainWriterTest {
     assertThat(loneStr.toLowerCase(java.util.Locale.ROOT))
         .as("lone high surrogate must be emitted as the JSON escape \\uD800")
         .contains("\\ud800");
+
+    // Lone low surrogate (U+DC00) takes the same escape path via the isHighSurrogate=false branch
+    // — pin it so a regression that treated a low surrogate as a valid pair starter would fail.
+    byte[] loneLoOut = writer.canonicalSubjectBytes(Map.of("k", "\uDC00"));
+    assertThat(new String(loneLoOut, StandardCharsets.UTF_8).toLowerCase(java.util.Locale.ROOT))
+        .as("lone low surrogate must be emitted as the JSON escape \\uDC00")
+        .contains("\\udc00");
 
     // Valid surrogate pair (U+1D11E MUSICAL SYMBOL G CLEF) must round-trip as literal UTF-8 —
     // not escape-encoded — so legitimate non-BMP characters survive canonicalization.

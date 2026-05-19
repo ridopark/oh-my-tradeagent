@@ -229,6 +229,12 @@ public class AuditLogChainWriter {
       if (Double.isNaN(d) || Double.isInfinite(d)) {
         throw new IllegalArgumentException("JCS forbids NaN/Infinity in canonical form: " + d);
       }
+      // ECMA-262 ToString(-0) is "0" but Java's Double.toString(-0.0) is "-0.0"; emit "0" to keep
+      // canonical form ECMA-conformant.
+      if (d == 0.0) {
+        sb.append('0');
+        return;
+      }
       // ECMA-262 ToString never emits a trailing ".0" for integer-valued doubles, while Java's
       // Double.toString does (e.g. 1.0). Strip the ".0" suffix to match the JCS expectation for
       // integer-valued doubles.
@@ -238,18 +244,19 @@ public class AuditLogChainWriter {
         sb.append(s);
         return;
       }
-      // Issue #118 / RFC 8785 §3.2.2.3: for non-integer doubles, Double.toString and ECMA-262
-      // ToString agree on the decimal-literal form only within abs(d) ∈ [5e-7, 1e21). Outside
-      // that range Java emits an uppercase 'E' exponent missing the mandatory '+' sign
-      // (e.g. "1.0E-8" vs ECMA-262 "0.00000001" or "1e-8"), so the canonical bytes would diverge
-      // from a conformant JCS implementation. Rather than re-implementing the full ECMA-262
-      // formatter (issue #118 explicitly offers the runtime guard as an acceptable alternative),
-      // reject divergent values at write time so an out-of-range subject surfaces as a loud
-      // failure rather than a silent canonical-form drift.
+      // Issue #118 / RFC 8785 §3.2.2.3: outside abs(d) ∈ [1e-3, 1e7) Java's Double.toString
+      // switches to scientific notation ("1.0E-4", "1.0E7") while ECMA-262 ToString stays in
+      // decimal form ("0.0001", "10000000"), so the canonical bytes would diverge from a
+      // conformant JCS implementation. The bounds match JLS Double.toString's decimal-vs-
+      // scientific cutoffs exactly, so any value that survives this check is guaranteed to
+      // round-trip ECMA-262-conformant on every JDK that conforms to the JLS. Rather than re-
+      // implementing the full ECMA-262 formatter (issue #118 explicitly offers the runtime guard
+      // as an acceptable alternative), reject divergent values at write time so an out-of-range
+      // subject surfaces as a loud failure rather than silent canonical drift.
       double abs = Math.abs(d);
-      if (abs < 5e-7 || abs >= 1e21) {
+      if (abs < 1e-3 || abs >= 1e7) {
         throw new IllegalArgumentException(
-            "JCS non-integer double outside ECMA-262 safe range [5e-7, 1e21): " + d);
+            "JCS non-integer double outside ECMA-262 safe range [1e-3, 1e7): " + d);
       }
       sb.append(s);
       return;
