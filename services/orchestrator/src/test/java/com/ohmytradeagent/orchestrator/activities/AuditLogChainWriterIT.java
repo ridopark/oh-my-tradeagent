@@ -459,23 +459,23 @@ class AuditLogChainWriterIT {
   /**
    * Issue #120: explicit single-threaded assertion that the {@code pg_advisory_xact_lock} acquired
    * by {@code log()} auto-releases at transaction commit. PR #160 (issue #119) proved this
-   * implicitly via 4-thread / 60-row contention — if the lock did not auto-release, that test
-   * would deadlock within seconds. Issue #120 asks for the same property expressed as a
-   * deterministic, single-threaded "call log() twice in sequence; both must complete in well
-   * under the lock timeout" assertion so the regression surface is visible without relying on
-   * the concurrency stress test to detect it.
+   * implicitly via 4-thread / 60-row contention — if the lock did not auto-release, that test would
+   * deadlock within seconds. Issue #120 asks for the same property expressed as a deterministic,
+   * single-threaded "call log() twice in sequence; both must complete in well under the lock
+   * timeout" assertion so the regression surface is visible without relying on the concurrency
+   * stress test to detect it.
    *
    * <p>If a future change removes {@code @Transactional} from {@code AuditActivitiesImpl.log()},
-   * the advisory lock would have no transaction to attach to (so no commit boundary to release
-   * at), and the second sequential call on the same {@code (tenant, strategy)} key tuple within
-   * the same pooled connection would block on its own un-released lock. The 5-second budget
-   * below is a generous liveness floor — uncontended advisory-lock acquisition is sub-millisecond
-   * in practice — so even a 5-second budget exposes a hang without flaking under normal CI load.
+   * the advisory lock would have no transaction to attach to (so no commit boundary to release at),
+   * and the second sequential call on the same {@code (tenant, strategy)} key tuple within the same
+   * pooled connection would block on its own un-released lock. The 5-second budget below is a
+   * generous liveness floor — uncontended advisory-lock acquisition is sub-millisecond in practice
+   * — so even a 5-second budget exposes a hang without flaking under normal CI load.
    *
    * <p>Asserts (a) both inserts persisted (two rows visible via admin read-back), (b) the second
    * row's {@code prev_hash} equals the first row's {@code row_hash} (chain link proves
-   * serialization across the two sequential calls), and (c) elapsed wall-clock across the two
-   * calls is below the liveness budget.
+   * serialization across the two sequential calls), and (c) elapsed wall-clock across the two calls
+   * is below the liveness budget.
    */
   @Test
   @Order(5)
@@ -524,7 +524,9 @@ class AuditLogChainWriterIT {
         byte[] firstRowHash = rs.getBytes("row_hash");
         byte[] firstPrevHash = rs.getBytes("prev_hash");
         assertThat(firstRowHash).as("first row must have populated row_hash").isNotNull();
-        assertThat(firstPrevHash).as("first row must have SQL NULL prev_hash (chain head)").isNull();
+        assertThat(firstPrevHash)
+            .as("first row must have SQL NULL prev_hash (chain head)")
+            .isNull();
 
         assertThat(rs.next()).as("second sequential row must persist").isTrue();
         byte[] secondRowHash = rs.getBytes("row_hash");

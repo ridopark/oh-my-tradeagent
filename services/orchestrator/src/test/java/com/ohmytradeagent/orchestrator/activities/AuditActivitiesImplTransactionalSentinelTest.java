@@ -8,8 +8,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Issue #120 sentinel: asserts that {@link AuditActivitiesImpl#log(AuditEvent)} carries the {@code
- * @Transactional} annotation.
+ * Issue #120 sentinel: asserts that {@link AuditActivitiesImpl#log(AuditEvent)} carries the
+ * {@code @Transactional} annotation.
  *
  * <p>This is a pure-reflection unit test (no Spring context, no DB) so it runs in the default
  * {@code gradle test} task. It exists because the production wiring contract called out in issue
