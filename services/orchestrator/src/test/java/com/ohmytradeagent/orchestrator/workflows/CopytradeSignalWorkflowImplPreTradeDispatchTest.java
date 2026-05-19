@@ -347,8 +347,9 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
                   CopytradeSignalWorkflow.class,
                   WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
 
-      // The non-retryable ApplicationFailure thrown from inside the workflow body should surface
-      // as the cause of WorkflowFailedException. Unwrap one level if the runtime wrapped it.
+      // Pins the stable contract: WorkflowFailedException thrown with a non-retryable
+      // ApplicationFailure of type PreTradeCheckMisconfigured somewhere in its cause chain.
+      // Wrapping depth is runtime-dependent (see unwrapApplicationFailure).
       assertThatThrownBy(() -> wf.process(btoPayload()))
           .isInstanceOf(WorkflowFailedException.class)
           .satisfies(
@@ -391,10 +392,10 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   }
 
   /**
-   * Walks up to two levels of cause-chain looking for an {@link ApplicationFailure}. Temporal's
-   * runtime may wrap a workflow-body {@code ApplicationFailure} in another failure type; the stable
-   * contract this test pins is the failure's <em>type</em> and <em>non-retryable</em> flag, not the
-   * wrapping depth.
+   * Walks up to three levels of the cause chain looking for an {@link ApplicationFailure}.
+   * Temporal's runtime may wrap a workflow-body {@code ApplicationFailure} in another failure type
+   * (e.g. {@code ActivityFailure}); this test pins the failure's <em>type</em> and
+   * <em>non-retryable</em> flag, not the wrapping depth.
    */
   private static ApplicationFailure unwrapApplicationFailure(Throwable t) {
     Throwable cur = t;
