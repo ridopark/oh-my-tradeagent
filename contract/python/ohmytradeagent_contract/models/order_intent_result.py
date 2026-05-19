@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, PositiveFloat, conint, constr
 
 
 class State(StrEnum):
@@ -43,4 +43,12 @@ class OrderIntentResult(BaseModel):
     last_error: str | None = None
     """
     Most recent broker / journal error message, if state==ERRORED or a transient failure was recorded.
+    """
+    filled_qty: conint(ge=0) | None = None
+    """
+    Broker-confirmed filled quantity. Populated when state=FILLED (typically via cancel-on-filled race recovery — see issue #165).
+    """
+    avg_fill_price: PositiveFloat | None = None
+    """
+    Broker-confirmed average fill price. Populated when state=FILLED.
     """

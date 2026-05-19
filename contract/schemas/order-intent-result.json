@@ -37,6 +37,16 @@
     "last_error": {
       "type": "string",
       "description": "Most recent broker / journal error message, if state==ERRORED or a transient failure was recorded."
+    },
+    "filled_qty": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Broker-confirmed filled quantity. Populated when state=FILLED (typically via cancel-on-filled race recovery — see issue #165)."
+    },
+    "avg_fill_price": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Broker-confirmed average fill price. Populated when state=FILLED."
     }
   }
 }
