@@ -1,6 +1,7 @@
 package com.ohmytradeagent.contract.activities;
 
 import com.ohmytradeagent.contract.BrokerOpenOrder;
+import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.JournalEntry;
 import io.temporal.activity.ActivityInterface;
 import java.util.List;
@@ -10,7 +11,7 @@ import java.util.List;
  * pair). Reconciliation routes these to the relevant broker task queue (Phase 2c.2: {@code
  * broker-<broker_target>}, e.g. {@code broker-alpaca-paper}). Both methods return a flat snapshot;
  * ReconciliationWorkflow walks the two lists in pure workflow code and audits discrepancies
- * (JournalOrphan, BrokerOrphan).
+ * (JournalOrphan, BrokerOrphan, PositionOrphan).
  */
 @ActivityInterface
 public interface ReconciliationExecActivity {
@@ -24,4 +25,24 @@ public interface ReconciliationExecActivity {
 
   /** List currently-open broker orders for the broker env this Activity is hosted in. */
   List<BrokerOpenOrder> brokerListOpenOrders();
+
+  /**
+   * Issue #165 Phase 3: list currently-held broker positions for the broker env this Activity is
+   * hosted in. The {@code tenantId} / {@code strategyId} parameters are forward-compat hooks
+   * (Alpaca paper is single-account so they're unused today; future multi-account brokers will
+   * filter on them). Reconciliation walks the returned list to detect broker-held positions with no
+   * running {@code PositionWorkflow} and emits {@code PositionOrphan} audits.
+   */
+  List<BrokerPosition> brokerListOpenPositions(String tenantId, String strategyId);
+
+  /**
+   * Issue #165 Phase 3: return at most one journal entry for the given OCC option symbol whose
+   * state is {@code FILLED}, sorted by {@code filled_at DESC} (most recent first). Used by
+   * reconciliation to map a broker-held position back to the {@code (tenant, strategy,
+   * option_symbol, entry_signal_id)} tuple that determines the expected {@code PositionWorkflow}
+   * id. Returns an empty list if the journal has no FILLED row for that OCC under this (tenant,
+   * strategy) — reconciliation treats that as a stronger orphan signal ({@code
+   * journal_status=missing}).
+   */
+  List<JournalEntry> journalListFilledByOcc(String tenantId, String strategyId, String occ);
 }

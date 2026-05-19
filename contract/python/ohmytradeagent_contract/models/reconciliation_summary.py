@@ -25,3 +25,7 @@ class ReconciliationSummary(BaseModel):
     """
     Broker open orders with client_order_id not in journal.
     """
+    position_orphans: conint(ge=0) | None = None
+    """
+    Issue #165: broker-held positions with no running PositionWorkflow. Optional + back-compat: older consumers (and older workflow versions) that don't set this field still parse cleanly.
+    """

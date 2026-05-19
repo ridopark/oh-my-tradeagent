@@ -1,6 +1,7 @@
 package com.ohmytradeagent.exec.activities;
 
 import com.ohmytradeagent.contract.BrokerOpenOrder;
+import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.JournalEntry;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
@@ -36,6 +37,21 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
   @Override
   public List<BrokerOpenOrder> brokerListOpenOrders() {
     return broker.listOpenOrders();
+  }
+
+  @Override
+  public List<BrokerPosition> brokerListOpenPositions(String tenantId, String strategyId) {
+    // tenantId / strategyId are forward-compat hooks — Alpaca paper is single-account so the
+    // broker's listOpenPositions cannot filter by them today. Future multi-account brokers will
+    // honour them inside the broker impl.
+    return broker.listOpenPositions();
+  }
+
+  @Override
+  public List<JournalEntry> journalListFilledByOcc(String tenantId, String strategyId, String occ) {
+    // RED placeholder: returns empty until GREEN wires up
+    // OrderIntentJournal.listFilledByOccLatest(tenantId, strategyId, occ).
+    return List.of();
   }
 
   private static JournalEntry toContract(JournaledOrder row) {

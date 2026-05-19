@@ -69,6 +69,12 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
     redis.opsForValue().set(key(tenantId, strategyId, occ), workflowId, CACHE_TTL);
   }
 
+  @Override
+  public boolean isPositionWorkflowRunning(String workflowId) {
+    // RED placeholder: returns false until GREEN wires up the describeWorkflowExecution probe.
+    return false;
+  }
+
   private static Comparator<Instant> instantNullsLast() {
     return Comparator.nullsLast(Comparator.naturalOrder());
   }

@@ -19,4 +19,13 @@ public interface PositionLookupActivities {
 
   /** Write-through cache hook called by CopytradeSignalWorkflow once a PositionWorkflow starts. */
   void cachePositionMapping(String tenantId, String strategyId, String occ, String workflowId);
+
+  /**
+   * Issue #165 Phase 3: returns {@code true} iff a Temporal workflow with this id is currently
+   * RUNNING. Returns {@code false} on {@code NotFound} (no execution by that id), and for any
+   * non-RUNNING terminal status (COMPLETED, FAILED, TERMINATED, CANCELED, TIMED_OUT,
+   * CONTINUED_AS_NEW). Used by {@code ReconciliationWorkflow} to detect filled-but-no-workflow
+   * orphans without leaning on Visibility (which lags behind the durable history).
+   */
+  boolean isPositionWorkflowRunning(String workflowId);
 }
