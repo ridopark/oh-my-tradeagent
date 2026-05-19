@@ -73,6 +73,15 @@ class PromotionControllerTest {
 
   @Test
   void approve_missingApprover2_returns400() throws Exception {
+    // Round-3 reviewer ask (issue #122): pin (a) the surfaced error-code in the response body
+    // and (b) that the gateway short-circuits BEFORE issuing the Temporal Update.
+    //
+    // First-run inspection (PR for #122) showed the missing-header path resolves through
+    // TenantContext.approverId2 → MissingHeaderException, which GlobalExceptionHandler maps to
+    // a 400 body of shape {"error":"missing_header","header":"X-Approver-Id-2"} — no $.detail
+    // field on this path. The gateway already short-circuits today (the resolved exception is
+    // MissingHeaderException, not WorkflowUpdateException), so the conditional production-code
+    // null/blank guard from the plan is NOT added; instead we pin the actual contract.
     mvc.perform(
             org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
                     "/promotion/approve")
@@ -81,7 +90,16 @@ class PromotionControllerTest {
                 .content("{\"broker_target\":\"tradier-live\"}"))
         .andExpect(
             org.springframework.test.web.servlet.result.MockMvcResultMatchers.status()
-                .isBadRequest());
+                .isBadRequest())
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error")
+                .value("missing_header"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.header")
+                .value(org.hamcrest.Matchers.containsString("X-Approver-Id-2")));
+
+    // Defense-in-depth: gateway short-circuits before dispatching the Temporal Update.
+    verify(stub, never()).update(any(String.class), any(Class.class), any());
   }
 
   @Test
