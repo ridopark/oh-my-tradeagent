@@ -63,6 +63,12 @@ class CopytradeSignalWorkflowImplTest {
   @BeforeEach
   void setUp() {
     env = TestWorkflowEnvironment.newInstance();
+    // Register the custom search attributes startPositionWorkflow sets on the child workflow.
+    // Production registers these at cluster bootstrap; the test server requires per-test setup.
+    env.registerSearchAttribute(
+        "TenantStrategy", io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+    env.registerSearchAttribute(
+        "ContractSymbol", io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(
         CopytradeSignalWorkflowImpl.class, PositionWorkflowImpl.class);
@@ -239,8 +245,9 @@ class CopytradeSignalWorkflowImplTest {
         .containsEntry("recovery", "cancel_on_filled")
         .containsEntry("broker_order_id", "brk-1");
     assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(5L);
-    assertThat(((BigDecimal) filled.getSubject().get("avg_fill_price")))
-        .isEqualByComparingTo(new BigDecimal("0.84"));
+    // Audit subject round-trips through Jackson, so BigDecimal arrives back as Double — compare
+    // as Number to avoid coupling the test to the on-wire numeric representation.
+    assertThat(((Number) filled.getSubject().get("avg_fill_price")).doubleValue()).isEqualTo(0.84);
 
     // EntryExpired / OrderCancelFailed are NOT emitted on the recovery path.
     ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
@@ -274,7 +281,8 @@ class CopytradeSignalWorkflowImplTest {
         .containsEntry("position_workflow_id", posWfId);
     ArgumentCaptor<AuditEvent> eventsAfterStc = ArgumentCaptor.forClass(AuditEvent.class);
     verify(audit, atLeastOnce()).log(eventsAfterStc.capture());
-    assertThat(eventsAfterStc.getAllValues().stream().anyMatch(e -> "OrphanSTC".equals(e.getKind())))
+    assertThat(
+            eventsAfterStc.getAllValues().stream().anyMatch(e -> "OrphanSTC".equals(e.getKind())))
         .isFalse();
   }
 

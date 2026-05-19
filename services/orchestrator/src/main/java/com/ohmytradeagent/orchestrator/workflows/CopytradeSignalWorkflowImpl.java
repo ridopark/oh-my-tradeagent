@@ -64,6 +64,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private static final String REASON_TTL_EXPIRED = "ttl_expired";
   private static final String VERSION_POSITION_HANDOFF = "position-handoff";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
+  // Issue #165 phase 2: gate the FILLED branch in handleTtlExpired so pre-fix replay histories
+  // deterministically take the legacy CANCELLED/else paths. Mirrors VERSION_POSITION_HANDOFF.
+  private static final String VERSION_TTL_FILLED_ADOPTION = "ttl-filled-adoption-v1";
   // Issue #112: Gate the 3-activity pre-trade dispatch (assertPreTradeCheckRoutable →
   // dispatchPreTradeCheck → checkEntry(payload, config, preTradeResult)) introduced in PR #111.
   // Pre-#111 in-flight CopytradeSignalWorkflow executions had a single checkEntry(payload, config)
@@ -256,7 +259,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       return payload.getSignalId();
     }
 
-    handleTtlExpired(payload, placed, intentKey, ttlSecs);
+    handleTtlExpired(payload, config, resolved, placed, intentKey, ttlSecs);
     return payload.getSignalId();
   }
 
@@ -434,7 +437,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   private void handleTtlExpired(
-      CopytradeSignalPayload payload, OrderIntentResult placed, String intentKey, long ttlSecs) {
+      CopytradeSignalPayload payload,
+      StrategyConfig config,
+      ContractResolveResult resolved,
+      OrderIntentResult placed,
+      String intentKey,
+      long ttlSecs) {
     logAudit(
         payload,
         KIND_ORDER_CANCEL_REQUESTED,
@@ -444,6 +452,18 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "reason", REASON_TTL_EXPIRED));
 
     OrderIntentResult cancelResult = exec.cancelOrder(intentKey);
+
+    // Issue #165 phase 2: when the broker filled inside the TTL/cancel race, the exec sidecar
+    // now reconciles the journal to FILLED and returns the broker-confirmed fill detail. Adopt
+    // the orphan position by spawning the PositionWorkflow instead of emitting EntryExpired.
+    // Versioned so replays of pre-fix histories deterministically take the legacy paths below.
+    int adoptionVersion =
+        Workflow.getVersion(VERSION_TTL_FILLED_ADOPTION, Workflow.DEFAULT_VERSION, 1);
+    if (adoptionVersion >= 1 && cancelResult.getState() == OrderIntentResult.State.FILLED) {
+      handleCancelOnFilled(payload, config, resolved, cancelResult);
+      return;
+    }
+
     if (cancelResult.getState() == OrderIntentResult.State.CANCELLED) {
       logAudit(
           payload,
@@ -453,6 +473,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               "broker_order_id", placed.getBrokerOrderId(),
               "reason", REASON_TTL_EXPIRED));
     } else {
+      // Issue #165 phase 2: drop the `orphan_position_until_phase_3` note value. The orphan case
+      // is now either recovered by the FILLED branch above or detected by Phase 3 reconciliation.
+      // Keep the `note` key so audit consumers don't break.
       logAudit(
           payload,
           KIND_ORDER_CANCEL_FAILED,
@@ -461,7 +484,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               "broker_order_id", placed.getBrokerOrderId(),
               "broker_reason", cancelResult.getLastError(),
               "severity", "ERROR",
-              "note", "orphan_position_until_phase_3"));
+              "note", "cancel_failed"));
     }
 
     logAudit(
@@ -473,6 +496,41 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "broker_order_id", placed.getBrokerOrderId(),
             "ttl_secs", ttlSecs,
             "outcome", "EXPIRED"));
+  }
+
+  /**
+   * Issue #165 phase 2: recover from the cancel-on-filled race by synthesising a {@link FillEvent}
+   * from the broker-confirmed cancel result, emitting {@code EntryFilled} with a {@code
+   * recovery=cancel_on_filled} marker, and spawning the missing PositionWorkflow. Mirrors the
+   * happy-path fill branch's audit + child-workflow handoff so subsequent STCs route to {@code
+   * partialExit} rather than producing {@code OrphanSTC}.
+   */
+  private void handleCancelOnFilled(
+      CopytradeSignalPayload payload,
+      StrategyConfig config,
+      ContractResolveResult resolved,
+      OrderIntentResult cancelResult) {
+    long filledQty = cancelResult.getFilledQty() != null ? cancelResult.getFilledQty() : 0L;
+    BigDecimal avgFillPrice =
+        cancelResult.getAvgFillPrice() != null
+            ? cancelResult.getAvgFillPrice()
+            : payload.getPrice();
+    FillEvent synth =
+        new FillEvent(cancelResult.getBrokerOrderId(), filledQty, avgFillPrice, workflowNow());
+
+    logAudit(
+        payload,
+        KIND_ENTRY_FILLED,
+        subject(
+            "signal_id", payload.getSignalId(),
+            "intent_key", cancelResult.getIntentKey(),
+            "broker_order_id", synth.brokerOrderId(),
+            "filled_qty", synth.filledQty(),
+            "avg_fill_price", synth.avgFillPrice(),
+            "outcome", "FILLED",
+            "recovery", "cancel_on_filled"));
+
+    startPositionWorkflow(payload, config, resolved, synth);
   }
 
   /**

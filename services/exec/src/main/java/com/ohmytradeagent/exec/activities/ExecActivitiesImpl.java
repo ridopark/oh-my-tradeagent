@@ -136,6 +136,10 @@ public class ExecActivitiesImpl implements ExecActivities {
     r.setState(OrderIntentResult.State.fromValue(row.state().name()));
     r.setLastStateAt(row.lastStateAt() != null ? row.lastStateAt() : OffsetDateTime.now());
     r.setLastError(row.lastError());
+    // Issue #165 phase 2: surface broker-confirmed fill detail so the orchestrator can synthesise
+    // a FillEvent on the cancel-on-filled recovery path. Nullable for non-FILLED rows.
+    r.setFilledQty(row.filledQty());
+    r.setAvgFillPrice(row.avgFillPrice());
     return r;
   }
 }
