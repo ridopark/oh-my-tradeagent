@@ -22,14 +22,20 @@ jobs:
 
       - name: Detect infra/k8s/** changes
         id: changed
+        # PR-derived SHAs are routed through `env:` (per GitHub's security
+        # hardening guide for untrusted input in shell `run:` blocks) rather
+        # than being interpolated directly with ${{ ... }}. SHAs are hex-only
+        # so the practical risk is nil, but the env-var pattern is the
+        # documented best practice — see issue #97.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          base_sha="${{ github.event.pull_request.base.sha }}"
-          head_sha="${{ github.event.pull_request.head.sha }}"
-          if git diff --name-only "$base_sha" "$head_sha" \
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
               | grep -qE '^(infra/k8s/|\.github/workflows/ci\.yml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
