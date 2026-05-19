@@ -81,10 +81,10 @@ class ReconciliationScheduleBootstrapperTest {
         .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.TRADIER_PAPER));
 
     ScheduleClient scheduleClient = mock(ScheduleClient.class);
-    // listSchedules() is invoked per-strategy by the new reap pass; return an empty stream each
-    // time so the reap pass is a no-op. Stream is AutoCloseable so the try-with-resources in
-    // reapStaleSchedules() closes it; the stub must return a non-null stream.
-    when(scheduleClient.listSchedules()).thenReturn(Stream.empty(), Stream.empty());
+    // Issue #110: listSchedules() is hoisted out of the per-strategy loop and invoked exactly
+    // once per bootstrap pass. The stub returns the snapshot once; if anything calls it a second
+    // time Mockito returns null and the run will NPE — which is the regression we want to catch.
+    when(scheduleClient.listSchedules()).thenReturn(Stream.empty());
     WorkflowClient workflowClient = mock(WorkflowClient.class);
     WorkflowServiceStubs stubs = mock(WorkflowServiceStubs.class);
 
@@ -92,6 +92,9 @@ class ReconciliationScheduleBootstrapperTest {
         new ReconciliationScheduleBootstrapper(
             workflowClient, stubs, registry, tenantsDir.toString());
     bootstrapper.runWith(scheduleClient);
+
+    // Issue #110: O(N×M) → O(M). Two strategies must share a single listSchedules() snapshot.
+    verify(scheduleClient, times(1)).listSchedules();
 
     ArgumentCaptor<String> idCaptor = ArgumentCaptor.forClass(String.class);
     ArgumentCaptor<Schedule> scheduleCaptor = ArgumentCaptor.forClass(Schedule.class);
