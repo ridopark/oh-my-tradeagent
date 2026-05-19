@@ -184,20 +184,105 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
-  void approvedSignal_cancelFailed_emitsOrderCancelFailedWithOrphanNote() {
+  void approvedSignal_cancelFailed_emitsOrderCancelFailedWithFailureNote() {
+    // Issue #165 phase 2: the audit note value changes from `orphan_position_until_phase_3`
+    // to `cancel_failed` — the orphan case is now either recovered by the new FILLED branch
+    // in handleTtlExpired or detected by Phase 3 reconciliation. The else-branch (non-CANCELLED,
+    // non-FILLED) keeps the note key so audit consumers don't break.
     setupApprovedMocks();
     when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-intent-K"));
     OrderIntentResult cancelFailed = submittedResult("intent-K", "stub-intent-K");
-    cancelFailed.setLastError("order already filled");
+    cancelFailed.setLastError("some transient broker failure");
     when(exec.cancelOrder(anyString())).thenReturn(cancelFailed);
 
     runWorkflow(btoPayload());
 
     AuditEvent failed = capture("OrderCancelFailed");
     assertThat(failed.getSubject())
-        .containsEntry("broker_reason", "order already filled")
+        .containsEntry("broker_reason", "some transient broker failure")
         .containsEntry("severity", "ERROR")
-        .containsEntry("note", "orphan_position_until_phase_3");
+        .containsEntry("note", "cancel_failed");
+  }
+
+  @Test
+  void handleTtlExpired_brokerAlreadyFilled_spawnsPositionWorkflow() {
+    // Issue #165 phase 2: when the broker filled inside the TTL/cancel race, the exec sidecar
+    // now returns state=FILLED with broker-confirmed filled_qty + avg_fill_price. The
+    // orchestrator must recognise this as a successful entry, log EntryFilled (not
+    // EntryExpired/OrderCancelFailed), and spawn the PositionWorkflow so subsequent STCs
+    // dispatch partialExit instead of OrphanSTC.
+    setupApprovedMocks();
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-1"));
+    // No onFill signal -> TTL fires -> cancelOrder runs -> broker reports already filled.
+    OrderIntentResult cancelFilled = new OrderIntentResult();
+    cancelFilled.setSchemaVersion(1L);
+    cancelFilled.setIntentKey("intent-K");
+    cancelFilled.setBrokerOrderId("brk-1");
+    cancelFilled.setState(OrderIntentResult.State.FILLED);
+    cancelFilled.setLastStateAt(OffsetDateTime.now());
+    cancelFilled.setLastError(null);
+    cancelFilled.setFilledQty(5L);
+    cancelFilled.setAvgFillPrice(new BigDecimal("0.84"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelFilled);
+
+    String parentId = "rec-bto-1";
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId(parentId)
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    // EntryFilled present with recovery marker and broker-confirmed numbers.
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(filled.getSubject())
+        .containsEntry("outcome", "FILLED")
+        .containsEntry("recovery", "cancel_on_filled")
+        .containsEntry("broker_order_id", "brk-1");
+    assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(5L);
+    assertThat(((BigDecimal) filled.getSubject().get("avg_fill_price")))
+        .isEqualByComparingTo(new BigDecimal("0.84"));
+
+    // EntryExpired / OrderCancelFailed are NOT emitted on the recovery path.
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    assertThat(all.getAllValues().stream().anyMatch(e -> "EntryExpired".equals(e.getKind())))
+        .isFalse();
+    assertThat(all.getAllValues().stream().anyMatch(e -> "OrderCancelFailed".equals(e.getKind())))
+        .isFalse();
+
+    // PositionWorkflow was started — startPositionWorkflow's last side-effect is the
+    // cachePositionMapping call. Verify with the OCC we resolved.
+    verify(positionLookup, atLeastOnce())
+        .cachePositionMapping(
+            eq("dev"), eq("copytrade-v1"), eq("NVDA  260516C00140000"), anyString());
+
+    // Subsequent STC on the same OCC: positionLookup now serves the cached id, so STC
+    // dispatches ExitRequested (partialExit) — no OrphanSTC.
+    String posWfId =
+        com.ohmytradeagent.contract.identity.WorkflowIds.position(
+            "dev", "copytrade-v1", "NVDA  260516C00140000", "111:0");
+    when(positionLookup.findPositionWorkflowId("dev", "copytrade-v1", "NVDA  260516C00140000"))
+        .thenReturn(posWfId);
+
+    CopytradeSignalPayload stc = btoPayload();
+    stc.setAction(CopytradeSignalPayload.Action.STC);
+    stc.setTail("half out");
+    stc.setSignalId("111:1");
+    runWorkflow(stc);
+
+    AuditEvent exit = capture("ExitRequested");
+    assertThat(exit.getSubject())
+        .containsEntry("signal_id", "111:1")
+        .containsEntry("position_workflow_id", posWfId);
+    ArgumentCaptor<AuditEvent> all2 = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all2.capture());
+    assertThat(all2.getAllValues().stream().anyMatch(e -> "OrphanSTC".equals(e.getKind())))
+        .isFalse();
   }
 
   @Test
