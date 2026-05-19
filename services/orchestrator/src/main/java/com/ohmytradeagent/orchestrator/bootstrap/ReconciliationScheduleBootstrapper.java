@@ -24,6 +24,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -91,8 +92,15 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
   /**
    * Package-private hook for tests so we can drive the bootstrapper against a mock {@link
    * ScheduleClient} without standing up a Temporal server.
+   *
+   * <p>Issue #110: {@code listSchedules()} is hoisted out of the per-strategy loop and collected
+   * lazily on first need. For N strategies sharing M schedules this reduces the Temporal frontend
+   * round-trips from O(N×M) to O(M) — and early-exit iterations (whitelist-reject, missing
+   * StrategyConfig) still incur zero list RPCs because the snapshot is only collected when the
+   * first valid strategy reaches the reap step.
    */
   void runWith(ScheduleClient scheduleClient) {
+    List<ScheduleListDescription> existingSchedules = null;
     for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       String brokerTarget;
       try {
@@ -123,7 +131,15 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
       }
       String desiredScheduleId =
           "recon-t-" + ts.tenantId() + "-s-" + ts.strategyId() + "-" + brokerTarget;
-      reapStaleSchedules(scheduleClient, ts.tenantId(), ts.strategyId(), desiredScheduleId);
+      if (existingSchedules == null) {
+        // Lazy: only call listSchedules() once the first valid strategy reaches the reap step.
+        // try-with-resources closes the SDK Stream exactly once per bootstrap pass.
+        try (Stream<ScheduleListDescription> listed = scheduleClient.listSchedules()) {
+          existingSchedules = listed.collect(Collectors.toUnmodifiableList());
+        }
+      }
+      reapStaleSchedules(
+          scheduleClient, existingSchedules, ts.tenantId(), ts.strategyId(), desiredScheduleId);
       ensureSchedule(scheduleClient, ts.tenantId(), ts.strategyId(), brokerTarget);
     }
   }
@@ -139,35 +155,41 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
    * any other {@link RuntimeException} from the SDK is logged and the iteration continues so a
    * single stale schedule can't take down the whole bootstrap pass.
    *
+   * <p>Issue #110: callers pass a pre-collected snapshot of existing schedules so the full
+   * namespace listing happens once per bootstrap pass instead of once per strategy. The {@code
+   * scheduleClient} parameter is still required for the per-stale-entry {@code
+   * getHandle(staleId).delete()} step, which remains O(stale-entries) and is unavoidable.
+   *
    * <p>Package-private so unit tests can drive it directly against a mock {@link ScheduleClient}.
    */
   void reapStaleSchedules(
-      ScheduleClient scheduleClient, String tenantId, String strategyId, String desiredScheduleId) {
+      ScheduleClient scheduleClient,
+      List<ScheduleListDescription> existingSchedules,
+      String tenantId,
+      String strategyId,
+      String desiredScheduleId) {
     String prefix = "recon-t-" + tenantId + "-s-" + strategyId + "-";
-    try (Stream<ScheduleListDescription> listed = scheduleClient.listSchedules()) {
-      listed
-          .filter(d -> d.getScheduleId().startsWith(prefix))
-          .filter(d -> !d.getScheduleId().equals(desiredScheduleId))
-          .forEach(
-              d -> {
-                String staleId = d.getScheduleId();
-                try {
-                  ScheduleHandle handle = scheduleClient.getHandle(staleId);
-                  handle.delete();
-                  log.info(
-                      "reaped stale Reconciliation Schedule id={} (desired={}) tenant={} strategy={}",
-                      staleId,
-                      desiredScheduleId,
-                      tenantId,
-                      strategyId);
-                } catch (RuntimeException e) {
-                  log.warn(
-                      "could not reap stale Reconciliation Schedule id={} (desired={}); peer race or already removed",
-                      staleId,
-                      desiredScheduleId,
-                      e);
-                }
-              });
+    for (ScheduleListDescription d : existingSchedules) {
+      String staleId = d.getScheduleId();
+      if (!staleId.startsWith(prefix) || staleId.equals(desiredScheduleId)) {
+        continue;
+      }
+      try {
+        ScheduleHandle handle = scheduleClient.getHandle(staleId);
+        handle.delete();
+        log.info(
+            "reaped stale Reconciliation Schedule id={} (desired={}) tenant={} strategy={}",
+            staleId,
+            desiredScheduleId,
+            tenantId,
+            strategyId);
+      } catch (RuntimeException e) {
+        log.warn(
+            "could not reap stale Reconciliation Schedule id={} (desired={}); peer race or already removed",
+            staleId,
+            desiredScheduleId,
+            e);
+      }
     }
   }
 
