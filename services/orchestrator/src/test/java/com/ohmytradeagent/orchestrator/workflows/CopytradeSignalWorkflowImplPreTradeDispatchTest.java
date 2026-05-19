@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -23,17 +24,25 @@ import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
+import com.ohmytradeagent.orchestrator.activities.RiskActivitiesImpl;
+import com.ohmytradeagent.orchestrator.activities.RiskCollaboratorDefaults;
+import com.ohmytradeagent.orchestrator.activities.SectorResolver;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -281,7 +290,123 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     assertThat(resultCaptor.getValue()).isNotNull();
   }
 
+  /**
+   * Issue #114: End-to-end pin for {@link RiskActivitiesImpl#assertPreTradeCheckRoutable} —
+   * verifies the non-retryable {@link ApplicationFailure} thrown from inside the workflow body
+   * surfaces as the cause of {@link WorkflowFailedException} (i.e. the assertion is not retried and
+   * not swallowed at the workflow boundary), and that no order is placed.
+   *
+   * <p>Unit-level coverage of the assertion itself lives in {@code RiskActivitiesAssertionTest};
+   * this test pins the workflow-level contract by wiring a <b>real</b> {@link RiskActivitiesImpl}
+   * with the {@link RiskCollaboratorDefaults#permissivePreTradeCheck() permissive default bean}
+   * instead of the shared {@code Mockito.mock(RiskActivities.class)} used by the other tests.
+   */
+  @Test
+  void handleBto_workflowFails_whenPreTradeCheckEnabled_andOnlyPermissiveDefaultBeanWired() {
+    // Close the shared env from setUp(); this test builds its own with a real RiskActivitiesImpl.
+    env.close();
+
+    TestWorkflowEnvironment localEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      Worker coreWorker = localEnv.newWorker(CORE_QUEUE);
+      coreWorker.registerWorkflowImplementationTypes(
+          CopytradeSignalWorkflowImpl.class, PositionWorkflowImpl.class);
+
+      RiskActivitiesImpl realRisk = realRiskWithPermissiveDefaultBean();
+      StrategyActivities localStrategy = Mockito.mock(StrategyActivities.class);
+      AuditActivities localAudit = Mockito.mock(AuditActivities.class);
+      ContractActivities localContract = Mockito.mock(ContractActivities.class);
+      ExecActivities localExec = Mockito.mock(ExecActivities.class);
+      PositionLookupActivities localPositionLookup = Mockito.mock(PositionLookupActivities.class);
+      MarketCalendarActivities localCalendar = Mockito.mock(MarketCalendarActivities.class);
+      SubscribePremiumActivity localMarketData = Mockito.mock(SubscribePremiumActivity.class);
+      when(localCalendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+      when(localCalendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+
+      StrategyConfig cfg = configWithPreTradeEnabled();
+      when(localStrategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+
+      coreWorker.registerActivitiesImplementations(
+          localAudit, localStrategy, realRisk, localContract, localPositionLookup, localCalendar);
+
+      // PreTradeCheckActivity stub on the broker worker — never invoked because the assertion in
+      // the workflow body fires before dispatch. Required only so the worker can start.
+      PreTradeCheckActivity noopPreTradeStub = request -> null;
+      Worker brokerWorker =
+          localEnv.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+      brokerWorker.registerActivitiesImplementations(localExec, noopPreTradeStub);
+      Worker mdWorker = localEnv.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
+      mdWorker.registerActivitiesImplementations(localMarketData);
+
+      localEnv.start();
+
+      CopytradeSignalWorkflow wf =
+          localEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  CopytradeSignalWorkflow.class,
+                  WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+
+      // Pins the stable contract: WorkflowFailedException thrown with a non-retryable
+      // ApplicationFailure of type PreTradeCheckMisconfigured somewhere in its cause chain.
+      // Wrapping depth is runtime-dependent (see unwrapApplicationFailure).
+      assertThatThrownBy(() -> wf.process(btoPayload()))
+          .isInstanceOf(WorkflowFailedException.class)
+          .satisfies(
+              t -> {
+                Throwable cause = t.getCause();
+                ApplicationFailure af = unwrapApplicationFailure(cause);
+                assertThat(af).isNotNull();
+                assertThat(af.getType()).isEqualTo("PreTradeCheckMisconfigured");
+                assertThat(af.isNonRetryable()).isTrue();
+                assertThat(af.getOriginalMessage()).contains("dev").contains("copytrade-v1");
+              });
+
+      // Proves the workflow terminated rather than retrying past the assertion.
+      Mockito.verify(localExec, Mockito.never()).placeOrder(any());
+    } finally {
+      localEnv.close();
+    }
+  }
+
   // ----- helpers -----
+
+  /**
+   * Builds a real {@link RiskActivitiesImpl} wired with {@link
+   * RiskCollaboratorDefaults#permissivePreTradeCheck()} — the no-op bean whose presence (when
+   * {@code preTradeCheckEnabled=true}) causes {@code assertPreTradeCheckRoutable} to throw a
+   * non-retryable {@link ApplicationFailure}. Mirrors {@code RiskActivitiesAssertionTest}'s private
+   * {@code buildRiskWith} helper — kept local to avoid cross-test coupling.
+   */
+  private static RiskActivitiesImpl realRiskWithPermissiveDefaultBean() {
+    Clock clock = Clock.fixed(Instant.parse("2026-05-13T17:22:31Z"), ZoneOffset.UTC);
+    return new RiskActivitiesImpl(
+        (tenant, strategy) -> 0L,
+        clock,
+        Mockito.mock(WorkflowClient.class),
+        RiskCollaboratorDefaults.permissivePortfolioSnapshot(),
+        SectorResolver.CONFIG_BACKED,
+        RiskCollaboratorDefaults.zeroDailyTradeCounter(),
+        RiskCollaboratorDefaults.zeroDrawdownSampler(),
+        RiskCollaboratorDefaults.permissivePreTradeCheck());
+  }
+
+  /**
+   * Walks up to three levels of the cause chain looking for an {@link ApplicationFailure}.
+   * Temporal's runtime may wrap a workflow-body {@code ApplicationFailure} in another failure type
+   * (e.g. {@code ActivityFailure}); this test pins the failure's <em>type</em> and
+   * <em>non-retryable</em> flag, not the wrapping depth.
+   */
+  private static ApplicationFailure unwrapApplicationFailure(Throwable t) {
+    Throwable cur = t;
+    for (int i = 0; i < 3 && cur != null; i++) {
+      if (cur instanceof ApplicationFailure) {
+        return (ApplicationFailure) cur;
+      }
+      cur = cur.getCause();
+    }
+    return null;
+  }
 
   private void runWorkflow(CopytradeSignalPayload payload) {
     CopytradeSignalWorkflow wf =
