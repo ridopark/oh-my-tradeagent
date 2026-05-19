@@ -238,7 +238,6 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     runWorkflow(btoPayload());
     long elapsedVirtualMs = env.currentTimeMillis() - startVirtualMs;
 
-    // Fail-closed sentinel surfaces.
     ArgumentCaptor<PreTradeCheckResult> resultCaptor =
         ArgumentCaptor.forClass(PreTradeCheckResult.class);
     verify(risk).checkEntry(any(), eq(cfg), resultCaptor.capture());
