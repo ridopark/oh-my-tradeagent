@@ -244,15 +244,10 @@ public class AuditLogChainWriter {
         sb.append(s);
         return;
       }
-      // Issue #118 / RFC 8785 §3.2.2.3: outside abs(d) ∈ [1e-3, 1e7) Java's Double.toString
-      // switches to scientific notation ("1.0E-4", "1.0E7") while ECMA-262 ToString stays in
-      // decimal form ("0.0001", "10000000"), so the canonical bytes would diverge from a
-      // conformant JCS implementation. The bounds match JLS Double.toString's decimal-vs-
-      // scientific cutoffs exactly, so any value that survives this check is guaranteed to
-      // round-trip ECMA-262-conformant on every JDK that conforms to the JLS. Rather than re-
-      // implementing the full ECMA-262 formatter (issue #118 explicitly offers the runtime guard
-      // as an acceptable alternative), reject divergent values at write time so an out-of-range
-      // subject surfaces as a loud failure rather than silent canonical drift.
+      // RFC 8785 §3.2.2.3: the bounds match JLS Double.toString's decimal-vs-scientific cutoffs
+      // exactly. Outside abs(d) ∈ [1e-3, 1e7) Java emits scientific notation ("1.0E-4", "1.0E7")
+      // while ECMA-262 ToString stays decimal ("0.0001", "10000000"). Reject divergent values
+      // so out-of-range subjects surface as a loud failure rather than silent canonical drift.
       double abs = Math.abs(d);
       if (abs < 1e-3 || abs >= 1e7) {
         throw new IllegalArgumentException(

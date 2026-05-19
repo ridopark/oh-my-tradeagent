@@ -155,11 +155,8 @@ class AuditLogChainWriterTest {
 
   @Test
   void canonicalSubjectRejectsFloatOutsideSafeRange() {
-    // Plan #118 item 1: doubles whose ECMA-262 ToString diverges from Java's Double.toString must
-    // be rejected. The bounds match JLS Double.toString's decimal-vs-scientific cutoffs: 1e-4
-    // (just below 1e-3) and 1e7 (the inclusive upper cutoff) both render as Java scientific
-    // notation that diverges from ECMA-262 decimal form. 1e21 is the original PR's anchor and
-    // remains rejected.
+    // 1e-4 sits below the 1e-3 JLS cutoff; 1e7 is the inclusive upper cutoff; 1e21 is far above.
+    // All three render as Java scientific notation and would diverge from ECMA-262 decimal form.
     AuditEvent belowLow = buildSyntheticEvent();
     belowLow.setSubject(Map.of("x", 1e-4));
     assertThatThrownBy(() -> writer.computeRowHash(belowLow, null))
@@ -181,10 +178,9 @@ class AuditLogChainWriterTest {
 
   @Test
   void canonicalSubjectAcceptsFloatInsideSafeRange() {
-    // Plan #118 item 1: 1.5 is a clean non-integer double well inside [1e-3, 1e7). Also pin the
-    // lower-bound neighbourhood (0.0015) and a near-upper-bound value (1.5e6) with canonical-
-    // string assertions so any future bound tweak surfaces as a test failure rather than silent
-    // canonical drift.
+    // Anchors near-lower-bound and near-upper-bound canonical bytes so any future bound tweak
+    // or Double.toString drift surfaces as a loud test failure rather than silent canonical
+    // divergence.
     AuditEvent ev = buildSyntheticEvent();
     ev.setSubject(Map.of("x", 1.5));
     byte[] first = writer.computeRowHash(ev, null);
@@ -193,9 +189,6 @@ class AuditLogChainWriterTest {
         .as("safe-range float canonicalization must be deterministic")
         .isEqualTo(AuditLogChainWriter.hex(second));
 
-    // Anchor the canonical bytes for near-lower-bound and near-upper-bound values. If Java's
-    // Double.toString output ever drifts from these forms for these values, the test fails loudly
-    // and the bounds need re-deriving.
     byte[] nearLow = writer.canonicalSubjectBytes(Map.of("x", 0.0015));
     assertThat(new String(nearLow, StandardCharsets.UTF_8))
         .as("0.0015 must canonicalize as ECMA-262 decimal form")
@@ -209,9 +202,8 @@ class AuditLogChainWriterTest {
 
   @Test
   void canonicalSubjectRendersNegativeZeroAsZero() {
-    // Plan #118 nit: ECMA-262 ToString(-0) is "0" but Double.toString(-0.0) is "-0.0". The
-    // canonical encoder must emit "0" to stay ECMA-262 conformant. The endsWith(".0") strip
-    // alone would have produced "-0", still divergent — the dedicated zero guard fires first.
+    // Anchors that the dedicated zero guard fires before the endsWith(".0") strip — the strip
+    // alone would have produced "-0", still divergent from ECMA-262.
     byte[] out = writer.canonicalSubjectBytes(Map.of("x", -0.0));
     assertThat(new String(out, StandardCharsets.UTF_8))
         .as("-0.0 must canonicalize as ECMA-262 \"0\"")
