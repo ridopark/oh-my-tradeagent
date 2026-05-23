@@ -160,6 +160,7 @@ public final class AuditEventKinds {
           "ReconciliationCompleted",
           "JournalOrphan",
           "BrokerOrphan",
+          "PositionOrphan",
           "ReconciliationMetricsRecordFailed",
           // LivePromotionActivitiesImpl
           "LivePromotionApproved",
