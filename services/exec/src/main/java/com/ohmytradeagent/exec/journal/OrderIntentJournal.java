@@ -31,6 +31,14 @@ public interface OrderIntentJournal {
   Optional<JournaledOrder> findByBrokerOrderId(String brokerOrderId);
 
   /**
+   * Page through journal rows in state {@code SUBMITTED} whose {@code submitted_at} is older than
+   * the cutoff. Powers the fill-listener polling fallback: rows newer than the cutoff are still in
+   * the WebSocket's hot window and excluded to avoid wasted broker calls. {@code limit} caps the
+   * batch so a single cycle cannot exhaust broker rate budget.
+   */
+  List<JournaledOrder> findSubmittedOlderThan(OffsetDateTime cutoff, int limit);
+
+  /**
    * List non-terminal (RECORDED + SUBMITTED) journal entries scoped to one (tenant, strategy).
    * Powers Phase 5 reconciliation.
    */

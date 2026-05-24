@@ -51,6 +51,11 @@ exec:
     reconnect-base-ms: 1000
     reconnect-cap-ms: 60000
     dedup-cache-size: 1024
+    poll:
+      enabled: ${EXEC_FILL_LISTENER_POLL_ENABLED:false}
+      interval-ms: 30000
+      grace-ms: 60000
+      batch-size: 50
 
 management:
   endpoints:

@@ -30,6 +30,9 @@ public class FillListenerMetrics {
   private final Counter eventsUnknownOrder;
   private final Counter signalWorkflowNotFound;
   private final Counter signalErrors;
+  private final Counter pollCycles;
+  private final Counter pollRowsScanned;
+  private final Counter pollFillsDetected;
 
   public FillListenerMetrics(MeterRegistry registry) {
     this(registry, Clock.systemUTC());
@@ -70,6 +73,19 @@ public class FillListenerMetrics {
     this.signalErrors =
         Counter.builder("fill_listener.signal_errors")
             .description("Non-NOT_FOUND Temporal failures while sending the onFill signal.")
+            .register(registry);
+    this.pollCycles =
+        Counter.builder("fill_listener.poll_cycles")
+            .description("Polling fallback cycles completed.")
+            .register(registry);
+    this.pollRowsScanned =
+        Counter.builder("fill_listener.poll_rows_scanned")
+            .description("SUBMITTED rows examined by the polling fallback (sum across cycles).")
+            .register(registry);
+    this.pollFillsDetected =
+        Counter.builder("fill_listener.poll_fills_detected")
+            .description(
+                "Polled rows the broker reported as FILLED (routed through FillDispatcher).")
             .register(registry);
     Gauge.builder(
             "fill_listener.last_event_age_seconds",
@@ -115,6 +131,18 @@ public class FillListenerMetrics {
 
   public void recordSignalError() {
     signalErrors.increment();
+  }
+
+  public void recordPollCycle() {
+    pollCycles.increment();
+  }
+
+  public void recordPollRowsScanned(long n) {
+    pollRowsScanned.increment(n);
+  }
+
+  public void recordPollFillDetected() {
+    pollFillsDetected.increment();
   }
 
   public void markEvent() {

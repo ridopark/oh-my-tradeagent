@@ -83,6 +83,18 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public List<JournaledOrder> findSubmittedOlderThan(OffsetDateTime cutoff, int limit) {
+    Result<?> rows =
+        dsl.selectFrom(TABLE)
+            .where(field("state", String.class).eq(OrderState.SUBMITTED.name()))
+            .and(field("submitted_at", OffsetDateTime.class).lt(cutoff))
+            .orderBy(field("submitted_at", OffsetDateTime.class).asc())
+            .limit(limit)
+            .fetch();
+    return rows.stream().map(JooqOrderIntentJournal::mapRow).toList();
+  }
+
+  @Override
   public List<JournaledOrder> listOpenByTenantStrategy(String tenantId, String strategyId) {
     Result<?> rows =
         dsl.selectFrom(TABLE)

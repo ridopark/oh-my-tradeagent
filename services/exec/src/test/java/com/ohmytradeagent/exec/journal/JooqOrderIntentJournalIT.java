@@ -241,6 +241,58 @@ class JooqOrderIntentJournalIT {
   }
 
   @Test
+  void findSubmittedOlderThan_returnsOnlyOldSubmittedRows() {
+    OffsetDateTime now = OffsetDateTime.parse("2026-05-23T20:00:00Z");
+    OffsetDateTime old = now.minusMinutes(5);
+    OffsetDateTime recent = now.minusSeconds(5);
+
+    OrderIntent oldIntent = intent("old-intent");
+    oldIntent.setRecordedAt(old);
+    journal.upsertIntent(oldIntent);
+    journal.markSubmittedIfRecorded("old-intent", "brk-old");
+    dsl.update(table("order_intent_journal"))
+        .set(org.jooq.impl.DSL.field("submitted_at"), old)
+        .where(org.jooq.impl.DSL.field("intent_key").eq("old-intent"))
+        .execute();
+
+    OrderIntent recentIntent = intent("recent-intent");
+    recentIntent.setRecordedAt(recent);
+    journal.upsertIntent(recentIntent);
+    journal.markSubmittedIfRecorded("recent-intent", "brk-recent");
+    dsl.update(table("order_intent_journal"))
+        .set(org.jooq.impl.DSL.field("submitted_at"), recent)
+        .where(org.jooq.impl.DSL.field("intent_key").eq("recent-intent"))
+        .execute();
+
+    var rows = journal.findSubmittedOlderThan(now.minusMinutes(1), 10);
+    assertThat(rows).extracting(JournaledOrder::intentKey).containsExactly("old-intent");
+  }
+
+  @Test
+  void findSubmittedOlderThan_respectsLimit() {
+    OffsetDateTime old = OffsetDateTime.parse("2026-05-23T19:00:00Z");
+    for (int i = 0; i < 5; i++) {
+      String key = "intent-" + i;
+      journal.upsertIntent(intent(key));
+      journal.markSubmittedIfRecorded(key, "brk-" + i);
+      dsl.update(table("order_intent_journal"))
+          .set(org.jooq.impl.DSL.field("submitted_at"), old.plusSeconds(i))
+          .where(org.jooq.impl.DSL.field("intent_key").eq(key))
+          .execute();
+    }
+    var rows = journal.findSubmittedOlderThan(OffsetDateTime.parse("2026-05-23T20:00:00Z"), 3);
+    assertThat(rows).hasSize(3);
+  }
+
+  @Test
+  void findSubmittedOlderThan_excludesRecorded() {
+    journal.upsertIntent(intent("intent-A"));
+
+    var rows = journal.findSubmittedOlderThan(OffsetDateTime.parse("2030-01-01T00:00:00Z"), 10);
+    assertThat(rows).isEmpty();
+  }
+
+  @Test
   void findByBrokerOrderId_returnsEmpty_forRecordedRow() {
     // RECORDED rows have no broker_order_id yet; the partial index excludes them and the lookup
     // returns empty rather than matching on NULL.

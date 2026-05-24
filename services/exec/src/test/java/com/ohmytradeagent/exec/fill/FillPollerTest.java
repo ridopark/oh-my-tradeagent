@@ -1,0 +1,180 @@
+package com.ohmytradeagent.exec.fill;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+import com.ohmytradeagent.exec.broker.BrokerFillDetail;
+import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
+import com.ohmytradeagent.exec.broker.OptionsBroker;
+import com.ohmytradeagent.exec.journal.JournaledOrder;
+import com.ohmytradeagent.exec.journal.OrderIntentJournal;
+import com.ohmytradeagent.exec.journal.OrderState;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+
+/**
+ * Pins the polling fallback contract: scan SUBMITTED rows older than the grace window, ask the
+ * broker, route any FILLED row through the shared {@link FillDispatcher} with {@link
+ * BrokerFillEvent.Source#POLL}, and respect the batch cap.
+ */
+class FillPollerTest {
+
+  private static final Instant NOW = Instant.parse("2026-05-23T20:00:00Z");
+  private static final Clock FIXED_CLOCK = Clock.fixed(NOW, ZoneOffset.UTC);
+
+  private OrderIntentJournal journal;
+  private OptionsBroker broker;
+  private FillDispatcher dispatcher;
+  private SimpleMeterRegistry registry;
+  private FillListenerMetrics metrics;
+  private FillPoller poller;
+  private FillPollerProperties props;
+
+  @BeforeEach
+  void setUp() {
+    journal = mock(OrderIntentJournal.class);
+    broker = mock(OptionsBroker.class);
+    dispatcher = mock(FillDispatcher.class);
+    registry = new SimpleMeterRegistry();
+    metrics = new FillListenerMetrics(registry);
+    props = new FillPollerProperties(true, 30_000L, 60_000L, 50);
+    poller = new FillPoller(journal, broker, dispatcher, metrics, props, FIXED_CLOCK);
+  }
+
+  @Test
+  void runOnce_filledRow_dispatchesWithPollSource() {
+    JournaledOrder row = row("ck-1", "brk-1");
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(row));
+    when(broker.getOrderStatus("brk-1")).thenReturn(BrokerOrderStatus.FILLED);
+    when(broker.getFillDetail("brk-1"))
+        .thenReturn(
+            new BrokerFillDetail(
+                7L, new BigDecimal("1.45"), OffsetDateTime.parse("2026-05-23T19:58:00Z")));
+
+    poller.runOnce();
+
+    ArgumentCaptor<BrokerFillEvent> captor = ArgumentCaptor.forClass(BrokerFillEvent.class);
+    verify(dispatcher).dispatch(captor.capture());
+
+    BrokerFillEvent dispatched = captor.getValue();
+    assertThat(dispatched.brokerOrderId()).isEqualTo("brk-1");
+    assertThat(dispatched.clientOrderId()).isEqualTo("ck-1");
+    assertThat(dispatched.filledQty()).isEqualTo(7L);
+    assertThat(dispatched.avgFillPrice()).isEqualByComparingTo(new BigDecimal("1.45"));
+    assertThat(dispatched.filledAt()).isEqualTo(OffsetDateTime.parse("2026-05-23T19:58:00Z"));
+    assertThat(dispatched.source()).isEqualTo(BrokerFillEvent.Source.POLL);
+
+    assertThat(registry.counter("fill_listener.poll_cycles").count()).isEqualTo(1.0);
+    assertThat(registry.counter("fill_listener.poll_rows_scanned").count()).isEqualTo(1.0);
+    assertThat(registry.counter("fill_listener.poll_fills_detected").count()).isEqualTo(1.0);
+  }
+
+  @Test
+  void runOnce_stillOpen_doesNotDispatch() {
+    JournaledOrder row = row("ck-2", "brk-2");
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(row));
+    when(broker.getOrderStatus("brk-2")).thenReturn(BrokerOrderStatus.OPEN);
+
+    poller.runOnce();
+
+    verify(dispatcher, never()).dispatch(any());
+    verify(broker, never()).getFillDetail(any());
+    assertThat(registry.counter("fill_listener.poll_rows_scanned").count()).isEqualTo(1.0);
+    assertThat(registry.counter("fill_listener.poll_fills_detected").count()).isEqualTo(0.0);
+  }
+
+  @Test
+  void runOnce_emptyJournal_makesNoBrokerCalls() {
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of());
+
+    poller.runOnce();
+
+    verifyNoInteractions(broker);
+    verify(dispatcher, never()).dispatch(any());
+    assertThat(registry.counter("fill_listener.poll_cycles").count()).isEqualTo(1.0);
+    assertThat(registry.counter("fill_listener.poll_rows_scanned").count()).isEqualTo(0.0);
+  }
+
+  @Test
+  void runOnce_passesCutoffMinusGraceToJournal() {
+    when(journal.findSubmittedOlderThan(any(), anyInt())).thenReturn(List.of());
+
+    poller.runOnce();
+
+    ArgumentCaptor<OffsetDateTime> cutoff = ArgumentCaptor.forClass(OffsetDateTime.class);
+    verify(journal).findSubmittedOlderThan(cutoff.capture(), eq(50));
+    OffsetDateTime expected = OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC).minusSeconds(60);
+    assertThat(cutoff.getValue()).isEqualTo(expected);
+  }
+
+  @Test
+  void runOnce_respectsBatchSize() {
+    FillPollerProperties tinyBatch = new FillPollerProperties(true, 30_000L, 60_000L, 3);
+    poller = new FillPoller(journal, broker, dispatcher, metrics, tinyBatch, FIXED_CLOCK);
+    when(journal.findSubmittedOlderThan(any(), eq(3))).thenReturn(List.of());
+
+    poller.runOnce();
+
+    verify(journal).findSubmittedOlderThan(any(), eq(3));
+  }
+
+  @Test
+  void runOnce_mixedBatch_onlyFilledRowsDispatched() {
+    JournaledOrder a = row("ck-a", "brk-a");
+    JournaledOrder b = row("ck-b", "brk-b");
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(a, b));
+    when(broker.getOrderStatus("brk-a")).thenReturn(BrokerOrderStatus.OPEN);
+    when(broker.getOrderStatus("brk-b")).thenReturn(BrokerOrderStatus.FILLED);
+    when(broker.getFillDetail("brk-b"))
+        .thenReturn(
+            new BrokerFillDetail(
+                4L, new BigDecimal("0.55"), OffsetDateTime.parse("2026-05-23T19:59:30Z")));
+
+    poller.runOnce();
+
+    verify(dispatcher, times(1)).dispatch(any());
+    assertThat(registry.counter("fill_listener.poll_rows_scanned").count()).isEqualTo(2.0);
+    assertThat(registry.counter("fill_listener.poll_fills_detected").count()).isEqualTo(1.0);
+  }
+
+  private JournaledOrder row(String intentKey, String brokerOrderId) {
+    return new JournaledOrder(
+        intentKey,
+        "sig-" + intentKey,
+        "dev",
+        "copytrade-v1",
+        "alpaca-paper",
+        intentKey,
+        "SPY   260519C00737000",
+        "BUY",
+        5L,
+        new BigDecimal("0.84"),
+        OrderState.SUBMITTED,
+        brokerOrderId,
+        OffsetDateTime.parse("2026-05-23T19:00:00Z"),
+        OffsetDateTime.parse("2026-05-23T19:00:01Z"),
+        OffsetDateTime.parse("2026-05-23T19:00:01Z"),
+        null,
+        null,
+        null,
+        null,
+        null,
+        1L);
+  }
+}
