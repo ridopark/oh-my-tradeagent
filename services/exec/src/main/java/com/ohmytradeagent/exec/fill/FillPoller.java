@@ -11,6 +11,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -41,6 +42,7 @@ public class FillPoller {
   private final FillPollerProperties props;
   private final Clock clock;
 
+  @Autowired
   public FillPoller(
       OrderIntentJournal journal,
       OptionsBroker broker,

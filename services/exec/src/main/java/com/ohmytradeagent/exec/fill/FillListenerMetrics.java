@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
@@ -35,6 +36,7 @@ public class FillListenerMetrics {
   private final Counter pollFillsDetected;
   private final Counter pollScanFailures;
 
+  @Autowired
   public FillListenerMetrics(MeterRegistry registry) {
     this(registry, Clock.systemUTC());
   }
