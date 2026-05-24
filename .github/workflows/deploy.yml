@@ -153,6 +153,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
+      - name: Checkout repo (for infra/k8s manifests)
+        uses: actions/checkout@v4
+
       - name: Write deploy kubeconfig
         env:
           KUBECONFIG_DEPLOY: ${{ secrets.KUBECONFIG_DEPLOY }}
@@ -162,7 +165,33 @@ jobs:
           chmod 600 "$RUNNER_TEMP/.kube/config"
           echo "KUBECONFIG=$RUNNER_TEMP/.kube/config" >> "$GITHUB_ENV"
 
+      - name: Apply manifest for ${{ matrix.service }}
+        # Picks up env-var / resource / image-tag changes from git.
+        # Prior to this step, deploy.yml only ran `kubectl rollout restart`,
+        # which preserves whatever spec is live in etcd — so manifest edits
+        # never reached the cluster without a manual `kubectl apply`.
+        # See post-incident notes from the fill-listener launch.
+        #
+        # Each service has exactly one manifest under infra/k8s/ named
+        # `NN-<service>.yaml` (51-orchestrator.yaml, 52-exec-alpaca-paper.yaml,
+        # 53-market-data.yaml, 54-api-gateway.yaml, 55-signal-source-discord.yaml).
+        # The glob below fails if there's not exactly one match — adding a
+        # second matching manifest is a config error worth surfacing here.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          matches=(infra/k8s/*-${{ matrix.service }}.yaml)
+          if [ "${#matches[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one infra/k8s/*-${{ matrix.service }}.yaml; found ${#matches[@]}: ${matches[*]:-<none>}"
+            exit 1
+          fi
+          kubectl -n "$NAMESPACE" apply -f "${matches[0]}"
+
       - name: Rollout restart deployment/${{ matrix.service }}
+        # Still needed even after `apply`: when the manifest hasn't changed
+        # but a new `:latest` image was pushed, this forces a pod restart so
+        # `imagePullPolicy: Always` actually re-pulls (the policy only fires
+        # on pod creation, not on existing pods).
         run: |
           kubectl -n "$NAMESPACE" rollout restart deployment/${{ matrix.service }}
 
