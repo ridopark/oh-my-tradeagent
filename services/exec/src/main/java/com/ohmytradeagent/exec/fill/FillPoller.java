@@ -6,8 +6,8 @@ import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -74,15 +74,13 @@ public class FillPoller {
 
   /** Visible for testing — exercises one polling cycle without the scheduler. */
   void runOnce() {
-    OffsetDateTime cutoff =
-        OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)
-            .minusNanos(props.graceMs() * 1_000_000L);
+    OffsetDateTime cutoff = OffsetDateTime.now(clock).minus(Duration.ofMillis(props.graceMs()));
     List<JournaledOrder> rows;
     try {
       rows = journal.findSubmittedOlderThan(cutoff, props.batchSize());
     } catch (RuntimeException e) {
       log.warn("fill-poller journal scan failed: {}", e.toString());
-      metrics.recordPollCycle();
+      metrics.recordPollScanFailure();
       return;
     }
     metrics.recordPollCycle();
@@ -93,9 +91,9 @@ public class FillPoller {
   }
 
   private void checkRow(JournaledOrder row) {
-    if (row.brokerOrderId() == null) {
-      return;
-    }
+    // markSubmittedIfRecorded atomically sets state=SUBMITTED + broker_order_id, so a row matching
+    // state='SUBMITTED' always carries a non-null broker_order_id. Defensive checks here would mask
+    // an invariant break.
     BrokerOrderStatus status;
     try {
       status = broker.getOrderStatus(row.brokerOrderId());

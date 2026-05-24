@@ -33,6 +33,7 @@ public class FillListenerMetrics {
   private final Counter pollCycles;
   private final Counter pollRowsScanned;
   private final Counter pollFillsDetected;
+  private final Counter pollScanFailures;
 
   public FillListenerMetrics(MeterRegistry registry) {
     this(registry, Clock.systemUTC());
@@ -86,6 +87,12 @@ public class FillListenerMetrics {
         Counter.builder("fill_listener.poll_fills_detected")
             .description(
                 "Polled rows the broker reported as FILLED (routed through FillDispatcher).")
+            .register(registry);
+    this.pollScanFailures =
+        Counter.builder("fill_listener.poll_scan_failures")
+            .description(
+                "Polling cycles where the journal scan threw — distinguishes broken DB from empty"
+                    + " journal in Grafana.")
             .register(registry);
     Gauge.builder(
             "fill_listener.last_event_age_seconds",
@@ -143,6 +150,10 @@ public class FillListenerMetrics {
 
   public void recordPollFillDetected() {
     pollFillsDetected.increment();
+  }
+
+  public void recordPollScanFailure() {
+    pollScanFailures.increment();
   }
 
   public void markEvent() {
