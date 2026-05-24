@@ -84,7 +84,7 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
 
   @Override
   public List<JournaledOrder> findSubmittedOlderThan(OffsetDateTime cutoff, int limit) {
-    // Backed by V5 partial index (submitted_at) WHERE state='SUBMITTED'; the leaf order matches
+    // Backed by V4 partial index (submitted_at) WHERE state='SUBMITTED'; the leaf order matches
     // ORDER BY submitted_at ASC so this is an index-range scan with no sort.
     Result<?> rows =
         dsl.selectFrom(TABLE)

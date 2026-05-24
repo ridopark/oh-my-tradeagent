@@ -24,9 +24,9 @@ public interface OrderIntentJournal {
 
   /**
    * Resolve a row by its broker-issued order ID. Used by the fill listener to map an inbound trade
-   * update back to the originating intent / workflow. Backed by the V4 partial index on {@code
-   * broker_order_id WHERE broker_order_id IS NOT NULL}; returns empty for unknown / never-placed
-   * IDs.
+   * update back to the originating intent / workflow. Backed by the V1 partial index {@code
+   * order_intent_journal_broker_order_id_idx (broker_order_id) WHERE broker_order_id IS NOT NULL};
+   * returns empty for unknown / never-placed IDs.
    */
   Optional<JournaledOrder> findByBrokerOrderId(String brokerOrderId);
 
