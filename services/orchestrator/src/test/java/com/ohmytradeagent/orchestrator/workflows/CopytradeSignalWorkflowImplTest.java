@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -283,6 +284,52 @@ class CopytradeSignalWorkflowImplTest {
     assertThat(
             eventsAfterStc.getAllValues().stream().anyMatch(e -> "OrphanSTC".equals(e.getKind())))
         .isFalse();
+  }
+
+  @Test
+  void onFill_signaledTwice_spawnsPositionWorkflowExactlyOnce() throws Exception {
+    // Phase 4 of the fill-listener plan pins the at-least-once safety claim: the WS listener and
+    // polling fallback may both signal onFill for the same broker fill. The workflow must absorb
+    // the duplicate without spawning a second PositionWorkflow.
+    setupApprovedMocks();
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-1"));
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("idem-bto-1")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+
+    // Wait until the workflow has placed the order and is sitting at the await — so the first
+    // signal lands while still awaiting, and the second arrives after the await wakes. Covers
+    // both legs of the idempotency claim in one shot.
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, atLeastOnce()).placeOrder(any());
+        break;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+
+    FillEvent fill =
+        new FillEvent(
+            "brk-1", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-24T17:00:00Z"));
+    wf.onFill(fill);
+    wf.onFill(fill);
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    // cachePositionMapping is startPositionWorkflow's last side-effect, so exactly-one invocation
+    // proves exactly-one PositionWorkflow start.
+    verify(positionLookup, times(1))
+        .cachePositionMapping(
+            eq("dev"), eq("copytrade-v1"), eq("NVDA  260516C00140000"), anyString());
   }
 
   @Test

@@ -225,6 +225,94 @@ class JooqOrderIntentJournalIT {
     assertThat(journal.findLatestFilledByOcc("other-tenant", "copytrade-v1", occ)).isPresent();
   }
 
+  @Test
+  void findByBrokerOrderId_returnsRowAfterSubmit() {
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "brk-A");
+
+    JournaledOrder row = journal.findByBrokerOrderId("brk-A").orElseThrow();
+    assertThat(row.intentKey()).isEqualTo("intent-A");
+    assertThat(row.brokerOrderId()).isEqualTo("brk-A");
+  }
+
+  @Test
+  void findByBrokerOrderId_returnsEmpty_whenAbsent() {
+    assertThat(journal.findByBrokerOrderId("never-existed")).isEmpty();
+  }
+
+  @Test
+  void findSubmittedOlderThan_returnsOnlyOldSubmittedRows() {
+    OffsetDateTime now = OffsetDateTime.parse("2026-05-23T20:00:00Z");
+    OffsetDateTime old = now.minusMinutes(5);
+    OffsetDateTime recent = now.minusSeconds(5);
+
+    OrderIntent oldIntent = intent("old-intent");
+    oldIntent.setRecordedAt(old);
+    journal.upsertIntent(oldIntent);
+    journal.markSubmittedIfRecorded("old-intent", "brk-old");
+    dsl.update(table("order_intent_journal"))
+        .set(org.jooq.impl.DSL.field("submitted_at"), old)
+        .where(org.jooq.impl.DSL.field("intent_key").eq("old-intent"))
+        .execute();
+
+    OrderIntent recentIntent = intent("recent-intent");
+    recentIntent.setRecordedAt(recent);
+    journal.upsertIntent(recentIntent);
+    journal.markSubmittedIfRecorded("recent-intent", "brk-recent");
+    dsl.update(table("order_intent_journal"))
+        .set(org.jooq.impl.DSL.field("submitted_at"), recent)
+        .where(org.jooq.impl.DSL.field("intent_key").eq("recent-intent"))
+        .execute();
+
+    var rows = journal.findSubmittedOlderThan(now.minusMinutes(1), 10);
+    assertThat(rows).extracting(JournaledOrder::intentKey).containsExactly("old-intent");
+  }
+
+  @Test
+  void findSubmittedOlderThan_respectsLimit() {
+    OffsetDateTime old = OffsetDateTime.parse("2026-05-23T19:00:00Z");
+    for (int i = 0; i < 5; i++) {
+      String key = "intent-" + i;
+      journal.upsertIntent(intent(key));
+      journal.markSubmittedIfRecorded(key, "brk-" + i);
+      dsl.update(table("order_intent_journal"))
+          .set(org.jooq.impl.DSL.field("submitted_at"), old.plusSeconds(i))
+          .where(org.jooq.impl.DSL.field("intent_key").eq(key))
+          .execute();
+    }
+    var rows = journal.findSubmittedOlderThan(OffsetDateTime.parse("2026-05-23T20:00:00Z"), 3);
+    assertThat(rows).hasSize(3);
+  }
+
+  @Test
+  void findSubmittedOlderThan_excludesNonSubmittedStates() {
+    // RECORDED — never reached SUBMITTED yet.
+    journal.upsertIntent(intent("intent-recorded"));
+
+    // FILLED — the only "exit" state that records fill detail; ensure it's excluded.
+    journal.upsertIntent(intent("intent-filled"));
+    journal.markSubmittedIfRecorded("intent-filled", "brk-filled");
+    journal.markFilled(
+        "intent-filled", 1L, new BigDecimal("1.00"), OffsetDateTime.parse("2026-05-24T00:00:00Z"));
+
+    // CANCELLED — terminal cancel from the broker.
+    journal.upsertIntent(intent("intent-cancelled"));
+    journal.markSubmittedIfRecorded("intent-cancelled", "brk-cancelled");
+    journal.markCancelled("intent-cancelled");
+
+    var rows = journal.findSubmittedOlderThan(OffsetDateTime.parse("2030-01-01T00:00:00Z"), 10);
+    assertThat(rows).isEmpty();
+  }
+
+  @Test
+  void findByBrokerOrderId_returnsEmpty_forRecordedRow() {
+    // RECORDED rows have no broker_order_id yet; the partial index excludes them and the lookup
+    // returns empty rather than matching on NULL.
+    journal.upsertIntent(intent("intent-A"));
+
+    assertThat(journal.findByBrokerOrderId("anything")).isEmpty();
+  }
+
   private OrderIntent intent(String key) {
     OrderIntent i = new OrderIntent();
     i.setSchemaVersion(1L);

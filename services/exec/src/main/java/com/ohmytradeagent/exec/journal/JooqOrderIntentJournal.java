@@ -74,6 +74,29 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public Optional<JournaledOrder> findByBrokerOrderId(String brokerOrderId) {
+    Record row =
+        dsl.selectFrom(TABLE)
+            .where(field("broker_order_id", String.class).eq(brokerOrderId))
+            .fetchOne();
+    return row == null ? Optional.empty() : Optional.of(mapRow(row));
+  }
+
+  @Override
+  public List<JournaledOrder> findSubmittedOlderThan(OffsetDateTime cutoff, int limit) {
+    // Backed by V4 partial index (submitted_at) WHERE state='SUBMITTED'; the leaf order matches
+    // ORDER BY submitted_at ASC so this is an index-range scan with no sort.
+    Result<?> rows =
+        dsl.selectFrom(TABLE)
+            .where(field("state", String.class).eq(OrderState.SUBMITTED.name()))
+            .and(field("submitted_at", OffsetDateTime.class).lt(cutoff))
+            .orderBy(field("submitted_at", OffsetDateTime.class).asc())
+            .limit(limit)
+            .fetch();
+    return rows.stream().map(JooqOrderIntentJournal::mapRow).toList();
+  }
+
+  @Override
   public List<JournaledOrder> listOpenByTenantStrategy(String tenantId, String strategyId) {
     Result<?> rows =
         dsl.selectFrom(TABLE)

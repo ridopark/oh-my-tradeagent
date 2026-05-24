@@ -23,6 +23,22 @@ public interface OrderIntentJournal {
   Optional<JournaledOrder> findByIntentKey(String intentKey);
 
   /**
+   * Resolve a row by its broker-issued order ID. Used by the fill listener to map an inbound trade
+   * update back to the originating intent / workflow. Backed by the V1 partial index {@code
+   * order_intent_journal_broker_order_id_idx (broker_order_id) WHERE broker_order_id IS NOT NULL};
+   * returns empty for unknown / never-placed IDs.
+   */
+  Optional<JournaledOrder> findByBrokerOrderId(String brokerOrderId);
+
+  /**
+   * Page through journal rows in state {@code SUBMITTED} whose {@code submitted_at} is older than
+   * the cutoff. Powers the fill-listener polling fallback: rows newer than the cutoff are still in
+   * the WebSocket's hot window and excluded to avoid wasted broker calls. {@code limit} caps the
+   * batch so a single cycle cannot exhaust broker rate budget.
+   */
+  List<JournaledOrder> findSubmittedOlderThan(OffsetDateTime cutoff, int limit);
+
+  /**
    * List non-terminal (RECORDED + SUBMITTED) journal entries scoped to one (tenant, strategy).
    * Powers Phase 5 reconciliation.
    */

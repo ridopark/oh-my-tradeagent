@@ -37,6 +37,15 @@ public final class WorkflowIds {
   }
 
   /**
+   * Workflow ID of the {@code CopytradeSignalWorkflow} for a given signal. The Python emitter
+   * builds the same shape in {@code services/signal-source-discord/.../emitter.py:workflow_id_for}
+   * — keep the two in lockstep (cross-language constant sharing is a separate cleanup).
+   */
+  public static String copytradeSignal(String tenantId, String strategyId, String signalId) {
+    return tenantStrategy(tenantId, strategyId) + "/sig/" + signalId;
+  }
+
+  /**
    * Escape a value before interpolating it into a Temporal Visibility query. Visibility query
    * grammar uses single-quoted strings; a single-quote inside a value would break the query (or, in
    * a hostile setting, allow query injection). Doubles every quote per ANSI-SQL convention.

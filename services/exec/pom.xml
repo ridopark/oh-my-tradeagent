@@ -109,6 +109,15 @@
       <artifactId>mockwebserver</artifactId>
       <scope>test</scope>
     </dependency>
+
+    <!-- In-process WS server for AlpacaTradeUpdatesStreamTest: Java-WebSocket has
+         zero transitive deps and stays out of the prod classpath. -->
+    <dependency>
+      <groupId>org.java-websocket</groupId>
+      <artifactId>Java-WebSocket</artifactId>
+      <version>1.5.7</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
