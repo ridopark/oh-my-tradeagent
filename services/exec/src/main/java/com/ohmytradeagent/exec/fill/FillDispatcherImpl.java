@@ -26,7 +26,9 @@ import org.springframework.stereotype.Component;
  *       FillSignalPayload} JSON into the orchestrator's own {@code FillEvent} record.
  * </ol>
  *
- * <p>Replaces {@link NoopFillDispatcher} via Spring's {@code @ConditionalOnMissingBean} chain.
+ * <p>Registered as the active {@link FillDispatcher} bean; {@link NoopFillDispatcher} falls back
+ * via {@code @ConditionalOnMissingBean} only in contexts where this bean is excluded
+ * (transport-only smoke tests, etc).
  *
  * <p>At-least-once contract: the workflow's {@code onFill} handler MUST tolerate replays. A second
  * fill arriving after the workflow has already moved on is benign (the field is overwritten and
@@ -69,8 +71,8 @@ public class FillDispatcherImpl implements FillDispatcher {
     WorkflowStub stub = workflowClient.newUntypedWorkflowStub(workflowId);
     try {
       stub.signal(SIGNAL_NAME, payload);
-      log.info(
-          "fill-dispatcher signalled workflow_id={} broker_order_id={} qty={}",
+      log.debug(
+          "fill-dispatcher signal accepted workflow_id={} broker_order_id={} qty={}",
           workflowId,
           event.brokerOrderId(),
           event.filledQty());
