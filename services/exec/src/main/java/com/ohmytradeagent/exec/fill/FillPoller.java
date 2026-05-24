@@ -67,12 +67,14 @@ public class FillPoller {
     this.clock = clock;
   }
 
-  // SpEL reference into the bound properties bean so @Scheduled and the validated record share a
-  // single source of truth — the raw ${exec.fill-listener.poll.interval-ms} placeholder was being
-  // read twice (once by Spring binder, once by the annotation) without any link between the two.
+  // The @Scheduled annotation reads the env placeholder directly; the bound FillPollerProperties
+  // record reads the same placeholder via Spring Binder and rejects invalid values at construction
+  // time, so they share the underlying source even though the annotation can't reference the bean
+  // (SpEL `#{@fillPollerProperties...}` fails — @ConfigurationProperties records register under a
+  // `<prefix>-<fqcn>` bean name, not the camelCased simple-class name).
   @Scheduled(
-      fixedDelayString = "#{@fillPollerProperties.intervalMs}",
-      initialDelayString = "#{@fillPollerProperties.intervalMs}")
+      fixedDelayString = "${exec.fill-listener.poll.interval-ms:30000}",
+      initialDelayString = "${exec.fill-listener.poll.interval-ms:30000}")
   public void poll() {
     runOnce();
   }
