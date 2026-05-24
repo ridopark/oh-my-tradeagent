@@ -9,6 +9,8 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -18,6 +20,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import org.assertj.core.api.Assertions;
 import org.java_websocket.WebSocket;
+import org.java_websocket.enums.Opcode;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
 import org.junit.jupiter.api.AfterEach;
@@ -165,6 +168,98 @@ class AlpacaTradeUpdatesStreamTest {
     assertThat(registry.find("fill_listener.last_event_age_seconds").gauge()).isNotNull();
   }
 
+  @Test
+  void malformedJsonIsSwallowed() throws Exception {
+    stream.start();
+    awaitHandshake();
+
+    server.broadcast("not json at all {{{");
+    server.broadcast(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-ok\",\"client_order_id\":\"ck-ok\","
+            + "\"filled_qty\":\"1\",\"filled_avg_price\":\"2.00\","
+            + "\"filled_at\":\"2026-05-19T19:00:00Z\"}}}");
+
+    BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(fill).isNotNull();
+    assertThat(fill.brokerOrderId()).isEqualTo("brk-ok");
+  }
+
+  @Test
+  void multiFrameTextIsReassembled() throws Exception {
+    stream.start();
+    awaitHandshake();
+
+    String payload =
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-mf\",\"client_order_id\":\"ck-mf\","
+            + "\"filled_qty\":\"2\",\"filled_avg_price\":\"3.30\","
+            + "\"filled_at\":\"2026-05-19T20:00:00Z\"}}}";
+    int mid = payload.length() / 2;
+    server.sendFragmented(payload.substring(0, mid), payload.substring(mid));
+
+    BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(fill).isNotNull();
+    assertThat(fill.brokerOrderId()).isEqualTo("brk-mf");
+    assertThat(fill.filledQty()).isEqualTo(2L);
+  }
+
+  @Test
+  void missingRequiredFieldIsSkipped() throws Exception {
+    stream.start();
+    awaitHandshake();
+
+    server.broadcast(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-mf2\",\"client_order_id\":\"ck-mf2\","
+            + "\"filled_qty\":\"5\",\"filled_at\":\"2026-05-19T21:00:00Z\"}}}");
+
+    BrokerFillEvent never = dispatcher.events.poll(500, TimeUnit.MILLISECONDS);
+    assertThat(never).isNull();
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(0.0);
+  }
+
+  @Test
+  void dispatcherThrowingDoesNotBreakStream() throws Exception {
+    java.util.concurrent.atomic.AtomicBoolean firstCallThrows =
+        new java.util.concurrent.atomic.AtomicBoolean(true);
+    java.util.concurrent.BlockingQueue<BrokerFillEvent> seen =
+        new java.util.concurrent.LinkedBlockingQueue<>();
+    FillDispatcher throwing =
+        event -> {
+          if (firstCallThrows.getAndSet(false)) {
+            throw new RuntimeException("boom");
+          }
+          seen.add(event);
+        };
+    stream =
+        new AlpacaTradeUpdatesStream(
+            new FillListenerProperties(
+                true, "ws://localhost:" + port + "/stream", 100L, 1_000L, 32),
+            new com.ohmytradeagent.exec.broker.alpaca.AlpacaProperties(
+                "http://unused", "test-key", "test-secret"),
+            throwing,
+            metrics,
+            new ObjectMapper().registerModule(new JavaTimeModule()));
+    stream.start();
+    awaitHandshake();
+
+    server.broadcast(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-boom\",\"client_order_id\":\"ck-boom\","
+            + "\"filled_qty\":\"1\",\"filled_avg_price\":\"0.50\","
+            + "\"filled_at\":\"2026-05-19T22:00:00Z\"}}}");
+    server.broadcast(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-after\",\"client_order_id\":\"ck-after\","
+            + "\"filled_qty\":\"4\",\"filled_avg_price\":\"0.60\","
+            + "\"filled_at\":\"2026-05-19T22:00:01Z\"}}}");
+
+    BrokerFillEvent second = seen.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(second).isNotNull();
+    assertThat(second.brokerOrderId()).isEqualTo("brk-after");
+  }
+
   private void awaitHandshake() throws InterruptedException {
     String auth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
     String listen = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
@@ -232,6 +327,24 @@ class AlpacaTradeUpdatesStreamTest {
       }
       for (WebSocket c : snapshot) {
         c.close();
+      }
+    }
+
+    /**
+     * Sends a text payload split into two WS frames (first fin=false, second fin=true). The
+     * Java-WebSocket API requires both calls to pass the same {@code Opcode.TEXT}; it handles
+     * promoting the second to a continuation frame internally.
+     */
+    void sendFragmented(String first, String second) {
+      List<WebSocket> snapshot;
+      synchronized (clients) {
+        snapshot = new ArrayList<>(clients);
+      }
+      for (WebSocket c : snapshot) {
+        c.sendFragmentedFrame(
+            Opcode.TEXT, ByteBuffer.wrap(first.getBytes(StandardCharsets.UTF_8)), false);
+        c.sendFragmentedFrame(
+            Opcode.TEXT, ByteBuffer.wrap(second.getBytes(StandardCharsets.UTF_8)), true);
       }
     }
   }

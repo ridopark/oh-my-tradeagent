@@ -21,7 +21,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.event.EventListener;
@@ -39,8 +39,13 @@ import org.springframework.stereotype.Component;
  * <p>Lifecycle: starts in a daemon thread on {@link ApplicationReadyEvent} so Temporal worker
  * registration completes first; stops on bean destruction.
  */
+// Gate on BOTH flags so an operator who flips fill-listener on with broker.impl=stub gets a clean
+// "bean disabled, condition not met" startup message instead of a cryptic
+// NoSuchBeanDefinitionException
+// on AlpacaProperties (which AlpacaConfig only registers when broker.impl=alpaca-paper).
 @Component
-@ConditionalOnProperty(name = "exec.fill-listener.enabled", havingValue = "true")
+@ConditionalOnExpression(
+    "'${broker.impl:}' == 'alpaca-paper' and ${exec.fill-listener.enabled:false}")
 @EnableConfigurationProperties(FillListenerProperties.class)
 public class AlpacaTradeUpdatesStream {
 
@@ -172,7 +177,7 @@ public class AlpacaTradeUpdatesStream {
     currentSocket.compareAndSet(ws, null);
   }
 
-  private void sendAuth(WebSocket ws) {
+  private void sendAuth(WebSocket ws) throws InterruptedException {
     Map<String, Object> frame =
         Map.of(
             "action",
@@ -183,13 +188,24 @@ public class AlpacaTradeUpdatesStream {
                 nullToEmpty(alpacaProps.apiKeyId()),
                 "secret_key",
                 nullToEmpty(alpacaProps.apiSecretKey())));
-    ws.sendText(serialize(frame), true).join();
+    sendTextWithTimeout(ws, serialize(frame));
   }
 
-  private void sendListen(WebSocket ws) {
+  private void sendListen(WebSocket ws) throws InterruptedException {
     Map<String, Object> frame =
         Map.of("action", "listen", "data", Map.of("streams", java.util.List.of("trade_updates")));
-    ws.sendText(serialize(frame), true).join();
+    sendTextWithTimeout(ws, serialize(frame));
+  }
+
+  private void sendTextWithTimeout(WebSocket ws, String frame) throws InterruptedException {
+    try {
+      ws.sendText(frame, true)
+          .toCompletableFuture()
+          .get(HANDSHAKE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+    } catch (ExecutionException | TimeoutException e) {
+      Throwable cause = e.getCause() != null ? e.getCause() : e;
+      throw new RuntimeException("ws sendText failed: " + cause, cause);
+    }
   }
 
   private String serialize(Object value) {

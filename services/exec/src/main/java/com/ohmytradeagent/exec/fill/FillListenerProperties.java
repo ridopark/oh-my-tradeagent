@@ -1,5 +1,8 @@
 package com.ohmytradeagent.exec.fill;
 
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.Set;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
@@ -24,6 +27,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record FillListenerProperties(
     boolean enabled, String wsUrl, long reconnectBaseMs, long reconnectCapMs, int dedupCacheSize) {
 
+  private static final Set<String> LOOPBACK_HOSTS = Set.of("localhost", "127.0.0.1", "::1");
+
   public FillListenerProperties {
     if (reconnectBaseMs <= 0L) {
       throw new IllegalArgumentException(
@@ -45,5 +50,38 @@ public record FillListenerProperties(
       throw new IllegalArgumentException(
           "exec.fill-listener.dedup-cache-size must be > 0, got " + dedupCacheSize);
     }
+    if (enabled) {
+      validateWsUrl(wsUrl);
+    }
+  }
+
+  /**
+   * Reject plaintext {@code ws://} for non-loopback hosts. The handshake carries the broker API key
+   * + secret in the first frame; a misconfigured {@code EXEC_FILL_LISTENER_WS_URL=ws://prod...}
+   * would send those credentials in the clear. Only loopback {@code ws://} is allowed so the
+   * in-process test fixture (Java-WebSocket server on localhost) keeps working.
+   */
+  private static void validateWsUrl(String wsUrl) {
+    if (wsUrl == null || wsUrl.isBlank()) {
+      throw new IllegalArgumentException("exec.fill-listener.ws-url is required when enabled=true");
+    }
+    URI uri;
+    try {
+      uri = new URI(wsUrl);
+    } catch (URISyntaxException e) {
+      throw new IllegalArgumentException(
+          "exec.fill-listener.ws-url is not a valid URI: " + wsUrl, e);
+    }
+    String scheme = uri.getScheme();
+    if ("wss".equalsIgnoreCase(scheme)) {
+      return;
+    }
+    if ("ws".equalsIgnoreCase(scheme)
+        && uri.getHost() != null
+        && LOOPBACK_HOSTS.contains(uri.getHost().toLowerCase())) {
+      return;
+    }
+    throw new IllegalArgumentException(
+        "exec.fill-listener.ws-url must use wss:// (or ws:// for a loopback host); got " + wsUrl);
   }
 }
