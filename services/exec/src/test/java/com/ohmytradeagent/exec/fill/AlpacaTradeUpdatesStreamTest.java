@@ -169,6 +169,32 @@ class AlpacaTradeUpdatesStreamTest {
   }
 
   @Test
+  void backoffResetsAfterSuccessfulConnection() throws Exception {
+    // Regression: runForever previously doubled backoff every iteration without ever resetting,
+    // so a long-lived stream that disconnects normally would sleep at reconnectCapMs before
+    // retrying — even though the network is fine. Drive 5 successful close/reconnect cycles and
+    // assert the total elapsed time stays in the "base × N" regime (~500ms with reset) instead
+    // of "geometric series up to cap" (~2500ms without).
+    stream.start();
+    awaitHandshake();
+
+    long start = System.currentTimeMillis();
+    for (int i = 0; i < 5; i++) {
+      server.closeAllClients();
+      String auth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+      String listen = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+      assertThat(auth).as("auth frame for reconnect %d", i + 1).isNotNull();
+      assertThat(listen).as("listen frame for reconnect %d", i + 1).isNotNull();
+    }
+    long elapsed = System.currentTimeMillis() - start;
+
+    assertThat(elapsed)
+        .as("5 reconnect cycles at base=100ms should complete in well under 1500ms with reset")
+        .isLessThan(1500L);
+    assertThat(registry.counter("fill_listener.reconnects").count()).isGreaterThanOrEqualTo(5.0);
+  }
+
+  @Test
   void malformedJsonIsSwallowed() throws Exception {
     stream.start();
     awaitHandshake();

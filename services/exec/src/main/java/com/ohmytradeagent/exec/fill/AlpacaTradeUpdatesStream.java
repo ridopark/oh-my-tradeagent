@@ -138,11 +138,16 @@ public class AlpacaTradeUpdatesStream {
         }
         firstAttempt = false;
         connectAndRun();
+        // Clean return = the WS connected, served traffic, then closed normally.
+        // Reset backoff so the NEXT reconnect doesn't pay for the cap from a
+        // long-lived prior session.
+        backoff = props.reconnectBaseMs();
       } catch (InterruptedException ie) {
         Thread.currentThread().interrupt();
         return;
       } catch (RuntimeException e) {
         log.warn("fill-listener connect/run failed: {}", e.toString());
+        backoff = Math.min(backoff * 2L, props.reconnectCapMs());
       }
       if (stopped) {
         return;
@@ -153,7 +158,6 @@ public class AlpacaTradeUpdatesStream {
         Thread.currentThread().interrupt();
         return;
       }
-      backoff = Math.min(backoff * 2L, props.reconnectCapMs());
     }
   }
 
