@@ -13,6 +13,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.FilterType;
 
 /**
  * Pins the bean-wiring claim that {@link FillDispatcherImpl} wins over {@link NoopFillDispatcher}
@@ -24,7 +25,12 @@ import org.springframework.context.annotation.Configuration;
 class FillDispatcherWiringTest {
 
   @Configuration
-  @ComponentScan(basePackageClasses = FillDispatcherImpl.class)
+  @ComponentScan(
+      basePackageClasses = FillDispatcherImpl.class,
+      // Exclude sibling test-only Config inner classes so two wiring tests in this package don't
+      // crash each other by registering the same dependency beans under different names.
+      excludeFilters =
+          @ComponentScan.Filter(type = FilterType.REGEX, pattern = ".*WiringTest\\$Config"))
   static class Config {
     @Bean
     WorkflowClient workflowClient() {
