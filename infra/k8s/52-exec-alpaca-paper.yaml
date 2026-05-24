@@ -75,6 +75,13 @@ spec:
                   key: POSTGRES_PASSWORD
             - name: BROKER_IMPL
               value: alpaca-paper
+            # Production fill detection: WebSocket trade-updates stream + 30s polling fallback.
+            # See docs/ops/fill-listener.md for the cooperation model, single-pod constraint,
+            # and triage scenarios. Both default OFF in application.yml; this manifest opts in.
+            - name: EXEC_FILL_LISTENER_ENABLED
+              value: "true"
+            - name: EXEC_FILL_LISTENER_POLL_ENABLED
+              value: "true"
           # exec-svc is a Temporal worker only (spring.main.web-application-type=none).
           # No HTTP listener — http-get probes would loop the pod. Worker poll loop is
           # the implicit liveness signal.
