@@ -5,26 +5,25 @@ import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.stereotype.Component;
 
 /**
- * Centralised Micrometer instrumentation for the fill listener. Counters are registered eagerly
- * (zero-valued at startup) so a Prometheus scrape that arrives before the first fill still sees the
- * series — silent-zero is operationally clearer than no-series-at-all when triaging "is the
- * listener up?"
+ * Centralised Micrometer instrumentation for the fill listener. Counters are registered eagerly so
+ * a Prometheus scrape that arrives before the first fill still sees the series — silent-zero is
+ * operationally clearer than no-series-at-all when triaging "is the listener up?".
  *
  * <p>{@code fill_listener.last_event_age_seconds} is a derived gauge over the most-recent event
- * timestamp; the bean exposes {@link #markEvent()} so the listener bumps the clock from its own
- * thread without taking a meter lock.
+ * timestamp; {@link #markEvent()} bumps the clock without taking a meter lock.
  */
 @Component
 public class FillListenerMetrics {
 
   private final Clock clock;
   private final AtomicLong lastEventEpochMs = new AtomicLong(0L);
-  private final Counter eventsReceivedFill;
-  private final Counter eventsReceivedPartial;
+  private final Map<String, Counter> receivedByEvent;
   private final Counter eventsDispatched;
   private final Counter eventsDroppedDedup;
   private final Counter reconnects;
@@ -35,16 +34,16 @@ public class FillListenerMetrics {
 
   FillListenerMetrics(MeterRegistry registry, Clock clock) {
     this.clock = clock;
-    this.eventsReceivedFill =
-        Counter.builder("fill_listener.events_received")
-            .tag("event", "fill")
-            .description("Trade-update events received from the broker stream.")
-            .register(registry);
-    this.eventsReceivedPartial =
-        Counter.builder("fill_listener.events_received")
-            .tag("event", "partial_fill")
-            .description("Trade-update events received from the broker stream.")
-            .register(registry);
+    Map<String, Counter> received = new LinkedHashMap<>();
+    for (String event : new String[] {"fill", "partial_fill"}) {
+      received.put(
+          event,
+          Counter.builder("fill_listener.events_received")
+              .tag("event", event)
+              .description("Trade-update events received from the broker stream.")
+              .register(registry));
+    }
+    this.receivedByEvent = Map.copyOf(received);
     this.eventsDispatched =
         Counter.builder("fill_listener.events_dispatched")
             .description("Events handed to FillDispatcher after filter + dedup.")
@@ -73,10 +72,9 @@ public class FillListenerMetrics {
   }
 
   public void recordReceived(String event) {
-    if ("fill".equals(event)) {
-      eventsReceivedFill.increment();
-    } else if ("partial_fill".equals(event)) {
-      eventsReceivedPartial.increment();
+    Counter counter = receivedByEvent.get(event);
+    if (counter != null) {
+      counter.increment();
     }
   }
 

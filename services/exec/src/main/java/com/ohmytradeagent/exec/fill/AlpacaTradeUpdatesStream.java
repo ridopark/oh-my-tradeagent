@@ -10,12 +10,14 @@ import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.time.Duration;
 import java.time.OffsetDateTime;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,12 +31,10 @@ import org.springframework.stereotype.Component;
  * Long-running Alpaca trade-updates WebSocket listener. Connects to the configured stream URL,
  * sends the {@code authenticate} + {@code listen} handshake frames, parses incoming JSON, filters
  * to {@code fill} / {@code partial_fill}, dedupes on {@code (broker_order_id, filled_qty)}, and
- * hands each surviving event to a {@link FillDispatcher} (Phase 1 ships a {@link
- * NoopFillDispatcher}; Phase 2 swaps in the real journal-lookup + workflow-signal impl).
+ * hands each surviving event to a {@link FillDispatcher}.
  *
  * <p><b>Single-pod constraint.</b> This component is NOT leader-elected. The exec service must
- * deploy with {@code replicas: 1}; multi-pod scaling would multiply dispatch cost by N. Tracking
- * issue for leader-election is a follow-up of the fill-listener plan.
+ * deploy with {@code replicas: 1}; multi-pod scaling would multiply dispatch cost by N.
  *
  * <p>Lifecycle: starts in a daemon thread on {@link ApplicationReadyEvent} so Temporal worker
  * registration completes first; stops on bean destruction.
@@ -46,15 +46,24 @@ public class AlpacaTradeUpdatesStream {
 
   private static final Logger log = LoggerFactory.getLogger(AlpacaTradeUpdatesStream.class);
   private static final Duration HANDSHAKE_TIMEOUT = Duration.ofSeconds(5);
+  private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(5);
+  private static final Duration SHUTDOWN_TIMEOUT = Duration.ofSeconds(2);
+
+  /**
+   * Upper bound on a single accumulated text frame. Alpaca fills are sub-kilobyte; a runaway
+   * continuation frame past this size aborts the socket and lets the reconnect loop recover rather
+   * than letting the listener OOM.
+   */
+  private static final int MAX_FRAME_BYTES = 1 << 20;
 
   private final FillListenerProperties props;
   private final AlpacaProperties alpacaProps;
   private final FillDispatcher dispatcher;
   private final FillListenerMetrics metrics;
   private final ObjectMapper mapper;
+  private final HttpClient http;
 
   private final Map<String, Boolean> dedup;
-  private final StringBuilder partialFrame = new StringBuilder();
   private final AtomicReference<WebSocket> currentSocket = new AtomicReference<>();
 
   private volatile boolean stopped;
@@ -71,14 +80,14 @@ public class AlpacaTradeUpdatesStream {
     this.dispatcher = dispatcher;
     this.metrics = metrics;
     this.mapper = mapper;
+    this.http = HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build();
     this.dedup =
-        Collections.synchronizedMap(
-            new LinkedHashMap<>(props.dedupCacheSize(), 0.75f, true) {
-              @Override
-              protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
-                return size() > props.dedupCacheSize();
-              }
-            });
+        new LinkedHashMap<>(props.dedupCacheSize(), 0.75f, true) {
+          @Override
+          protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+            return size() > props.dedupCacheSize();
+          }
+        };
   }
 
   @EventListener(ApplicationReadyEvent.class)
@@ -96,13 +105,21 @@ public class AlpacaTradeUpdatesStream {
     if (ws != null) {
       try {
         ws.sendClose(WebSocket.NORMAL_CLOSURE, "shutdown")
-            .orTimeout(2, java.util.concurrent.TimeUnit.SECONDS);
-      } catch (RuntimeException e) {
-        log.warn("fill-listener close failed", e);
+            .toCompletableFuture()
+            .get(SHUTDOWN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+      } catch (ExecutionException | TimeoutException | RuntimeException e) {
+        log.warn("fill-listener close failed: {}", e.toString());
       }
     }
     if (runner != null) {
       runner.interrupt();
+      try {
+        runner.join(SHUTDOWN_TIMEOUT.toMillis());
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+      }
     }
   }
 
@@ -116,7 +133,6 @@ public class AlpacaTradeUpdatesStream {
         }
         firstAttempt = false;
         connectAndRun();
-        // connectAndRun returned cleanly -> server closed the socket.
       } catch (InterruptedException ie) {
         Thread.currentThread().interrupt();
         return;
@@ -138,16 +154,16 @@ public class AlpacaTradeUpdatesStream {
 
   void connectAndRun() throws InterruptedException {
     CountDownLatch closed = new CountDownLatch(1);
-    HttpClient http = HttpClient.newHttpClient();
     Listener listener = new Listener(closed);
     WebSocket ws;
     try {
       ws =
           http.newWebSocketBuilder()
               .buildAsync(URI.create(props.wsUrl()), listener)
-              .get(HANDSHAKE_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
-    } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
-      throw new RuntimeException("ws connect failed: " + e.getMessage(), e);
+              .get(HANDSHAKE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+    } catch (ExecutionException | TimeoutException e) {
+      Throwable cause = e.getCause() != null ? e.getCause() : e;
+      throw new RuntimeException("ws connect failed: " + cause, cause);
     }
     currentSocket.set(ws);
     sendAuth(ws);
@@ -157,23 +173,35 @@ public class AlpacaTradeUpdatesStream {
   }
 
   private void sendAuth(WebSocket ws) {
-    String frame =
-        String.format(
-            "{\"action\":\"authenticate\",\"data\":{\"key_id\":%s,\"secret_key\":%s}}",
-            jsonString(alpacaProps.apiKeyId()), jsonString(alpacaProps.apiSecretKey()));
-    ws.sendText(frame, true).join();
+    Map<String, Object> frame =
+        Map.of(
+            "action",
+            "authenticate",
+            "data",
+            Map.of(
+                "key_id",
+                nullToEmpty(alpacaProps.apiKeyId()),
+                "secret_key",
+                nullToEmpty(alpacaProps.apiSecretKey())));
+    ws.sendText(serialize(frame), true).join();
   }
 
   private void sendListen(WebSocket ws) {
-    String frame = "{\"action\":\"listen\",\"data\":{\"streams\":[\"trade_updates\"]}}";
-    ws.sendText(frame, true).join();
+    Map<String, Object> frame =
+        Map.of("action", "listen", "data", Map.of("streams", java.util.List.of("trade_updates")));
+    ws.sendText(serialize(frame), true).join();
   }
 
-  private static String jsonString(String value) {
-    if (value == null) {
-      return "\"\"";
+  private String serialize(Object value) {
+    try {
+      return mapper.writeValueAsString(value);
+    } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+      throw new IllegalStateException("ws frame serialization failed", e);
     }
-    return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+  }
+
+  private static String nullToEmpty(String value) {
+    return value == null ? "" : value;
   }
 
   private void handleFrame(String frame) {
@@ -186,7 +214,7 @@ public class AlpacaTradeUpdatesStream {
     }
     JsonNode streamNode = root.get("stream");
     if (streamNode == null || !"trade_updates".equals(streamNode.asText())) {
-      return; // authorization / listening / other control frames
+      return;
     }
     JsonNode data = root.get("data");
     if (data == null) {
@@ -239,12 +267,13 @@ public class AlpacaTradeUpdatesStream {
       metrics.recordDispatched();
     } catch (RuntimeException e) {
       log.error("fill-listener dispatch failed broker_order_id={}", brokerOrderId, e);
-      // Do not close the socket on a dispatcher error — keep the stream alive.
+      // Stream stays alive — a dispatcher fault must not blind the listener.
     }
   }
 
   private class Listener implements WebSocket.Listener {
     private final CountDownLatch closed;
+    private final StringBuilder partialFrame = new StringBuilder();
 
     Listener(CountDownLatch closed) {
       this.closed = closed;
@@ -257,6 +286,15 @@ public class AlpacaTradeUpdatesStream {
 
     @Override
     public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+      if (partialFrame.length() + data.length() > MAX_FRAME_BYTES) {
+        log.warn(
+            "fill-listener frame exceeds {} bytes; aborting socket to recover via reconnect",
+            MAX_FRAME_BYTES);
+        partialFrame.setLength(0);
+        webSocket.abort();
+        closed.countDown();
+        return null;
+      }
       partialFrame.append(data);
       if (last) {
         String frame = partialFrame.toString();

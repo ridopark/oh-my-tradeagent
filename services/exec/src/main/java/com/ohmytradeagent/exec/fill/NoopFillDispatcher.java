@@ -6,11 +6,10 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.stereotype.Component;
 
 /**
- * Placeholder {@link FillDispatcher} that logs each event but does not signal any workflow. Active
- * in Phase 1 of the fill-listener plan: the WebSocket transport ships first; Phase 2 replaces this
- * bean with a real journal-lookup + workflow-signal implementation. {@link
- * ConditionalOnMissingBean} makes the swap transparent — once {@code FillDispatcherImpl} is
- * present, this bean is not created.
+ * Fallback {@link FillDispatcher} active only when no other {@code FillDispatcher} bean is
+ * registered. Logs each event but does not signal any workflow — used when the listener is enabled
+ * but the resolver-to-workflow path is not yet wired (e.g. integration testing the transport
+ * without a Temporal cluster).
  */
 @Component
 @ConditionalOnMissingBean(FillDispatcher.class)

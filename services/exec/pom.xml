@@ -110,10 +110,8 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- Java-WebSocket drives AlpacaTradeUpdatesStreamTest: stands up an in-process
-         ws://localhost:N/stream endpoint so the listener exercises its real
-         java.net.http.WebSocket client + auth/listen handshake against a recording
-         server fixture. Zero transitive deps; isolated to test scope. -->
+    <!-- In-process WS server for AlpacaTradeUpdatesStreamTest: Java-WebSocket has
+         zero transitive deps and stays out of the prod classpath. -->
     <dependency>
       <groupId>org.java-websocket</groupId>
       <artifactId>Java-WebSocket</artifactId>
