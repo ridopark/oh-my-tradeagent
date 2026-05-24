@@ -30,9 +30,13 @@ import org.springframework.stereotype.Component;
  * via {@code @ConditionalOnMissingBean} only in contexts where this bean is excluded
  * (transport-only smoke tests, etc).
  *
- * <p>At-least-once contract: the workflow's {@code onFill} handler MUST tolerate replays. A second
- * fill arriving after the workflow has already moved on is benign (the field is overwritten and
- * never read).
+ * <p>At-least-once contract: the workflow's {@code onFill} handler is idempotent by structure — the
+ * handler assigns a single private {@code fillEvent} field and the workflow's main path reads it
+ * once through {@code Workflow.await(..., () -> fillEvent != null ...)}. A second signal arriving
+ * after the await has woken just overwrites a no-longer-read field; a signal arriving after the
+ * workflow has completed raises {@link WorkflowNotFoundException}, which this dispatcher swallows.
+ * The WS listener and polling fallback may therefore both fire for the same fill without
+ * coordination. See {@code docs/ops/fill-listener.md} for the listener-vs-poller cooperation model.
  */
 @Component
 public class FillDispatcherImpl implements FillDispatcher {

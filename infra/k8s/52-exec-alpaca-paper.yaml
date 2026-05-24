@@ -19,6 +19,11 @@ metadata:
   labels:
     app: exec-alpaca-paper
 spec:
+  # MUST stay at 1. The fill-listener (AlpacaTradeUpdatesStream + FillPoller in
+  # the exec-svc fill package) is not leader-elected; multi-pod deployments
+  # would multiply broker calls and Temporal signals by N. See
+  # docs/ops/fill-listener.md for the constraint + the multi-pod leader-election
+  # follow-up.
   replicas: 1
   selector:
     matchLabels:
