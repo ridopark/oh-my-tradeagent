@@ -74,6 +74,15 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public Optional<JournaledOrder> findByBrokerOrderId(String brokerOrderId) {
+    Record row =
+        dsl.selectFrom(TABLE)
+            .where(field("broker_order_id", String.class).eq(brokerOrderId))
+            .fetchOne();
+    return row == null ? Optional.empty() : Optional.of(mapRow(row));
+  }
+
+  @Override
   public List<JournaledOrder> listOpenByTenantStrategy(String tenantId, String strategyId) {
     Result<?> rows =
         dsl.selectFrom(TABLE)

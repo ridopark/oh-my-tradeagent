@@ -225,6 +225,30 @@ class JooqOrderIntentJournalIT {
     assertThat(journal.findLatestFilledByOcc("other-tenant", "copytrade-v1", occ)).isPresent();
   }
 
+  @Test
+  void findByBrokerOrderId_returnsRowAfterSubmit() {
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "brk-A");
+
+    JournaledOrder row = journal.findByBrokerOrderId("brk-A").orElseThrow();
+    assertThat(row.intentKey()).isEqualTo("intent-A");
+    assertThat(row.brokerOrderId()).isEqualTo("brk-A");
+  }
+
+  @Test
+  void findByBrokerOrderId_returnsEmpty_whenAbsent() {
+    assertThat(journal.findByBrokerOrderId("never-existed")).isEmpty();
+  }
+
+  @Test
+  void findByBrokerOrderId_returnsEmpty_forRecordedRow() {
+    // RECORDED rows have no broker_order_id yet; the partial index excludes them and the lookup
+    // returns empty rather than matching on NULL.
+    journal.upsertIntent(intent("intent-A"));
+
+    assertThat(journal.findByBrokerOrderId("anything")).isEmpty();
+  }
+
   private OrderIntent intent(String key) {
     OrderIntent i = new OrderIntent();
     i.setSchemaVersion(1L);

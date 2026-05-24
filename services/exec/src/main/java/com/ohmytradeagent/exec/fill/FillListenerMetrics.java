@@ -27,6 +27,9 @@ public class FillListenerMetrics {
   private final Counter eventsDispatched;
   private final Counter eventsDroppedDedup;
   private final Counter reconnects;
+  private final Counter eventsUnknownOrder;
+  private final Counter signalWorkflowNotFound;
+  private final Counter signalErrors;
 
   public FillListenerMetrics(MeterRegistry registry) {
     this(registry, Clock.systemUTC());
@@ -55,6 +58,18 @@ public class FillListenerMetrics {
     this.reconnects =
         Counter.builder("fill_listener.reconnects")
             .description("WebSocket reconnect attempts (incremented when the socket re-opens).")
+            .register(registry);
+    this.eventsUnknownOrder =
+        Counter.builder("fill_listener.events_unknown_order")
+            .description("Fills whose broker_order_id has no matching journal row.")
+            .register(registry);
+    this.signalWorkflowNotFound =
+        Counter.builder("fill_listener.signal_workflow_not_found")
+            .description("Workflow already completed when the signal arrived (benign).")
+            .register(registry);
+    this.signalErrors =
+        Counter.builder("fill_listener.signal_errors")
+            .description("Non-NOT_FOUND Temporal failures while sending the onFill signal.")
             .register(registry);
     Gauge.builder(
             "fill_listener.last_event_age_seconds",
@@ -88,6 +103,18 @@ public class FillListenerMetrics {
 
   public void recordReconnect() {
     reconnects.increment();
+  }
+
+  public void recordUnknownOrder() {
+    eventsUnknownOrder.increment();
+  }
+
+  public void recordSignalWorkflowNotFound() {
+    signalWorkflowNotFound.increment();
+  }
+
+  public void recordSignalError() {
+    signalErrors.increment();
   }
 
   public void markEvent() {

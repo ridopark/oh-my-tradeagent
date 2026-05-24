@@ -23,6 +23,14 @@ public interface OrderIntentJournal {
   Optional<JournaledOrder> findByIntentKey(String intentKey);
 
   /**
+   * Resolve a row by its broker-issued order ID. Used by the fill listener to map an inbound trade
+   * update back to the originating intent / workflow. Backed by the V4 partial index on {@code
+   * broker_order_id WHERE broker_order_id IS NOT NULL}; returns empty for unknown / never-placed
+   * IDs.
+   */
+  Optional<JournaledOrder> findByBrokerOrderId(String brokerOrderId);
+
+  /**
    * List non-terminal (RECORDED + SUBMITTED) journal entries scoped to one (tenant, strategy).
    * Powers Phase 5 reconciliation.
    */
