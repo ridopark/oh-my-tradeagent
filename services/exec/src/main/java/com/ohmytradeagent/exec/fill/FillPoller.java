@@ -67,9 +67,12 @@ public class FillPoller {
     this.clock = clock;
   }
 
+  // SpEL reference into the bound properties bean so @Scheduled and the validated record share a
+  // single source of truth — the raw ${exec.fill-listener.poll.interval-ms} placeholder was being
+  // read twice (once by Spring binder, once by the annotation) without any link between the two.
   @Scheduled(
-      fixedDelayString = "${exec.fill-listener.poll.interval-ms:30000}",
-      initialDelayString = "${exec.fill-listener.poll.interval-ms:30000}")
+      fixedDelayString = "#{@fillPollerProperties.intervalMs}",
+      initialDelayString = "#{@fillPollerProperties.intervalMs}")
   public void poll() {
     runOnce();
   }

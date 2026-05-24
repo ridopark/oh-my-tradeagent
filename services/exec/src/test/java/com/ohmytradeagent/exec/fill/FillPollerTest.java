@@ -135,6 +135,18 @@ class FillPollerTest {
   }
 
   @Test
+  void runOnce_journalThrows_recordsScanFailure_noBrokerCalls() {
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenThrow(new RuntimeException("db boom"));
+
+    poller.runOnce();
+
+    verifyNoInteractions(broker);
+    verify(dispatcher, never()).dispatch(any());
+    assertThat(registry.counter("fill_listener.poll_scan_failures").count()).isEqualTo(1.0);
+    assertThat(registry.counter("fill_listener.poll_cycles").count()).isEqualTo(0.0);
+  }
+
+  @Test
   void runOnce_mixedBatch_onlyFilledRowsDispatched() {
     JournaledOrder a = row("ck-a", "brk-a");
     JournaledOrder b = row("ck-b", "brk-b");

@@ -285,8 +285,20 @@ class JooqOrderIntentJournalIT {
   }
 
   @Test
-  void findSubmittedOlderThan_excludesRecorded() {
-    journal.upsertIntent(intent("intent-A"));
+  void findSubmittedOlderThan_excludesNonSubmittedStates() {
+    // RECORDED — never reached SUBMITTED yet.
+    journal.upsertIntent(intent("intent-recorded"));
+
+    // FILLED — the only "exit" state that records fill detail; ensure it's excluded.
+    journal.upsertIntent(intent("intent-filled"));
+    journal.markSubmittedIfRecorded("intent-filled", "brk-filled");
+    journal.markFilled(
+        "intent-filled", 1L, new BigDecimal("1.00"), OffsetDateTime.parse("2026-05-24T00:00:00Z"));
+
+    // CANCELLED — terminal cancel from the broker.
+    journal.upsertIntent(intent("intent-cancelled"));
+    journal.markSubmittedIfRecorded("intent-cancelled", "brk-cancelled");
+    journal.markCancelled("intent-cancelled");
 
     var rows = journal.findSubmittedOlderThan(OffsetDateTime.parse("2030-01-01T00:00:00Z"), 10);
     assertThat(rows).isEmpty();
