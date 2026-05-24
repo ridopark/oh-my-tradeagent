@@ -40,6 +40,18 @@ alpaca:
   api-key-id: ${APCA_API_KEY_ID:}
   api-secret-key: ${APCA_API_SECRET_KEY:}
 
+# Fill listener (broker push + polling fallback). Default OFF; enable per
+# deployment via EXEC_FILL_LISTENER_ENABLED=true. Single-pod constraint —
+# multi-pod deployments would multiply dispatch cost by N until leader
+# election lands.
+exec:
+  fill-listener:
+    enabled: ${EXEC_FILL_LISTENER_ENABLED:false}
+    ws-url: ${EXEC_FILL_LISTENER_WS_URL:wss://paper-api.alpaca.markets/stream}
+    reconnect-base-ms: 1000
+    reconnect-cap-ms: 60000
+    dedup-cache-size: 1024
+
 management:
   endpoints:
     web:

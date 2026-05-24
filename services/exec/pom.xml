@@ -109,6 +109,17 @@
       <artifactId>mockwebserver</artifactId>
       <scope>test</scope>
     </dependency>
+
+    <!-- Java-WebSocket drives AlpacaTradeUpdatesStreamTest: stands up an in-process
+         ws://localhost:N/stream endpoint so the listener exercises its real
+         java.net.http.WebSocket client + auth/listen handshake against a recording
+         server fixture. Zero transitive deps; isolated to test scope. -->
+    <dependency>
+      <groupId>org.java-websocket</groupId>
+      <artifactId>Java-WebSocket</artifactId>
+      <version>1.5.7</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
