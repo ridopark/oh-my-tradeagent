@@ -12,6 +12,7 @@ import io.temporal.client.schedules.Schedule;
 import io.temporal.client.schedules.ScheduleActionStartWorkflow;
 import io.temporal.client.schedules.ScheduleAlreadyRunningException;
 import io.temporal.client.schedules.ScheduleClient;
+import io.temporal.client.schedules.ScheduleClientOptions;
 import io.temporal.client.schedules.ScheduleHandle;
 import io.temporal.client.schedules.ScheduleIntervalSpec;
 import io.temporal.client.schedules.ScheduleListDescription;
@@ -86,7 +87,13 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
       log.warn("tenants dir {} not found; skipping Reconciliation Schedule bootstrap", tenantsDir);
       return;
     }
-    runWith(ScheduleClient.newInstance(serviceStubs));
+    // ScheduleClient.newInstance(serviceStubs) silently defaults to namespace "default" — a
+    // schedule created with the no-options form ends up in the wrong namespace and its action
+    // workflows can never reach our copytrade-namespace workers. Explicitly bind to the same
+    // namespace as the WorkflowClient. Verified the hard way (commit history).
+    String namespace = workflowClient.getOptions().getNamespace();
+    ScheduleClientOptions opts = ScheduleClientOptions.newBuilder().setNamespace(namespace).build();
+    runWith(ScheduleClient.newInstance(serviceStubs, opts));
   }
 
   /**
