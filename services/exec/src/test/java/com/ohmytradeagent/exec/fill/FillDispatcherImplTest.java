@@ -73,6 +73,47 @@ class FillDispatcherImplTest {
           null,
           1L);
 
+  // Realistic STC intent_key from PositionWorkflowImpl: <position-wf-id> + ":exit:" + signalId.
+  // The dispatcher must extract the position workflow ID prefix and signal IT (not the
+  // CopytradeSignalWorkflow derived from the row's signalId).
+  private static final String STC_INTENT_KEY =
+      "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/sig-bto-1:exit:sig-stc-7";
+  private static final String STC_POSITION_WF_ID =
+      "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/sig-bto-1";
+
+  private static final JournaledOrder STC_ROW =
+      new JournaledOrder(
+          STC_INTENT_KEY,
+          "sig-stc-7",
+          "dev",
+          "copytrade-v1",
+          "alpaca-paper",
+          STC_INTENT_KEY,
+          "NVDA  260516C00140000",
+          "SELL",
+          3L,
+          new BigDecimal("2.10"),
+          OrderState.SUBMITTED,
+          "brk-stc-7",
+          OffsetDateTime.parse("2026-05-25T14:00:00Z"),
+          OffsetDateTime.parse("2026-05-25T14:00:01Z"),
+          OffsetDateTime.parse("2026-05-25T14:00:01Z"),
+          null,
+          null,
+          null,
+          null,
+          null,
+          1L);
+
+  private static final BrokerFillEvent STC_FILL =
+      new BrokerFillEvent(
+          "brk-stc-7",
+          STC_INTENT_KEY,
+          3L,
+          new BigDecimal("2.15"),
+          OffsetDateTime.parse("2026-05-25T14:00:15Z"),
+          BrokerFillEvent.Source.WS);
+
   @BeforeEach
   void setUp() {
     journal = mock(OrderIntentJournal.class);
@@ -115,6 +156,31 @@ class FillDispatcherImplTest {
     assertThat(registry.counter("fill_listener.events_unknown_order").count()).isEqualTo(0.0);
     assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(0.0);
     assertThat(registry.counter("fill_listener.signal_errors").count()).isEqualTo(0.0);
+  }
+
+  @Test
+  void dispatch_stcIntentKey_routesToPositionWorkflow() {
+    // Pins the STC routing branch: intent_key contains ":exit:" → workflow ID is the prefix
+    // before the marker (= PositionWorkflow ID). Without this branch the dispatcher would
+    // resolve to the short-lived STC CopytradeSignalWorkflow (already completed), the
+    // PositionWorkflow would block on lastFillEvent until EOD, and PartialExitFilled would
+    // never land in audit_log.
+    when(journal.findByBrokerOrderId("brk-stc-7")).thenReturn(Optional.of(STC_ROW));
+
+    dispatcher.dispatch(STC_FILL);
+
+    verify(workflowClient).newUntypedWorkflowStub(STC_POSITION_WF_ID);
+    ArgumentCaptor<Object> arg = ArgumentCaptor.forClass(Object.class);
+    verify(workflowStub).signal(eq("onFill"), arg.capture());
+    assertThat(arg.getValue())
+        .isInstanceOfSatisfying(
+            FillSignalPayload.class,
+            p -> {
+              assertThat(p.brokerOrderId()).isEqualTo("brk-stc-7");
+              assertThat(p.filledQty()).isEqualTo(3L);
+              assertThat(p.avgFillPrice()).isEqualByComparingTo(new BigDecimal("2.15"));
+            });
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(1.0);
   }
 
   @Test
