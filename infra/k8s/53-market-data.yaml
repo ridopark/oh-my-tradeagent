@@ -7,12 +7,13 @@ spec:
   selector:
     app: market-data
   ports:
-    # Spring Boot actuator runs on a dedicated management port; the main
-    # application is web-application-type=none. Use for health probes,
-    # Prometheus scrape, and ad-hoc `kubectl exec ... wget` triage.
-    - port: 8081
-      targetPort: management
-      name: management
+    # Spring Boot actuator on the main HTTP port. Use for health / info /
+    # prometheus scrape and ad-hoc `kubectl exec ... wget /actuator/...` triage.
+    # No business-logic controllers on this port — market-data is a Temporal
+    # worker, so requests to `/` get a Spring 404.
+    - port: 8080
+      targetPort: http
+      name: http
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -36,8 +37,8 @@ spec:
           image: ghcr.io/ridopark/oh-my-tradeagent-market-data:latest
           imagePullPolicy: Always
           ports:
-            - containerPort: 8081
-              name: management
+            - containerPort: 8080
+              name: http
           envFrom:
             # Alpaca paper credentials shared with exec-svc: APCA_API_KEY_ID + APCA_API_SECRET_KEY.
             # The operator creates this Secret once (kubectl apply -f
@@ -54,10 +55,10 @@ spec:
             # stream). Flip to 'inmemory' to disable the live feed for triage.
             - name: MARKET_DATA_PROVIDER
               value: alpaca
-          # market-data-svc is a Temporal worker only (web-application-type=none).
-          # The main application has no HTTP listener; actuator runs on port 8081
-          # (management) for health/info/prometheus. Worker poll loop is still the
-          # implicit liveness signal — no httpGet probes wired today.
+          # market-data-svc is a Temporal worker but keeps the default servlet web
+          # stack so actuator (health / info / prometheus) is reachable on 8080. No
+          # business-logic controllers; the worker poll loop is still the implicit
+          # liveness signal — no httpGet probes wired today.
           resources:
             requests:
               cpu: 100m

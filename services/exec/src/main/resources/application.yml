@@ -1,10 +1,10 @@
 spring:
   application:
     name: exec-svc
-  # Worker-only service; spring-boot-starter-web is on the classpath for RestClient,
-  # but no HTTP listener should bind on this pod.
-  main:
-    web-application-type: none
+  # Worker-only by design (Temporal poll loop is the work driver), but we keep
+  # the default servlet web stack so Spring Boot Actuator can expose health /
+  # info / prometheus on port 8080. Setting spring.main.web-application-type=none
+  # disables the management server too — verified the hard way (commit history).
   datasource:
     # Phase 2c.2: env vars renamed EXEC_TRADIER_PAPER_DB_* -> EXEC_DB_* (provider-agnostic).
     # Required env var with no fallback — Spring fails fast on missing value. The journal must
@@ -58,12 +58,6 @@ exec:
       batch-size: 50
 
 management:
-  # Run actuator on a dedicated port so the main app can stay
-  # web-application-type=none (no HTTP listener for Temporal-worker
-  # business logic) while still exposing health/info/prometheus for
-  # in-cluster scrapers and `kubectl exec ... wget` triage.
-  server:
-    port: 8081
   endpoints:
     web:
       exposure:
