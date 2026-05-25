@@ -23,6 +23,12 @@ market-data:
     api-secret-key: ${APCA_API_SECRET_KEY:}
 
 management:
+  # Run actuator on a dedicated port so the main app can stay
+  # web-application-type=none (no HTTP listener for Temporal-worker
+  # business logic) while still exposing health/info/prometheus for
+  # in-cluster scrapers and `kubectl exec ... wget` triage.
+  server:
+    port: 8081
   endpoints:
     web:
       exposure:

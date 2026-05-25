@@ -1,0 +1,8 @@
+# Test-profile override: the production config runs actuator on a dedicated
+# management port (8081) so the worker-only app can stay
+# web-application-type=none. Multiple @SpringBootTest contexts in this module
+# would fight over that fixed port; disabling the management server in tests
+# avoids the conflict (no test currently exercises actuator endpoints).
+management:
+  server:
+    port: -1

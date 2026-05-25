@@ -7,9 +7,12 @@ spec:
   selector:
     app: market-data
   ports:
-    - port: 8080
-      targetPort: 8080
-      name: http
+    # Spring Boot actuator runs on a dedicated management port; the main
+    # application is web-application-type=none. Use for health probes,
+    # Prometheus scrape, and ad-hoc `kubectl exec ... wget` triage.
+    - port: 8081
+      targetPort: management
+      name: management
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -33,8 +36,8 @@ spec:
           image: ghcr.io/ridopark/oh-my-tradeagent-market-data:latest
           imagePullPolicy: Always
           ports:
-            - containerPort: 8080
-              name: http
+            - containerPort: 8081
+              name: management
           envFrom:
             # Alpaca paper credentials shared with exec-svc: APCA_API_KEY_ID + APCA_API_SECRET_KEY.
             # The operator creates this Secret once (kubectl apply -f
@@ -52,8 +55,9 @@ spec:
             - name: MARKET_DATA_PROVIDER
               value: alpaca
           # market-data-svc is a Temporal worker only (web-application-type=none).
-          # No HTTP listener — http-get probes would loop the pod. Worker poll loop is
-          # the implicit liveness signal.
+          # The main application has no HTTP listener; actuator runs on port 8081
+          # (management) for health/info/prometheus. Worker poll loop is still the
+          # implicit liveness signal — no httpGet probes wired today.
           resources:
             requests:
               cpu: 100m
