@@ -75,6 +75,7 @@ public class FillDispatcherImpl implements FillDispatcher {
     WorkflowStub stub = workflowClient.newUntypedWorkflowStub(workflowId);
     try {
       stub.signal(SIGNAL_NAME, payload);
+      metrics.recordDispatched();
       log.debug(
           "fill-dispatcher signal accepted workflow_id={} broker_order_id={} qty={}",
           workflowId,

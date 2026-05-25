@@ -110,7 +110,9 @@ class AlpacaTradeUpdatesStreamTest {
 
     assertThat(registry.counter("fill_listener.events_received", "event", "fill").count())
         .isEqualTo(1.0);
-    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(1.0);
+    // events_dispatched_total is now bumped inside FillDispatcherImpl (not the listener), so
+    // tests using a RecordingDispatcher don't trip it. See FillDispatcherImplTest for the
+    // counter's success-path assertion.
   }
 
   @Test
