@@ -130,7 +130,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
         continue;
       }
       String desiredScheduleId =
-          "recon-t-" + ts.tenantId() + "-s-" + ts.strategyId() + "-" + brokerTarget;
+          "recon-v2-t-" + ts.tenantId() + "-s-" + ts.strategyId() + "-" + brokerTarget;
       if (existingSchedules == null) {
         // Lazy: only call listSchedules() once the first valid strategy reaches the reap step.
         // try-with-resources closes the SDK Stream exactly once per bootstrap pass.
@@ -147,7 +147,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
   /**
    * Deletes any existing Temporal schedule for {@code (tenantId, strategyId)} whose ID encodes a
    * different {@code broker_target} than the desired one. Match key is the prefix {@code
-   * "recon-t-<tenantId>-s-<strategyId>-"} — the schedule-ID grammar built in {@link
+   * "recon-v2-t-<tenantId>-s-<strategyId>-"} — the schedule-ID grammar built in {@link
    * #ensureSchedule}. The trailing dash prevents tenant-prefix collisions (e.g. {@code dev} vs
    * {@code dev-other}).
    *
@@ -168,7 +168,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
       String tenantId,
       String strategyId,
       String desiredScheduleId) {
-    String prefix = "recon-t-" + tenantId + "-s-" + strategyId + "-";
+    String prefix = "recon-v2-t-" + tenantId + "-s-" + strategyId + "-";
     for (ScheduleListDescription d : existingSchedules) {
       String staleId = d.getScheduleId();
       if (!staleId.startsWith(prefix) || staleId.equals(desiredScheduleId)) {
@@ -193,9 +193,18 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
     }
   }
 
+  /**
+   * Why "v2" in the prefix: a {@code recon-t-<tenant>-s-<strategy>-<broker>} schedule on the
+   * homelab cluster fell into a zombie state where {@code listSchedules()} returned empty but
+   * {@code createSchedule()} still threw {@code ScheduleAlreadyRunningException} — the underlying
+   * scheduler workflow was gone, but Temporal's internal schedule registry kept a stub entry that
+   * blocked re-creation under the same ID. Bumping the prefix to {@code recon-v2-t-} side-steps the
+   * registry collision; the old zombie metadata stays in Temporal forever but is inert (doesn't
+   * fire, doesn't appear in listings, doesn't consume resources).
+   */
   private void ensureSchedule(
       ScheduleClient scheduleClient, String tenantId, String strategyId, String brokerTarget) {
-    String scheduleId = "recon-t-" + tenantId + "-s-" + strategyId + "-" + brokerTarget;
+    String scheduleId = "recon-v2-t-" + tenantId + "-s-" + strategyId + "-" + brokerTarget;
     String wfIdPrefix = WorkflowIds.reconciliationPrefix(tenantId, strategyId, brokerTarget);
 
     ReconciliationWorkflowInput input = new ReconciliationWorkflowInput();

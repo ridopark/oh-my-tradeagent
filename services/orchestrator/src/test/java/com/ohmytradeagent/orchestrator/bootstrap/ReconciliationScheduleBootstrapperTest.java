@@ -108,8 +108,8 @@ class ReconciliationScheduleBootstrapperTest {
       byId.put(idCaptor.getAllValues().get(i), scheduleCaptor.getAllValues().get(i));
     }
 
-    String alpacaId = "recon-t-tenant-a-s-strat-1-alpaca-paper";
-    String tradierId = "recon-t-tenant-b-s-strat-2-tradier-paper";
+    String alpacaId = "recon-v2-t-tenant-a-s-strat-1-alpaca-paper";
+    String tradierId = "recon-v2-t-tenant-b-s-strat-2-tradier-paper";
     assertThat(byId).containsKey(alpacaId);
     assertThat(byId).containsKey(tradierId);
 
@@ -158,8 +158,8 @@ class ReconciliationScheduleBootstrapperTest {
     when(registry.get("t-dev", "s-copytrade-v1"))
         .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.ALPACA_PAPER));
 
-    String staleId = "recon-t-t-dev-s-s-copytrade-v1-tradier-paper";
-    String desiredId = "recon-t-t-dev-s-s-copytrade-v1-alpaca-paper";
+    String staleId = "recon-v2-t-t-dev-s-s-copytrade-v1-tradier-paper";
+    String desiredId = "recon-v2-t-t-dev-s-s-copytrade-v1-alpaca-paper";
 
     ScheduleListDescription stale = mock(ScheduleListDescription.class);
     when(stale.getScheduleId()).thenReturn(staleId);
@@ -193,7 +193,7 @@ class ReconciliationScheduleBootstrapperTest {
     when(registry.get("t-dev", "s-copytrade-v1"))
         .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.ALPACA_PAPER));
 
-    String desiredId = "recon-t-t-dev-s-s-copytrade-v1-alpaca-paper";
+    String desiredId = "recon-v2-t-t-dev-s-s-copytrade-v1-alpaca-paper";
 
     ScheduleListDescription desired = mock(ScheduleListDescription.class);
     when(desired.getScheduleId()).thenReturn(desiredId);
@@ -227,12 +227,13 @@ class ReconciliationScheduleBootstrapperTest {
     when(registry.get("t-dev", "s-copytrade-v1"))
         .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.ALPACA_PAPER));
 
-    String desiredId = "recon-t-t-dev-s-s-copytrade-v1-alpaca-paper";
+    String desiredId = "recon-v2-t-t-dev-s-s-copytrade-v1-alpaca-paper";
 
     ScheduleListDescription otherTenant = mock(ScheduleListDescription.class);
-    when(otherTenant.getScheduleId()).thenReturn("recon-t-other-s-s-copytrade-v1-tradier-paper");
+    when(otherTenant.getScheduleId()).thenReturn("recon-v2-t-other-s-s-copytrade-v1-tradier-paper");
     ScheduleListDescription otherStrategy = mock(ScheduleListDescription.class);
-    when(otherStrategy.getScheduleId()).thenReturn("recon-t-t-dev-s-s-other-strat-tradier-paper");
+    when(otherStrategy.getScheduleId())
+        .thenReturn("recon-v2-t-t-dev-s-s-other-strat-tradier-paper");
     ScheduleListDescription killSwitch = mock(ScheduleListDescription.class);
     when(killSwitch.getScheduleId()).thenReturn("t-t-dev/s-s-copytrade-v1/killswitch");
 
@@ -286,8 +287,8 @@ class ReconciliationScheduleBootstrapperTest {
     when(registry.get("t-dev", "s-copytrade-v1"))
         .thenReturn(strategyConfig(StrategyConfig.BrokerTarget.ALPACA_PAPER));
 
-    String staleId = "recon-t-t-dev-s-s-copytrade-v1-tradier-paper";
-    String desiredId = "recon-t-t-dev-s-s-copytrade-v1-alpaca-paper";
+    String staleId = "recon-v2-t-t-dev-s-s-copytrade-v1-tradier-paper";
+    String desiredId = "recon-v2-t-t-dev-s-s-copytrade-v1-alpaca-paper";
 
     ScheduleListDescription stale = mock(ScheduleListDescription.class);
     when(stale.getScheduleId()).thenReturn(staleId);
