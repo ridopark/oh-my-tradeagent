@@ -55,7 +55,9 @@ public class FillListenerMetrics {
     this.receivedByEvent = Map.copyOf(received);
     this.eventsDispatched =
         Counter.builder("fill_listener.events_dispatched")
-            .description("Events handed to FillDispatcher after filter + dedup.")
+            .description(
+                "Events successfully signalled to the target workflow (post journal-lookup). "
+                    + "Bumped inside FillDispatcherImpl so WS and poll paths share one count.")
             .register(registry);
     this.eventsDroppedDedup =
         Counter.builder("fill_listener.events_dropped_dedup")

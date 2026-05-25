@@ -284,11 +284,12 @@ public class AlpacaTradeUpdatesStream {
             BrokerFillEvent.Source.WS);
     try {
       dispatcher.dispatch(fill);
-      metrics.recordDispatched();
     } catch (RuntimeException e) {
       log.error("fill-listener dispatch failed broker_order_id={}", brokerOrderId, e);
       // Stream stays alive — a dispatcher fault must not blind the listener.
     }
+    // events_dispatched_total is bumped inside FillDispatcherImpl after the
+    // signal succeeds, so WS and poll paths share one accounting point.
   }
 
   private class Listener implements WebSocket.Listener {

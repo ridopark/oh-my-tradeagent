@@ -108,6 +108,10 @@ class FillDispatcherImplTest {
               assertThat(p.filledAt()).isEqualTo(OffsetDateTime.parse("2026-05-19T17:08:11Z"));
             });
 
+    // Success path is the ONLY path that bumps events_dispatched_total — pinning here so a future
+    // refactor that moves the counter back out of the dispatcher (or accidentally bumps it on a
+    // drop path) trips this test instead of silently mis-counting.
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(1.0);
     assertThat(registry.counter("fill_listener.events_unknown_order").count()).isEqualTo(0.0);
     assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(0.0);
     assertThat(registry.counter("fill_listener.signal_errors").count()).isEqualTo(0.0);
@@ -122,6 +126,7 @@ class FillDispatcherImplTest {
     verify(workflowClient, never()).newUntypedWorkflowStub(anyString());
     verify(workflowStub, never()).signal(anyString(), org.mockito.ArgumentMatchers.any());
     assertThat(registry.counter("fill_listener.events_unknown_order").count()).isEqualTo(1.0);
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(0.0);
   }
 
   @Test
@@ -137,6 +142,7 @@ class FillDispatcherImplTest {
 
     assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(1.0);
     assertThat(registry.counter("fill_listener.signal_errors").count()).isEqualTo(0.0);
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(0.0);
   }
 
   @Test
@@ -150,5 +156,6 @@ class FillDispatcherImplTest {
 
     assertThat(registry.counter("fill_listener.signal_errors").count()).isEqualTo(1.0);
     assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(0.0);
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(0.0);
   }
 }
