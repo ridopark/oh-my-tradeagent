@@ -23,10 +23,9 @@ public final class Sizing {
   private Sizing() {}
 
   /**
-   * @param limit per-contract price used to divide the allocation; pass the slip-adjusted limit
-   *     from {@code BtoPricing.computeBtoLimit(...)} so sizing sees max-acceptable cost (Issue
-   *     #195). When slippage caps are unset, callers pass the mirror {@code payload.getPrice()} —
-   *     {@code Sizing} stays unaware of {@code BtoPricing}.
+   * @param limit per-contract price used to divide the allocation. Pass the slip-adjusted limit
+   *     when slippage caps are set, so sizing reflects max-acceptable cost rather than the
+   *     optimistic mirror. {@code Sizing} stays unaware of how the limit is computed.
    */
   public static long computeContracts(
       CopytradeSignalPayload payload, StrategyConfig config, BigDecimal capital, BigDecimal limit) {

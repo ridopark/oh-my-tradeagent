@@ -161,12 +161,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   private String handleBto(CopytradeSignalPayload payload, StrategyConfig config) {
-    // Issue #195: compute the slip-adjusted BTO limit ONCE at the top of the BTO path so the
-    // same value flows into (a) the PreTradeCheckRequest.estimated_notional dispatched to
-    // exec-svc, (b) the Sizing.computeContracts allocation math, and (c) the OrderIntent
-    // limit price + OrderSubmitted audit subject. BtoPricing.computeBtoLimit is pure /
-    // deterministic (Issue #191 halt-condition 3), so moving it earlier inside the same
-    // workflow method does not change its determinism profile.
+    // Computed once at the top: the same limit feeds pre-trade notional, sizing, and the
+    // OrderIntent/audit subject — guarantees those three views agree on max-acceptable cost.
     PricedLimit priced = BtoPricing.computeBtoLimit(payload, config);
     // Issue #112: Version gate retires the PR #111 deploy-time-drain mitigation. Pre-#111
     // in-flight workflows replay through the v=DEFAULT_VERSION branch (single checkEntry with
@@ -206,8 +202,6 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
     BigDecimal capital =
         strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
-    // Issue #195: divide by the slip-adjusted limit (max-acceptable cost), not the mirror price,
-    // so sizing respects the same notional ceiling that exec-svc's pre-trade check enforces.
     long contracts = Sizing.computeContracts(payload, config, capital, priced.limit());
 
     logAudit(
@@ -600,10 +594,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   /**
    * Builds the {@link PreTradeCheckRequest} the workflow dispatches to exec-svc. {@code
    * estimated_notional} is the 1-contract floor computed against the slip-adjusted limit
-   * (max-acceptable cost from {@code BtoPricing.computeBtoLimit}) so the risk-svc cap sees the
-   * realistic worst-case cost rather than the optimistic mirror price (Issue #195). The workflow
-   * sizes down later if needed. {@code correlation_id} is the deterministic {@code signal_id} so
-   * audit traces stitch end-to-end.
+   * (max-acceptable cost) so the risk-svc cap sees the realistic worst-case rather than the
+   * optimistic mirror. The workflow sizes down later if needed. {@code correlation_id} is the
+   * deterministic {@code signal_id} so audit traces stitch end-to-end.
    */
   private static PreTradeCheckRequest buildPreTradeCheckRequest(
       CopytradeSignalPayload payload, StrategyConfig config, BigDecimal estimatedLimitPrice) {
@@ -663,8 +656,6 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     i.setOptionSymbol(resolved.optionSymbol());
     i.setSide(OrderIntent.Side.BUY);
     i.setQty(contracts);
-    // Issue #191: limit comes from BtoPricing.computeBtoLimit(payload, config) (mirror when no
-    // slippage caps configured, slip-adjusted otherwise). See call site in handleBto.
     i.setLimitPrice(limitPrice);
     i.setRecordedAt(workflowNow());
     return i;
