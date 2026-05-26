@@ -6,6 +6,7 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
+import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
@@ -279,7 +280,7 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
     }
 
     @Override
-    public void onFill(FillEvent event) {}
+    public void onFill(FillSignalPayload event) {}
 
     @Override
     public void riskBreach(com.ohmytradeagent.contract.RiskBreachPayload payload) {}

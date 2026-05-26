@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
+import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.RiskBreachPayload;
 import io.temporal.workflow.SignalMethod;
 import io.temporal.workflow.WorkflowInterface;
@@ -19,7 +20,7 @@ public interface CopytradeSignalWorkflow {
    * non-deterministic schema change once the source comes online.
    */
   @SignalMethod
-  void onFill(FillEvent event);
+  void onFill(FillSignalPayload event);
 
   /**
    * Phase 5: kill-switch cascade. Sets an internal flag that short-circuits the BTO await + STC

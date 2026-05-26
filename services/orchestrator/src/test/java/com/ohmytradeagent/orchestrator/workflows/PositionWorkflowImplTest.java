@@ -11,6 +11,7 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.OrderIntentResult;
@@ -110,6 +111,19 @@ class PositionWorkflowImplTest {
     return p;
   }
 
+  /**
+   * Builds a {@link FillSignalPayload} via the generated builder. Pre-#168 tests used the deleted
+   * {@code FillEvent} record's positional constructor; this helper preserves the same call-site
+   * brevity now that the contract DTO is a bean.
+   */
+  private static FillSignalPayload fill(String brokerOrderId, long qty, BigDecimal avg) {
+    return new FillSignalPayload()
+        .withBrokerOrderId(brokerOrderId)
+        .withFilledQty(qty)
+        .withAvgFillPrice(avg)
+        .withFilledAt(OffsetDateTime.now());
+  }
+
   private PremiumTick tick(BigDecimal premium) {
     PremiumTick t = new PremiumTick();
     t.setSchemaVersion(1L);
@@ -136,12 +150,12 @@ class PositionWorkflowImplTest {
     stub.partialExit(partialExitRequest("sig-1", "pos-happy", 0.5));
     // Wait for the workflow to call exec.placeOrder before signalling fill.
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-1", 3L, new BigDecimal("2.85"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-1", 3L, new BigDecimal("2.85")));
 
     // Then full close
     stub.partialExit(partialExitRequest("sig-2", "pos-happy", 1.0));
     waitForPlaceOrderCount(2);
-    stub.onFill(new FillEvent("brk-2", 2L, new BigDecimal("3.10"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-2", 2L, new BigDecimal("3.10")));
 
     String result = WorkflowStub.fromTyped(stub).getResult(String.class);
     assertThat(result).isEqualTo("pos-happy");
@@ -167,7 +181,7 @@ class PositionWorkflowImplTest {
     waitForPlaceOrderCount(1);
     // Second signal with same signal_id — should be a no-op.
     stub.partialExit(partialExitRequest("sig-dup", "pos-dup", 1.0));
-    stub.onFill(new FillEvent("brk-1", 5L, new BigDecimal("3.0"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-1", 5L, new BigDecimal("3.0")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
@@ -189,9 +203,9 @@ class PositionWorkflowImplTest {
 
     waitForPlaceOrderCount(1);
     // First fill closes 2 of 4
-    stub.onFill(new FillEvent("brk-A", 2L, new BigDecimal("2.85"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-A", 2L, new BigDecimal("2.85")));
     waitForPlaceOrderCount(2);
-    stub.onFill(new FillEvent("brk-B", 2L, new BigDecimal("2.90"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-B", 2L, new BigDecimal("2.90")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
@@ -276,7 +290,7 @@ class PositionWorkflowImplTest {
     // Drain to completion so the workflow terminates cleanly.
     stub.partialExit(partialExitRequest("sig-close", "pos-arm-valid", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-x", 5L, new BigDecimal("3.10"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-x", 5L, new BigDecimal("3.10")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent armed = captureKind("ChandelierArmed");
@@ -297,7 +311,7 @@ class PositionWorkflowImplTest {
 
     stub.partialExit(partialExitRequest("sig-close", "pos-arm-bad-peak", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-x", 3L, new BigDecimal("3.00")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent rej = captureKind("ChandelierArmRejected");
@@ -315,7 +329,7 @@ class PositionWorkflowImplTest {
 
     stub.partialExit(partialExitRequest("sig-close", "pos-arm-bad-gb", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-x", 3L, new BigDecimal("3.00")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent rej = captureKind("ChandelierArmRejected");
@@ -339,7 +353,7 @@ class PositionWorkflowImplTest {
 
     stub.partialExit(partialExitRequest("sig-close", "pos-arm-subfail", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-x", 3L, new BigDecimal("3.00")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent failed = captureKind("ChandelierSubscriptionFailed");
@@ -364,7 +378,7 @@ class PositionWorkflowImplTest {
 
     stub.partialExit(partialExitRequest("sig-close", "pos-arm-second", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-x", 3L, new BigDecimal("3.00")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     // Only one ChandelierArmed audit emitted.
@@ -381,7 +395,7 @@ class PositionWorkflowImplTest {
 
     stub.partialExit(partialExitRequest("sig-close", "pos-tick-before-arm", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-x", 3L, new BigDecimal("3.00")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     assertThat(captureAll("ChandelierTrailFired")).isEmpty();
@@ -402,7 +416,7 @@ class PositionWorkflowImplTest {
 
     stub.partialExit(partialExitRequest("sig-close", "pos-tick-near-no-fire", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-x", 5L, new BigDecimal("2.85"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-x", 5L, new BigDecimal("2.85")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     assertThat(captureAll("ChandelierTrailFired")).isEmpty();
@@ -468,7 +482,7 @@ class PositionWorkflowImplTest {
     // Drain to remaining=0 via STC (not chandelier).
     stub.partialExit(partialExitRequest("sig-close", "pos-unarmed-stc", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-x", 3L, new BigDecimal("3.10"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-x", 3L, new BigDecimal("3.10")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent unarmed = captureKind("ChandelierUnarmedByExit");
@@ -514,7 +528,7 @@ class PositionWorkflowImplTest {
     // Workflow still healthy; drain to clean shutdown.
     stub.partialExit(partialExitRequest("sig-drain", "pos-force-blank-op", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-drain", 3L, new BigDecimal("3.10"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-drain", 3L, new BigDecimal("3.10")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
   }
 
@@ -531,7 +545,7 @@ class PositionWorkflowImplTest {
 
     stub.partialExit(partialExitRequest("sig-drain", "pos-force-blank-reason", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-drain", 3L, new BigDecimal("3.10"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-drain", 3L, new BigDecimal("3.10")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
   }
 
@@ -590,7 +604,7 @@ class PositionWorkflowImplTest {
     // the workflow routed Activities to that task queue.
     stub.partialExit(partialExitRequest("sig-bt-alpaca", "pos-bt-alpaca", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-bt-1", 3L, new BigDecimal("3.00"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-bt-1", 3L, new BigDecimal("3.00")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
@@ -608,7 +622,7 @@ class PositionWorkflowImplTest {
 
     stub.partialExit(partialExitRequest("sig-bt-default", "pos-bt-default", 1.0));
     waitForPlaceOrderCount(1);
-    stub.onFill(new FillEvent("brk-bt-2", 2L, new BigDecimal("3.05"), OffsetDateTime.now()));
+    stub.onFill(fill("brk-bt-2", 2L, new BigDecimal("3.05")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 

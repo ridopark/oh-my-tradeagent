@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
+import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.RiskBreachPayload;
@@ -317,9 +318,12 @@ class CopytradeSignalWorkflowImplTest {
       }
     }
 
-    FillEvent fill =
-        new FillEvent(
-            "brk-1", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-24T17:00:00Z"));
+    FillSignalPayload fill =
+        new FillSignalPayload()
+            .withBrokerOrderId("brk-1")
+            .withFilledQty(5L)
+            .withAvgFillPrice(new BigDecimal("0.84"))
+            .withFilledAt(OffsetDateTime.parse("2026-05-24T17:00:00Z"));
     wf.onFill(fill);
     wf.onFill(fill);
 

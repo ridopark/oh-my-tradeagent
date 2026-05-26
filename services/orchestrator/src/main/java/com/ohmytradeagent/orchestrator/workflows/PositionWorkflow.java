@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
+import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
@@ -20,8 +21,8 @@ import io.temporal.workflow.WorkflowMethod;
  *
  * <ul>
  *   <li>{@link #partialExit(PartialExitRequest)} — STC dispatch from CopytradeSignalWorkflow.
- *   <li>{@link #onFill(FillEvent)} — exit-fill confirmation from the broker side (Phase 3 uses
- *       test-only signaling; Phase 4 wires the broker fill listener).
+ *   <li>{@link #onFill(FillSignalPayload)} — exit-fill confirmation from the broker side (Phase 3
+ *       uses test-only signaling; Phase 4 wires the broker fill listener).
  *   <li>{@link #armChandelier(ArmChandelierPayload)} — Phase 4: arm trailing exit on first partial.
  *   <li>{@link #chandelierTick(PremiumTick)} — Phase 4: premium tick from market-data-svc, drives
  *       peak-ratcheting + threshold fire.
@@ -43,7 +44,7 @@ public interface PositionWorkflow {
   void partialExit(PartialExitRequest req);
 
   @SignalMethod
-  void onFill(FillEvent event);
+  void onFill(FillSignalPayload event);
 
   @SignalMethod
   void armChandelier(ArmChandelierPayload payload);

@@ -10,6 +10,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
@@ -27,9 +28,9 @@ import org.mockito.ArgumentCaptor;
 
 /**
  * Pins the fill-dispatch contract: journal lookup by broker_order_id → workflow ID via {@code
- * WorkflowIds.copytradeSignal} → untyped Temporal signal on {@code onFill} with a payload whose
- * JSON shape matches the orchestrator's {@code FillEvent} record. Tests the four documented
- * outcomes (happy path, unknown order, workflow already completed, other Temporal error).
+ * WorkflowIds.copytradeSignal} → untyped Temporal signal on {@code onFill} with a contract-owned
+ * {@link FillSignalPayload}. Tests the four documented outcomes (happy path, unknown order,
+ * workflow already completed, other Temporal error).
  */
 class FillDispatcherImplTest {
 
@@ -143,10 +144,10 @@ class FillDispatcherImplTest {
         .isInstanceOfSatisfying(
             FillSignalPayload.class,
             p -> {
-              assertThat(p.brokerOrderId()).isEqualTo("brk-42");
-              assertThat(p.filledQty()).isEqualTo(5L);
-              assertThat(p.avgFillPrice()).isEqualByComparingTo(new BigDecimal("0.84"));
-              assertThat(p.filledAt()).isEqualTo(OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+              assertThat(p.getBrokerOrderId()).isEqualTo("brk-42");
+              assertThat(p.getFilledQty()).isEqualTo(5L);
+              assertThat(p.getAvgFillPrice()).isEqualByComparingTo(new BigDecimal("0.84"));
+              assertThat(p.getFilledAt()).isEqualTo(OffsetDateTime.parse("2026-05-19T17:08:11Z"));
             });
 
     // Success path is the ONLY path that bumps events_dispatched_total — pinning here so a future
@@ -176,9 +177,9 @@ class FillDispatcherImplTest {
         .isInstanceOfSatisfying(
             FillSignalPayload.class,
             p -> {
-              assertThat(p.brokerOrderId()).isEqualTo("brk-stc-7");
-              assertThat(p.filledQty()).isEqualTo(3L);
-              assertThat(p.avgFillPrice()).isEqualByComparingTo(new BigDecimal("2.15"));
+              assertThat(p.getBrokerOrderId()).isEqualTo("brk-stc-7");
+              assertThat(p.getFilledQty()).isEqualTo(3L);
+              assertThat(p.getAvgFillPrice()).isEqualByComparingTo(new BigDecimal("2.15"));
             });
     assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(1.0);
   }

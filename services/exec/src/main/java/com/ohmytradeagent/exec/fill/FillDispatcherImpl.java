@@ -1,5 +1,6 @@
 package com.ohmytradeagent.exec.fill;
 
+import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
@@ -29,8 +30,9 @@ import org.springframework.stereotype.Component;
  * </ul>
  *
  * <p>Both targets accept the same {@link FillSignalPayload} JSON shape — Temporal's Jackson data
- * converter rehydrates it into the receiver-side {@code FillEvent} record by field name. Using
- * untyped workflow stubs avoids dragging orchestrator-side interfaces across the module boundary.
+ * converter rehydrates the camelCase JSON into the receiver-side bean by {@code @JsonProperty}.
+ * Using untyped workflow stubs avoids dragging orchestrator-side interfaces across the module
+ * boundary.
  *
  * <p>Registered as the active {@link FillDispatcher} bean; {@link NoopFillDispatcher} falls back
  * via {@code @ConditionalOnMissingBean} only in contexts where this bean is excluded
@@ -82,8 +84,11 @@ public class FillDispatcherImpl implements FillDispatcher {
     JournaledOrder order = row.get();
     String workflowId = resolveWorkflowId(order);
     FillSignalPayload payload =
-        new FillSignalPayload(
-            event.brokerOrderId(), event.filledQty(), event.avgFillPrice(), event.filledAt());
+        new FillSignalPayload()
+            .withBrokerOrderId(event.brokerOrderId())
+            .withFilledQty(event.filledQty())
+            .withAvgFillPrice(event.avgFillPrice())
+            .withFilledAt(event.filledAt());
     WorkflowStub stub = workflowClient.newUntypedWorkflowStub(workflowId);
     try {
       stub.signal(SIGNAL_NAME, payload);
