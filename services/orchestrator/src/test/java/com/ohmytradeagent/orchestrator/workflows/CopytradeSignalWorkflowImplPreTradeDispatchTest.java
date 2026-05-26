@@ -203,19 +203,21 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   }
 
   /**
-   * Issue #115: pins the {@code scheduleToCloseTimeout = 60s} envelope on the {@code
-   * PreTradeCheckActivity} stub. With {@code startToCloseTimeout=15s} × {@code maxAttempts=3} = 45s
-   * of pure run time plus exponential-backoff jitter, the wall-clock total can drift past 45s
-   * before the fail-closed sentinel is produced. The schedule-to-close cap makes the worst-case
-   * dispatch latency explicit and predictable vs the workflow TTL.
+   * Issue #115 (tightened post-#157): pins the {@code maxAttempts × startToCloseTimeout} retry
+   * budget on the {@code PreTradeCheckActivity} stub. With {@code startToCloseTimeout=15s} × {@code
+   * maxAttempts=3} ≈ 45s of pure run time plus exponential-backoff jitter, the {@code maxAttempts}
+   * budget is the actual binding constraint on dispatch latency before the fail-closed sentinel is
+   * produced. The {@code scheduleToCloseTimeout=60s} on the production stub is the absolute
+   * backstop (a hard cap if jitter overruns), but in practice the test never reaches it.
    *
    * <p>The assertion uses Temporal's {@link TestWorkflowEnvironment#currentTimeMillis()} virtual
    * clock — wall-clock sleeps would make this non-deterministic. We capture the virtual time before
    * {@code start()} and after {@code wf.process()} returns; the elapsed virtual time must stay
-   * within the schedule-to-close envelope, proving the activity is not retrying past the cap.
+   * within the maxAttempts retry budget plus a small head-room for audit + workflow-cleanup virtual
+   * time, proving the activity is not retrying past the budget.
    */
   @Test
-  void handleBto_failsClosed_withinScheduleToCloseEnvelope_whenPreTradeCheckActivityAlwaysThrows() {
+  void handleBto_failsClosed_withinMaxAttemptsRetryBudget_whenPreTradeCheckActivityAlwaysThrows() {
     StrategyConfig cfg = configWithPreTradeEnabled();
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(contract.resolve(any())).thenReturn(resolved());
@@ -246,13 +248,17 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     assertThat(sentinel.getRejectReason()).startsWith("dispatch_failed:");
     Mockito.verify(exec, Mockito.never()).placeOrder(any());
 
-    // Schedule-to-close envelope = 60s. The downstream rejection path adds a small amount of
-    // post-dispatch virtual time (audit log, workflow cleanup), so the upper bound is the
-    // envelope plus a generous head-room. The lower-bound check pins that retries actually ran
-    // (i.e. the test is observing the bounded-retry path, not a fast-path bypass).
+    AuditEvent rejected = capture("SignalRejected");
+    assertThat(rejected.getSubject()).containsEntry("reason_code", "PRE_TRADE_CHECK_FAILED");
+    assertThat(rejected.getSubject()).containsEntry("outcome", "REJECTED");
+
+    // maxAttempts (3) × startToCloseTimeout (15s) ≈ 45s budget; the downstream rejection path
+    // adds a small amount of post-dispatch virtual time (audit log, workflow cleanup). The 60s
+    // scheduleToCloseTimeout on the production stub is the absolute backstop (not the binding
+    // constraint here).
     assertThat(elapsedVirtualMs)
-        .as("dispatch_failed sentinel must surface within the scheduleToCloseTimeout envelope")
-        .isLessThanOrEqualTo(Duration.ofSeconds(75).toMillis());
+        .as("dispatch_failed sentinel must surface within the maxAttempts retry budget")
+        .isLessThanOrEqualTo(Duration.ofSeconds(55).toMillis());
   }
 
   @Test
