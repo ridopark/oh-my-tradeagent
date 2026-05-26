@@ -110,7 +110,7 @@ class CopytradeSignalWorkflowImplTest {
   @Test
   void rejectedByAuthor_producesSignalRejectedAndDoesNotCallExec() {
     when(strategy.get(anyString(), anyString())).thenReturn(config());
-    when(risk.checkEntry(any(), any(), any()))
+    when(risk.checkEntryWithLimit(any(), any(), any(), any()))
         .thenReturn(
             RiskDecision.rejected(RejectionReason.AUTHOR_NOT_WHITELISTED, "author=stranger"));
 
@@ -127,7 +127,7 @@ class CopytradeSignalWorkflowImplTest {
   @Test
   void rejectedByStaleSignal_producesSignalRejected() {
     when(strategy.get(anyString(), anyString())).thenReturn(config());
-    when(risk.checkEntry(any(), any(), any()))
+    when(risk.checkEntryWithLimit(any(), any(), any(), any()))
         .thenReturn(RiskDecision.rejected(RejectionReason.SIGNAL_TOO_OLD, "age_secs=2000"));
 
     runWorkflow(btoPayload());
@@ -140,7 +140,7 @@ class CopytradeSignalWorkflowImplTest {
   @Test
   void rejectedByMaxPositions_producesSignalRejected() {
     when(strategy.get(anyString(), anyString())).thenReturn(config());
-    when(risk.checkEntry(any(), any(), any()))
+    when(risk.checkEntryWithLimit(any(), any(), any(), any()))
         .thenReturn(RiskDecision.rejected(RejectionReason.MAX_POSITIONS_EXCEEDED, "open=5"));
 
     runWorkflow(btoPayload());
@@ -161,7 +161,8 @@ class CopytradeSignalWorkflowImplTest {
     cfg.setMaxSlippageAbs(new BigDecimal("0.05"));
     cfg.setMaxSlippagePct(new BigDecimal("0.05"));
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
-    when(risk.checkEntry(any(), eq(cfg), any())).thenReturn(RiskDecision.approved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any()))
+        .thenReturn(RiskDecision.approved());
     when(contract.resolve(any()))
         .thenReturn(
             new ContractResolveResult(
@@ -513,7 +514,7 @@ class CopytradeSignalWorkflowImplTest {
     StrategyConfig cfg = config();
     cfg.setPendingTtlPaperSecs(120L); // generous TTL so we can signal before it expires
     when(strategy.get(anyString(), anyString())).thenReturn(cfg);
-    when(risk.checkEntry(any(), any(), any())).thenReturn(RiskDecision.approved());
+    when(risk.checkEntryWithLimit(any(), any(), any(), any())).thenReturn(RiskDecision.approved());
     when(contract.resolve(any()))
         .thenReturn(
             new ContractResolveResult(
@@ -678,7 +679,8 @@ class CopytradeSignalWorkflowImplTest {
     StrategyConfig cfg = config();
     cfg.setPendingTtlPaperSecs(1L); // short TTL so test exits quickly
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
-    when(risk.checkEntry(any(), eq(cfg), any())).thenReturn(RiskDecision.approved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any()))
+        .thenReturn(RiskDecision.approved());
     when(contract.resolve(any()))
         .thenReturn(
             new ContractResolveResult(

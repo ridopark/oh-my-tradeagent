@@ -110,6 +110,62 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(d.detail()).contains("notional=");
   }
 
+  // Pins that the v>=1 `checkEntryWithLimit` entry-point feeds the slip-adjusted
+  // limit into the notional cap rather than the unadjusted mirror price. The two scenarios
+  // are deliberately tuned so the mirror would APPROVE (50000 == cap, compareTo > 0 false)
+  // but the slip-adjusted figure REJECTS (50085 > 50000) — proves the wiring inversion.
+  @Test
+  void checkEntryWithLimit_notionalCap_usesSlipAdjustedLimit_notMirrorPrice() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // 50% of 100k = 50k cap
+    when(portfolioSnapshot.openPositions(anyString(), anyString()))
+        .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("49770"))));
+
+    // Mirror baseline: 49770 + (2.30 * 100) = 50000 == cap → approves (compareTo > 0 false).
+    RiskDecision mirror = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
+    assertThat(mirror.allowed()).isTrue();
+
+    // Slip-adjusted via the new entry-point: 49770 + (3.15 * 100) = 50085 > 50000 → rejects.
+    RiskDecision slip =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW), c, null, new BigDecimal("3.15"));
+    assertThat(slip.allowed()).isFalse();
+    assertThat(slip.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
+    assertThat(slip.detail()).contains("notional=50085");
+    assertThat(slip.detail()).contains("cap=50000");
+  }
+
+  // BP gate must compare against the slip-adjusted notional, not the mirror.
+  // BP=250 covers the mirror (230) but not the slip-adjusted required cost (315) → REJECT.
+  @Test
+  void checkEntryWithLimit_buyingPower_comparesAgainstSlipAdjustedNotional() {
+    StrategyConfig c = config();
+    c.setPreTradeCheckEnabled(true);
+    PreTradeCheckResult res = approvedPreTradeCheck();
+    res.setBuyingPower(new BigDecimal("250"));
+    RiskDecision d =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW), c, res, new BigDecimal("3.15"));
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
+    assertThat(d.detail()).contains("buying_power=250");
+    assertThat(d.detail()).contains("required=315");
+  }
+
+  // Strict less-than semantics on the BP compare are preserved.
+  // BP exactly equal to the slip-adjusted notional must APPROVE — no off-by-one regression.
+  @Test
+  void checkEntryWithLimit_buyingPower_equalToSlipAdjustedNotional_approves() {
+    StrategyConfig c = config();
+    c.setPreTradeCheckEnabled(true);
+    PreTradeCheckResult res = approvedPreTradeCheck();
+    res.setBuyingPower(new BigDecimal("315.00"));
+    RiskDecision d =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW), c, res, new BigDecimal("3.15"));
+    assertThat(d.allowed()).isTrue();
+  }
+
   @Test
   void notionalCap_disabled_whenConfigNull() {
     StrategyConfig c = config();
