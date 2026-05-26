@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/fill-signal-payload.json",
+  "title": "FillSignalPayload",
+  "description": "Wire shape signalled from exec-svc to the orchestrator's CopytradeSignalWorkflow.onFill / PositionWorkflow.onFill handlers when the broker reports a fill. Field names are camelCase to match the Temporal data converter's default Jackson naming, so workflows in flight at deploy time deserialise without drift.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.FillSignalPayload",
+  "additionalProperties": false,
+  "required": [
+    "brokerOrderId",
+    "filledQty",
+    "avgFillPrice",
+    "filledAt"
+  ],
+  "properties": {
+    "brokerOrderId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Broker-assigned order identifier the fill is reported against. Matches OrderIntentJournal.broker_order_id for the originating intent."
+    },
+    "filledQty": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Cumulative filled quantity reported by the broker for this order."
+    },
+    "avgFillPrice": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Average fill price across all partials reported for this order."
+    },
+    "filledAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Broker timestamp of the fill report (ISO-8601 with offset)."
+    }
+  }
+}

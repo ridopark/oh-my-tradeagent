@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.workflows;
 import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
+import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
@@ -112,13 +113,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    */
   private ExecActivities exec;
 
-  private FillEvent fillEvent;
+  private FillSignalPayload fillEvent;
   private boolean riskBreachReceived;
   private String riskBreachReason;
   private String riskBreachActor;
 
   @Override
-  public void onFill(FillEvent event) {
+  public void onFill(FillSignalPayload event) {
     this.fillEvent = event;
   }
 
@@ -245,9 +246,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
           subject(
               "signal_id", payload.getSignalId(),
               "intent_key", placed.getIntentKey(),
-              "broker_order_id", fillEvent.brokerOrderId(),
-              "filled_qty", fillEvent.filledQty(),
-              "avg_fill_price", fillEvent.avgFillPrice(),
+              "broker_order_id", fillEvent.getBrokerOrderId(),
+              "filled_qty", fillEvent.getFilledQty(),
+              "avg_fill_price", fillEvent.getAvgFillPrice(),
               "outcome", "FILLED"));
 
       // Phase 3: start PositionWorkflow + cache OCC → workflow_id mapping. Versioned so
@@ -285,7 +286,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       CopytradeSignalPayload payload,
       StrategyConfig config,
       ContractResolveResult resolved,
-      FillEvent fill) {
+      FillSignalPayload fill) {
     String tenant = payload.getTenantId();
     String strategyId = payload.getStrategyId();
     String posWfId =
@@ -309,9 +310,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     posInput.setStrategyId(strategyId);
     posInput.setEntrySignalId(payload.getSignalId());
     posInput.setContractSymbol(resolved.optionSymbol());
-    posInput.setQty(fill.filledQty());
+    posInput.setQty(fill.getFilledQty());
     posInput.setEntryPremium(
-        fill.avgFillPrice() != null ? fill.avgFillPrice() : payload.getPrice());
+        fill.getAvgFillPrice() != null ? fill.getAvgFillPrice() : payload.getPrice());
     posInput.setSourceSignalWorkflowId(Workflow.getInfo().getWorkflowId());
     // Phase 2c.2: carry broker_target so the child routes its exit/flatten Activities to the
     // same broker-<value> queue as the parent's entry.
@@ -499,10 +500,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   /**
-   * Issue #165 phase 2: recover from the cancel-on-filled race by synthesising a {@link FillEvent}
-   * from the broker-confirmed cancel result, emitting {@code EntryFilled} with a {@code
-   * recovery=cancel_on_filled} marker, and spawning the missing PositionWorkflow. Mirrors the
-   * happy-path fill branch's audit + child-workflow handoff so subsequent STCs route to {@code
+   * Issue #165 phase 2: recover from the cancel-on-filled race by synthesising a {@link
+   * FillSignalPayload} from the broker-confirmed cancel result, emitting {@code EntryFilled} with a
+   * {@code recovery=cancel_on_filled} marker, and spawning the missing PositionWorkflow. Mirrors
+   * the happy-path fill branch's audit + child-workflow handoff so subsequent STCs route to {@code
    * partialExit} rather than producing {@code OrphanSTC}.
    */
   private void handleCancelOnFilled(
@@ -515,8 +516,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         cancelResult.getAvgFillPrice() != null
             ? cancelResult.getAvgFillPrice()
             : payload.getPrice();
-    FillEvent synth =
-        new FillEvent(cancelResult.getBrokerOrderId(), filledQty, avgFillPrice, workflowNow());
+    FillSignalPayload synth =
+        new FillSignalPayload()
+            .withBrokerOrderId(cancelResult.getBrokerOrderId())
+            .withFilledQty(filledQty)
+            .withAvgFillPrice(avgFillPrice)
+            .withFilledAt(workflowNow());
 
     logAudit(
         payload,
@@ -524,9 +529,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         subject(
             "signal_id", payload.getSignalId(),
             "intent_key", cancelResult.getIntentKey(),
-            "broker_order_id", synth.brokerOrderId(),
-            "filled_qty", synth.filledQty(),
-            "avg_fill_price", synth.avgFillPrice(),
+            "broker_order_id", synth.getBrokerOrderId(),
+            "filled_qty", synth.getFilledQty(),
+            "avg_fill_price", synth.getAvgFillPrice(),
             "outcome", "FILLED",
             "recovery", "cancel_on_filled"));
 

@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.OrderIntent;
@@ -32,9 +33,9 @@ import java.util.Map;
 
 /**
  * Long-running position lifecycle. Receives STC dispatches via {@link
- * #partialExit(PartialExitRequest)}, fills via {@link #onFill(FillEvent)}, and force-flattens on
- * EOD (15:55 ET) or expiry close (15:30 ET for 0DTE). Deterministic by construction — all time
- * reads go through {@link MarketCalendarActivities} or {@link Workflow}.
+ * #partialExit(PartialExitRequest)}, fills via {@link #onFill(FillSignalPayload)}, and
+ * force-flattens on EOD (15:55 ET) or expiry close (15:30 ET for 0DTE). Deterministic by
+ * construction — all time reads go through {@link MarketCalendarActivities} or {@link Workflow}.
  *
  * <p>Phase 4 adds CHANDELIER_TRAIL: the CopytradeSignalWorkflow's STC branch may signal {@link
  * #armChandelier(ArmChandelierPayload)} after the partial exit, which subscribes a premium stream
@@ -112,7 +113,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private final LinkedHashSet<String> processedSignalIds = new LinkedHashSet<>();
   private boolean exitInFlight;
   private final ArrayDeque<PartialExitRequest> pendingExits = new ArrayDeque<>();
-  private FillEvent lastFillEvent;
+  private FillSignalPayload lastFillEvent;
   private String currentInFlightBrokerOrderId;
   private String currentInFlightSignalId;
   private boolean eodFired;
@@ -322,7 +323,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   }
 
   @Override
-  public void onFill(FillEvent event) {
+  public void onFill(FillSignalPayload event) {
     this.lastFillEvent = event;
   }
 
@@ -602,7 +603,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                 || !pendingForceCloses.isEmpty());
 
     if (lastFillEvent != null) {
-      long filled = lastFillEvent.filledQty();
+      long filled = lastFillEvent.getFilledQty();
       remainingQty -= filled;
       auditLog(
           KIND_PARTIAL_EXIT_FILLED,
@@ -614,9 +615,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               "remaining_qty_after",
               remainingQty,
               "broker_order_id",
-              lastFillEvent.brokerOrderId(),
+              lastFillEvent.getBrokerOrderId(),
               "avg_fill_price",
-              lastFillEvent.avgFillPrice()));
+              lastFillEvent.getAvgFillPrice()));
       exitInFlight = false;
       currentInFlightBrokerOrderId = null;
       currentInFlightSignalId = null;
