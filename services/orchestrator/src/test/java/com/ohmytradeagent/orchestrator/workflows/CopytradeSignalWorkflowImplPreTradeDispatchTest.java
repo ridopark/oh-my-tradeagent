@@ -248,14 +248,10 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     assertThat(sentinel.getRejectReason()).startsWith("dispatch_failed:");
     Mockito.verify(exec, Mockito.never()).placeOrder(any());
 
-    AuditEvent rejected = capture("SignalRejected");
-    assertThat(rejected.getSubject()).containsEntry("reason_code", "PRE_TRADE_CHECK_FAILED");
-    assertThat(rejected.getSubject()).containsEntry("outcome", "REJECTED");
+    assertThat(capture("SignalRejected").getSubject())
+        .containsEntry("reason_code", "PRE_TRADE_CHECK_FAILED")
+        .containsEntry("outcome", "REJECTED");
 
-    // maxAttempts (3) × startToCloseTimeout (15s) ≈ 45s budget; the downstream rejection path
-    // adds a small amount of post-dispatch virtual time (audit log, workflow cleanup). The 60s
-    // scheduleToCloseTimeout on the production stub is the absolute backstop (not the binding
-    // constraint here).
     assertThat(elapsedVirtualMs)
         .as("dispatch_failed sentinel must surface within the maxAttempts retry budget")
         .isLessThanOrEqualTo(Duration.ofSeconds(55).toMillis());
