@@ -131,6 +131,11 @@ curl -X POST http://copytrade.homelab.local/killswitch/trip \
   `contract.resolve` (visible in audit log).
 - `KillSwitchWorkflow` is `Running` (not `Completed` / `Failed`).
 
+See also: [`post-deploy-verification/issue-127-killswitch-history.md`](post-deploy-verification/issue-127-killswitch-history.md)
+for the audit-trail evidence that the PR #126 `continueAsNew` history-cap fix
+is working as designed (zero `history count exceeds limit` warnings, daily
+recurrence cadence, etc.).
+
 ## Drill log
 
 Every kill-switch drill run must be recorded in
