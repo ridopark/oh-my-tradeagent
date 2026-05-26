@@ -23,6 +23,13 @@ second log table further down. Other markdown tables in this file
 (e.g. the format-reference table immediately below) are ignored by
 the parser because they do not match the canonical header order.
 
+**Date convention:** the `date` column is the **UTC calendar date**
+(ISO-8601 `YYYY-MM-DD`, interpreted in UTC). For drills run near a
+day boundary in your local timezone, log the UTC day, not the local
+day — the freshness checker compares against `datetime.date.today()`
+in the operator's local tz, but the in-repo convention is UTC so
+multi-operator entries remain comparable.
+
 | column | required | meaning |
 | --- | --- | --- |
 | `date` | yes | ISO-8601 calendar date the drill was performed (UTC). |

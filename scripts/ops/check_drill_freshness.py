@@ -48,6 +48,8 @@ EXPECTED_COLUMNS: tuple[str, ...] = (
     "audit_refs",
     "result",
 )
+# `<provider>-live` convention enforced as a soft warning (item 7 of #141).
+TARGET_ADAPTER_PATTERN: re.Pattern[str] = re.compile(r"^[a-z0-9-]+-live$")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,7 +79,11 @@ def _is_separator_row(cells: list[str]) -> bool:
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", c) for c in cells)
 
 
-def parse_drill_log(path: pathlib.Path) -> list[DrillEntry]:
+def parse_drill_log(
+    path: pathlib.Path,
+    *,
+    stderr: IO[str] | None = None,
+) -> list[DrillEntry]:
     """Parse `drill-log.md` and return the structured entry rows.
 
     The log MUST contain exactly one table whose header columns match
@@ -85,20 +91,23 @@ def parse_drill_log(path: pathlib.Path) -> list[DrillEntry]:
     (e.g. a "Format" reference table) are ignored — only the table with
     the canonical header is read.
 
-    Rows whose `date` cannot be parsed as ISO-8601 are skipped silently;
-    rows whose `drill_type` is not one of `REQUIRED_DRILL_TYPES` are still
-    returned (the freshness check filters later). Rows where any cell is
-    a template placeholder (`<...>`) are skipped — the entry template
-    section in the doc itself must not satisfy the gate.
+    Rows whose `date` cannot be parsed as ISO-8601 are skipped (with a
+    `WARN:` stderr line identifying the row number + reason); rows with
+    the wrong column count likewise emit a WARN and are skipped. Rows
+    where any cell is a template placeholder (`<...>`) are skipped
+    silently — the entry template section in the doc itself must not
+    satisfy the gate, and that skip is intentional.
     """
+    stderr = stderr if stderr is not None else sys.stderr
     text = path.read_text(encoding="utf-8")
     entries: list[DrillEntry] = []
     lines = text.splitlines()
 
     in_target_table = False
     saw_separator = False
+    file_label = path.name
 
-    for raw in lines:
+    for line_no, raw in enumerate(lines, start=1):
         line = raw.rstrip()
         if not line.strip().startswith("|"):
             # Leaving any table.
@@ -123,15 +132,26 @@ def parse_drill_log(path: pathlib.Path) -> list[DrillEntry]:
             # row of an adjacent doc table can't poison a real entry.
             continue
 
-        if len(cells) != len(EXPECTED_COLUMNS):
-            continue
         if any(cell.startswith("<") and cell.endswith(">") for cell in cells):
             # Template placeholder row inside the entries table — must not
             # satisfy the gate even if dated within the freshness window.
+            # Intentional skip; do NOT warn.
+            continue
+        if len(cells) != len(EXPECTED_COLUMNS):
+            print(
+                f"WARN: {file_label} line {line_no}: skipping row with "
+                f"{len(cells)} cells (expected {len(EXPECTED_COLUMNS)})",
+                file=stderr,
+            )
             continue
         try:
             date_val = dt.date.fromisoformat(cells[0])
         except ValueError:
+            print(
+                f"WARN: {file_label} line {line_no}: skipping row with "
+                f"unparseable date {cells[0]!r}",
+                file=stderr,
+            )
             continue
         entries.append(
             DrillEntry(
@@ -178,6 +198,13 @@ def _check_one(
             f"{drill_type}: no passing entry for adapter {target_adapter!r} found in "
             f"the drill log"
         )
+    if latest.date > today:
+        # Future-dated rows would yield a negative `age` and silently
+        # satisfy `age > max_age_days`. Reject them explicitly.
+        return (
+            f"{drill_type}: latest passing entry for adapter {target_adapter!r} is "
+            f"future-dated ({latest.date.isoformat()}); refusing to treat as fresh"
+        )
     age = (today - latest.date).days
     if age > max_age_days:
         return (
@@ -219,12 +246,22 @@ def run(
     )
     args = parser.parse_args(argv)
 
+    if not TARGET_ADAPTER_PATTERN.fullmatch(args.target_adapter):
+        # Soft validation: warn but proceed so the script remains usable
+        # for future adapters that don't yet match the `<provider>-live`
+        # convention (item 7 of #141).
+        print(
+            f"WARN: --target-adapter {args.target_adapter!r} does not match "
+            f"expected '<provider>-live' convention; continuing anyway",
+            file=stderr,
+        )
+
     log_path = pathlib.Path(args.log)
     if not log_path.exists():
         print(f"check_drill_freshness: log not found: {log_path}", file=stderr)
         return 2
 
-    entries = parse_drill_log(log_path)
+    entries = parse_drill_log(log_path, stderr=stderr)
 
     failures: list[str] = []
     for drill_type in REQUIRED_DRILL_TYPES:
