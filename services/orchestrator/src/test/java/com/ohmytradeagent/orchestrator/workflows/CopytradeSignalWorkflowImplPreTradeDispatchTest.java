@@ -163,6 +163,54 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     assertThat(intentCaptor.getValue().getSide()).isEqualTo(OrderIntent.Side.BUY);
   }
 
+  /**
+   * Issue #195: when {@code max_slippage_abs} / {@code max_slippage_pct} are configured, the {@code
+   * PreTradeCheckRequest.estimatedNotional} dispatched to exec-svc must be computed against the
+   * slip-adjusted limit (max-acceptable cost), not the unadjusted mirror price. The mirror /
+   * no-caps back-compat path is covered by the {@code _dispatchesPreTradeCheckViaWorkflowStub_*}
+   * test above (price=2.30 -> 230.00).
+   *
+   * <p>Incident fixture from the issue body: price=3.10, abs=0.05, pct=0.05 -> SLIP_MIN branch ->
+   * limit=3.15 -> estimated_notional = 3.15 * 100 = 315.00.
+   */
+  @Test
+  void handleBto_preTradeCheckEstimatedNotional_usesSlipAdjustedLimit_whenCapsSet() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setMaxSlippageAbs(new BigDecimal("0.05"));
+    cfg.setMaxSlippagePct(new BigDecimal("0.05"));
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntry(any(), eq(cfg), any())).thenReturn(RiskDecision.approved());
+
+    AtomicReference<PreTradeCheckRequest> capturedRequest = new AtomicReference<>();
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          capturedRequest.set(request);
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-K"));
+    env.start();
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setPrice(new BigDecimal("3.10"));
+    runWorkflow(p);
+
+    PreTradeCheckRequest req = capturedRequest.get();
+    assertThat(req).isNotNull();
+    // SLIP_MIN: min(3.10+0.05, 3.10*1.05) = min(3.15, 3.255) = 3.15 -> 3.15 * 100 = 315.00.
+    assertThat(req.getEstimatedNotional()).isEqualByComparingTo(new BigDecimal("315.00"));
+  }
+
   @Test
   void handleBto_failsClosed_whenPreTradeCheckActivityThrows() {
     StrategyConfig cfg = configWithPreTradeEnabled();

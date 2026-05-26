@@ -22,12 +22,18 @@ public final class Sizing {
 
   private Sizing() {}
 
+  /**
+   * @param limit per-contract price used to divide the allocation; pass the slip-adjusted limit
+   *     from {@code BtoPricing.computeBtoLimit(...)} so sizing sees max-acceptable cost (Issue
+   *     #195). When slippage caps are unset, callers pass the mirror {@code payload.getPrice()} —
+   *     {@code Sizing} stays unaware of {@code BtoPricing}.
+   */
   public static long computeContracts(
-      CopytradeSignalPayload payload, StrategyConfig config, BigDecimal capital) {
+      CopytradeSignalPayload payload, StrategyConfig config, BigDecimal capital, BigDecimal limit) {
     BigDecimal allocation = capital.multiply(config.getCapitalWeight());
-    BigDecimal pricePerContract = payload.getPrice().multiply(CONTRACT_MULTIPLIER);
+    BigDecimal pricePerContract = limit.multiply(CONTRACT_MULTIPLIER);
     if (pricePerContract.signum() <= 0) {
-      throw new IllegalArgumentException("price must be > 0, got: " + payload.getPrice());
+      throw new IllegalArgumentException("limit must be > 0, got: " + limit);
     }
     long raw = allocation.divide(pricePerContract, 0, RoundingMode.FLOOR).longValueExact();
     return Math.max(config.getMinContracts(), Math.min(config.getMaxContracts(), raw));
