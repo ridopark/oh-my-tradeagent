@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Primary;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -129,10 +128,7 @@ class ProductionContextSmokeTest {
 
     @Bean
     WorkerFactory workerFactory(WorkflowClient client) {
-      WorkerFactory factory = mock(WorkerFactory.class);
-      when(factory.newWorker(org.mockito.ArgumentMatchers.anyString()))
-          .thenReturn(mock(Worker.class));
-      return factory;
+      return mock(WorkerFactory.class);
     }
 
     @Bean
@@ -151,7 +147,6 @@ class ProductionContextSmokeTest {
      * DSLContext}.
      */
     @Bean
-    @Primary
     DSLContext smokeDslContext() {
       return mock(DSLContext.class);
     }
@@ -163,7 +158,6 @@ class ProductionContextSmokeTest {
      * StringRedisTemplate}.
      */
     @Bean
-    @Primary
     StringRedisTemplate smokeStringRedisTemplate() {
       return mock(StringRedisTemplate.class);
     }
