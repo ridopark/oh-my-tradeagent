@@ -20,6 +20,8 @@ import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.domain.BtoPricing;
+import com.ohmytradeagent.orchestrator.domain.BtoPricing.PricedLimit;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveInput;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
 import com.ohmytradeagent.orchestrator.domain.KeywordPartialMatcher;
@@ -209,7 +211,11 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "ref_premium", payload.getPrice()));
 
     String intentKey = Workflow.getInfo().getWorkflowId() + ":entry";
-    OrderIntent intent = newIntent(payload, config, resolved, contracts, intentKey);
+    // Issue #191: apply max-slippage caps to derive the BTO limit price (vs blind mirror).
+    // The helper is pure/deterministic; computing it here (rather than inside newIntent) keeps the
+    // strategy tag in scope for the OrderSubmitted audit subject without a wrapper type.
+    PricedLimit priced = BtoPricing.computeBtoLimit(payload, config);
+    OrderIntent intent = newIntent(payload, config, resolved, contracts, intentKey, priced.limit());
     OrderIntentResult placed = exec.placeOrder(intent);
 
     logAudit(
@@ -221,7 +227,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "option_symbol", resolved.optionSymbol(),
             "side", "BUY",
             "qty", contracts,
-            "broker_target", config.getBrokerTarget().value()));
+            "broker_target", config.getBrokerTarget().value(),
+            "limit_price_strategy", priced.strategy().name().toLowerCase()));
 
     long ttlSecs = pendingTtlSecs(config);
     // Phase 5: also wake on risk_breach so the cascade can short-circuit the BTO.
@@ -637,7 +644,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       StrategyConfig config,
       ContractResolveResult resolved,
       long contracts,
-      String intentKey) {
+      String intentKey,
+      BigDecimal limitPrice) {
     OrderIntent i = new OrderIntent();
     i.setSchemaVersion(1L);
     i.setTenantId(payload.getTenantId());
@@ -648,7 +656,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     i.setOptionSymbol(resolved.optionSymbol());
     i.setSide(OrderIntent.Side.BUY);
     i.setQty(contracts);
-    i.setLimitPrice(payload.getPrice());
+    // Issue #191: limit comes from BtoPricing.computeBtoLimit(payload, config) (mirror when no
+    // slippage caps configured, slip-adjusted otherwise). See call site in handleBto.
+    i.setLimitPrice(limitPrice);
     i.setRecordedAt(workflowNow());
     return i;
   }
