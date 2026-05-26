@@ -20,7 +20,6 @@ import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
 import io.temporal.workflow.Workflow;
-import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -88,6 +87,7 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
       Path.of("src/test/resources/temporal/replay/copytrade-signal-pre-111-legacy-history.json");
 
   private static final String CORE_QUEUE = "orchestrator-core";
+  private static final String LEGACY_EMULATOR_WORKFLOW_ID = "legacy-pre-111-emulator";
 
   /**
    * Pins the version-marker constant name so a rename in {@link CopytradeSignalWorkflowImpl} fails
@@ -111,17 +111,13 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
    */
   @Test
   void legacyPre111HistoryReplaysAgainstCurrentImplWithoutNonDeterminism() throws Exception {
-    // Sanity-check the fixture exists; emit a clear error path rather than the SDK's
-    // FileNotFound. The fixture is regenerated via the @EnabledIfSystemProperty test below.
-    try (InputStream in = getClass().getClassLoader().getResourceAsStream(FIXTURE_RESOURCE)) {
-      assertThat(in)
-          .as(
-              "Missing fixture resource %s. Regenerate with"
-                  + " `mvn -pl services/orchestrator test -Dgenerate.legacy.fixture=true"
-                  + " -Dtest=CopytradeSignalWorkflowImplLegacyReplayTest#regenerateLegacyFixture`",
-              FIXTURE_RESOURCE)
-          .isNotNull();
-    }
+    assertThat(getClass().getClassLoader().getResource(FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. Regenerate with"
+                + " `mvn -pl services/orchestrator test -Dgenerate.legacy.fixture=true"
+                + " -Dtest=CopytradeSignalWorkflowImplLegacyReplayTest#regenerateLegacyFixture`",
+            FIXTURE_RESOURCE)
+        .isNotNull();
 
     WorkflowReplayer.replayWorkflowExecutionFromResource(
         FIXTURE_RESOURCE, CopytradeSignalWorkflowImpl.class);
@@ -148,7 +144,7 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
   @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
   void regenerateLegacyFixture() throws Exception {
     TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
-    String workflowId;
+    String json;
     try {
       Worker worker = env.newWorker(CORE_QUEUE);
       worker.registerWorkflowImplementationTypes(LegacyHandleBtoEmulatorWorkflowImpl.class);
@@ -172,28 +168,18 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
               CopytradeSignalWorkflow.class,
               WorkflowOptions.newBuilder()
                   .setTaskQueue(CORE_QUEUE)
-                  .setWorkflowId("legacy-pre-111-emulator")
+                  .setWorkflowId(LEGACY_EMULATOR_WORKFLOW_ID)
                   .build());
       wf.process(btoPayload());
-      workflowId = "legacy-pre-111-emulator";
 
-      WorkflowExecutionHistory history = client.fetchHistory(workflowId);
-      // toJson(true) requests pretty-printed protojson; the SDK uses
-      // google.protobuf.util.JsonFormat
-      // under the hood so the output is round-trippable via WorkflowExecutionHistory.fromJson(...).
-      String json = history.toJson(true);
-
-      Files.createDirectories(FIXTURE_SOURCE_PATH.getParent());
-      Files.writeString(FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+      json = client.fetchHistory(LEGACY_EMULATOR_WORKFLOW_ID).toJson(true);
     } finally {
       env.close();
     }
 
-    // Sanity check: the regenerated file must parse back via WorkflowExecutionHistory.fromJson.
-    assertThat(Files.exists(FIXTURE_SOURCE_PATH)).isTrue();
-    String roundTrip = Files.readString(FIXTURE_SOURCE_PATH, StandardCharsets.UTF_8);
-    WorkflowExecutionHistory parsed = WorkflowExecutionHistory.fromJson(roundTrip);
-    assertThat(parsed.getEvents()).isNotEmpty();
+    assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
+    Files.createDirectories(FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
   }
 
   // ---------------------------------------------------------------------------
@@ -293,14 +279,10 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
     }
 
     @Override
-    public void onFill(FillEvent event) {
-      // unused — replay path never signals
-    }
+    public void onFill(FillEvent event) {}
 
     @Override
-    public void riskBreach(com.ohmytradeagent.contract.RiskBreachPayload payload) {
-      // unused — replay path never signals
-    }
+    public void riskBreach(com.ohmytradeagent.contract.RiskBreachPayload payload) {}
 
     private static AuditEvent auditEvent(CopytradeSignalPayload payload, String kind) {
       AuditEvent event = new AuditEvent();
