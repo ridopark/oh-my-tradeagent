@@ -9,6 +9,7 @@ document. Failure here means contract drift between the two languages.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from ohmytradeagent_contract.models.copytrade_signal_payload import (
     CopytradeSignalPayload,
     Right,
 )
+from ohmytradeagent_contract.models.fill_signal_payload import FillSignalPayload
 from ohmytradeagent_contract.models.partial_exit_request import PartialExitRequest
 from ohmytradeagent_contract.models.pre_trade_check_request import (
     PreTradeCheckRequest,
@@ -98,7 +100,7 @@ def test_premium_tick_round_trips() -> None:
 
     assert model.schema_version == 1
     assert model.contract_symbol == "NVDA  260516C00140000"
-    assert model.premium == 2.95
+    assert model.premium == Decimal("2.95")
 
     serialized = json.loads(model.model_dump_json(by_alias=True))
     assert serialized == original
@@ -111,7 +113,7 @@ def test_arm_chandelier_payload_round_trips() -> None:
 
     assert model.schema_version == 1
     assert model.tenant_id == "dev"
-    assert model.peak_premium == 2.85
+    assert model.peak_premium == Decimal("2.85")
     assert model.giveback_pct == 0.15
 
     serialized = json.loads(model.model_dump_json(by_alias=True))
@@ -138,7 +140,7 @@ def test_strategy_config_round_trips() -> None:
     assert model.schema_version == 1
     assert model.tenant_id == "dev"
     assert model.strategy_id == "copytrade-v1"
-    assert model.max_slippage_abs == 0.05
+    assert model.max_slippage_abs == Decimal("0.05")
     assert model.max_slippage_pct == 0.05
     assert model.repeg_after_ms == 5000
 
@@ -172,7 +174,7 @@ def test_pre_trade_check_request_round_trips() -> None:
     assert model.broker_target == BrokerTarget.paper
     assert model.side == Side.buy
     assert model.qty == 1
-    assert model.estimated_notional == 230.0
+    assert model.estimated_notional == Decimal("230.0")
 
     serialized = json.loads(model.model_dump_json(by_alias=True))
     assert serialized == original
@@ -263,11 +265,11 @@ def test_strategy_config_notional_cap_fields_round_trip() -> None:
         "max_daily_notional_deployed": 25000.0,
     }
     model = StrategyConfig.model_validate(data)
-    assert model.max_notional_per_signal == 2500.0
-    assert model.max_daily_notional_deployed == 25000.0
+    assert model.max_notional_per_signal == Decimal("2500.0")
+    assert model.max_daily_notional_deployed == Decimal("25000.0")
     reloaded = StrategyConfig.model_validate_json(model.model_dump_json(by_alias=True, exclude_none=True))
-    assert reloaded.max_notional_per_signal == 2500.0
-    assert reloaded.max_daily_notional_deployed == 25000.0
+    assert reloaded.max_notional_per_signal == Decimal("2500.0")
+    assert reloaded.max_daily_notional_deployed == Decimal("25000.0")
 
     # Absent case (the existing copytrade-v1 fixture) must still validate cleanly — both fields are opt-in.
     absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
@@ -282,3 +284,52 @@ def test_strategy_config_notional_cap_non_positive_rejected() -> None:
             with pytest.raises(ValidationError) as exc_info:
                 StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, field: bad})
             assert field in str(exc_info.value)
+
+
+def test_fill_signal_payload_decimal_wire_shape_canary() -> None:
+    """Issue #189 wire-shape canary: bare JSON number ⇄ Decimal round-trip.
+
+    Java's Jackson serialises BigDecimal as a bare JSON number (e.g. 3.14).
+    Pydantic v2's default Decimal serialisation emits a JSON string ("3.14"),
+    which would break the wire contract with the Java side. The regen.sh
+    post-processor injects ConfigDict(json_encoders={Decimal: float}) into
+    every model to keep the Python output bare-number-shaped. This test
+    locks that contract: any regression to string-shaped output will trip
+    here before it can ship.
+    """
+    # Java-equivalent JSON shape: bare number for avgFillPrice.
+    java_shape = b'{"brokerOrderId":"order-abc","filledQty":1,"avgFillPrice":3.14,"filledAt":"2026-05-26T13:35:00Z"}'
+
+    model = FillSignalPayload.model_validate_json(java_shape)
+
+    # Bare-number JSON parses cleanly into Decimal (no precision loss for tick-grid values).
+    assert model.avg_fill_price == Decimal("3.14")
+    assert isinstance(model.avg_fill_price, Decimal)
+
+    # Re-serialise with by_alias to round-trip the camelCase wire form.
+    out_bytes = model.model_dump_json(by_alias=True).encode()
+
+    # Byte-identical round-trip (modulo field order; the generated model declares
+    # fields in the same order as the schema so the order is in fact preserved).
+    assert out_bytes == java_shape, f"wire-shape drift: expected {java_shape!r}, got {out_bytes!r}"
+
+    # And belt-and-braces: structural equality after re-parsing both sides.
+    assert json.loads(out_bytes) == json.loads(java_shape)
+
+
+def test_decimal_field_accepts_bare_number_and_string_inputs() -> None:
+    """Issue #189: Pydantic v2 Decimal fields must accept both bare-number and string JSON input.
+
+    The Java side emits bare numbers (Jackson BigDecimal default). Some legacy
+    audit records may carry string-shaped decimals. Both forms must parse to
+    the same Decimal value so reading historical journal rows never fails.
+    """
+    bare = b'{"brokerOrderId":"x","filledQty":1,"avgFillPrice":3.14,"filledAt":"2026-05-26T13:35:00Z"}'
+    quoted = b'{"brokerOrderId":"x","filledQty":1,"avgFillPrice":"3.14","filledAt":"2026-05-26T13:35:00Z"}'
+
+    m_bare = FillSignalPayload.model_validate_json(bare)
+    m_quoted = FillSignalPayload.model_validate_json(quoted)
+
+    assert m_bare.avg_fill_price == Decimal("3.14")
+    assert m_quoted.avg_fill_price == Decimal("3.14")
+    assert m_bare.avg_fill_price == m_quoted.avg_fill_price

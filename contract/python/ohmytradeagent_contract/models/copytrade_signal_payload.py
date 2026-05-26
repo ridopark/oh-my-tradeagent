@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from typing import Annotated
+
 from datetime import date
 from enum import StrEnum
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, PositiveFloat, conint, constr
+from pydantic import Field, AwareDatetime, BaseModel, ConfigDict, conint, constr
 
 
 class Action(StrEnum):
@@ -35,6 +38,7 @@ class CopytradeSignalPayload(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     schema_version: conint(ge=1)
     """
@@ -76,7 +80,7 @@ class CopytradeSignalPayload(BaseModel):
     """
     Option expiry date (YYYY-MM-DD) at 00:00 UTC of that calendar date.
     """
-    strike: PositiveFloat
+    strike: Annotated[Decimal, Field(gt=0)]
     """
     Strike price, dollars.
     """
@@ -84,7 +88,7 @@ class CopytradeSignalPayload(BaseModel):
     """
     Option right: Call or Put.
     """
-    price: PositiveFloat
+    price: Annotated[Decimal, Field(gt=0)]
     """
     Author's stated fill premium (per contract, dollars). 5-30s stale by the time we read it; size off fresh ask not this.
     """

@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from typing import Annotated
+
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PositiveFloat,
     confloat,
     conint,
     constr,
@@ -25,6 +27,7 @@ class StrategyConfig(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     schema_version: conint(ge=1)
     """
@@ -92,7 +95,7 @@ class StrategyConfig(BaseModel):
     """
     Phase 2b/3: BTO entry order TTL for live broker target.
     """
-    max_slippage_abs: PositiveFloat | None = None
+    max_slippage_abs: Annotated[Decimal, Field(gt=0)] | None = None
     """
     Issue #4: Absolute slippage cap (dollars per contract premium) added to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_pct via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation.
     """
@@ -120,7 +123,7 @@ class StrategyConfig(BaseModel):
     """
     Issue #14 (Phase 4 chandelier-trail EOD disarm): disarm the trail in the final N minutes before market close so the EOD timer handles the exit instead. Past this disarm window theta giveback dominates real momentum and the trail becomes a noise-driven flush. Default 30 when null. PositionWorkflow.chandelier_tick checks `now >= market_close - trail_disarm_minutes_before_close minutes` on every tick.
     """
-    daily_loss_threshold: PositiveFloat | None = None
+    daily_loss_threshold: Annotated[Decimal, Field(gt=0)] | None = None
     """
     Phase 5: KillSwitchWorkflow auto-trip threshold (absolute dollars) on realized cumulative daily loss for (tenant, strategy). Auto-trip fires when realizedPnL <= -daily_loss_threshold. Phase 5 ships realized-only PnL composition (sum of EntryFilled/ExitFilled premia from audit_log); MTM on open positions lands in Phase 5b.
     """
@@ -148,7 +151,7 @@ class StrategyConfig(BaseModel):
     """
     Issue #6 portfolio-level gate: max accepted BTO entries per UTC trading day. Reject with DAILY_TRADE_COUNT_EXCEEDED when today's count (from audit log: SignalAccepted with action=BTO) >= daily_trade_count. Opt-in: null disables the gate. Anti-overtrading circuit-breaker for volatile sessions.
     """
-    drawdown_velocity_threshold: PositiveFloat | None = None
+    drawdown_velocity_threshold: Annotated[Decimal, Field(gt=0)] | None = None
     """
     Issue #6 portfolio-level gate: per-minute MTM loss rate (absolute dollars/minute) at which new entries are blocked. Reject with DRAWDOWN_VELOCITY_EXCEEDED when sampled loss rate over the trailing minute >= drawdown_velocity_threshold. Opt-in: null disables the gate. Intraday rate-of-loss circuit breaker complementing daily_loss_threshold (which is a cumulative bound).
     """
@@ -166,11 +169,11 @@ class StrategyConfig(BaseModel):
     """
     Issue #15 (quant-analyst review): wall-clock time (HH:MM in US/Eastern) at which PositionWorkflow force-flats non-0DTE positions for the EOD sweep. Default 15:45 ET when null. The prior 15:55 ET default left only 5 minutes of book depth before close for liquidation; 15:45 ET preserves a 15-minute window of reasonable spreads. Spec-only field in this PR; PositionWorkflow timer wiring lands separately.
     """
-    max_notional_per_signal: PositiveFloat | None = None
+    max_notional_per_signal: Annotated[Decimal, Field(gt=0)] | None = None
     """
     Issue #17 (quant-analyst review): hard per-signal dollar cap on entry notional. The sizing formula sources price from the contract-resolver's freshly-fetched ask (or mid clamped to ask) instead of payload.price (which is 5-30s stale). After computing qty = clamp(floor(allocation / (price * 100)), min_contracts, max_contracts), reject the signal with NOTIONAL_PER_SIGNAL_EXCEEDED when clamp(floor(...), min, max) == min AND min * price * 100 > max_notional_per_signal — silently over-sizing on a high-IV ticker is the failure mode this gate prevents. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.
     """
-    max_daily_notional_deployed: PositiveFloat | None = None
+    max_daily_notional_deployed: Annotated[Decimal, Field(gt=0)] | None = None
     """
     Issue #17 (quant-analyst review): hard per-day dollar cap on cumulative entry notional deployed (sum of qty * fill_premium * 100 for SignalAccepted BTO entries today, UTC trading day). Reject new BTO entries with DAILY_NOTIONAL_DEPLOYED_EXCEEDED when today_deployed + new_notional > max_daily_notional_deployed. Complements max_notional_per_signal (per-signal bound) by capping total daily capital at risk against premium-spike over-leverage across many signals. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.
     """

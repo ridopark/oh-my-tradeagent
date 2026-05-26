@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from typing import Annotated
+
 from pydantic import (
     AwareDatetime,
     BaseModel,
     ConfigDict,
-    PositiveFloat,
+    Field,
     confloat,
     conint,
     constr,
@@ -21,6 +24,7 @@ class PartialExitRequest(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     schema_version: conint(ge=1)
     """
@@ -40,7 +44,7 @@ class PartialExitRequest(BaseModel):
     """
     Fraction of remaining qty to close. Resolved from KeywordPartialMatcher.match(tail, cfg.partial_fractions, cfg.default_stc_fraction).
     """
-    ref_premium: PositiveFloat
+    ref_premium: Annotated[Decimal, Field(gt=0)]
     """
     Author-posted exit premium (for audit; not source-of-truth for fill price).
     """

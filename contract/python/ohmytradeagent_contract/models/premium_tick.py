@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, PositiveFloat, conint, constr
+from decimal import Decimal
+from typing import Annotated
+
+from pydantic import Field, AwareDatetime, BaseModel, ConfigDict, conint, constr
 
 
 class PremiumTick(BaseModel):
@@ -13,6 +16,7 @@ class PremiumTick(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     schema_version: conint(ge=1)
     """
@@ -22,7 +26,7 @@ class PremiumTick(BaseModel):
     """
     OCC option symbol the tick is for.
     """
-    premium: PositiveFloat
+    premium: Annotated[Decimal, Field(gt=0)]
     """
     Premium per contract, dollars. Source-of-truth field for the chandelier trail comparison. For chandelier-trail comparisons, market-data-svc fills this with the mid (bid+ask)/2 smoothed over a 5-10s window, not the last-trade price.
     """

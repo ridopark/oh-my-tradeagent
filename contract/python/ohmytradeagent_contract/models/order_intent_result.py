@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from typing import Annotated
+
 from enum import StrEnum
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, PositiveFloat, conint, constr
+from pydantic import Field, AwareDatetime, BaseModel, ConfigDict, conint, constr
 
 
 class State(StrEnum):
@@ -28,6 +31,7 @@ class OrderIntentResult(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     schema_version: conint(ge=1)
     intent_key: constr(min_length=1)
@@ -48,7 +52,7 @@ class OrderIntentResult(BaseModel):
     """
     Broker-confirmed filled quantity. Populated when state=FILLED (typically via cancel-on-filled race recovery — see issue #165).
     """
-    avg_fill_price: PositiveFloat | None = None
+    avg_fill_price: Annotated[Decimal, Field(gt=0)] | None = None
     """
     Broker-confirmed average fill price. Populated when state=FILLED.
     """
