@@ -16,7 +16,7 @@ from pydantic import (
 
 class FillSignalPayload(BaseModel):
     """
-    Wire shape signalled from exec-svc to the orchestrator's CopytradeSignalWorkflow.onFill / PositionWorkflow.onFill handlers when the broker reports a fill. Field names are camelCase to byte-match PR #167's hand-mirrored Java records, so workflows in flight at deploy time deserialise without drift.
+    Wire shape signalled from exec-svc to the orchestrator's CopytradeSignalWorkflow.onFill / PositionWorkflow.onFill handlers when the broker reports a fill. Field names are camelCase to match the Temporal data converter's default Jackson naming, so workflows in flight at deploy time deserialise without drift.
     """
 
     model_config = ConfigDict(
