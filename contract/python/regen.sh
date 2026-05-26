@@ -163,6 +163,17 @@ from pathlib import Path
 
 OUT_DIR = Path("ohmytradeagent_contract/models")
 
+# Hoisted constants mirror the BrokerTarget block's IMPORT_LINE / CLASS_HEADER /
+# BLOCK pattern: every literal the rewrites depend on lives at the top so a future
+# generator-shape change is grep-and-replace, not search-the-file.
+POSITIVEFLOAT_TOKEN = "PositiveFloat"
+DECIMAL_IMPORT = "from decimal import Decimal\n"
+ANNOTATED_IMPORT = "from typing import Annotated\n"
+CONFIGDICT_TAIL_OLD = '        extra="forbid",\n    )'
+CONFIGDICT_TAIL_NEW = (
+    '        extra="forbid",\n        json_encoders={Decimal: float},\n    )'
+)
+
 
 def _rewrite_pydantic_import(text: str) -> str:
     """Drop `PositiveFloat` from `from pydantic import (...)` or single-line forms.
@@ -209,12 +220,12 @@ def _ensure_field_in_pydantic_import(text: str) -> str:
 
 
 def _ensure_decimal_import(text: str) -> str:
-    if "from decimal import Decimal" in text:
+    if DECIMAL_IMPORT.rstrip() in text:
         return text
     # Insert right after the `from __future__` import block.
     return re.sub(
         r"(from __future__ import annotations\n)",
-        r"\1\nfrom decimal import Decimal\n",
+        lambda m: m.group(1) + "\n" + DECIMAL_IMPORT,
         text,
         count=1,
     )
@@ -252,22 +263,27 @@ def _inject_json_encoders(text: str) -> str:
             extra="forbid",
         )
 
-    We add the json_encoders kwarg after `extra="forbid",`. If a model has no
-    ConfigDict (none today, but defensive), we skip; the model would still
-    parse correctly but serialise Decimal as string — and the wire-shape canary
-    would catch it.
+    Wire-shape contract: any model that now references Decimal MUST also carry
+    json_encoders={Decimal: float}, otherwise Pydantic v2 serialises Decimal as
+    a JSON string and breaks compat with Java's Jackson bare-number emit. If
+    the literal replace misses (generator changed its ConfigDict shape), halt
+    — silently shipping a half-rewrite would surface as wire drift in prod.
     """
     if "json_encoders=" in text:
         return text  # already present
-    return text.replace(
-        '        extra="forbid",\n    )',
-        '        extra="forbid",\n        json_encoders={Decimal: float},\n    )',
-    )
+    new_text = text.replace(CONFIGDICT_TAIL_OLD, CONFIGDICT_TAIL_NEW)
+    if new_text == text:
+        raise SystemExit(
+            "[positivefloat -> decimal] FAILED to inject json_encoders into ConfigDict; "
+            "the generator's ConfigDict shape no longer matches the expected literal "
+            f"{CONFIGDICT_TAIL_OLD!r}. Update CONFIGDICT_TAIL_OLD in regen.sh."
+        )
+    return new_text
 
 
 def process(path: Path) -> bool:
     text = path.read_text()
-    if "PositiveFloat" not in text:
+    if POSITIVEFLOAT_TOKEN not in text:
         return False
 
     new_text = text
@@ -279,7 +295,7 @@ def process(path: Path) -> bool:
     new_text = _inject_json_encoders(new_text)
 
     # Defensive: if any PositiveFloat survived, halt rather than ship a half-rewrite.
-    if "PositiveFloat" in new_text:
+    if POSITIVEFLOAT_TOKEN in new_text:
         raise SystemExit(
             f"[positivefloat -> decimal] FAILED to fully rewrite {path.name}; "
             f"a PositiveFloat reference survived the regex. "
