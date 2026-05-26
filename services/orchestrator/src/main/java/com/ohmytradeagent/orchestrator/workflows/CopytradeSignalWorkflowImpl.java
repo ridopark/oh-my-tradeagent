@@ -76,10 +76,18 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // Pre-#111 in-flight CopytradeSignalWorkflow executions had a single checkEntry(payload, config)
   // call; the v=DEFAULT_VERSION branch preserves that shape via the legacy 3-arg checkEntry
   // overload with null preTradeResult so replays of legacy histories remain deterministic. The
-  // v>=1 branch routes through checkEntryWithLimit (a NEW activity type CheckEntryWithLimit) so
+  // v>=1 branch dispatches the pre-trade check; the inner VERSION_CHECK_ENTRY_WITH_LIMIT gate
+  // then routes to checkEntryWithLimit (CheckEntryWithLimit Activity type) for new executions so
   // notional-cap + buying-power gates see the slip-adjusted limit rather than the mirror price.
   // Retires the deploy-time drain mitigation documented in #111.
   private static final String VERSION_PRE_TRADE_DISPATCH = "pre-trade-dispatch-v2";
+
+  // In-flight v>=1 workflows recorded a CheckEntry activity-task call before this gate was added.
+  // After deploy, the new code scheduling CheckEntryWithLimit would mismatch the recorded history
+  // and trip a Temporal non-determinism error. v=DEFAULT_VERSION (open workflows) keeps the legacy
+  // checkEntry call; v>=1 (new workflows) routes to checkEntryWithLimit with the slip-adjusted
+  // limit so notional-cap + BP gates see the max-acceptable cost.
+  private static final String VERSION_CHECK_ENTRY_WITH_LIMIT = "check-entry-with-limit";
 
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
@@ -186,7 +194,15 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         risk.assertPreTradeCheckRoutable(config);
       }
       PreTradeCheckResult preTradeResult = dispatchPreTradeCheck(payload, config, priced.limit());
-      decision = risk.checkEntryWithLimit(payload, config, preTradeResult, priced.limit());
+      int checkEntryWithLimitVersion =
+          Workflow.getVersion(VERSION_CHECK_ENTRY_WITH_LIMIT, Workflow.DEFAULT_VERSION, 1);
+      if (checkEntryWithLimitVersion == Workflow.DEFAULT_VERSION) {
+        // In-flight v>=1 workflows whose history recorded a CheckEntry call before this gate
+        // landed.
+        decision = risk.checkEntry(payload, config, preTradeResult);
+      } else {
+        decision = risk.checkEntryWithLimit(payload, config, preTradeResult, priced.limit());
+      }
     }
     if (!decision.allowed()) {
       Map<String, Object> rejectSubject =
