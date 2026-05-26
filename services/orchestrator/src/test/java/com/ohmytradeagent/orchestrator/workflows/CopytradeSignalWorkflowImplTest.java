@@ -152,11 +152,32 @@ class CopytradeSignalWorkflowImplTest {
 
   @Test
   void approvedSignal_callsExecPlaceOrderAndEmitsOrderSubmitted() {
-    setupApprovedMocks();
+    // Issue #191: configure both slippage caps (abs=0.05, pct=0.05) and price=3.10 so the
+    // BTO limit derives via the SLIP_MIN branch (min(3.15, 3.255) = 3.15). The end-to-end wire-up
+    // is asserted via (a) the captured OrderIntent.limitPrice and (b) the OrderSubmitted audit
+    // subject carrying limit_price_strategy=slip_min.
+    StrategyConfig cfg = config();
+    cfg.setPendingTtlPaperSecs(1L); // short TTL so test exits quickly
+    cfg.setMaxSlippageAbs(new BigDecimal("0.05"));
+    cfg.setMaxSlippagePct(new BigDecimal("0.05"));
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(risk.checkEntry(any(), eq(cfg), any())).thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-intent-K"));
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-intent-K"));
 
-    runWorkflow(btoPayload());
+    CopytradeSignalPayload p = btoPayload();
+    p.setPrice(new BigDecimal("3.10"));
+    runWorkflow(p);
 
     ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
     verify(exec).placeOrder(intentCaptor.capture());
@@ -165,11 +186,15 @@ class CopytradeSignalWorkflowImplTest {
     assertThat(submitted.getSide()).isEqualTo(OrderIntent.Side.BUY);
     assertThat(submitted.getQty()).isEqualTo(5L);
     assertThat(submitted.getOptionSymbol()).isEqualTo("NVDA  260516C00140000");
+    // Issue #191: compareTo (not equals) — BigDecimal scale of `3.10 + 0.05` is 2 (matches plan
+    // halt-condition 4 guard against scale-mismatch flakes).
+    assertThat(submitted.getLimitPrice()).isEqualByComparingTo(new BigDecimal("3.15"));
 
     AuditEvent orderSubmitted = capture("OrderSubmitted");
     assertThat(orderSubmitted.getSubject())
         .containsEntry("broker_order_id", "stub-intent-K")
-        .containsEntry("option_symbol", "NVDA  260516C00140000");
+        .containsEntry("option_symbol", "NVDA  260516C00140000")
+        .containsEntry("limit_price_strategy", "slip_min");
   }
 
   @Test
