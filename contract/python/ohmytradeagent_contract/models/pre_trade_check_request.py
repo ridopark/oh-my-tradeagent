@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from typing import Annotated
+
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, PositiveFloat, conint, constr
+from pydantic import Field, BaseModel, ConfigDict, conint, constr
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -27,6 +30,7 @@ class PreTradeCheckRequest(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     schema_version: conint(ge=1)
     """
@@ -50,7 +54,7 @@ class PreTradeCheckRequest(BaseModel):
     """
     Contracts requested.
     """
-    estimated_notional: PositiveFloat
+    estimated_notional: Annotated[Decimal, Field(gt=0)]
     """
     Dollar notional the risk gate computed (qty * payload.price * 100 for options). Broker adapters compare this to buying_power.
     """

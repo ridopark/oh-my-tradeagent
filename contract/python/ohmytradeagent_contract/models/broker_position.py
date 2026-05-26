@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from typing import Annotated
+
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, PositiveFloat, conint, constr
+from pydantic import Field, BaseModel, ConfigDict, conint, constr
 
 
 class Side(StrEnum):
@@ -23,6 +26,7 @@ class BrokerPosition(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     schema_version: conint(ge=1)
     option_symbol: constr(min_length=1)
@@ -37,7 +41,7 @@ class BrokerPosition(BaseModel):
     """
     Phase 3 v0 supports LONG only; SHORT/inverse positions are not produced by copytrade.
     """
-    avg_entry_price: PositiveFloat | None = None
+    avg_entry_price: Annotated[Decimal, Field(gt=0)] | None = None
     """
     Optional avg entry price from broker. May be omitted if broker doesn't carry it.
     """

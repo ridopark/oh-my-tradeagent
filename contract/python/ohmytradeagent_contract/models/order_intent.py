@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from typing import Annotated
+
 from enum import StrEnum
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, PositiveFloat, conint, constr
+from pydantic import Field, AwareDatetime, BaseModel, ConfigDict, conint, constr
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -27,6 +30,7 @@ class OrderIntent(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     schema_version: conint(ge=1)
     """
@@ -58,7 +62,7 @@ class OrderIntent(BaseModel):
     """
     Number of contracts (after capital-weight clamp).
     """
-    limit_price: PositiveFloat | None = None
+    limit_price: Annotated[Decimal, Field(gt=0)] | None = None
     """
     Optional limit. Omitted (null) means marketable-mid. Phase 2b passes payload.price.
     """

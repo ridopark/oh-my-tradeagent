@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, PositiveFloat, conint, constr
+
+from pydantic import Field, BaseModel, ConfigDict, conint, constr
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -17,6 +20,7 @@ class PositionWorkflowInput(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     schema_version: conint(ge=1)
     tenant_id: constr(min_length=1)
@@ -33,7 +37,7 @@ class PositionWorkflowInput(BaseModel):
     """
     Original position size, contracts.
     """
-    entry_premium: PositiveFloat
+    entry_premium: Annotated[Decimal, Field(gt=0)]
     """
     Fill premium per contract, dollars (source-of-truth: broker fill, not author-posted price).
     """

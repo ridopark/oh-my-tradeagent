@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from typing import Annotated
+
 from pydantic import (
     AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
-    PositiveFloat,
     conint,
     constr,
 )
@@ -21,6 +23,7 @@ class FillSignalPayload(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     broker_order_id: constr(min_length=1) = Field(..., alias="brokerOrderId")
     """
@@ -30,7 +33,7 @@ class FillSignalPayload(BaseModel):
     """
     Cumulative filled quantity reported by the broker for this order.
     """
-    avg_fill_price: PositiveFloat = Field(..., alias="avgFillPrice")
+    avg_fill_price: Annotated[Decimal, Field(gt=0)] = Field(..., alias="avgFillPrice")
     """
     Average fill price across all partials reported for this order.
     """

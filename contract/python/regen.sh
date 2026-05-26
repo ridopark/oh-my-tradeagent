@@ -132,6 +132,191 @@ else:
     print("[broker_target dedup] no files needed rewriting")
 PY
 
+# Post-process: rewrite `PositiveFloat` -> `Annotated[Decimal, Field(gt=0)]` so the
+# Python side mirrors the Java side's BigDecimal treatment of `"type": "number"`
+# schema fields (issue #189). The wire shape stays bare-JSON-number both ways:
+# Java's Jackson emits BigDecimal as a bare number, and Pydantic v2 defaults to
+# emitting Decimal as a JSON string — so we also inject
+# `json_encoders={Decimal: float}` into every model's ConfigDict to keep the
+# Python output byte-identical-shape (bare number, not "string"). The
+# json_encoders escape hatch is deprecated-in-v3 but functional in v2.13 and is
+# the explicit fallback called out in the issue body's halt-conditions section.
+uv run python - <<'PY'
+"""Rewrite generated PositiveFloat declarations to Annotated[Decimal, Field(gt=0)].
+
+Implementation notes:
+- Only touches files that actually import `PositiveFloat` from pydantic.
+- Field-line rewrite is anchored on ': PositiveFloat' so it never collides with
+  arbitrary identifiers; supports both the bare and the `| None` shapes.
+- Import-line rewrite drops `PositiveFloat` from the pydantic import (preserving
+  the rest of the import list) and inserts `from decimal import Decimal` plus
+  ensures `from typing import Annotated` is present.
+- Ensures `Field` is in the pydantic import (needed for the `Field(gt=0)` arg);
+  some files already had it for `Field(..., alias=...)` uses, others did not.
+- Injects `json_encoders={Decimal: float}` into the existing ConfigDict so
+  serialised output matches the Java BigDecimal bare-number wire shape.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+OUT_DIR = Path("ohmytradeagent_contract/models")
+
+# Hoisted constants mirror the BrokerTarget block's IMPORT_LINE / CLASS_HEADER /
+# BLOCK pattern: every literal the rewrites depend on lives at the top so a future
+# generator-shape change is grep-and-replace, not search-the-file.
+POSITIVEFLOAT_TOKEN = "PositiveFloat"
+DECIMAL_IMPORT = "from decimal import Decimal\n"
+ANNOTATED_IMPORT = "from typing import Annotated\n"
+CONFIGDICT_TAIL_OLD = '        extra="forbid",\n    )'
+CONFIGDICT_TAIL_NEW = (
+    '        extra="forbid",\n        json_encoders={Decimal: float},\n    )'
+)
+
+
+def _rewrite_pydantic_import(text: str) -> str:
+    """Drop `PositiveFloat` from `from pydantic import (...)` or single-line forms.
+
+    Handles both shapes the generator emits:
+      from pydantic import A, PositiveFloat, B
+      from pydantic import (
+          A,
+          PositiveFloat,
+          B,
+      )
+    """
+    # Multi-line parenthesised: drop the `    PositiveFloat,\n` line outright.
+    text = re.sub(r"^    PositiveFloat,\n", "", text, flags=re.MULTILINE)
+    # Single-line: drop `PositiveFloat, ` or `, PositiveFloat` (whichever shape).
+    text = re.sub(r"from pydantic import ([^\n]*?)PositiveFloat, ", r"from pydantic import \1", text)
+    text = re.sub(r"from pydantic import ([^\n]*?), PositiveFloat", r"from pydantic import \1", text)
+    return text
+
+
+def _ensure_field_in_pydantic_import(text: str) -> str:
+    """Make sure `Field` is imported from pydantic; needed for Field(gt=0).
+
+    Scans the entire `from pydantic import (...)` block (multi-line or single
+    line) and only inserts `Field` if it isn't already there.
+    """
+    # Multi-line parenthesised form: `from pydantic import (\n    A,\n    B,\n)`.
+    m = re.search(r"^from pydantic import \(\n(.*?)^\)", text, flags=re.MULTILINE | re.DOTALL)
+    if m:
+        block = m.group(1)
+        if re.search(r"^\s*Field,\s*$", block, flags=re.MULTILINE):
+            return text  # Field already imported
+        # Insert `    Field,\n` after `    ConfigDict,\n` if present, else at top of block.
+        if "    ConfigDict,\n" in block:
+            new_block = block.replace("    ConfigDict,\n", "    ConfigDict,\n    Field,\n", 1)
+        else:
+            new_block = "    Field,\n" + block
+        return text[: m.start(1)] + new_block + text[m.end(1) :]
+    # Single-line form: `from pydantic import A, B, C`.
+    sm = re.search(r"^from pydantic import ([^\n(]+)$", text, flags=re.MULTILINE)
+    if sm and not re.search(r"\bField\b", sm.group(1)):
+        return text[: sm.start(1)] + "Field, " + sm.group(1) + text[sm.end(1) :]
+    return text
+
+
+def _ensure_decimal_import(text: str) -> str:
+    if DECIMAL_IMPORT.rstrip() in text:
+        return text
+    # Insert right after the `from __future__` import block.
+    return re.sub(
+        r"(from __future__ import annotations\n)",
+        lambda m: m.group(1) + "\n" + DECIMAL_IMPORT,
+        text,
+        count=1,
+    )
+
+
+def _ensure_annotated_import(text: str) -> str:
+    if re.search(r"from typing import [^\n]*\bAnnotated\b", text):
+        return text
+    if "from typing import" in text:
+        # Add Annotated to an existing typing import.
+        return re.sub(r"from typing import ([^\n]+)", lambda m: f"from typing import Annotated, {m.group(1)}" if "Annotated" not in m.group(1) else m.group(0), text, count=1)
+    # Insert right after the decimal import (which we always add first).
+    return re.sub(
+        r"(from decimal import Decimal\n)",
+        r"\1from typing import Annotated\n",
+        text,
+        count=1,
+    )
+
+
+def _rewrite_field_declarations(text: str) -> str:
+    """Replace `: PositiveFloat` (and `: PositiveFloat | None`) at field-decl sites."""
+    # Order matters: handle `| None` first so we don't double-rewrite.
+    text = re.sub(r": PositiveFloat \| None", r": Annotated[Decimal, Field(gt=0)] | None", text)
+    text = re.sub(r": PositiveFloat\b", r": Annotated[Decimal, Field(gt=0)]", text)
+    return text
+
+
+def _inject_json_encoders(text: str) -> str:
+    """Inject json_encoders={Decimal: float} into ConfigDict.
+
+    The generator emits ConfigDict in this exact shape on every model:
+
+        model_config = ConfigDict(
+            extra="forbid",
+        )
+
+    Wire-shape contract: any model that now references Decimal MUST also carry
+    json_encoders={Decimal: float}, otherwise Pydantic v2 serialises Decimal as
+    a JSON string and breaks compat with Java's Jackson bare-number emit. If
+    the literal replace misses (generator changed its ConfigDict shape), halt
+    — silently shipping a half-rewrite would surface as wire drift in prod.
+    """
+    if "json_encoders=" in text:
+        return text  # already present
+    new_text = text.replace(CONFIGDICT_TAIL_OLD, CONFIGDICT_TAIL_NEW)
+    if new_text == text:
+        raise SystemExit(
+            "[positivefloat -> decimal] FAILED to inject json_encoders into ConfigDict; "
+            "the generator's ConfigDict shape no longer matches the expected literal "
+            f"{CONFIGDICT_TAIL_OLD!r}. Update CONFIGDICT_TAIL_OLD in regen.sh."
+        )
+    return new_text
+
+
+def process(path: Path) -> bool:
+    text = path.read_text()
+    if POSITIVEFLOAT_TOKEN not in text:
+        return False
+
+    new_text = text
+    new_text = _rewrite_pydantic_import(new_text)
+    new_text = _ensure_field_in_pydantic_import(new_text)
+    new_text = _ensure_decimal_import(new_text)
+    new_text = _ensure_annotated_import(new_text)
+    new_text = _rewrite_field_declarations(new_text)
+    new_text = _inject_json_encoders(new_text)
+
+    # Defensive: if any PositiveFloat survived, halt rather than ship a half-rewrite.
+    if POSITIVEFLOAT_TOKEN in new_text:
+        raise SystemExit(
+            f"[positivefloat -> decimal] FAILED to fully rewrite {path.name}; "
+            f"a PositiveFloat reference survived the regex. "
+            f"Inspect the file and extend the post-processor."
+        )
+
+    path.write_text(new_text)
+    return True
+
+
+touched = []
+for py in sorted(OUT_DIR.glob("*.py")):
+    if process(py):
+        touched.append(py.name)
+
+if touched:
+    print(f"[positivefloat -> decimal] rewrote {len(touched)} file(s): {', '.join(touched)}")
+else:
+    print("[positivefloat -> decimal] no files needed rewriting")
+PY
+
 echo "Regenerated under $OUT_DIR/"
 find "$OUT_DIR" -name '*.py' | sort
 echo "---class names---"

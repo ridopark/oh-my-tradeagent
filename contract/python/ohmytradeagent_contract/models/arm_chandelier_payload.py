@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, PositiveFloat, confloat, conint, constr
+from decimal import Decimal
+from typing import Annotated
+
+from pydantic import Field, BaseModel, ConfigDict, confloat, conint, constr
 
 
 class ArmChandelierPayload(BaseModel):
@@ -13,6 +16,7 @@ class ArmChandelierPayload(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        json_encoders={Decimal: float},
     )
     schema_version: conint(ge=1)
     """
@@ -28,7 +32,7 @@ class ArmChandelierPayload(BaseModel):
     """
     signal_id of the STC line that triggered the arm. Recorded for audit forensics.
     """
-    peak_premium: PositiveFloat
+    peak_premium: Annotated[Decimal, Field(gt=0)]
     """
     Initial peak premium to anchor the trail at. Typically the STC ref_premium at arm time.
     """
