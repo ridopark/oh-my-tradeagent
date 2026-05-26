@@ -71,11 +71,14 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // deterministically take the legacy CANCELLED/else paths. Mirrors VERSION_POSITION_HANDOFF.
   private static final String VERSION_TTL_FILLED_ADOPTION = "ttl-filled-adoption-v1";
   // Issue #112: Gate the 3-activity pre-trade dispatch (assertPreTradeCheckRoutable →
-  // dispatchPreTradeCheck → checkEntry(payload, config, preTradeResult)) introduced in PR #111.
+  // dispatchPreTradeCheck → checkEntryWithLimit(payload, config, preTradeResult, limit))
+  // introduced in PR #111 and tightened in #198 to thread the slip-adjusted limit through.
   // Pre-#111 in-flight CopytradeSignalWorkflow executions had a single checkEntry(payload, config)
-  // call; the v=DEFAULT_VERSION branch preserves that shape via the 3-arg overload with null
-  // preTradeResult so replays of legacy histories remain deterministic. Retires the deploy-time
-  // drain mitigation documented in #111.
+  // call; the v=DEFAULT_VERSION branch preserves that shape via the legacy 3-arg checkEntry
+  // overload with null preTradeResult so replays of legacy histories remain deterministic. The
+  // v>=1 branch routes through checkEntryWithLimit (a NEW activity type CheckEntryWithLimit) so
+  // notional-cap + buying-power gates see the slip-adjusted limit rather than the mirror price.
+  // Retires the deploy-time drain mitigation documented in #111.
   private static final String VERSION_PRE_TRADE_DISPATCH = "pre-trade-dispatch-v2";
 
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
@@ -183,7 +186,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         risk.assertPreTradeCheckRoutable(config);
       }
       PreTradeCheckResult preTradeResult = dispatchPreTradeCheck(payload, config, priced.limit());
-      decision = risk.checkEntry(payload, config, preTradeResult);
+      // Issue #198: thread the slip-adjusted limit so notional-cap + BP gates align with the
+      // workflow's max-acceptable cost (no more optimistic-mirror blind spot).
+      decision = risk.checkEntryWithLimit(payload, config, preTradeResult, priced.limit());
     }
     if (!decision.allowed()) {
       Map<String, Object> rejectSubject =

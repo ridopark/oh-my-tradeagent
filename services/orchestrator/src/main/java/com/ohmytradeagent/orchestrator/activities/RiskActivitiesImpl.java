@@ -92,6 +92,33 @@ public class RiskActivitiesImpl implements RiskActivities {
   @Override
   public RiskDecision checkEntry(
       CopytradeSignalPayload payload, StrategyConfig config, PreTradeCheckResult preTradeResult) {
+    // Legacy v=DEFAULT_VERSION path: keep bit-exact pre-#198 mirror-notional behavior so replays
+    // of pre-#111 in-flight workflows remain deterministic. New executions take the v>=1 branch
+    // in handleBto, which calls checkEntryWithLimit with the slip-adjusted limit.
+    BigDecimal mirrorPrice = payload.getPrice() == null ? BigDecimal.ZERO : payload.getPrice();
+    return checkEntryInternal(payload, config, preTradeResult, entryNotional(mirrorPrice, 1L));
+  }
+
+  @Override
+  public RiskDecision checkEntryWithLimit(
+      CopytradeSignalPayload payload,
+      StrategyConfig config,
+      PreTradeCheckResult preTradeResult,
+      BigDecimal limit) {
+    // Issue #198: feed the slip-adjusted limit (from BtoPricing.computeBtoLimit) into the
+    // notional-cap + buying-power gates so a snug cap can no longer be cleared on the
+    // optimistic mirror premium. Defensive null fall-back keeps unit-test ergonomics; the
+    // production v>=1 caller always passes priced.limit().
+    BigDecimal price = limit != null ? limit : payload.getPrice();
+    BigDecimal effective = price == null ? BigDecimal.ZERO : price;
+    return checkEntryInternal(payload, config, preTradeResult, entryNotional(effective, 1L));
+  }
+
+  private RiskDecision checkEntryInternal(
+      CopytradeSignalPayload payload,
+      StrategyConfig config,
+      PreTradeCheckResult preTradeResult,
+      BigDecimal entryNotional) {
     if (!config.getAuthorWhitelist().contains(payload.getAuthor())) {
       return RiskDecision.rejected(
           RejectionReason.AUTHOR_NOT_WHITELISTED, "author=" + payload.getAuthor());
@@ -126,7 +153,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     // pre-Issue-#6 behavior. Order matters only for which reason wins when multiple gates fail;
     // the order below mirrors the recommendation list in issue #6. Positions are fetched once and
     // shared across the gates that need them (production impl is a Temporal Visibility query).
-    PortfolioContext ctx = new PortfolioContext(payload, config, preTradeResult);
+    PortfolioContext ctx = new PortfolioContext(payload, config, preTradeResult, entryNotional);
     return Stream.<Supplier<RiskDecision>>of(
             () -> checkNotionalCap(ctx),
             () -> checkSameUnderlyingCount(ctx),
@@ -143,19 +170,26 @@ public class RiskActivitiesImpl implements RiskActivities {
   /**
    * Per-call cache for the portfolio gates. Holds the open-position list (fetched lazily so a
    * deployment that disables all position-aware gates skips the Visibility query entirely) plus the
-   * resolved entry notional, which several gates need.
+   * resolved entry notional, which several gates need. The {@code entryNotional} is pre-computed by
+   * the entry-point method ({@link #checkEntry} = mirror price, {@link #checkEntryWithLimit} =
+   * slip-adjusted limit) so the gate bodies stay source-agnostic.
    */
   private final class PortfolioContext {
     final CopytradeSignalPayload payload;
     final StrategyConfig config;
     final PreTradeCheckResult preTradeResult;
+    final BigDecimal entryNotional;
     private List<PortfolioSnapshot.OpenPosition> openPositions;
 
     PortfolioContext(
-        CopytradeSignalPayload payload, StrategyConfig config, PreTradeCheckResult preTradeResult) {
+        CopytradeSignalPayload payload,
+        StrategyConfig config,
+        PreTradeCheckResult preTradeResult,
+        BigDecimal entryNotional) {
       this.payload = payload;
       this.config = config;
       this.preTradeResult = preTradeResult;
+      this.entryNotional = entryNotional;
     }
 
     List<PortfolioSnapshot.OpenPosition> openPositions() {
@@ -184,7 +218,7 @@ public class RiskActivitiesImpl implements RiskActivities {
       return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
     }
     BigDecimal cap = equity.multiply(capPct);
-    BigDecimal projected = sumOpenNotional(ctx).add(entryNotional(ctx.payload));
+    BigDecimal projected = sumOpenNotional(ctx).add(ctx.entryNotional);
     if (projected.compareTo(cap) > 0) {
       return RiskDecision.rejected(
           RejectionReason.NOTIONAL_CAP_EXCEEDED,
@@ -295,7 +329,7 @@ public class RiskActivitiesImpl implements RiskActivities {
       return RiskDecision.rejected(
           RejectionReason.PRE_TRADE_CHECK_FAILED, "allowed=false reason=" + reason);
     }
-    BigDecimal notional = entryNotional(ctx.payload);
+    BigDecimal notional = ctx.entryNotional;
     BigDecimal buyingPower = result.getBuyingPower();
     if (buyingPower == null || buyingPower.compareTo(notional) < 0) {
       BigDecimal bp = buyingPower == null ? BigDecimal.ZERO : buyingPower;
@@ -337,14 +371,16 @@ public class RiskActivitiesImpl implements RiskActivities {
   }
 
   /**
-   * Per-contract premium dollars. The risk gate runs before final qty is computed by the workflow's
-   * {@link Sizing#computeContracts}, so we use a 1-contract floor — a conservative under-estimate
-   * that keeps the gate from rejecting a borderline entry the workflow would have sized down. The
-   * gate's job is to catch run-away notional, not the single-contract baseline.
+   * Per-contract notional dollars: {@code price × contracts × CONTRACT_MULTIPLIER}. The 1-contract
+   * floor is the responsibility of the caller — the risk gate runs before {@link
+   * Sizing#computeContracts} so the entry-point methods pass {@code (limit, 1L)} as a conservative
+   * under-estimate that keeps the gate from rejecting a borderline entry the workflow would have
+   * sized down. Threading {@code contracts} explicitly future-proofs the helper if the gate later
+   * switches to a sized count.
    */
-  private static BigDecimal entryNotional(CopytradeSignalPayload payload) {
-    BigDecimal price = payload.getPrice() == null ? BigDecimal.ZERO : payload.getPrice();
-    return price.multiply(Sizing.CONTRACT_MULTIPLIER);
+  private static BigDecimal entryNotional(BigDecimal price, long contracts) {
+    BigDecimal p = price == null ? BigDecimal.ZERO : price;
+    return p.multiply(BigDecimal.valueOf(contracts)).multiply(Sizing.CONTRACT_MULTIPLIER);
   }
 
   /**
