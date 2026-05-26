@@ -161,6 +161,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   private String handleBto(CopytradeSignalPayload payload, StrategyConfig config) {
+    // Computed once at the top: the same limit feeds pre-trade notional, sizing, and the
+    // OrderIntent/audit subject — guarantees those three views agree on max-acceptable cost.
+    PricedLimit priced = BtoPricing.computeBtoLimit(payload, config);
     // Issue #112: Version gate retires the PR #111 deploy-time-drain mitigation. Pre-#111
     // in-flight workflows replay through the v=DEFAULT_VERSION branch (single checkEntry with
     // null preTradeResult); new executions take v>=1 and run the full assert → dispatch →
@@ -179,7 +182,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       if (Boolean.TRUE.equals(config.getPreTradeCheckEnabled())) {
         risk.assertPreTradeCheckRoutable(config);
       }
-      PreTradeCheckResult preTradeResult = dispatchPreTradeCheck(payload, config);
+      PreTradeCheckResult preTradeResult = dispatchPreTradeCheck(payload, config, priced.limit());
       decision = risk.checkEntry(payload, config, preTradeResult);
     }
     if (!decision.allowed()) {
@@ -199,7 +202,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
     BigDecimal capital =
         strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
-    long contracts = Sizing.computeContracts(payload, config, capital);
+    long contracts = Sizing.computeContracts(payload, config, capital, priced.limit());
 
     logAudit(
         payload,
@@ -211,10 +214,6 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "ref_premium", payload.getPrice()));
 
     String intentKey = Workflow.getInfo().getWorkflowId() + ":entry";
-    // Issue #191: apply max-slippage caps to derive the BTO limit price (vs blind mirror).
-    // The helper is pure/deterministic; computing it here (rather than inside newIntent) keeps the
-    // strategy tag in scope for the OrderSubmitted audit subject without a wrapper type.
-    PricedLimit priced = BtoPricing.computeBtoLimit(payload, config);
     OrderIntent intent = newIntent(payload, config, resolved, contracts, intentKey, priced.limit());
     OrderIntentResult placed = exec.placeOrder(intent);
 
@@ -559,7 +558,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    * signalId}). Safe to call inside the workflow body.
    */
   private PreTradeCheckResult dispatchPreTradeCheck(
-      CopytradeSignalPayload payload, StrategyConfig config) {
+      CopytradeSignalPayload payload, StrategyConfig config, BigDecimal estimatedLimitPrice) {
     if (!Boolean.TRUE.equals(config.getPreTradeCheckEnabled())) {
       return null;
     }
@@ -584,7 +583,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
                 .setScheduleToCloseTimeout(Duration.ofSeconds(60))
                 .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
                 .build());
-    PreTradeCheckRequest request = buildPreTradeCheckRequest(payload, config);
+    PreTradeCheckRequest request = buildPreTradeCheckRequest(payload, config, estimatedLimitPrice);
     try {
       return preTradeStub.preTradeCheck(request);
     } catch (Exception e) {
@@ -594,12 +593,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   /**
    * Builds the {@link PreTradeCheckRequest} the workflow dispatches to exec-svc. {@code
-   * estimated_notional} is the 1-contract floor (the workflow sizes down later if needed) and
-   * {@code correlation_id} is the deterministic {@code signal_id} so audit traces stitch
-   * end-to-end.
+   * estimated_notional} is the 1-contract floor computed against the slip-adjusted limit
+   * (max-acceptable cost) so the risk-svc cap sees the realistic worst-case rather than the
+   * optimistic mirror. The workflow sizes down later if needed. {@code correlation_id} is the
+   * deterministic {@code signal_id} so audit traces stitch end-to-end.
    */
   private static PreTradeCheckRequest buildPreTradeCheckRequest(
-      CopytradeSignalPayload payload, StrategyConfig config) {
+      CopytradeSignalPayload payload, StrategyConfig config, BigDecimal estimatedLimitPrice) {
     PreTradeCheckRequest r = new PreTradeCheckRequest();
     r.setSchemaVersion(1L);
     r.setTenantId(payload.getTenantId());
@@ -610,8 +610,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     r.setSide(PreTradeCheckRequest.Side.BUY);
     Long minContracts = config.getMinContracts();
     r.setQty(minContracts == null ? 1L : Math.max(1L, minContracts));
-    BigDecimal price = payload.getPrice() == null ? BigDecimal.ZERO : payload.getPrice();
-    r.setEstimatedNotional(price.multiply(Sizing.CONTRACT_MULTIPLIER));
+    BigDecimal limit = estimatedLimitPrice == null ? BigDecimal.ZERO : estimatedLimitPrice;
+    r.setEstimatedNotional(limit.multiply(Sizing.CONTRACT_MULTIPLIER));
     r.setCorrelationId(payload.getSignalId());
     return r;
   }
@@ -656,8 +656,6 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     i.setOptionSymbol(resolved.optionSymbol());
     i.setSide(OrderIntent.Side.BUY);
     i.setQty(contracts);
-    // Issue #191: limit comes from BtoPricing.computeBtoLimit(payload, config) (mirror when no
-    // slippage caps configured, slip-adjusted otherwise). See call site in handleBto.
     i.setLimitPrice(limitPrice);
     i.setRecordedAt(workflowNow());
     return i;
