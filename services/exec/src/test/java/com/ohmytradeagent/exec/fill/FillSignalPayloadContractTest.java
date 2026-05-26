@@ -12,10 +12,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Pins the wire shape of the contract-owned {@link FillSignalPayload} DTO against Temporal's
- * default Jackson data converter. The orchestrator-side receivers (both {@code
- * CopytradeSignalWorkflow.onFill} and {@code PositionWorkflow.onFill}) reference the same generated
- * DTO, so the canary is now type identity rather than a hand-mirrored record. The JSON shape is
- * camelCase by {@code @JsonProperty} (see {@code contract/schemas/fill-signal-payload.json}).
+ * default Jackson data converter — both sender ({@code FillDispatcherImpl}) and receivers ({@code
+ * CopytradeSignalWorkflow.onFill}, {@code PositionWorkflow.onFill}) reference the same generated
+ * DTO, so the roundtrip here is the canary against accidental drift.
  */
 class FillSignalPayloadContractTest {
 
@@ -37,15 +36,5 @@ class FillSignalPayloadContractTest {
     assertThat(received.getFilledQty()).isEqualTo(42L);
     assertThat(received.getAvgFillPrice()).isEqualByComparingTo(new BigDecimal("3.14"));
     assertThat(received.getFilledAt()).isEqualTo(OffsetDateTime.parse("2026-05-24T01:23:45Z"));
-  }
-
-  @Test
-  void senderAndReceiverShareTheSameContractType() {
-    // Sender (exec/FillDispatcherImpl) and receiver (orchestrator/CopytradeSignalWorkflow,
-    // PositionWorkflow) both reference com.ohmytradeagent.contract.FillSignalPayload directly —
-    // there is no hand-maintained mirror to drift. This identity check replaces the reflective
-    // component-by-component equality the deleted mirror record used to enforce (issue #168).
-    assertThat(FillSignalPayload.class.getName())
-        .isEqualTo("com.ohmytradeagent.contract.FillSignalPayload");
   }
 }

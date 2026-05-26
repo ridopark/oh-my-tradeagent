@@ -111,11 +111,7 @@ class PositionWorkflowImplTest {
     return p;
   }
 
-  /**
-   * Builds a {@link FillSignalPayload} via the generated builder. Pre-#168 tests used the deleted
-   * {@code FillEvent} record's positional constructor; this helper preserves the same call-site
-   * brevity now that the contract DTO is a bean.
-   */
+  /** Builds a {@link FillSignalPayload} with a synthetic {@code filledAt}. */
   private static FillSignalPayload fill(String brokerOrderId, long qty, BigDecimal avg) {
     return new FillSignalPayload()
         .withBrokerOrderId(brokerOrderId)
