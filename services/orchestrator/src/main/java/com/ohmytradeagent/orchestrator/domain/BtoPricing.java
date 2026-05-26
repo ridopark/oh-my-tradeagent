@@ -36,12 +36,26 @@ public final class BtoPricing {
 
   private BtoPricing() {}
 
-  /** Branch tag emitted into the {@code OrderSubmitted} audit subject as {@code lowercase()}. */
+  /**
+   * Branch tag emitted into the {@code OrderSubmitted} audit subject. The {@link #wireKey} value is
+   * the contract — Java enum constants may be renamed without changing the wire-format string
+   * downstream consumers parse.
+   */
   public enum Strategy {
-    MIRROR,
-    SLIP_ABS,
-    SLIP_PCT,
-    SLIP_MIN
+    MIRROR("mirror"),
+    SLIP_ABS("slip_abs"),
+    SLIP_PCT("slip_pct"),
+    SLIP_MIN("slip_min");
+
+    private final String wireKey;
+
+    Strategy(String wireKey) {
+      this.wireKey = wireKey;
+    }
+
+    public String wireKey() {
+      return wireKey;
+    }
   }
 
   /** Carrier for the limit price + branch taken. */

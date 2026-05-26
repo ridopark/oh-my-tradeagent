@@ -228,7 +228,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "side", "BUY",
             "qty", contracts,
             "broker_target", config.getBrokerTarget().value(),
-            "limit_price_strategy", priced.strategy().name().toLowerCase()));
+            "limit_price_strategy", priced.strategy().wireKey()));
 
     long ttlSecs = pendingTtlSecs(config);
     // Phase 5: also wake on risk_breach so the cascade can short-circuit the BTO.

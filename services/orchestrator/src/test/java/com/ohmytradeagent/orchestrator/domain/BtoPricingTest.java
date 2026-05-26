@@ -126,6 +126,16 @@ class BtoPricingTest {
     assertThat(out.limit()).isEqualByComparingTo(new BigDecimal("3.15"));
   }
 
+  @Test
+  void wireKeys_areStableContractRegardlessOfJavaEnumRenames() {
+    // Pins the audit-subject wire-format contract: a Java rename (e.g. SLIP_MIN → SlipMin) must
+    // NOT silently change what downstream consumers parse. The decoupling lives in wireKey().
+    assertThat(Strategy.MIRROR.wireKey()).isEqualTo("mirror");
+    assertThat(Strategy.SLIP_ABS.wireKey()).isEqualTo("slip_abs");
+    assertThat(Strategy.SLIP_PCT.wireKey()).isEqualTo("slip_pct");
+    assertThat(Strategy.SLIP_MIN.wireKey()).isEqualTo("slip_min");
+  }
+
   private static CopytradeSignalPayload payloadWithPrice(BigDecimal price) {
     CopytradeSignalPayload p = new CopytradeSignalPayload();
     p.setPrice(price);
