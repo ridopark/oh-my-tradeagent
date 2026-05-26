@@ -92,11 +92,9 @@ public class RiskActivitiesImpl implements RiskActivities {
   @Override
   public RiskDecision checkEntry(
       CopytradeSignalPayload payload, StrategyConfig config, PreTradeCheckResult preTradeResult) {
-    // Legacy v=DEFAULT_VERSION path: keep bit-exact pre-#198 mirror-notional behavior so replays
-    // of pre-#111 in-flight workflows remain deterministic. New executions take the v>=1 branch
-    // in handleBto, which calls checkEntryWithLimit with the slip-adjusted limit.
-    BigDecimal mirrorPrice = payload.getPrice() == null ? BigDecimal.ZERO : payload.getPrice();
-    return checkEntryInternal(payload, config, preTradeResult, entryNotional(mirrorPrice, 1L));
+    // Legacy path: notional from unadjusted mirror, preserved bit-exact for pre-#111 replays.
+    return checkEntryInternal(
+        payload, config, preTradeResult, entryNotional(payload.getPrice(), 1L));
   }
 
   @Override
@@ -105,13 +103,9 @@ public class RiskActivitiesImpl implements RiskActivities {
       StrategyConfig config,
       PreTradeCheckResult preTradeResult,
       BigDecimal limit) {
-    // Issue #198: feed the slip-adjusted limit (from BtoPricing.computeBtoLimit) into the
-    // notional-cap + buying-power gates so a snug cap can no longer be cleared on the
-    // optimistic mirror premium. Defensive null fall-back keeps unit-test ergonomics; the
-    // production v>=1 caller always passes priced.limit().
+    // Production callers always pass priced.limit(); fall back to mirror keeps unit-test ergonomic.
     BigDecimal price = limit != null ? limit : payload.getPrice();
-    BigDecimal effective = price == null ? BigDecimal.ZERO : price;
-    return checkEntryInternal(payload, config, preTradeResult, entryNotional(effective, 1L));
+    return checkEntryInternal(payload, config, preTradeResult, entryNotional(price, 1L));
   }
 
   private RiskDecision checkEntryInternal(

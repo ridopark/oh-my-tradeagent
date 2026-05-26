@@ -110,13 +110,7 @@ class CopytradeSignalWorkflowImplTest {
   @Test
   void rejectedByAuthor_producesSignalRejectedAndDoesNotCallExec() {
     when(strategy.get(anyString(), anyString())).thenReturn(config());
-    // Issue #198: v=1 branch in handleBto routes through checkEntryWithLimit; legacy checkEntry
-    // stub retained for parity with the v=DEFAULT_VERSION path (unreachable in fresh-workflow
-    // tests but keeps the stub set self-consistent).
     when(risk.checkEntryWithLimit(any(), any(), any(), any()))
-        .thenReturn(
-            RiskDecision.rejected(RejectionReason.AUTHOR_NOT_WHITELISTED, "author=stranger"));
-    when(risk.checkEntry(any(), any(), any()))
         .thenReturn(
             RiskDecision.rejected(RejectionReason.AUTHOR_NOT_WHITELISTED, "author=stranger"));
 
@@ -135,8 +129,6 @@ class CopytradeSignalWorkflowImplTest {
     when(strategy.get(anyString(), anyString())).thenReturn(config());
     when(risk.checkEntryWithLimit(any(), any(), any(), any()))
         .thenReturn(RiskDecision.rejected(RejectionReason.SIGNAL_TOO_OLD, "age_secs=2000"));
-    when(risk.checkEntry(any(), any(), any()))
-        .thenReturn(RiskDecision.rejected(RejectionReason.SIGNAL_TOO_OLD, "age_secs=2000"));
 
     runWorkflow(btoPayload());
 
@@ -149,8 +141,6 @@ class CopytradeSignalWorkflowImplTest {
   void rejectedByMaxPositions_producesSignalRejected() {
     when(strategy.get(anyString(), anyString())).thenReturn(config());
     when(risk.checkEntryWithLimit(any(), any(), any(), any()))
-        .thenReturn(RiskDecision.rejected(RejectionReason.MAX_POSITIONS_EXCEEDED, "open=5"));
-    when(risk.checkEntry(any(), any(), any()))
         .thenReturn(RiskDecision.rejected(RejectionReason.MAX_POSITIONS_EXCEEDED, "open=5"));
 
     runWorkflow(btoPayload());

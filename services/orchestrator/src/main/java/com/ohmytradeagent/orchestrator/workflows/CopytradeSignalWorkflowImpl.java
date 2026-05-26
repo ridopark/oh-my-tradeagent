@@ -186,8 +186,6 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         risk.assertPreTradeCheckRoutable(config);
       }
       PreTradeCheckResult preTradeResult = dispatchPreTradeCheck(payload, config, priced.limit());
-      // Issue #198: thread the slip-adjusted limit so notional-cap + BP gates align with the
-      // workflow's max-acceptable cost (no more optimistic-mirror blind spot).
       decision = risk.checkEntryWithLimit(payload, config, preTradeResult, priced.limit());
     }
     if (!decision.allowed()) {

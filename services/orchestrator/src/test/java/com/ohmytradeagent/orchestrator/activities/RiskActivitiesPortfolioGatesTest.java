@@ -110,7 +110,7 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(d.detail()).contains("notional=");
   }
 
-  // Issue #198: pin that the v>=1 `checkEntryWithLimit` entry-point feeds the slip-adjusted
+  // Pins that the v>=1 `checkEntryWithLimit` entry-point feeds the slip-adjusted
   // limit into the notional cap rather than the unadjusted mirror price. The two scenarios
   // are deliberately tuned so the mirror would APPROVE (50000 == cap, compareTo > 0 false)
   // but the slip-adjusted figure REJECTS (50085 > 50000) — proves the wiring inversion.
@@ -135,7 +135,7 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(slip.detail()).contains("cap=50000");
   }
 
-  // Issue #198: BP gate must compare against the slip-adjusted notional, not the mirror.
+  // BP gate must compare against the slip-adjusted notional, not the mirror.
   // BP=250 covers the mirror (230) but not the slip-adjusted required cost (315) → REJECT.
   @Test
   void checkEntryWithLimit_buyingPower_comparesAgainstSlipAdjustedNotional() {
@@ -152,7 +152,7 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(d.detail()).contains("required=315");
   }
 
-  // Issue #198 halt-condition 2: strict less-than semantics on the BP compare are preserved.
+  // Strict less-than semantics on the BP compare are preserved.
   // BP exactly equal to the slip-adjusted notional must APPROVE — no off-by-one regression.
   @Test
   void checkEntryWithLimit_buyingPower_equalToSlipAdjustedNotional_approves() {

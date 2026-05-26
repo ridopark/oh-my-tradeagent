@@ -114,7 +114,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(contract.resolve(any())).thenReturn(resolved());
-    // Issue #198: workflow's v=1 branch now calls checkEntryWithLimit.
+    // Workflow's v=1 branch now calls checkEntryWithLimit.
     when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any()))
         .thenReturn(RiskDecision.approved());
 
@@ -215,7 +215,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   }
 
   /**
-   * Issue #198: pins the workflow-side wiring of the slip-adjusted limit through {@code
+   * Pins the workflow-side wiring of the slip-adjusted limit through {@code
    * risk.checkEntryWithLimit(...)}. Mirrors the request-level test above but asserts at the
    * Activity-stub boundary that the v=1 branch invokes the new Activity method with {@code
    * priced.limit()} rather than re-deriving from the mirror price.
