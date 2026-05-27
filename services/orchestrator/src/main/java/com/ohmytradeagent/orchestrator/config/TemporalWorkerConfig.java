@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.config;
 
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
@@ -63,6 +64,7 @@ public class TemporalWorkerConfig {
   public Worker worker(
       WorkerFactory factory,
       AuditActivities audit,
+      AuditQueryActivities auditQuery,
       StrategyActivities strategy,
       RiskActivities risk,
       ContractActivities contract,
@@ -80,6 +82,7 @@ public class TemporalWorkerConfig {
         ReconciliationWorkflowImpl.class);
     worker.registerActivitiesImplementations(
         audit,
+        auditQuery,
         strategy,
         risk,
         contract,
