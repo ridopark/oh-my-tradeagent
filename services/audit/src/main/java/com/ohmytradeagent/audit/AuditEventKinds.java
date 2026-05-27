@@ -61,7 +61,11 @@ public final class AuditEventKinds {
           // The position queued a duplicate exit signal while the prior one was inflight;
           // it counts as fulfilling the duplicate request because the original will fill the
           // next time the position is signal-ready.
-          "ExitQueued");
+          "ExitQueued",
+          // Issue #205: runner-quantum partial-exit skip. When remainingQty<=1 and floor(qty *
+          // fraction)==0 and StrategyConfig.min_partial_qty_behavior=skip (default), the partial
+          // is fulfilled by deciding-not-to-fill — same pattern as ExitDuplicateSuppressed.
+          "PartialExitSkippedMinQty");
 
   /**
    * "Hard" terminal kinds that must follow a real entry. A hard close without a preceding {@link
@@ -144,6 +148,11 @@ public final class AuditEventKinds {
           // *_TERMINAL_CLOSE_KINDS set. Distinct from PositionNeverFilled (#203), which IS a
           // soft-terminal because it ends the workflow.
           "PartialExitFillTimeout",
+          // Issue #205: emitted by PositionWorkflowImpl when a partial-exit signal lands on a
+          // remainingQty<=1 runner with floor(qty * fraction)==0 and config selects SKIP. Also
+          // classified in PARTIAL_EXIT_FILL_KINDS (it fulfills the partial-exit request by
+          // deciding-not-to-fill, same pattern as ExitDuplicateSuppressed).
+          "PartialExitSkippedMinQty",
           "ExitDuplicateSuppressed",
           "ExitQueued",
           "EodForceFlattenRequested",

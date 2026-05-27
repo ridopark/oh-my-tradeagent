@@ -6,6 +6,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Annotated
 
+from enum import StrEnum
 
 from pydantic import (
     BaseModel,
@@ -18,6 +19,15 @@ from pydantic import (
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
+
+
+class MinPartialQtyBehavior(StrEnum):
+    """
+    Issue #205 (originally #16): governs partial_exit when remainingQty <= 1 AND floor(remainingQty * fraction) == 0 — the integer broker quantum can no longer represent a partial honestly. 'skip' (default) logs PartialExitSkippedMinQty and places no order; the runner rides to trail/EOD/STC. 'full_close' closes the last contract on the partial signal. Null/absent treated as 'skip'. PositionWorkflowImpl gates the new branch behind Workflow.getVersion('min-partial-qty-skip', DEFAULT, 1) so in-flight pre-#205 workflows preserve their legacy ceil(remainingQty * fraction) behavior on replay.
+    """
+
+    skip = "skip"
+    full_close = "full_close"
 
 
 class StrategyConfig(BaseModel):
@@ -192,4 +202,8 @@ class StrategyConfig(BaseModel):
     eod_force_flatten: bool | None = None
     """
     Issue #202: gate the EOD force-flatten timer (15:55 ET) in PositionWorkflow. Default true (null treated as true) preserves the pre-issue-202 behavior for every strategy that doesn't explicitly opt out. Copytrade strategies that mirror an external Discord author MUST set this to false — the only normal exit for an author-mirror position is an STC message from the author; force-flattening at EOD diverges from the author's actual position and breaks mirror fidelity. The expiry-close timer (0DTE physical-expiry handling), chandelier trail (when armed), risk-breach, and operator force_close remain available as emergency exits regardless of this flag.
+    """
+    min_partial_qty_behavior: MinPartialQtyBehavior | None = None
+    """
+    Issue #205 (originally #16): governs partial_exit when remainingQty <= 1 AND floor(remainingQty * fraction) == 0 — the integer broker quantum can no longer represent a partial honestly. 'skip' (default) logs PartialExitSkippedMinQty and places no order; the runner rides to trail/EOD/STC. 'full_close' closes the last contract on the partial signal. Null/absent treated as 'skip'. PositionWorkflowImpl gates the new branch behind Workflow.getVersion('min-partial-qty-skip', DEFAULT, 1) so in-flight pre-#205 workflows preserve their legacy ceil(remainingQty * fraction) behavior on replay.
     """

@@ -6,11 +6,21 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Annotated
 
+from enum import StrEnum
 
 from pydantic import Field, BaseModel, ConfigDict, conint, constr
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
+
+
+class MinPartialQtyBehavior(StrEnum):
+    """
+    Issue #205: carried over from the spawning CopytradeSignalWorkflow's StrategyConfig.min_partial_qty_behavior. Drives PositionWorkflow.processOne's pre-qtyToClose gate when remainingQty <= 1 AND floor(remainingQty * fraction) == 0. 'skip' emits PartialExitSkippedMinQty and places no order; 'full_close' closes the last contract. Optional/null treated as 'skip' to match the YAML comment's documented default. Gated behind Workflow.getVersion('min-partial-qty-skip', DEFAULT, 1) so in-flight pre-#205 workflows preserve legacy ceil(remainingQty * fraction) behavior on replay.
+    """
+
+    skip = "skip"
+    full_close = "full_close"
 
 
 class PositionWorkflowInput(BaseModel):
@@ -52,4 +62,8 @@ class PositionWorkflowInput(BaseModel):
     eod_force_flatten: bool | None = None
     """
     Issue #202: carried over from the spawning CopytradeSignalWorkflow's StrategyConfig.eod_force_flatten. When false, PositionWorkflow does NOT arm the 15:55 ET EOD force-flatten timer (the expiry-close timer for 0DTE handling still arms unconditionally; chandelier trail, risk-breach, and operator force_close remain available as emergency exits). Optional/null treated as true to preserve pre-issue-202 behavior for replays of positions spawned before this field existed.
+    """
+    min_partial_qty_behavior: MinPartialQtyBehavior | None = None
+    """
+    Issue #205: carried over from the spawning CopytradeSignalWorkflow's StrategyConfig.min_partial_qty_behavior. Drives PositionWorkflow.processOne's pre-qtyToClose gate when remainingQty <= 1 AND floor(remainingQty * fraction) == 0. 'skip' emits PartialExitSkippedMinQty and places no order; 'full_close' closes the last contract. Optional/null treated as 'skip' to match the YAML comment's documented default. Gated behind Workflow.getVersion('min-partial-qty-skip', DEFAULT, 1) so in-flight pre-#205 workflows preserve legacy ceil(remainingQty * fraction) behavior on replay.
     """
