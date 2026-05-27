@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -15,6 +16,7 @@ import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
+import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
@@ -319,25 +321,32 @@ class PositionWorkflowImplTest {
     stub.partialExit(partialExitRequest("sig-stuck", "pos-exit-timeout", 0.5));
     waitForPlaceOrderCount(1);
 
-    // Advance virtual time past the 90s exit-fill TTL — the workflow must time out, audit, cancel
-    // and release the in-flight latch.
+    // Advance virtual time past the 90s exit-fill TTL — the workflow must time out, audit, cancel,
+    // and (Issue #216) re-place a retry order with a fresh limit price + intent_key.
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+
+    // Advance past the retry's TTL too — second timeout drops the STC permanently and releases
+    // the in-flight latch so pendingExits can drain.
     env.sleep(Duration.ofSeconds(120));
 
-    // Second STC arrives after the timeout: with the latch released, processOne must drain it and
-    // fill it normally.
+    // Second STC arrives after the retry was also dropped: with the latch released, processOne
+    // must drain it and fill it normally.
     stub.partialExit(partialExitRequest("sig-follow", "pos-exit-timeout", 1.0));
-    waitForPlaceOrderCount(2);
+    waitForPlaceOrderCount(3);
     stub.onFill(fill("brk-follow", 5L, new BigDecimal("2.90")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
-    AuditEvent timeout = captureKind("PartialExitFillTimeout");
-    assertThat(timeout.getSubject())
+    // Two timeouts — original and retry — for the stuck STC.
+    List<AuditEvent> timeouts = captureAll("PartialExitFillTimeout");
+    assertThat(timeouts).hasSize(2);
+    assertThat(timeouts.get(0).getSubject())
         .containsEntry("signal_id", "sig-stuck")
         .containsEntry("broker_order_id", "brk-exit");
-    assertThat(asLong(timeout.getSubject().get("remaining_qty"))).isEqualTo(5L);
+    assertThat(asLong(timeouts.get(0).getSubject().get("remaining_qty"))).isEqualTo(5L);
 
-    // Cancel was attempted on the stuck order.
+    // Cancel was attempted on both the original and the retry order.
     verify(exec, atLeastOnce()).cancelOrder(anyString());
 
     // The follow-up STC actually filled — partial-exit audit reflects 5 contracts closed.
@@ -370,11 +379,15 @@ class PositionWorkflowImplTest {
     stub.partialExit(partialExitRequest("sig-stuck", "pos-exit-timeout-cancelfail", 0.5));
     waitForPlaceOrderCount(1);
 
+    // First timeout — retry fires under Issue #216 v=1 even though cancel throws.
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+    // Second timeout (the retry) — drops the STC permanently, releases the latch.
     env.sleep(Duration.ofSeconds(120));
 
     // Follow-up STC drains — proving the latch was released even though cancel threw.
     stub.partialExit(partialExitRequest("sig-follow", "pos-exit-timeout-cancelfail", 1.0));
-    waitForPlaceOrderCount(2);
+    waitForPlaceOrderCount(3);
     stub.onFill(fill("brk-follow", 3L, new BigDecimal("3.00")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
@@ -1097,12 +1110,15 @@ class PositionWorkflowImplTest {
     stub.partialExit(partialExitRequest("sig-stuck-212", "pos-exit-fill-ttl-20", 0.5));
     waitForPlaceOrderCount(1);
 
-    // Advance just past the configured 20s exit-fill TTL.
+    // Advance just past the configured 20s exit-fill TTL — first timeout, retry fires.
+    env.sleep(Duration.ofSeconds(25));
+    waitForPlaceOrderCount(2);
+    // Advance past the retry's TTL too — second timeout drops the STC.
     env.sleep(Duration.ofSeconds(25));
 
     // Drain the runner so the workflow terminates cleanly.
     stub.partialExit(partialExitRequest("sig-follow-212", "pos-exit-fill-ttl-20", 1.0));
-    waitForPlaceOrderCount(2);
+    waitForPlaceOrderCount(3);
     stub.onFill(fill("brk-follow-212", 5L, new BigDecimal("2.95")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
@@ -1114,13 +1130,309 @@ class PositionWorkflowImplTest {
     assertThat(asLong(timeout.getSubject().get("remaining_qty"))).isEqualTo(5L);
     assertThat(asLong(timeout.getSubject().get("ttl_secs"))).isEqualTo(20L);
 
-    // Cancel was attempted on the stuck order.
+    // Cancel was attempted on the stuck order(s).
     verify(exec, atLeastOnce()).cancelOrder(anyString());
 
     // The follow-up STC drained normally after the latch release.
     List<AuditEvent> partialFills = captureAll("PartialExitFilled");
     assertThat(partialFills).hasSize(1);
     assertThat(partialFills.get(0).getSubject()).containsEntry("signal_id", "sig-follow-212");
+  }
+
+  // ---------- Issue #216: PartialExitFillTimeout retry with fresh limit price ----------
+
+  /**
+   * Issue #216 Done-when 1: when the v=1 exit-fill await times out, the workflow must (a) audit
+   * {@code PartialExitRetryRequested}, (b) place a retry order with a fresh {@code intent_key}
+   * (suffix {@code ":retry"}) and a fresh limit price (ref_premium fallback when no chandelier tick
+   * has arrived), and (c) on retry-fill, decrement remainingQty and emit {@code PartialExitFilled}
+   * carrying the original signal_id (the retry is logically the same STC). No second {@code
+   * PartialExitFillTimeout} fires because the retry filled.
+   */
+  @Test
+  void processOne_exitFillTimeoutRetry_freshLimitOrderFillsAndDecrementsRemaining()
+      throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-retry-fills");
+    WorkflowStub.fromTyped(stub).start(input(4));
+    confirmEntry(stub, 4L);
+
+    // First STC: ask for fraction=0.5 (qtyToClose=2) and never deliver the original fill.
+    stub.partialExit(partialExitRequest("sig-retry", "pos-retry-fills", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Advance past the 90s default TTL — first timeout fires, retry is dispatched.
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+
+    // Deliver the retry fill — partial fill of 2 contracts (matching qtyToClose).
+    stub.onFill(fill("brk-retry", 2L, new BigDecimal("2.78")));
+
+    // Drain the runner so the workflow can terminate cleanly.
+    stub.partialExit(partialExitRequest("sig-close-final", "pos-retry-fills", 1.0));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-close-final", 2L, new BigDecimal("2.80")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // Exactly one timeout (the original); the retry filled so no second timeout audit.
+    List<AuditEvent> timeouts = captureAll("PartialExitFillTimeout");
+    assertThat(timeouts).hasSize(1);
+    assertThat(timeouts.get(0).getSubject()).containsEntry("signal_id", "sig-retry");
+
+    // Exactly one retry-requested audit carrying the original signal_id, retry_attempt=1, and
+    // the source_premium provenance (no chandelier tick yet → ref_premium fallback).
+    List<AuditEvent> retries = captureAll("PartialExitRetryRequested");
+    assertThat(retries).hasSize(1);
+    assertThat(retries.get(0).getSubject())
+        .containsEntry("signal_id", "sig-retry")
+        .containsEntry("source_premium", "ref_premium");
+    assertThat(asLong(retries.get(0).getSubject().get("retry_attempt"))).isEqualTo(1L);
+    // intent_key has the :retry suffix so it's distinct from the original.
+    assertThat((String) retries.get(0).getSubject().get("intent_key")).endsWith(":retry");
+
+    // The retry order placed by placeOrder() carries the :retry intent_key.
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeast(2)).placeOrder(intentCaptor.capture());
+    List<OrderIntent> capturedIntents = intentCaptor.getAllValues();
+    assertThat(capturedIntents.stream().map(OrderIntent::getIntentKey))
+        .anyMatch(k -> k != null && k.endsWith(":retry"));
+
+    // Two PartialExitFilled audits: the retry-fill for sig-retry, then the closing sig-close-final.
+    List<AuditEvent> partialFills = captureAll("PartialExitFilled");
+    assertThat(partialFills).hasSize(2);
+    assertThat(partialFills.get(0).getSubject())
+        .containsEntry("signal_id", "sig-retry")
+        .containsEntry("broker_order_id", "brk-retry");
+    assertThat(asLong(partialFills.get(0).getSubject().get("qty_filled"))).isEqualTo(2L);
+  }
+
+  /**
+   * Issue #216 Done-when 4: retry budget caps at 1. Two consecutive timeouts (original + retry)
+   * MUST drop the STC permanently — no third placeOrder, no second retry-requested audit. The
+   * runner survives at the same {@code remainingQty}; a follow-up STC drains normally.
+   */
+  @Test
+  void processOne_exitFillTimeoutRetry_secondTimeoutDropsAndCapsAtOneRetry() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-retry-caps");
+    WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
+
+    // First STC: never deliver the original fill.
+    stub.partialExit(partialExitRequest("sig-drop", "pos-retry-caps", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // First timeout — retry fires.
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+    // Second timeout (retry also stuck) — STC dropped, no third placeOrder.
+    env.sleep(Duration.ofSeconds(120));
+
+    // Follow-up STC drains normally — proving the latch released after the cap.
+    stub.partialExit(partialExitRequest("sig-after", "pos-retry-caps", 1.0));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-after", 5L, new BigDecimal("2.92")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // Exactly 2 timeouts (original + retry) and exactly 1 retry-requested audit (cap=1).
+    List<AuditEvent> timeouts = captureAll("PartialExitFillTimeout");
+    assertThat(timeouts).hasSize(2);
+    assertThat(timeouts.stream().map(e -> e.getSubject().get("signal_id")))
+        .containsExactly("sig-drop", "sig-drop");
+
+    List<AuditEvent> retries = captureAll("PartialExitRetryRequested");
+    assertThat(retries).hasSize(1);
+    assertThat(retries.get(0).getSubject()).containsEntry("signal_id", "sig-drop");
+
+    // remainingQty was not decremented for the dropped STC; the follow-up close cleared all 5.
+    List<AuditEvent> partialFills = captureAll("PartialExitFilled");
+    assertThat(partialFills).hasSize(1);
+    assertThat(partialFills.get(0).getSubject()).containsEntry("signal_id", "sig-after");
+    assertThat(asLong(partialFills.get(0).getSubject().get("qty_filled"))).isEqualTo(5L);
+
+    // Cancel was attempted on both the original and retry orders.
+    verify(exec, atLeast(2)).cancelOrder(anyString());
+  }
+
+  /**
+   * Issue #216: when the chandelier trail is armed and has received at least one tick before the
+   * exit-fill timeout fires, the retry's fresh limit price is sourced from {@code lastTickPremium}
+   * (most recent mid) rather than the original {@code req.getRefPremium()}. Drives the {@code
+   * source_premium=last_tick_premium} provenance in the {@code PartialExitRetryRequested} audit
+   * subject.
+   */
+  @Test
+  void processOne_exitFillTimeoutRetry_chandelierTickDrivesFreshLimitSource() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-retry-tick");
+    WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
+
+    // Arm the chandelier (peak=2.85, giveback=0.15 → threshold=2.4225) and seed a tick well above
+    // threshold so the trail does NOT fire — only the lastTickPremium gets latched on state.
+    stub.armChandelier(
+        armPayload(
+            "pos-retry-tick", "src-arm-216", new BigDecimal("2.85"), new BigDecimal("0.15")));
+    stub.chandelierTick(tick(new BigDecimal("2.70")));
+
+    // STC arrives; the original limit order never fills.
+    stub.partialExit(partialExitRequest("sig-tick-retry", "pos-retry-tick", 0.5));
+    waitForPlaceOrderCount(1);
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-retry-tick", 2L, new BigDecimal("2.65")));
+
+    // Drain the remaining runner.
+    stub.partialExit(partialExitRequest("sig-tick-close", "pos-retry-tick", 1.0));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-tick-close", 1L, new BigDecimal("2.60")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent retry = captureKind("PartialExitRetryRequested");
+    assertThat(retry.getSubject())
+        .containsEntry("signal_id", "sig-tick-retry")
+        .containsEntry("source_premium", "last_tick_premium");
+    // fresh_limit_price reflects the latched tick premium (2.70), not the original ref (2.85).
+    assertThat(((Number) retry.getSubject().get("fresh_limit_price")).doubleValue())
+        .isEqualTo(2.70);
+  }
+
+  /**
+   * Issue #216 PR #226 review follow-up: v=0 back-compat envelope for the new {@code
+   * VERSION_EXIT_RETRY_ON_TIMEOUT} gate. Under {@code DEFAULT_VERSION} (an in-flight workflow that
+   * started before #216 shipped), the timeout branch must drop the STC on the first timeout — one
+   * {@code PartialExitFillTimeout} audit, no {@code PartialExitRetryRequested}, no retry {@code
+   * placeOrder} call — exactly matching PR #214's single-cycle semantics.
+   *
+   * <p><b>Test scope note:</b> {@link io.temporal.testing.TestWorkflowEnvironment} starts every
+   * workflow with a fresh history, so {@code Workflow.getVersion(VERSION_EXIT_RETRY_ON_TIMEOUT,
+   * DEFAULT_VERSION, 1)} resolves to {@code 1} (the max version registered) — there is no clean
+   * knob to force {@code DEFAULT_VERSION} without {@code WorkflowReplayer} replaying a real
+   * pre-#216 history file. The v=0 protection is therefore enforced by Temporal SDK's history-based
+   * version resolution itself, which is covered by SDK-level tests. This test asserts the v=1
+   * envelope that the gate produces under TestWorkflowEnvironment (single timeout + single
+   * retry-requested for one stuck STC), and the javadoc documents the v=0 gap so reviewers see why
+   * a direct v=0 assertion is absent.
+   */
+  @Test
+  void processOne_exitFillTimeout_retryGateUnderVersionResolutionDocsAndAsserts() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-retry-gate-doc");
+    PositionWorkflowInput in = input(4);
+    // Keep TTLs short so the test runs quickly under virtual time.
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 4L);
+
+    // First STC: never deliver the fill.
+    stub.partialExit(partialExitRequest("sig-doc", "pos-retry-gate-doc", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // First timeout — under v=1 (TestWorkflowEnvironment default) the retry fires.
+    env.sleep(Duration.ofSeconds(5));
+    waitForPlaceOrderCount(2);
+
+    // Second timeout (retry also stuck) — STC dropped under the cap=1 retry budget.
+    env.sleep(Duration.ofSeconds(5));
+
+    // Drain the runner so the workflow terminates cleanly.
+    stub.partialExit(partialExitRequest("sig-doc-drain", "pos-retry-gate-doc", 1.0));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-doc-drain", 4L, new BigDecimal("2.95")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // v=1 envelope: original + retry = two PartialExitFillTimeout audits, both for sig-doc.
+    // Under v=0 this would be exactly one timeout audit and zero retry audits (the gate-off
+    // semantics from PR #214) — that path is enforced by Temporal's getVersion replay logic
+    // and is not directly testable in TestWorkflowEnvironment without WorkflowReplayer.
+    List<AuditEvent> timeouts = captureAll("PartialExitFillTimeout");
+    assertThat(timeouts).hasSize(2);
+    assertThat(timeouts.stream().map(e -> e.getSubject().get("signal_id")))
+        .containsExactly("sig-doc", "sig-doc");
+
+    // Exactly one PartialExitRetryRequested audit under v=1 (cap=1). Under v=0 this list would
+    // be empty — documented above; enforced by Temporal SDK version resolution.
+    List<AuditEvent> retries = captureAll("PartialExitRetryRequested");
+    assertThat(retries).hasSize(1);
+    assertThat(retries.get(0).getSubject()).containsEntry("signal_id", "sig-doc");
+  }
+
+  /**
+   * Issue #216 PR #226 /simplify follow-up: when an EOD timer fires while a retry order is in
+   * flight, {@code flattenRemaining()} must cancel the retry order's intent_key — not the original
+   * (already-cancelled) {@code :exit:<sig>} key. The {@code currentInFlightIntentKey} state field
+   * tracks the live intent_key so the EOD-preemption cancel hits the right broker order. Without
+   * this fix, flattenRemaining would reconstruct the original key from {@code
+   * currentInFlightSignalId} and double-cancel an already-cancelled order while leaving the live
+   * retry order open.
+   */
+  @Test
+  void processOne_retryActive_eodTimerFires_cancelHitsRetryKey() throws Exception {
+    // EOD horizon: long enough that the original STC times out and the retry order is placed
+    // first, but short enough that EOD fires during the retry's exit-fill await (before the
+    // retry's own TTL expires).
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofSeconds(150));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-eod-during-retry");
+    WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
+
+    // First STC: never deliver the fill — original will time out at the default 90s TTL.
+    stub.partialExit(partialExitRequest("sig-eod-retry", "pos-eod-during-retry", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Advance past the original's 90s TTL — original times out, retry is dispatched.
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+
+    // Advance past the EOD horizon (set at t=150s) while the retry is still awaiting its fill.
+    // The retry's own TTL would fire at t=120+90=210s, but EOD at t=150s fires first. The retry
+    // await's predicate wakes on eodFired=true; processOne returns with currentInFlightIntentKey
+    // still set to the ":retry"-suffixed key, and run() invokes flattenRemaining("eod") which
+    // cancels that key.
+    env.sleep(Duration.ofSeconds(60));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // The original timeout fired and audited; the retry did NOT time out (EOD preempted).
+    List<AuditEvent> timeouts = captureAll("PartialExitFillTimeout");
+    assertThat(timeouts).hasSize(1);
+    assertThat(timeouts.get(0).getSubject()).containsEntry("signal_id", "sig-eod-retry");
+
+    captureKind("PartialExitRetryRequested");
+    captureKind("EodForceFlattenRequested");
+    captureKind("EodForceFlattened");
+
+    // The critical assertion: capture every cancelOrder argument and prove that the cancel
+    // fired by flattenRemaining targets the :retry intent_key — the live in-flight order —
+    // not the original (already-cancelled) :exit:<sig> key. Without the
+    // currentInFlightIntentKey fix from the /simplify [skip-review] commit, flattenRemaining
+    // would reconstruct the original key and miss the live retry order.
+    ArgumentCaptor<String> cancelKeyCaptor = ArgumentCaptor.forClass(String.class);
+    verify(exec, atLeast(2)).cancelOrder(cancelKeyCaptor.capture());
+    List<String> cancelledKeys = cancelKeyCaptor.getAllValues();
+    // Original timeout cancel hits the :exit:<sig> key (no :retry suffix).
+    assertThat(cancelledKeys)
+        .as("processOne's original-timeout cancel must hit the original intent_key")
+        .anyMatch(k -> k.endsWith(":exit:sig-eod-retry"));
+    // EOD-during-retry cancel from flattenRemaining hits the :retry-suffixed key.
+    assertThat(cancelledKeys)
+        .as("flattenRemaining must cancel the live retry intent_key, not the original")
+        .anyMatch(k -> k.endsWith(":exit:sig-eod-retry:retry"));
   }
 
   // ---------- helpers ----------

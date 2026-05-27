@@ -91,6 +91,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // request by deciding-not-to-fill, the same pattern as ExitDuplicateSuppressed.
   private static final String KIND_PARTIAL_EXIT_SKIPPED_MIN_QTY = "PartialExitSkippedMinQty";
 
+  // Issue #216 audit kind: emitted by processOne()'s v=1 timeout branch when the original
+  // exit order timed out without a fill AND retry_count==0, immediately before placing the
+  // retry order with a fresh limit price and a fresh intent_key (suffix ":retry"). Subject
+  // carries signal_id (unchanged — same logical STC), retry_attempt=1, the fresh limit price,
+  // and source_premium describing where the fresh price came from (last_tick / peak / ref).
+  // NOT a lifecycle event — the next PartialExitFilled (on retry success) or second
+  // PartialExitFillTimeout (on retry timeout, after which the STC is dropped) closes the
+  // exit cycle. Registered in AuditEventKinds.ALL_KINDS only.
+  private static final String KIND_PARTIAL_EXIT_RETRY_REQUESTED = "PartialExitRetryRequested";
+
   private static final String VERSION_CHANDELIER = "chandelier-v1";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
   private static final String VERSION_FORCE_CLOSE = "force-close-v1";
@@ -143,6 +153,18 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * underlying timeout mechanisms.
    */
   private static final String VERSION_TTL_FROM_INPUT = "ttl-from-input";
+
+  /**
+   * Issue #216 replay gate. v=DEFAULT_VERSION (in-flight workflows started before this patch) keep
+   * the PR #214 behavior of silently dropping the STC on {@link #KIND_PARTIAL_EXIT_FILL_TIMEOUT}.
+   * v>=1 (new executions) retry the timed-out STC exactly once with a fresh limit price and a fresh
+   * {@code intent_key} (suffix {@code ":retry"}) before falling back to the drop. Distinct from the
+   * six prior session keys ({@link #VERSION_DEFER_POSITION_ENTERED} #203, {@link
+   * #VERSION_EXIT_FILL_TIMEOUT} #204, {@link #VERSION_MIN_PARTIAL_QTY_SKIP} #205, {@link
+   * #VERSION_TTL_FROM_INPUT} #212, the chandelier / risk-breach / force-close gates) so the retry
+   * policy rolls independently of the underlying timeout machinery.
+   */
+  private static final String VERSION_EXIT_RETRY_ON_TIMEOUT = "exit-retry-on-timeout";
 
   /**
    * Issue #203 / #212 fallback: bounded wait for the first onFill before the workflow gives up and
@@ -228,6 +250,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private FillSignalPayload lastFillEvent;
   private String currentInFlightBrokerOrderId;
   private String currentInFlightSignalId;
+  // Issue #216: track the live intent_key of the in-flight exit order. Pre-#216 the key was
+  // always {@code workflowId:exit:<signalId>} and {@link #flattenRemaining(String)} could
+  // reconstruct it from {@link #currentInFlightSignalId}. The retry path uses a ":retry"-suffixed
+  // key, so flattenRemaining must read the actual key rather than reconstruct it; otherwise an
+  // EOD/expiry/risk_breach/force_close preemption during the retry window would cancel the wrong
+  // (non-existent) intent_key and leave the retry broker order orphaned.
+  private String currentInFlightIntentKey;
   private boolean eodFired;
   private boolean expiryFired;
 
@@ -830,102 +859,161 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
     exitInFlight = true;
     currentInFlightSignalId = req.getSignalId();
-    String intentKey = Workflow.getInfo().getWorkflowId() + ":exit:" + req.getSignalId();
-    OrderIntent intent = exitIntent(req, qtyToClose, intentKey);
-    lastFillEvent = null;
-    OrderIntentResult placed = exec.placeOrder(intent);
-    currentInFlightBrokerOrderId = placed.getBrokerOrderId();
 
     // Issue #204: gate the await on a version flag so v=0 (in-flight) workflows keep their
     // original untimed semantics for replay safety; v>=1 (new executions) take the bounded await
     // that recovers from a non-filling broker order instead of wedging pendingExits forever.
     int exitTimeoutVersion =
         Workflow.getVersion(VERSION_EXIT_FILL_TIMEOUT, Workflow.DEFAULT_VERSION, 1);
-    boolean filledInTime;
+    // Issue #216: gate retry-on-timeout. v=DEFAULT_VERSION preserves PR #214 single-cycle drop;
+    // v>=1 retries the timed-out STC exactly once with a fresh limit price and intent_key.
+    int retryVersion =
+        Workflow.getVersion(VERSION_EXIT_RETRY_ON_TIMEOUT, Workflow.DEFAULT_VERSION, 1);
+    int maxRetries = retryVersion >= 1 ? 1 : 0;
+    int retryCount = 0;
     long exitFillTtlSecs = 0L;
-    if (exitTimeoutVersion == Workflow.DEFAULT_VERSION) {
-      Workflow.await(
-          () ->
-              lastFillEvent != null
-                  || eodFired
-                  || expiryFired
-                  || !pendingRiskBreaches.isEmpty()
-                  || !pendingForceCloses.isEmpty());
-      filledInTime = true; // v=0 has no timeout; only an await wakeup gets us here.
-    } else {
-      // Issue #212: per-strategy TTL sourced from input under VERSION_TTL_FROM_INPUT v>=1; falls
-      // back to EXIT_FILL_TTL_SECS_DEFAULT under v=DEFAULT_VERSION or null input field.
-      exitFillTtlSecs = resolveExitFillTtlSecs();
-      filledInTime =
-          Workflow.await(
-              Duration.ofSeconds(exitFillTtlSecs),
-              () ->
-                  lastFillEvent != null
-                      || eodFired
-                      || expiryFired
-                      || !pendingRiskBreaches.isEmpty()
-                      || !pendingForceCloses.isEmpty());
-    }
 
-    if (lastFillEvent != null) {
-      long filled = lastFillEvent.getFilledQty();
-      remainingQty -= filled;
-      auditLog(
-          KIND_PARTIAL_EXIT_FILLED,
-          subject(
-              "signal_id",
-              req.getSignalId(),
-              "qty_filled",
-              filled,
-              "remaining_qty_after",
-              remainingQty,
-              "broker_order_id",
-              lastFillEvent.getBrokerOrderId(),
-              "avg_fill_price",
-              lastFillEvent.getAvgFillPrice()));
-      exitInFlight = false;
-      currentInFlightBrokerOrderId = null;
-      currentInFlightSignalId = null;
-      if (remainingQty == 0 && closeReason == null) {
-        closeReason = "normal_stc";
+    // Place-order + bounded-await cycle. Loop body executes once (original order) plus up to
+    // maxRetries additional iterations under #216 v>=1 when the prior cycle timed out.
+    while (true) {
+      String intentKey;
+      OrderIntent intent;
+      if (retryCount == 0) {
+        intentKey = Workflow.getInfo().getWorkflowId() + ":exit:" + req.getSignalId();
+        intent = exitIntent(req, qtyToClose, intentKey, req.getRefPremium());
+      } else {
+        // Issue #216 retry: fresh intent_key (the prior one was cancelled) and fresh limit price.
+        // Source preference: lastTickPremium (most recent chandelier mid) > peakPremium
+        // (chandelier-armed but no tick yet) > req.getRefPremium() (the author-posted price the
+        // original limit was based on, now treated as a fresh quote). Keeps the source explicit
+        // and deterministic for replay; no activity call needed.
+        intentKey = Workflow.getInfo().getWorkflowId() + ":exit:" + req.getSignalId() + ":retry";
+        BigDecimal freshLimit;
+        String source;
+        if (lastTickPremium != null && lastTickPremium.signum() > 0) {
+          freshLimit = lastTickPremium;
+          source = "last_tick_premium";
+        } else if (peakPremium != null && peakPremium.signum() > 0) {
+          freshLimit = peakPremium;
+          source = "peak_premium";
+        } else {
+          freshLimit = req.getRefPremium();
+          source = "ref_premium";
+        }
+        auditLog(
+            KIND_PARTIAL_EXIT_RETRY_REQUESTED,
+            subject(
+                "signal_id",
+                req.getSignalId(),
+                "retry_attempt",
+                retryCount,
+                "fresh_limit_price",
+                freshLimit,
+                "source_premium",
+                source,
+                "intent_key",
+                intentKey));
+        intent = exitIntent(req, qtyToClose, intentKey, freshLimit);
       }
+
+      lastFillEvent = null;
+      currentInFlightIntentKey = intentKey;
+      OrderIntentResult placed = exec.placeOrder(intent);
+      currentInFlightBrokerOrderId = placed.getBrokerOrderId();
+
+      boolean filledInTime;
+      if (exitTimeoutVersion == Workflow.DEFAULT_VERSION) {
+        Workflow.await(
+            () ->
+                lastFillEvent != null
+                    || eodFired
+                    || expiryFired
+                    || !pendingRiskBreaches.isEmpty()
+                    || !pendingForceCloses.isEmpty());
+        filledInTime = true; // v=0 has no timeout; only an await wakeup gets us here.
+      } else {
+        // Issue #212: per-strategy TTL sourced from input under VERSION_TTL_FROM_INPUT v>=1;
+        // falls back to EXIT_FILL_TTL_SECS_DEFAULT under v=DEFAULT_VERSION or null input field.
+        exitFillTtlSecs = resolveExitFillTtlSecs();
+        filledInTime =
+            Workflow.await(
+                Duration.ofSeconds(exitFillTtlSecs),
+                () ->
+                    lastFillEvent != null
+                        || eodFired
+                        || expiryFired
+                        || !pendingRiskBreaches.isEmpty()
+                        || !pendingForceCloses.isEmpty());
+      }
+
+      if (lastFillEvent != null) {
+        long filled = lastFillEvent.getFilledQty();
+        remainingQty -= filled;
+        auditLog(
+            KIND_PARTIAL_EXIT_FILLED,
+            subject(
+                "signal_id",
+                req.getSignalId(),
+                "qty_filled",
+                filled,
+                "remaining_qty_after",
+                remainingQty,
+                "broker_order_id",
+                lastFillEvent.getBrokerOrderId(),
+                "avg_fill_price",
+                lastFillEvent.getAvgFillPrice()));
+        exitInFlight = false;
+        currentInFlightBrokerOrderId = null;
+        currentInFlightSignalId = null;
+        currentInFlightIntentKey = null;
+        if (remainingQty == 0 && closeReason == null) {
+          closeReason = "normal_stc";
+        }
+        return;
+      }
+
+      // Issue #204: v>=1 timeout path — no fill arrived within the resolved exit-fill TTL and no
+      // EOD/expiry/risk_breach/force_close preemption. Best-effort cancel the broker order and
+      // audit the timeout. Under #216 v>=1, if retry budget remains, re-loop with a fresh limit
+      // price and intent_key. Otherwise (v=0 or retry exhausted), release the in-flight latch so
+      // pendingExits can drain on the next iteration; do NOT decrement remainingQty (no fill
+      // happened). On EOD/expiry pre-emption (filledInTime=true but lastFillEvent=null) we
+      // leave exitInFlight/currentInFlightSignalId set so flattenRemaining() can cancel the
+      // still-open broker order — same as the v=0 behavior.
+      if (exitTimeoutVersion >= 1 && !filledInTime) {
+        auditLog(
+            KIND_PARTIAL_EXIT_FILL_TIMEOUT,
+            subject(
+                "signal_id",
+                req.getSignalId(),
+                "broker_order_id",
+                currentInFlightBrokerOrderId,
+                "intent_key",
+                intentKey,
+                "remaining_qty",
+                remainingQty,
+                "ttl_secs",
+                exitFillTtlSecs));
+        try {
+          exec.cancelOrder(intentKey);
+        } catch (RuntimeException ignored) {
+          // Cancel is best-effort; the broker may have already filled or rejected the order.
+          // Reconciliation closes the loop on the real broker-side state.
+        }
+        if (retryCount < maxRetries) {
+          retryCount++;
+          continue; // Issue #216: place the retry order with a fresh limit price + intent_key.
+        }
+        exitInFlight = false;
+        currentInFlightBrokerOrderId = null;
+        currentInFlightSignalId = null;
+        currentInFlightIntentKey = null;
+      }
+      // On EOD/expiry/risk_breach/force_close pre-emption (filledInTime=true but lastFillEvent
+      // still null) we leave exitInFlight/currentInFlightSignalId set so flattenRemaining() can
+      // cancel the still-open broker order.
       return;
     }
-
-    // Issue #204: v>=1 timeout path — no fill arrived within the resolved exit-fill TTL and no
-    // EOD/expiry
-    // /risk_breach/force_close preemption. Best-effort cancel the broker order, audit the
-    // timeout, release the in-flight latch so pendingExits can drain on the next iteration. Do
-    // NOT decrement remainingQty (no fill happened). On EOD/expiry pre-emption (filledInTime
-    // true but lastFillEvent still null) we leave exitInFlight/currentInFlightSignalId set so
-    // flattenRemaining() can cancel the still-open broker order — same as the v=0 behavior.
-    if (exitTimeoutVersion >= 1 && !filledInTime) {
-      auditLog(
-          KIND_PARTIAL_EXIT_FILL_TIMEOUT,
-          subject(
-              "signal_id",
-              req.getSignalId(),
-              "broker_order_id",
-              currentInFlightBrokerOrderId,
-              "intent_key",
-              intentKey,
-              "remaining_qty",
-              remainingQty,
-              "ttl_secs",
-              exitFillTtlSecs));
-      try {
-        exec.cancelOrder(intentKey);
-      } catch (RuntimeException ignored) {
-        // Cancel is best-effort; the broker may have already filled or rejected the order.
-        // Reconciliation closes the loop on the real broker-side state.
-      }
-      exitInFlight = false;
-      currentInFlightBrokerOrderId = null;
-      currentInFlightSignalId = null;
-    }
-    // On EOD/expiry/risk_breach/force_close pre-emption (filledInTime=true but lastFillEvent
-    // still null) we leave exitInFlight/currentInFlightSignalId set so flattenRemaining() can
-    // cancel the still-open broker order.
   }
 
   private void flattenRemaining(String reason) {
@@ -958,7 +1046,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             reason));
 
     if (exitInFlight && currentInFlightSignalId != null) {
-      String intentKey = Workflow.getInfo().getWorkflowId() + ":exit:" + currentInFlightSignalId;
+      // Issue #216: read the live intent_key rather than reconstructing it — the in-flight order
+      // may be a retry attempt whose key carries the ":retry" suffix. Fall back to reconstruction
+      // for the (impossible-in-practice) case where the field is unset, to preserve pre-#216
+      // behavior under a replay anomaly.
+      String intentKey =
+          currentInFlightIntentKey != null
+              ? currentInFlightIntentKey
+              : Workflow.getInfo().getWorkflowId() + ":exit:" + currentInFlightSignalId;
       try {
         exec.cancelOrder(intentKey);
       } catch (RuntimeException ignored) {
@@ -999,7 +1094,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
   }
 
-  private OrderIntent exitIntent(PartialExitRequest req, long qty, String intentKey) {
+  private OrderIntent exitIntent(
+      PartialExitRequest req, long qty, String intentKey, BigDecimal limitPrice) {
     OrderIntent i = new OrderIntent();
     i.setSchemaVersion(1L);
     i.setTenantId(input.getTenantId());
@@ -1009,7 +1105,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     i.setOptionSymbol(input.getContractSymbol());
     i.setSide(OrderIntent.Side.SELL);
     i.setQty(qty);
-    i.setLimitPrice(req.getRefPremium());
+    i.setLimitPrice(limitPrice);
     i.setRecordedAt(workflowNow());
     return i;
   }
