@@ -808,7 +808,7 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
-  void selectPendingTtlSecs_nullConfig_returns90LDefault() {
+  void selectPendingTtlSecs_nullTtlFields_returns90LDefault() {
     CopytradeSignalWorkflowImpl impl = Mockito.mock(CopytradeSignalWorkflowImpl.class);
     Mockito.when(impl.selectPendingTtlSecs(Mockito.any())).thenCallRealMethod();
 
