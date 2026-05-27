@@ -137,6 +137,13 @@ public final class AuditEventKinds {
           "PositionNeverFilled",
           "PartialExitRequested",
           "PartialExitFilled",
+          // Issue #204: per-exit-cycle timeout event emitted by PositionWorkflowImpl when an
+          // exit order does not receive a fill within the bounded EXIT_FILL_TTL_SECS. NOT a
+          // lifecycle terminator (the workflow continues to drain pendingExits); intentionally
+          // placed in ALL_KINDS only, not in ENTRY_KINDS, PARTIAL_EXIT_FILL_KINDS, or any
+          // *_TERMINAL_CLOSE_KINDS set. Distinct from PositionNeverFilled (#203), which IS a
+          // soft-terminal because it ends the workflow.
+          "PartialExitFillTimeout",
           "ExitDuplicateSuppressed",
           "ExitQueued",
           "EodForceFlattenRequested",
