@@ -1035,6 +1035,93 @@ class PositionWorkflowImplTest {
             });
   }
 
+  // ---------- Issue #212: first-fill / exit-fill TTLs configurable via PositionWorkflowInput ----
+
+  /**
+   * Issue #212 Done-when 4: when {@code input.first_fill_ttl_secs} is set, the first-fill bounded
+   * await uses that value (not the hardcoded 90s default). Drives the {@code PositionNeverFilled}
+   * audit to fire at the configured deadline so per-strategy paper/live TTLs from {@code
+   * StrategyConfig.pending_ttl_paper_secs / pending_ttl_live_secs} actually take effect at runtime.
+   * The audit's {@code ttl_secs} subject reflects the resolved value, not the constant.
+   */
+  @Test
+  void firstFillTtlSecs_fromInput_drivesPositionNeverFilledAtConfiguredDeadline() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-first-fill-ttl-10");
+    PositionWorkflowInput in = input(5);
+    in.setFirstFillTtlSecs(10L);
+    WorkflowStub.fromTyped(stub).start(in);
+
+    // Advance just past the configured 10s TTL without sending any onFill. The workflow must
+    // time out via PositionNeverFilled — proving the input field, not the 90s default constant,
+    // drove the bound.
+    env.sleep(Duration.ofSeconds(15));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-first-fill-ttl-10");
+
+    AuditEvent neverFilled = captureKind("PositionNeverFilled");
+    // The audit's ttl_secs reflects the resolved value (input field, not the constant).
+    assertThat(asLong(neverFilled.getSubject().get("ttl_secs"))).isEqualTo(10L);
+    assertThat(neverFilled.getSubject())
+        .containsEntry("entry_signal_id", "entry-1")
+        .containsEntry("contract_symbol", "NVDA  260516C00140000");
+
+    // No PositionEntered audit fired — the position never existed.
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(captor.capture());
+    List<String> kinds = captor.getAllValues().stream().map(AuditEvent::getKind).toList();
+    assertThat(kinds).doesNotContain("PositionEntered", "PositionClosed");
+  }
+
+  /**
+   * Issue #212 Done-when 5: when {@code input.exit_fill_ttl_secs} is set, the {@code processOne()}
+   * bounded exit-fill await uses that value. Drives the {@code PartialExitFillTimeout} audit to
+   * fire at the configured deadline so per-strategy TTLs reach the exit-side runtime gate too.
+   */
+  @Test
+  void exitFillTtlSecs_fromInput_drivesPartialExitFillTimeoutAtConfiguredDeadline()
+      throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-exit-fill-ttl-20");
+    PositionWorkflowInput in = input(5);
+    in.setExitFillTtlSecs(20L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // First STC: send fraction=0.5 and never deliver the fill — the configured 20s TTL must
+    // bound the wait (not the 90s default).
+    stub.partialExit(partialExitRequest("sig-stuck-212", "pos-exit-fill-ttl-20", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Advance just past the configured 20s exit-fill TTL.
+    env.sleep(Duration.ofSeconds(25));
+
+    // Drain the runner so the workflow terminates cleanly.
+    stub.partialExit(partialExitRequest("sig-follow-212", "pos-exit-fill-ttl-20", 1.0));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-follow-212", 5L, new BigDecimal("2.95")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent timeout = captureKind("PartialExitFillTimeout");
+    assertThat(timeout.getSubject())
+        .containsEntry("signal_id", "sig-stuck-212")
+        .containsEntry("broker_order_id", "brk-exit");
+    assertThat(asLong(timeout.getSubject().get("remaining_qty"))).isEqualTo(5L);
+
+    // Cancel was attempted on the stuck order.
+    verify(exec, atLeastOnce()).cancelOrder(anyString());
+
+    // The follow-up STC drained normally after the latch release.
+    List<AuditEvent> partialFills = captureAll("PartialExitFilled");
+    assertThat(partialFills).hasSize(1);
+    assertThat(partialFills.get(0).getSubject()).containsEntry("signal_id", "sig-follow-212");
+  }
+
   // ---------- helpers ----------
 
   private PositionWorkflow newStub(String workflowId) {

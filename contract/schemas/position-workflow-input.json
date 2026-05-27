@@ -76,6 +76,16 @@
       "type": "string",
       "enum": ["skip", "full_close"],
       "description": "Issue #205: carried over from the spawning CopytradeSignalWorkflow's StrategyConfig.min_partial_qty_behavior. Drives PositionWorkflow.processOne's pre-qtyToClose gate when remainingQty <= 1 AND floor(remainingQty * fraction) == 0. 'skip' emits PartialExitSkippedMinQty and places no order; 'full_close' closes the last contract. Optional/null treated as 'skip' to match the YAML comment's documented default. Gated behind Workflow.getVersion('min-partial-qty-skip', DEFAULT, 1) so in-flight pre-#205 workflows preserve legacy ceil(remainingQty * fraction) behavior on replay."
+    },
+    "first_fill_ttl_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue #212: bounded wait (seconds) inside PositionWorkflow.run() for the first onFill that confirms PositionEntered (issue #203 entry-fill gate). Carried over from the spawning CopytradeSignalWorkflow's StrategyConfig — paper broker_targets receive pending_ttl_paper_secs, live broker_targets receive pending_ttl_live_secs. Optional/null treated as the legacy 90L default to preserve pre-#212 behavior for replays of positions spawned before this field existed. PositionWorkflowImpl gates consumption behind Workflow.getVersion('ttl-from-input', DEFAULT, 1) so in-flight pre-#212 workflows continue with the hardcoded 90s constant on replay."
+    },
+    "exit_fill_ttl_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue #212: bounded wait (seconds) inside PositionWorkflow.processOne() for the broker fill confirmation on a placed exit order (issue #204 exit-fill timeout). Carried over from the spawning CopytradeSignalWorkflow's StrategyConfig — paper broker_targets receive pending_ttl_paper_secs, live broker_targets receive pending_ttl_live_secs. Optional/null treated as the legacy 90L default to preserve pre-#212 behavior for replays of positions spawned before this field existed. PositionWorkflowImpl gates consumption behind Workflow.getVersion('ttl-from-input', DEFAULT, 1) so in-flight pre-#212 workflows continue with the hardcoded 90s constant on replay."
     }
   }
 }

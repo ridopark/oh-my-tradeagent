@@ -130,23 +130,37 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_MIN_PARTIAL_QTY_SKIP = "min-partial-qty-skip";
 
   /**
-   * Issue #203: bounded wait for the first onFill before the workflow gives up and emits
-   * PositionNeverFilled. Matches {@code pending_ttl_paper_secs} in {@code copytrade-v1.yaml} (90s
-   * paper default). Hardcoded here because PositionWorkflowInput does not carry the
-   * StrategyConfig-derived TTL today; promote to a per-tenant field once a second consumer needs
-   * it.
+   * Issue #212 replay gate. v=DEFAULT_VERSION (in-flight workflows started before this patch) keep
+   * the hardcoded {@link #FIRST_FILL_TTL_SECS_DEFAULT} / {@link #EXIT_FILL_TTL_SECS_DEFAULT}
+   * constants in the two bounded {@code Workflow.await} calls so their recorded histories replay
+   * without a Temporal non-determinism error. v>=1 (new executions) read {@code
+   * input.first_fill_ttl_secs} and {@code input.exit_fill_ttl_secs} so per-strategy paper/live TTLs
+   * from {@code StrategyConfig.pending_ttl_paper_secs} / {@code pending_ttl_live_secs} actually
+   * drive the runtime behavior. Null input fields under v>=1 still fall back to the constants so a
+   * pre-#212 PositionWorkflowInput payload (e.g. from a re-played CopytradeSignal) keeps the legacy
+   * 90s behavior. Distinct from {@link #VERSION_DEFER_POSITION_ENTERED} (#203) and {@link
+   * #VERSION_EXIT_FILL_TIMEOUT} (#204) so the TTL-source change rolls independently of the
+   * underlying timeout mechanisms.
    */
-  private static final long FIRST_FILL_TTL_SECS = 90L;
+  private static final String VERSION_TTL_FROM_INPUT = "ttl-from-input";
 
   /**
-   * Issue #204: bounded wait for an exit-order fill event inside {@link
-   * #processOne(PartialExitRequest)} before the workflow times out, cancels the broker order and
-   * releases the in-flight latch so subsequent STCs can drain. Matches {@code
-   * pending_ttl_paper_secs} in {@code copytrade-v1.yaml} for consistency with the entry-side TTL
-   * (#203). Hardcoded here for the same reason as {@link #FIRST_FILL_TTL_SECS} — issue #212 tracks
-   * promoting both to a StrategyConfig-derived per-tenant field.
+   * Issue #203 / #212 fallback: bounded wait for the first onFill before the workflow gives up and
+   * emits PositionNeverFilled. Matches {@code pending_ttl_paper_secs} in {@code copytrade-v1.yaml}
+   * (90s paper default). Used (a) for v=DEFAULT_VERSION replays under {@link
+   * #VERSION_TTL_FROM_INPUT}, and (b) under v>=1 when {@code input.first_fill_ttl_secs} is null
+   * (e.g. PositionWorkflowInput payload was minted by a pre-#212 CopytradeSignalWorkflow).
    */
-  private static final long EXIT_FILL_TTL_SECS = 90L;
+  private static final long FIRST_FILL_TTL_SECS_DEFAULT = 90L;
+
+  /**
+   * Issue #204 / #212 fallback: bounded wait for an exit-order fill event inside {@link
+   * #processOne(PartialExitRequest)} before the workflow times out, cancels the broker order and
+   * releases the in-flight latch so subsequent STCs can drain. Used (a) for v=DEFAULT_VERSION
+   * replays under {@link #VERSION_TTL_FROM_INPUT}, and (b) under v>=1 when {@code
+   * input.exit_fill_ttl_secs} is null.
+   */
+  private static final long EXIT_FILL_TTL_SECS_DEFAULT = 90L;
 
   private static final BigDecimal MAX_GIVEBACK = new BigDecimal("0.5");
 
@@ -327,12 +341,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
 
     // Issue #203: v>=1 awaits the first onFill before declaring PositionEntered. If no fill
-    // arrives within FIRST_FILL_TTL_SECS (or EOD/expiry pre-empt first), emit PositionNeverFilled
-    // and terminate so reconciliation can prune the stale SUBMITTED journal row.
+    // arrives within the resolved first-fill TTL (or EOD/expiry pre-empt first), emit
+    // PositionNeverFilled and terminate so reconciliation can prune the stale SUBMITTED journal
+    // row. Issue #212: the TTL value is sourced from input under VERSION_TTL_FROM_INPUT v>=1
+    // (carried over from StrategyConfig.pending_ttl_paper_secs / pending_ttl_live_secs by the
+    // spawning CopytradeSignalWorkflow); under v=DEFAULT_VERSION or when the input field is null,
+    // it falls back to FIRST_FILL_TTL_SECS_DEFAULT to preserve pre-#212 replay semantics.
+    long firstFillTtlSecs = resolveFirstFillTtlSecs(in);
     if (deferVersion >= 1) {
       boolean filled =
           Workflow.await(
-              Duration.ofSeconds(FIRST_FILL_TTL_SECS),
+              Duration.ofSeconds(firstFillTtlSecs),
               () -> firstFillReceived || eodFired || expiryFired);
       if (!filled || !firstFillReceived) {
         auditLog(
@@ -345,7 +364,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                 "expected_qty",
                 expectedQty,
                 "ttl_secs",
-                FIRST_FILL_TTL_SECS));
+                firstFillTtlSecs));
         return Workflow.getInfo().getWorkflowId();
       }
       // First fill confirms the position. remainingQty MUST come from the fill, not input.qty —
@@ -833,9 +852,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   || !pendingForceCloses.isEmpty());
       filledInTime = true; // v=0 has no timeout; only an await wakeup gets us here.
     } else {
+      // Issue #212: per-strategy TTL sourced from input under VERSION_TTL_FROM_INPUT v>=1; falls
+      // back to EXIT_FILL_TTL_SECS_DEFAULT under v=DEFAULT_VERSION or null input field.
+      long exitFillTtlSecs = resolveExitFillTtlSecs();
       filledInTime =
           Workflow.await(
-              Duration.ofSeconds(EXIT_FILL_TTL_SECS),
+              Duration.ofSeconds(exitFillTtlSecs),
               () ->
                   lastFillEvent != null
                       || eodFired
@@ -1020,6 +1042,36 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     e.setWorkflowId(Workflow.getInfo().getWorkflowId());
     e.setCorrelationId(input.getEntrySignalId());
     return e;
+  }
+
+  /**
+   * Issue #212: resolves the first-fill TTL used by run()'s entry-confirmation await. Under
+   * VERSION_TTL_FROM_INPUT v>=1 consults input.first_fill_ttl_secs; null/absent or v=0 falls back
+   * to FIRST_FILL_TTL_SECS_DEFAULT (90s). Called once at the top of run() so the resolved value is
+   * stable for both the await call and the PositionNeverFilled audit subject.
+   */
+  private long resolveFirstFillTtlSecs(PositionWorkflowInput in) {
+    int v = Workflow.getVersion(VERSION_TTL_FROM_INPUT, Workflow.DEFAULT_VERSION, 1);
+    if (v < 1) {
+      return FIRST_FILL_TTL_SECS_DEFAULT;
+    }
+    Long configured = in.getFirstFillTtlSecs();
+    return configured != null ? configured : FIRST_FILL_TTL_SECS_DEFAULT;
+  }
+
+  /**
+   * Issue #212: resolves the exit-fill TTL used by processOne()'s bounded await on the exit-order
+   * fill. Same version-gate semantics as {@link #resolveFirstFillTtlSecs(PositionWorkflowInput)}.
+   * Sourced from {@link #input} (assigned in run()) so processOne can call this without re-passing
+   * the input.
+   */
+  private long resolveExitFillTtlSecs() {
+    int v = Workflow.getVersion(VERSION_TTL_FROM_INPUT, Workflow.DEFAULT_VERSION, 1);
+    if (v < 1) {
+      return EXIT_FILL_TTL_SECS_DEFAULT;
+    }
+    Long configured = input.getExitFillTtlSecs();
+    return configured != null ? configured : EXIT_FILL_TTL_SECS_DEFAULT;
   }
 
   private static Map<String, Object> subject(Object... kv) {
