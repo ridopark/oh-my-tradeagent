@@ -148,6 +148,13 @@ public final class AuditEventKinds {
           // *_TERMINAL_CLOSE_KINDS set. Distinct from PositionNeverFilled (#203), which IS a
           // soft-terminal because it ends the workflow.
           "PartialExitFillTimeout",
+          // Issue #216: per-retry-cycle event emitted by PositionWorkflowImpl when the v=1
+          // exit-fill timeout fires AND a single retry is dispatched with a fresh limit price
+          // and a fresh intent_key. NOT a lifecycle event — the original signal_id is still
+          // in flight; PartialExitFilled (on retry success) or PartialExitFillTimeout (on
+          // second timeout, after which the STC is dropped) closes the cycle. Intentionally
+          // placed in ALL_KINDS only, not in PARTIAL_EXIT_REQUEST_KINDS or _FILL_KINDS.
+          "PartialExitRetryRequested",
           // Issue #205: emitted by PositionWorkflowImpl when a partial-exit signal lands on a
           // remainingQty<=1 runner with floor(qty * fraction)==0 and config selects SKIP. Also
           // classified in PARTIAL_EXIT_FILL_KINDS (it fulfills the partial-exit request by
