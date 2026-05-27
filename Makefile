@@ -8,16 +8,22 @@
 help:
 	@echo "Available targets:"
 	@echo "  hooks   Install git hooks from contract/python/git-hooks/"
-	@echo "          into .git/hooks/. Idempotent. Run once after clone."
+	@echo "          into .git/hooks/. Installs pre-commit (schema regen drift,"
+	@echo "          issue #68) and pre-push (audit KindRegistryGuard, issue"
+	@echo "          #213). Idempotent. Run once after clone."
 
-# Install the contract regen-drift pre-commit hook. Issue #68 — catches
-# the 'edited schema, forgot to re-run regen.sh' mistake locally instead
-# of in CI. CI still enforces the same check as the source of truth.
-# Note: re-running `make hooks` overwrites any existing .git/hooks/pre-commit;
-# reviewers should inspect the hook diff before re-installing on shared checkouts.
+# Install local git hooks. Each hook is opt-in DX (CI is still the source
+# of truth) and respects the standard `--no-verify` bypass.
+#   * pre-commit — schema regen-drift guard. Issue #68.
+#   * pre-push   — audit-svc KindRegistryGuardTest. Issue #213.
+# Note: re-running `make hooks` overwrites existing hook files in
+# .git/hooks/; reviewers should inspect the hook diff before re-installing
+# on shared checkouts.
 hooks:
 	@git_dir="$$(git rev-parse --git-common-dir)"; \
-	  src="contract/python/git-hooks/pre-commit"; \
-	  dest="$$git_dir/hooks/pre-commit"; \
-	  install -m 0755 "$$src" "$$dest"; \
-	  echo "[make hooks] installed $$src -> $$dest"
+	  for hook in pre-commit pre-push; do \
+	    src="contract/python/git-hooks/$$hook"; \
+	    dest="$$git_dir/hooks/$$hook"; \
+	    install -m 0755 "$$src" "$$dest"; \
+	    echo "[make hooks] installed $$src -> $$dest"; \
+	  done

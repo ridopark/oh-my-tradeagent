@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Pre-push hook: enforce that every orchestrator `KIND_X` audit-event
+# constant is registered in `services/audit` `AuditEventKinds.ALL_KINDS`.
+#
+# Runs the audit-svc `KindRegistryGuardTest`, which re-scans the
+# orchestrator workflows/activities source tree for `private static
+# final String KIND_NAME = "Value"` declarations and asserts each
+# literal value is present in the central registry. The guard is the
+# same one CI runs under `Java (mvn verify + spotless)` — catching it
+# locally before push saves a CI cycle. See issue #213.
+#
+# Install: `make hooks` (copies this file into `.git/hooks/pre-push`).
+# Bypass:  `git push --no-verify` (only when you know what you're doing).
+#
+# Expected wall time: ~10-15s on a warm Maven cache (the guard test
+# itself runs in well under 1s; the bulk is Maven boot + classpath
+# resolution for `-am` on services/audit). If your local takes
+# noticeably longer, your Maven cache is cold — re-run; the second run
+# should be fast.
+#
+# Issue: https://github.com/ridopark/oh-my-tradeagent/issues/213
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+echo "[pre-push] running KindRegistryGuardTest (audit-svc) ..." >&2
+
+LOG=$(mktemp -t kindguard-prepush.XXXXXX.log)
+if ! mvn -q -pl services/audit -am test \
+      -Dtest=KindRegistryGuardTest \
+      -Dsurefire.failIfNoSpecifiedTests=false \
+      >"$LOG" 2>&1; then
+  echo "" >&2
+  echo "[pre-push] ERROR: KindRegistryGuardTest failed." >&2
+  echo "[pre-push] An orchestrator KIND_X constant is not registered in" >&2
+  echo "[pre-push]   services/audit/src/main/java/com/ohmytradeagent/audit/AuditEventKinds.java" >&2
+  echo "[pre-push] Add the missing literal to ALL_KINDS and re-push." >&2
+  echo "" >&2
+  echo "[pre-push] Last 40 lines of test output ($LOG):" >&2
+  tail -n 40 "$LOG" >&2 || true
+  echo "" >&2
+  echo "[pre-push] Bypass (use sparingly): git push --no-verify" >&2
+  exit 1
+fi
+
+echo "[pre-push] KindRegistryGuardTest passed" >&2
+exit 0
