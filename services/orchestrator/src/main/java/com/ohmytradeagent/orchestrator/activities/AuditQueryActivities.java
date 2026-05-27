@@ -62,8 +62,8 @@ public interface AuditQueryActivities {
    * Counts prior {@code PositionOrphanOngoing} audit rows for {@code (tenant_id, strategy_id)} with
    * the same debounce key (option_symbol + journal_status) within the window. Used to enforce
    * "escalate once per window": if any {@code PositionOrphanOngoing} row already exists for this
-   * key, the workflow must NOT emit another one even when {@code priorCount ==
-   * ORPHAN_ESCALATION_THRESHOLD} on the current tick.
+   * key, the workflow must NOT emit another one even when the time-since-first-seen escalation gate
+   * (issue #219) would otherwise re-trigger every subsequent tick within the debounce window.
    */
   long countPriorPositionOrphanOngoing(
       String tenantId,
