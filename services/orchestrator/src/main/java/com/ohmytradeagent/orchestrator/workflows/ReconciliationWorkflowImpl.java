@@ -172,7 +172,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
                   staleSecs,
                   "option_symbol",
                   e.getOptionSymbol()));
-        } else if (priorCount == ORPHAN_ESCALATION_THRESHOLD) {
+        } else if (priorCount >= ORPHAN_ESCALATION_THRESHOLD) {
           // TODO(#219): the primary count-source bug (audit_log COUNT freezes at 1 once debounce
           // suppression kicks in) is still tracked under #219; tests pass via a direct mock of
           // countPriorJournalOrphans returning 2. When #219 lands and the count source becomes
@@ -350,7 +350,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         subj.put("journal_entry_signal_id", signalId);
       }
       auditLog(KIND_POSITION_ORPHAN, subj);
-    } else if (priorCount == ORPHAN_ESCALATION_THRESHOLD) {
+    } else if (priorCount >= ORPHAN_ESCALATION_THRESHOLD) {
       // TODO(#219): the primary count-source bug (audit_log COUNT freezes at 1 once debounce
       // suppression kicks in) is still tracked under #219; tests pass via a direct mock of
       // countPriorPositionOrphans returning 2. When #219 lands and the count source becomes

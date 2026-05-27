@@ -425,23 +425,25 @@ class ReconciliationWorkflowImplTest {
 
   @Test
   void positionOrphan_fourthDetectionWithinWindow_doesNotEmitOngoingTwice() {
-    // Claude bot review on PR #220: once #219 fixes countPriorPositionOrphans to return accurate
-    // counts, priorCount == ORPHAN_ESCALATION_THRESHOLD will remain true on every subsequent tick
-    // within the debounce window — without a guard the PositionOrphanOngoing audit would re-fire
-    // on every cron tick. The countPriorPositionOrphanOngoing check enforces once-per-window:
-    //   tick-3: priorOrphans=2, priorOngoing=0 → emit PositionOrphanOngoing (count goes to 1)
-    //   tick-4: priorOrphans=2, priorOngoing=1 → suppress, do NOT emit a second Ongoing
+    // Invariant: once escalated within a debounce window, subsequent ticks must NOT re-emit the
+    // PositionOrphanOngoing event regardless of how the underlying count source grows. Two facets:
+    //   (a) `priorCount >= ORPHAN_ESCALATION_THRESHOLD` (not `==`) → still evaluated when the count
+    //       crosses past the threshold on tick-4+. With `==`, tick-4 falls through silently AND
+    //       loses failure-recovery (if tick-3's emission silently failed, no retry).
+    //   (b) `countPriorPositionOrphanOngoing == 0` guard suppresses duplicate emission.
+    // Tick-3: priorOrphans=2, priorOngoing=0 → emit PositionOrphanOngoing (count goes to 1).
+    // Tick-4: priorOrphans=3 (simulating the #219-fixed accurate-count scenario), priorOngoing=1
+    //         → enters the >= branch, hits the priorOngoing guard, suppresses.
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
-    // Simulate the #219-fixed accurate count: stays at 2 across both ticks.
+    // Growing count across the two ticks — exercises the `>=` branch on tick-4.
     when(auditQuery.countPriorPositionOrphans(
             eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
-        .thenReturn(2L);
-    // Tick-3 sees 0 prior Ongoing rows (this tick emits the first); tick-4 sees 1 (the row tick-3
-    // just wrote) and must suppress.
+        .thenReturn(2L, 3L);
+    // Tick-3 sees 0 prior Ongoing rows (emits); tick-4 sees 1 (suppresses).
     when(auditQuery.countPriorPositionOrphanOngoing(
             eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
         .thenReturn(0L, 1L);
@@ -456,14 +458,16 @@ class ReconciliationWorkflowImplTest {
 
   @Test
   void journalOrphan_fourthDetectionWithinWindow_doesNotEmitOngoingTwice() {
-    // Parallel to the PositionOrphan case above — JournalOrphan keyed on intent_key.
+    // Parallel to the PositionOrphan case — JournalOrphan keyed on intent_key. Same invariant:
+    // `priorCount >= ORPHAN_ESCALATION_THRESHOLD` + `priorOngoing == 0` together enforce
+    // once-per-window even when the underlying count grows accurately past the threshold.
     OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
     when(auditQuery.countPriorJournalOrphans(
             eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
-        .thenReturn(2L);
+        .thenReturn(2L, 3L);
     when(auditQuery.countPriorJournalOrphanOngoing(
             eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
         .thenReturn(0L, 1L);
