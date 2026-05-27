@@ -250,6 +250,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private FillSignalPayload lastFillEvent;
   private String currentInFlightBrokerOrderId;
   private String currentInFlightSignalId;
+  // Issue #216: track the live intent_key of the in-flight exit order. Pre-#216 the key was
+  // always {@code workflowId:exit:<signalId>} and {@link #flattenRemaining(String)} could
+  // reconstruct it from {@link #currentInFlightSignalId}. The retry path uses a ":retry"-suffixed
+  // key, so flattenRemaining must read the actual key rather than reconstruct it; otherwise an
+  // EOD/expiry/risk_breach/force_close preemption during the retry window would cancel the wrong
+  // (non-existent) intent_key and leave the retry broker order orphaned.
+  private String currentInFlightIntentKey;
   private boolean eodFired;
   private boolean expiryFired;
 
@@ -910,6 +917,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       }
 
       lastFillEvent = null;
+      currentInFlightIntentKey = intentKey;
       OrderIntentResult placed = exec.placeOrder(intent);
       currentInFlightBrokerOrderId = placed.getBrokerOrderId();
 
@@ -957,6 +965,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         exitInFlight = false;
         currentInFlightBrokerOrderId = null;
         currentInFlightSignalId = null;
+        currentInFlightIntentKey = null;
         if (remainingQty == 0 && closeReason == null) {
           closeReason = "normal_stc";
         }
@@ -998,6 +1007,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         exitInFlight = false;
         currentInFlightBrokerOrderId = null;
         currentInFlightSignalId = null;
+        currentInFlightIntentKey = null;
       }
       // On EOD/expiry/risk_breach/force_close pre-emption (filledInTime=true but lastFillEvent
       // still null) we leave exitInFlight/currentInFlightSignalId set so flattenRemaining() can
@@ -1036,7 +1046,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             reason));
 
     if (exitInFlight && currentInFlightSignalId != null) {
-      String intentKey = Workflow.getInfo().getWorkflowId() + ":exit:" + currentInFlightSignalId;
+      // Issue #216: read the live intent_key rather than reconstructing it — the in-flight order
+      // may be a retry attempt whose key carries the ":retry" suffix. Fall back to reconstruction
+      // for the (impossible-in-practice) case where the field is unset, to preserve pre-#216
+      // behavior under a replay anomaly.
+      String intentKey =
+          currentInFlightIntentKey != null
+              ? currentInFlightIntentKey
+              : Workflow.getInfo().getWorkflowId() + ":exit:" + currentInFlightSignalId;
       try {
         exec.cancelOrder(intentKey);
       } catch (RuntimeException ignored) {
