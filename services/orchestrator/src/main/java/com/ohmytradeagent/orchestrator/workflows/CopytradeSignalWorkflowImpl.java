@@ -362,6 +362,17 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
           PositionWorkflowInput.MinPartialQtyBehavior.fromValue(
               config.getMinPartialQtyBehavior().value()));
     }
+    // Issue #212: carry per-strategy first-fill / exit-fill TTLs so PositionWorkflowImpl's
+    // bounded awaits (#203 entry-fill, #204 exit-fill) use the configured value selected by
+    // broker_target instead of the hardcoded 90s constants. Paper broker_targets receive
+    // pending_ttl_paper_secs; live broker_targets receive pending_ttl_live_secs; the StrategyConfig
+    // fallback to 90L lives in {@link #selectPendingTtlSecs}. Both fields are passed regardless of
+    // null-ness so the child sees a deterministic value once it crosses the VERSION_TTL_FROM_INPUT
+    // v>=1 gate (the child still handles a null input field defensively for replays of
+    // PositionWorkflowInput payloads minted by a pre-#212 parent).
+    long ttlSecsForChild = selectPendingTtlSecs(config);
+    posInput.setFirstFillTtlSecs(ttlSecsForChild);
+    posInput.setExitFillTtlSecs(ttlSecsForChild);
 
     Async.function(child::run, posInput);
     // Wait until the child is durably scheduled before returning.
@@ -665,6 +676,22 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   private long pendingTtlSecs(StrategyConfig config) {
     Long configured = config.getPendingTtlPaperSecs();
+    return configured != null ? configured : DEFAULT_PENDING_TTL_PAPER_SECS;
+  }
+
+  /**
+   * Issue #212: selects the per-strategy pending TTL value to forward into PositionWorkflowInput's
+   * first_fill_ttl_secs / exit_fill_ttl_secs. Inspects {@code config.broker_target.value()}: a
+   * "live" substring uses {@code pending_ttl_live_secs}; otherwise (any "paper" or unknown variant)
+   * uses {@code pending_ttl_paper_secs}. Falls back to {@link #DEFAULT_PENDING_TTL_PAPER_SECS}
+   * (90L) when the selected StrategyConfig field is null/absent. The substring match keeps the
+   * helper open to future broker_target enum additions (e.g. {@code ibkr-paper}, {@code
+   * tradier-live}) without re-touching this method.
+   */
+  long selectPendingTtlSecs(StrategyConfig config) {
+    String target = config.getBrokerTarget() != null ? config.getBrokerTarget().value() : "";
+    boolean isLive = target.contains("live");
+    Long configured = isLive ? config.getPendingTtlLiveSecs() : config.getPendingTtlPaperSecs();
     return configured != null ? configured : DEFAULT_PENDING_TTL_PAPER_SECS;
   }
 
