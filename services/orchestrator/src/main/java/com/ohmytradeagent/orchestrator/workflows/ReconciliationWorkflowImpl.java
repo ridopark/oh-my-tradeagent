@@ -159,9 +159,9 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
                   staleSecs,
                   "option_symbol",
                   e.getOptionSymbol()));
-        } else if (priorCount + 1L == ORPHAN_ESCALATION_THRESHOLD + 1L) {
+        } else if (priorCount == ORPHAN_ESCALATION_THRESHOLD) {
           // Threshold tripped on the current detection (prior=2, this=3) — emit the one-time
-          // PositionOrphanOngoing observability signal. Subsequent ticks within the window keep
+          // JournalOrphanOngoing observability signal. Subsequent ticks within the window keep
           // the audit_log quiet until either the window expires or the orphan resolves.
           OffsetDateTime firstSeen =
               auditQuery.firstSeenJournalOrphan(
@@ -325,7 +325,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         subj.put("journal_entry_signal_id", signalId);
       }
       auditLog(KIND_POSITION_ORPHAN, subj);
-    } else if (priorCount + 1L == ORPHAN_ESCALATION_THRESHOLD + 1L) {
+    } else if (priorCount == ORPHAN_ESCALATION_THRESHOLD) {
       OffsetDateTime firstSeen =
           auditQuery.firstSeenPositionOrphan(
               in.getTenantId(),
