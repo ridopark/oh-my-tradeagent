@@ -78,10 +78,12 @@ public final class AuditEventKinds {
    * "Soft" terminal kinds that legitimately close a lifecycle that never opened — pre-fill
    * rejections, expiries, and cancels. {@code SignalRejected} fires before any broker activity;
    * {@code EntryExpired} fires when the entry leg's TTL elapses without a fill; {@code
-   * OrderCancelled} fires when the order is cancelled before fill.
+   * OrderCancelled} fires when the order is cancelled before fill; {@code PositionNeverFilled}
+   * (Issue #203) fires when a PositionWorkflow's first-fill TTL elapses without an {@code onFill}
+   * signal — same family of "never opened" terminations, one layer deeper in the workflow stack.
    */
   public static final Set<String> SOFT_TERMINAL_CLOSE_KINDS =
-      Set.of("EntryExpired", "OrderCancelled", "SignalRejected");
+      Set.of("EntryExpired", "OrderCancelled", "SignalRejected", "PositionNeverFilled");
 
   /**
    * Every kind that terminates a lifecycle. An open lifecycle (one with an {@link #ENTRY_KINDS}
@@ -132,6 +134,7 @@ public final class AuditEventKinds {
           "SignalAbortedByRiskBreach",
           // PositionWorkflowImpl
           "PositionEntered",
+          "PositionNeverFilled",
           "PartialExitRequested",
           "PartialExitFilled",
           "ExitDuplicateSuppressed",
