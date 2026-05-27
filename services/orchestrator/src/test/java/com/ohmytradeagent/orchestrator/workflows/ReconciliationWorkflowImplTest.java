@@ -70,6 +70,14 @@ class ReconciliationWorkflowImplTest {
         .thenReturn(0L);
     when(auditQuery.countPriorJournalOrphans(anyString(), anyString(), anyString(), any()))
         .thenReturn(0L);
+    // Per-window escalation guard: default to "no prior Ongoing audit in the window" so the
+    // existing threshold tests still emit the PositionOrphanOngoing / JournalOrphanOngoing signal
+    // on the first escalation tick.
+    when(auditQuery.countPriorPositionOrphanOngoing(
+            anyString(), anyString(), anyString(), anyString(), any()))
+        .thenReturn(0L);
+    when(auditQuery.countPriorJournalOrphanOngoing(anyString(), anyString(), anyString(), any()))
+        .thenReturn(0L);
     coreWorker.registerActivitiesImplementations(audit, auditQuery, metrics, positionLookup);
     Worker brokerWorker = env.newWorker(EXEC_QUEUE);
     brokerWorker.registerActivitiesImplementations(exec);
@@ -413,6 +421,58 @@ class ReconciliationWorkflowImplTest {
         .containsEntry("intent_key", "intent-orphan")
         .containsEntry("first_seen_at", firstSeen.toString());
     assertThat(((Number) ongoing.getSubject().get("detection_count")).longValue()).isEqualTo(3L);
+  }
+
+  @Test
+  void positionOrphan_fourthDetectionWithinWindow_doesNotEmitOngoingTwice() {
+    // Claude bot review on PR #220: once #219 fixes countPriorPositionOrphans to return accurate
+    // counts, priorCount == ORPHAN_ESCALATION_THRESHOLD will remain true on every subsequent tick
+    // within the debounce window — without a guard the PositionOrphanOngoing audit would re-fire
+    // on every cron tick. The countPriorPositionOrphanOngoing check enforces once-per-window:
+    //   tick-3: priorOrphans=2, priorOngoing=0 → emit PositionOrphanOngoing (count goes to 1)
+    //   tick-4: priorOrphans=2, priorOngoing=1 → suppress, do NOT emit a second Ongoing
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    // Simulate the #219-fixed accurate count: stays at 2 across both ticks.
+    when(auditQuery.countPriorPositionOrphans(
+            eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
+        .thenReturn(2L);
+    // Tick-3 sees 0 prior Ongoing rows (this tick emits the first); tick-4 sees 1 (the row tick-3
+    // just wrote) and must suppress.
+    when(auditQuery.countPriorPositionOrphanOngoing(
+            eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
+        .thenReturn(0L, 1L);
+
+    runWorkflow(); // tick-3
+    runWorkflow(); // tick-4
+
+    // Exactly one PositionOrphanOngoing audit emitted across both ticks.
+    Mockito.verify(audit, times(1))
+        .log(Mockito.argThat(e -> e != null && "PositionOrphanOngoing".equals(e.getKind())));
+  }
+
+  @Test
+  void journalOrphan_fourthDetectionWithinWindow_doesNotEmitOngoingTwice() {
+    // Parallel to the PositionOrphan case above — JournalOrphan keyed on intent_key.
+    OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
+    when(exec.journalDumpOpen(anyString(), anyString()))
+        .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(auditQuery.countPriorJournalOrphans(
+            eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
+        .thenReturn(2L);
+    when(auditQuery.countPriorJournalOrphanOngoing(
+            eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
+        .thenReturn(0L, 1L);
+
+    runWorkflow(); // tick-3
+    runWorkflow(); // tick-4
+
+    Mockito.verify(audit, times(1))
+        .log(Mockito.argThat(e -> e != null && "JournalOrphanOngoing".equals(e.getKind())));
   }
 
   // ---------- helpers ----------

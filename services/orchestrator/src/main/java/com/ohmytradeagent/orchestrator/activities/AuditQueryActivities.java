@@ -59,6 +59,28 @@ public interface AuditQueryActivities {
       String tenantId, String strategyId, String intentKey, OffsetDateTime since);
 
   /**
+   * Counts prior {@code PositionOrphanOngoing} audit rows for {@code (tenant_id, strategy_id)} with
+   * the same debounce key (option_symbol + journal_status) within the window. Used to enforce
+   * "escalate once per window": if any {@code PositionOrphanOngoing} row already exists for this
+   * key, the workflow must NOT emit another one even when {@code priorCount ==
+   * ORPHAN_ESCALATION_THRESHOLD} on the current tick.
+   */
+  long countPriorPositionOrphanOngoing(
+      String tenantId,
+      String strategyId,
+      String optionSymbol,
+      String journalStatus,
+      OffsetDateTime since);
+
+  /**
+   * Counts prior {@code JournalOrphanOngoing} audit rows for {@code (tenant_id, strategy_id)} with
+   * the same {@code intent_key} debounce key within the window. Same once-per-window enforcement as
+   * {@link #countPriorPositionOrphanOngoing}.
+   */
+  long countPriorJournalOrphanOngoing(
+      String tenantId, String strategyId, String intentKey, OffsetDateTime since);
+
+  /**
    * Returns the earliest (oldest) {@code occurred_at} among matching prior {@code PositionOrphan}
    * rows. Used to populate {@code first_seen_at} on the {@code PositionOrphanOngoing} escalation
    * audit. Returns {@code null} when no matching row exists.

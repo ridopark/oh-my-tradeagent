@@ -173,33 +173,39 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
                   "option_symbol",
                   e.getOptionSymbol()));
         } else if (priorCount == ORPHAN_ESCALATION_THRESHOLD) {
-          // TODO(#219): unreachable in production until count source changes — see PR #220.
-          // Threshold tripped on the current detection (prior=2, this=3) — emit the one-time
-          // JournalOrphanOngoing observability signal. Subsequent ticks within the window keep
-          // the audit_log quiet until either the window expires or the orphan resolves.
-          //
-          // KNOWN BUG: the priorCount source (audit_log COUNT) only increases on actual emissions,
-          // so debounce suppression freezes the count at 1 forever. Tests pass via direct mock of
-          // countPriorJournalOrphans to return 2. See #219 for the design fix (likely option A:
-          // time-since-first-seen escalation).
-          OffsetDateTime firstSeen =
-              auditQuery.firstSeenJournalOrphan(
+          // TODO(#219): the primary count-source bug (audit_log COUNT freezes at 1 once debounce
+          // suppression kicks in) is still tracked under #219; tests pass via a direct mock of
+          // countPriorJournalOrphans returning 2. When #219 lands and the count source becomes
+          // accurate, the secondary "fires-every-tick within the window" concern is already
+          // guarded here: countPriorJournalOrphanOngoing == 0 ensures the escalation emits at
+          // most once per debounce window.
+          long priorOngoing =
+              auditQuery.countPriorJournalOrphanOngoing(
                   in.getTenantId(), in.getStrategyId(), e.getIntentKey(), debounceSince);
-          auditLog(
-              KIND_JOURNAL_ORPHAN_ONGOING,
-              subject(
-                  "intent_key",
-                  e.getIntentKey(),
-                  "state",
-                  e.getState() == null ? null : e.getState().value(),
-                  "option_symbol",
-                  e.getOptionSymbol(),
-                  "first_seen_at",
-                  firstSeen == null ? null : firstSeen.toString(),
-                  "last_seen_at",
-                  now.toString(),
-                  "detection_count",
-                  priorCount + 1L));
+          if (priorOngoing == 0L) {
+            // Threshold tripped on the current detection (prior=2, this=3) — emit the one-time
+            // JournalOrphanOngoing observability signal. Subsequent ticks within the window stay
+            // silent because priorOngoing will be >= 1 on the next look.
+            OffsetDateTime firstSeen =
+                auditQuery.firstSeenJournalOrphan(
+                    in.getTenantId(), in.getStrategyId(), e.getIntentKey(), debounceSince);
+            auditLog(
+                KIND_JOURNAL_ORPHAN_ONGOING,
+                subject(
+                    "intent_key",
+                    e.getIntentKey(),
+                    "state",
+                    e.getState() == null ? null : e.getState().value(),
+                    "option_symbol",
+                    e.getOptionSymbol(),
+                    "first_seen_at",
+                    firstSeen == null ? null : firstSeen.toString(),
+                    "last_seen_at",
+                    now.toString(),
+                    "detection_count",
+                    priorCount + 1L));
+          }
+          // Else: already escalated this window — silent suppress.
         }
         // Else: prior count is non-zero but not at the escalation tick — suppress entirely.
         journalOrphans++;
@@ -345,38 +351,51 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       }
       auditLog(KIND_POSITION_ORPHAN, subj);
     } else if (priorCount == ORPHAN_ESCALATION_THRESHOLD) {
-      // TODO(#219): unreachable in production until count source changes — see PR #220.
-      // Threshold-trip escalation (prior=2, this=3) — emit the PositionOrphanOngoing signal.
-      // KNOWN BUG: the priorCount source (audit_log COUNT) only increases on actual emissions,
-      // so debounce suppression freezes the count at 1 forever. Tests pass via direct mock of
-      // countPriorPositionOrphans to return 2. See #219 for the design fix.
-      OffsetDateTime firstSeen =
-          auditQuery.firstSeenPositionOrphan(
+      // TODO(#219): the primary count-source bug (audit_log COUNT freezes at 1 once debounce
+      // suppression kicks in) is still tracked under #219; tests pass via a direct mock of
+      // countPriorPositionOrphans returning 2. When #219 lands and the count source becomes
+      // accurate, the secondary "fires-every-tick within the window" concern is already
+      // guarded here: countPriorPositionOrphanOngoing == 0 ensures the escalation emits at
+      // most once per debounce window.
+      long priorOngoing =
+          auditQuery.countPriorPositionOrphanOngoing(
               in.getTenantId(),
               in.getStrategyId(),
               p.getOptionSymbol(),
               journalStatus,
               debounceSince);
-      Map<String, Object> subj =
-          subject(
-              "option_symbol",
-              p.getOptionSymbol(),
-              "qty",
-              p.getQty(),
-              "expected_workflow_id",
-              expectedWfId,
-              "journal_status",
-              journalStatus,
-              "first_seen_at",
-              firstSeen == null ? null : firstSeen.toString(),
-              "last_seen_at",
-              now.toString(),
-              "detection_count",
-              priorCount + 1L);
-      if (signalId != null) {
-        subj.put("journal_entry_signal_id", signalId);
+      if (priorOngoing == 0L) {
+        // Threshold-trip escalation (prior=2, this=3) — emit the one-time PositionOrphanOngoing
+        // signal. Subsequent ticks within the window stay silent because priorOngoing >= 1.
+        OffsetDateTime firstSeen =
+            auditQuery.firstSeenPositionOrphan(
+                in.getTenantId(),
+                in.getStrategyId(),
+                p.getOptionSymbol(),
+                journalStatus,
+                debounceSince);
+        Map<String, Object> subj =
+            subject(
+                "option_symbol",
+                p.getOptionSymbol(),
+                "qty",
+                p.getQty(),
+                "expected_workflow_id",
+                expectedWfId,
+                "journal_status",
+                journalStatus,
+                "first_seen_at",
+                firstSeen == null ? null : firstSeen.toString(),
+                "last_seen_at",
+                now.toString(),
+                "detection_count",
+                priorCount + 1L);
+        if (signalId != null) {
+          subj.put("journal_entry_signal_id", signalId);
+        }
+        auditLog(KIND_POSITION_ORPHAN_ONGOING, subj);
       }
-      auditLog(KIND_POSITION_ORPHAN_ONGOING, subj);
+      // Else: already escalated this window — silent suppress.
     }
     // Else: suppressed (priorCount in [1, threshold-1] or > threshold).
   }
