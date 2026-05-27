@@ -182,6 +182,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             "qty", in.getQty(),
             "entry_premium", in.getEntryPremium()));
 
+    // Issue #202: copytrade strategies set eod_force_flatten=false because the only
+    // normal exit for an author-mirror position is an STC message from the Discord
+    // author; forcing a flatten at 15:55 ET would diverge from the author's actual
+    // position. Null is treated as true to preserve pre-#202 behavior for replays
+    // of positions spawned before this field existed. The expiry-close timer below
+    // still arms unconditionally (0DTE physical expiry is not a tunable).
+    boolean armEodTimer = !Boolean.FALSE.equals(in.getEodForceFlatten());
+
     Duration eodIn = calendar.durationUntilEodEt();
     Duration expiryIn = Duration.ZERO;
     LocalDate expiryDate = expiryDateFromOcc(in.getContractSymbol());
@@ -189,7 +197,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       expiryIn = calendar.durationUntilExpiryCloseEt(expiryDate);
     }
 
-    if (!eodIn.isZero() && !eodIn.isNegative()) {
+    if (armEodTimer && !eodIn.isZero() && !eodIn.isNegative()) {
       Promise<Void> eodTimer = Workflow.newTimer(eodIn);
       eodTimer.thenApply(
           v -> {

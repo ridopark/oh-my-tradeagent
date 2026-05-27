@@ -57,3 +57,11 @@ trail_giveback_pct: 0.15
 # Phase 5 kill switch
 daily_loss_threshold: 2500.00
 reset_cooldown_secs: 60
+
+# Issue #202: Copytrade mirrors a Discord author; the only normal exit is an STC
+# message from the author. Never EOD-flatten — would diverge from the author's
+# actual position and break mirror fidelity. Expiry-close timer (0DTE),
+# chandelier trail, risk-breach, and operator force_close remain as emergency
+# exits. Any future strategy that mirrors an external author MUST also set this
+# to false. This is policy, not a tunable.
+eod_force_flatten: false

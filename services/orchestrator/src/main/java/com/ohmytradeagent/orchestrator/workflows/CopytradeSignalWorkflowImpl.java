@@ -343,6 +343,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // same broker-<value> queue as the parent's entry.
     posInput.setBrokerTarget(
         PositionWorkflowInput.BrokerTarget.fromValue(config.getBrokerTarget().value()));
+    // Issue #202: carry eod_force_flatten so copytrade positions (and any future strategy that
+    // mirrors an external author) skip the 15:55 ET EOD timer in PositionWorkflowImpl. Null is
+    // passed through unchanged; PositionWorkflowImpl treats null as the default-true policy.
+    posInput.setEodForceFlatten(config.getEodForceFlatten());
 
     Async.function(child::run, posInput);
     // Wait until the child is durably scheduled before returning.

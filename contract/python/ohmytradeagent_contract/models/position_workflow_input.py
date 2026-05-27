@@ -49,3 +49,7 @@ class PositionWorkflowInput(BaseModel):
     """
     Phase 2c.2: broker_target carried over from the spawning CopytradeSignalWorkflow's StrategyConfig so the position's exit Activities route to the same broker task queue (broker-<value>). Optional for back-compat with pre-2c.2 replays; when absent the workflow falls back to the legacy default (broker-alpaca-paper since 2c.2). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 inputs; an active position spawned with them produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.
     """
+    eod_force_flatten: bool | None = None
+    """
+    Issue #202: carried over from the spawning CopytradeSignalWorkflow's StrategyConfig.eod_force_flatten. When false, PositionWorkflow does NOT arm the 15:55 ET EOD force-flatten timer (the expiry-close timer for 0DTE handling still arms unconditionally; chandelier trail, risk-breach, and operator force_close remain available as emergency exits). Optional/null treated as true to preserve pre-issue-202 behavior for replays of positions spawned before this field existed.
+    """

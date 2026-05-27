@@ -189,3 +189,7 @@ class StrategyConfig(BaseModel):
     """
     Issue #19 (quant-analyst review): if true, gates the future market-data-svc underlying-halt subscription that PositionWorkflow consumes to force-flat affected positions. When the underlying enters an LULD pause the option bid collapses to zero and the position becomes unexitable except by exercise; PositionWorkflow will force-flat with UNDERLYING_HALTED on receipt of the halt signal so the position closes the moment the halt clears. Opt-in: null/false disables the subscription. Spec-only field in this PR; market-data-svc halt subscription + PositionWorkflow handler land separately.
     """
+    eod_force_flatten: bool | None = None
+    """
+    Issue #202: gate the EOD force-flatten timer (15:55 ET) in PositionWorkflow. Default true (null treated as true) preserves the pre-issue-202 behavior for every strategy that doesn't explicitly opt out. Copytrade strategies that mirror an external Discord author MUST set this to false — the only normal exit for an author-mirror position is an STC message from the author; force-flattening at EOD diverges from the author's actual position and breaks mirror fidelity. The expiry-close timer (0DTE physical-expiry handling), chandelier trail (when armed), risk-breach, and operator force_close remain available as emergency exits regardless of this flag.
+    """
