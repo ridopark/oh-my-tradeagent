@@ -631,7 +631,8 @@ class PositionWorkflowImplTest {
    * Issue #202: when {@code eod_force_flatten} is false, PositionWorkflow MUST NOT arm the 15:55 ET
    * EOD timer. The position remains in its main {@link io.temporal.workflow.Workflow#await} loop
    * until STC, expiry, chandelier trail, risk_breach, or operator force_close — never EOD. Drives
-   * the copytrade author-mirror fidelity contract (see {@code tenants/dev/strategies/copytrade-v1.yaml}).
+   * the copytrade author-mirror fidelity contract (see {@code
+   * tenants/dev/strategies/copytrade-v1.yaml}).
    */
   @Test
   void eodTimer_skipsArmingWhenEodForceFlattenFalse() throws Exception {
