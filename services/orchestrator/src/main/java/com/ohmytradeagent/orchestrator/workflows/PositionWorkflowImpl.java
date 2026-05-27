@@ -547,19 +547,22 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       result.setStatus(ForceCloseResult.Status.NOOP_ALREADY_CLOSED);
       return result;
     }
-    if (!positionConfirmed) {
-      pendingForceCloses.add(
-          new ForceCloseDirective(request.getOperatorId(), request.getReason(), exitSignalId));
-      result.setStatus(ForceCloseResult.Status.ACCEPTED);
-      return result;
-    }
-
-    // Issue #203: ForceCloseRequested audit is emitted from processForceClose so the v=1
-    // buffered path (pre-first-fill) and the v=0 / post-confirm normal path both audit exactly
-    // once, at the moment the directive is actually picked up by the main loop. Note that
-    // remaining_qty is therefore captured at processing time (not at request time), which is more
-    // useful for ops since the directive may sit briefly in pendingForceCloses while a queued exit
-    // drains.
+    // Emit ForceCloseRequested in-handler so the activity is scheduled in the same workflow task
+    // as the Update — this matches the pre-#203 recorded command sequence and keeps in-flight v=0
+    // workflows replay-safe (their histories already have this audit scheduled at handler time).
+    // remaining_qty reflects the value at request time: it's 0 under the v=1 buffered path
+    // (positionConfirmed=false) and the real remaining count under the confirmed path.
+    auditLog(
+        KIND_FORCE_CLOSE_REQUESTED,
+        subject(
+            "operator_id",
+            request.getOperatorId(),
+            "reason",
+            request.getReason(),
+            "exit_signal_id",
+            exitSignalId,
+            "remaining_qty",
+            remainingQty));
     pendingForceCloses.add(
         new ForceCloseDirective(request.getOperatorId(), request.getReason(), exitSignalId));
     result.setStatus(ForceCloseResult.Status.ACCEPTED);
@@ -584,22 +587,6 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   /** Main-loop force-close processor. Cancel-then-flatten via the shared flatten helper. */
   private void processForceClose(ForceCloseDirective d) {
-    // Issue #203: when an Update arrives before the position was confirmed (v=1 pre-first-fill),
-    // the forceClose handler buffered the directive without emitting the ForceCloseRequested
-    // audit (remainingQty wasn't yet authoritative). Emit it here, once the main loop reaches the
-    // directive — at this point remainingQty is real and the audit's remaining_qty field is
-    // meaningful.
-    auditLog(
-        KIND_FORCE_CLOSE_REQUESTED,
-        subject(
-            "operator_id",
-            d.operatorId(),
-            "reason",
-            d.reason(),
-            "exit_signal_id",
-            d.exitSignalId(),
-            "remaining_qty",
-            remainingQty));
     closeReason = "force_close";
     flattenRemaining("force_close");
   }
