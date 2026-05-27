@@ -76,7 +76,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String KIND_POSITION_NEVER_FILLED = "PositionNeverFilled";
 
   // Issue #204 audit kind: an exit order placed by processOne() did not receive a fill
-  // event within the bounded EXIT_FILL_TTL_SECS. The handler best-effort cancels the
+  // event within the bounded exit-fill TTL. The handler best-effort cancels the
   // broker order and releases the exitInFlight latch so subsequent STCs can drain;
   // remainingQty is NOT decremented (no fill happened). Reconciliation closes the loop
   // on the broker-side order state.
@@ -111,7 +111,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * preserve the legacy "PositionEntered emitted at workflow start with qty=input.qty" behavior so
    * their replays don't trip a Temporal non-determinism error. v>=1 (new executions) defer
    * PositionEntered and remainingQty until the first onFill arrives, and emit PositionNeverFilled +
-   * terminate if no fill arrives within {@link #FIRST_FILL_TTL_SECS}.
+   * terminate if no fill arrives within {@link #FIRST_FILL_TTL_SECS_DEFAULT}.
    */
   private static final String VERSION_DEFER_POSITION_ENTERED = "position-entered-on-fill";
 
@@ -891,7 +891,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       return;
     }
 
-    // Issue #204: v>=1 timeout path — no fill arrived within EXIT_FILL_TTL_SECS and no EOD/expiry
+    // Issue #204: v>=1 timeout path — no fill arrived within the resolved exit-fill TTL and no
+    // EOD/expiry
     // /risk_breach/force_close preemption. Best-effort cancel the broker order, audit the
     // timeout, release the in-flight latch so pendingExits can drain on the next iteration. Do
     // NOT decrement remainingQty (no fill happened). On EOD/expiry pre-emption (filledInTime
