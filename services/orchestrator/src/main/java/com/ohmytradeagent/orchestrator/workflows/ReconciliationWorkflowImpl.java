@@ -80,10 +80,23 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   private final AuditActivities audit =
       Workflow.newActivityStub(AuditActivities.class, DEFAULT_OPTIONS);
 
+  /**
+   * Issue #206: read-only debounce lookups against {@code audit_log}. The Impl is fail-soft
+   * (catches {@link RuntimeException} and returns 0/null per its docstrings), so the activity NEVER
+   * throws to the workflow — Temporal's default unbounded retry policy is dead weight that bloats
+   * history on transient DB hiccups. Bound to {@code maximumAttempts=1} like {@link
+   * #METRICS_OPTIONS}.
+   */
+  private static final ActivityOptions AUDIT_QUERY_OPTIONS =
+      ActivityOptions.newBuilder()
+          .setStartToCloseTimeout(Duration.ofSeconds(5))
+          .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
+          .build();
+
   // Issue #206: read-side audit lookups for orphan debounce + escalation. Cron-fresh workflows
   // cannot carry state across ticks; we derive prior detections from audit_log queries.
   private final AuditQueryActivities auditQuery =
-      Workflow.newActivityStub(AuditQueryActivities.class, DEFAULT_OPTIONS);
+      Workflow.newActivityStub(AuditQueryActivities.class, AUDIT_QUERY_OPTIONS);
 
   private final ReconciliationMetricsActivities metrics =
       Workflow.newActivityStub(ReconciliationMetricsActivities.class, METRICS_OPTIONS);
@@ -160,9 +173,15 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
                   "option_symbol",
                   e.getOptionSymbol()));
         } else if (priorCount == ORPHAN_ESCALATION_THRESHOLD) {
+          // TODO(#219): unreachable in production until count source changes — see PR #220.
           // Threshold tripped on the current detection (prior=2, this=3) — emit the one-time
           // JournalOrphanOngoing observability signal. Subsequent ticks within the window keep
           // the audit_log quiet until either the window expires or the orphan resolves.
+          //
+          // KNOWN BUG: the priorCount source (audit_log COUNT) only increases on actual emissions,
+          // so debounce suppression freezes the count at 1 forever. Tests pass via direct mock of
+          // countPriorJournalOrphans to return 2. See #219 for the design fix (likely option A:
+          // time-since-first-seen escalation).
           OffsetDateTime firstSeen =
               auditQuery.firstSeenJournalOrphan(
                   in.getTenantId(), in.getStrategyId(), e.getIntentKey(), debounceSince);
@@ -326,6 +345,11 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       }
       auditLog(KIND_POSITION_ORPHAN, subj);
     } else if (priorCount == ORPHAN_ESCALATION_THRESHOLD) {
+      // TODO(#219): unreachable in production until count source changes — see PR #220.
+      // Threshold-trip escalation (prior=2, this=3) — emit the PositionOrphanOngoing signal.
+      // KNOWN BUG: the priorCount source (audit_log COUNT) only increases on actual emissions,
+      // so debounce suppression freezes the count at 1 forever. Tests pass via direct mock of
+      // countPriorPositionOrphans to return 2. See #219 for the design fix.
       OffsetDateTime firstSeen =
           auditQuery.firstSeenPositionOrphan(
               in.getTenantId(),
