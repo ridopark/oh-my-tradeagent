@@ -289,6 +289,102 @@ class PositionWorkflowImplTest {
     captureKind("EodForceFlattened");
   }
 
+  // ---------- Issue #204: bounded exit-fill await in processOne() ----------
+
+  /**
+   * Issue #204 Done-when 1: when an exit order is placed and the fill never arrives within the
+   * EXIT_FILL_TTL_SECS bound, the workflow must:
+   *
+   * <ol>
+   *   <li>emit a {@code PartialExitFillTimeout} audit (subject includes signal_id, broker_order_id,
+   *       intent_key, remaining_qty),
+   *   <li>best-effort cancel the broker order via {@code exec.cancelOrder(intentKey)},
+   *   <li>release the {@code exitInFlight} latch so {@code pendingExits} can drain on the next
+   *       workflow tick,
+   *   <li>NOT decrement {@code remainingQty} (no fill happened).
+   * </ol>
+   *
+   * <p>The follow-up STC must then drain and fill normally.
+   */
+  @Test
+  void processOne_exitFillTimeout_emitsAuditCancelsAndDrainsNextPending() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-exit-timeout");
+    WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
+
+    // First STC: send fraction=0.5 and never deliver the fill.
+    stub.partialExit(partialExitRequest("sig-stuck", "pos-exit-timeout", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Advance virtual time past the 90s exit-fill TTL — the workflow must time out, audit, cancel
+    // and release the in-flight latch.
+    env.sleep(Duration.ofSeconds(120));
+
+    // Second STC arrives after the timeout: with the latch released, processOne must drain it and
+    // fill it normally.
+    stub.partialExit(partialExitRequest("sig-follow", "pos-exit-timeout", 1.0));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-follow", 5L, new BigDecimal("2.90")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent timeout = captureKind("PartialExitFillTimeout");
+    assertThat(timeout.getSubject())
+        .containsEntry("signal_id", "sig-stuck")
+        .containsEntry("broker_order_id", "brk-exit");
+    assertThat(asLong(timeout.getSubject().get("remaining_qty"))).isEqualTo(5L);
+
+    // Cancel was attempted on the stuck order.
+    verify(exec, atLeastOnce()).cancelOrder(anyString());
+
+    // The follow-up STC actually filled — partial-exit audit reflects 5 contracts closed.
+    List<AuditEvent> partialFills = captureAll("PartialExitFilled");
+    assertThat(partialFills).hasSize(1);
+    assertThat(partialFills.get(0).getSubject()).containsEntry("signal_id", "sig-follow");
+    assertThat(asLong(partialFills.get(0).getSubject().get("qty_filled"))).isEqualTo(5L);
+  }
+
+  /**
+   * Issue #204: when cancelOrder throws (broker already filled/rejected the working order), the
+   * timeout-handler must swallow the exception and still release the latch + audit the timeout.
+   * Reconciliation closes the loop on the broker-side state.
+   *
+   * <p>Uses a non-retryable {@link ApplicationFailure} so the activity does not retry — the catch
+   * block in the workflow body must absorb it and continue.
+   */
+  @Test
+  void processOne_exitFillTimeout_swallowsCancelFailureAndStillReleasesLatch() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString()))
+        .thenThrow(
+            ApplicationFailure.newNonRetryableFailure(
+                "broker rejected cancel — already filled", "BrokerCancelRejected"));
+
+    PositionWorkflow stub = newStub("pos-exit-timeout-cancelfail");
+    WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
+
+    stub.partialExit(partialExitRequest("sig-stuck", "pos-exit-timeout-cancelfail", 0.5));
+    waitForPlaceOrderCount(1);
+
+    env.sleep(Duration.ofSeconds(120));
+
+    // Follow-up STC drains — proving the latch was released even though cancel threw.
+    stub.partialExit(partialExitRequest("sig-follow", "pos-exit-timeout-cancelfail", 1.0));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-follow", 3L, new BigDecimal("3.00")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    captureKind("PartialExitFillTimeout");
+    List<AuditEvent> partialFills = captureAll("PartialExitFilled");
+    assertThat(partialFills).hasSize(1);
+    assertThat(partialFills.get(0).getSubject()).containsEntry("signal_id", "sig-follow");
+  }
+
   // ---------- Phase 4: CHANDELIER_TRAIL ----------
 
   @Test

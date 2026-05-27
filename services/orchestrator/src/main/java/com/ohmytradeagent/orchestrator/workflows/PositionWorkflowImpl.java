@@ -75,9 +75,27 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // journal row instead of leaving an orphan that downstream STCs could target.
   private static final String KIND_POSITION_NEVER_FILLED = "PositionNeverFilled";
 
+  // Issue #204 audit kind: an exit order placed by processOne() did not receive a fill
+  // event within the bounded EXIT_FILL_TTL_SECS. The handler best-effort cancels the
+  // broker order and releases the exitInFlight latch so subsequent STCs can drain;
+  // remainingQty is NOT decremented (no fill happened). Reconciliation closes the loop
+  // on the broker-side order state.
+  private static final String KIND_PARTIAL_EXIT_FILL_TIMEOUT = "PartialExitFillTimeout";
+
   private static final String VERSION_CHANDELIER = "chandelier-v1";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
   private static final String VERSION_FORCE_CLOSE = "force-close-v1";
+
+  /**
+   * Issue #204 replay gate. v=DEFAULT_VERSION (in-flight workflows started before this patch) keep
+   * the original untimed {@code Workflow.await} in {@link #processOne(PartialExitRequest)} so their
+   * recorded histories replay without a Temporal non-determinism error. v>=1 (new executions) take
+   * the bounded await that emits {@link #KIND_PARTIAL_EXIT_FILL_TIMEOUT}, cancels the broker order,
+   * and releases the in-flight latch so {@code pendingExits} drains on the next iteration. Distinct
+   * from {@link #VERSION_DEFER_POSITION_ENTERED} (issue #203, the entry-side analogue) so the two
+   * patches roll independently.
+   */
+  private static final String VERSION_EXIT_FILL_TIMEOUT = "exit-fill-timeout";
 
   /**
    * Issue #203 replay gate. v=DEFAULT_VERSION (in-flight workflows started before this patch)
@@ -96,6 +114,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * it.
    */
   private static final long FIRST_FILL_TTL_SECS = 90L;
+
+  /**
+   * Issue #204: bounded wait for an exit-order fill event inside {@link
+   * #processOne(PartialExitRequest)} before the workflow times out, cancels the broker order and
+   * releases the in-flight latch so subsequent STCs can drain. Matches {@code
+   * pending_ttl_paper_secs} in {@code copytrade-v1.yaml} for consistency with the entry-side TTL
+   * (#203). Hardcoded here for the same reason as {@link #FIRST_FILL_TTL_SECS} — issue #212 tracks
+   * promoting both to a StrategyConfig-derived per-tenant field.
+   */
+  private static final long EXIT_FILL_TTL_SECS = 90L;
 
   private static final BigDecimal MAX_GIVEBACK = new BigDecimal("0.5");
 
@@ -730,13 +758,32 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     OrderIntentResult placed = exec.placeOrder(intent);
     currentInFlightBrokerOrderId = placed.getBrokerOrderId();
 
-    Workflow.await(
-        () ->
-            lastFillEvent != null
-                || eodFired
-                || expiryFired
-                || !pendingRiskBreaches.isEmpty()
-                || !pendingForceCloses.isEmpty());
+    // Issue #204: gate the await on a version flag so v=0 (in-flight) workflows keep their
+    // original untimed semantics for replay safety; v>=1 (new executions) take the bounded await
+    // that recovers from a non-filling broker order instead of wedging pendingExits forever.
+    int exitTimeoutVersion =
+        Workflow.getVersion(VERSION_EXIT_FILL_TIMEOUT, Workflow.DEFAULT_VERSION, 1);
+    boolean filledInTime;
+    if (exitTimeoutVersion == Workflow.DEFAULT_VERSION) {
+      Workflow.await(
+          () ->
+              lastFillEvent != null
+                  || eodFired
+                  || expiryFired
+                  || !pendingRiskBreaches.isEmpty()
+                  || !pendingForceCloses.isEmpty());
+      filledInTime = true; // v=0 has no timeout; only an await wakeup gets us here.
+    } else {
+      filledInTime =
+          Workflow.await(
+              Duration.ofSeconds(EXIT_FILL_TTL_SECS),
+              () ->
+                  lastFillEvent != null
+                      || eodFired
+                      || expiryFired
+                      || !pendingRiskBreaches.isEmpty()
+                      || !pendingForceCloses.isEmpty());
+    }
 
     if (lastFillEvent != null) {
       long filled = lastFillEvent.getFilledQty();
@@ -760,9 +807,40 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       if (remainingQty == 0 && closeReason == null) {
         closeReason = "normal_stc";
       }
+      return;
     }
-    // On EOD/expiry pre-emption we leave exitInFlight/currentInFlightSignalId set so
-    // flattenRemaining() can cancel the still-open broker order.
+
+    // Issue #204: v>=1 timeout path — no fill arrived within EXIT_FILL_TTL_SECS and no EOD/expiry
+    // /risk_breach/force_close preemption. Best-effort cancel the broker order, audit the
+    // timeout, release the in-flight latch so pendingExits can drain on the next iteration. Do
+    // NOT decrement remainingQty (no fill happened). On EOD/expiry pre-emption (filledInTime
+    // true but lastFillEvent still null) we leave exitInFlight/currentInFlightSignalId set so
+    // flattenRemaining() can cancel the still-open broker order — same as the v=0 behavior.
+    if (exitTimeoutVersion >= 1 && !filledInTime) {
+      auditLog(
+          KIND_PARTIAL_EXIT_FILL_TIMEOUT,
+          subject(
+              "signal_id",
+              req.getSignalId(),
+              "broker_order_id",
+              currentInFlightBrokerOrderId,
+              "intent_key",
+              intentKey,
+              "remaining_qty",
+              remainingQty));
+      try {
+        exec.cancelOrder(intentKey);
+      } catch (RuntimeException ignored) {
+        // Cancel is best-effort; the broker may have already filled or rejected the order.
+        // Reconciliation closes the loop on the real broker-side state.
+      }
+      exitInFlight = false;
+      currentInFlightBrokerOrderId = null;
+      currentInFlightSignalId = null;
+    }
+    // On EOD/expiry/risk_breach/force_close pre-emption (filledInTime=true but lastFillEvent
+    // still null) we leave exitInFlight/currentInFlightSignalId set so flattenRemaining() can
+    // cancel the still-open broker order.
   }
 
   private void flattenRemaining(String reason) {
