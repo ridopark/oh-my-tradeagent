@@ -625,6 +625,68 @@ class PositionWorkflowImplTest {
     verify(exec, times(1)).placeOrder(any());
   }
 
+  // ---------- Issue #202: eod_force_flatten = false suppresses EOD timer ----------
+
+  /**
+   * Issue #202: when {@code eod_force_flatten} is false, PositionWorkflow MUST NOT arm the 15:55 ET
+   * EOD timer. The position remains in its main {@link io.temporal.workflow.Workflow#await} loop
+   * until STC, expiry, chandelier trail, risk_breach, or operator force_close — never EOD. Drives
+   * the copytrade author-mirror fidelity contract (see {@code tenants/dev/strategies/copytrade-v1.yaml}).
+   */
+  @Test
+  void eodTimer_skipsArmingWhenEodForceFlattenFalse() throws Exception {
+    // EOD timer would fire ~immediately if armed.
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-no-eod-flatten");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.FALSE);
+    WorkflowStub.fromTyped(stub).start(in);
+
+    // Advance virtual time well past the would-be EOD trigger to prove the timer is not armed.
+    env.sleep(Duration.ofMinutes(1));
+
+    // STC closes the position — the only normal exit path for this strategy.
+    stub.partialExit(partialExitRequest("sig-stc-author", "pos-no-eod-flatten", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-stc", 5L, new BigDecimal("3.20")));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-no-eod-flatten");
+
+    // No EOD force-flatten audit fired. Capture every audit kind once and assert.
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(captor.capture());
+    List<String> kinds = captor.getAllValues().stream().map(AuditEvent::getKind).toList();
+    assertThat(kinds).doesNotContain("EodForceFlattenRequested", "EodForceFlattened");
+
+    // Exit went through the normal STC path (and only that path), so exactly one placeOrder.
+    verify(exec, times(1)).placeOrder(any());
+  }
+
+  /**
+   * Issue #202: null {@code eod_force_flatten} is treated as true to preserve back-compat for
+   * pre-#202 replays — the EOD timer still arms.
+   */
+  @Test
+  void eodTimer_armsWhenEodForceFlattenNull() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-null-eod-flatten");
+    PositionWorkflowInput in = input(3);
+    // eod_force_flatten left null — the default-true contract.
+    WorkflowStub.fromTyped(stub).start(in);
+
+    env.sleep(Duration.ofMinutes(1));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    captureKind("EodForceFlattenRequested");
+    captureKind("EodForceFlattened");
+  }
+
   @Test
   void runWithInvalidBrokerTargetRaisesInvalidBrokerTargetError() {
     // The PositionWorkflowInput.BrokerTarget enum admits "paper" / "live" for back-compat
