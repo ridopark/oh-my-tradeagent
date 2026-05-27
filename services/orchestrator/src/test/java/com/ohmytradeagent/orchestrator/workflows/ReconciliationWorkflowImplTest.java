@@ -27,6 +27,7 @@ import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.failure.ApplicationFailure;
+import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
@@ -54,7 +55,16 @@ class ReconciliationWorkflowImplTest {
 
   @BeforeEach
   void setUp() {
-    env = TestWorkflowEnvironment.newInstance();
+    // Issue #219: disable time skipping so virtual time stays aligned with wall clock between
+    // sequential runWorkflow() calls. The realStateMachine tests stub firstSeenPositionOrphan /
+    // firstSeenJournalOrphan with wall-clock-relative timestamps (t-2min, t-31min) and rely on
+    // Duration.between(firstSeen, workflowNow()) matching real elapsed time. With default time
+    // skipping, the env can fast-forward virtual time arbitrarily while the test thread blocks on
+    // wf.run() completion, causing tick-2's stubbed t-2min firstSeen to look 30+ minutes old and
+    // unexpectedly fire the escalation. This made the test deterministic locally but flaky in CI.
+    env =
+        TestWorkflowEnvironment.newInstance(
+            TestEnvironmentOptions.newBuilder().setUseTimeskipping(false).build());
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(ReconciliationWorkflowImpl.class);
     audit = Mockito.mock(AuditActivities.class);
