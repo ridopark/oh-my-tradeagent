@@ -928,6 +928,91 @@ class PositionWorkflowImplTest {
     assertThat(asLong(partialFills.get(0).getSubject().get("qty_filled"))).isEqualTo(3L);
   }
 
+  // ---------- Issue #205: min_partial_qty_behavior — runner-quantum partial-exit gate ----------
+
+  /**
+   * Issue #205 Done-when 3a: when {@code min_partial_qty_behavior=skip} (default), a partial-exit
+   * signal that would round to zero contracts under the integer broker quantum (remainingQty=1 +
+   * fraction=0.5 → floor(0.5)=0) MUST audit {@code PartialExitSkippedMinQty} and place NO close
+   * order. The runner survives for trail/EOD/STC drain. Closes the dead-config gap from issue #205
+   * (the YAML key was declared but no Java code read it).
+   */
+  @Test
+  void partialExit_remainingQty1_fraction0_5_skipBranch_emitsSkippedAuditAndPlacesNoOrder()
+      throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-min-qty-skip");
+    PositionWorkflowInput in = input(1);
+    in.setMinPartialQtyBehavior(PositionWorkflowInput.MinPartialQtyBehavior.SKIP);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 1L);
+
+    // Half-out on a 1-contract runner: floor(1 * 0.5) = 0 → SKIP branch.
+    stub.partialExit(partialExitRequest("sig-skip", "pos-min-qty-skip", 0.5));
+
+    // The SKIP branch does not place an order, so we can't waitForPlaceOrderCount. Give the
+    // workflow a virtual moment to process the signal then drain via a full close so the workflow
+    // terminates cleanly.
+    Thread.sleep(200);
+    stub.partialExit(partialExitRequest("sig-full", "pos-min-qty-skip", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-final", 1L, new BigDecimal("3.20")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent skipped = captureKind("PartialExitSkippedMinQty");
+    assertThat(skipped.getSubject()).containsEntry("signal_id", "sig-skip");
+    assertThat(asLong(skipped.getSubject().get("remaining_qty"))).isEqualTo(1L);
+    assertThat(((Number) skipped.getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
+
+    // Critical: the SKIP branch placed NO close order. Only the follow-up full-close exits placed
+    // the single broker order observed.
+    verify(exec, times(1)).placeOrder(any());
+
+    // No PartialExitFilled fired for the skipped signal — the skip is a fulfillment-by-not-filling.
+    List<AuditEvent> filled = captureAll("PartialExitFilled");
+    assertThat(filled).hasSize(1);
+    assertThat(filled.get(0).getSubject()).containsEntry("signal_id", "sig-full");
+  }
+
+  /**
+   * Issue #205 Done-when 3b: when {@code min_partial_qty_behavior=full_close}, the same edge
+   * (remainingQty=1 + fraction=0.5) MUST place a 1-contract close order — the runner is flushed on
+   * the partial signal. PartialExitFilled fires normally; PartialExitSkippedMinQty does NOT.
+   */
+  @Test
+  void partialExit_remainingQty1_fraction0_5_fullCloseBranch_placesOneContractCloseOrder()
+      throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-min-qty-full-close");
+    PositionWorkflowInput in = input(1);
+    in.setMinPartialQtyBehavior(PositionWorkflowInput.MinPartialQtyBehavior.FULL_CLOSE);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 1L);
+
+    stub.partialExit(partialExitRequest("sig-flush", "pos-min-qty-full-close", 0.5));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flush", 1L, new BigDecimal("3.05")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // PartialExitFilled fires for the runner-flush; no PartialExitSkippedMinQty.
+    AuditEvent filled = captureKind("PartialExitFilled");
+    assertThat(filled.getSubject()).containsEntry("signal_id", "sig-flush");
+    assertThat(asLong(filled.getSubject().get("qty_filled"))).isEqualTo(1L);
+
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(captor.capture());
+    List<String> kinds = captor.getAllValues().stream().map(AuditEvent::getKind).toList();
+    assertThat(kinds).doesNotContain("PartialExitSkippedMinQty");
+
+    // The PartialExitRequested audit reflects the rounded-up qty_to_close=1.
+    AuditEvent requested = captureKind("PartialExitRequested");
+    assertThat(asLong(requested.getSubject().get("qty_to_close"))).isEqualTo(1L);
+  }
+
   @Test
   void runWithInvalidBrokerTargetRaisesInvalidBrokerTargetError() {
     // The PositionWorkflowInput.BrokerTarget enum admits "paper" / "live" for back-compat

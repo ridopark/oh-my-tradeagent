@@ -354,6 +354,14 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // mirrors an external author) skip the 15:55 ET EOD timer in PositionWorkflowImpl. Null is
     // passed through unchanged; PositionWorkflowImpl treats null as the default-true policy.
     posInput.setEodForceFlatten(config.getEodForceFlatten());
+    // Issue #205: carry min_partial_qty_behavior so PositionWorkflow's runner-quantum gate can
+    // decide between SKIP (default) and FULL_CLOSE when a partial signal would round to zero
+    // contracts. Null/absent passes through unchanged; PositionWorkflowImpl treats null as SKIP.
+    if (config.getMinPartialQtyBehavior() != null) {
+      posInput.setMinPartialQtyBehavior(
+          PositionWorkflowInput.MinPartialQtyBehavior.fromValue(
+              config.getMinPartialQtyBehavior().value()));
+    }
 
     Async.function(child::run, posInput);
     // Wait until the child is durably scheduled before returning.

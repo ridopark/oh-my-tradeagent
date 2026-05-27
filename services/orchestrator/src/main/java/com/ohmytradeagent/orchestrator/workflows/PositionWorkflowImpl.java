@@ -82,6 +82,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // on the broker-side order state.
   private static final String KIND_PARTIAL_EXIT_FILL_TIMEOUT = "PartialExitFillTimeout";
 
+  // Issue #205 audit kind: a partial-exit signal arrived for a remainingQty<=1 runner where
+  // floor(remainingQty * fraction) == 0 (i.e. the integer broker quantum cannot honestly
+  // represent the requested partial). When StrategyConfig.min_partial_qty_behavior is SKIP
+  // (or null/absent → SKIP per the YAML-documented default), processOne emits this audit
+  // and places NO close order — the runner survives for trail/EOD/STC drain. Classified as
+  // a PARTIAL_EXIT_FILL_KINDS member in AuditEventKinds because it fulfills the partial-exit
+  // request by deciding-not-to-fill, the same pattern as ExitDuplicateSuppressed.
+  private static final String KIND_PARTIAL_EXIT_SKIPPED_MIN_QTY = "PartialExitSkippedMinQty";
+
   private static final String VERSION_CHANDELIER = "chandelier-v1";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
   private static final String VERSION_FORCE_CLOSE = "force-close-v1";
@@ -105,6 +114,20 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * terminate if no fill arrives within {@link #FIRST_FILL_TTL_SECS}.
    */
   private static final String VERSION_DEFER_POSITION_ENTERED = "position-entered-on-fill";
+
+  /**
+   * Issue #205 replay gate. v=DEFAULT_VERSION (in-flight workflows started before this patch) keep
+   * the legacy {@code qtyToClose = ceil(remainingQty * fraction)} path inside {@link
+   * #processOne(PartialExitRequest)} so their recorded histories replay without a Temporal
+   * non-determinism error — pre-#205 a remainingQty=1 + fraction=0.5 STC always closed the runner
+   * (ceil(0.5)=1), regardless of YAML config. v>=1 (new executions) consult {@code
+   * input.min_partial_qty_behavior}: SKIP (default when null/absent) emits {@link
+   * #KIND_PARTIAL_EXIT_SKIPPED_MIN_QTY} and places no order when the rounded-down qty would be
+   * zero; FULL_CLOSE sets {@code qtyToClose=remainingQty} and continues the normal partial-exit
+   * flow. Closes the dead-config gap from issue #205 — the YAML key was declared in {@code
+   * copytrade-v1.yaml} but no Java code read it.
+   */
+  private static final String VERSION_MIN_PARTIAL_QTY_SKIP = "min-partial-qty-skip";
 
   /**
    * Issue #203: bounded wait for the first onFill before the workflow gives up and emits
@@ -736,8 +759,44 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   }
 
   private void processOne(PartialExitRequest req) {
-    long qtyToClose =
-        Math.min(remainingQty, (long) Math.ceil(remainingQty * req.getFraction().doubleValue()));
+    double fraction = req.getFraction().doubleValue();
+    long qtyToClose;
+
+    // Issue #205: runner-quantum gate. When remainingQty <= 1 and floor(remainingQty * fraction)
+    // == 0, the integer broker quantum cannot honestly represent the requested partial. The
+    // configured behavior decides whether to skip (default) or flush the runner via a full close.
+    // v=DEFAULT_VERSION keeps the legacy ceil() path for replay safety; v>=1 honors the config.
+    int minQtyVersion =
+        Workflow.getVersion(VERSION_MIN_PARTIAL_QTY_SKIP, Workflow.DEFAULT_VERSION, 1);
+    boolean atRunnerQuantum =
+        minQtyVersion >= 1 && remainingQty <= 1 && (long) Math.floor(remainingQty * fraction) == 0;
+    if (atRunnerQuantum) {
+      // Null / absent treated as SKIP per the YAML-documented default in copytrade-v1.yaml.
+      PositionWorkflowInput.MinPartialQtyBehavior behavior = input.getMinPartialQtyBehavior();
+      boolean skip =
+          behavior == null || behavior == PositionWorkflowInput.MinPartialQtyBehavior.SKIP;
+      if (skip) {
+        auditLog(
+            KIND_PARTIAL_EXIT_SKIPPED_MIN_QTY,
+            subject(
+                "signal_id",
+                req.getSignalId(),
+                "remaining_qty",
+                remainingQty,
+                "fraction",
+                req.getFraction()));
+        // No order placed; clear the in-flight latch so pendingExits drains on the next iteration.
+        // (exitInFlight was never set to true on this code path — defensive reset for symmetry
+        // with the FULL_CLOSE / normal exit return paths.)
+        exitInFlight = false;
+        return;
+      }
+      // FULL_CLOSE: flush the runner on this partial signal.
+      qtyToClose = remainingQty;
+    } else {
+      qtyToClose = Math.min(remainingQty, (long) Math.ceil(remainingQty * fraction));
+    }
+
     auditLog(
         KIND_PARTIAL_EXIT_REQUESTED,
         subject(
