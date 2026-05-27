@@ -842,6 +842,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     int exitTimeoutVersion =
         Workflow.getVersion(VERSION_EXIT_FILL_TIMEOUT, Workflow.DEFAULT_VERSION, 1);
     boolean filledInTime;
+    long exitFillTtlSecs = 0L;
     if (exitTimeoutVersion == Workflow.DEFAULT_VERSION) {
       Workflow.await(
           () ->
@@ -854,7 +855,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     } else {
       // Issue #212: per-strategy TTL sourced from input under VERSION_TTL_FROM_INPUT v>=1; falls
       // back to EXIT_FILL_TTL_SECS_DEFAULT under v=DEFAULT_VERSION or null input field.
-      long exitFillTtlSecs = resolveExitFillTtlSecs();
+      exitFillTtlSecs = resolveExitFillTtlSecs();
       filledInTime =
           Workflow.await(
               Duration.ofSeconds(exitFillTtlSecs),
@@ -909,7 +910,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               "intent_key",
               intentKey,
               "remaining_qty",
-              remainingQty));
+              remainingQty,
+              "ttl_secs",
+              exitFillTtlSecs));
       try {
         exec.cancelOrder(intentKey);
       } catch (RuntimeException ignored) {

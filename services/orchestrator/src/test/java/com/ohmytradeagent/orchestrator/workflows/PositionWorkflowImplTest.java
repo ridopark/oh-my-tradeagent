@@ -1112,6 +1112,7 @@ class PositionWorkflowImplTest {
         .containsEntry("signal_id", "sig-stuck-212")
         .containsEntry("broker_order_id", "brk-exit");
     assertThat(asLong(timeout.getSubject().get("remaining_qty"))).isEqualTo(5L);
+    assertThat(asLong(timeout.getSubject().get("ttl_secs"))).isEqualTo(20L);
 
     // Cancel was attempted on the stuck order.
     verify(exec, atLeastOnce()).cancelOrder(anyString());

@@ -765,4 +765,58 @@ class CopytradeSignalWorkflowImplTest {
     c.setMaxContracts(5L);
     return c;
   }
+
+  // ---------- selectPendingTtlSecs unit tests ----------
+
+  @Test
+  void selectPendingTtlSecs_paperBrokerTarget_returnsPaperTtl() {
+    CopytradeSignalWorkflowImpl impl = Mockito.mock(CopytradeSignalWorkflowImpl.class);
+    Mockito.when(impl.selectPendingTtlSecs(Mockito.any())).thenCallRealMethod();
+
+    StrategyConfig cfg = new StrategyConfig();
+    cfg.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
+    cfg.setPendingTtlPaperSecs(90L);
+    cfg.setPendingTtlLiveSecs(30L);
+
+    assertThat(impl.selectPendingTtlSecs(cfg)).isEqualTo(90L);
+  }
+
+  @Test
+  void selectPendingTtlSecs_liveBrokerTarget_returnsLiveTtl() {
+    CopytradeSignalWorkflowImpl impl = Mockito.mock(CopytradeSignalWorkflowImpl.class);
+    Mockito.when(impl.selectPendingTtlSecs(Mockito.any())).thenCallRealMethod();
+
+    StrategyConfig cfg = new StrategyConfig();
+    cfg.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_LIVE);
+    cfg.setPendingTtlPaperSecs(90L);
+    cfg.setPendingTtlLiveSecs(30L);
+
+    assertThat(impl.selectPendingTtlSecs(cfg)).isEqualTo(30L);
+  }
+
+  @Test
+  void selectPendingTtlSecs_nullBrokerTarget_returnsPaperFallback() {
+    CopytradeSignalWorkflowImpl impl = Mockito.mock(CopytradeSignalWorkflowImpl.class);
+    Mockito.when(impl.selectPendingTtlSecs(Mockito.any())).thenCallRealMethod();
+
+    StrategyConfig cfg = new StrategyConfig();
+    cfg.setBrokerTarget(null);
+    cfg.setPendingTtlPaperSecs(90L);
+    cfg.setPendingTtlLiveSecs(30L);
+
+    assertThat(impl.selectPendingTtlSecs(cfg)).isEqualTo(90L);
+  }
+
+  @Test
+  void selectPendingTtlSecs_nullConfig_returns90LDefault() {
+    CopytradeSignalWorkflowImpl impl = Mockito.mock(CopytradeSignalWorkflowImpl.class);
+    Mockito.when(impl.selectPendingTtlSecs(Mockito.any())).thenCallRealMethod();
+
+    StrategyConfig cfg = new StrategyConfig();
+    cfg.setBrokerTarget(null);
+    cfg.setPendingTtlPaperSecs(null);
+    cfg.setPendingTtlLiveSecs(null);
+
+    assertThat(impl.selectPendingTtlSecs(cfg)).isEqualTo(90L);
+  }
 }
