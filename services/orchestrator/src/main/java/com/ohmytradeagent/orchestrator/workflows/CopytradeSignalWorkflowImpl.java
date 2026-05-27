@@ -89,6 +89,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // limit so notional-cap + BP gates see the max-acceptable cost.
   private static final String VERSION_CHECK_ENTRY_WITH_LIMIT = "check-entry-with-limit";
 
+  // Issue #203: gate the new child.onFill(fill) call that forwards the BTO fill to the child
+  // PositionWorkflow so its v=1 first-fill await wakes. In-flight CopytradeSignalWorkflow
+  // executions
+  // that already passed through startPositionWorkflow without this call must keep replaying without
+  // the extra signal command; new executions (v>=1) forward the fill so the child confirms entry.
+  private static final String VERSION_FORWARD_BTO_FILL = "forward-bto-fill-v1";
+
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
 
@@ -351,6 +358,15 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     Async.function(child::run, posInput);
     // Wait until the child is durably scheduled before returning.
     Workflow.getWorkflowExecution(child).get();
+
+    // Issue #203: forward the BTO fill into the child so its v=1 first-fill await gate wakes and
+    // PositionEntered fires with the real filled qty. Gated by a dedicated version so in-flight
+    // workflows that already executed startPositionWorkflow without this command preserve their
+    // recorded history on replay.
+    int forwardFill = Workflow.getVersion(VERSION_FORWARD_BTO_FILL, Workflow.DEFAULT_VERSION, 1);
+    if (forwardFill >= 1) {
+      child.onFill(fill);
+    }
 
     positionLookup.cachePositionMapping(tenant, strategyId, resolved.optionSymbol(), posWfId);
   }

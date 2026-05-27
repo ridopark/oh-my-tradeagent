@@ -70,9 +70,32 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String KIND_FORCE_CLOSE_REQUESTED = "ForceCloseRequested";
   private static final String KIND_FORCE_CLOSE_NOOP = "ForceCloseNoop";
 
+  // Issue #203 audit kind: BTO submission never reached FILLED within the bounded
+  // first-fill TTL. Reconciliation uses this signal to prune the stale SUBMITTED
+  // journal row instead of leaving an orphan that downstream STCs could target.
+  private static final String KIND_POSITION_NEVER_FILLED = "PositionNeverFilled";
+
   private static final String VERSION_CHANDELIER = "chandelier-v1";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
   private static final String VERSION_FORCE_CLOSE = "force-close-v1";
+
+  /**
+   * Issue #203 replay gate. v=DEFAULT_VERSION (in-flight workflows started before this patch)
+   * preserve the legacy "PositionEntered emitted at workflow start with qty=input.qty" behavior so
+   * their replays don't trip a Temporal non-determinism error. v>=1 (new executions) defer
+   * PositionEntered and remainingQty until the first onFill arrives, and emit PositionNeverFilled +
+   * terminate if no fill arrives within {@link #FIRST_FILL_TTL_SECS}.
+   */
+  private static final String VERSION_DEFER_POSITION_ENTERED = "position-entered-on-fill";
+
+  /**
+   * Issue #203: bounded wait for the first onFill before the workflow gives up and emits
+   * PositionNeverFilled. Matches {@code pending_ttl_paper_secs} in {@code copytrade-v1.yaml} (90s
+   * paper default). Hardcoded here because PositionWorkflowInput does not carry the
+   * StrategyConfig-derived TTL today; promote to a per-tenant field once a second consumer needs
+   * it.
+   */
+  private static final long FIRST_FILL_TTL_SECS = 90L;
 
   private static final BigDecimal MAX_GIVEBACK = new BigDecimal("0.5");
 
@@ -110,6 +133,30 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   private PositionWorkflowInput input;
   private long remainingQty;
+
+  /**
+   * Issue #203: original BTO size from input.qty. Recorded only for the PositionNeverFilled audit
+   * subject — never used for sizing under v=1, where remainingQty derives from the first onFill.
+   */
+  private long expectedQty;
+
+  /**
+   * Issue #203: latched true by {@link #onFill(FillSignalPayload)} on the first fill that arrives.
+   * Drives the v=1 first-fill await gate in {@link #run(PositionWorkflowInput)}. Distinct from
+   * {@code lastFillEvent} (which is cleared and re-used by every {@link #processOne} cycle).
+   */
+  private boolean firstFillReceived;
+
+  /**
+   * Issue #203: latched true by {@link #run(PositionWorkflowInput)} once remainingQty has been
+   * authoritatively assigned (v=0 from input.qty; v=1 from the first onFill). The {@link
+   * #partialExit(PartialExitRequest)} handler buffers signals into pendingExits while this is
+   * false, so an STC racing the entry-fill confirmation is processed only after the position is
+   * real. Independent of {@link #firstFillReceived} because the signal handler may run before
+   * run()'s main thread has woken from the first-fill await.
+   */
+  private boolean positionConfirmed;
+
   private final LinkedHashSet<String> processedSignalIds = new LinkedHashSet<>();
   private boolean exitInFlight;
   private final ArrayDeque<PartialExitRequest> pendingExits = new ArrayDeque<>();
@@ -165,7 +212,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   @Override
   public String run(PositionWorkflowInput in) {
     this.input = in;
-    this.remainingQty = in.getQty();
+    // Issue #203: input.qty is the *expected* quantity (sourced from the parent
+    // CopytradeSignalWorkflow's BTO fill in normal flow). Under v=1 we no longer treat it as
+    // proof-of-fill — remainingQty stays 0 until the first onFill arrives.
+    this.expectedQty = in.getQty();
 
     // Phase 2c.2: route exec Activities to broker-<broker_target>. Falls back to the
     // 2c.2 default broker when the input was minted by a pre-2c.2 CopytradeSignalWorkflow that
@@ -174,13 +224,24 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         in.getBrokerTarget() != null ? in.getBrokerTarget().value() : DEFAULT_BROKER_TARGET;
     this.exec = ExecActivitiesFactory.forTarget(brokerTarget);
 
-    auditLog(
-        KIND_POSITION_ENTERED,
-        subject(
-            "entry_signal_id", in.getEntrySignalId(),
-            "contract_symbol", in.getContractSymbol(),
-            "qty", in.getQty(),
-            "entry_premium", in.getEntryPremium()));
+    int deferVersion =
+        Workflow.getVersion(VERSION_DEFER_POSITION_ENTERED, Workflow.DEFAULT_VERSION, 1);
+    if (deferVersion == Workflow.DEFAULT_VERSION) {
+      // Legacy in-flight workflows: preserve the original ordering — assign remainingQty from
+      // input.qty and emit PositionEntered at workflow start so their recorded histories replay
+      // without a non-determinism error.
+      this.remainingQty = in.getQty();
+      this.positionConfirmed = true;
+      auditLog(
+          KIND_POSITION_ENTERED,
+          subject(
+              "entry_signal_id", in.getEntrySignalId(),
+              "contract_symbol", in.getContractSymbol(),
+              "qty", in.getQty(),
+              "entry_premium", in.getEntryPremium()));
+    }
+    // v>=1: PositionEntered + remainingQty assignment are deferred to the awaitFirstFill step
+    // below.
 
     // Issue #202: copytrade strategies set eod_force_flatten=false because the only
     // normal exit for an author-mirror position is an STC message from the Discord
@@ -212,6 +273,53 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             expiryFired = true;
             return null;
           });
+    }
+
+    // Issue #203: v>=1 awaits the first onFill before declaring PositionEntered. If no fill
+    // arrives within FIRST_FILL_TTL_SECS (or EOD/expiry pre-empt first), emit PositionNeverFilled
+    // and terminate so reconciliation can prune the stale SUBMITTED journal row.
+    if (deferVersion >= 1) {
+      boolean filled =
+          Workflow.await(
+              Duration.ofSeconds(FIRST_FILL_TTL_SECS),
+              () -> firstFillReceived || eodFired || expiryFired);
+      if (!filled || !firstFillReceived) {
+        auditLog(
+            KIND_POSITION_NEVER_FILLED,
+            subject(
+                "entry_signal_id",
+                in.getEntrySignalId(),
+                "contract_symbol",
+                in.getContractSymbol(),
+                "expected_qty",
+                expectedQty,
+                "ttl_secs",
+                FIRST_FILL_TTL_SECS));
+        return Workflow.getInfo().getWorkflowId();
+      }
+      // First fill confirms the position. remainingQty MUST come from the fill, not input.qty —
+      // partial fills are possible and the audit + downstream logic must reflect the real qty.
+      long firstFilledQty = lastFillEvent.getFilledQty();
+      BigDecimal firstFillPrice =
+          lastFillEvent.getAvgFillPrice() != null
+              ? lastFillEvent.getAvgFillPrice()
+              : in.getEntryPremium();
+      this.remainingQty = firstFilledQty;
+      this.positionConfirmed = true;
+      auditLog(
+          KIND_POSITION_ENTERED,
+          subject(
+              "entry_signal_id",
+              in.getEntrySignalId(),
+              "contract_symbol",
+              in.getContractSymbol(),
+              "qty",
+              firstFilledQty,
+              "entry_premium",
+              firstFillPrice));
+      // Clear lastFillEvent so the next processOne()'s await for the partial-exit fill doesn't
+      // immediately observe the stale entry fill.
+      this.lastFillEvent = null;
     }
 
     while (remainingQty > 0 && !eodFired && !expiryFired) {
@@ -288,16 +396,23 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   public void partialExit(PartialExitRequest req) {
     // Temporal can dispatch signals before the @WorkflowMethod body has executed (the constructor
     // ran, but `run(input)` hasn't reached `this.input = in` yet). In that race, `input` is null
-    // and
-    // every auditLog call below would NPE. Buffer the signal; the main loop drains pendingExits
-    // after init and applies the validation/audit logic uniformly via processOne.
+    // and every auditLog call below would NPE. Defer the legacy null-input case to the main loop;
+    // the rest of the validation runs in-handler so duplicate / fraction audits fire promptly even
+    // for signals that arrive before run()'s main thread has resumed.
     if (input == null) {
       pendingExits.add(req);
       return;
     }
-    // Phase 3 latent-bug fix: if the position is already drained, surface a clear audit instead of
-    // recording a "duplicate_signal_id" muddle.
-    if (remainingQty <= 0) {
+    // Issue #203: when v=1 has not yet confirmed the position (positionConfirmed=false), still run
+    // duplicate / fraction validation in-handler so the audit trail matches v=0 semantics. The
+    // position-confirmed gate only changes WHERE remainingQty is consulted: for the
+    // "position_already_drained" audit (which requires a real position to be drained from), defer
+    // that check to processOne via the main loop. If the v=1 first-fill TTL elapses without an
+    // entry fill, run() returns via PositionNeverFilled without entering the main loop, so
+    // buffered exits are dropped (no broker placeOrder, no credit against a phantom position).
+    // Drained-position check only applies once the position has been confirmed — otherwise we'd
+    // misclassify a pre-fill STC as a duplicate of a phantom position.
+    if (positionConfirmed && remainingQty <= 0) {
       auditLog(
           KIND_EXIT_DUPLICATE_SUPPRESSED,
           subject("signal_id", req.getSignalId(), "note", "position_already_drained"));
@@ -333,6 +448,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   @Override
   public void onFill(FillSignalPayload event) {
     this.lastFillEvent = event;
+    // Issue #203: latch on the first fill so run()'s v>=1 await wakes. Subsequent fills (exit fills
+    // dispatched into processOne) still update lastFillEvent but don't reset the latch — the
+    // latch's sole purpose is the entry-confirmation gate in run().
+    this.firstFillReceived = true;
   }
 
   @Override
@@ -413,7 +532,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       return result;
     }
 
-    if (remainingQty <= 0) {
+    // Issue #203: only treat remainingQty<=0 as "already closed" once the position has been
+    // confirmed. Under v=1 pre-first-fill, remainingQty stays 0 even though the operator's intent
+    // is to flatten a position that's about to be confirmed. Buffer the directive so the main
+    // loop applies it after the first-fill await unblocks. If the TTL elapses without an entry
+    // fill, run() returns via PositionNeverFilled and the buffered directive is dropped.
+    if (positionConfirmed && remainingQty <= 0) {
       auditLog(
           KIND_FORCE_CLOSE_NOOP,
           subject(
@@ -423,18 +547,19 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       result.setStatus(ForceCloseResult.Status.NOOP_ALREADY_CLOSED);
       return result;
     }
+    if (!positionConfirmed) {
+      pendingForceCloses.add(
+          new ForceCloseDirective(request.getOperatorId(), request.getReason(), exitSignalId));
+      result.setStatus(ForceCloseResult.Status.ACCEPTED);
+      return result;
+    }
 
-    auditLog(
-        KIND_FORCE_CLOSE_REQUESTED,
-        subject(
-            "operator_id",
-            request.getOperatorId(),
-            "reason",
-            request.getReason(),
-            "exit_signal_id",
-            exitSignalId,
-            "remaining_qty",
-            remainingQty));
+    // Issue #203: ForceCloseRequested audit is emitted from processForceClose so the v=1
+    // buffered path (pre-first-fill) and the v=0 / post-confirm normal path both audit exactly
+    // once, at the moment the directive is actually picked up by the main loop. Note that
+    // remaining_qty is therefore captured at processing time (not at request time), which is more
+    // useful for ops since the directive may sit briefly in pendingForceCloses while a queued exit
+    // drains.
     pendingForceCloses.add(
         new ForceCloseDirective(request.getOperatorId(), request.getReason(), exitSignalId));
     result.setStatus(ForceCloseResult.Status.ACCEPTED);
@@ -459,6 +584,22 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   /** Main-loop force-close processor. Cancel-then-flatten via the shared flatten helper. */
   private void processForceClose(ForceCloseDirective d) {
+    // Issue #203: when an Update arrives before the position was confirmed (v=1 pre-first-fill),
+    // the forceClose handler buffered the directive without emitting the ForceCloseRequested
+    // audit (remainingQty wasn't yet authoritative). Emit it here, once the main loop reaches the
+    // directive — at this point remainingQty is real and the audit's remaining_qty field is
+    // meaningful.
+    auditLog(
+        KIND_FORCE_CLOSE_REQUESTED,
+        subject(
+            "operator_id",
+            d.operatorId(),
+            "reason",
+            d.reason(),
+            "exit_signal_id",
+            d.exitSignalId(),
+            "remaining_qty",
+            remainingQty));
     closeReason = "force_close";
     flattenRemaining("force_close");
   }

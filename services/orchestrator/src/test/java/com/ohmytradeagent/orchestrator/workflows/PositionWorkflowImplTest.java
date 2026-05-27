@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -120,6 +121,16 @@ class PositionWorkflowImplTest {
         .withFilledAt(OffsetDateTime.now());
   }
 
+  /**
+   * Issue #203: sends the entry-fill signal that confirms the v=1 BTO. Without this, the workflow's
+   * first-fill await times out into the PositionNeverFilled branch and never reaches the partial-
+   * exit pipeline. The production-side fix buffers any partialExit signal arriving before the first
+   * onFill, so test ordering is robust: the test can send onFill before or after partialExit.
+   */
+  private static void confirmEntry(PositionWorkflow stub, long qty) {
+    stub.onFill(fill("brk-entry", qty, new BigDecimal("2.30")));
+  }
+
   private PremiumTick tick(BigDecimal premium) {
     PremiumTick t = new PremiumTick();
     t.setSchemaVersion(1L);
@@ -141,6 +152,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-happy");
     WorkflowExecution exec1 = WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
 
     // Signal half-out
     stub.partialExit(partialExitRequest("sig-1", "pos-happy", 0.5));
@@ -172,6 +184,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-dup");
     WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
 
     stub.partialExit(partialExitRequest("sig-dup", "pos-dup", 1.0));
     waitForPlaceOrderCount(1);
@@ -192,6 +205,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-queue");
     WorkflowStub.fromTyped(stub).start(input(4));
+    confirmEntry(stub, 4L);
 
     // Signal both before any fill arrives
     stub.partialExit(partialExitRequest("sig-A", "pos-queue", 0.5));
@@ -217,6 +231,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-eod");
     WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
 
     // Let virtual time advance past EOD
     env.sleep(Duration.ofMinutes(1));
@@ -239,6 +254,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-expiry");
     WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
 
     env.sleep(Duration.ofMinutes(1));
 
@@ -257,6 +273,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-eod-inflight");
     WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
 
     // Queue an STC but never deliver the fill — exit is in-flight when EOD fires.
     stub.partialExit(partialExitRequest("sig-inflight", "pos-eod-inflight", 0.5));
@@ -279,6 +296,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-arm-valid");
     WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
 
     stub.armChandelier(
         armPayload("pos-arm-valid", "src-sig-1", new BigDecimal("2.85"), new BigDecimal("0.15")));
@@ -302,6 +320,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-arm-bad-peak");
     WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
 
     stub.armChandelier(armPayload("pos-arm-bad-peak", "src-sig-bp", null, new BigDecimal("0.15")));
 
@@ -319,6 +338,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-arm-bad-gb");
     WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
 
     stub.armChandelier(
         armPayload("pos-arm-bad-gb", "src-sig-bg", new BigDecimal("2.85"), new BigDecimal("0.60")));
@@ -339,6 +359,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-arm-subfail");
     WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
 
     stub.armChandelier(
         armPayload(
@@ -366,6 +387,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-arm-second");
     WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
 
     stub.armChandelier(
         armPayload("pos-arm-second", "src-sig-A", new BigDecimal("2.85"), new BigDecimal("0.15")));
@@ -386,6 +408,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-tick-before-arm");
     WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
 
     stub.chandelierTick(tick(new BigDecimal("1.00")));
 
@@ -402,6 +425,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-tick-near-no-fire");
     WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
 
     // peak=3.00, gb=0.15 -> threshold = 3.00 * 0.85 = 2.55
     stub.armChandelier(
@@ -423,6 +447,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-tick-exact-threshold");
     WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
 
     // peak=3.00, gb=0.10 -> threshold = 2.70
     stub.armChandelier(
@@ -448,6 +473,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-tick-rising");
     WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
 
     stub.armChandelier(
         armPayload("pos-tick-rising", "src-sig-1", new BigDecimal("3.00"), new BigDecimal("0.15")));
@@ -471,6 +497,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-unarmed-stc");
     WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
 
     stub.armChandelier(
         armPayload("pos-unarmed-stc", "src-sig-1", new BigDecimal("2.85"), new BigDecimal("0.15")));
@@ -493,6 +520,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-force-healthy");
     WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
 
     ForceCloseResult result = stub.forceClose(forceCloseRequest("ops-1", "manual intervention"));
     assertThat(result.getStatus()).isEqualTo(ForceCloseResult.Status.ACCEPTED);
@@ -516,6 +544,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-force-blank-op");
     WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
 
     assertThatThrownBy(() -> stub.forceClose(forceCloseRequest("", "reason ok")))
         .isInstanceOf(WorkflowUpdateException.class)
@@ -534,6 +563,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-force-blank-reason");
     WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
 
     assertThatThrownBy(() -> stub.forceClose(forceCloseRequest("ops-2", "")))
         .isInstanceOf(WorkflowUpdateException.class)
@@ -551,6 +581,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-risk-breach");
     WorkflowStub.fromTyped(stub).start(input(4));
+    confirmEntry(stub, 4L);
 
     stub.riskBreach(riskBreachPayload("auto:daily_loss", "auto:daily_loss"));
 
@@ -571,6 +602,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-risk-breach-inflight");
     WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
 
     // Queue an STC that won't be filled — exit is in flight when risk_breach arrives.
     stub.partialExit(partialExitRequest("sig-inflight", "pos-risk-breach-inflight", 0.5));
@@ -594,6 +626,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(3);
     in.setBrokerTarget(PositionWorkflowInput.BrokerTarget.ALPACA_PAPER);
     WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 3L);
 
     // Drain via a partial close so the workflow actually dispatches exec.placeOrder. The
     // exec mock is registered on the broker-alpaca-paper worker; a successful call confirms
@@ -615,6 +648,7 @@ class PositionWorkflowImplTest {
     // input() helper does not set broker_target — exercises the pre-2c.2 replay path that
     // falls back to DEFAULT_BROKER_TARGET = "alpaca-paper".
     WorkflowStub.fromTyped(stub).start(input(2));
+    confirmEntry(stub, 2L);
 
     stub.partialExit(partialExitRequest("sig-bt-default", "pos-bt-default", 1.0));
     waitForPlaceOrderCount(1);
@@ -644,6 +678,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(5);
     in.setEodForceFlatten(Boolean.FALSE);
     WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
 
     // Advance virtual time well past the would-be EOD trigger to prove the timer is not armed.
     env.sleep(Duration.ofMinutes(1));
@@ -679,6 +714,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(3);
     // eod_force_flatten left null — the default-true contract.
     WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 3L);
 
     env.sleep(Duration.ofMinutes(1));
 
@@ -686,6 +722,114 @@ class PositionWorkflowImplTest {
 
     captureKind("EodForceFlattenRequested");
     captureKind("EodForceFlattened");
+  }
+
+  // ---------- Issue #203: phantom position — defer PositionEntered until first onFill ----------
+
+  /**
+   * Issue #203 Done-when 2: a BTO that never reaches FILLED must emit {@code PositionNeverFilled}
+   * and terminate cleanly within the bounded TTL, with NO {@code PositionEntered} audit. Drives
+   * reconciliation's ability to prune the stale SUBMITTED journal row.
+   */
+  @Test
+  void btoNeverFilled_emitsPositionNeverFilledAndTerminatesWithoutPositionEntered()
+      throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-never-filled");
+    WorkflowStub.fromTyped(stub).start(input(5));
+
+    // Advance virtual time past the 90s first-fill TTL without sending any onFill. The workflow
+    // must time out into the PositionNeverFilled path.
+    env.sleep(Duration.ofSeconds(120));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-never-filled");
+
+    AuditEvent neverFilled = captureKind("PositionNeverFilled");
+    assertThat(neverFilled.getSubject())
+        .containsEntry("entry_signal_id", "entry-1")
+        .containsEntry("contract_symbol", "NVDA  260516C00140000");
+    assertThat(asLong(neverFilled.getSubject().get("expected_qty"))).isEqualTo(5L);
+    assertThat(asLong(neverFilled.getSubject().get("ttl_secs"))).isEqualTo(90L);
+
+    // Critical: no PositionEntered audit. The position never existed.
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(captor.capture());
+    List<String> kinds = captor.getAllValues().stream().map(AuditEvent::getKind).toList();
+    assertThat(kinds).doesNotContain("PositionEntered", "PositionClosed");
+
+    // No order was placed — the workflow exited before the partial-exit pipeline could run.
+    verify(exec, never()).placeOrder(any());
+  }
+
+  /**
+   * Issue #203 Done-when 4: an STC arriving before the first onFill must not credit against a
+   * non-existent position. The partial exit is buffered into pendingExits but is silently dropped
+   * when the workflow terminates via the PositionNeverFilled timeout — no PartialExitFilled fires.
+   */
+  @Test
+  void partialExitBeforeFirstFill_doesNotCreditAgainstPhantomPosition() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-stc-before-fill");
+    WorkflowStub.fromTyped(stub).start(input(5));
+
+    // STC arrives before any onFill — the workflow is still awaiting the first-fill confirmation.
+    // The signal handler buffers it into pendingExits, but the main loop never reaches the
+    // partial-exit drain because run() returns from the PositionNeverFilled branch first.
+    stub.partialExit(partialExitRequest("sig-stc-phantom", "pos-stc-before-fill", 0.5));
+
+    // Advance past TTL without sending onFill.
+    env.sleep(Duration.ofSeconds(120));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // PositionNeverFilled fired; PartialExitFilled / PartialExitRequested did NOT.
+    captureKind("PositionNeverFilled");
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(captor.capture());
+    List<String> kinds = captor.getAllValues().stream().map(AuditEvent::getKind).toList();
+    assertThat(kinds)
+        .doesNotContain("PartialExitFilled", "PartialExitRequested", "PositionEntered");
+
+    // exec.placeOrder was never called — no broker exit could target a phantom.
+    verify(exec, never()).placeOrder(any());
+  }
+
+  /**
+   * Issue #203 Done-when 1: PositionEntered fires AFTER the first onFill, with {@code qty} equal to
+   * the broker-reported {@code filled_qty} — even when the fill is partial (filled_qty &lt;
+   * input.qty).
+   */
+  @Test
+  void positionEntered_firesAfterFirstFill_withFilledQtyNotInputQty() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-partial-fill");
+    // Input requests 5 contracts, but the BTO only partial-fills 3 — PositionEntered must reflect
+    // the 3 actually held, not the 5 requested.
+    WorkflowStub.fromTyped(stub).start(input(5));
+    stub.onFill(fill("brk-entry", 3L, new BigDecimal("2.40")));
+
+    // Drain via a full close so the workflow terminates cleanly.
+    stub.partialExit(partialExitRequest("sig-close", "pos-partial-fill", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-exit", 3L, new BigDecimal("3.10")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent entered = captureKind("PositionEntered");
+    assertThat(asLong(entered.getSubject().get("qty"))).isEqualTo(3L);
+    assertThat(entered.getSubject()).containsEntry("entry_signal_id", "entry-1");
+
+    // The exit drain saw the partial-fill qty (3), not the requested input.qty (5).
+    AuditEvent closed = captureKind("PositionClosed");
+    assertThat(asLong(closed.getSubject().get("remaining_qty"))).isEqualTo(0L);
+
+    List<AuditEvent> partialFills = captureAll("PartialExitFilled");
+    assertThat(partialFills).hasSize(1);
+    assertThat(asLong(partialFills.get(0).getSubject().get("qty_filled"))).isEqualTo(3L);
   }
 
   @Test
