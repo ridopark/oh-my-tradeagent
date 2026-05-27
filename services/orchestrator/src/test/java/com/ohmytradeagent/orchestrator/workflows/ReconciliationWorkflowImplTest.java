@@ -2,10 +2,12 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -18,6 +20,7 @@ import com.ohmytradeagent.contract.ReconciliationSummary;
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import io.temporal.client.WorkflowFailedException;
@@ -44,6 +47,7 @@ class ReconciliationWorkflowImplTest {
 
   private TestWorkflowEnvironment env;
   private AuditActivities audit;
+  private AuditQueryActivities auditQuery;
   private ReconciliationExecActivity exec;
   private ReconciliationMetricsActivities metrics;
   private PositionLookupActivities positionLookup;
@@ -54,10 +58,19 @@ class ReconciliationWorkflowImplTest {
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(ReconciliationWorkflowImpl.class);
     audit = Mockito.mock(AuditActivities.class);
+    auditQuery = Mockito.mock(AuditQueryActivities.class);
     exec = Mockito.mock(ReconciliationExecActivity.class);
     metrics = Mockito.mock(ReconciliationMetricsActivities.class);
     positionLookup = Mockito.mock(PositionLookupActivities.class);
-    coreWorker.registerActivitiesImplementations(audit, metrics, positionLookup);
+    // Issue #206: default to "no prior detection" so existing tests (which don't care about
+    // debounce) keep emitting per-cycle PositionOrphan / JournalOrphan audits as before. The
+    // primitive long return defaults to 0 already, but make it explicit for readability.
+    when(auditQuery.countPriorPositionOrphans(
+            anyString(), anyString(), anyString(), anyString(), any()))
+        .thenReturn(0L);
+    when(auditQuery.countPriorJournalOrphans(anyString(), anyString(), anyString(), any()))
+        .thenReturn(0L);
+    coreWorker.registerActivitiesImplementations(audit, auditQuery, metrics, positionLookup);
     Worker brokerWorker = env.newWorker(EXEC_QUEUE);
     brokerWorker.registerActivitiesImplementations(exec);
     env.start();
@@ -308,6 +321,98 @@ class ReconciliationWorkflowImplTest {
         .containsEntry("journal_status", "missing")
         .containsEntry("expected_workflow_id", null);
     assertThat(((Number) orphan.getSubject().get("qty")).longValue()).isEqualTo(5L);
+  }
+
+  @Test
+  void positionOrphan_priorDetectionWithinWindow_isDebounced() {
+    // Issue #206: the same broker position has already been detected as a PositionOrphan within
+    // the 1h debounce window. The workflow must suppress the per-cycle PositionOrphan audit
+    // entirely (no PositionOrphan AND no PositionOrphanOngoing yet — escalation only fires at the
+    // 3rd detection). Summary still counts the orphan since the broker state is unchanged.
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    // 1 prior detection in the window → priorCount=1, this tick is the 2nd. Below the threshold
+    // (escalation fires at the 3rd), so the audit is fully suppressed.
+    when(auditQuery.countPriorPositionOrphans(
+            eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
+        .thenReturn(1L);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    // No PositionOrphan audit emitted.
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+    // No PositionOrphanOngoing escalation yet (only 2nd detection, threshold is 3).
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphanOngoing".equals(e.getKind())));
+  }
+
+  @Test
+  void positionOrphan_thirdDetectionWithinWindow_emitsOngoingEscalation() {
+    // Issue #206: at the 3rd consecutive detection within the debounce window (priorCount=2,
+    // current=3), the workflow must emit a one-time PositionOrphanOngoing escalation carrying
+    // detection_count=3, first_seen_at, last_seen_at — instead of yet another PositionOrphan.
+    OffsetDateTime firstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(45);
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(auditQuery.countPriorPositionOrphans(
+            eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
+        .thenReturn(2L);
+    when(auditQuery.firstSeenPositionOrphan(
+            eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
+        .thenReturn(firstSeen);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    // PositionOrphan is NOT emitted at the escalation tick (the Ongoing event replaces it).
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+
+    AuditEvent ongoing = captureKind("PositionOrphanOngoing");
+    assertThat(ongoing.getSubject())
+        .containsEntry("option_symbol", "SPY   260519C00737000")
+        .containsEntry("journal_status", "missing")
+        .containsEntry("first_seen_at", firstSeen.toString());
+    assertThat(((Number) ongoing.getSubject().get("detection_count")).longValue()).isEqualTo(3L);
+    assertThat((String) ongoing.getSubject().get("last_seen_at")).isNotBlank();
+  }
+
+  @Test
+  void journalOrphan_thirdDetectionWithinWindow_emitsOngoingEscalation() {
+    // Issue #206: same escalation semantics for JournalOrphan. Debounce key is intent_key. At
+    // priorCount=2, the workflow emits a JournalOrphanOngoing audit and suppresses the per-cycle
+    // JournalOrphan.
+    OffsetDateTime firstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(30);
+    OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
+    when(exec.journalDumpOpen(anyString(), anyString()))
+        .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(auditQuery.countPriorJournalOrphans(
+            eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
+        .thenReturn(2L);
+    when(auditQuery.firstSeenJournalOrphan(
+            eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
+        .thenReturn(firstSeen);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getJournalOrphans()).isEqualTo(1L);
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "JournalOrphan".equals(e.getKind())));
+
+    AuditEvent ongoing = captureKind("JournalOrphanOngoing");
+    assertThat(ongoing.getSubject())
+        .containsEntry("intent_key", "intent-orphan")
+        .containsEntry("first_seen_at", firstSeen.toString());
+    assertThat(((Number) ongoing.getSubject().get("detection_count")).longValue()).isEqualTo(3L);
   }
 
   // ---------- helpers ----------

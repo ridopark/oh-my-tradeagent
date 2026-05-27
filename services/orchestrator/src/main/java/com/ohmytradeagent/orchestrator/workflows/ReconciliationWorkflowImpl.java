@@ -9,6 +9,7 @@ import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import io.temporal.activity.ActivityOptions;
@@ -34,6 +35,21 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   /** Journal entries older than this with no broker match are treated as orphans. */
   static final Duration JOURNAL_ORPHAN_STALE = Duration.ofMinutes(5);
 
+  /**
+   * Issue #206: debounce window for repeat orphan detection. If the same orphan key was already
+   * audited within this window, suppress the per-cycle duplicate. Replay-safe because
+   * reconciliation workflows are cron-fresh (per-tick) — state is derived from {@code audit_log}
+   * via {@link AuditQueryActivities}, not from in-workflow variables.
+   */
+  static final Duration ORPHAN_DEBOUNCE_WINDOW = Duration.ofHours(1);
+
+  /**
+   * Issue #206: emit a {@code *OrphanOngoing} escalation audit when prior-detection count within
+   * the debounce window reaches this threshold. "Prior count" excludes the current detection — so 2
+   * prior detections + this one == 3 total observations of the same orphan within 1h.
+   */
+  static final long ORPHAN_ESCALATION_THRESHOLD = 2L;
+
   // Audit kinds
   private static final String KIND_RECON_STARTED = "ReconciliationStarted";
   private static final String KIND_RECON_COMPLETED = "ReconciliationCompleted";
@@ -41,6 +57,9 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   private static final String KIND_BROKER_ORPHAN = "BrokerOrphan";
   // Issue #165 Phase 3: broker holds a position with no running PositionWorkflow.
   private static final String KIND_POSITION_ORPHAN = "PositionOrphan";
+  // Issue #206: escalation kinds emitted when an orphan persists past the threshold.
+  private static final String KIND_POSITION_ORPHAN_ONGOING = "PositionOrphanOngoing";
+  private static final String KIND_JOURNAL_ORPHAN_ONGOING = "JournalOrphanOngoing";
   private static final String KIND_METRICS_RECORD_FAILED = "ReconciliationMetricsRecordFailed";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
@@ -60,6 +79,11 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
 
   private final AuditActivities audit =
       Workflow.newActivityStub(AuditActivities.class, DEFAULT_OPTIONS);
+
+  // Issue #206: read-side audit lookups for orphan debounce + escalation. Cron-fresh workflows
+  // cannot carry state across ticks; we derive prior detections from audit_log queries.
+  private final AuditQueryActivities auditQuery =
+      Workflow.newActivityStub(AuditQueryActivities.class, DEFAULT_OPTIONS);
 
   private final ReconciliationMetricsActivities metrics =
       Workflow.newActivityStub(ReconciliationMetricsActivities.class, METRICS_OPTIONS);
@@ -108,6 +132,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     }
 
     OffsetDateTime now = workflowNow();
+    OffsetDateTime debounceSince = now.minus(ORPHAN_DEBOUNCE_WINDOW);
     long journalOrphans = 0;
     for (JournalEntry e : journal) {
       if (brokerClientIds.contains(e.getIntentKey())) {
@@ -117,17 +142,47 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       long staleSecs =
           recorded == null ? Long.MAX_VALUE : Duration.between(recorded, now).getSeconds();
       if (staleSecs > JOURNAL_ORPHAN_STALE.getSeconds()) {
-        auditLog(
-            KIND_JOURNAL_ORPHAN,
-            subject(
-                "intent_key",
-                e.getIntentKey(),
-                "state",
-                e.getState() == null ? null : e.getState().value(),
-                "stale_secs",
-                staleSecs,
-                "option_symbol",
-                e.getOptionSymbol()));
+        // Issue #206: debounce — count prior detections of THIS intent_key within the window.
+        long priorCount =
+            auditQuery.countPriorJournalOrphans(
+                in.getTenantId(), in.getStrategyId(), e.getIntentKey(), debounceSince);
+        if (priorCount == 0L) {
+          // First sighting in the window — emit the standard per-cycle JournalOrphan.
+          auditLog(
+              KIND_JOURNAL_ORPHAN,
+              subject(
+                  "intent_key",
+                  e.getIntentKey(),
+                  "state",
+                  e.getState() == null ? null : e.getState().value(),
+                  "stale_secs",
+                  staleSecs,
+                  "option_symbol",
+                  e.getOptionSymbol()));
+        } else if (priorCount + 1L == ORPHAN_ESCALATION_THRESHOLD + 1L) {
+          // Threshold tripped on the current detection (prior=2, this=3) — emit the one-time
+          // PositionOrphanOngoing observability signal. Subsequent ticks within the window keep
+          // the audit_log quiet until either the window expires or the orphan resolves.
+          OffsetDateTime firstSeen =
+              auditQuery.firstSeenJournalOrphan(
+                  in.getTenantId(), in.getStrategyId(), e.getIntentKey(), debounceSince);
+          auditLog(
+              KIND_JOURNAL_ORPHAN_ONGOING,
+              subject(
+                  "intent_key",
+                  e.getIntentKey(),
+                  "state",
+                  e.getState() == null ? null : e.getState().value(),
+                  "option_symbol",
+                  e.getOptionSymbol(),
+                  "first_seen_at",
+                  firstSeen == null ? null : firstSeen.toString(),
+                  "last_seen_at",
+                  now.toString(),
+                  "detection_count",
+                  priorCount + 1L));
+        }
+        // Else: prior count is non-zero but not at the escalation tick — suppress entirely.
         journalOrphans++;
       }
     }
@@ -168,17 +223,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       if (filled.isEmpty()) {
         // No FILLED journal row for this OCC — stronger orphan signal. We can't rebuild the
         // expected PositionWorkflow id because there is no entry_signal_id to anchor it on.
-        auditLog(
-            KIND_POSITION_ORPHAN,
-            subject(
-                "option_symbol",
-                p.getOptionSymbol(),
-                "qty",
-                p.getQty(),
-                "expected_workflow_id",
-                null,
-                "journal_status",
-                "missing"));
+        emitPositionOrphanWithDebounce(
+            in, p, /* expectedWfId= */ null, /* signalId= */ null, "missing", now, debounceSince);
         positionOrphans++;
         continue;
       }
@@ -190,14 +236,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
               p.getOptionSymbol(),
               recentFilled.getSignalId());
       if (!positionLookup.isPositionWorkflowRunning(expectedWfId)) {
-        auditLog(
-            KIND_POSITION_ORPHAN,
-            subject(
-                "option_symbol", p.getOptionSymbol(),
-                "qty", p.getQty(),
-                "expected_workflow_id", expectedWfId,
-                "journal_entry_signal_id", recentFilled.getSignalId(),
-                "journal_status", "filled"));
+        emitPositionOrphanWithDebounce(
+            in, p, expectedWfId, recentFilled.getSignalId(), "filled", now, debounceSince);
         positionOrphans++;
       }
     }
@@ -247,6 +287,74 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
               "error_message", e.getMessage()));
     }
     return summary;
+  }
+
+  /**
+   * Issue #206: emit a PositionOrphan with 1h debounce. Suppresses re-emission within the window
+   * and emits a one-time {@code PositionOrphanOngoing} escalation when prior+1 reaches the
+   * threshold. Debounce key is {@code option_symbol + journal_status} (so a "missing" → "filled"
+   * flip emits a fresh first-detection rather than being silently debounced).
+   */
+  private void emitPositionOrphanWithDebounce(
+      ReconciliationWorkflowInput in,
+      BrokerPosition p,
+      String expectedWfId,
+      String signalId,
+      String journalStatus,
+      OffsetDateTime now,
+      OffsetDateTime debounceSince) {
+    long priorCount =
+        auditQuery.countPriorPositionOrphans(
+            in.getTenantId(),
+            in.getStrategyId(),
+            p.getOptionSymbol(),
+            journalStatus,
+            debounceSince);
+    if (priorCount == 0L) {
+      Map<String, Object> subj =
+          subject(
+              "option_symbol",
+              p.getOptionSymbol(),
+              "qty",
+              p.getQty(),
+              "expected_workflow_id",
+              expectedWfId,
+              "journal_status",
+              journalStatus);
+      if (signalId != null) {
+        subj.put("journal_entry_signal_id", signalId);
+      }
+      auditLog(KIND_POSITION_ORPHAN, subj);
+    } else if (priorCount + 1L == ORPHAN_ESCALATION_THRESHOLD + 1L) {
+      OffsetDateTime firstSeen =
+          auditQuery.firstSeenPositionOrphan(
+              in.getTenantId(),
+              in.getStrategyId(),
+              p.getOptionSymbol(),
+              journalStatus,
+              debounceSince);
+      Map<String, Object> subj =
+          subject(
+              "option_symbol",
+              p.getOptionSymbol(),
+              "qty",
+              p.getQty(),
+              "expected_workflow_id",
+              expectedWfId,
+              "journal_status",
+              journalStatus,
+              "first_seen_at",
+              firstSeen == null ? null : firstSeen.toString(),
+              "last_seen_at",
+              now.toString(),
+              "detection_count",
+              priorCount + 1L);
+      if (signalId != null) {
+        subj.put("journal_entry_signal_id", signalId);
+      }
+      auditLog(KIND_POSITION_ORPHAN_ONGOING, subj);
+    }
+    // Else: suppressed (priorCount in [1, threshold-1] or > threshold).
   }
 
   private void auditLog(String kind, Map<String, Object> subject) {

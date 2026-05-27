@@ -180,6 +180,13 @@ public final class AuditEventKinds {
           "JournalOrphan",
           "BrokerOrphan",
           "PositionOrphan",
+          // Issue #206: detection-idempotency escalation kinds. Emitted by
+          // ReconciliationWorkflowImpl when the same orphan key has been detected ≥3 times
+          // within the debounce window. NOT lifecycle events — pure observability signals
+          // (dashboard-alert on these instead of the per-cycle PositionOrphan/JournalOrphan
+          // noise). Intentionally placed in ALL_KINDS only, not in any *_KINDS group.
+          "PositionOrphanOngoing",
+          "JournalOrphanOngoing",
           "ReconciliationMetricsRecordFailed",
           // LivePromotionActivitiesImpl
           "LivePromotionApproved",
