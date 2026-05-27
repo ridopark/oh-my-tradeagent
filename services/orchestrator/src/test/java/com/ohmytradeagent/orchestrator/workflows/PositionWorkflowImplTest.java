@@ -1427,12 +1427,12 @@ class PositionWorkflowImplTest {
     List<String> cancelledKeys = cancelKeyCaptor.getAllValues();
     // Original timeout cancel hits the :exit:<sig> key (no :retry suffix).
     assertThat(cancelledKeys)
-        .anyMatch(k -> k.endsWith(":exit:sig-eod-retry"))
-        .as("processOne's original-timeout cancel must hit the original intent_key");
+        .as("processOne's original-timeout cancel must hit the original intent_key")
+        .anyMatch(k -> k.endsWith(":exit:sig-eod-retry"));
     // EOD-during-retry cancel from flattenRemaining hits the :retry-suffixed key.
     assertThat(cancelledKeys)
-        .anyMatch(k -> k.endsWith(":exit:sig-eod-retry:retry"))
-        .as("flattenRemaining must cancel the live retry intent_key, not the original");
+        .as("flattenRemaining must cancel the live retry intent_key, not the original")
+        .anyMatch(k -> k.endsWith(":exit:sig-eod-retry:retry"));
   }
 
   // ---------- helpers ----------
