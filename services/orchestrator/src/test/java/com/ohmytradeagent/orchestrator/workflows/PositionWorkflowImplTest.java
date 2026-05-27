@@ -1306,6 +1306,135 @@ class PositionWorkflowImplTest {
         .isEqualTo(2.70);
   }
 
+  /**
+   * Issue #216 PR #226 review follow-up: v=0 back-compat envelope for the new {@code
+   * VERSION_EXIT_RETRY_ON_TIMEOUT} gate. Under {@code DEFAULT_VERSION} (an in-flight workflow that
+   * started before #216 shipped), the timeout branch must drop the STC on the first timeout — one
+   * {@code PartialExitFillTimeout} audit, no {@code PartialExitRetryRequested}, no retry {@code
+   * placeOrder} call — exactly matching PR #214's single-cycle semantics.
+   *
+   * <p><b>Test scope note:</b> {@link io.temporal.testing.TestWorkflowEnvironment} starts every
+   * workflow with a fresh history, so {@code Workflow.getVersion(VERSION_EXIT_RETRY_ON_TIMEOUT,
+   * DEFAULT_VERSION, 1)} resolves to {@code 1} (the max version registered) — there is no clean
+   * knob to force {@code DEFAULT_VERSION} without {@code WorkflowReplayer} replaying a real
+   * pre-#216 history file. The v=0 protection is therefore enforced by Temporal SDK's history-based
+   * version resolution itself, which is covered by SDK-level tests. This test asserts the v=1
+   * envelope that the gate produces under TestWorkflowEnvironment (single timeout + single
+   * retry-requested for one stuck STC), and the javadoc documents the v=0 gap so reviewers see why
+   * a direct v=0 assertion is absent.
+   */
+  @Test
+  void processOne_exitFillTimeout_retryGateUnderVersionResolutionDocsAndAsserts() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-retry-gate-doc");
+    PositionWorkflowInput in = input(4);
+    // Keep TTLs short so the test runs quickly under virtual time.
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 4L);
+
+    // First STC: never deliver the fill.
+    stub.partialExit(partialExitRequest("sig-doc", "pos-retry-gate-doc", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // First timeout — under v=1 (TestWorkflowEnvironment default) the retry fires.
+    env.sleep(Duration.ofSeconds(5));
+    waitForPlaceOrderCount(2);
+
+    // Second timeout (retry also stuck) — STC dropped under the cap=1 retry budget.
+    env.sleep(Duration.ofSeconds(5));
+
+    // Drain the runner so the workflow terminates cleanly.
+    stub.partialExit(partialExitRequest("sig-doc-drain", "pos-retry-gate-doc", 1.0));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-doc-drain", 4L, new BigDecimal("2.95")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // v=1 envelope: original + retry = two PartialExitFillTimeout audits, both for sig-doc.
+    // Under v=0 this would be exactly one timeout audit and zero retry audits (the gate-off
+    // semantics from PR #214) — that path is enforced by Temporal's getVersion replay logic
+    // and is not directly testable in TestWorkflowEnvironment without WorkflowReplayer.
+    List<AuditEvent> timeouts = captureAll("PartialExitFillTimeout");
+    assertThat(timeouts).hasSize(2);
+    assertThat(timeouts.stream().map(e -> e.getSubject().get("signal_id")))
+        .containsExactly("sig-doc", "sig-doc");
+
+    // Exactly one PartialExitRetryRequested audit under v=1 (cap=1). Under v=0 this list would
+    // be empty — documented above; enforced by Temporal SDK version resolution.
+    List<AuditEvent> retries = captureAll("PartialExitRetryRequested");
+    assertThat(retries).hasSize(1);
+    assertThat(retries.get(0).getSubject()).containsEntry("signal_id", "sig-doc");
+  }
+
+  /**
+   * Issue #216 PR #226 /simplify follow-up: when an EOD timer fires while a retry order is in
+   * flight, {@code flattenRemaining()} must cancel the retry order's intent_key — not the original
+   * (already-cancelled) {@code :exit:<sig>} key. The {@code currentInFlightIntentKey} state field
+   * tracks the live intent_key so the EOD-preemption cancel hits the right broker order. Without
+   * this fix, flattenRemaining would reconstruct the original key from {@code
+   * currentInFlightSignalId} and double-cancel an already-cancelled order while leaving the live
+   * retry order open.
+   */
+  @Test
+  void processOne_retryActive_eodTimerFires_cancelHitsRetryKey() throws Exception {
+    // EOD horizon: long enough that the original STC times out and the retry order is placed
+    // first, but short enough that EOD fires during the retry's exit-fill await (before the
+    // retry's own TTL expires).
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofSeconds(150));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-eod-during-retry");
+    WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
+
+    // First STC: never deliver the fill — original will time out at the default 90s TTL.
+    stub.partialExit(partialExitRequest("sig-eod-retry", "pos-eod-during-retry", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Advance past the original's 90s TTL — original times out, retry is dispatched.
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+
+    // Advance past the EOD horizon (set at t=150s) while the retry is still awaiting its fill.
+    // The retry's own TTL would fire at t=120+90=210s, but EOD at t=150s fires first. The retry
+    // await's predicate wakes on eodFired=true; processOne returns with currentInFlightIntentKey
+    // still set to the ":retry"-suffixed key, and run() invokes flattenRemaining("eod") which
+    // cancels that key.
+    env.sleep(Duration.ofSeconds(60));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // The original timeout fired and audited; the retry did NOT time out (EOD preempted).
+    List<AuditEvent> timeouts = captureAll("PartialExitFillTimeout");
+    assertThat(timeouts).hasSize(1);
+    assertThat(timeouts.get(0).getSubject()).containsEntry("signal_id", "sig-eod-retry");
+
+    captureKind("PartialExitRetryRequested");
+    captureKind("EodForceFlattenRequested");
+    captureKind("EodForceFlattened");
+
+    // The critical assertion: capture every cancelOrder argument and prove that the cancel
+    // fired by flattenRemaining targets the :retry intent_key — the live in-flight order —
+    // not the original (already-cancelled) :exit:<sig> key. Without the
+    // currentInFlightIntentKey fix from the /simplify [skip-review] commit, flattenRemaining
+    // would reconstruct the original key and miss the live retry order.
+    ArgumentCaptor<String> cancelKeyCaptor = ArgumentCaptor.forClass(String.class);
+    verify(exec, atLeast(2)).cancelOrder(cancelKeyCaptor.capture());
+    List<String> cancelledKeys = cancelKeyCaptor.getAllValues();
+    // Original timeout cancel hits the :exit:<sig> key (no :retry suffix).
+    assertThat(cancelledKeys)
+        .anyMatch(k -> k.endsWith(":exit:sig-eod-retry"))
+        .as("processOne's original-timeout cancel must hit the original intent_key");
+    // EOD-during-retry cancel from flattenRemaining hits the :retry-suffixed key.
+    assertThat(cancelledKeys)
+        .anyMatch(k -> k.endsWith(":exit:sig-eod-retry:retry"))
+        .as("flattenRemaining must cancel the live retry intent_key, not the original");
+  }
+
   // ---------- helpers ----------
 
   private PositionWorkflow newStub(String workflowId) {
