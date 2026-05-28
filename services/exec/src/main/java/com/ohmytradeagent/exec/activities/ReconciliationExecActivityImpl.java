@@ -56,6 +56,27 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
         .orElse(List.of());
   }
 
+  @Override
+  public BrokerPosition brokerGetPositionByOcc(String tenantId, String strategyId, String occ) {
+    // Issue #239: broker truth for the adoption phantom guard. Filters the broker position list to
+    // the requested OCC; returns null when the broker does not hold it.
+    return broker.listOpenPositions().stream()
+        .filter(p -> occ.equals(p.getOptionSymbol()))
+        .findFirst()
+        .orElse(null);
+  }
+
+  @Override
+  public boolean journalReconcileToFilled(
+      String intentKey,
+      long filledQty,
+      java.math.BigDecimal avgFillPrice,
+      java.time.OffsetDateTime filledAt) {
+    // Issue #239: terminalize the stale entry row to FILLED. markFilled is conditional on the
+    // current state being in (RECORDED, SUBMITTED), so a repeat call is an idempotent no-op.
+    return journal.markFilled(intentKey, filledQty, avgFillPrice, filledAt);
+  }
+
   private static JournalEntry toContract(JournaledOrder row) {
     JournalEntry e = new JournalEntry();
     e.setSchemaVersion(1L);
