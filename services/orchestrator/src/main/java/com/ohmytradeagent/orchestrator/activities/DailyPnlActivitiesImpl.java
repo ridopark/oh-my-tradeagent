@@ -4,6 +4,9 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Result;
@@ -38,6 +41,22 @@ import org.springframework.stereotype.Component;
  *       loss.
  * </ul>
  *
+ * <p>Issue #276: FIFO matching is grouped by {@code option_symbol} so each exited contract realizes
+ * against its OWN symbol's entry basis — pooling all symbols' entries into one FIFO queue let a
+ * same-day exit match a foreign symbol's cost basis and mis-state the daily figure against the
+ * kill-switch threshold. The {@code option_symbol} key is emitted on both fill-audit subjects under
+ * a {@code Workflow.getVersion} gate in the producers ({@code CopytradeSignalWorkflowImpl} entry,
+ * {@code PositionWorkflowImpl} exit). Pre-change historical rows lack the key; they are tolerated
+ * by grouping all keyless rows into a single no-symbol bucket that FIFO-matches among itself
+ * exactly as before (no data migration; never NPE, never cross-attribute against keyed rows).
+ *
+ * <p>Limitation (issue #276 §4, documented only, out of scope here): a position entered on a prior
+ * day and closed today credits raw exit proceeds with no same-day cost basis (phantom gain), so a
+ * genuine prior-day loss closed intraday does not count toward today's daily-loss figure — the
+ * switch can fail-open. The proper fix is wiring Alpaca account P&amp;L ({@code equity −
+ * last_equity} / {@code unrealized_pl + realized_pl}) as the kill-switch source of truth; tracked
+ * separately, not attempted in this change.
+ *
  * <p>Rows are already scoped to the trading day and (tenant, strategy), so orphaned / {@code
  * RECORDED}-but-unfilled (no {@code EntryFilled} audit is emitted until a fill lands) and prior-day
  * positions are excluded by construction. EOD/expiry force-flatten audits do not carry a fill price
@@ -71,14 +90,31 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
       return BigDecimal.ZERO;
     }
 
-    Deque<Lot> entries = fetchLots(tenantId, strategyId, tradingDay, "EntryFilled", "filled_qty");
-    Deque<Lot> exits =
+    // Issue #276: group both sides by option_symbol so each exited contract realizes against its
+    // OWN symbol's entry basis (pooling across symbols let an exit FIFO-match a foreign symbol's
+    // cost basis). Pre-change rows lacking option_symbol fall into a single no-symbol bucket ("")
+    // and FIFO-match among themselves exactly as before.
+    Map<String, Deque<Lot>> entriesBySymbol =
+        fetchLots(tenantId, strategyId, tradingDay, "EntryFilled", "filled_qty");
+    Map<String, Deque<Lot>> exitsBySymbol =
         fetchLots(tenantId, strategyId, tradingDay, "PartialExitFilled", "qty_filled");
 
-    // Realize P&L only for contracts that have actually been exited today. Each exited contract is
-    // matched FIFO against the day's entry cost basis: realized = (exit_price − entry_basis) * 100.
-    // Un-exited entry contracts contribute nothing — their debit is excluded until they exit
-    // (issue #273), so an open long never fabricates a loss.
+    BigDecimal realized = BigDecimal.ZERO;
+    for (Map.Entry<String, Deque<Lot>> e : exitsBySymbol.entrySet()) {
+      Deque<Lot> entries = entriesBySymbol.getOrDefault(e.getKey(), new ArrayDeque<>());
+      realized = realized.add(realizePerSymbol(entries, e.getValue()));
+    }
+    return realized.multiply(MULTIPLIER);
+  }
+
+  /**
+   * FIFO-matches one symbol's exits against that symbol's entry cost basis. Realizes P&L only for
+   * contracts that have actually been exited today: {@code realized = (exit_price − entry_basis)}
+   * per matched contract (multiplier applied by the caller). Un-exited entry contracts contribute
+   * nothing — their debit is excluded until they exit (issue #273), so an open long never
+   * fabricates a loss.
+   */
+  private static BigDecimal realizePerSymbol(Deque<Lot> entries, Deque<Lot> exits) {
     BigDecimal realized = BigDecimal.ZERO;
     Lot entry = entries.poll();
     for (Lot exit : exits) {
@@ -97,7 +133,7 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
         realized = realized.add(exit.price.multiply(BigDecimal.valueOf(remainingExitQty)));
       }
     }
-    return realized.multiply(MULTIPLIER);
+    return realized;
   }
 
   /** A fill lot: per-contract {@code avg_fill_price} and the (mutable-remaining) contract count. */
@@ -108,17 +144,35 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
   }
 
   /**
-   * Fetches fill lots for the given audit kind on the trading day, ordered by {@code occurred_at}
-   * (FIFO). Each lot is {@code (avg_fill_price, <qtyKey>)}. Rows missing either field, or with a
-   * non-positive quantity, are skipped — a malformed audit row never moves the figure.
+   * Allowlist for the {@code qtyKey} that is string-interpolated into the {@code fetchLots} SQL.
+   * {@code fetchLots} is only ever called with these hardcoded literals, but the allowlist guard
+   * (issue #276 [nit]) prevents a future refactor from introducing SQL injection through that
+   * interpolation point.
    */
-  private Deque<Lot> fetchLots(
+  private static final Set<String> ALLOWED_QTY_KEYS = Set.of("filled_qty", "qty_filled");
+
+  /** Bucket key for pre-change historical rows that lack an {@code option_symbol} subject field. */
+  private static final String NO_SYMBOL_BUCKET = "";
+
+  /**
+   * Fetches fill lots for the given audit kind on the trading day, ordered by {@code occurred_at}
+   * (FIFO), grouped by {@code option_symbol} (issue #276). Each lot is {@code (avg_fill_price,
+   * <qtyKey>)}. Rows missing either field, with a non-positive quantity, or with a fractional
+   * quantity (issue #276 [minor]) are skipped — a malformed audit row never moves the figure and
+   * never crashes the activity. Rows lacking {@code option_symbol} (pre-change history) are grouped
+   * under the {@link #NO_SYMBOL_BUCKET} key.
+   */
+  private Map<String, Deque<Lot>> fetchLots(
       String tenantId, String strategyId, LocalDate tradingDay, String kind, String qtyKey) {
+    if (!ALLOWED_QTY_KEYS.contains(qtyKey)) {
+      throw new IllegalArgumentException("unsupported qtyKey: " + qtyKey);
+    }
     String sql =
         "SELECT (subject->>'avg_fill_price')::numeric AS price, "
             + "(subject->>'"
             + qtyKey
-            + "')::numeric AS qty "
+            + "')::numeric AS qty, "
+            + "subject->>'option_symbol' AS option_symbol "
             + "FROM audit_log "
             + "WHERE tenant_id = ? AND strategy_id = ? AND kind = ? "
             + "AND (occurred_at AT TIME ZONE 'America/New_York')::date = ? "
@@ -128,15 +182,33 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
             + "' IS NOT NULL "
             + "ORDER BY occurred_at ASC, event_id ASC";
     Result<Record> rows = dsl.fetch(sql, tenantId, strategyId, kind, tradingDay);
-    Deque<Lot> lots = new ArrayDeque<>(rows.size());
+    Map<String, Deque<Lot>> lotsBySymbol = new LinkedHashMap<>();
     for (Record r : rows) {
       BigDecimal price = r.get("price", BigDecimal.class);
       BigDecimal qty = r.get("qty", BigDecimal.class);
       if (price == null || qty == null || qty.signum() <= 0) {
         continue;
       }
-      lots.add(new Lot(price, qty.longValueExact()));
+      long qtyLong;
+      try {
+        // Options qty is integer in practice; a fractional filled_qty is defensively skipped rather
+        // than thrown (longValueExact() would raise ArithmeticException and crash-loop the activity
+        // under Temporal retry).
+        qtyLong = qty.longValueExact();
+      } catch (ArithmeticException ex) {
+        log.warn(
+            "fetchLots: skipping {} row with fractional/oversized {}={} (tenant={} strategy={})",
+            kind,
+            qtyKey,
+            qty,
+            tenantId,
+            strategyId);
+        continue;
+      }
+      String symbol = r.get("option_symbol", String.class);
+      String bucket = symbol == null ? NO_SYMBOL_BUCKET : symbol;
+      lotsBySymbol.computeIfAbsent(bucket, k -> new ArrayDeque<>()).add(new Lot(price, qtyLong));
     }
-    return lots;
+    return lotsBySymbol;
   }
 }

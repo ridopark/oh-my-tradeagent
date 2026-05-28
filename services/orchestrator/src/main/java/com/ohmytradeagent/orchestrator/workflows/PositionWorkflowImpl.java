@@ -182,6 +182,18 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_EXIT_RETRY_SOURCE_ORDER = "exit-retry-source-order";
 
   /**
+   * Issue #276: gate the {@code option_symbol} field added to the {@link #KIND_PARTIAL_EXIT_FILLED}
+   * audit subject. The DailyPnl realized-P&amp;L consumer groups FIFO by {@code option_symbol} so
+   * each exited contract realizes against its OWN symbol's entry basis; emitting the key here
+   * (value {@code input.getContractSymbol()}) supplies the exit-side half of the correlation key
+   * that pairs with the EntryFilled key emitted by {@code CopytradeSignalWorkflowImpl}.
+   * Replay-gated so pre-change PositionWorkflow histories reproduce the legacy subject exactly (no
+   * {@code option_symbol}) and stay deterministic; only new executions (v&gt;=1) emit it. Mirrors
+   * the existing version-gate constants.
+   */
+  private static final String VERSION_EXIT_FILLED_OPTION_SYMBOL = "exit-filled-option-symbol-v1";
+
+  /**
    * Issue #203 / #212 fallback: bounded wait for the first onFill before the workflow gives up and
    * emits PositionNeverFilled. Matches {@code pending_ttl_paper_secs} in {@code copytrade-v1.yaml}
    * (90s paper default). Used (a) for v=DEFAULT_VERSION replays under {@link
@@ -984,8 +996,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       if (lastFillEvent != null) {
         long filled = lastFillEvent.getFilledQty();
         remainingQty -= filled;
-        auditLog(
-            KIND_PARTIAL_EXIT_FILLED,
+        Map<String, Object> exitSubject =
             subject(
                 "signal_id",
                 req.getSignalId(),
@@ -996,7 +1007,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                 "broker_order_id",
                 lastFillEvent.getBrokerOrderId(),
                 "avg_fill_price",
-                lastFillEvent.getAvgFillPrice()));
+                lastFillEvent.getAvgFillPrice());
+        // Issue #276: emit the per-symbol correlation key so the DailyPnl FIFO grouping matches
+        // this exit against its OWN symbol's entry basis. Replay-gated so legacy PositionWorkflow
+        // histories reproduce the old subject (no option_symbol) deterministically.
+        if (Workflow.getVersion(VERSION_EXIT_FILLED_OPTION_SYMBOL, Workflow.DEFAULT_VERSION, 1)
+            >= 1) {
+          exitSubject.put("option_symbol", input.getContractSymbol());
+        }
+        auditLog(KIND_PARTIAL_EXIT_FILLED, exitSubject);
         exitInFlight = false;
         currentInFlightBrokerOrderId = null;
         currentInFlightSignalId = null;

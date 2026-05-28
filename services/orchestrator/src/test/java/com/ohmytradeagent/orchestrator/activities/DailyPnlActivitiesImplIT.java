@@ -160,6 +160,99 @@ class DailyPnlActivitiesImplIT {
   }
 
   @Test
+  void computeRealizedPnl_crossSymbol_realizesAgainstOwnBasis_issue276() {
+    // Issue #276 regression: two entries for DIFFERENT symbols at DIFFERENT prices, then an exit
+    // for the SECOND symbol only. The exit MUST realize against its OWN symbol's entry basis, not
+    // FIFO-match the foreign (first) symbol's cheaper basis.
+    //
+    // Symbol A (NVDA): 1 @ 1.00  (NOT exited — contributes nothing)
+    // Symbol B (CRWV): 1 @ 5.00  -> exit 1 @ 6.00
+    // Correct (per-symbol): exit B realizes (6.00 - 5.00) * 100 = +100.
+    // Cross-matched (old, buggy pooled FIFO): exit would match A's 1.00 basis ->
+    //   (6.00 - 1.00) * 100 = +500 against the WRONG symbol's basis.
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-05-14T14:00:00Z",
+        "{\"avg_fill_price\":\"1.00\",\"filled_qty\":1,\"option_symbol\":\"NVDA  260516C00140000\"}");
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-05-14T14:05:00Z",
+        "{\"avg_fill_price\":\"5.00\",\"filled_qty\":1,\"option_symbol\":\"CRWV  260516C00040000\"}");
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-05-14T16:00:00Z",
+        "{\"avg_fill_price\":\"6.00\",\"qty_filled\":1,\"option_symbol\":\"CRWV  260516C00040000\"}");
+
+    BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
+
+    // Exit realizes against CRWV's own 5.00 basis: +100. NOT +500 (NVDA's foreign basis).
+    assertThat(pnl).isEqualByComparingTo("100.00");
+  }
+
+  @Test
+  void computeRealizedPnl_fractionalQty_isSkipped_issue276() {
+    // Issue #276 [minor]: a fractional filled_qty must be SKIPPED (not crash via
+    // longValueExact() ArithmeticException, which would crash-loop the activity under retry).
+    // The fractional entry is skipped, leaving no same-day basis for the exit — the exit then
+    // realizes its credit alone (no cost basis to net against).
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-05-14T14:00:00Z",
+        "{\"avg_fill_price\":\"2.00\",\"filled_qty\":\"10.5\",\"option_symbol\":\"NVDA  260516C00140000\"}");
+    // A clean integer entry for a second symbol that DOES match its exit.
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-05-14T14:05:00Z",
+        "{\"avg_fill_price\":\"2.00\",\"filled_qty\":3,\"option_symbol\":\"CRWV  260516C00040000\"}");
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-05-14T16:00:00Z",
+        "{\"avg_fill_price\":\"3.00\",\"qty_filled\":3,\"option_symbol\":\"CRWV  260516C00040000\"}");
+
+    // CRWV exit realizes 3 * (3.00 - 2.00) * 100 = +300; the fractional NVDA entry is skipped so
+    // the NVDA symbol contributes nothing and the activity never throws.
+    BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
+
+    assertThat(pnl).isEqualByComparingTo("300.00");
+  }
+
+  @Test
+  void computeRealizedPnl_legacyRowsWithoutOptionSymbol_groupTogether_issue276() {
+    // Issue #276: historical (pre-change) rows lack option_symbol. They must be TOLERATED — grouped
+    // into a single no-symbol bucket and FIFO-matched among themselves exactly as before (never
+    // NPE,
+    // never cross-attribute against keyed rows). Entry 10 @ 2.00, exit 4 @ 3.00 => +400.
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-05-14T14:00:00Z",
+        "{\"avg_fill_price\":\"2.00\",\"filled_qty\":10}");
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-05-14T16:00:00Z",
+        "{\"avg_fill_price\":\"3.00\",\"qty_filled\":4}");
+
+    BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
+
+    assertThat(pnl).isEqualByComparingTo("400.00");
+  }
+
+  @Test
   void computeRealizedPnl_noRows_returnsZero() {
     BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
 
