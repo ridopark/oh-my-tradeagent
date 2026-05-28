@@ -53,6 +53,18 @@ class FillDispatcherImplTest {
           OffsetDateTime.parse("2026-05-19T17:08:11Z"),
           BrokerFillEvent.Source.WS);
 
+  // #250: a WS partial_fill for the same order (ROW.qty() == 5). Alpaca reports filled_qty as the
+  // cumulative-so-far quantity, so a partial carries filledQty (2) < order.qty() (5). It must NOT
+  // terminalize the journal, but the onFill signal still fires with the partial qty.
+  private static final BrokerFillEvent PARTIAL_FILL =
+      new BrokerFillEvent(
+          "brk-42",
+          "ck-42",
+          2L,
+          new BigDecimal("0.83"),
+          OffsetDateTime.parse("2026-05-19T17:08:09Z"),
+          BrokerFillEvent.Source.WS);
+
   private static final JournaledOrder ROW =
       new JournaledOrder(
           "ck-42",
@@ -337,5 +349,98 @@ class FillDispatcherImplTest {
     assertThat(registry.counter("fill_listener.signal_errors").count()).isEqualTo(1.0);
     assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(0.0);
     assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(0.0);
+  }
+
+  @Test
+  void dispatch_wsPartialFill_doesNotTerminalizeJournal_butStillSignals() {
+    // #250 AC #1: a WS partial_fill (filledQty 2 < order.qty 5) must NOT terminalize the journal
+    // to FILLED — terminalizing with the partial qty would lose remaining-qty accounting and lock
+    // the row at a smaller filled_qty. The onFill signal IS still sent with the partial qty so the
+    // pre-existing partial-fill signalling behaviour is preserved.
+    when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
+
+    dispatcher.dispatch(PARTIAL_FILL);
+
+    verify(journal, never()).markFilled(anyString(), anyLong(), any(), any());
+
+    verify(workflowClient).newUntypedWorkflowStub("t-dev/s-copytrade-v1/sig/sig-42");
+    ArgumentCaptor<Object> arg = ArgumentCaptor.forClass(Object.class);
+    verify(workflowStub).signal(eq("onFill"), arg.capture());
+    assertThat(arg.getValue())
+        .isInstanceOfSatisfying(
+            FillSignalPayload.class,
+            p -> {
+              assertThat(p.getBrokerOrderId()).isEqualTo("brk-42");
+              assertThat(p.getFilledQty()).isEqualTo(2L);
+              assertThat(p.getAvgFillPrice()).isEqualByComparingTo(new BigDecimal("0.83"));
+              assertThat(p.getFilledAt()).isEqualTo(OffsetDateTime.parse("2026-05-19T17:08:09Z"));
+            });
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(1.0);
+  }
+
+  @Test
+  void dispatch_wsCompleteFill_terminalizesJournalWithFullQty() {
+    // #250 AC #2 / derived: a complete WS fill (filledQty 5 >= order.qty 5) terminalizes the
+    // journal exactly as before — with the event's full qty/price/time.
+    when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
+
+    dispatcher.dispatch(FILL);
+
+    verify(journal)
+        .markFilled(
+            eq("ck-42"),
+            eq(5L),
+            eq(new BigDecimal("0.84")),
+            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")));
+  }
+
+  @Test
+  void dispatch_wsPartialThenFull_endsFilledWithFullQty() {
+    // #250 AC #2 regression: a WS partial_fill (filledQty 2) followed by the terminal full fill
+    // (filledQty 5) ends with the journal FILLED at the FULL qty — never at the partial qty. The
+    // partial leaves the row untouched (no markFilled); only the full fill terminalizes.
+    when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
+
+    dispatcher.dispatch(PARTIAL_FILL);
+    dispatcher.dispatch(FILL);
+
+    // The partial NEVER calls markFilled; the full fill terminalizes with the full qty exactly
+    // once.
+    verify(journal, times(1))
+        .markFilled(
+            eq("ck-42"),
+            eq(5L),
+            eq(new BigDecimal("0.84")),
+            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")));
+    verify(journal, never()).markFilled(eq("ck-42"), eq(2L), any(), any());
+  }
+
+  @Test
+  void dispatch_pollFullFill_stillTerminalizes() {
+    // #250 poll-backstop regression guard: the POLL path only ever delivers a full-qty fill
+    // (AlpacaPaperBroker.mapStatus maps partially_filled -> OPEN, only filled -> FILLED), so a
+    // Source.POLL event with the full qty must still terminalize — the complete-fill guard does
+    // not break the immune POLL path.
+    BrokerFillEvent pollFill =
+        new BrokerFillEvent(
+            "brk-42",
+            "ck-42",
+            5L,
+            new BigDecimal("0.84"),
+            OffsetDateTime.parse("2026-05-19T17:08:11Z"),
+            BrokerFillEvent.Source.POLL);
+    when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
+
+    dispatcher.dispatch(pollFill);
+
+    verify(journal)
+        .markFilled(
+            eq("ck-42"),
+            eq(5L),
+            eq(new BigDecimal("0.84")),
+            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")));
   }
 }
