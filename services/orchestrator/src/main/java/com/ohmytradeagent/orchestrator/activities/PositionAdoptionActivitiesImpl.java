@@ -102,13 +102,17 @@ public class PositionAdoptionActivitiesImpl implements PositionAdoptionActivitie
       return AdoptionResult.refusedNoAnchor();
     }
     String entrySignalId = anchor.getSignalId();
-    // Issue #246 (sibling of #243): build the PositionWorkflow id from the journal anchor's
-    // canonical option_symbol — the padded 21-char OCC (OccSymbol.of pads the root to 6 chars with
-    // %-6s) that was also used to spawn the live owner (CopytradeSignalWorkflowImpl). The operator
-    // may supply the broker/audit *compact* OCC (Alpaca strips the space-padding), so anchoring the
-    // id (and the idempotency probe below) on the raw `occ` would build a non-matching id, miss a
-    // live owner, and adopt a duplicate. Mirrors ReconciliationWorkflowImpl:267-272.
-    String posWfId = WorkflowIds.position(tenantId, strategyId, anchor.getOptionSymbol(), entrySignalId);
+    // Issue #246 (sibling of #243): canonicalize the OCC to the journal anchor's option_symbol —
+    // the padded 21-char OccSymbol.of form (root padded to 6 chars with %-6s) that the live owner
+    // was spawned + registered under (CopytradeSignalWorkflowImpl uses resolved.optionSymbol()
+    // uniformly for the workflow id, ContractSymbol SA, PositionWorkflowInput, and discovery
+    // cache). The operator may supply the broker/audit *compact* OCC (Alpaca strips the
+    // space-padding), so every identity/discovery key below must use this canonical form — anchoring
+    // on the raw `occ` would build a non-matching id (miss a live owner → adopt a duplicate) and
+    // register the adopted owner under a cache key + ContractSymbol the STC lookup never queries.
+    // Mirrors ReconciliationWorkflowImpl:267-272.
+    String canonicalOcc = anchor.getOptionSymbol();
+    String posWfId = WorkflowIds.position(tenantId, strategyId, canonicalOcc, entrySignalId);
 
     // Idempotency guard: never double-own. If a live PositionWorkflow already owns the OCC, no-op.
     if (positionLookup.isPositionWorkflowRunning(posWfId)) {
@@ -139,12 +143,12 @@ public class PositionAdoptionActivitiesImpl implements PositionAdoptionActivitie
     }
 
     PositionWorkflowInput posInput =
-        buildInput(tenantId, strategyId, occ, entrySignalId, qty, entryPremium, config);
+        buildInput(tenantId, strategyId, canonicalOcc, entrySignalId, qty, entryPremium, config);
 
     // 4. Start the PositionWorkflow on orchestrator-core with the canonical id + search attributes.
     Map<String, Object> sa = new LinkedHashMap<>();
     sa.put("TenantStrategy", WorkflowIds.tenantStrategy(tenantId, strategyId));
-    sa.put("ContractSymbol", occ);
+    sa.put("ContractSymbol", canonicalOcc);
     WorkflowOptions opts =
         WorkflowOptions.newBuilder()
             .setWorkflowId(posWfId)
@@ -181,10 +185,10 @@ public class PositionAdoptionActivitiesImpl implements PositionAdoptionActivitie
 
     // 6. Terminalize the journal row, seed discovery, emit PositionAdopted provenance.
     exec.journalReconcileToFilled(anchor.getIntentKey(), qty, entryPremium, filledAt);
-    positionLookup.cachePositionMapping(tenantId, strategyId, occ, posWfId);
+    positionLookup.cachePositionMapping(tenantId, strategyId, canonicalOcc, posWfId);
 
     Map<String, Object> subject = new LinkedHashMap<>();
-    subject.put("option_symbol", occ);
+    subject.put("option_symbol", canonicalOcc);
     subject.put("entry_signal_id", entrySignalId);
     subject.put("intent_key", anchor.getIntentKey());
     subject.put("broker_order_id", anchor.getBrokerOrderId());

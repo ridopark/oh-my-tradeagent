@@ -330,9 +330,20 @@ class PositionAdoptionActivitiesImplTest {
 
     // Anchor resolved via the padding-agnostic open-row fallback -> adoption proceeds (not refused).
     assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ADOPTED);
+    String paddedWfId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
     // Owner started under the canonical PADDED id rebuilt from the anchor.
-    assertThat(result.getWorkflowId())
-        .isEqualTo(WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID));
+    assertThat(result.getWorkflowId()).isEqualTo(paddedWfId);
+
+    // Identity + discovery are keyed on the canonical PADDED OCC (not the compact operator input),
+    // matching CopytradeSignalWorkflowImpl's spawn so the adopted owner is discoverable by the same
+    // ContractSymbol Visibility query + Redis cache key the STC lookup uses.
+    ArgumentCaptor<io.temporal.client.WorkflowOptions> optsCaptor =
+        ArgumentCaptor.forClass(io.temporal.client.WorkflowOptions.class);
+    verify(workflowClient).newUntypedWorkflowStub(eq("PositionWorkflow"), optsCaptor.capture());
+    @SuppressWarnings("unchecked")
+    Map<String, Object> sa = (Map<String, Object>) optsCaptor.getValue().getSearchAttributes();
+    assertThat(sa).containsEntry("ContractSymbol", OCC);
+    verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, OCC, paddedWfId);
   }
 
   @Test
