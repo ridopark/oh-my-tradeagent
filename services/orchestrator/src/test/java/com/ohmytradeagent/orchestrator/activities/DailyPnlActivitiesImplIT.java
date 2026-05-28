@@ -62,15 +62,17 @@ class DailyPnlActivitiesImplIT {
   }
 
   @Test
-  void computeRealizedPnl_entryAndExitMatch_returnsNetPremiumTimesMultiplier() {
-    // Entry: 2 contracts * 2.30 fill * 100 = 460 debit
+  void computeRealizedPnl_entryAndExitMatch_realizesOnlyExitedCostBasis() {
+    // Entry: 2 contracts @ 2.30 (cost basis 2.30/contract).
     insertAudit(
         "dev",
         "copytrade-v1",
         "EntryFilled",
         "2026-05-14T14:00:00Z",
         "{\"avg_fill_price\":\"2.30\",\"filled_qty\":2}");
-    // Partial exit: 1 contract * 3.10 fill * 100 = 310 credit
+    // Partial exit: 1 contract @ 3.10. Only the exited contract's cost basis realizes:
+    // 1 * (3.10 - 2.30) * 100 = +80. The other open contract is excluded (issue #273) —
+    // its debit is not booked as a loss until it exits.
     insertAudit(
         "dev",
         "copytrade-v1",
@@ -80,8 +82,81 @@ class DailyPnlActivitiesImplIT {
 
     BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
 
-    // 310 - 460 = -150
-    assertThat(pnl).isEqualByComparingTo("-150.00");
+    assertThat(pnl).isEqualByComparingTo("80.00");
+  }
+
+  @Test
+  void computeRealizedPnl_entryWithNoExit_excludesOpenDebit_issue273() {
+    // Issue #273 regression: the 2026-05-28 fixture — two BTO entries, ZERO exits.
+    // CRWV 12 @ 2.86 (= 12 * 2.86 * 100 = 3432 entry cost) and
+    // PLTR 25 @ 0.88 (= 25 * 0.88 * 100 = 2200 entry cost). Combined entry notional
+    // = 5632, which under the old realized-only-with-no-offset logic was booked as a
+    // -5632 "realized loss" and tripped the $2,500 daily-loss kill switch on a normal
+    // trading day. Realized P&L with zero exits must be $0 (no contract has been
+    // exited, so no cost basis is realized), NOT -(entry notional).
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-05-28T14:00:00Z",
+        "{\"avg_fill_price\":\"2.86\",\"filled_qty\":12}");
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-05-28T14:05:00Z",
+        "{\"avg_fill_price\":\"0.88\",\"filled_qty\":25}");
+
+    BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 28));
+
+    // Zero exits => zero realized P&L. Crucially > -2500, so the kill switch does not trip.
+    assertThat(pnl).isEqualByComparingTo("0");
+    assertThat(pnl.compareTo(new BigDecimal("-2500")) > 0).isTrue();
+  }
+
+  @Test
+  void computeRealizedPnl_partialExit_realizesOnlyExitedCostBasis() {
+    // Entry: 10 contracts @ 2.00 (cost basis 2.00/contract).
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-05-14T14:00:00Z",
+        "{\"avg_fill_price\":\"2.00\",\"filled_qty\":10}");
+    // Exit 4 contracts @ 3.00. Realized = 4 * (3.00 - 2.00) * 100 = +400.
+    // The 6 still-open contracts contribute nothing (their debit stays excluded).
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-05-14T16:00:00Z",
+        "{\"avg_fill_price\":\"3.00\",\"qty_filled\":4}");
+
+    BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
+
+    assertThat(pnl).isEqualByComparingTo("400.00");
+  }
+
+  @Test
+  void computeRealizedPnl_fullExitAtLoss_realizesFullCostBasis() {
+    // Entry: 5 @ 4.00 = cost basis 4.00/contract.
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-05-14T14:00:00Z",
+        "{\"avg_fill_price\":\"4.00\",\"filled_qty\":5}");
+    // Exit all 5 @ 1.00. Realized = 5 * (1.00 - 4.00) * 100 = -1500.
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-05-14T15:00:00Z",
+        "{\"avg_fill_price\":\"1.00\",\"qty_filled\":5}");
+
+    BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
+
+    assertThat(pnl).isEqualByComparingTo("-1500.00");
   }
 
   @Test
@@ -93,29 +168,41 @@ class DailyPnlActivitiesImplIT {
 
   @Test
   void computeRealizedPnl_tenantScoped() {
-    // Different tenant — should be excluded.
+    // Different tenant — should be excluded entirely (entry AND exit).
     insertAudit(
         "other",
         "copytrade-v1",
         "EntryFilled",
         "2026-05-14T14:00:00Z",
         "{\"avg_fill_price\":\"5.00\",\"filled_qty\":10}");
-    // Same tenant — counted.
+    insertAudit(
+        "other",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-05-14T16:00:00Z",
+        "{\"avg_fill_price\":\"1.00\",\"qty_filled\":10}");
+    // Same tenant — counted: 1 @ 2.00 entry, exit 1 @ 1.00 => 1 * (1.00 - 2.00) * 100 = -100.
     insertAudit(
         "dev",
         "copytrade-v1",
         "EntryFilled",
         "2026-05-14T14:00:00Z",
         "{\"avg_fill_price\":\"2.00\",\"filled_qty\":1}");
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-05-14T16:00:00Z",
+        "{\"avg_fill_price\":\"1.00\",\"qty_filled\":1}");
 
     BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
 
-    assertThat(pnl.doubleValue()).isCloseTo(-200.00, within(0.01));
+    assertThat(pnl.doubleValue()).isCloseTo(-100.00, within(0.01));
   }
 
   @Test
   void computeRealizedPnl_dateScoped() {
-    // Day before — excluded.
+    // Day before — excluded entirely (entry AND exit).
     insertAudit(
         "dev",
         "copytrade-v1",
@@ -125,13 +212,26 @@ class DailyPnlActivitiesImplIT {
     insertAudit(
         "dev",
         "copytrade-v1",
+        "PartialExitFilled",
+        "2026-05-13T16:00:00Z",
+        "{\"avg_fill_price\":\"1.00\",\"qty_filled\":10}");
+    // Trading day — counted: 1 @ 2.00 entry, exit 1 @ 1.00 => -100.
+    insertAudit(
+        "dev",
+        "copytrade-v1",
         "EntryFilled",
-        "2026-05-14T18:00:00Z",
+        "2026-05-14T14:00:00Z",
         "{\"avg_fill_price\":\"2.00\",\"filled_qty\":1}");
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-05-14T18:00:00Z",
+        "{\"avg_fill_price\":\"1.00\",\"qty_filled\":1}");
 
     BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
 
-    assertThat(pnl.doubleValue()).isCloseTo(-200.00, within(0.01));
+    assertThat(pnl.doubleValue()).isCloseTo(-100.00, within(0.01));
   }
 
   private static void insertAudit(
