@@ -145,6 +145,10 @@ class FillDispatcherImplTest {
   @Test
   void dispatch_routesFillToWorkflowSignal() {
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
+    // #251: stub markFilled -> true so the `if (terminalized)` info-log branch in dispatch() is
+    // exercised on the happy path (Mockito otherwise returns false by default and the branch is
+    // never entered here).
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
 
     dispatcher.dispatch(FILL);
 
@@ -348,6 +352,24 @@ class FillDispatcherImplTest {
     verify(journal).markFilled(eq("ck-42"), anyLong(), any(), any());
     assertThat(registry.counter("fill_listener.signal_errors").count()).isEqualTo(1.0);
     assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(0.0);
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(0.0);
+  }
+
+  @Test
+  void dispatch_markFilledThrows_propagates() {
+    // #251: markFilled runs BEFORE the onFill signal (terminalize-then-signal, #244). If
+    // markFilled throws, the exception must propagate and the signal must NOT be sent — the row is
+    // not prematurely treated as FILLED-then-signalled when terminalization itself failed.
+    when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
+    doThrow(new RuntimeException("journal boom"))
+        .when(journal)
+        .markFilled(eq("ck-42"), anyLong(), any(), any());
+
+    assertThatThrownBy(() -> dispatcher.dispatch(FILL)).hasMessage("journal boom");
+
+    // The signal target is never resolved or signalled — markFilled threw first.
+    verify(workflowClient, never()).newUntypedWorkflowStub(anyString());
+    verify(workflowStub, never()).signal(anyString(), org.mockito.ArgumentMatchers.any());
     assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(0.0);
   }
 
