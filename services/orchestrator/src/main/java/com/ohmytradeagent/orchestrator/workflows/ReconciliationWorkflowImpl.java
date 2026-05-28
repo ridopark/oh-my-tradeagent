@@ -191,6 +191,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
               // First escalation in this debounce window — emit the one-time JournalOrphanOngoing
               // signal. Subsequent ticks within the window stay silent because priorOngoing will
               // be >= 1 on the next look.
+              long ageSecs = Duration.between(firstSeen, now).getSeconds();
               auditLog(
                   KIND_JOURNAL_ORPHAN_ONGOING,
                   subject(
@@ -204,8 +205,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
                       firstSeen.toString(),
                       "last_seen_at",
                       now.toString(),
-                      "escalation_window_secs",
-                      ORPHAN_ESCALATION_WINDOW.getSeconds()));
+                      "age_secs",
+                      ageSecs));
             }
             // Else: already escalated this window — silent suppress.
           }
@@ -376,6 +377,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         if (priorOngoing == 0L) {
           // First escalation in this debounce window — emit the one-time PositionOrphanOngoing
           // signal. Subsequent ticks within the window stay silent because priorOngoing >= 1.
+          long ageSecs = Duration.between(firstSeen, now).getSeconds();
           Map<String, Object> subj =
               subject(
                   "option_symbol",
@@ -390,8 +392,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
                   firstSeen.toString(),
                   "last_seen_at",
                   now.toString(),
-                  "escalation_window_secs",
-                  ORPHAN_ESCALATION_WINDOW.getSeconds());
+                  "age_secs",
+                  ageSecs);
           if (signalId != null) {
             subj.put("journal_entry_signal_id", signalId);
           }

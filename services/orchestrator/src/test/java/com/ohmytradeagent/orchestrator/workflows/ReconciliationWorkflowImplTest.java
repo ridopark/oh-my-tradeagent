@@ -433,9 +433,12 @@ class ReconciliationWorkflowImplTest {
         .containsEntry("option_symbol", "SPY   260519C00737000")
         .containsEntry("journal_status", "missing")
         .containsEntry("first_seen_at", firstSeen.toString());
-    // Time-based escalation carries the window, not a now-meaningless detection_count.
-    assertThat(((Number) ongoing.getSubject().get("escalation_window_secs")).longValue())
-        .isEqualTo(1800L);
+    // Issue #231: time-based escalation carries the actual age-since-first-seen, not the static
+    // escalation window. firstSeen is ~45m ago so the computed age is comfortably >= 1800s; assert
+    // >= because the workflow `now` is not pinned to the test wall clock (small skew is expected).
+    assertThat(((Number) ongoing.getSubject().get("age_secs")).longValue())
+        .isGreaterThanOrEqualTo(1800L);
+    assertThat(ongoing.getSubject()).doesNotContainKey("escalation_window_secs");
     assertThat((String) ongoing.getSubject().get("last_seen_at")).isNotBlank();
   }
 
@@ -465,8 +468,11 @@ class ReconciliationWorkflowImplTest {
     assertThat(ongoing.getSubject())
         .containsEntry("intent_key", "intent-orphan")
         .containsEntry("first_seen_at", firstSeen.toString());
-    assertThat(((Number) ongoing.getSubject().get("escalation_window_secs")).longValue())
-        .isEqualTo(1800L);
+    // Issue #231: assert the computed age-since-first-seen (>= the 30m window), not the static
+    // escalation window value, and confirm the old field is gone.
+    assertThat(((Number) ongoing.getSubject().get("age_secs")).longValue())
+        .isGreaterThanOrEqualTo(1800L);
+    assertThat(ongoing.getSubject()).doesNotContainKey("escalation_window_secs");
   }
 
   @Test
