@@ -178,6 +178,12 @@ class PositionWorkflowImplTest {
     assertThat(partialFills).hasSize(2);
     assertThat(asLong(partialFills.get(0).getSubject().get("qty_filled"))).isEqualTo(3L);
     assertThat(asLong(partialFills.get(1).getSubject().get("qty_filled"))).isEqualTo(2L);
+    // Issue #276: new executions (TestWorkflowEnvironment reports getVersion==1) carry the
+    // per-symbol correlation key so DailyPnl can group FIFO by option_symbol.
+    assertThat(partialFills.get(0).getSubject())
+        .containsEntry("option_symbol", "NVDA  260516C00140000");
+    assertThat(partialFills.get(1).getSubject())
+        .containsEntry("option_symbol", "NVDA  260516C00140000");
   }
 
   /**

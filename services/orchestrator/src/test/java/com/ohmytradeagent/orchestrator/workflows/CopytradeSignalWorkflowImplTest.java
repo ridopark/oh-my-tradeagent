@@ -270,7 +270,10 @@ class CopytradeSignalWorkflowImplTest {
     assertThat(filled.getSubject())
         .containsEntry("outcome", "FILLED")
         .containsEntry("recovery", "cancel_on_filled")
-        .containsEntry("broker_order_id", "brk-1");
+        .containsEntry("broker_order_id", "brk-1")
+        // Issue #276: new executions (TestWorkflowEnvironment reports getVersion==1) carry the
+        // per-symbol correlation key on the cancel-on-filled recovery EntryFilled too.
+        .containsEntry("option_symbol", "NVDA  260516C00140000");
     assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(5L);
     // Audit subject round-trips through Jackson, so BigDecimal arrives back as Double — compare
     // as Number to avoid coupling the test to the on-wire numeric representation.
@@ -360,6 +363,14 @@ class CopytradeSignalWorkflowImplTest {
     verify(positionLookup, times(1))
         .cachePositionMapping(
             eq("dev"), eq("copytrade-v1"), eq("NVDA  260516C00140000"), anyString());
+
+    // Issue #276: the happy-path EntryFilled audit carries the per-symbol correlation key for new
+    // executions (TestWorkflowEnvironment reports getVersion==1) so DailyPnl groups FIFO per
+    // symbol.
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(filled.getSubject())
+        .containsEntry("outcome", "FILLED")
+        .containsEntry("option_symbol", "NVDA  260516C00140000");
   }
 
   @Test

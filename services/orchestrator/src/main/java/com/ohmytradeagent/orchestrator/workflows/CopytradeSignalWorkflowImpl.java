@@ -103,6 +103,15 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // the extra signal command; new executions (v>=1) forward the fill so the child confirms entry.
   private static final String VERSION_FORWARD_BTO_FILL = "forward-bto-fill-v1";
 
+  // Issue #276: gate the option_symbol field added to the EntryFilled audit subject (both the
+  // happy-path fill branch and the cancel-on-filled recovery). The DailyPnl realized-P&L consumer
+  // groups FIFO by option_symbol so each exited contract realizes against its OWN symbol's basis;
+  // emitting the key on EntryFilled supplies the producer-side correlation key. Replay-gated so
+  // pre-change CopytradeSignalWorkflow histories reproduce the legacy subject exactly (no
+  // option_symbol key) and stay deterministic; only new executions (v>=1) emit it. Mirrors
+  // VERSION_TTL_FILLED_ADOPTION / VERSION_BREACH_FILLED_ADOPTION.
+  private static final String VERSION_ENTRY_FILLED_OPTION_SYMBOL = "entry-filled-option-symbol-v1";
+
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
 
@@ -312,16 +321,21 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     }
 
     if (filled) {
-      logAudit(
-          payload,
-          KIND_ENTRY_FILLED,
+      Map<String, Object> entrySubject =
           subject(
               "signal_id", payload.getSignalId(),
               "intent_key", placed.getIntentKey(),
               "broker_order_id", fillEvent.getBrokerOrderId(),
               "filled_qty", fillEvent.getFilledQty(),
               "avg_fill_price", fillEvent.getAvgFillPrice(),
-              "outcome", "FILLED"));
+              "outcome", "FILLED");
+      // Issue #276: emit the per-symbol correlation key for the DailyPnl FIFO grouping, gated so
+      // legacy replay histories reproduce the old subject (no option_symbol) deterministically.
+      if (Workflow.getVersion(VERSION_ENTRY_FILLED_OPTION_SYMBOL, Workflow.DEFAULT_VERSION, 1)
+          >= 1) {
+        entrySubject.put("option_symbol", resolved.optionSymbol());
+      }
+      logAudit(payload, KIND_ENTRY_FILLED, entrySubject);
 
       // Phase 3: start PositionWorkflow + cache OCC → workflow_id mapping. Versioned so
       // Phase 2b workflows in flight on replay don't attempt to spawn a child.
@@ -627,9 +641,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             .withAvgFillPrice(avgFillPrice)
             .withFilledAt(workflowNow());
 
-    logAudit(
-        payload,
-        KIND_ENTRY_FILLED,
+    Map<String, Object> recoverySubject =
         subject(
             "signal_id", payload.getSignalId(),
             "intent_key", cancelResult.getIntentKey(),
@@ -637,7 +649,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "filled_qty", synth.getFilledQty(),
             "avg_fill_price", synth.getAvgFillPrice(),
             "outcome", "FILLED",
-            "recovery", "cancel_on_filled"));
+            "recovery", "cancel_on_filled");
+    // Issue #276: same option_symbol correlation key as the happy-path fill, same replay gate so
+    // the cancel-on-filled recovery audit also groups per symbol in DailyPnl for new executions.
+    if (Workflow.getVersion(VERSION_ENTRY_FILLED_OPTION_SYMBOL, Workflow.DEFAULT_VERSION, 1) >= 1) {
+      recoverySubject.put("option_symbol", resolved.optionSymbol());
+    }
+    logAudit(payload, KIND_ENTRY_FILLED, recoverySubject);
 
     startPositionWorkflow(payload, config, resolved, synth);
   }
