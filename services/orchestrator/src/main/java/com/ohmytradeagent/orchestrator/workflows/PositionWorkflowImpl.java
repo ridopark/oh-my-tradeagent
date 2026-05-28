@@ -1143,9 +1143,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // Issue #266 (trading-critical): round the exit/STC limit to a penny tick before placement.
     // limitPrice flows in from req.getRefPremium()/freshLimit (the chandelier mid, author-posted
     // ref, or peak), any of which can be >2 dp; an unrounded SELL limit draws a non-retryable
-    // Alpaca 422 = FAILED position close. Shared OptionTick.round() keeps this in lock-step with
-    // the
-    // entry path (BtoPricing) and is deterministic, so it is replay-safe inside workflow code.
+    // Alpaca 422 = FAILED position close. The shared, deterministic OptionTick.round() keeps this
+    // in lock-step with the entry path (BtoPricing) and is replay-safe inside workflow code.
     i.setLimitPrice(OptionTick.round(limitPrice));
     i.setRecordedAt(workflowNow());
     return i;
