@@ -328,7 +328,8 @@ class PositionAdoptionActivitiesImplTest {
 
     AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, compactOcc);
 
-    // Anchor resolved via the padding-agnostic open-row fallback -> adoption proceeds (not refused).
+    // Anchor resolved via the padding-agnostic open-row fallback -> adoption proceeds (not
+    // refused).
     assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ADOPTED);
     String paddedWfId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
     // Owner started under the canonical PADDED id rebuilt from the anchor.

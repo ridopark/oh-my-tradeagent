@@ -107,7 +107,8 @@ public class PositionAdoptionActivitiesImpl implements PositionAdoptionActivitie
     // was spawned + registered under (CopytradeSignalWorkflowImpl uses resolved.optionSymbol()
     // uniformly for the workflow id, ContractSymbol SA, PositionWorkflowInput, and discovery
     // cache). The operator may supply the broker/audit *compact* OCC (Alpaca strips the
-    // space-padding), so every identity/discovery key below must use this canonical form — anchoring
+    // space-padding), so every identity/discovery key below must use this canonical form —
+    // anchoring
     // on the raw `occ` would build a non-matching id (miss a live owner → adopt a duplicate) and
     // register the adopted owner under a cache key + ContractSymbol the STC lookup never queries.
     // Mirrors ReconciliationWorkflowImpl:267-272.
