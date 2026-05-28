@@ -370,6 +370,37 @@ class ReconciliationWorkflowImplTest {
   }
 
   @Test
+  void journalOrphan_priorDetectionWithinWindow_isDebounced() {
+    // Issue #221 (parallel to positionOrphan_priorDetectionWithinWindow_isDebounced): the same
+    // journal entry has already been detected as a JournalOrphan within the debounce window. The
+    // workflow must suppress both the per-cycle JournalOrphan audit AND the JournalOrphanOngoing
+    // escalation (priorCount=1 enters the else/debounce-suppression branch; firstSeenJournalOrphan
+    // IS called but returns null by default — Mockito's default for unstubbed Object methods — so
+    // the `firstSeen != null` guard prevents the JournalOrphanOngoing escalation). Summary still
+    // counts the orphan since the journal state is unchanged.
+    OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
+    when(exec.journalDumpOpen(anyString(), anyString()))
+        .thenReturn(List.of(journal("intent-debounce", "OCC-debounce", old)));
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    // 1 prior detection in the window → priorCount=1, this tick is the 2nd. Debounce suppresses
+    // the per-cycle JournalOrphan audit.
+    when(auditQuery.countPriorJournalOrphans(
+            eq("dev"), eq("copytrade-v1"), eq("intent-debounce"), any()))
+        .thenReturn(1L);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getJournalOrphans()).isEqualTo(1L);
+    // No JournalOrphan audit emitted (debounce suppression).
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "JournalOrphan".equals(e.getKind())));
+    // No JournalOrphanOngoing escalation either (firstSeenJournalOrphan returns null by default;
+    // the time-based escalation requires a non-null firstSeen older than ORPHAN_ESCALATION_WINDOW).
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "JournalOrphanOngoing".equals(e.getKind())));
+  }
+
+  @Test
   void positionOrphan_thirdDetectionWithinWindow_emitsOngoingEscalation() {
     // Issue #219: escalation is now driven by time-since-first-seen, not by a count threshold.
     // The audit_log COUNT freezes at 1 once debounce suppression kicks in, so the workflow must
