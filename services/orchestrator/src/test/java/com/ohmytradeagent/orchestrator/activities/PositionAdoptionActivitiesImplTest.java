@@ -277,6 +277,77 @@ class PositionAdoptionActivitiesImplTest {
   }
 
   @Test
+  void compactOperatorOcc_resolvesPaddedOwnerId_isNoop_noDuplicate() {
+    // Issue #246: the operator supplies the broker/audit *compact* OCC, but the live owner's
+    // PositionWorkflow was registered under the *padded* OccSymbol.of form (the journal anchor's
+    // canonical option_symbol). The idempotency probe must run against the padded id rebuilt from
+    // the anchor — not the raw compact operator input — or it misses the owner and double-adopts.
+    String compactOcc = "UNH260618C00400000";
+    BrokerPosition lot = brokerLot(5L, new BigDecimal("3.40"));
+    lot.setOptionSymbol(compactOcc);
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, compactOcc)).thenReturn(lot);
+    // Journal anchor carries the canonical PADDED option_symbol (OCC constant = padded form).
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, compactOcc))
+        .thenReturn(List.of(filledJournalRow()));
+    // The live owner is registered under the padded id; the probe must hit that id to find it.
+    String paddedOwnerId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
+    when(positionLookup.isPositionWorkflowRunning(paddedOwnerId)).thenReturn(true);
+
+    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, compactOcc);
+
+    // Probe was invoked with the PADDED workflow id rebuilt from the anchor, not the compact input.
+    ArgumentCaptor<String> probeId = ArgumentCaptor.forClass(String.class);
+    verify(positionLookup).isPositionWorkflowRunning(probeId.capture());
+    assertThat(probeId.getValue()).isEqualTo(paddedOwnerId);
+
+    // Live owner found -> no duplicate adoption.
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ALREADY_OWNED);
+    verify(workflowClient, never()).newUntypedWorkflowStub(anyString(), any());
+    verify(stub, never()).start(any());
+    verify(stub, never()).signal(anyString(), any());
+    verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void compactOperatorOcc_openRowFallback_resolvesPaddedAnchor_underPaddingMismatch() {
+    // Issue #246: when there is no FILLED row, resolveAnchor falls back to an open
+    // (RECORDED/SUBMITTED) row. The match must be padding-agnostic: a compact operator OCC must
+    // still resolve an open row whose option_symbol is the padded form (and vice versa).
+    String compactOcc = "UNH260618C00400000";
+    BrokerPosition lot = brokerLot(5L, new BigDecimal("3.40"));
+    lot.setOptionSymbol(compactOcc);
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, compactOcc)).thenReturn(lot);
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, compactOcc)).thenReturn(List.of());
+    // Open row carries the PADDED option_symbol (OCC constant); operator supplied compact.
+    when(exec.journalDumpOpen(TENANT, STRATEGY)).thenReturn(List.of(filledJournalRow()));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
+    when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
+
+    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, compactOcc);
+
+    // Anchor resolved via the padding-agnostic open-row fallback -> adoption proceeds (not
+    // refused).
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ADOPTED);
+    String paddedWfId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
+    // Owner started under the canonical PADDED id rebuilt from the anchor.
+    assertThat(result.getWorkflowId()).isEqualTo(paddedWfId);
+
+    // Identity + discovery are keyed on the canonical PADDED OCC (not the compact operator input),
+    // matching CopytradeSignalWorkflowImpl's spawn so the adopted owner is discoverable by the same
+    // ContractSymbol Visibility query + Redis cache key the STC lookup uses.
+    ArgumentCaptor<io.temporal.client.WorkflowOptions> optsCaptor =
+        ArgumentCaptor.forClass(io.temporal.client.WorkflowOptions.class);
+    verify(workflowClient).newUntypedWorkflowStub(eq("PositionWorkflow"), optsCaptor.capture());
+    @SuppressWarnings("unchecked")
+    Map<String, Object> sa = (Map<String, Object>) optsCaptor.getValue().getSearchAttributes();
+    assertThat(sa).containsEntry("ContractSymbol", OCC);
+    verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, OCC, paddedWfId);
+  }
+
+  @Test
   void copytradeEodForceFlattenFalse_propagatesVerbatim_andTtlsFromConfig() {
     when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
         .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
