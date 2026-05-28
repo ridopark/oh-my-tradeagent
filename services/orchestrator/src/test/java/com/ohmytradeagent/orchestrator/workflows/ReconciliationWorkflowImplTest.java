@@ -374,10 +374,10 @@ class ReconciliationWorkflowImplTest {
     // Issue #221 (parallel to positionOrphan_priorDetectionWithinWindow_isDebounced): the same
     // journal entry has already been detected as a JournalOrphan within the debounce window. The
     // workflow must suppress both the per-cycle JournalOrphan audit AND the JournalOrphanOngoing
-    // escalation (priorCount=1 short-circuits before the firstSeenJournalOrphan time-gate, since
-    // the @BeforeEach default for firstSeenJournalOrphan returns null and the workflow only calls
-    // it when the time-based escalation actually has a chance to fire). Summary still counts the
-    // orphan since the journal state is unchanged.
+    // escalation (priorCount=1 enters the else/debounce-suppression branch; firstSeenJournalOrphan
+    // IS called but returns null by default — Mockito's default for unstubbed Object methods — so
+    // the `firstSeen != null` guard prevents the JournalOrphanOngoing escalation). Summary still
+    // counts the orphan since the journal state is unchanged.
     OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-debounce", "OCC-debounce", old)));
