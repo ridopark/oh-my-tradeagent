@@ -269,14 +269,30 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
     if (riskBreachReceived && fillEvent == null) {
       // Cascade arrived before the onFill signal landed — but the broker may have already filled
-      // (the async onFill races the breach and can lose). Reconcile broker truth via cancelOrder:
-      // ExecActivitiesImpl returns state=FILLED with broker-confirmed filled_qty/avg_fill_price on
-      // a cancel-on-filled race. Issue #274: adopt the filled lot through the existing
-      // handleCancelOnFilled → startPositionWorkflow recovery (the TTL-expiry path already does
-      // this) instead of discarding the result and orphaning. Versioned so replays of pre-fix
-      // histories deterministically take the legacy audit-and-abort path below.
+      // (the async onFill races the breach and can lose). Issue #274: reconcile broker truth via
+      // cancelOrder, which returns state=FILLED with broker-confirmed filled_qty/avg_fill_price on
+      // a cancel-on-filled race (ExecActivitiesImpl ALREADY_FILLED → markFilled), and adopt the
+      // filled lot through the existing handleCancelOnFilled → startPositionWorkflow recovery (the
+      // TTL-expiry path already does this) instead of discarding the result and orphaning.
+      //
+      // Versioned for replay determinism. The legacy (v=DEFAULT_VERSION) branch preserves the
+      // pre-fix command order EXACTLY — auditRiskBreachAbort (Log) before cancelOrder (CancelOrder)
+      // — so replays of in-flight pre-fix histories that already took this branch match their
+      // recorded ActivityTaskScheduled sequence. The new (v>=1) branch reorders to capture the
+      // cancel result first, which is safe because it only ever runs against histories minted with
+      // the version marker present.
       int breachAdoptionVersion =
           Workflow.getVersion(VERSION_BREACH_FILLED_ADOPTION, Workflow.DEFAULT_VERSION, 1);
+      if (breachAdoptionVersion == Workflow.DEFAULT_VERSION) {
+        // Legacy path: audit-and-abort, best-effort cancel (result discarded), unchanged ordering.
+        auditRiskBreachAbort(payload, "bto_pre_fill", intentKey);
+        try {
+          exec.cancelOrder(intentKey);
+        } catch (RuntimeException ignored) {
+          // Best-effort: reconciliation closes any orphan broker order.
+        }
+        return payload.getSignalId();
+      }
       OrderIntentResult cancelResult;
       try {
         cancelResult = exec.cancelOrder(intentKey);
@@ -286,12 +302,11 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         auditRiskBreachAbort(payload, "bto_pre_fill", intentKey);
         return payload.getSignalId();
       }
-      if (breachAdoptionVersion >= 1 && cancelResult.getState() == OrderIntentResult.State.FILLED) {
+      if (cancelResult.getState() == OrderIntentResult.State.FILLED) {
         handleCancelOnFilled(payload, config, resolved, cancelResult);
         return payload.getSignalId();
       }
-      // Genuinely cancelled (or version-gated-off / non-FILLED legacy replay): keep
-      // audit-and-abort.
+      // Genuinely cancelled (or any non-FILLED state): keep audit-and-abort.
       auditRiskBreachAbort(payload, "bto_pre_fill", intentKey);
       return payload.getSignalId();
     }
