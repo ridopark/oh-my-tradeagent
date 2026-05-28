@@ -55,15 +55,33 @@ class BtoPricingTest {
   }
 
   @Test
-  void onlyPctSet_returnsSlipPct() {
-    // 3.10 * (1 + 0.05) = 3.255
+  void onlyPctSet_returnsSlipPctRoundedToPennyTick() {
+    // 3.10 * (1 + 0.05) = 3.255, rounded HALF_UP to a penny tick -> 3.26 (Alpaca rejects >2 dp,
+    // Issue #263). The pre-#263 assertion enshrined the un-rounded 3.255 bug; it is corrected here.
     CopytradeSignalPayload p = payloadWithPrice(new BigDecimal("3.10"));
     StrategyConfig cfg = configWithSlippage(null, new BigDecimal("0.05"));
 
     PricedLimit out = BtoPricing.computeBtoLimit(p, cfg);
 
     assertThat(out.strategy()).isEqualTo(Strategy.SLIP_PCT);
-    assertThat(out.limit()).isEqualByComparingTo(new BigDecimal("3.255"));
+    assertThat(out.limit()).isEqualByComparingTo(new BigDecimal("3.26"));
+    assertThat(out.limit().scale()).isLessThanOrEqualTo(2);
+  }
+
+  @Test
+  void pctMultiplyLandingOn3dp_roundsToPennyTick_issue263() {
+    // Issue #263 regression: the live PLUG280121C00007000 BTO died because 1.35 * 1.10 = 1.485
+    // (3 dp) drew a non-retryable Alpaca 422 ("limit price must be limited to 2 decimal places"),
+    // killing the CopytradeSignalWorkflow with NO order placed. The limit must round HALF_UP to a
+    // broker-accepted penny tick: 1.485 -> 1.49.
+    CopytradeSignalPayload p = payloadWithPrice(new BigDecimal("1.35"));
+    StrategyConfig cfg = configWithSlippage(null, new BigDecimal("0.10"));
+
+    PricedLimit out = BtoPricing.computeBtoLimit(p, cfg);
+
+    assertThat(out.strategy()).isEqualTo(Strategy.SLIP_PCT);
+    assertThat(out.limit()).isEqualByComparingTo(new BigDecimal("1.49"));
+    assertThat(out.limit().scale()).isLessThanOrEqualTo(2);
   }
 
   @Test
