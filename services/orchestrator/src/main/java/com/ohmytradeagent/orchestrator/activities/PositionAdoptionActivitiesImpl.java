@@ -8,6 +8,7 @@ import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.orchestrator.domain.OccSymbol;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionAlreadyStarted;
 import io.temporal.client.WorkflowOptions;
@@ -225,10 +226,10 @@ public class PositionAdoptionActivitiesImpl implements PositionAdoptionActivitie
     // Issue #246: padding-agnostic match — the operator may supply the broker/audit *compact* OCC
     // while the journal row carries the *padded* OccSymbol.of form (and vice versa). Compare the
     // space-stripped forms, mirroring the journal backstop in JooqOrderIntentJournal:126.
-    String compactOcc = occ == null ? null : occ.replace(" ", "");
+    String compactOcc = OccSymbol.compact(occ);
     for (JournalEntry open : exec.journalDumpOpen(tenantId, strategyId)) {
       String openOcc = open.getOptionSymbol();
-      if (compactOcc != null && openOcc != null && compactOcc.equals(openOcc.replace(" ", ""))) {
+      if (compactOcc != null && openOcc != null && compactOcc.equals(OccSymbol.compact(openOcc))) {
         return open;
       }
     }

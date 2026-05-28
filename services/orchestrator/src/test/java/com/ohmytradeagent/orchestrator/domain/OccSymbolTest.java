@@ -83,4 +83,19 @@ class OccSymbolTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("precision");
   }
+
+  @Test
+  void compact_stripsRootPadding() {
+    assertThat(OccSymbol.compact("UNH   260618C00400000")).isEqualTo("UNH260618C00400000");
+  }
+
+  @Test
+  void compact_nullSafe() {
+    assertThat(OccSymbol.compact(null)).isNull();
+  }
+
+  @Test
+  void compact_isIdempotentOnAlreadyCompact() {
+    assertThat(OccSymbol.compact("UNH260618C00400000")).isEqualTo("UNH260618C00400000");
+  }
 }
