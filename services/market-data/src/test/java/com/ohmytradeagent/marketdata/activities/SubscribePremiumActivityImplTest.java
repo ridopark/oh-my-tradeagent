@@ -10,6 +10,8 @@ import com.ohmytradeagent.marketdata.provider.inmemory.InMemoryMarketData;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
+import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import io.temporal.workflow.SignalMethod;
@@ -91,7 +93,13 @@ class SubscribePremiumActivityImplTest {
   @BeforeEach
   void setUp() {
     TickCapture.lastTick = null;
-    env = TestWorkflowEnvironment.newInstance();
+    // Disable time-skipping: the chandelier_tick signal is dispatched from the activity's real
+    // background executor, so the virtual clock must stay locked to real time. Otherwise
+    // getResult() unlocks time-skipping and the capturing workflow's run timeout expires on the
+    // virtual clock before the real-thread signal RPC lands (issue #230).
+    env =
+        TestWorkflowEnvironment.newInstance(
+            TestEnvironmentOptions.newBuilder().setUseTimeskipping(false).build());
 
     Worker captureWorker = env.newWorker(CAPTURE_QUEUE);
     captureWorker.registerWorkflowImplementationTypes(
@@ -144,12 +152,14 @@ class SubscribePremiumActivityImplTest {
         new BigDecimal("3.10"),
         OffsetDateTime.parse("2026-05-13T17:55:00Z"));
 
-    // 50s deadline (under the 60s @Timeout) — CI runners under load have hit >25s for signal
-    // propagation through TestWorkflowEnvironment; the prior 25s was still too tight.
-    long deadline = System.currentTimeMillis() + 50_000;
-    while (System.currentTimeMillis() < deadline && TickCapture.lastTick == null) {
-      Thread.sleep(50);
-    }
+    // Deterministically wait for the captured signal by blocking on the capturing workflow's
+    // terminal result. CapturingWorkflowImpl.run() returns "done" exactly when
+    // Workflow.await(() -> TickCapture.lastTick != null) unblocks, so this returns only after the
+    // chandelier_tick signal has been received and lastTick set. With time-skipping disabled (see
+    // setUp), the workflow's run timeout cannot expire ahead of the real-thread signal. This
+    // replaces the prior wall-clock busy-poll, which raced a fixed real-time budget against an
+    // async signal path and flaked under CI scheduling pressure (issue #230).
+    WorkflowStub.fromTyped(target).getResult(String.class);
 
     assertThat(TickCapture.lastTick).isNotNull();
     assertThat(TickCapture.lastTick.getPremium().doubleValue()).isEqualTo(3.10);
