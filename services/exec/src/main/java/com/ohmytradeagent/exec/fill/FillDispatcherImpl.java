@@ -72,16 +72,44 @@ public class FillDispatcherImpl implements FillDispatcher {
 
   @Override
   public void dispatch(BrokerFillEvent event) {
+    // #244: resolve the journal row by broker_order_id first, then fall back to the
+    // client_order_id (== intent_key, set at upsertIntent and passed to the broker). The fallback
+    // closes the ~26ms submit/fill race: a WS fill can arrive AFTER broker.placeOrder returns but
+    // BEFORE ExecActivitiesImpl.placeOrder runs markSubmittedIfRecorded(intentKey, brokerOrderId),
+    // so the row carries no broker_order_id yet and findByBrokerOrderId is empty. Without the
+    // fallback the fill was logged unknown + dropped, leaving the row stuck SUBMITTED and stranding
+    // the position. Only a fill that resolves by NEITHER key is a genuine unknown.
     Optional<JournaledOrder> row = journal.findByBrokerOrderId(event.brokerOrderId());
+    if (row.isEmpty() && event.clientOrderId() != null) {
+      row = journal.findByIntentKey(event.clientOrderId());
+    }
     if (row.isEmpty()) {
       log.warn(
-          "fill-dispatcher unknown broker_order_id={} source={}; dropping",
+          "fill-dispatcher unknown broker_order_id={} client_order_id={} source={}; dropping",
           event.brokerOrderId(),
+          event.clientOrderId(),
           event.source());
       metrics.recordUnknownOrder();
       return;
     }
     JournaledOrder order = row.get();
+
+    // #244: terminalize the journal to FILLED BEFORE signalling. markFilled is conditional on the
+    // row being in (RECORDED, SUBMITTED), so a repeat (WS then POLL, or a re-delivery) is an
+    // idempotent no-op and never corrupts qty/price. Doing this before the signal guarantees the
+    // row reaches FILLED even if the onFill target has already completed (the previous behaviour
+    // only signalled and swallowed WorkflowNotFoundException, leaving the row stranded SUBMITTED).
+    boolean terminalized =
+        journal.markFilled(
+            order.intentKey(), event.filledQty(), event.avgFillPrice(), event.filledAt());
+    if (terminalized) {
+      log.info(
+          "fill-dispatcher journal terminalized FILLED intent_key={} broker_order_id={} qty={}",
+          order.intentKey(),
+          event.brokerOrderId(),
+          event.filledQty());
+    }
+
     String workflowId = resolveWorkflowId(order);
     FillSignalPayload payload =
         new FillSignalPayload()
@@ -99,6 +127,8 @@ public class FillDispatcherImpl implements FillDispatcher {
           event.brokerOrderId(),
           event.filledQty());
     } catch (WorkflowNotFoundException e) {
+      // Benign: the journal is already terminalized above, so the position is not stranded — recon
+      // / adoption can spawn the owner workflow from the FILLED row.
       log.info(
           "fill-dispatcher workflow already completed workflow_id={} broker_order_id={}",
           workflowId,
