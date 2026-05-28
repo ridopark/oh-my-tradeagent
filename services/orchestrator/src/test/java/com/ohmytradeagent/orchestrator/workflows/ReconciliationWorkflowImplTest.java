@@ -320,6 +320,36 @@ class ReconciliationWorkflowImplTest {
   }
 
   @Test
+  void run_brokerCompactOccVsJournalPaddedOcc_resolvesOwnerNoOrphan() {
+    // Issue #243: the broker reports the *compact* OCC (Alpaca strips the space-padding on order
+    // placement and returns the compact symbol from listOpenPositions) while the journal row — and
+    // the running PositionWorkflow id, built at spawn from OccSymbol.of's %-6s padded root — hold
+    // the *padded* 21-char OCC. Recon must rebuild expected_workflow_id from the journal row's
+    // canonical (padded) option_symbol, not the broker's compact form, so the running owner is
+    // found and NO false PositionOrphan fires.
+    String compactOcc = "SPY260519C00737000";
+    String paddedOcc = "SPY   260519C00737000";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(compactOcc, 5L, new BigDecimal("0.84"))));
+    // The journal lookup is format-agnostic (JooqOrderIntentJournal.findLatestFilledByOcc strips
+    // padding), so a compact broker OCC resolves the padded FILLED row.
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(compactOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-1506342699765338194:0", paddedOcc)));
+    // The live owner's workflow id carries the PADDED OCC (spawn-time form). Recon must look it up
+    // under that id, not the compact one.
+    String paddedWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-1506342699765338194:0";
+    when(positionLookup.isPositionWorkflowRunning(eq(paddedWfId))).thenReturn(true);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+  }
+
+  @Test
   void run_brokerPositionMissingJournalEntry_emitsPositionOrphanMissing() {
     // Broker holds a position with no FILLED journal record → strongest orphan signal, emit a
     // PositionOrphan with expected_workflow_id=null + journal_status=missing.
