@@ -17,6 +17,7 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
+import com.ohmytradeagent.orchestrator.domain.OptionTick;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
@@ -1139,7 +1140,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     i.setOptionSymbol(input.getContractSymbol());
     i.setSide(OrderIntent.Side.SELL);
     i.setQty(qty);
-    i.setLimitPrice(limitPrice);
+    // Issue #266 (trading-critical): round the exit/STC limit to a penny tick before placement.
+    // limitPrice flows in from req.getRefPremium()/freshLimit (the chandelier mid, author-posted
+    // ref, or peak), any of which can be >2 dp; an unrounded SELL limit draws a non-retryable
+    // Alpaca 422 = FAILED position close. Shared OptionTick.round() keeps this in lock-step with
+    // the
+    // entry path (BtoPricing) and is deterministic, so it is replay-safe inside workflow code.
+    i.setLimitPrice(OptionTick.round(limitPrice));
     i.setRecordedAt(workflowNow());
     return i;
   }

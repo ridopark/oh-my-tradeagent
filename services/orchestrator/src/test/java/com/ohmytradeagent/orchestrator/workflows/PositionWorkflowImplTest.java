@@ -180,6 +180,42 @@ class PositionWorkflowImplTest {
     assertThat(asLong(partialFills.get(1).getSubject().get("qty_filled"))).isEqualTo(2L);
   }
 
+  /**
+   * Issue #266 Gap A (trading-critical): the exit/STC limit fed into {@code exitIntent} from {@code
+   * req.getRefPremium()} was placed UNROUNDED. A {@code refPremium} of 3.255 would submit a 3-dp
+   * SELL limit and draw a non-retryable Alpaca 422 — a FAILED position close (worse than a failed
+   * entry: the position is stranded with no STC). The exit limit must be rounded to a penny tick
+   * via the shared {@link com.ohmytradeagent.orchestrator.domain.OptionTick#round(BigDecimal)}
+   * helper before the {@code OrderIntent} is placed: 3.255 -> 3.26.
+   */
+  @Test
+  void exitLimit_isRoundedToPennyTickBeforePlacement_issue266() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-exit-round");
+    WorkflowStub.fromTyped(stub).start(input(4));
+    confirmEntry(stub, 4L);
+
+    // STC with a 3-dp refPremium that must round HALF_UP to a broker-accepted penny tick.
+    PartialExitRequest req = partialExitRequest("sig-round", "pos-exit-round", 1.0);
+    req.setRefPremium(new BigDecimal("3.255"));
+    stub.partialExit(req);
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-round", 4L, new BigDecimal("3.20")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent exit =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL && i.getLimitPrice() != null)
+            .reduce((a, b) -> b)
+            .orElseThrow(() -> new AssertionError("no SELL OrderIntent with a limit price placed"));
+    assertThat(exit.getLimitPrice()).isEqualByComparingTo(new BigDecimal("3.26"));
+    assertThat(exit.getLimitPrice().scale()).isLessThanOrEqualTo(2);
+  }
+
   @Test
   void duplicateSignalId_isSuppressed() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
