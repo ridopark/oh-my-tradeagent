@@ -35,6 +35,7 @@ import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDate;
@@ -675,6 +676,102 @@ class CopytradeSignalWorkflowImplTest {
             all.getAllValues().stream()
                 .anyMatch(e -> "SignalAbortedByRiskBreach".equals(e.getKind())))
         .isFalse();
+  }
+
+  @Test
+  void riskBreach_btoPath_afterFill_cancelThrows_auditsAndAbortsWithoutStartingPositionWorkflow() {
+    // Issue #279: the v>=1 breach-abort path wraps exec.cancelOrder in a try/catch (see
+    // CopytradeSignalWorkflowImpl#handleBto). When the broker-truth reconciliation cancel THROWS
+    // (rather than returning CANCELLED or FILLED), the workflow must fall back to the genuine
+    // audit-and-abort: emit SignalAbortedByRiskBreach and start NO PositionWorkflow. This pins the
+    // catch branch that the happy-path adoption test (cancel returns FILLED) and the
+    // returns-CANCELLED test do not exercise.
+    StrategyConfig cfg = config();
+    cfg.setPendingTtlPaperSecs(120L); // generous TTL so we can signal before it expires
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any())).thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-1"));
+    // The reconciliation cancel throws — the broker is unreachable / errored. The v>=1 branch's
+    // catch must route to audit-and-abort, NOT adopt a (nonexistent) filled lot.
+    when(exec.cancelOrder(anyString()))
+        .thenThrow(new IllegalStateException("broker_unreachable_during_cancel"));
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("rb-bto-cancel-throws-1")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+
+    // Wait until placeOrder was called (workflow now awaiting fill) then risk_breach with no
+    // preceding onFill — fillEvent==null when the breach wakes the await, exactly the live race.
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, atLeastOnce()).placeOrder(any());
+        break;
+      } catch (AssertionError ignored) {
+        try {
+          Thread.sleep(50);
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+          break;
+        }
+      }
+    }
+
+    wf.riskBreach(riskBreach("auto:daily_loss", "auto:daily_loss"));
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    // The cancel threw, so the genuine audit-and-abort fires with the breach reason.
+    AuditEvent aborted = capture("SignalAbortedByRiskBreach");
+    assertThat(aborted.getSubject()).containsEntry("reason", "auto:daily_loss");
+    assertThat(aborted.getSubject()).containsEntry("stage", "bto_pre_fill");
+    verify(exec, atLeastOnce()).cancelOrder(anyString());
+
+    // No lot was adopted: no EntryFilled audit, and NO PositionWorkflow started
+    // (cachePositionMapping is startPositionWorkflow's last side-effect).
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    assertThat(all.getAllValues().stream().anyMatch(e -> "EntryFilled".equals(e.getKind())))
+        .isFalse();
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+  }
+
+  /**
+   * Issue #279: reflective constant-name pin for the breach/TTL filled-adoption change-ids,
+   * mirroring the {@code VERSION_PRE_TRADE_DISPATCH} precedent in {@link
+   * CopytradeSignalWorkflowImplLegacyReplayTest#versionPreTradeDispatchConstantNameIsStable}.
+   * Renaming or re-valuing either {@code Workflow.getVersion} change-id string after the gate is
+   * deployed would re-introduce the non-determinism the gates were added to prevent — in-flight
+   * histories minted with the OLD change-id would no longer find their marker and would replay
+   * through the wrong branch. The string VALUES are load-bearing, so this test pins them exactly.
+   */
+  @Test
+  void versionFilledAdoptionConstantNamesAreStable() throws Exception {
+    Field breach =
+        CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_BREACH_FILLED_ADOPTION");
+    breach.setAccessible(true);
+    assertThat((String) breach.get(null)).isEqualTo("breach-filled-adoption-v1");
+
+    Field ttl = CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_TTL_FILLED_ADOPTION");
+    ttl.setAccessible(true);
+    assertThat((String) ttl.get(null)).isEqualTo("ttl-filled-adoption-v1");
   }
 
   @Test
