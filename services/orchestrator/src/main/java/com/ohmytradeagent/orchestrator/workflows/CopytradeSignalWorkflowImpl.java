@@ -70,6 +70,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // Issue #165 phase 2: gate the FILLED branch in handleTtlExpired so pre-fix replay histories
   // deterministically take the legacy CANCELLED/else paths. Mirrors VERSION_POSITION_HANDOFF.
   private static final String VERSION_TTL_FILLED_ADOPTION = "ttl-filled-adoption-v1";
+  // Issue #274: gate the FILLED branch in the BTO risk-breach abort so pre-fix replay histories
+  // deterministically take the legacy audit-and-abort path. When a breach wakes the fill-await
+  // before the async onFill signal lands but the broker has already filled, exec.cancelOrder
+  // reconciles broker truth and returns state=FILLED; the v>=1 branch adopts the lot via
+  // handleCancelOnFilled instead of discarding the result and orphaning. Mirrors
+  // VERSION_TTL_FILLED_ADOPTION.
+  private static final String VERSION_BREACH_FILLED_ADOPTION = "breach-filled-adoption-v1";
   // Issue #112: Gate the 3-activity pre-trade dispatch (assertPreTradeCheckRoutable →
   // dispatchPreTradeCheck → checkEntryWithLimit(payload, config, preTradeResult, limit))
   // introduced in PR #111 and tightened in #198 to thread the slip-adjusted limit through.
@@ -261,13 +268,46 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         Workflow.await(Duration.ofSeconds(ttlSecs), () -> fillEvent != null || riskBreachReceived);
 
     if (riskBreachReceived && fillEvent == null) {
-      // Cascade arrived before fill — cancel the pending entry order best-effort.
-      auditRiskBreachAbort(payload, "bto_pre_fill", intentKey);
-      try {
-        exec.cancelOrder(intentKey);
-      } catch (RuntimeException ignored) {
-        // Best-effort: reconciliation closes any orphan broker order.
+      // Cascade arrived before the onFill signal landed — but the broker may have already filled
+      // (the async onFill races the breach and can lose). Issue #274: reconcile broker truth via
+      // cancelOrder, which returns state=FILLED with broker-confirmed filled_qty/avg_fill_price on
+      // a cancel-on-filled race (ExecActivitiesImpl ALREADY_FILLED → markFilled), and adopt the
+      // filled lot through the existing handleCancelOnFilled → startPositionWorkflow recovery (the
+      // TTL-expiry path already does this) instead of discarding the result and orphaning.
+      //
+      // Versioned for replay determinism. The legacy (v=DEFAULT_VERSION) branch preserves the
+      // pre-fix command order EXACTLY — auditRiskBreachAbort (Log) before cancelOrder (CancelOrder)
+      // — so replays of in-flight pre-fix histories that already took this branch match their
+      // recorded ActivityTaskScheduled sequence. The new (v>=1) branch reorders to capture the
+      // cancel result first, which is safe because it only ever runs against histories minted with
+      // the version marker present.
+      int breachAdoptionVersion =
+          Workflow.getVersion(VERSION_BREACH_FILLED_ADOPTION, Workflow.DEFAULT_VERSION, 1);
+      if (breachAdoptionVersion == Workflow.DEFAULT_VERSION) {
+        // Legacy path: audit-and-abort, best-effort cancel (result discarded), unchanged ordering.
+        auditRiskBreachAbort(payload, "bto_pre_fill", intentKey);
+        try {
+          exec.cancelOrder(intentKey);
+        } catch (RuntimeException ignored) {
+          // Best-effort: reconciliation closes any orphan broker order.
+        }
+        return payload.getSignalId();
       }
+      OrderIntentResult cancelResult;
+      try {
+        cancelResult = exec.cancelOrder(intentKey);
+      } catch (RuntimeException ignored) {
+        // Best-effort cancel failed: audit-and-abort; reconciliation closes any orphan broker
+        // order.
+        auditRiskBreachAbort(payload, "bto_pre_fill", intentKey);
+        return payload.getSignalId();
+      }
+      if (cancelResult.getState() == OrderIntentResult.State.FILLED) {
+        handleCancelOnFilled(payload, config, resolved, cancelResult);
+        return payload.getSignalId();
+      }
+      // Genuinely cancelled (or any non-FILLED state): keep audit-and-abort.
+      auditRiskBreachAbort(payload, "bto_pre_fill", intentKey);
       return payload.getSignalId();
     }
 

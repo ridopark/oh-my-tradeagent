@@ -564,6 +564,109 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
+  void riskBreach_btoPath_afterFill_adoptsPositionInsteadOfOrphaning() {
+    // Issue #274: a risk_breach landing in the fill-await race window must NOT orphan an
+    // already-filled entry. The async onFill signal may not have landed when the breach woke the
+    // await, but exec.cancelOrder reconciles broker truth and returns state=FILLED with the
+    // broker-confirmed filled_qty/avg_fill_price (ExecActivitiesImpl ALREADY_FILLED → markFilled).
+    // The breach-abort branch must capture that result and route to handleCancelOnFilled →
+    // startPositionWorkflow (the same recovery the TTL path uses) instead of discarding it.
+    StrategyConfig cfg = config();
+    cfg.setPendingTtlPaperSecs(120L); // generous TTL so we can signal before it expires
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any())).thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-1"));
+    // The cancel races the broker fill and loses: broker reports already-filled with 25 contracts.
+    OrderIntentResult cancelFilled = submittedResult("intent-K", "brk-1");
+    cancelFilled.setState(OrderIntentResult.State.FILLED);
+    cancelFilled.setFilledQty(25L);
+    cancelFilled.setAvgFillPrice(new BigDecimal("0.88"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelFilled);
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("rb-bto-filled-1")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+
+    // Wait until placeOrder was called (workflow now awaiting fill) then risk_breach with no
+    // preceding onFill — fillEvent==null when the breach wakes the await, exactly the live race.
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, atLeastOnce()).placeOrder(any());
+        break;
+      } catch (AssertionError ignored) {
+        try {
+          Thread.sleep(50);
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+          break;
+        }
+      }
+    }
+
+    wf.riskBreach(riskBreach("auto:daily_loss", "auto:daily_loss"));
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    // EntryFilled emitted with a recovery marker and the broker-confirmed 25 contracts.
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(filled.getSubject())
+        .containsEntry("outcome", "FILLED")
+        .containsEntry("recovery", "cancel_on_filled")
+        .containsEntry("broker_order_id", "brk-1");
+    assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(25L);
+
+    // PositionWorkflow was started — cachePositionMapping is startPositionWorkflow's last
+    // side-effect — using the canonical WorkflowIds.position id (asserted via the STC cache hit
+    // below). The lot is adopted, not orphaned.
+    verify(positionLookup, atLeastOnce())
+        .cachePositionMapping(
+            eq("dev"), eq("copytrade-v1"), eq("NVDA  260516C00140000"), anyString());
+
+    // Subsequent STC on the same OCC routes to partialExit (ExitRequested), not OrphanSTC.
+    String posWfId = WorkflowIds.position("dev", "copytrade-v1", "NVDA  260516C00140000", "111:0");
+    when(positionLookup.findPositionWorkflowId("dev", "copytrade-v1", "NVDA  260516C00140000"))
+        .thenReturn(posWfId);
+
+    CopytradeSignalPayload stc = btoPayload();
+    stc.setAction(CopytradeSignalPayload.Action.STC);
+    stc.setTail("half out");
+    stc.setSignalId("111:1");
+    runWorkflow(stc);
+
+    AuditEvent exit = capture("ExitRequested");
+    assertThat(exit.getSubject())
+        .containsEntry("signal_id", "111:1")
+        .containsEntry("position_workflow_id", posWfId);
+
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    assertThat(all.getAllValues().stream().anyMatch(e -> "OrphanSTC".equals(e.getKind())))
+        .isFalse();
+    // The genuine-pre-fill abort audit must NOT fire on the adopted path.
+    assertThat(
+            all.getAllValues().stream()
+                .anyMatch(e -> "SignalAbortedByRiskBreach".equals(e.getKind())))
+        .isFalse();
+  }
+
+  @Test
   void riskBreach_stcPath_shortCircuitsBeforeDispatch() throws Exception {
     StrategyConfig cfg = stcConfig();
     cfg.setPendingTtlPaperSecs(120L); // generous buffer so the STC sleep loop is still in play
