@@ -99,15 +99,33 @@ public class FillDispatcherImpl implements FillDispatcher {
     // idempotent no-op and never corrupts qty/price. Doing this before the signal guarantees the
     // row reaches FILLED even if the onFill target has already completed (the previous behaviour
     // only signalled and swallowed WorkflowNotFoundException, leaving the row stranded SUBMITTED).
-    boolean terminalized =
-        journal.markFilled(
-            order.intentKey(), event.filledQty(), event.avgFillPrice(), event.filledAt());
-    if (terminalized) {
-      log.info(
-          "fill-dispatcher journal terminalized FILLED intent_key={} broker_order_id={} qty={}",
+    //
+    // #250: gate terminalization on a COMPLETE fill. Alpaca's WS partial_fill events carry
+    // filled_qty as the cumulative-so-far quantity (< order.qty()); terminalizing on a partial
+    // would lock the row at the partial qty and lose remaining-qty accounting. Only the terminal
+    // WS fill (filledQty == order.qty()) — or the POLL backstop, which never delivers a partial
+    // (AlpacaPaperBroker.mapStatus maps partially_filled -> OPEN, only filled -> FILLED) —
+    // terminalizes, and it carries the full qty. The onFill signal below is intentionally still
+    // sent for partials so partial-fill signalling is preserved.
+    if (event.filledQty() >= order.qty()) {
+      boolean terminalized =
+          journal.markFilled(
+              order.intentKey(), event.filledQty(), event.avgFillPrice(), event.filledAt());
+      if (terminalized) {
+        log.info(
+            "fill-dispatcher journal terminalized FILLED intent_key={} broker_order_id={} qty={}",
+            order.intentKey(),
+            event.brokerOrderId(),
+            event.filledQty());
+      }
+    } else {
+      log.debug(
+          "fill-dispatcher partial fill not terminalizing intent_key={} broker_order_id={}"
+              + " filled_qty={} order_qty={}",
           order.intentKey(),
           event.brokerOrderId(),
-          event.filledQty());
+          event.filledQty(),
+          order.qty());
     }
 
     String workflowId = resolveWorkflowId(order);
