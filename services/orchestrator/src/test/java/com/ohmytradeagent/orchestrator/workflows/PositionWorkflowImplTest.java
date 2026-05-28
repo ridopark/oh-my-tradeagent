@@ -1307,6 +1307,107 @@ class PositionWorkflowImplTest {
   }
 
   /**
+   * Issue #227: when the chandelier is armed (peak populated) but no tick has arrived (so {@code
+   * lastTickPremium} stays null) AND the request carries a non-null {@code refPremium}, the retry's
+   * fresh limit price MUST be sourced from {@code req.getRefPremium()} — NOT from {@code
+   * peakPremium}. Rationale: {@code peakPremium} is a high-water-mark biased high for SELL exits;
+   * the author-posted {@code refPremium} is the closest fresh-quote proxy when no tick has fired.
+   * The new order is {@code lastTickPremium → refPremium → peakPremium}; this test exercises the
+   * middle branch (ref wins over peak).
+   */
+  @Test
+  void processOne_exitFillTimeoutRetry_refPremiumPreferredOverPeak() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-retry-ref-over-peak");
+    WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
+
+    // Arm the chandelier so peakPremium=2.85 is latched, but do NOT fire a tick — lastTickPremium
+    // stays null. Under the new order, refPremium (3.10) MUST win over peakPremium (2.85).
+    stub.armChandelier(
+        armPayload(
+            "pos-retry-ref-over-peak",
+            "src-arm-227",
+            new BigDecimal("2.85"),
+            new BigDecimal("0.15")));
+
+    // STC with an explicit refPremium=3.10 (distinct from the armed peak=2.85 so the audit
+    // assertion is unambiguous).
+    PartialExitRequest req =
+        partialExitRequest("sig-ref-over-peak", "pos-retry-ref-over-peak", 0.5);
+    req.setRefPremium(new BigDecimal("3.10"));
+    stub.partialExit(req);
+    waitForPlaceOrderCount(1);
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-retry-ref-over-peak", 2L, new BigDecimal("3.05")));
+
+    // Drain the remaining runner.
+    stub.partialExit(partialExitRequest("sig-ref-over-peak-close", "pos-retry-ref-over-peak", 1.0));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-ref-over-peak-close", 1L, new BigDecimal("3.00")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent retry = captureKind("PartialExitRetryRequested");
+    assertThat(retry.getSubject())
+        .containsEntry("signal_id", "sig-ref-over-peak")
+        .containsEntry("source_premium", "ref_premium");
+    // fresh_limit_price reflects refPremium (3.10), NOT the armed peakPremium (2.85).
+    assertThat(((Number) retry.getSubject().get("fresh_limit_price")).doubleValue())
+        .isEqualTo(3.10);
+  }
+
+  /**
+   * Issue #227: when both {@code lastTickPremium} AND {@code req.getRefPremium()} are null/zero,
+   * {@code peakPremium} is the last-resort source. Drives the {@code source_premium=peak_premium}
+   * audit and confirms peak only wins when both higher-priority sources are absent.
+   */
+  @Test
+  void processOne_exitFillTimeoutRetry_peakPremiumOnlyWhenLastTickAndRefAbsent() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-retry-peak-fallback");
+    WorkflowStub.fromTyped(stub).start(input(3));
+    confirmEntry(stub, 3L);
+
+    // Arm the chandelier with peak=2.85; no tick → lastTickPremium null.
+    stub.armChandelier(
+        armPayload(
+            "pos-retry-peak-fallback",
+            "src-arm-227-peak",
+            new BigDecimal("2.85"),
+            new BigDecimal("0.15")));
+
+    // STC with refPremium explicitly null so peak is the only available source.
+    PartialExitRequest req =
+        partialExitRequest("sig-peak-fallback", "pos-retry-peak-fallback", 0.5);
+    req.setRefPremium(null);
+    stub.partialExit(req);
+    waitForPlaceOrderCount(1);
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-retry-peak-fallback", 2L, new BigDecimal("2.80")));
+
+    // Drain the remaining runner.
+    stub.partialExit(partialExitRequest("sig-peak-fallback-close", "pos-retry-peak-fallback", 1.0));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-peak-fallback-close", 1L, new BigDecimal("2.75")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent retry = captureKind("PartialExitRetryRequested");
+    assertThat(retry.getSubject())
+        .containsEntry("signal_id", "sig-peak-fallback")
+        .containsEntry("source_premium", "peak_premium");
+    assertThat(((Number) retry.getSubject().get("fresh_limit_price")).doubleValue())
+        .isEqualTo(2.85);
+  }
+
+  /**
    * Issue #216 PR #226 review follow-up: v=0 back-compat envelope for the new {@code
    * VERSION_EXIT_RETRY_ON_TIMEOUT} gate. Under {@code DEFAULT_VERSION} (an in-flight workflow that
    * started before #216 shipped), the timeout branch must drop the STC on the first timeout — one

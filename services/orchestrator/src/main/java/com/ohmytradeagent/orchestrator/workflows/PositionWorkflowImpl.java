@@ -167,6 +167,20 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_EXIT_RETRY_ON_TIMEOUT = "exit-retry-on-timeout";
 
   /**
+   * Issue #227 replay gate. v=DEFAULT_VERSION (in-flight workflows that already entered the #216
+   * retry block under PR #226 v=1) keep the original {@code lastTickPremium → peakPremium →
+   * refPremium} fresh-limit fallback order for byte-identical replay. v>=1 (new executions) use the
+   * corrected order {@code lastTickPremium → refPremium → peakPremium} — {@code peakPremium} is a
+   * chandelier high-water-mark biased high for SELL exits, so it is the last-resort fallback rather
+   * than a preferred source. Distinct from the eight prior session keys ({@link
+   * #VERSION_DEFER_POSITION_ENTERED} #203, {@link #VERSION_EXIT_FILL_TIMEOUT} #204, {@link
+   * #VERSION_MIN_PARTIAL_QTY_SKIP} #205, {@link #VERSION_TTL_FROM_INPUT} #212, {@link
+   * #VERSION_EXIT_RETRY_ON_TIMEOUT} #216, the chandelier / risk-breach / force-close gates) so the
+   * source-order change rolls independently of the underlying retry machinery.
+   */
+  private static final String VERSION_EXIT_RETRY_SOURCE_ORDER = "exit-retry-source-order";
+
+  /**
    * Issue #203 / #212 fallback: bounded wait for the first onFill before the workflow gives up and
    * emits PositionNeverFilled. Matches {@code pending_ttl_paper_secs} in {@code copytrade-v1.yaml}
    * (90s paper default). Used (a) for v=DEFAULT_VERSION replays under {@link
@@ -870,6 +884,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     int retryVersion =
         Workflow.getVersion(VERSION_EXIT_RETRY_ON_TIMEOUT, Workflow.DEFAULT_VERSION, 1);
     int maxRetries = retryVersion >= 1 ? 1 : 0;
+    // Issue #227: gate the fresh-limit source-order swap. v=DEFAULT_VERSION (in-flight workflows
+    // that already entered the retry block under PR #226) keep the original lastTick → peak → ref
+    // chain for replay safety; v>=1 (new executions) use the corrected lastTick → ref → peak chain.
+    int sourceOrderVersion =
+        Workflow.getVersion(VERSION_EXIT_RETRY_SOURCE_ORDER, Workflow.DEFAULT_VERSION, 1);
     int retryCount = 0;
     long exitFillTtlSecs = 0L;
 
@@ -883,22 +902,37 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         intent = exitIntent(req, qtyToClose, intentKey, req.getRefPremium());
       } else {
         // Issue #216 retry: fresh intent_key (the prior one was cancelled) and fresh limit price.
-        // Source preference: lastTickPremium (most recent chandelier mid) > peakPremium
-        // (chandelier-armed but no tick yet) > req.getRefPremium() (the author-posted price the
-        // original limit was based on, now treated as a fresh quote). Keeps the source explicit
-        // and deterministic for replay; no activity call needed.
+        // Source preference under VERSION_EXIT_RETRY_SOURCE_ORDER v>=1 (#227):
+        //   lastTickPremium (most recent chandelier mid) > req.getRefPremium() (author-posted price
+        //   treated as a fresh quote) > peakPremium (chandelier high-water-mark; last-resort
+        //   because it is biased high for SELL exits and so over-quotes the bid).
+        // Under v=DEFAULT_VERSION (in-flight workflows that already executed the retry branch
+        // under PR #226) the original lastTick → peak → ref chain is preserved for byte-identical
+        // replay. Both branches are deterministic and need no activity call.
         intentKey = Workflow.getInfo().getWorkflowId() + ":exit:" + req.getSignalId() + ":retry";
         BigDecimal freshLimit;
         String source;
         if (lastTickPremium != null && lastTickPremium.signum() > 0) {
           freshLimit = lastTickPremium;
           source = "last_tick_premium";
-        } else if (peakPremium != null && peakPremium.signum() > 0) {
-          freshLimit = peakPremium;
-          source = "peak_premium";
+        } else if (sourceOrderVersion >= 1) {
+          // #227 v>=1: ref before peak.
+          if (req.getRefPremium() != null && req.getRefPremium().signum() > 0) {
+            freshLimit = req.getRefPremium();
+            source = "ref_premium";
+          } else {
+            freshLimit = peakPremium;
+            source = "peak_premium";
+          }
         } else {
-          freshLimit = req.getRefPremium();
-          source = "ref_premium";
+          // v=DEFAULT_VERSION: legacy peak before ref (PR #226 ordering).
+          if (peakPremium != null && peakPremium.signum() > 0) {
+            freshLimit = peakPremium;
+            source = "peak_premium";
+          } else {
+            freshLimit = req.getRefPremium();
+            source = "ref_premium";
+          }
         }
         auditLog(
             KIND_PARTIAL_EXIT_RETRY_REQUESTED,
