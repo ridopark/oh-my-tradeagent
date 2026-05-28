@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.common.RetryOptions;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
@@ -39,6 +40,20 @@ final class ExecActivitiesFactory {
 
   private static final Duration DEFAULT_START_TO_CLOSE = Duration.ofSeconds(15);
 
+  /**
+   * Issue #264: bound the exec-activity retry policy. The stub previously set only task-queue +
+   * start-to-close, leaving Temporal's default activity policy (unbounded retries with NPEs treated
+   * as retryable) — so a programming error such as a null {@code OrderIntent.brokerTarget} NPE
+   * looped to 1637+ attempts. The {@code InvalidOrderIntentError} non-retryable failure added in
+   * {@code ExecActivitiesImpl.placeOrder} already terminates that specific path; this max-attempts
+   * cap is the defense-in-depth backstop so <em>any</em> future programming error in the activity
+   * fails the workflow fast instead of spinning forever. 5 attempts mirrors the bounded-retry
+   * precedent at {@code CopytradeSignalWorkflowImpl} (pre-trade check, {@code
+   * setMaximumAttempts(3)}) with a little extra headroom for genuinely-transient broker/journal
+   * hiccups on the order path.
+   */
+  private static final int MAX_ATTEMPTS = 5;
+
   private ExecActivitiesFactory() {}
 
   /**
@@ -53,6 +68,7 @@ final class ExecActivitiesFactory {
         ActivityOptions.newBuilder()
             .setTaskQueue(taskQueueFor(brokerTarget))
             .setStartToCloseTimeout(DEFAULT_START_TO_CLOSE)
+            .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(MAX_ATTEMPTS).build())
             .build());
   }
 

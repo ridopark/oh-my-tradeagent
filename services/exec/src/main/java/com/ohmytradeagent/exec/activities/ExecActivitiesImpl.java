@@ -44,6 +44,7 @@ public class ExecActivitiesImpl implements ExecActivities {
 
   @Override
   public OrderIntentResult placeOrder(OrderIntent intent) {
+    validateIntent(intent);
     journal.upsertIntent(intent);
     JournaledOrder row =
         journal
@@ -126,6 +127,33 @@ public class ExecActivitiesImpl implements ExecActivities {
                     ApplicationFailure.newNonRetryableFailure(
                         "No journal row for " + intentKey, "JournalConsistencyError"));
     return result(row);
+  }
+
+  /**
+   * Issue #264: fail fast on a malformed {@link OrderIntent} before the journal upsert / broker
+   * call. A null required field (the {@code brokerTarget} enum is dereferenced by {@code
+   * JooqOrderIntentJournal.upsertIntent}, and {@code side}/{@code optionSymbol}/{@code qty} by the
+   * broker request below) would otherwise NPE — and because a bare {@link NullPointerException} is
+   * retryable under Temporal's default activity policy, the activity loops unbounded (the 1637+
+   * retry storm the issue reports). Throwing a non-retryable {@link ApplicationFailure} (mirroring
+   * the {@code JournalConsistencyError} / {@code InvalidBrokerTargetError} precedents) terminates a
+   * malformed intent immediately and names the offending field for the operator.
+   */
+  private static void validateIntent(OrderIntent intent) {
+    String intentKey = intent.getIntentKey();
+    requirePresent(intentKey, "intentKey", intentKey);
+    requirePresent(intent.getBrokerTarget(), "brokerTarget", intentKey);
+    requirePresent(intent.getOptionSymbol(), "optionSymbol", intentKey);
+    requirePresent(intent.getSide(), "side", intentKey);
+    requirePresent(intent.getQty(), "qty", intentKey);
+  }
+
+  private static void requirePresent(Object value, String field, String intentKey) {
+    if (value == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "OrderIntent." + field + " is required but was null (intentKey=" + intentKey + ")",
+          "InvalidOrderIntentError");
+    }
   }
 
   private static OrderIntentResult result(JournaledOrder row) {
