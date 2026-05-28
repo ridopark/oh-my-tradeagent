@@ -27,6 +27,7 @@ import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.failure.ApplicationFailure;
+import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
@@ -54,7 +55,16 @@ class ReconciliationWorkflowImplTest {
 
   @BeforeEach
   void setUp() {
-    env = TestWorkflowEnvironment.newInstance();
+    // Issue #219: disable time skipping so virtual time stays aligned with wall clock between
+    // sequential runWorkflow() calls. The realStateMachine tests stub firstSeenPositionOrphan /
+    // firstSeenJournalOrphan with wall-clock-relative timestamps (t-2min, t-31min) and rely on
+    // Duration.between(firstSeen, workflowNow()) matching real elapsed time. With default time
+    // skipping, the env can fast-forward virtual time arbitrarily while the test thread blocks on
+    // wf.run() completion, causing tick-2's stubbed t-2min firstSeen to look 30+ minutes old and
+    // unexpectedly fire the escalation. This made the test deterministic locally but flaky in CI.
+    env =
+        TestWorkflowEnvironment.newInstance(
+            TestEnvironmentOptions.newBuilder().setUseTimeskipping(false).build());
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(ReconciliationWorkflowImpl.class);
     audit = Mockito.mock(AuditActivities.class);
@@ -361,18 +371,21 @@ class ReconciliationWorkflowImplTest {
 
   @Test
   void positionOrphan_thirdDetectionWithinWindow_emitsOngoingEscalation() {
-    // Issue #206: at the 3rd consecutive detection within the debounce window (priorCount=2,
-    // current=3), the workflow must emit a one-time PositionOrphanOngoing escalation carrying
-    // detection_count=3, first_seen_at, last_seen_at — instead of yet another PositionOrphan.
+    // Issue #219: escalation is now driven by time-since-first-seen, not by a count threshold.
+    // The audit_log COUNT freezes at 1 once debounce suppression kicks in, so the workflow must
+    // fall through to firstSeenPositionOrphan(...) when priorCount >= 1, and emit
+    // PositionOrphanOngoing iff the first-seen row is older than ORPHAN_ESCALATION_WINDOW (30m).
     OffsetDateTime firstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(45);
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    // Realistic post-#219 count source: tick 1 wrote a PositionOrphan, debounce suppressed every
+    // subsequent tick, so the count is frozen at 1. NOT mocked to 2 — that was the old bug-mask.
     when(auditQuery.countPriorPositionOrphans(
             eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
-        .thenReturn(2L);
+        .thenReturn(1L);
     when(auditQuery.firstSeenPositionOrphan(
             eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
         .thenReturn(firstSeen);
@@ -389,23 +402,24 @@ class ReconciliationWorkflowImplTest {
         .containsEntry("option_symbol", "SPY   260519C00737000")
         .containsEntry("journal_status", "missing")
         .containsEntry("first_seen_at", firstSeen.toString());
-    assertThat(((Number) ongoing.getSubject().get("detection_count")).longValue()).isEqualTo(3L);
+    // Time-based escalation carries the window, not a now-meaningless detection_count.
+    assertThat(((Number) ongoing.getSubject().get("escalation_window_secs")).longValue())
+        .isEqualTo(1800L);
     assertThat((String) ongoing.getSubject().get("last_seen_at")).isNotBlank();
   }
 
   @Test
   void journalOrphan_thirdDetectionWithinWindow_emitsOngoingEscalation() {
-    // Issue #206: same escalation semantics for JournalOrphan. Debounce key is intent_key. At
-    // priorCount=2, the workflow emits a JournalOrphanOngoing audit and suppresses the per-cycle
-    // JournalOrphan.
-    OffsetDateTime firstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(30);
+    // Issue #219: JournalOrphan escalation also keys off firstSeenJournalOrphan, not a count
+    // threshold. priorCount stays at 1 once debounce suppression activates.
+    OffsetDateTime firstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(45);
     OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
     when(auditQuery.countPriorJournalOrphans(
             eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
-        .thenReturn(2L);
+        .thenReturn(1L);
     when(auditQuery.firstSeenJournalOrphan(
             eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
         .thenReturn(firstSeen);
@@ -420,29 +434,30 @@ class ReconciliationWorkflowImplTest {
     assertThat(ongoing.getSubject())
         .containsEntry("intent_key", "intent-orphan")
         .containsEntry("first_seen_at", firstSeen.toString());
-    assertThat(((Number) ongoing.getSubject().get("detection_count")).longValue()).isEqualTo(3L);
+    assertThat(((Number) ongoing.getSubject().get("escalation_window_secs")).longValue())
+        .isEqualTo(1800L);
   }
 
   @Test
   void positionOrphan_fourthDetectionWithinWindow_doesNotEmitOngoingTwice() {
-    // Invariant: once escalated within a debounce window, subsequent ticks must NOT re-emit the
-    // PositionOrphanOngoing event regardless of how the underlying count source grows. Two facets:
-    //   (a) `priorCount >= ORPHAN_ESCALATION_THRESHOLD` (not `==`) → still evaluated when the count
-    //       crosses past the threshold on tick-4+. With `==`, tick-4 falls through silently AND
-    //       loses failure-recovery (if tick-3's emission silently failed, no retry).
-    //   (b) `countPriorPositionOrphanOngoing == 0` guard suppresses duplicate emission.
-    // Tick-3: priorOrphans=2, priorOngoing=0 → emit PositionOrphanOngoing (count goes to 1).
-    // Tick-4: priorOrphans=3 (simulating the #219-fixed accurate-count scenario), priorOngoing=1
-    //         → enters the >= branch, hits the priorOngoing guard, suppresses.
+    // Issue #219 invariant: once escalated within a debounce window, subsequent ticks must NOT
+    // re-emit PositionOrphanOngoing even though the time-since-first-seen condition stays true.
+    // The countPriorPositionOrphanOngoing == 0 guard is what enforces once-per-window — the
+    // first-seen timestamp would re-trigger the >= window check forever otherwise.
+    // Tick-3: priorOrphans=1, firstSeen=45m ago, priorOngoing=0 → emit PositionOrphanOngoing.
+    // Tick-4: same priorOrphans=1, same firstSeen=45m ago, priorOngoing=1 → suppress.
+    OffsetDateTime firstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(45);
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
-    // Growing count across the two ticks — exercises the `>=` branch on tick-4.
     when(auditQuery.countPriorPositionOrphans(
             eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
-        .thenReturn(2L, 3L);
+        .thenReturn(1L);
+    when(auditQuery.firstSeenPositionOrphan(
+            eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
+        .thenReturn(firstSeen);
     // Tick-3 sees 0 prior Ongoing rows (emits); tick-4 sees 1 (suppresses).
     when(auditQuery.countPriorPositionOrphanOngoing(
             eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
@@ -458,16 +473,19 @@ class ReconciliationWorkflowImplTest {
 
   @Test
   void journalOrphan_fourthDetectionWithinWindow_doesNotEmitOngoingTwice() {
-    // Parallel to the PositionOrphan case — JournalOrphan keyed on intent_key. Same invariant:
-    // `priorCount >= ORPHAN_ESCALATION_THRESHOLD` + `priorOngoing == 0` together enforce
-    // once-per-window even when the underlying count grows accurately past the threshold.
+    // Parallel to the PositionOrphan case — JournalOrphan keyed on intent_key. Same #219
+    // invariant: time-based trigger + priorOngoing == 0 guard together enforce once-per-window.
+    OffsetDateTime firstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(45);
     OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
     when(auditQuery.countPriorJournalOrphans(
             eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
-        .thenReturn(2L, 3L);
+        .thenReturn(1L);
+    when(auditQuery.firstSeenJournalOrphan(
+            eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
+        .thenReturn(firstSeen);
     when(auditQuery.countPriorJournalOrphanOngoing(
             eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
         .thenReturn(0L, 1L);
@@ -477,6 +495,96 @@ class ReconciliationWorkflowImplTest {
 
     Mockito.verify(audit, times(1))
         .log(Mockito.argThat(e -> e != null && "JournalOrphanOngoing".equals(e.getKind())));
+  }
+
+  @Test
+  void positionOrphan_realStateMachine_emitsOngoingAfterEscalationWindow() {
+    // Issue #219: drive the workflow through 3 sequential ticks with the real audit_log shape —
+    // count is 0 on tick 1 (first sighting), then 1 on every subsequent tick because debounce
+    // suppression freezes it. The firstSeen timestamp advances from null (tick 1, nothing in the
+    // window yet) → t-2min (tick 2, within escalation window) → t-31min (tick 3, past the 30m
+    // escalation window).
+    //
+    // Expected emission sequence:
+    //   tick 1 → PositionOrphan (first sighting)
+    //   tick 2 → suppressed (firstSeen too recent)
+    //   tick 3 → PositionOrphanOngoing (firstSeen > escalation window)
+    OffsetDateTime tick2FirstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(2);
+    OffsetDateTime tick3FirstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(31);
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(auditQuery.countPriorPositionOrphans(
+            eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
+        .thenReturn(0L, 1L, 1L);
+    // firstSeenPositionOrphan is only invoked on tick 2 and tick 3 (tick 1 takes the
+    // priorCount==0 first-emission branch and skips the firstSeen lookup).
+    when(auditQuery.firstSeenPositionOrphan(
+            eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
+        .thenReturn(tick2FirstSeen, tick3FirstSeen);
+    // countPriorPositionOrphanOngoing is only invoked on tick 3 (tick 1 skips it, tick 2's
+    // firstSeen is too recent so the time-gate short-circuits before it's called).
+    when(auditQuery.countPriorPositionOrphanOngoing(
+            eq("dev"), eq("copytrade-v1"), eq("SPY   260519C00737000"), eq("missing"), any()))
+        .thenReturn(0L);
+
+    runWorkflow(); // tick 1
+    runWorkflow(); // tick 2
+    runWorkflow(); // tick 3
+
+    // Exactly one PositionOrphan (tick 1) and exactly one PositionOrphanOngoing (tick 3).
+    Mockito.verify(audit, times(1))
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+    Mockito.verify(audit, times(1))
+        .log(Mockito.argThat(e -> e != null && "PositionOrphanOngoing".equals(e.getKind())));
+
+    AuditEvent ongoing = captureKind("PositionOrphanOngoing");
+    assertThat(ongoing.getSubject())
+        .containsEntry("option_symbol", "SPY   260519C00737000")
+        .containsEntry("journal_status", "missing")
+        .containsEntry("first_seen_at", tick3FirstSeen.toString());
+  }
+
+  @Test
+  void journalOrphan_realStateMachine_emitsOngoingAfterEscalationWindow() {
+    // Issue #219: same 3-tick state machine for JournalOrphan keyed on intent_key.
+    //   tick 1 → JournalOrphan (count=0, firstSeen=null)
+    //   tick 2 → suppressed (count=1, firstSeen=t-2m)
+    //   tick 3 → JournalOrphanOngoing (count=1, firstSeen=t-31m)
+    OffsetDateTime tick2FirstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(2);
+    OffsetDateTime tick3FirstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(31);
+    OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
+    when(exec.journalDumpOpen(anyString(), anyString()))
+        .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(auditQuery.countPriorJournalOrphans(
+            eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
+        .thenReturn(0L, 1L, 1L);
+    // firstSeenJournalOrphan is only invoked on tick 2 and tick 3 (tick 1 first-emission branch
+    // skips it).
+    when(auditQuery.firstSeenJournalOrphan(
+            eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
+        .thenReturn(tick2FirstSeen, tick3FirstSeen);
+    // countPriorJournalOrphanOngoing only invoked on tick 3 (tick 2 short-circuits on time gate).
+    when(auditQuery.countPriorJournalOrphanOngoing(
+            eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
+        .thenReturn(0L);
+
+    runWorkflow(); // tick 1
+    runWorkflow(); // tick 2
+    runWorkflow(); // tick 3
+
+    Mockito.verify(audit, times(1))
+        .log(Mockito.argThat(e -> e != null && "JournalOrphan".equals(e.getKind())));
+    Mockito.verify(audit, times(1))
+        .log(Mockito.argThat(e -> e != null && "JournalOrphanOngoing".equals(e.getKind())));
+
+    AuditEvent ongoing = captureKind("JournalOrphanOngoing");
+    assertThat(ongoing.getSubject())
+        .containsEntry("intent_key", "intent-orphan")
+        .containsEntry("first_seen_at", tick3FirstSeen.toString());
   }
 
   // ---------- helpers ----------
