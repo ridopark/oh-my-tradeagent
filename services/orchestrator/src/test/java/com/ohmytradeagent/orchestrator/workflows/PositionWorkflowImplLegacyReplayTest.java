@@ -181,21 +181,12 @@ class PositionWorkflowImplLegacyReplayTest {
                   .build());
       WorkflowStub.fromTyped(wf).start(input());
 
-      // Full close on the partial exit. Wait until placeOrder ran (workflow now on the untimed
+      // Full close on the partial exit: signal partialExit (buffered/processed by the main loop),
+      // which drives exec.placeOrder. Wait until placeOrder ran (workflow now on the untimed
       // exit-fill await) then deliver the exit fill so remainingQty drains to zero and the loop
       // exits through PositionClosed.
-      long deadline = System.currentTimeMillis() + 5_000;
-      while (System.currentTimeMillis() < deadline) {
-        try {
-          Mockito.verify(legacyExec, Mockito.atLeastOnce()).placeOrder(any());
-          break;
-        } catch (AssertionError ignored) {
-          Thread.sleep(50);
-        }
-      }
       wf.partialExit(partialExitRequest());
-      // The partialExit drives placeOrder; once it's placed, deliver the fill.
-      deadline = System.currentTimeMillis() + 5_000;
+      long deadline = System.currentTimeMillis() + 5_000;
       while (System.currentTimeMillis() < deadline) {
         try {
           Mockito.verify(legacyExec, Mockito.atLeastOnce()).placeOrder(any());
