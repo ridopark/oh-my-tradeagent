@@ -112,14 +112,28 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   @Override
   public Optional<JournaledOrder> findLatestFilledByOcc(
       String tenantId, String strategyId, String occ) {
-    // Backed by V3 partial index (tenant_id, strategy_id, option_symbol, filled_at DESC)
-    // WHERE state='FILLED'. The ORDER BY column matches the index leaf order so this is an
-    // index-only descending scan limited to one row.
+    // Issue #243: the journal persists the *padded* 21-char OCC (OccSymbol.of pads the root to 6
+    // chars with %-6s, e.g. "UNH   260618C00400000") while the broker reports the *compact* form
+    // (Alpaca strips the space-padding on order placement, e.g. "UNH260618C00400000"). Recon passes
+    // the broker's compact OCC here, so the match must be padding-agnostic — strip space-padding
+    // from both the stored column and the supplied OCC — otherwise an exact .eq() returns empty and
+    // recon falsely reports the owned position as a "missing"-journal PositionOrphan every cycle.
+    //
+    // The (tenant_id, strategy_id, state='FILLED') predicates still narrow to a tiny partition
+    // (one OCC per tenant/strategy in practice), so wrapping option_symbol in REPLACE — which makes
+    // the V3 partial index leaf no longer directly sargable on option_symbol — leaves a negligible
+    // residual filter; filled_at DESC still drives the single-row pick.
+    String compactOcc = occ == null ? null : occ.replace(" ", "");
     Record row =
         dsl.selectFrom(TABLE)
             .where(field("tenant_id", String.class).eq(tenantId))
             .and(field("strategy_id", String.class).eq(strategyId))
-            .and(field("option_symbol", String.class).eq(occ))
+            .and(
+                org.jooq
+                    .impl
+                    .DSL
+                    .replace(field("option_symbol", String.class), " ", "")
+                    .eq(compactOcc))
             .and(field("state", String.class).eq(OrderState.FILLED.name()))
             .orderBy(field("filled_at", OffsetDateTime.class).desc())
             .limit(1)

@@ -258,11 +258,17 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         continue;
       }
       JournalEntry recentFilled = filled.get(0);
+      // Issue #243: rebuild expected_workflow_id from the journal row's canonical option_symbol —
+      // the padded 21-char OCC (OccSymbol.of pads the root to 6 chars with %-6s) that was also used
+      // to build the live PositionWorkflow id at spawn (CopytradeSignalWorkflowImpl). The broker
+      // reports the compact OCC (Alpaca strips the space-padding on order placement), so anchoring
+      // on p.getOptionSymbol() would produce an id the running owner never registered under and
+      // fire a false PositionOrphan even when the owner is alive.
       String expectedWfId =
           WorkflowIds.position(
               in.getTenantId(),
               in.getStrategyId(),
-              p.getOptionSymbol(),
+              recentFilled.getOptionSymbol(),
               recentFilled.getSignalId());
       if (!positionLookup.isPositionWorkflowRunning(expectedWfId)) {
         emitPositionOrphanWithDebounce(

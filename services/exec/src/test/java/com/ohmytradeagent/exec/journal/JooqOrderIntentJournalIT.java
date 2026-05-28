@@ -226,6 +226,28 @@ class JooqOrderIntentJournalIT {
   }
 
   @Test
+  void findLatestFilledByOcc_paddedJournalRow_matchesCompactBrokerOcc() {
+    // Issue #243: the journal persists the *padded* 21-char OCC (OccSymbol.of pads the root to 6
+    // chars with %-6s) while the broker reports the *compact* form (Alpaca strips the spaces on
+    // order placement and returns the compact symbol). Recon passes the broker's compact OCC to
+    // findLatestFilledByOcc, so the lookup must be padding-agnostic or recon falsely reports the
+    // owned position as a "missing"-journal PositionOrphan. The query strips space-padding on both
+    // sides so the padded stored row resolves under the compact broker OCC.
+    String paddedOcc = "SPY   260519C00737000";
+    String compactOcc = "SPY260519C00737000";
+    journal.upsertIntent(intentWithOcc("intent-padded", "sig-padded", paddedOcc));
+    journal.markSubmittedIfRecorded("intent-padded", "stub-padded");
+    journal.markFilled(
+        "intent-padded", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+
+    JournaledOrder latest =
+        journal.findLatestFilledByOcc("dev", "copytrade-v1", compactOcc).orElseThrow();
+    assertThat(latest.intentKey()).isEqualTo("intent-padded");
+    assertThat(latest.signalId()).isEqualTo("sig-padded");
+    assertThat(latest.optionSymbol()).isEqualTo(paddedOcc);
+  }
+
+  @Test
   void findByBrokerOrderId_returnsRowAfterSubmit() {
     journal.upsertIntent(intent("intent-A"));
     journal.markSubmittedIfRecorded("intent-A", "brk-A");
