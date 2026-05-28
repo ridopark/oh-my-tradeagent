@@ -102,7 +102,13 @@ public class PositionAdoptionActivitiesImpl implements PositionAdoptionActivitie
       return AdoptionResult.refusedNoAnchor();
     }
     String entrySignalId = anchor.getSignalId();
-    String posWfId = WorkflowIds.position(tenantId, strategyId, occ, entrySignalId);
+    // Issue #246 (sibling of #243): build the PositionWorkflow id from the journal anchor's
+    // canonical option_symbol — the padded 21-char OCC (OccSymbol.of pads the root to 6 chars with
+    // %-6s) that was also used to spawn the live owner (CopytradeSignalWorkflowImpl). The operator
+    // may supply the broker/audit *compact* OCC (Alpaca strips the space-padding), so anchoring the
+    // id (and the idempotency probe below) on the raw `occ` would build a non-matching id, miss a
+    // live owner, and adopt a duplicate. Mirrors ReconciliationWorkflowImpl:267-272.
+    String posWfId = WorkflowIds.position(tenantId, strategyId, anchor.getOptionSymbol(), entrySignalId);
 
     // Idempotency guard: never double-own. If a live PositionWorkflow already owns the OCC, no-op.
     if (positionLookup.isPositionWorkflowRunning(posWfId)) {
@@ -211,8 +217,13 @@ public class PositionAdoptionActivitiesImpl implements PositionAdoptionActivitie
     if (!filled.isEmpty()) {
       return filled.get(0);
     }
+    // Issue #246: padding-agnostic match — the operator may supply the broker/audit *compact* OCC
+    // while the journal row carries the *padded* OccSymbol.of form (and vice versa). Compare the
+    // space-stripped forms, mirroring the journal backstop in JooqOrderIntentJournal:126.
+    String compactOcc = occ == null ? null : occ.replace(" ", "");
     for (JournalEntry open : exec.journalDumpOpen(tenantId, strategyId)) {
-      if (occ.equals(open.getOptionSymbol())) {
+      String openOcc = open.getOptionSymbol();
+      if (compactOcc != null && openOcc != null && compactOcc.equals(openOcc.replace(" ", ""))) {
         return open;
       }
     }
