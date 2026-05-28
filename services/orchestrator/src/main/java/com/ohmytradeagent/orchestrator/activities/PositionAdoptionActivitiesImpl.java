@@ -27,8 +27,7 @@ import org.springframework.stereotype.Component;
  * Issue #239: operator-triggered orphan-position adoption. Plain Activity code (not workflow), so
  * it drives the {@link WorkflowClient} directly to start + signal the reconstructed {@code
  * PositionWorkflow} — the same pattern as the bootstrappers. The {@code orchestrator-core} worker
- * registers this impl ({@link
- * com.ohmytradeagent.orchestrator.config.TemporalWorkerConfig}).
+ * registers this impl ({@link com.ohmytradeagent.orchestrator.config.TemporalWorkerConfig}).
  *
  * <p>Flow mirrors {@code CopytradeSignalWorkflowImpl.startPositionWorkflow} but sources every value
  * from broker truth + the journal + strategy config rather than a live signal payload:
@@ -244,7 +243,9 @@ public class PositionAdoptionActivitiesImpl implements PositionAdoptionActivitie
    */
   long selectPendingTtlSecs(StrategyConfig config) {
     String target =
-        (config != null && config.getBrokerTarget() != null) ? config.getBrokerTarget().value() : "";
+        (config != null && config.getBrokerTarget() != null)
+            ? config.getBrokerTarget().value()
+            : "";
     boolean isLive = target.contains("live");
     Long configured =
         config == null

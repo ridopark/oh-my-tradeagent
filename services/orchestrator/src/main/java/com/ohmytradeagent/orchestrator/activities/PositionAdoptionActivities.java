@@ -3,10 +3,10 @@ package com.ohmytradeagent.orchestrator.activities;
 import io.temporal.activity.ActivityInterface;
 
 /**
- * Issue #239: operator-triggered orphan-position adoption. Reconstructs a {@code
- * PositionWorkflow} owner from broker truth + the journal for a confirmed orphaned broker lot (a
- * broker-held position with no running {@code PositionWorkflow}), so an orphaned-but-legit
- * position can be re-attached and managed normally instead of being force-flattened.
+ * Issue #239: operator-triggered orphan-position adoption. Reconstructs a {@code PositionWorkflow}
+ * owner from broker truth + the journal for a confirmed orphaned broker lot (a broker-held position
+ * with no running {@code PositionWorkflow}), so an orphaned-but-legit position can be re-attached
+ * and managed normally instead of being force-flattened.
  *
  * <p>Recon detects orphans today but only audits them ({@code ReconciliationWorkflowImpl}
  * PositionOrphan); this Activity is the validated, idempotent recovery path. The recon-loop

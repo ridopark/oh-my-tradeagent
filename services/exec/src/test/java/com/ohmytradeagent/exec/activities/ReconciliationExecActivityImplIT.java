@@ -115,7 +115,8 @@ class ReconciliationExecActivityImplIT {
     assertThat(row.filledAt()).isEqualTo(filledAt);
 
     // Idempotent: a repeat call does not re-transition (already terminal).
-    boolean second = exec.journalReconcileToFilled("intent-A", 9L, new BigDecimal("9.99"), filledAt);
+    boolean second =
+        exec.journalReconcileToFilled("intent-A", 9L, new BigDecimal("9.99"), filledAt);
 
     assertThat(second).isFalse();
     JournaledOrder unchanged = journal.findByIntentKey("intent-A").orElseThrow();

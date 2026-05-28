@@ -104,7 +104,8 @@ class PositionAdoptionActivitiesImplTest {
   void happyPath_startsOwner_signalsFill_terminalizesJournal_seedsCache_auditsProvenance() {
     when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
         .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
-    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC)).thenReturn(List.of(filledJournalRow()));
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(List.of(filledJournalRow()));
     when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
     when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
     when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
@@ -148,8 +149,7 @@ class PositionAdoptionActivitiesImplTest {
     assertThat(fill.getBrokerOrderId()).isEqualTo(BROKER_ORDER_ID);
 
     // Journal terminalized + discovery cache seeded.
-    verify(exec)
-        .journalReconcileToFilled(eq(INTENT_KEY), eq(5L), any(BigDecimal.class), any());
+    verify(exec).journalReconcileToFilled(eq(INTENT_KEY), eq(5L), any(BigDecimal.class), any());
     verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, OCC, expectedWfId);
 
     // PositionAdopted audit emitted with provenance.
@@ -173,7 +173,8 @@ class PositionAdoptionActivitiesImplTest {
   void alreadyOwned_noStart_noSignal_noTerminalize_isNoop() {
     when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
         .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
-    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC)).thenReturn(List.of(filledJournalRow()));
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(List.of(filledJournalRow()));
     when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
 
     AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, OCC);
@@ -183,7 +184,8 @@ class PositionAdoptionActivitiesImplTest {
     verify(stub, never()).start(any());
     verify(stub, never()).signal(anyString(), any());
     verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
-    verify(positionLookup, never()).cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
   }
 
   @Test
@@ -197,7 +199,8 @@ class PositionAdoptionActivitiesImplTest {
     verify(stub, never()).start(any());
     verify(stub, never()).signal(anyString(), any());
     verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
-    verify(positionLookup, never()).cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
     // Phantom guard: never even probes for a live owner.
     verify(positionLookup, never()).isPositionWorkflowRunning(anyString());
   }
@@ -206,7 +209,8 @@ class PositionAdoptionActivitiesImplTest {
   void copytradeEodForceFlattenFalse_propagatesVerbatim_andTtlsFromConfig() {
     when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
         .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
-    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC)).thenReturn(List.of(filledJournalRow()));
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(List.of(filledJournalRow()));
     when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
     when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
     when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
