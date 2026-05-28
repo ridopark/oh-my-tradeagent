@@ -199,8 +199,11 @@ class FillPollerTest {
     when(realJournal.markFilled(eq("ck-missed"), anyLong(), any(), any())).thenReturn(true);
     when(workflowClient.newUntypedWorkflowStub(anyString())).thenReturn(stub);
     WorkflowExecution exec =
-        WorkflowExecution.newBuilder().setWorkflowId("t-dev/s-copytrade-v1/sig/sig-ck-missed").build();
-    org.mockito.Mockito.doThrow(new WorkflowNotFoundException(exec, "CopytradeSignalWorkflow", null))
+        WorkflowExecution.newBuilder()
+            .setWorkflowId("t-dev/s-copytrade-v1/sig/sig-ck-missed")
+            .build();
+    org.mockito.Mockito.doThrow(
+            new WorkflowNotFoundException(exec, "CopytradeSignalWorkflow", null))
         .when(stub)
         .signal(eq("onFill"), any());
 
