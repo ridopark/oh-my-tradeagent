@@ -119,10 +119,17 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
     // from both the stored column and the supplied OCC — otherwise an exact .eq() returns empty and
     // recon falsely reports the owned position as a "missing"-journal PositionOrphan every cycle.
     //
-    // The (tenant_id, strategy_id, state='FILLED') predicates still narrow to a tiny partition
-    // (one OCC per tenant/strategy in practice), so wrapping option_symbol in REPLACE — which makes
-    // the V3 partial index leaf no longer directly sargable on option_symbol — leaves a negligible
-    // residual filter; filled_at DESC still drives the single-row pick.
+    // Issue #247 — documented decision (no functional index): wrapping option_symbol in REPLACE
+    // makes the V3 partial index (tenant_id, strategy_id, option_symbol, filled_at DESC) WHERE
+    // state='FILLED' no longer directly sargable on option_symbol. That is intentional and
+    // acceptable at homelab scale: the index's leading columns (tenant_id, strategy_id) plus the
+    // state='FILLED' partial predicate stay sargable, so Postgres uses the partial index as the
+    // leaf and applies the REPLACE comparison only as a residual filter over the already-tiny
+    // (one OCC per tenant/strategy in practice) FILLED partition; filled_at DESC drives the
+    // single-row pick. A homelab journal stays sub-million rows with a near-single-row FILLED
+    // partition per key, so a functional index on replace(option_symbol,' ','') would add
+    // migration/maintenance cost for no measurable gain (KISS). Revisit only if the FILLED
+    // partition grows large.
     String compactOcc = occ == null ? null : occ.replace(" ", "");
     Record row =
         dsl.selectFrom(TABLE)
