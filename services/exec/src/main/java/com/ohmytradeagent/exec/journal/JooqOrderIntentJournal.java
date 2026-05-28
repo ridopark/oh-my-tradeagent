@@ -129,7 +129,10 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
             .where(field("tenant_id", String.class).eq(tenantId))
             .and(field("strategy_id", String.class).eq(strategyId))
             .and(
-                org.jooq.impl.DSL.replace(field("option_symbol", String.class), " ", "")
+                org.jooq
+                    .impl
+                    .DSL
+                    .replace(field("option_symbol", String.class), " ", "")
                     .eq(compactOcc))
             .and(field("state", String.class).eq(OrderState.FILLED.name()))
             .orderBy(field("filled_at", OffsetDateTime.class).desc())
