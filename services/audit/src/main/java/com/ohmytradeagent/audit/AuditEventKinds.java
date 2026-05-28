@@ -197,6 +197,14 @@ public final class AuditEventKinds {
           "PositionOrphanOngoing",
           "JournalOrphanOngoing",
           "ReconciliationMetricsRecordFailed",
+          // Issue #239: emitted by PositionAdoptionActivitiesImpl when an operator-triggered
+          // adoption reconstructs + starts a PositionWorkflow owner for a confirmed orphan. Pure
+          // provenance / observability — NOT a lifecycle event. The real ledger ENTRY is the
+          // adopted workflow's PositionEntered (fired by its first-fill gate after the onFill
+          // signal); PositionAdopted only records orphan-detection -> broker-truth ->
+          // reconstructed-input. Intentionally placed in ALL_KINDS only, not in ENTRY_KINDS or
+          // any *_TERMINAL_CLOSE_KINDS group.
+          "PositionAdopted",
           // LivePromotionActivitiesImpl
           "LivePromotionApproved",
           // TenantConfigChangedEmitter (no KIND_ constant; literal string in the emitter)

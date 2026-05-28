@@ -45,4 +45,28 @@ public interface ReconciliationExecActivity {
    * journal_status=missing}).
    */
   List<JournalEntry> journalListFilledByOcc(String tenantId, String strategyId, String occ);
+
+  /**
+   * Issue #239 (orphan adoption): return the broker-held lot for the requested OCC under this
+   * (tenant, strategy), or {@code null} when the broker does not hold it. Filters {@link
+   * #brokerListOpenPositions} by {@code option_symbol}. This is broker truth — the phantom guard
+   * for adoption refuses to adopt when this returns null, and the returned {@code qty} / {@code
+   * avg_entry_price} are the authoritative values reconstruction uses (never the author-posted
+   * price).
+   */
+  BrokerPosition brokerGetPositionByOcc(String tenantId, String strategyId, String occ);
+
+  /**
+   * Issue #239 (orphan adoption): terminalize a stale entry journal row to {@code FILLED} with
+   * broker-confirmed fill detail. Thin wrapper over the existing conditional {@code
+   * OrderIntentJournal.markFilled} (transitions only from RECORDED/SUBMITTED, so a repeat call is a
+   * no-op). Returns {@code true} iff the row was actually flipped. Used by adoption to reconcile
+   * the ledger to broker reality and clear the recon {@code PositionOrphan}/{@code JournalOrphan}
+   * noise on the next tick.
+   */
+  boolean journalReconcileToFilled(
+      String intentKey,
+      long filledQty,
+      java.math.BigDecimal avgFillPrice,
+      java.time.OffsetDateTime filledAt);
 }
