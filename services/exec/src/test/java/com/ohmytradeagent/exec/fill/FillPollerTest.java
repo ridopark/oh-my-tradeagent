@@ -3,6 +3,8 @@ package com.ohmytradeagent.exec.fill;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -18,12 +20,17 @@ import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowNotFoundException;
+import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -163,6 +170,51 @@ class FillPollerTest {
     verify(dispatcher, times(1)).dispatch(any());
     assertThat(registry.counter("fill_listener.poll_rows_scanned").count()).isEqualTo(2.0);
     assertThat(registry.counter("fill_listener.poll_fills_detected").count()).isEqualTo(1.0);
+  }
+
+  @Test
+  void backstop_missedEvent_terminalizesJournalToFilled_evenWhenWorkflowCompleted() {
+    // #244 AC #4: the poll/recon backstop must catch a stream/webhook event the WS listener
+    // missed and terminalize the journal to FILLED WITHOUT relying on a live onFill signal target.
+    // Wire a REAL FillDispatcherImpl behind the poller so this exercises the full backstop path:
+    // poll finds a SUBMITTED row the broker reports FILLED → dispatch → markFilled. The onFill
+    // signal target is gone (workflow already completed → WorkflowNotFoundException, swallowed),
+    // yet the journal still reaches FILLED so the position is not stranded.
+    OrderIntentJournal realJournal = mock(OrderIntentJournal.class);
+    WorkflowClient workflowClient = mock(WorkflowClient.class);
+    WorkflowStub stub = mock(WorkflowStub.class);
+    FillDispatcherImpl realDispatcher =
+        new FillDispatcherImpl(realJournal, workflowClient, metrics);
+    FillPoller backstopPoller =
+        new FillPoller(realJournal, broker, realDispatcher, metrics, props, FIXED_CLOCK);
+
+    JournaledOrder submittedRow = row("ck-missed", "brk-missed");
+    when(realJournal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(submittedRow));
+    when(broker.getOrderStatus("brk-missed")).thenReturn(BrokerOrderStatus.FILLED);
+    when(broker.getFillDetail("brk-missed"))
+        .thenReturn(
+            new BrokerFillDetail(
+                5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-23T19:58:00Z")));
+    when(realJournal.findByBrokerOrderId("brk-missed")).thenReturn(Optional.of(submittedRow));
+    when(realJournal.markFilled(eq("ck-missed"), anyLong(), any(), any())).thenReturn(true);
+    when(workflowClient.newUntypedWorkflowStub(anyString())).thenReturn(stub);
+    WorkflowExecution exec =
+        WorkflowExecution.newBuilder().setWorkflowId("t-dev/s-copytrade-v1/sig/sig-ck-missed").build();
+    org.mockito.Mockito.doThrow(new WorkflowNotFoundException(exec, "CopytradeSignalWorkflow", null))
+        .when(stub)
+        .signal(eq("onFill"), any());
+
+    backstopPoller.runOnce(); // must not throw despite the completed workflow
+
+    // The journal is terminalized to FILLED through the backstop, independent of signal liveness.
+    verify(realJournal)
+        .markFilled(
+            eq("ck-missed"),
+            eq(5L),
+            eq(new BigDecimal("0.84")),
+            eq(OffsetDateTime.parse("2026-05-23T19:58:00Z")));
+    assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(1.0);
+    assertThat(registry.counter("fill_listener.events_unknown_order").count()).isEqualTo(0.0);
   }
 
   private JournaledOrder row(String intentKey, String brokerOrderId) {
