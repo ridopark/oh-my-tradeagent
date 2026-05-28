@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -18,7 +19,9 @@ import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowExecutionAlreadyStarted;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
@@ -203,6 +206,74 @@ class PositionAdoptionActivitiesImplTest {
         .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
     // Phantom guard: never even probes for a live owner.
     verify(positionLookup, never()).isPositionWorkflowRunning(anyString());
+  }
+
+  @Test
+  void retryAfterPartialAdoption_resendsOnFill_terminalizes_caches_audits_andAdopts() {
+    // Regression for the retry signal-loss: on an activity retry, start() succeeded on the prior
+    // attempt (so it now throws WorkflowExecutionAlreadyStarted) but the fill signal had not yet
+    // been sent. The running-probe still returns false (the adopted owner is parked on the
+    // first-fill gate, not yet "running" by this probe), so we must NOT bail out on the
+    // already-started catch — we must fall through and re-send onFill + finish steps 6-8.
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(List.of(filledJournalRow()));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
+    when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
+
+    // start() throws as if the workflow was already started on a prior (interrupted) attempt.
+    doThrow(
+            new WorkflowExecutionAlreadyStarted(
+                WorkflowExecution.getDefaultInstance(),
+                "PositionWorkflow",
+                new RuntimeException("already started")))
+        .when(stub)
+        .start(any());
+
+    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, OCC);
+
+    // Outcome is ADOPTED (not ALREADY_OWNED) — the retry recovers the dropped fill signal.
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ADOPTED);
+
+    String expectedWfId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
+    assertThat(result.getWorkflowId()).isEqualTo(expectedWfId);
+
+    // The dropped fill signal is re-sent (the whole point of the fix).
+    ArgumentCaptor<Object> signalArgs = ArgumentCaptor.forClass(Object.class);
+    verify(stub).signal(eq("onFill"), signalArgs.capture());
+    FillSignalPayload fill = (FillSignalPayload) signalArgs.getValue();
+    assertThat(fill.getFilledQty()).isEqualTo(5L);
+    assertThat(fill.getAvgFillPrice()).isEqualByComparingTo(new BigDecimal("3.40"));
+    assertThat(fill.getBrokerOrderId()).isEqualTo(BROKER_ORDER_ID);
+
+    // Steps 6-8 still complete (all idempotent): terminalize, cache, audit.
+    verify(exec).journalReconcileToFilled(eq(INTENT_KEY), eq(5L), any(BigDecimal.class), any());
+    verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, OCC, expectedWfId);
+
+    ArgumentCaptor<AuditEvent> auditCaptor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit).log(auditCaptor.capture());
+    assertThat(auditCaptor.getValue().getKind()).isEqualTo("PositionAdopted");
+  }
+
+  @Test
+  void noJournalAnchor_refused_noStartNoSignal() {
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC)).thenReturn(List.of());
+    when(exec.journalDumpOpen(TENANT, STRATEGY)).thenReturn(List.of());
+
+    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, OCC);
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.REFUSED_NO_ANCHOR);
+    // No workflow start / no signal occurred — refusal is before any side effect.
+    verify(workflowClient, never()).newUntypedWorkflowStub(anyString(), any());
+    verify(stub, never()).start(any());
+    verify(stub, never()).signal(anyString(), any());
+    verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
   }
 
   @Test

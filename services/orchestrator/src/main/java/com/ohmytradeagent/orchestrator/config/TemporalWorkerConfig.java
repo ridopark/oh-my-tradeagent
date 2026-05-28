@@ -76,21 +76,23 @@ public class TemporalWorkerConfig {
    */
   @Bean
   public ReconciliationExecActivity reconciliationExecActivity() {
-    return (ReconciliationExecActivity)
-        java.lang.reflect.Proxy.newProxyInstance(
-            ReconciliationExecActivity.class.getClassLoader(),
-            new Class<?>[] {ReconciliationExecActivity.class},
-            (proxy, method, args) -> {
-              if (method.getDeclaringClass() == Object.class) {
-                return method.invoke(this, args);
-              }
-              throw new UnsupportedOperationException(
-                  "ReconciliationExecActivity is not wired for direct invocation from the"
-                      + " orchestrator worker. Issue #239 adoption needs the deferred recon"
-                      + " auto-trigger / operator command to route broker-queue calls through a"
-                      + " workflow. Method invoked: "
-                      + method.getName());
-            });
+    ReconciliationExecActivity placeholder =
+        (ReconciliationExecActivity)
+            java.lang.reflect.Proxy.newProxyInstance(
+                ReconciliationExecActivity.class.getClassLoader(),
+                new Class<?>[] {ReconciliationExecActivity.class},
+                (proxy, method, args) -> {
+                  if (method.getDeclaringClass() == Object.class) {
+                    return method.invoke(this, args);
+                  }
+                  throw new UnsupportedOperationException(
+                      "ReconciliationExecActivity is not wired for direct invocation from the"
+                          + " orchestrator worker. Issue #239 adoption needs the deferred recon"
+                          + " auto-trigger / operator command to route broker-queue calls through a"
+                          + " workflow. Method invoked: "
+                          + method.getName());
+                });
+    return placeholder;
   }
 
   @Bean

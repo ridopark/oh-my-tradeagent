@@ -114,7 +114,23 @@ public class PositionAdoptionActivitiesImpl implements PositionAdoptionActivitie
     StrategyConfig config = strategy.get(tenantId, strategyId);
     long qty = brokerLot.getQty();
     BigDecimal entryPremium = resolveEntryPremium(brokerLot);
-    OffsetDateTime filledAt = anchor.getSubmittedAt() != null ? anchor.getSubmittedAt() : now();
+    // Prefer the anchor's submitted_at as the fill timestamp. When the journal carries no
+    // submitted_at we fall back to the adoption instant — which is the adoption time, NOT the true
+    // entry time, so any duration metric derived from it will be understated. Logged as a WARNING
+    // and documented on AdoptionResult.adopted(...).
+    OffsetDateTime filledAt;
+    if (anchor.getSubmittedAt() != null) {
+      filledAt = anchor.getSubmittedAt();
+    } else {
+      filledAt = now();
+      log.warn(
+          "adoptOrphanPosition: journal anchor has no submitted_at; using adoption instant {} as"
+              + " the fill timestamp (NOT the true entry time) tenant={} strategy={} occ={}",
+          filledAt,
+          tenantId,
+          strategyId,
+          occ);
+    }
 
     PositionWorkflowInput posInput =
         buildInput(tenantId, strategyId, occ, entrySignalId, qty, entryPremium, config);
@@ -133,9 +149,19 @@ public class PositionAdoptionActivitiesImpl implements PositionAdoptionActivitie
     try {
       stub.start(posInput);
     } catch (WorkflowExecutionAlreadyStarted alreadyStarted) {
-      // Second idempotency backstop: the running-probe raced and an owner already exists.
-      log.info("adoptOrphanPosition no-op: workflow already started wf_id={}", posWfId);
-      return AdoptionResult.alreadyOwned();
+      // Activity-retry safety: start() succeeded on a prior attempt but the run crashed
+      // before the onFill signal landed. Do NOT bail out here — that would drop the fill and
+      // leave the adopted PositionWorkflow to time out into PositionNeverFilled. The
+      // running-probe above already let a genuinely-live owner short-circuit; reaching here
+      // means we own a half-adopted workflow, so fall through to re-send onFill and finish
+      // steps 6-8. Every downstream step is idempotent: markFilled is conditional on state in
+      // {RECORDED, SUBMITTED}; cachePositionMapping is an idempotent put; the PositionWorkflow
+      // first-fill latch dedupes a duplicate onFill; the PositionAdopted audit dup is a benign
+      // provenance row.
+      log.info(
+          "adoptOrphanPosition retry: workflow already started (prior attempt); re-sending onFill"
+              + " wf_id={}",
+          posWfId);
     }
 
     // 5. Signal onFill within the TTL so the first-fill gate wakes and PositionEntered fires with

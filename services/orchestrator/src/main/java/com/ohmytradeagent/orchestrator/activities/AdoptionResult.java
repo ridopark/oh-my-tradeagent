@@ -35,6 +35,12 @@ public final class AdoptionResult {
     this.qty = qty;
   }
 
+  /**
+   * Known limitation: the reconstructed fill timestamp prefers the anchoring journal row's {@code
+   * submitted_at}, but when that is absent the adoption falls back to the adoption instant (logged
+   * as a WARNING). In that fallback case the fill time reflects when adoption ran, not the true
+   * entry time, so any duration/age metric derived from it will be understated.
+   */
   public static AdoptionResult adopted(String workflowId, String entrySignalId, long qty) {
     return new AdoptionResult(Outcome.ADOPTED, workflowId, entrySignalId, qty);
   }

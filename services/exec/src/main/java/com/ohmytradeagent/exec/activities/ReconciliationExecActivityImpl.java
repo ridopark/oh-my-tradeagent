@@ -56,6 +56,11 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
         .orElse(List.of());
   }
 
+  /**
+   * Issue #239: broker truth for the adoption phantom guard. {@code tenantId}/{@code strategyId}
+   * are intentionally unused — the injected broker client is already tenant/strategy-scoped at
+   * construction (per the broker task queue), so they only document the call site.
+   */
   @Override
   public BrokerPosition brokerGetPositionByOcc(String tenantId, String strategyId, String occ) {
     // Issue #239: broker truth for the adoption phantom guard. Filters the broker position list to
