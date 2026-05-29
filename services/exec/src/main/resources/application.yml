@@ -61,11 +61,13 @@ exec:
       grace-ms: 60000
       batch-size: 50
 
-# Issue #297 / #295: non-blocking, best-effort Discord alert on a broker rejection in
-# ExecActivitiesImpl.placeOrder (the failure that caused the #295 outage). The webhook URL comes
-# from a k8s secret (operator follow-up) — when blank the alerter is a no-op (logs the would-be
-# alert at INFO). A webhook timeout/error is caught and logged, NEVER propagated into the broker
-# exception flow (it must not alter the Temporal retryable/non-retryable classification).
+# Issue #297 / #295 / #302: non-blocking, best-effort Discord alert on a broker rejection in
+# ExecActivitiesImpl.placeOrder (the failure that caused the #295 outage). Issue #302: the webhook
+# post runs on a bounded async executor so the ~5s timeout is not consumed inline before the broker
+# exception is rethrown unchanged. The webhook URL comes from a k8s secret (operator follow-up) —
+# when blank the alerter is a no-op (logs the would-be alert at INFO). A webhook timeout/error is
+# caught and logged, NEVER propagated into the broker exception flow (it must not alter the Temporal
+# retryable/non-retryable classification).
 alert:
   discord:
     webhook-url: ${ALERT_DISCORD_WEBHOOK_URL:}
