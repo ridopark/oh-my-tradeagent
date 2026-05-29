@@ -57,7 +57,7 @@ class ExecActivitiesImplIT {
   static void initDb() throws Exception {
     Flyway.configure()
         .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
-        .locations("classpath:db/migration")
+        .locations("classpath:db/exec")
         .load()
         .migrate();
     conn =

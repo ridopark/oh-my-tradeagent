@@ -19,6 +19,9 @@ server:
 temporal:
   target: ${TEMPORAL_TARGET:localhost:7233}
   namespace: ${TEMPORAL_NAMESPACE:default}
+  # Task queue the orchestrator worker polls; api-gateway starts the operator-triggered
+  # AdoptionWorkflow (POST /positions/adopt, issue #285) on it.
+  orchestrator-task-queue: ${TEMPORAL_ORCHESTRATOR_TASK_QUEUE:orchestrator-core}
 
 api-gateway:
   default-tenant: ${API_GATEWAY_DEFAULT_TENANT:dev}

@@ -106,6 +106,20 @@
       <artifactId>postgresql</artifactId>
       <scope>test</scope>
     </dependency>
+    <!--
+      Issue #285: TEST-ONLY. AdoptionWorkflowIT registers the REAL exec broker-truth Activity
+      (ReconciliationExecActivityImpl + JooqOrderIntentJournal + StubBroker, all in exec-svc/src/main)
+      on the broker-alpaca-paper task queue to prove the adoption path reaches real broker truth +
+      a real journal over the exec task queue (the throwing placeholder is gone). This is a
+      test-scope reuse of exec's fixtures only — production keeps orchestrator and exec decoupled
+      across the Temporal task-queue boundary (no in-process exec injection).
+    -->
+    <dependency>
+      <groupId>com.ohmytradeagent</groupId>
+      <artifactId>exec-svc</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>

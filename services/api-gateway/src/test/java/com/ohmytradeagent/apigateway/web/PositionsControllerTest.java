@@ -3,6 +3,7 @@ package com.ohmytradeagent.apigateway.web;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -11,11 +12,15 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.ohmytradeagent.contract.AdoptionResult;
+import com.ohmytradeagent.contract.AdoptionWorkflowInput;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowExecutionAlreadyStarted;
 import io.temporal.client.WorkflowExecutionMetadata;
+import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import java.time.Instant;
 import java.util.stream.Stream;
@@ -39,7 +44,7 @@ class PositionsControllerTest {
     when(client.newUntypedWorkflowStub(any(String.class))).thenReturn(stub);
 
     TenantContext ctx = new TenantContext("dev", "copytrade-v1");
-    PositionsController controller = new PositionsController(client, ctx);
+    PositionsController controller = new PositionsController(client, ctx, "orchestrator-core");
     mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
@@ -123,5 +128,139 @@ class PositionsControllerTest {
                 .content("{\"workflowId\":\"t-dev/s-copytrade-v1/pos/AAPL260620C00150000/sig-1\"}"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.status").value("NOOP_ALREADY_CLOSED"));
+  }
+
+  @Test
+  void adopt_adoptedReturns200_withWorkflowIdAndProvenance() throws Exception {
+    AdoptionResult result = new AdoptionResult();
+    result.setSchemaVersion(1L);
+    result.setOutcome(AdoptionResult.Outcome.ADOPTED);
+    result.setWorkflowId("t-dev/s-copytrade-v1/pos/UNH   260618C00400000/sig-abc");
+    result.setEntrySignalId("sig-abc");
+    result.setQty(5L);
+    when(client.newUntypedWorkflowStub(eq("AdoptionWorkflow"), any(WorkflowOptions.class)))
+        .thenReturn(stub);
+    when(stub.getResult(AdoptionResult.class)).thenReturn(result);
+
+    mvc.perform(
+            post("/positions/adopt")
+                .header("X-Operator-Id", "ridopark")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"occ\":\"UNH260618C00400000\"}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.outcome").value("ADOPTED"))
+        .andExpect(jsonPath("$.qty").value(5))
+        .andExpect(jsonPath("$.entry_signal_id").value("sig-abc"));
+
+    // Adoption workflow started on the orchestrator queue with operator + occ from the request.
+    ArgumentCaptor<WorkflowOptions> optsCap = ArgumentCaptor.forClass(WorkflowOptions.class);
+    verify(client).newUntypedWorkflowStub(eq("AdoptionWorkflow"), optsCap.capture());
+    assertThat(optsCap.getValue().getTaskQueue()).isEqualTo("orchestrator-core");
+    assertThat(optsCap.getValue().getWorkflowId())
+        .isEqualTo("t-dev/s-copytrade-v1/adopt/UNH260618C00400000");
+
+    ArgumentCaptor<Object> startCap = ArgumentCaptor.forClass(Object.class);
+    verify(stub).start(startCap.capture());
+    AdoptionWorkflowInput in = (AdoptionWorkflowInput) startCap.getValue();
+    assertThat(in.getTenantId()).isEqualTo("dev");
+    assertThat(in.getStrategyId()).isEqualTo("copytrade-v1");
+    assertThat(in.getOcc()).isEqualTo("UNH260618C00400000");
+    assertThat(in.getOperatorId()).isEqualTo("ridopark");
+  }
+
+  @Test
+  void adopt_refusedNotHeldReturns409() throws Exception {
+    AdoptionResult result = new AdoptionResult();
+    result.setSchemaVersion(1L);
+    result.setOutcome(AdoptionResult.Outcome.REFUSED_NOT_HELD);
+    when(client.newUntypedWorkflowStub(eq("AdoptionWorkflow"), any(WorkflowOptions.class)))
+        .thenReturn(stub);
+    when(stub.getResult(AdoptionResult.class)).thenReturn(result);
+
+    mvc.perform(
+            post("/positions/adopt")
+                .header("X-Operator-Id", "ridopark")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"occ\":\"UNH260618C00400000\"}"))
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.outcome").value("REFUSED_NOT_HELD"));
+  }
+
+  @Test
+  void adopt_alreadyOwnedReturns200() throws Exception {
+    AdoptionResult result = new AdoptionResult();
+    result.setSchemaVersion(1L);
+    result.setOutcome(AdoptionResult.Outcome.ALREADY_OWNED);
+    when(client.newUntypedWorkflowStub(eq("AdoptionWorkflow"), any(WorkflowOptions.class)))
+        .thenReturn(stub);
+    when(stub.getResult(AdoptionResult.class)).thenReturn(result);
+
+    mvc.perform(
+            post("/positions/adopt")
+                .header("X-Operator-Id", "ridopark")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"occ\":\"UNH260618C00400000\"}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.outcome").value("ALREADY_OWNED"));
+  }
+
+  @Test
+  void adopt_reInvokeSameOcc_whenStartRejectsDuplicate_returnsIdempotentResultNot500()
+      throws Exception {
+    // A second POST for the same OCC reuses the workflow id, so stub.start() throws
+    // WorkflowExecutionAlreadyStarted (default ALLOW_DUPLICATE_FAILED_ONLY reuse policy). The
+    // controller must attach to the existing execution and return its idempotent result, NOT 500.
+    WorkflowStub startStub = mock(WorkflowStub.class);
+    when(client.newUntypedWorkflowStub(eq("AdoptionWorkflow"), any(WorkflowOptions.class)))
+        .thenReturn(startStub);
+    doThrow(
+            new WorkflowExecutionAlreadyStarted(
+                WorkflowExecution.newBuilder()
+                    .setWorkflowId("t-dev/s-copytrade-v1/adopt/UNH260618C00400000")
+                    .build(),
+                "AdoptionWorkflow",
+                null))
+        .when(startStub)
+        .start(any());
+
+    AdoptionResult existing = new AdoptionResult();
+    existing.setSchemaVersion(1L);
+    existing.setOutcome(AdoptionResult.Outcome.ALREADY_OWNED);
+    // The controller re-binds to the existing run via the single-arg untyped stub (by workflow id).
+    WorkflowStub existingStub = mock(WorkflowStub.class);
+    when(client.newUntypedWorkflowStub("t-dev/s-copytrade-v1/adopt/UNH260618C00400000"))
+        .thenReturn(existingStub);
+    when(existingStub.getResult(AdoptionResult.class)).thenReturn(existing);
+
+    mvc.perform(
+            post("/positions/adopt")
+                .header("X-Operator-Id", "ridopark")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"occ\":\"UNH260618C00400000\"}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.outcome").value("ALREADY_OWNED"));
+
+    // The existing execution's result was returned without ever surfacing the duplicate-start
+    // error.
+    verify(existingStub).getResult(AdoptionResult.class);
+  }
+
+  @Test
+  void adopt_missingOperatorHeaderReturns400() throws Exception {
+    mvc.perform(
+            post("/positions/adopt")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"occ\":\"UNH260618C00400000\"}"))
+        .andExpect(status().isBadRequest());
+  }
+
+  @Test
+  void adopt_missingOccReturns400() throws Exception {
+    mvc.perform(
+            post("/positions/adopt")
+                .header("X-Operator-Id", "ridopark")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}"))
+        .andExpect(status().isBadRequest());
   }
 }

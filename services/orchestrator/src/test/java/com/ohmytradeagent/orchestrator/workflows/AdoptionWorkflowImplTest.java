@@ -1,73 +1,149 @@
-package com.ohmytradeagent.orchestrator.activities;
+package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.AdoptionResult;
+import com.ohmytradeagent.contract.AdoptionWorkflowInput;
+import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.FillSignalPayload;
+import com.ohmytradeagent.contract.ForceCloseRequest;
+import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.JournalEntry;
+import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
+import com.ohmytradeagent.contract.PremiumTick;
+import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
-import io.temporal.api.common.v1.WorkflowExecution;
-import io.temporal.client.WorkflowClient;
-import io.temporal.client.WorkflowExecutionAlreadyStarted;
-import io.temporal.client.WorkflowStub;
+import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
+import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import io.temporal.api.enums.v1.IndexedValueType;
+import io.temporal.client.WorkflowFailedException;
+import io.temporal.client.WorkflowOptions;
+import io.temporal.failure.ApplicationFailure;
+import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.worker.Worker;
+import io.temporal.workflow.Workflow;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 /**
- * Issue #239 unit coverage for the operator-triggered orphan-adoption Activity. All five
- * collaborators are mocked. Covers: happy-path adoption, already-owned no-op, broker-doesn't-hold
- * refusal, and copytrade {@code eod_force_flatten=false} propagation.
+ * Issue #239/#285 coverage for the operator-triggered orphan-adoption workflow. The exec activity
+ * is registered on a SEPARATE {@code broker-alpaca-paper} worker, so a passing test proves the
+ * adoption path routes broker-truth calls through the exec task queue (not the throwing in-process
+ * placeholder). Covers: happy-path adoption, ALREADY_OWNED no-op, REFUSED_NOT_HELD, and
+ * REFUSED_NO_ANCHOR.
  */
-class PositionAdoptionActivitiesImplTest {
+class AdoptionWorkflowImplTest {
+
+  private static final String CORE_QUEUE = "orchestrator-core";
+  private static final String EXEC_QUEUE = "broker-alpaca-paper";
 
   private static final String TENANT = "dev";
   private static final String STRATEGY = "copytrade-v1";
+  private static final String OPERATOR = "op-1";
   private static final String OCC = "UNH   260618C00400000";
   private static final String SIGNAL_ID = "sig-abc";
   private static final String INTENT_KEY = "intent-abc";
   private static final String BROKER_ORDER_ID = "db5459fe";
   private static final OffsetDateTime FILLED_AT = OffsetDateTime.parse("2026-05-19T17:08:11Z");
 
-  private WorkflowClient workflowClient;
+  /**
+   * Child-workflow recorder. Temporal's test env runs workers in-process (same JVM), so the spawned
+   * child {@link RecordingPositionWorkflowImpl} can publish what it received here for assertions.
+   */
+  static final Map<String, PositionWorkflowInput> STARTED = new ConcurrentHashMap<>();
+
+  static final Map<String, FillSignalPayload> FILLS = new ConcurrentHashMap<>();
+
+  private TestWorkflowEnvironment env;
+  private ReconciliationExecActivity exec;
   private StrategyActivities strategy;
   private PositionLookupActivities positionLookup;
-  private ReconciliationExecActivity exec;
   private AuditActivities audit;
-  private WorkflowStub stub;
-
-  private PositionAdoptionActivitiesImpl activities;
 
   @BeforeEach
   void setUp() {
-    workflowClient = mock(WorkflowClient.class);
+    STARTED.clear();
+    FILLS.clear();
+    env = TestWorkflowEnvironment.newInstance();
+    // The adopted PositionWorkflow child is started with TenantStrategy/ContractSymbol custom SAs
+    // (matching the production spawn) — register them or the in-memory test visibility store
+    // rejects the child start with INVALID_ARGUMENT.
+    env.registerSearchAttribute("TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+    env.registerSearchAttribute("ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+    exec = mock(ReconciliationExecActivity.class);
     strategy = mock(StrategyActivities.class);
     positionLookup = mock(PositionLookupActivities.class);
-    exec = mock(ReconciliationExecActivity.class);
     audit = mock(AuditActivities.class);
-    stub = mock(WorkflowStub.class);
 
-    when(workflowClient.newUntypedWorkflowStub(anyString(), any())).thenReturn(stub);
+    // The adoption workflow resolves broker_target from strategy config FIRST (to build the
+    // exec-queue stub before any broker-truth call), so every path needs a config. Per-test
+    // overrides may re-stub eod_force_flatten etc.
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
 
-    activities =
-        new PositionAdoptionActivitiesImpl(workflowClient, strategy, positionLookup, exec, audit);
+    Worker coreWorker = env.newWorker(CORE_QUEUE);
+    // The adoption workflow under test + a light recording PositionWorkflow double (so a real
+    // child start + onFill forward is exercised without pulling in market-data/exec deps).
+    coreWorker.registerWorkflowImplementationTypes(
+        AdoptionWorkflowImpl.class, RecordingPositionWorkflowImpl.class);
+    coreWorker.registerActivitiesImplementations(strategy, positionLookup, audit);
+
+    // Exec broker-truth lives on a DISTINCT queue — the adoption path only reaches it by routing
+    // through the exec task queue, which is the whole point of #285.
+    Worker brokerWorker = env.newWorker(EXEC_QUEUE);
+    brokerWorker.registerActivitiesImplementations(exec);
+
+    env.start();
+  }
+
+  @AfterEach
+  void tearDown() {
+    env.close();
+  }
+
+  private AdoptionResult runAdopt() {
+    return runAdopt(OCC);
+  }
+
+  private AdoptionResult runAdopt(String occ) {
+    return newAdoptionStub().adopt(input(occ));
+  }
+
+  private AdoptionWorkflow newAdoptionStub() {
+    return env.getWorkflowClient()
+        .newWorkflowStub(
+            AdoptionWorkflow.class, WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+  }
+
+  private AdoptionWorkflowInput input(String occ) {
+    AdoptionWorkflowInput in = new AdoptionWorkflowInput();
+    in.setSchemaVersion(1L);
+    in.setTenantId(TENANT);
+    in.setStrategyId(STRATEGY);
+    in.setOcc(occ);
+    in.setOperatorId(OPERATOR);
+    return in;
   }
 
   private BrokerPosition brokerLot(long qty, BigDecimal avgEntryPrice) {
@@ -104,7 +180,7 @@ class PositionAdoptionActivitiesImplTest {
   }
 
   @Test
-  void happyPath_startsOwner_signalsFill_terminalizesJournal_seedsCache_auditsProvenance() {
+  void happyPath_startsOwner_forwardsFill_terminalizesJournal_seedsCache_auditsProvenance() {
     when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
         .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
     when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
@@ -113,49 +189,39 @@ class PositionAdoptionActivitiesImplTest {
     when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
     when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
 
-    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, OCC);
+    AdoptionResult result = runAdopt();
 
     assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ADOPTED);
-
     String expectedWfId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
     assertThat(result.getWorkflowId()).isEqualTo(expectedWfId);
+    assertThat(result.getQty()).isEqualTo(5L);
+    assertThat(result.getEntrySignalId()).isEqualTo(SIGNAL_ID);
 
-    // Started the PositionWorkflow with the canonical id + TenantStrategy/ContractSymbol SAs.
-    ArgumentCaptor<io.temporal.client.WorkflowOptions> optsCaptor =
-        ArgumentCaptor.forClass(io.temporal.client.WorkflowOptions.class);
-    verify(workflowClient).newUntypedWorkflowStub(eq("PositionWorkflow"), optsCaptor.capture());
-    io.temporal.client.WorkflowOptions opts = optsCaptor.getValue();
-    assertThat(opts.getWorkflowId()).isEqualTo(expectedWfId);
-    assertThat(opts.getTaskQueue()).isEqualTo("orchestrator-core");
-    @SuppressWarnings("unchecked")
-    Map<String, Object> sa = (Map<String, Object>) opts.getSearchAttributes();
-    assertThat(sa).containsEntry("TenantStrategy", WorkflowIds.tenantStrategy(TENANT, STRATEGY));
-    assertThat(sa).containsEntry("ContractSymbol", OCC);
+    // The PositionWorkflow child was started with broker-truth qty/premium under the canonical id.
+    PositionWorkflowInput started = STARTED.get(expectedWfId);
+    assertThat(started).isNotNull();
+    assertThat(started.getTenantId()).isEqualTo(TENANT);
+    assertThat(started.getStrategyId()).isEqualTo(STRATEGY);
+    assertThat(started.getEntrySignalId()).isEqualTo(SIGNAL_ID);
+    assertThat(started.getContractSymbol()).isEqualTo(OCC);
+    assertThat(started.getQty()).isEqualTo(5L);
+    assertThat(started.getEntryPremium()).isEqualByComparingTo(new BigDecimal("3.40"));
+    // eod_force_flatten propagated verbatim; TTLs sourced from config.
+    assertThat(started.getEodForceFlatten()).isEqualTo(Boolean.FALSE);
+    assertThat(started.getFirstFillTtlSecs()).isEqualTo(120L);
 
-    // start(posInput) was called with the reconstructed input carrying broker-truth qty/price.
-    ArgumentCaptor<Object> startArg = ArgumentCaptor.forClass(Object.class);
-    verify(stub).start(startArg.capture());
-    PositionWorkflowInput posInput = (PositionWorkflowInput) startArg.getValue();
-    assertThat(posInput.getTenantId()).isEqualTo(TENANT);
-    assertThat(posInput.getStrategyId()).isEqualTo(STRATEGY);
-    assertThat(posInput.getEntrySignalId()).isEqualTo(SIGNAL_ID);
-    assertThat(posInput.getContractSymbol()).isEqualTo(OCC);
-    assertThat(posInput.getQty()).isEqualTo(5L);
-    assertThat(posInput.getEntryPremium()).isEqualByComparingTo(new BigDecimal("3.40"));
-
-    // onFill signalled with broker-confirmed payload.
-    ArgumentCaptor<Object> signalArgs = ArgumentCaptor.forClass(Object.class);
-    verify(stub).signal(eq("onFill"), signalArgs.capture());
-    FillSignalPayload fill = (FillSignalPayload) signalArgs.getValue();
+    // onFill forwarded so the first-fill gate wakes.
+    FillSignalPayload fill = FILLS.get(expectedWfId);
+    assertThat(fill).isNotNull();
     assertThat(fill.getFilledQty()).isEqualTo(5L);
     assertThat(fill.getAvgFillPrice()).isEqualByComparingTo(new BigDecimal("3.40"));
     assertThat(fill.getBrokerOrderId()).isEqualTo(BROKER_ORDER_ID);
 
-    // Journal terminalized + discovery cache seeded.
+    // Journal terminalized through the exec queue + discovery cache seeded.
     verify(exec).journalReconcileToFilled(eq(INTENT_KEY), eq(5L), any(BigDecimal.class), any());
     verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, OCC, expectedWfId);
 
-    // PositionAdopted audit emitted with provenance.
+    // PositionAdopted audit emitted with provenance (including the triggering operator).
     ArgumentCaptor<AuditEvent> auditCaptor = ArgumentCaptor.forClass(AuditEvent.class);
     verify(audit).log(auditCaptor.capture());
     AuditEvent ev = auditCaptor.getValue();
@@ -168,39 +234,36 @@ class PositionAdoptionActivitiesImplTest {
     assertThat(subject).containsEntry("intent_key", INTENT_KEY);
     assertThat(subject).containsEntry("broker_order_id", BROKER_ORDER_ID);
     assertThat(subject).containsEntry("workflow_id", expectedWfId);
+    assertThat(subject).containsEntry("operator_id", OPERATOR);
     assertThat(subject).containsKey("qty");
     assertThat(subject).containsKey("entry_premium");
   }
 
   @Test
-  void alreadyOwned_noStart_noSignal_noTerminalize_isNoop() {
+  void alreadyOwned_noStart_noForward_noTerminalize_isNoop() {
     when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
         .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
     when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
         .thenReturn(List.of(filledJournalRow()));
     when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
 
-    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, OCC);
+    AdoptionResult result = runAdopt();
 
     assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ALREADY_OWNED);
-    verify(workflowClient, never()).newUntypedWorkflowStub(anyString(), any());
-    verify(stub, never()).start(any());
-    verify(stub, never()).signal(anyString(), any());
+    assertThat(STARTED).isEmpty();
     verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
     verify(positionLookup, never())
         .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
   }
 
   @Test
-  void brokerDoesNotHold_refused_noStartNoSignalNoTerminalize() {
+  void brokerDoesNotHold_refusedNotHeld_noSideEffects() {
     when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC)).thenReturn(null);
 
-    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, OCC);
+    AdoptionResult result = runAdopt();
 
     assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.REFUSED_NOT_HELD);
-    verify(workflowClient, never()).newUntypedWorkflowStub(anyString(), any());
-    verify(stub, never()).start(any());
-    verify(stub, never()).signal(anyString(), any());
+    assertThat(STARTED).isEmpty();
     verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
     verify(positionLookup, never())
         .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
@@ -209,68 +272,16 @@ class PositionAdoptionActivitiesImplTest {
   }
 
   @Test
-  void retryAfterPartialAdoption_resendsOnFill_terminalizes_caches_audits_andAdopts() {
-    // Regression for the retry signal-loss: on an activity retry, start() succeeded on the prior
-    // attempt (so it now throws WorkflowExecutionAlreadyStarted) but the fill signal had not yet
-    // been sent. The running-probe still returns false (the adopted owner is parked on the
-    // first-fill gate, not yet "running" by this probe), so we must NOT bail out on the
-    // already-started catch — we must fall through and re-send onFill + finish steps 6-8.
-    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
-        .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
-    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
-        .thenReturn(List.of(filledJournalRow()));
-    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
-    when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
-    when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
-
-    // start() throws as if the workflow was already started on a prior (interrupted) attempt.
-    doThrow(
-            new WorkflowExecutionAlreadyStarted(
-                WorkflowExecution.getDefaultInstance(),
-                "PositionWorkflow",
-                new RuntimeException("already started")))
-        .when(stub)
-        .start(any());
-
-    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, OCC);
-
-    // Outcome is ADOPTED (not ALREADY_OWNED) — the retry recovers the dropped fill signal.
-    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ADOPTED);
-
-    String expectedWfId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
-    assertThat(result.getWorkflowId()).isEqualTo(expectedWfId);
-
-    // The dropped fill signal is re-sent (the whole point of the fix).
-    ArgumentCaptor<Object> signalArgs = ArgumentCaptor.forClass(Object.class);
-    verify(stub).signal(eq("onFill"), signalArgs.capture());
-    FillSignalPayload fill = (FillSignalPayload) signalArgs.getValue();
-    assertThat(fill.getFilledQty()).isEqualTo(5L);
-    assertThat(fill.getAvgFillPrice()).isEqualByComparingTo(new BigDecimal("3.40"));
-    assertThat(fill.getBrokerOrderId()).isEqualTo(BROKER_ORDER_ID);
-
-    // Steps 6-8 still complete (all idempotent): terminalize, cache, audit.
-    verify(exec).journalReconcileToFilled(eq(INTENT_KEY), eq(5L), any(BigDecimal.class), any());
-    verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, OCC, expectedWfId);
-
-    ArgumentCaptor<AuditEvent> auditCaptor = ArgumentCaptor.forClass(AuditEvent.class);
-    verify(audit).log(auditCaptor.capture());
-    assertThat(auditCaptor.getValue().getKind()).isEqualTo("PositionAdopted");
-  }
-
-  @Test
-  void noJournalAnchor_refused_noStartNoSignal() {
+  void noJournalAnchor_refusedNoAnchor_noSideEffects() {
     when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
         .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
     when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC)).thenReturn(List.of());
     when(exec.journalDumpOpen(TENANT, STRATEGY)).thenReturn(List.of());
 
-    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, OCC);
+    AdoptionResult result = runAdopt();
 
     assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.REFUSED_NO_ANCHOR);
-    // No workflow start / no signal occurred — refusal is before any side effect.
-    verify(workflowClient, never()).newUntypedWorkflowStub(anyString(), any());
-    verify(stub, never()).start(any());
-    verify(stub, never()).signal(anyString(), any());
+    assertThat(STARTED).isEmpty();
     verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
     verify(positionLookup, never())
         .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
@@ -293,7 +304,7 @@ class PositionAdoptionActivitiesImplTest {
     String paddedOwnerId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
     when(positionLookup.isPositionWorkflowRunning(paddedOwnerId)).thenReturn(true);
 
-    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, compactOcc);
+    AdoptionResult result = runAdopt(compactOcc);
 
     // Probe was invoked with the PADDED workflow id rebuilt from the anchor, not the compact input.
     ArgumentCaptor<String> probeId = ArgumentCaptor.forClass(String.class);
@@ -302,9 +313,7 @@ class PositionAdoptionActivitiesImplTest {
 
     // Live owner found -> no duplicate adoption.
     assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ALREADY_OWNED);
-    verify(workflowClient, never()).newUntypedWorkflowStub(anyString(), any());
-    verify(stub, never()).start(any());
-    verify(stub, never()).signal(anyString(), any());
+    assertThat(STARTED).isEmpty();
     verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
     verify(positionLookup, never())
         .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
@@ -326,7 +335,7 @@ class PositionAdoptionActivitiesImplTest {
     when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
     when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
 
-    AdoptionResult result = activities.adoptOrphanPosition(TENANT, STRATEGY, compactOcc);
+    AdoptionResult result = runAdopt(compactOcc);
 
     // Anchor resolved via the padding-agnostic open-row fallback -> adoption proceeds (not
     // refused).
@@ -338,35 +347,87 @@ class PositionAdoptionActivitiesImplTest {
     // Identity + discovery are keyed on the canonical PADDED OCC (not the compact operator input),
     // matching CopytradeSignalWorkflowImpl's spawn so the adopted owner is discoverable by the same
     // ContractSymbol Visibility query + Redis cache key the STC lookup uses.
-    ArgumentCaptor<io.temporal.client.WorkflowOptions> optsCaptor =
-        ArgumentCaptor.forClass(io.temporal.client.WorkflowOptions.class);
-    verify(workflowClient).newUntypedWorkflowStub(eq("PositionWorkflow"), optsCaptor.capture());
-    @SuppressWarnings("unchecked")
-    Map<String, Object> sa = (Map<String, Object>) optsCaptor.getValue().getSearchAttributes();
-    assertThat(sa).containsEntry("ContractSymbol", OCC);
+    PositionWorkflowInput started = STARTED.get(paddedWfId);
+    assertThat(started).isNotNull();
+    assertThat(started.getContractSymbol()).isEqualTo(OCC);
     verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, OCC, paddedWfId);
   }
 
   @Test
-  void copytradeEodForceFlattenFalse_propagatesVerbatim_andTtlsFromConfig() {
-    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
-        .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
-    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
-        .thenReturn(List.of(filledJournalRow()));
-    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
-    when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
-    when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
+  void nullBrokerTarget_failsFastWithInvalidBrokerTargetError() {
+    // Issue #285: broker_target is resolved from StrategyConfig FIRST so the exec-queue stub can be
+    // built before any broker-truth call. When the config carries a null broker_target there is no
+    // exec task queue to route to, so the workflow must fail fast with a non-retryable
+    // InvalidBrokerTargetError (ExecActivitiesFactory.taskQueueFor) instead of NPEing or hanging on
+    // a StartToCloseTimeout — and before any broker-truth side effect.
+    StrategyConfig noTarget = config(Boolean.FALSE);
+    noTarget.setBrokerTarget(null);
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(noTarget);
 
-    activities.adoptOrphanPosition(TENANT, STRATEGY, OCC);
+    AdoptionWorkflow wf = newAdoptionStub();
 
-    ArgumentCaptor<Object> startArg = ArgumentCaptor.forClass(Object.class);
-    verify(stub).start(startArg.capture());
-    PositionWorkflowInput posInput = (PositionWorkflowInput) startArg.getValue();
+    assertThatThrownBy(() -> wf.adopt(input(OCC)))
+        .isInstanceOf(WorkflowFailedException.class)
+        .hasCauseInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> {
+              ApplicationFailure af = (ApplicationFailure) t.getCause();
+              assertThat(af.getType()).isEqualTo("InvalidBrokerTargetError");
+              assertThat(af.isNonRetryable()).isTrue();
+            });
 
-    // eod_force_flatten passed through verbatim — exactly false, never null, never defaulted.
-    assertThat(posInput.getEodForceFlatten()).isEqualTo(Boolean.FALSE);
-    // per-strategy TTLs sourced from config (pending_ttl_paper_secs=120), not left null.
-    assertThat(posInput.getFirstFillTtlSecs()).isEqualTo(120L);
-    assertThat(posInput.getExitFillTtlSecs()).isEqualTo(120L);
+    // Fast-fail happened before any broker-truth call / side effect.
+    assertThat(STARTED).isEmpty();
+    verify(exec, never()).brokerGetPositionByOcc(anyString(), anyString(), anyString());
+    verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+  }
+
+  /**
+   * Light {@link PositionWorkflow} double registered on the core queue instead of the real {@code
+   * PositionWorkflowImpl}: records the start input + onFill payload to the static maps, then parks
+   * on a never-completing await so the adopted owner stays "running" like production. The adoption
+   * workflow doesn't wait on this child's result, so parking is harmless.
+   */
+  public static final class RecordingPositionWorkflowImpl implements PositionWorkflow {
+    @Override
+    public String run(PositionWorkflowInput input) {
+      STARTED.put(Workflow.getInfo().getWorkflowId(), input);
+      // Park until an onFill arrives, then record it. The adoption workflow forwards onFill right
+      // after the child is durably scheduled; it does not block on this child's completion.
+      Workflow.await(() -> FILLS.containsKey(Workflow.getInfo().getWorkflowId()));
+      return input.getEntrySignalId();
+    }
+
+    @Override
+    public void partialExit(PartialExitRequest req) {}
+
+    @Override
+    public void onFill(FillSignalPayload event) {
+      FILLS.put(Workflow.getInfo().getWorkflowId(), event);
+    }
+
+    @Override
+    public void armChandelier(ArmChandelierPayload payload) {}
+
+    @Override
+    public void chandelierTick(PremiumTick tick) {}
+
+    @Override
+    public void riskBreach(RiskBreachPayload payload) {}
+
+    @Override
+    public TrailingState trailingState() {
+      return null;
+    }
+
+    @Override
+    public void forceCloseValidator(ForceCloseRequest request) {}
+
+    @Override
+    public ForceCloseResult forceClose(ForceCloseRequest request) {
+      return null;
+    }
   }
 }
