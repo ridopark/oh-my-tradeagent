@@ -209,6 +209,11 @@ class AdoptionWorkflowImplTest {
     // eod_force_flatten propagated verbatim; TTLs sourced from config.
     assertThat(started.getEodForceFlatten()).isEqualTo(Boolean.FALSE);
     assertThat(started.getFirstFillTtlSecs()).isEqualTo(120L);
+    // Issue #288: the resolved broker target is threaded onto the adopted child input from
+    // StrategyConfig.broker_target so PositionWorkflowImpl can stamp it on the exit OrderIntent
+    // (its first exec.placeOrder is the STC — without it the lot would re-orphan).
+    assertThat(started.getBrokerTarget())
+        .isEqualTo(PositionWorkflowInput.BrokerTarget.ALPACA_PAPER);
 
     // onFill forwarded so the first-fill gate wakes.
     FillSignalPayload fill = FILLS.get(expectedWfId);
