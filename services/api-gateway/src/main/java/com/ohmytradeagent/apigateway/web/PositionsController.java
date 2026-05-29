@@ -1,17 +1,21 @@
 package com.ohmytradeagent.apigateway.web;
 
+import com.ohmytradeagent.contract.AdoptionResult;
+import com.ohmytradeagent.contract.AdoptionWorkflowInput;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import io.temporal.api.enums.v1.WorkflowExecutionStatus;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
+import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -27,9 +31,14 @@ import org.springframework.web.bind.annotation.RestController;
  *   <li>{@code GET /positions} — list running PositionWorkflows for the caller's (tenant, strategy)
  *       via Advanced Visibility {@code listWorkflowExecutions} filtered on the {@code
  *       TenantStrategy} Search Attribute.
- *   <li>{@code POST /positions/{workflowId}/force-close} — Update {@code force_close} with
- *       WaitPolicy=Accepted; returns the workflow's {@link ForceCloseResult} payload directly so
- *       the operator can correlate the eventual fill via {@code position_state} polling.
+ *   <li>{@code POST /positions/force-close} — Update {@code force_close} with WaitPolicy=Accepted;
+ *       returns the workflow's {@link ForceCloseResult} payload directly so the operator can
+ *       correlate the eventual fill via {@code position_state} polling.
+ *   <li>{@code POST /positions/adopt} — operator-triggered orphan adoption (issue #285). Body
+ *       {@code {"occ": "<compact or padded OCC>"}}; tenant/strategy from {@code X-Tenant-Id}/{@code
+ *       X-Strategy-Id} (defaults dev/copytrade-v1); operator auth via {@code X-Operator-Id} (same
+ *       single-operator pattern as force-close). Starts the short-lived {@code AdoptionWorkflow} on
+ *       the orchestrator task queue and returns its {@link AdoptionResult} synchronously.
  * </ul>
  */
 @RestController
@@ -37,13 +46,20 @@ import org.springframework.web.bind.annotation.RestController;
 public class PositionsController {
 
   private static final String POSITION_WORKFLOW_TYPE = "PositionWorkflow";
+  private static final String ADOPTION_WORKFLOW_TYPE = "AdoptionWorkflow";
 
   private final WorkflowClient client;
   private final TenantContext ctx;
+  private final String orchestratorTaskQueue;
 
-  public PositionsController(WorkflowClient client, TenantContext ctx) {
+  public PositionsController(
+      WorkflowClient client,
+      TenantContext ctx,
+      @Value("${temporal.orchestrator-task-queue:orchestrator-core}")
+          String orchestratorTaskQueue) {
     this.client = client;
     this.ctx = ctx;
+    this.orchestratorTaskQueue = orchestratorTaskQueue;
   }
 
   @GetMapping
@@ -95,6 +111,49 @@ public class PositionsController {
     return ResponseEntity.status(status).body(result);
   }
 
+  /**
+   * Issue #285: operator-triggered orphan adoption. Starts the short-lived {@code AdoptionWorkflow}
+   * for the supplied OCC and returns its {@link AdoptionResult} synchronously. The workflow id is
+   * keyed on the OCC ({@link WorkflowIds#adoption}) so a double-click maps to one execution and the
+   * workflow's own idempotency guard makes a re-run a safe {@code ALREADY_OWNED} no-op.
+   */
+  @PostMapping("/adopt")
+  public ResponseEntity<AdoptionResult> adopt(
+      HttpServletRequest req, @RequestBody AdoptPayload body) {
+    if (body == null || body.occ() == null || body.occ().isBlank()) {
+      throw new IllegalArgumentException("occ is required");
+    }
+    String tenant = ctx.tenantId(req);
+    String strategy = ctx.strategyId(req);
+    String operator = ctx.operatorId(req);
+
+    AdoptionWorkflowInput in = new AdoptionWorkflowInput();
+    in.setSchemaVersion(1L);
+    in.setTenantId(tenant);
+    in.setStrategyId(strategy);
+    in.setOcc(body.occ());
+    in.setOperatorId(operator);
+
+    WorkflowOptions opts =
+        WorkflowOptions.newBuilder()
+            .setWorkflowId(WorkflowIds.adoption(tenant, strategy, body.occ()))
+            .setTaskQueue(orchestratorTaskQueue)
+            .build();
+    WorkflowStub stub = client.newUntypedWorkflowStub(ADOPTION_WORKFLOW_TYPE, opts);
+    stub.start(in);
+    AdoptionResult result = stub.getResult(AdoptionResult.class);
+
+    // ADOPTED + ALREADY_OWNED are successful (idempotent) outcomes -> 200. The refusals
+    // (REFUSED_NOT_HELD / REFUSED_NO_ANCHOR) mean the request can't be fulfilled given current
+    // broker/journal state -> 409 Conflict so the operator distinguishes them from a 200.
+    HttpStatus status =
+        switch (result.getOutcome()) {
+          case ADOPTED, ALREADY_OWNED -> HttpStatus.OK;
+          case REFUSED_NOT_HELD, REFUSED_NO_ANCHOR -> HttpStatus.CONFLICT;
+        };
+    return ResponseEntity.status(status).body(result);
+  }
+
   private static Map<String, Object> summarize(WorkflowExecutionMetadata m) {
     Instant start = m.getStartTime();
     return Map.of(
@@ -104,4 +163,6 @@ public class PositionsController {
   }
 
   public record ForceClosePayload(String workflowId, String reason) {}
+
+  public record AdoptPayload(String occ) {}
 }

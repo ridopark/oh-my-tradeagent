@@ -37,6 +37,18 @@ public final class WorkflowIds {
   }
 
   /**
+   * Workflow ID for the short-lived {@code AdoptionWorkflow} that adopts the orphaned {@code occ}.
+   * Issue #285: keyed on the OCC (not a random id) so a double-click maps to one execution —
+   * concurrent starts collide on this id and the adoption workflow's own idempotency guard ({@code
+   * ALREADY_OWNED}) makes a post-completion re-run a safe no-op. The compact OCC keeps the id
+   * stable regardless of whether the operator supplies the padded or compact form.
+   */
+  public static String adoption(String tenantId, String strategyId, String occ) {
+    String compact = occ == null ? "" : occ.replace(" ", "");
+    return tenantStrategy(tenantId, strategyId) + "/adopt/" + compact;
+  }
+
+  /**
    * Workflow ID of the {@code CopytradeSignalWorkflow} for a given signal. The Python emitter
    * builds the same shape in {@code services/signal-source-discord/.../emitter.py:workflow_id_for}
    * — keep the two in lockstep (cross-language constant sharing is a separate cleanup).
