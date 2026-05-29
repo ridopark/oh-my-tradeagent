@@ -4,6 +4,7 @@ import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.CancelResponse;
+import com.ohmytradeagent.exec.broker.ClientOrderId;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
@@ -26,7 +27,7 @@ import org.springframework.stereotype.Component;
  *   1. journal.upsertIntent(intent)                  // INSERT ON CONFLICT DO NOTHING
  *   2. journal.findByIntentKey                       // read canonical row
  *   3. if state == SUBMITTED       → return existing (skip broker call)
- *   4. broker.placeOrder(client_order_id = intent_key)   // idempotent on client_order_id
+ *   4. broker.placeOrder(client_order_id = ClientOrderId.forIntent(intent_key))  // bounded (#295)
  *   5. journal.markSubmittedIfRecorded               // WHERE state = 'RECORDED'
  *   6. return SUBMITTED result
  * </pre>
@@ -59,14 +60,32 @@ public class ExecActivitiesImpl implements ExecActivities {
       return result(row);
     }
 
-    PlaceOrderResponse br =
-        broker.placeOrder(
-            new PlaceOrderRequest(
-                intent.getIntentKey(),
-                intent.getOptionSymbol(),
-                intent.getSide().value(),
-                intent.getQty(),
-                intent.getLimitPrice()));
+    // Issue #295: the broker-facing client_order_id is the bounded, hashed value derived from the
+    // (possibly 161-char) intent_key — Alpaca caps client_order_id at 128. JooqOrderIntentJournal
+    // persists this SAME value in the client_order_id column, so the wire id, the stored column,
+    // and
+    // the WS-echoed id all match. The intent_key stays unchanged (journal PK / :exit: STC routing).
+    String clientOrderId = ClientOrderId.forIntent(intent.getIntentKey());
+    PlaceOrderResponse br;
+    try {
+      br =
+          broker.placeOrder(
+              new PlaceOrderRequest(
+                  clientOrderId,
+                  intent.getOptionSymbol(),
+                  intent.getSide().value(),
+                  intent.getQty(),
+                  intent.getLimitPrice()));
+    } catch (RuntimeException e) {
+      // Issue #295: surface the broker rejection at the DB layer. Without this the row stays
+      // RECORDED with last_error=NULL and a broker-side outage (e.g. the 128-char 422) is
+      // invisible.
+      // State is left RECORDED so a later retry can still place; then rethrow to preserve
+      // Temporal's
+      // retry/non-retry classification.
+      journal.markPlaceFailed(intent.getIntentKey(), e.getMessage());
+      throw e;
+    }
 
     journal.markSubmittedIfRecorded(intent.getIntentKey(), br.brokerOrderId());
 

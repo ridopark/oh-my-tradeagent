@@ -73,15 +73,19 @@ public class FillDispatcherImpl implements FillDispatcher {
   @Override
   public void dispatch(BrokerFillEvent event) {
     // #244: resolve the journal row by broker_order_id first, then fall back to the
-    // client_order_id (== intent_key, set at upsertIntent and passed to the broker). The fallback
-    // closes the ~26ms submit/fill race: a WS fill can arrive AFTER broker.placeOrder returns but
-    // BEFORE ExecActivitiesImpl.placeOrder runs markSubmittedIfRecorded(intentKey, brokerOrderId),
-    // so the row carries no broker_order_id yet and findByBrokerOrderId is empty. Without the
-    // fallback the fill was logged unknown + dropped, leaving the row stuck SUBMITTED and stranding
-    // the position. Only a fill that resolves by NEITHER key is a genuine unknown.
+    // client_order_id. The fallback closes the ~26ms submit/fill race: a WS fill can arrive AFTER
+    // broker.placeOrder returns but BEFORE ExecActivitiesImpl.placeOrder runs
+    // markSubmittedIfRecorded(intentKey, brokerOrderId), so the row carries no broker_order_id yet
+    // and findByBrokerOrderId is empty. Without the fallback the fill was logged unknown + dropped,
+    // leaving the row stuck SUBMITTED and stranding the position. Only a fill that resolves by
+    // NEITHER key is a genuine unknown.
+    //
+    // #295: the broker echoes the bounded client_order_id (ClientOrderId.forIntent(intent_key)),
+    // which is NO LONGER equal to the intent_key, so the fallback resolves by client_order_id —
+    // not findByIntentKey, which would now miss the bounded id and drop the race-window fill.
     Optional<JournaledOrder> row = journal.findByBrokerOrderId(event.brokerOrderId());
     if (row.isEmpty() && event.clientOrderId() != null) {
-      row = journal.findByIntentKey(event.clientOrderId());
+      row = journal.findByClientOrderId(event.clientOrderId());
     }
     if (row.isEmpty()) {
       log.warn(

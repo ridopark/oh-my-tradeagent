@@ -327,6 +327,46 @@ class JooqOrderIntentJournalIT {
   }
 
   @Test
+  void upsertIntent_storesBoundedClientOrderId_notRawIntentKey() {
+    // Issue #295: a 161-char exit intent_key is stored as the long PK, but the client_order_id
+    // column holds the BOUNDED (≤128) value the broker receives. findByClientOrderId resolves the
+    // row by that bounded value — powering the fill-dispatcher WS-race fallback.
+    String exitKey =
+        "t-dev/s-copytrade-v1/pos/TSLA  260529C00435000/"
+            + "chat-messages-769797179992571914-1509927843260268616:0"
+            + ":exit:chat-messages-769797179992571914-1509928607168860170:0";
+    journal.upsertIntent(intentWithOcc(exitKey, "sig-stc", "TSLA  260529C00435000"));
+
+    JournaledOrder row = journal.findByIntentKey(exitKey).orElseThrow();
+    assertThat(row.clientOrderId().length()).isLessThanOrEqualTo(128);
+    assertThat(row.clientOrderId()).isNotEqualTo(exitKey);
+    assertThat(row.clientOrderId())
+        .isEqualTo(com.ohmytradeagent.exec.broker.ClientOrderId.forIntent(exitKey));
+
+    JournaledOrder byCid = journal.findByClientOrderId(row.clientOrderId()).orElseThrow();
+    assertThat(byCid.intentKey()).isEqualTo(exitKey);
+  }
+
+  @Test
+  void findByClientOrderId_returnsEmpty_whenAbsent() {
+    assertThat(journal.findByClientOrderId("no-such-client-order-id")).isEmpty();
+  }
+
+  @Test
+  void markPlaceFailed_setsLastError_leavesStateRecorded() {
+    // Issue #295: a broker rejection on the place path persists last_error without leaving the row
+    // RECORDED-with-NULL-error (the silent outage the issue reports). State stays RECORDED so a
+    // later retry can still transition it to SUBMITTED.
+    journal.upsertIntent(intent("intent-A"));
+
+    journal.markPlaceFailed("intent-A", "alpaca 422: client_order_id too long");
+
+    JournaledOrder row = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(row.state()).isEqualTo(OrderState.RECORDED);
+    assertThat(row.lastError()).isEqualTo("alpaca 422: client_order_id too long");
+  }
+
+  @Test
   void findByBrokerOrderId_returnsEmpty_forRecordedRow() {
     // RECORDED rows have no broker_order_id yet; the partial index excludes them and the lookup
     // returns empty rather than matching on NULL.
