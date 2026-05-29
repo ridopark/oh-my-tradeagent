@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.activities;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter;
 import java.sql.Timestamp;
 import java.util.UUID;
 import org.jooq.DSLContext;
@@ -43,17 +44,20 @@ public class AuditActivitiesImpl implements AuditActivities {
   private final ObjectMapper objectMapper;
   private final AuditLogChainWriter chainWriter;
   private final boolean chainWriterEnabled;
+  private final OrderFailureAlerter failureAlerter;
 
   @Autowired
   public AuditActivitiesImpl(
       DSLContext dsl,
       ObjectMapper objectMapper,
       AuditLogChainWriter chainWriter,
-      @Value("${audit.chain-writer.enabled:true}") boolean chainWriterEnabled) {
+      @Value("${audit.chain-writer.enabled:true}") boolean chainWriterEnabled,
+      OrderFailureAlerter failureAlerter) {
     this.dsl = dsl;
     this.objectMapper = objectMapper;
     this.chainWriter = chainWriter;
     this.chainWriterEnabled = chainWriterEnabled;
+    this.failureAlerter = failureAlerter;
   }
 
   @Override
@@ -70,9 +74,17 @@ public class AuditActivitiesImpl implements AuditActivities {
         event.getCorrelationId(),
         event.getSubject());
 
-    if (dsl == null) {
-      return;
+    if (dsl != null) {
+      persist(event);
     }
+
+    // Issue #297: AFTER the audit row is written (or the dsl-less unit-test path is taken),
+    // dispatch a best-effort Discord alert for allowlisted BTO/STC failure kinds. The alerter
+    // never throws — a notification must not break the audit write or the trading path.
+    failureAlerter.onAuditEvent(event);
+  }
+
+  private void persist(AuditEvent event) {
     try {
       String subjectJson = objectMapper.writeValueAsString(event.getSubject());
       Timestamp occurredAt = Timestamp.from(event.getOccurredAt().toInstant());

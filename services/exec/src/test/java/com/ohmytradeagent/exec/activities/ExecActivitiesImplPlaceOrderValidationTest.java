@@ -34,7 +34,11 @@ class ExecActivitiesImplPlaceOrderValidationTest {
 
   private final ThrowingJournal journal = new ThrowingJournal();
   private final ThrowingBroker broker = new ThrowingBroker();
-  private final ExecActivitiesImpl exec = new ExecActivitiesImpl(journal, broker);
+  private final ExecActivitiesImpl exec =
+      new ExecActivitiesImpl(
+          journal,
+          broker,
+          new com.ohmytradeagent.exec.alert.BrokerRejectionAlerter(content -> {}, false));
 
   @Test
   void placeOrder_nullBrokerTarget_throwsNonRetryable_beforeJournalOrBroker() {
