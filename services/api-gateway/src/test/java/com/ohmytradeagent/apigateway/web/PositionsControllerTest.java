@@ -3,6 +3,7 @@ package com.ohmytradeagent.apigateway.web;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -17,6 +18,7 @@ import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowExecutionAlreadyStarted;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -200,6 +202,47 @@ class PositionsControllerTest {
                 .content("{\"occ\":\"UNH260618C00400000\"}"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.outcome").value("ALREADY_OWNED"));
+  }
+
+  @Test
+  void adopt_reInvokeSameOcc_whenStartRejectsDuplicate_returnsIdempotentResultNot500()
+      throws Exception {
+    // A second POST for the same OCC reuses the workflow id, so stub.start() throws
+    // WorkflowExecutionAlreadyStarted (default ALLOW_DUPLICATE_FAILED_ONLY reuse policy). The
+    // controller must attach to the existing execution and return its idempotent result, NOT 500.
+    WorkflowStub startStub = mock(WorkflowStub.class);
+    when(client.newUntypedWorkflowStub(eq("AdoptionWorkflow"), any(WorkflowOptions.class)))
+        .thenReturn(startStub);
+    doThrow(
+            new WorkflowExecutionAlreadyStarted(
+                WorkflowExecution.newBuilder()
+                    .setWorkflowId("t-dev/s-copytrade-v1/adopt/UNH260618C00400000")
+                    .build(),
+                "AdoptionWorkflow",
+                null))
+        .when(startStub)
+        .start(any());
+
+    AdoptionResult existing = new AdoptionResult();
+    existing.setSchemaVersion(1L);
+    existing.setOutcome(AdoptionResult.Outcome.ALREADY_OWNED);
+    // The controller re-binds to the existing run via the single-arg untyped stub (by workflow id).
+    WorkflowStub existingStub = mock(WorkflowStub.class);
+    when(client.newUntypedWorkflowStub("t-dev/s-copytrade-v1/adopt/UNH260618C00400000"))
+        .thenReturn(existingStub);
+    when(existingStub.getResult(AdoptionResult.class)).thenReturn(existing);
+
+    mvc.perform(
+            post("/positions/adopt")
+                .header("X-Operator-Id", "ridopark")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"occ\":\"UNH260618C00400000\"}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.outcome").value("ALREADY_OWNED"));
+
+    // The existing execution's result was returned without ever surfacing the duplicate-start
+    // error.
+    verify(existingStub).getResult(AdoptionResult.class);
   }
 
   @Test

@@ -7,6 +7,7 @@ import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import io.temporal.api.enums.v1.WorkflowExecutionStatus;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowExecutionAlreadyStarted;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -116,6 +117,13 @@ public class PositionsController {
    * for the supplied OCC and returns its {@link AdoptionResult} synchronously. The workflow id is
    * keyed on the OCC ({@link WorkflowIds#adoption}) so a double-click maps to one execution and the
    * workflow's own idempotency guard makes a re-run a safe {@code ALREADY_OWNED} no-op.
+   *
+   * <p>A re-{@code POST} for the same OCC after a prior adoption has already started (in flight) or
+   * completed makes {@code stub.start} throw {@link WorkflowExecutionAlreadyStarted} (the workflow
+   * id is reused and the default {@code ALLOW_DUPLICATE_FAILED_ONLY} reuse policy rejects the
+   * duplicate). Rather than surfacing that as a 500, we attach to the existing execution and return
+   * its {@link AdoptionResult} — yielding the idempotent {@code ALREADY_OWNED} (or original {@code
+   * ADOPTED}) outcome for both the in-flight and completed cases.
    */
   @PostMapping("/adopt")
   public ResponseEntity<AdoptionResult> adopt(
@@ -134,14 +142,22 @@ public class PositionsController {
     in.setOcc(body.occ());
     in.setOperatorId(operator);
 
+    String workflowId = WorkflowIds.adoption(tenant, strategy, body.occ());
     WorkflowOptions opts =
         WorkflowOptions.newBuilder()
-            .setWorkflowId(WorkflowIds.adoption(tenant, strategy, body.occ()))
+            .setWorkflowId(workflowId)
             .setTaskQueue(orchestratorTaskQueue)
             .build();
     WorkflowStub stub = client.newUntypedWorkflowStub(ADOPTION_WORKFLOW_TYPE, opts);
-    stub.start(in);
-    AdoptionResult result = stub.getResult(AdoptionResult.class);
+    AdoptionResult result;
+    try {
+      stub.start(in);
+      result = stub.getResult(AdoptionResult.class);
+    } catch (WorkflowExecutionAlreadyStarted alreadyStarted) {
+      // Same-OCC re-invoke: attach to the existing (in-flight or completed) execution and return
+      // its idempotent result instead of 500-ing on the duplicate-start rejection.
+      result = client.newUntypedWorkflowStub(workflowId).getResult(AdoptionResult.class);
+    }
 
     // ADOPTED + ALREADY_OWNED are successful (idempotent) outcomes -> 200. The refusals
     // (REFUSED_NOT_HELD / REFUSED_NO_ANCHOR) mean the request can't be fulfilled given current
