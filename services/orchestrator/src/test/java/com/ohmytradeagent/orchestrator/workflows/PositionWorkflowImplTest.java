@@ -265,6 +265,47 @@ class PositionWorkflowImplTest {
     assertThat(exit.getBrokerTarget()).isEqualTo(OrderIntent.BrokerTarget.ALPACA_PAPER);
   }
 
+  /**
+   * Issue #291 (follow-up to #288): the FLATTEN path (EOD/expiry/risk-breach force-close) must also
+   * thread the resolved broker target onto its SELL {@code OrderIntent}, mirroring the exit path
+   * covered by {@link #exitIntent_carriesResolvedBrokerTarget_issue288()}. An adopted-shaped
+   * position carries {@code brokerTarget} resolved at run() (the same value routing {@code
+   * ExecActivitiesFactory.forTarget}); if {@code flattenIntent(...)} dropped it, the force-flatten
+   * PlaceOrder would fail validateIntent and the lot would be stranded. Drives a flatten via the
+   * EOD timer and asserts the SELL {@code OrderIntent.getBrokerTarget()} survives.
+   */
+  @Test
+  void flattenIntent_carriesResolvedBrokerTarget_issue288() throws Exception {
+    // Short EOD horizon forces the workflow to force-flatten the remaining lot via flattenIntent().
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    // Models the adopted-position input: brokerTarget resolved by AdoptionWorkflowImpl.buildInput
+    // from StrategyConfig.broker_target and threaded onto PositionWorkflowInput.
+    PositionWorkflowInput in = input(4);
+    in.setBrokerTarget(PositionWorkflowInput.BrokerTarget.ALPACA_PAPER);
+
+    PositionWorkflow stub = newStub("pos-flatten-broker-target");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 4L);
+
+    // Let virtual time advance past EOD so the force-flatten fires.
+    env.sleep(Duration.ofMinutes(1));
+
+    // Workflow survives the force-flatten (does not crash/terminate/re-orphan).
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-flatten-broker-target");
+
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent flatten =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow(() -> new AssertionError("no SELL OrderIntent placed"));
+    assertThat(flatten.getBrokerTarget()).isEqualTo(OrderIntent.BrokerTarget.ALPACA_PAPER);
+  }
+
   @Test
   void duplicateSignalId_isSuppressed() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
