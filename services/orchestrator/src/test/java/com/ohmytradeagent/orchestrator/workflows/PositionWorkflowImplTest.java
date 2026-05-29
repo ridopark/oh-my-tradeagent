@@ -222,6 +222,49 @@ class PositionWorkflowImplTest {
     assertThat(exit.getLimitPrice().scale()).isLessThanOrEqualTo(2);
   }
 
+  /**
+   * Issue #288 (trading-critical): an adopted {@code PositionWorkflow} (spawned by {@code
+   * AdoptionWorkflowImpl} from its already-filled broker lot) never places an entry — its FIRST
+   * {@code exec.placeOrder} is the exit. Before this fix {@code exitIntent(...)} never called
+   * {@code setBrokerTarget}, so the exit {@code OrderIntent} carried {@code brokerTarget=null},
+   * {@code ExecActivitiesImpl.validateIntent} threw a non-retryable {@code
+   * InvalidOrderIntentError}, the PlaceOrder activity failed {@code
+   * RETRY_STATE_NON_RETRYABLE_FAILURE}, the workflow terminated, and recon re-flagged {@code
+   * PositionOrphan} — the lot became unsellable. The resolved broker target (the same value used at
+   * run() to route {@code ExecActivitiesFactory.forTarget}) must be threaded onto the exit {@code
+   * OrderIntent} so the STC reaches the exec broker and the workflow survives.
+   */
+  @Test
+  void exitIntent_carriesResolvedBrokerTarget_issue288() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    // Models the adopted-position input: brokerTarget resolved by AdoptionWorkflowImpl.buildInput
+    // from StrategyConfig.broker_target and threaded onto PositionWorkflowInput.
+    PositionWorkflowInput in = input(4);
+    in.setBrokerTarget(PositionWorkflowInput.BrokerTarget.ALPACA_PAPER);
+
+    PositionWorkflow stub = newStub("pos-exit-broker-target");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 4L);
+
+    stub.partialExit(partialExitRequest("sig-bt", "pos-exit-broker-target", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-bt", 4L, new BigDecimal("3.20")));
+
+    // Workflow survives the exit (does not crash/terminate/re-orphan).
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-exit-broker-target");
+
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent exit =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow(() -> new AssertionError("no SELL OrderIntent placed"));
+    assertThat(exit.getBrokerTarget()).isEqualTo(OrderIntent.BrokerTarget.ALPACA_PAPER);
+  }
+
   @Test
   void duplicateSignalId_isSuppressed() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());

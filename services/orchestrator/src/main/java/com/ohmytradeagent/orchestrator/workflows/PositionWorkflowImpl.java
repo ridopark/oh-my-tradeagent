@@ -237,6 +237,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    */
   private ExecActivities exec;
 
+  /**
+   * Issue #288: the resolved broker target (same value used to route {@link #exec} via {@link
+   * ExecActivitiesFactory#forTarget}), threaded onto exit/flatten {@link OrderIntent}s so {@code
+   * ExecActivitiesImpl.validateIntent} passes. Adopted positions never place an entry, so their
+   * first {@code exec.placeOrder} is the exit — without this the exit intent would carry {@code
+   * brokerTarget=null} and the workflow would re-orphan. Set once in {@link
+   * #run(PositionWorkflowInput)} alongside {@link #exec}.
+   */
+  private String brokerTarget;
+
   private final SubscribePremiumActivity marketData =
       Workflow.newActivityStub(
           SubscribePremiumActivity.class,
@@ -341,7 +351,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // Phase 2c.2: route exec Activities to broker-<broker_target>. Falls back to the
     // 2c.2 default broker when the input was minted by a pre-2c.2 CopytradeSignalWorkflow that
     // didn't populate broker_target.
-    String brokerTarget =
+    this.brokerTarget =
         in.getBrokerTarget() != null ? in.getBrokerTarget().value() : DEFAULT_BROKER_TARGET;
     this.exec = ExecActivitiesFactory.forTarget(brokerTarget);
 
@@ -1156,6 +1166,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     i.setStrategyId(input.getStrategyId());
     i.setIntentKey(intentKey);
     i.setSignalId(req.getSignalId());
+    // Issue #288: thread the resolved broker target onto the exit intent so validateIntent passes
+    // and PlaceOrder reaches the exec broker (adopted positions surface this on their first STC).
+    i.setBrokerTarget(OrderIntent.BrokerTarget.fromValue(brokerTarget));
     i.setOptionSymbol(input.getContractSymbol());
     i.setSide(OrderIntent.Side.SELL);
     i.setQty(qty);
@@ -1176,6 +1189,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     i.setStrategyId(input.getStrategyId());
     i.setIntentKey(intentKey);
     i.setSignalId("flatten-" + reason);
+    // Issue #288: thread the resolved broker target onto the flatten intent so validateIntent
+    // passes and the force-close/EOD-flatten PlaceOrder reaches the exec broker.
+    i.setBrokerTarget(OrderIntent.BrokerTarget.fromValue(brokerTarget));
     i.setOptionSymbol(input.getContractSymbol());
     i.setSide(OrderIntent.Side.SELL);
     i.setQty(remainingQty);
