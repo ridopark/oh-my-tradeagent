@@ -84,4 +84,10 @@ class ClientOrderIdTest {
     assertThatThrownBy(() -> ClientOrderId.forIntent(null))
         .isInstanceOf(IllegalArgumentException.class);
   }
+
+  @Test
+  void forIntent_blankIntentKey_throws() {
+    assertThatThrownBy(() -> ClientOrderId.forIntent("   "))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
 }

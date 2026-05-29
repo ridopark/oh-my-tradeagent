@@ -25,7 +25,7 @@ class BrokerOpenOrder(BaseModel):
     broker_order_id: constr(min_length=1)
     client_order_id: constr(min_length=1)
     """
-    Required even from broker — our place_order always sets it to intent_key. Mismatch here means the broker book contains an order we did not place.
+    Required even from broker. Per #295 our place_order sets this to a bounded (<=128-char) SHA-256-derived id deterministically computed from — and distinct from — the internal intent_key (a raw exit intent_key can exceed Alpaca's 128-char cap), so reconciliation matches on this derived id, not on intent_key verbatim. An id we cannot reproduce from a known intent_key means the broker book contains an order we did not place.
     """
     option_symbol: constr(min_length=1)
     side: Side

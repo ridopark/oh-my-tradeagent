@@ -21,7 +21,7 @@
       "minimum": 1
     },
     "broker_order_id":  { "type": "string", "minLength": 1 },
-    "client_order_id":  { "type": "string", "minLength": 1, "description": "Required even from broker — our place_order always sets it to intent_key. Mismatch here means the broker book contains an order we did not place." },
+    "client_order_id":  { "type": "string", "minLength": 1, "description": "Required even from broker. Per #295 our place_order sets this to a bounded (<=128-char) SHA-256-derived id deterministically computed from — and distinct from — the internal intent_key (a raw exit intent_key can exceed Alpaca's 128-char cap), so reconciliation matches on this derived id, not on intent_key verbatim. An id we cannot reproduce from a known intent_key means the broker book contains an order we did not place." },
     "option_symbol":    { "type": "string", "minLength": 1 },
     "side":  { "type": "string", "enum": ["BUY", "SELL"] },
     "qty":   { "type": "integer", "minimum": 1 },

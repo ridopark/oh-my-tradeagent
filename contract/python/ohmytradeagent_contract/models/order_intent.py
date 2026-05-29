@@ -40,7 +40,7 @@ class OrderIntent(BaseModel):
     strategy_id: constr(min_length=1)
     intent_key: constr(min_length=1)
     """
-    Deterministic idempotency key shared with broker client_order_id. Shape: '<workflow_id>:entry' or '<workflow_id>:exit:<exit_signal_id>'.
+    Internal deterministic idempotency key (journal PK). Shape: '<workflow_id>:entry' or '<workflow_id>:exit:<exit_signal_id>'. The broker-facing client_order_id is NOT this value verbatim: per #295 it is a bounded (<=128-char) SHA-256-derived id deterministically computed from — and distinct from — this intent_key, since a real exit intent_key can exceed Alpaca's 128-char client_order_id cap.
     """
     signal_id: constr(min_length=1)
     """
