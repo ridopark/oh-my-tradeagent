@@ -104,17 +104,23 @@ class _ContentExtractor(HTMLParser):
     def __init__(self, target_id: str) -> None:
         super().__init__(convert_charrefs=True)
         self._target_id = target_id
-        self._depth = 0          # nesting depth inside the target div (>0 = capturing)
+        # ``<div>`` nesting depth inside the target div (>0 = capturing). We
+        # count only ``div`` tags, not every element: ``html.parser`` dispatches
+        # void elements (``<img>`` custom emoji, ``<br>``, ``<wbr>``) to
+        # ``handle_starttag`` with no matching end tag, so counting all tags
+        # would leave the capture latched open after an emoji. Nested ``div``s
+        # (code blocks, spoilers) balance correctly under div-only counting.
+        self._depth = 0
         self._parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attr = dict(attrs)
         if self._depth > 0:
-            self._depth += 1
-            if tag == "br":
+            if tag == "div":
+                self._depth += 1
+            elif tag == "br":
                 self._parts.append("\n")
             return
-        if tag == "div" and attr.get("id") == self._target_id:
+        if tag == "div" and dict(attrs).get("id") == self._target_id:
             self._depth = 1
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -122,7 +128,7 @@ class _ContentExtractor(HTMLParser):
             self._parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if self._depth > 0:
+        if self._depth > 0 and tag == "div":
             self._depth -= 1
 
     def handle_data(self, data: str) -> None:

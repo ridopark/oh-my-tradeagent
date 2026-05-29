@@ -168,6 +168,51 @@ def test_plain_message_yields_its_own_body() -> None:
     assert sigs[0].ticker == "SMCI"
 
 
+def test_body_with_emoji_img_does_not_overcapture() -> None:
+    # Discord renders custom emoji as void <img> tags (no closing tag).
+    # html.parser dispatches those to handle_starttag with no matching
+    # end tag, so naive depth counting would latch the capture open and
+    # bleed in trailing siblings. The new body must stop at its own </div>.
+    new_id = "1497333333333333333"
+    quoted_id = "1480000000000000000"
+    li_id = f"chat-messages-{CHANNEL}-{new_id}"
+    li = _reply_li(
+        channel=CHANNEL,
+        new_id=new_id,
+        quoted_id=quoted_id,
+        quoted_body="BTO SMCI 8/21 45c @ 3.10",
+        new_body='STC SMCI 8/21 45c @ 8.15 all out <img alt=":fire:" class="emoji">',
+    )
+
+    content = select_message_content(li, li_id)
+
+    assert content.startswith("STC SMCI 8/21 45c @ 8.15 all out")
+    # The quoted BTO sits in a sibling div AFTER nothing, but the trailing
+    # username/timestamp siblings must not be captured.
+    assert "TradingTheTrend" not in content
+    assert "BTO" not in content
+    sigs = parse_message(content, today=REF_DATE)
+    assert len(sigs) == 1
+    assert sigs[0].action == "STC"
+
+
+def test_body_with_nested_div_captures_full_text() -> None:
+    # Discord wraps code blocks / spoilers in nested <div>s; div-depth
+    # counting must balance them and capture the inner text.
+    msg_id = "1497444444444444444"
+    li_id = f"chat-messages-{CHANNEL}-{msg_id}"
+    li = f"""
+    <li id="chat-messages-{CHANNEL}-{msg_id}">
+      <div id="message-content-{msg_id}" class="messageContent">STC NVDA 4/27 205c <div class="spoiler">@ 1.58</div> partial</div>
+    </li>
+    """
+    content = select_message_content(li, li_id)
+    sigs = parse_message(content, today=REF_DATE)
+    assert len(sigs) == 1
+    assert sigs[0].price == 1.58
+    assert sigs[0].tail == "partial"
+
+
 def test_multiline_body_preserves_line_breaks() -> None:
     msg_id = "1497222222222222222"
     li_id = f"chat-messages-{CHANNEL}-{msg_id}"
