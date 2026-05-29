@@ -9,6 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
 
 /**
  * Issue #297: audit-driven Discord alerter for copytrade BTO/STC order failures.
@@ -27,6 +29,12 @@ import org.springframework.stereotype.Component;
  * best-effort, but as a belt-and-suspenders the dispatch is wrapped so that any unexpected error
  * (message-building bug, etc.) is caught and logged rather than propagated into the audit write /
  * Temporal activity. A notification feature must not become a trading-path failure mode.
+ *
+ * <p>Issue #302: the dispatch is invoked from {@link #onAuditCommitted(AuditEventCommitted)}, a
+ * {@code @TransactionalEventListener(phase = AFTER_COMMIT, fallbackExecution = true)} handler, so a
+ * slow ~5s webhook can never hold the audit {@code @Transactional} commit boundary open. {@code
+ * fallbackExecution = true} keeps the no-active-transaction unit-test path firing the listener
+ * synchronously.
  */
 @Component
 public class OrderFailureAlerter {
@@ -53,8 +61,21 @@ public class OrderFailureAlerter {
   }
 
   /**
-   * Called by {@code AuditActivitiesImpl.log} AFTER the audit row is persisted. Best-effort and
-   * non-blocking: returns silently for non-allowlisted kinds and never throws.
+   * Issue #302: after-commit entry point. {@code AuditActivitiesImpl.log} publishes an {@link
+   * AuditEventCommitted} inside its {@code @Transactional} body; this listener fires only once that
+   * transaction has committed (or, with {@code fallbackExecution = true}, synchronously when {@code
+   * log()} ran without an active transaction — the dsl-less unit-test path). Running here means a
+   * slow webhook can never delay or hold the audit transaction open.
+   */
+  @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
+  public void onAuditCommitted(AuditEventCommitted committed) {
+    onAuditEvent(committed.event());
+  }
+
+  /**
+   * Called (via {@link #onAuditCommitted}) AFTER the audit row is persisted and the transaction
+   * commits. Best-effort and non-blocking: returns silently for non-allowlisted kinds and never
+   * throws. Retained as package/public for direct unit testing of the dispatch logic.
    */
   public void onAuditEvent(AuditEvent event) {
     try {

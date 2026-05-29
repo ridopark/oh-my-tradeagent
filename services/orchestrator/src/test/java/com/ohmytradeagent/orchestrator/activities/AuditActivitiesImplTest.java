@@ -17,6 +17,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.orchestrator.alert.AuditEventCommitted;
 import com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter;
 import java.time.OffsetDateTime;
 import java.util.Map;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 
 class AuditActivitiesImplTest {
 
@@ -55,7 +57,7 @@ class AuditActivitiesImplTest {
 
     AuditActivitiesImpl activities =
         new AuditActivitiesImpl(
-            dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ false, noopAlerter());
+            dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ false, noopPublisher());
 
     AuditEvent event = buildEvent();
     assertThatCode(() -> activities.log(event)).doesNotThrowAnyException();
@@ -81,7 +83,7 @@ class AuditActivitiesImplTest {
 
     AuditActivitiesImpl activities =
         new AuditActivitiesImpl(
-            dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ true, noopAlerter());
+            dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ true, noopPublisher());
 
     AuditEvent event = buildEvent();
     assertThatCode(() -> activities.log(event)).doesNotThrowAnyException();
@@ -110,17 +112,21 @@ class AuditActivitiesImplTest {
     AuditLogChainWriter chainWriter = mock(AuditLogChainWriter.class);
 
     // A real alerter whose webhook ALWAYS throws — simulates Discord being down (the #295 class).
-    // The audit INSERT must still execute and log() must not propagate the failure.
+    // Issue #302: log() now publishes an AuditEventCommitted that the OrderFailureAlerter consumes
+    // after commit. Here the publisher drives the listener synchronously (the fallbackExecution /
+    // no-active-transaction unit-test path) so a throwing webhook still must not propagate out of
+    // log() nor break the audit INSERT.
     OrderFailureAlerter throwingAlerter =
         new OrderFailureAlerter(
             content -> {
               throw new RuntimeException("discord down");
             },
             "SignalRejected,OrphanSTC,EntryExpired");
+    ApplicationEventPublisher publisher = listenerDrivingPublisher(throwingAlerter);
 
     AuditActivitiesImpl activities =
         new AuditActivitiesImpl(
-            dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ false, throwingAlerter);
+            dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ false, publisher);
 
     AuditEvent event = buildEvent();
     event.setKind("SignalRejected"); // allowlisted → alerter attempts (and fails) the webhook
@@ -130,9 +136,64 @@ class AuditActivitiesImplTest {
     verify(dsl, times(1)).execute(anyString(), any(Object[].class));
   }
 
-  /** Empty-allowlist alerter so the pre-existing chain-writer tests exercise only the DB path. */
-  private static OrderFailureAlerter noopAlerter() {
-    return new OrderFailureAlerter(content -> {}, "");
+  @Test
+  void slowWebhookDispatchRunsAfterPersistAndCannotHoldTheAuditWork() throws Exception {
+    // Issue #302 acceptance: a hung/slow webhook must not delay or hold the audit transaction work.
+    // The dispatch is published as an AuditEventCommitted only AFTER persist() has run; a publisher
+    // that records ordering proves the INSERT completed before the (slow) dispatch is even handed
+    // off. The dispatch itself runs through the after-commit listener path.
+    DSLContext dsl = mock(DSLContext.class);
+    AuditLogChainWriter chainWriter = mock(AuditLogChainWriter.class);
+
+    java.util.List<String> order = new java.util.concurrent.CopyOnWriteArrayList<>();
+    // Record when the INSERT executes.
+    org.mockito.Mockito.doAnswer(
+            inv -> {
+              order.add("persist");
+              return 0;
+            })
+        .when(dsl)
+        .execute(anyString(), any(Object[].class));
+
+    // A slow alerter: simulates the ~5s webhook. It must run only after persist, and off the
+    // audit-work path. We record its start ordering; the test does not block on its completion.
+    OrderFailureAlerter slowAlerter =
+        new OrderFailureAlerter(
+            content -> order.add("dispatch"), "SignalRejected,OrphanSTC,EntryExpired");
+    ApplicationEventPublisher publisher = listenerDrivingPublisher(slowAlerter);
+
+    AuditActivitiesImpl activities =
+        new AuditActivitiesImpl(
+            dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ false, publisher);
+
+    AuditEvent event = buildEvent();
+    event.setKind("SignalRejected");
+    assertThatCode(() -> activities.log(event)).doesNotThrowAnyException();
+
+    // The persist (audit INSERT) ran strictly before the alert dispatch was handed off.
+    assertThat(order).containsExactly("persist", "dispatch");
+  }
+
+  /**
+   * Empty-allowlist publisher so the pre-existing chain-writer tests exercise only the DB path: it
+   * drops the published {@link AuditEventCommitted} (no listener wired).
+   */
+  private static ApplicationEventPublisher noopPublisher() {
+    return event -> {};
+  }
+
+  /**
+   * A publisher that mimics the production after-commit wiring: when {@code log()} publishes an
+   * {@link AuditEventCommitted}, it synchronously drives the given alerter's after-commit listener
+   * (the {@code fallbackExecution = true} / no-active-transaction path). Lets the unit tests verify
+   * the dispatch behaviour without a Spring transaction manager.
+   */
+  private static ApplicationEventPublisher listenerDrivingPublisher(OrderFailureAlerter alerter) {
+    return event -> {
+      if (event instanceof AuditEventCommitted committed) {
+        alerter.onAuditCommitted(committed);
+      }
+    };
   }
 
   private static AuditEvent buildEvent() {
