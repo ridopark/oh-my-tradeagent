@@ -173,7 +173,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   @Override
   public String process(CopytradeSignalPayload payload) {
-    logAudit(payload, KIND_SIGNAL_RECEIVED, subject("signal_id", payload.getSignalId()));
+    // Issue #308: enrich the SignalReceived subject with the parsed signal fields so the Discord
+    // signal-feed mirror (SignalFeedAlerter) can render a "received" message at the fastest point —
+    // before any risk gates. Carries action/ticker/expiry/strike/right/price/author/posted_at from
+    // the CopytradeSignalPayload. Enums are stored as their wire string; dates/decimals are stored
+    // as deterministic String renderings so the JSONB subject is replay-stable and self-describing.
+    logAudit(payload, KIND_SIGNAL_RECEIVED, receivedSubject(payload));
 
     StrategyConfig config = strategy.get(payload.getTenantId(), payload.getStrategyId());
 
@@ -795,6 +800,39 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   private void logAudit(CopytradeSignalPayload payload, String kind, Map<String, Object> subject) {
     audit.log(auditEvent(payload, kind, subject));
+  }
+
+  /**
+   * Issue #308: builds the enriched {@code SignalReceived} subject. Beyond the original {@code
+   * signal_id}, it carries the parsed signal fields the feed mirror renders. Each value is rendered
+   * to a deterministic, null-safe String (enums to their wire value; date/decimal to {@code
+   * toString()}) so the JSONB subject is replay-stable regardless of Jackson type handling.
+   */
+  private static Map<String, Object> receivedSubject(CopytradeSignalPayload payload) {
+    return subject(
+        "signal_id", payload.getSignalId(),
+        "action", str(payload.getAction()),
+        "ticker", str(payload.getTicker()),
+        "expiry", str(payload.getExpiry()),
+        "strike", str(payload.getStrike()),
+        "right", str(payload.getRight()),
+        "price", str(payload.getPrice()),
+        "author", str(payload.getAuthor()),
+        "posted_at", str(payload.getPostedAt()));
+  }
+
+  /** Null-safe stringifier used to render the enriched SignalReceived subject deterministically. */
+  private static String str(Object value) {
+    if (value == null) {
+      return "";
+    }
+    if (value instanceof CopytradeSignalPayload.Action action) {
+      return action.value();
+    }
+    if (value instanceof CopytradeSignalPayload.Right right) {
+      return right.value();
+    }
+    return String.valueOf(value);
   }
 
   /** Builds an insertion-ordered subject map from alternating key/value varargs. */

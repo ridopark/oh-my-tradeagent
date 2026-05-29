@@ -103,6 +103,14 @@ spec:
                   name: discord-alert-credentials
                   key: ALERT_DISCORD_WEBHOOK_URL
                   optional: true
+            # Issue #308: SignalFeedAlerter mirrors the FULL BTO/STC/AVG signal feed (received +
+            # accepted/rejected/avg-skipped outcomes) to the SAME discord-alert-credentials webhook
+            # via the same after-commit seam. Off by default so the high-volume mirror is opt-in and
+            # toggles independently of the failure alerts. Set to "true" to enable. A blank/absent
+            # webhook keeps it a no-op (logs would-be alerts) — the trading path is unaffected either
+            # way (non-blocking, exception-swallowing dispatch).
+            - name: ALERT_SIGNAL_FEED_ENABLED
+              value: "false"
           volumeMounts:
             - name: tenants
               mountPath: /etc/copytrade/tenants
