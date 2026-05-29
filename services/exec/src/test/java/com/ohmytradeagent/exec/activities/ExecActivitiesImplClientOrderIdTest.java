@@ -53,9 +53,15 @@ class ExecActivitiesImplClientOrderIdTest {
     journal = mock(OrderIntentJournal.class);
     broker = mock(OptionsBroker.class);
     webhook = mock(WebhookClient.class);
+    // Issue #302: the alerter dispatches asynchronously in production; here we inject a synchronous
+    // (same-thread) executor so the broker-rejection -> webhook.post interaction is
+    // deterministically
+    // observable in these rethrow-ordering assertions.
     exec =
         new ExecActivitiesImpl(
-            journal, broker, new BrokerRejectionAlerter(webhook, /* enabled= */ true));
+            journal,
+            broker,
+            new BrokerRejectionAlerter(webhook, /* enabled= */ true, Runnable::run));
   }
 
   @Test

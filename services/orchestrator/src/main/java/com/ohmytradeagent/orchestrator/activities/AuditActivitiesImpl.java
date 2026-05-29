@@ -3,7 +3,7 @@ package com.ohmytradeagent.orchestrator.activities;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.contract.AuditEvent;
-import com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter;
+import com.ohmytradeagent.orchestrator.alert.AuditEventCommitted;
 import java.sql.Timestamp;
 import java.util.UUID;
 import org.jooq.DSLContext;
@@ -12,6 +12,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -44,7 +45,7 @@ public class AuditActivitiesImpl implements AuditActivities {
   private final ObjectMapper objectMapper;
   private final AuditLogChainWriter chainWriter;
   private final boolean chainWriterEnabled;
-  private final OrderFailureAlerter failureAlerter;
+  private final ApplicationEventPublisher eventPublisher;
 
   @Autowired
   public AuditActivitiesImpl(
@@ -52,12 +53,12 @@ public class AuditActivitiesImpl implements AuditActivities {
       ObjectMapper objectMapper,
       AuditLogChainWriter chainWriter,
       @Value("${audit.chain-writer.enabled:true}") boolean chainWriterEnabled,
-      OrderFailureAlerter failureAlerter) {
+      ApplicationEventPublisher eventPublisher) {
     this.dsl = dsl;
     this.objectMapper = objectMapper;
     this.chainWriter = chainWriter;
     this.chainWriterEnabled = chainWriterEnabled;
-    this.failureAlerter = failureAlerter;
+    this.eventPublisher = eventPublisher;
   }
 
   @Override
@@ -78,10 +79,14 @@ public class AuditActivitiesImpl implements AuditActivities {
       persist(event);
     }
 
-    // Issue #297: AFTER the audit row is written (or the dsl-less unit-test path is taken),
-    // dispatch a best-effort Discord alert for allowlisted BTO/STC failure kinds. The alerter
-    // never throws — a notification must not break the audit write or the trading path.
-    failureAlerter.onAuditEvent(event);
+    // Issue #297 / #302: publish an internal event so the best-effort Discord alert for allowlisted
+    // BTO/STC failure kinds is dispatched AFTER this @Transactional method commits, not inline. The
+    // OrderFailureAlerter consumes it via @TransactionalEventListener(AFTER_COMMIT,
+    // fallbackExecution=true) — moving the (potentially slow ~5s) webhook off the audit commit
+    // boundary so a hung webhook can never hold the audit DB transaction open. fallbackExecution
+    // keeps the dsl-less / no-active-transaction unit-test path firing the listener synchronously.
+    // The alerter never throws — a notification must not break the audit write or the trading path.
+    eventPublisher.publishEvent(new AuditEventCommitted(event));
   }
 
   private void persist(AuditEvent event) {

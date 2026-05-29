@@ -1,6 +1,10 @@
 package com.ohmytradeagent.exec.alert;
 
 import com.ohmytradeagent.contract.OrderIntent;
+import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,11 +22,18 @@ import org.springframework.stereotype.Component;
  * intent_key}, {@code client_order_id}) to find the failure — the orchestrator workflow id is not
  * in scope at this seam.
  *
- * <p>NON-BLOCKING GUARANTEE: {@link #onBrokerRejection} never throws. The webhook client is itself
- * best-effort, but as belt-and-suspenders the dispatch is wrapped so any unexpected error is caught
- * and logged rather than propagated. Critically, this must not alter the original broker
- * exception's Temporal retryable/non-retryable classification — the alert fires alongside {@code
- * journal.markPlaceFailed}, before the original exception is rethrown unchanged.
+ * <p>NON-BLOCKING GUARANTEE: {@link #onBrokerRejection} never throws and never blocks the caller.
+ * Issue #302: the (potentially slow ~5s) webhook {@code post} is handed to a bounded async executor
+ * so the timeout is NOT consumed inline on the broker-rejection path before the original broker
+ * exception is rethrown. The webhook client is itself best-effort, but as belt-and-suspenders the
+ * dispatch is wrapped so any unexpected error on the dispatch thread is caught and logged rather
+ * than propagated. Critically, this must not alter the original broker exception's Temporal
+ * retryable/non-retryable classification — the alert is enqueued alongside {@code
+ * journal.markPlaceFailed}, and the original exception is rethrown unchanged by the caller.
+ *
+ * <p>If the bounded executor's queue is saturated (a burst of rejections while the webhook is slow)
+ * the rejected submission is swallowed-and-logged — dropping a notification is always preferable to
+ * blocking or failing the order path.
  *
  * <p>Toggleable via {@code alert.discord.broker-rejection.enabled} (default {@code true}) for
  * single-knob disable without a code change.
@@ -34,17 +45,33 @@ public class BrokerRejectionAlerter {
 
   private final WebhookClient webhookClient;
   private final boolean enabled;
+  private final Executor dispatchExecutor;
 
+  @org.springframework.beans.factory.annotation.Autowired
   public BrokerRejectionAlerter(
       WebhookClient webhookClient,
       @Value("${alert.discord.broker-rejection.enabled:true}") boolean enabled) {
+    this(webhookClient, enabled, defaultDispatchExecutor());
+  }
+
+  /**
+   * Explicit-executor seam (also used by tests). Tests pass a synchronous ({@code Runnable::run})
+   * executor so the {@code webhookClient.post} interaction is deterministically observable; the
+   * production {@code @Autowired} constructor uses {@link #defaultDispatchExecutor()} (a bounded
+   * single daemon thread).
+   */
+  public BrokerRejectionAlerter(
+      WebhookClient webhookClient, boolean enabled, Executor dispatchExecutor) {
     this.webhookClient = webhookClient;
     this.enabled = enabled;
+    this.dispatchExecutor = dispatchExecutor;
   }
 
   /**
    * Called from the {@code placeOrder} catch block alongside {@code journal.markPlaceFailed}. Best
-   * effort and non-blocking: never throws, never changes the surrounding exception flow.
+   * effort and non-blocking: never throws, never blocks, never changes the surrounding exception
+   * flow. The webhook {@code post} runs on the async dispatch executor (issue #302) so the ~5s
+   * timeout is not consumed inline before the broker exception is rethrown unchanged.
    *
    * @param intent the order intent that the broker rejected
    * @param clientOrderId the bounded broker-facing client_order_id derived from the intent_key
@@ -54,14 +81,61 @@ public class BrokerRejectionAlerter {
     if (!enabled) {
       return;
     }
+    // Build the message on the caller thread (cheap, deterministic) but POST asynchronously so the
+    // webhook timeout never blocks the broker/order path. A failure to even enqueue (queue full /
+    // executor rejected) is swallowed — dropping a notification beats blocking the order path.
+    final String message;
     try {
-      webhookClient.post(buildMessage(intent, clientOrderId, reason));
+      message = buildMessage(intent, clientOrderId, reason);
     } catch (RuntimeException e) {
-      // Defensive: a notification must never break the broker/order path or mask the broker
-      // rejection that is about to be rethrown.
-      log.warn(
-          "broker-rejection-alert build/dispatch failed intent_key={}", safeIntentKey(intent), e);
+      log.warn("broker-rejection-alert build failed intent_key={}", safeIntentKey(intent), e);
+      return;
     }
+    try {
+      dispatchExecutor.execute(
+          () -> {
+            try {
+              webhookClient.post(message);
+            } catch (RuntimeException e) {
+              // Defensive: an error on the dispatch thread must never surface — the order path has
+              // already moved on and is rethrowing the original broker exception.
+              log.warn(
+                  "broker-rejection-alert async dispatch failed intent_key={}",
+                  safeIntentKey(intent),
+                  e);
+            }
+          });
+    } catch (RuntimeException e) {
+      // Executor rejected the task (e.g. bounded queue saturated). Never propagate.
+      log.warn(
+          "broker-rejection-alert could not enqueue dispatch intent_key={}",
+          safeIntentKey(intent),
+          e);
+    }
+  }
+
+  /**
+   * Bounded single-daemon-thread dispatch executor: one worker, a small bounded queue, and a
+   * caller-rejects (abort) saturation policy so a slow/hung webhook can at worst drop notifications
+   * — it can never grow an unbounded backlog or block the broker/order path. Daemon-threaded so it
+   * does not keep the JVM alive on shutdown.
+   */
+  private static Executor defaultDispatchExecutor() {
+    ThreadPoolExecutor executor =
+        new ThreadPoolExecutor(
+            1,
+            1,
+            30L,
+            TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(64),
+            runnable -> {
+              Thread thread = new Thread(runnable, "broker-rejection-alert-dispatch");
+              thread.setDaemon(true);
+              return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy());
+    executor.allowCoreThreadTimeOut(true);
+    return executor;
   }
 
   private static String buildMessage(OrderIntent intent, String clientOrderId, String reason) {
