@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/adoption-workflow-input.json",
+  "title": "AdoptionWorkflowInput",
+  "description": "Issue #285: input to the short-lived AdoptionWorkflow started by api-gateway POST /positions/adopt. Identifies the confirmed orphan (tenant, strategy, occ) to adopt and the operator who triggered it (provenance / audit). broker_target lets the workflow route its broker-truth ReconciliationExecActivity calls to the correct exec task queue (broker-<broker_target>); when absent the workflow resolves it from StrategyConfig.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.AdoptionWorkflowInput",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "occ",
+    "operator_id"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "strategy_id": { "type": "string", "minLength": 1 },
+    "occ": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The orphaned OCC option symbol to adopt. Operator may supply the broker/audit compact form or the padded OccSymbol.of form; the workflow resolves the canonical padded form from the journal anchor."
+    },
+    "operator_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Operator who triggered the adoption (from X-Operator-Id). Recorded in the PositionAdopted audit provenance."
+    }
+  }
+}

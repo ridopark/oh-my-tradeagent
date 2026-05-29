@@ -1,0 +1,328 @@
+package com.ohmytradeagent.orchestrator.workflows;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.ohmytradeagent.contract.AdoptionResult;
+import com.ohmytradeagent.contract.AdoptionWorkflowInput;
+import com.ohmytradeagent.contract.ArmChandelierPayload;
+import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.BrokerPosition;
+import com.ohmytradeagent.contract.FillSignalPayload;
+import com.ohmytradeagent.contract.ForceCloseRequest;
+import com.ohmytradeagent.contract.ForceCloseResult;
+import com.ohmytradeagent.contract.JournalEntry;
+import com.ohmytradeagent.contract.PartialExitRequest;
+import com.ohmytradeagent.contract.PositionWorkflowInput;
+import com.ohmytradeagent.contract.PremiumTick;
+import com.ohmytradeagent.contract.RiskBreachPayload;
+import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
+import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import io.temporal.api.enums.v1.IndexedValueType;
+import io.temporal.client.WorkflowOptions;
+import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.worker.Worker;
+import io.temporal.workflow.Workflow;
+import java.math.BigDecimal;
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+
+/**
+ * Issue #239/#285 coverage for the operator-triggered orphan-adoption workflow. The exec activity
+ * is registered on a SEPARATE {@code broker-alpaca-paper} worker, so a passing test proves the
+ * adoption path routes broker-truth calls through the exec task queue (not the throwing in-process
+ * placeholder). Covers: happy-path adoption, ALREADY_OWNED no-op, REFUSED_NOT_HELD, and
+ * REFUSED_NO_ANCHOR.
+ */
+class AdoptionWorkflowImplTest {
+
+  private static final String CORE_QUEUE = "orchestrator-core";
+  private static final String EXEC_QUEUE = "broker-alpaca-paper";
+
+  private static final String TENANT = "dev";
+  private static final String STRATEGY = "copytrade-v1";
+  private static final String OPERATOR = "op-1";
+  private static final String OCC = "UNH   260618C00400000";
+  private static final String SIGNAL_ID = "sig-abc";
+  private static final String INTENT_KEY = "intent-abc";
+  private static final String BROKER_ORDER_ID = "db5459fe";
+  private static final OffsetDateTime FILLED_AT = OffsetDateTime.parse("2026-05-19T17:08:11Z");
+
+  /**
+   * Child-workflow recorder. Temporal's test env runs workers in-process (same JVM), so the spawned
+   * child {@link RecordingPositionWorkflowImpl} can publish what it received here for assertions.
+   */
+  static final Map<String, PositionWorkflowInput> STARTED = new ConcurrentHashMap<>();
+
+  static final Map<String, FillSignalPayload> FILLS = new ConcurrentHashMap<>();
+
+  private TestWorkflowEnvironment env;
+  private ReconciliationExecActivity exec;
+  private StrategyActivities strategy;
+  private PositionLookupActivities positionLookup;
+  private AuditActivities audit;
+
+  @BeforeEach
+  void setUp() {
+    STARTED.clear();
+    FILLS.clear();
+    env = TestWorkflowEnvironment.newInstance();
+    // The adopted PositionWorkflow child is started with TenantStrategy/ContractSymbol custom SAs
+    // (matching the production spawn) — register them or the in-memory test visibility store
+    // rejects the child start with INVALID_ARGUMENT.
+    env.registerSearchAttribute("TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+    env.registerSearchAttribute("ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+    exec = mock(ReconciliationExecActivity.class);
+    strategy = mock(StrategyActivities.class);
+    positionLookup = mock(PositionLookupActivities.class);
+    audit = mock(AuditActivities.class);
+
+    // The adoption workflow resolves broker_target from strategy config FIRST (to build the
+    // exec-queue stub before any broker-truth call), so every path needs a config. Per-test
+    // overrides may re-stub eod_force_flatten etc.
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
+
+    Worker coreWorker = env.newWorker(CORE_QUEUE);
+    // The adoption workflow under test + a light recording PositionWorkflow double (so a real
+    // child start + onFill forward is exercised without pulling in market-data/exec deps).
+    coreWorker.registerWorkflowImplementationTypes(
+        AdoptionWorkflowImpl.class, RecordingPositionWorkflowImpl.class);
+    coreWorker.registerActivitiesImplementations(strategy, positionLookup, audit);
+
+    // Exec broker-truth lives on a DISTINCT queue — the adoption path only reaches it by routing
+    // through the exec task queue, which is the whole point of #285.
+    Worker brokerWorker = env.newWorker(EXEC_QUEUE);
+    brokerWorker.registerActivitiesImplementations(exec);
+
+    env.start();
+  }
+
+  @AfterEach
+  void tearDown() {
+    env.close();
+  }
+
+  private AdoptionResult runAdopt() {
+    AdoptionWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                AdoptionWorkflow.class,
+                WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+    return wf.adopt(input());
+  }
+
+  private AdoptionWorkflowInput input() {
+    AdoptionWorkflowInput in = new AdoptionWorkflowInput();
+    in.setSchemaVersion(1L);
+    in.setTenantId(TENANT);
+    in.setStrategyId(STRATEGY);
+    in.setOcc(OCC);
+    in.setOperatorId(OPERATOR);
+    return in;
+  }
+
+  private BrokerPosition brokerLot(long qty, BigDecimal avgEntryPrice) {
+    BrokerPosition p = new BrokerPosition();
+    p.setSchemaVersion(1L);
+    p.setOptionSymbol(OCC);
+    p.setQty(qty);
+    p.setSide(BrokerPosition.Side.LONG);
+    p.setAvgEntryPrice(avgEntryPrice);
+    return p;
+  }
+
+  private JournalEntry filledJournalRow() {
+    JournalEntry e = new JournalEntry();
+    e.setSchemaVersion(1L);
+    e.setIntentKey(INTENT_KEY);
+    e.setSignalId(SIGNAL_ID);
+    e.setTenantId(TENANT);
+    e.setStrategyId(STRATEGY);
+    e.setOptionSymbol(OCC);
+    e.setQty(5L);
+    e.setBrokerOrderId(BROKER_ORDER_ID);
+    e.setSubmittedAt(FILLED_AT);
+    e.setRecordedAt(FILLED_AT);
+    return e;
+  }
+
+  private StrategyConfig config(Boolean eodForceFlatten) {
+    StrategyConfig c = new StrategyConfig();
+    c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
+    c.setEodForceFlatten(eodForceFlatten);
+    c.setPendingTtlPaperSecs(120L);
+    return c;
+  }
+
+  @Test
+  void happyPath_startsOwner_forwardsFill_terminalizesJournal_seedsCache_auditsProvenance() {
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(List.of(filledJournalRow()));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
+    when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
+
+    AdoptionResult result = runAdopt();
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ADOPTED);
+    String expectedWfId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
+    assertThat(result.getWorkflowId()).isEqualTo(expectedWfId);
+    assertThat(result.getQty()).isEqualTo(5L);
+    assertThat(result.getEntrySignalId()).isEqualTo(SIGNAL_ID);
+
+    // The PositionWorkflow child was started with broker-truth qty/premium under the canonical id.
+    PositionWorkflowInput started = STARTED.get(expectedWfId);
+    assertThat(started).isNotNull();
+    assertThat(started.getTenantId()).isEqualTo(TENANT);
+    assertThat(started.getStrategyId()).isEqualTo(STRATEGY);
+    assertThat(started.getEntrySignalId()).isEqualTo(SIGNAL_ID);
+    assertThat(started.getContractSymbol()).isEqualTo(OCC);
+    assertThat(started.getQty()).isEqualTo(5L);
+    assertThat(started.getEntryPremium()).isEqualByComparingTo(new BigDecimal("3.40"));
+    // eod_force_flatten propagated verbatim; TTLs sourced from config.
+    assertThat(started.getEodForceFlatten()).isEqualTo(Boolean.FALSE);
+    assertThat(started.getFirstFillTtlSecs()).isEqualTo(120L);
+
+    // onFill forwarded so the first-fill gate wakes.
+    FillSignalPayload fill = FILLS.get(expectedWfId);
+    assertThat(fill).isNotNull();
+    assertThat(fill.getFilledQty()).isEqualTo(5L);
+    assertThat(fill.getAvgFillPrice()).isEqualByComparingTo(new BigDecimal("3.40"));
+    assertThat(fill.getBrokerOrderId()).isEqualTo(BROKER_ORDER_ID);
+
+    // Journal terminalized through the exec queue + discovery cache seeded.
+    verify(exec).journalReconcileToFilled(eq(INTENT_KEY), eq(5L), any(BigDecimal.class), any());
+    verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, OCC, expectedWfId);
+
+    // PositionAdopted audit emitted with provenance (including the triggering operator).
+    ArgumentCaptor<AuditEvent> auditCaptor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit).log(auditCaptor.capture());
+    AuditEvent ev = auditCaptor.getValue();
+    assertThat(ev.getKind()).isEqualTo("PositionAdopted");
+    assertThat(ev.getTenantId()).isEqualTo(TENANT);
+    assertThat(ev.getStrategyId()).isEqualTo(STRATEGY);
+    Map<String, Object> subject = ev.getSubject();
+    assertThat(subject).containsEntry("option_symbol", OCC);
+    assertThat(subject).containsEntry("entry_signal_id", SIGNAL_ID);
+    assertThat(subject).containsEntry("intent_key", INTENT_KEY);
+    assertThat(subject).containsEntry("broker_order_id", BROKER_ORDER_ID);
+    assertThat(subject).containsEntry("workflow_id", expectedWfId);
+    assertThat(subject).containsEntry("operator_id", OPERATOR);
+    assertThat(subject).containsKey("qty");
+    assertThat(subject).containsKey("entry_premium");
+  }
+
+  @Test
+  void alreadyOwned_noStart_noForward_noTerminalize_isNoop() {
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(List.of(filledJournalRow()));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
+
+    AdoptionResult result = runAdopt();
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ALREADY_OWNED);
+    assertThat(STARTED).isEmpty();
+    verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void brokerDoesNotHold_refusedNotHeld_noSideEffects() {
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC)).thenReturn(null);
+
+    AdoptionResult result = runAdopt();
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.REFUSED_NOT_HELD);
+    assertThat(STARTED).isEmpty();
+    verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+    // Phantom guard: never even probes for a live owner.
+    verify(positionLookup, never()).isPositionWorkflowRunning(anyString());
+  }
+
+  @Test
+  void noJournalAnchor_refusedNoAnchor_noSideEffects() {
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(brokerLot(5L, new BigDecimal("3.40")));
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC)).thenReturn(List.of());
+    when(exec.journalDumpOpen(TENANT, STRATEGY)).thenReturn(List.of());
+
+    AdoptionResult result = runAdopt();
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.REFUSED_NO_ANCHOR);
+    assertThat(STARTED).isEmpty();
+    verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+  }
+
+  /**
+   * Light {@link PositionWorkflow} double registered on the core queue instead of the real {@code
+   * PositionWorkflowImpl}: records the start input + onFill payload to the static maps, then parks
+   * on a never-completing await so the adopted owner stays "running" like production. The adoption
+   * workflow doesn't wait on this child's result, so parking is harmless.
+   */
+  public static final class RecordingPositionWorkflowImpl implements PositionWorkflow {
+    @Override
+    public String run(PositionWorkflowInput input) {
+      STARTED.put(Workflow.getInfo().getWorkflowId(), input);
+      // Park until an onFill arrives, then record it. The adoption workflow forwards onFill right
+      // after the child is durably scheduled; it does not block on this child's completion.
+      Workflow.await(() -> FILLS.containsKey(Workflow.getInfo().getWorkflowId()));
+      return input.getEntrySignalId();
+    }
+
+    @Override
+    public void partialExit(PartialExitRequest req) {}
+
+    @Override
+    public void onFill(FillSignalPayload event) {
+      FILLS.put(Workflow.getInfo().getWorkflowId(), event);
+    }
+
+    @Override
+    public void armChandelier(ArmChandelierPayload payload) {}
+
+    @Override
+    public void chandelierTick(PremiumTick tick) {}
+
+    @Override
+    public void riskBreach(RiskBreachPayload payload) {}
+
+    @Override
+    public TrailingState trailingState() {
+      return null;
+    }
+
+    @Override
+    public void forceCloseValidator(ForceCloseRequest request) {}
+
+    @Override
+    public ForceCloseResult forceClose(ForceCloseRequest request) {
+      return null;
+    }
+  }
+}

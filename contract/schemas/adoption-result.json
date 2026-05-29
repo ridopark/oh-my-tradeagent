@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/adoption-result.json",
+  "title": "AdoptionResult",
+  "description": "Issue #239/#285: terminal outcome of AdoptionWorkflow (operator-triggered orphan-position adoption). Returned to api-gateway POST /positions/adopt. On a successful adoption it carries the reconstructed PositionWorkflow id + broker-truth provenance (entry_signal_id, qty) so the operator and the audit trail can confirm what was started.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.AdoptionResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "outcome"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "outcome": {
+      "type": "string",
+      "enum": ["ADOPTED", "ALREADY_OWNED", "REFUSED_NOT_HELD", "REFUSED_NO_ANCHOR"],
+      "description": "ADOPTED: a PositionWorkflow owner was reconstructed + started for the orphan. ALREADY_OWNED: a live PositionWorkflow already owns the OCC (idempotency no-op). REFUSED_NOT_HELD: the broker does not actually hold the lot (phantom guard). REFUSED_NO_ANCHOR: no entry_signal_id could be anchored from the journal, so the canonical workflow id cannot be built (documented known limitation)."
+    },
+    "workflow_id": {
+      "type": "string",
+      "description": "On ADOPTED, the canonical reconstructed PositionWorkflow id (t-<tenant>/s-<strategy>/pos/<padded-occ>/<entry_signal_id>). Null otherwise."
+    },
+    "entry_signal_id": {
+      "type": "string",
+      "description": "On ADOPTED, the entry_signal_id anchored from the journal row that disambiguates the canonical workflow id. Null otherwise."
+    },
+    "qty": {
+      "type": "integer",
+      "description": "On ADOPTED, the broker-derived contract quantity the owner was reconstructed with. Null otherwise."
+    }
+  }
+}
