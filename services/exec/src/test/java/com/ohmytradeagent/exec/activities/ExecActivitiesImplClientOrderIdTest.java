@@ -11,6 +11,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.OrderIntent;
+import com.ohmytradeagent.exec.alert.BrokerRejectionAlerter;
+import com.ohmytradeagent.exec.alert.WebhookClient;
 import com.ohmytradeagent.exec.broker.ClientOrderId;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
@@ -43,13 +45,17 @@ class ExecActivitiesImplClientOrderIdTest {
 
   private OrderIntentJournal journal;
   private OptionsBroker broker;
+  private WebhookClient webhook;
   private ExecActivitiesImpl exec;
 
   @BeforeEach
   void setUp() {
     journal = mock(OrderIntentJournal.class);
     broker = mock(OptionsBroker.class);
-    exec = new ExecActivitiesImpl(journal, broker);
+    webhook = mock(WebhookClient.class);
+    exec =
+        new ExecActivitiesImpl(
+            journal, broker, new BrokerRejectionAlerter(webhook, /* enabled= */ true));
   }
 
   @Test
@@ -90,7 +96,57 @@ class ExecActivitiesImplClientOrderIdTest {
     verify(journal).markPlaceFailed(eq(EXIT_INTENT_KEY), anyString());
     // The row is NOT prematurely marked SUBMITTED when the broker call failed.
     verify(journal, never()).markSubmittedIfRecorded(anyString(), anyString());
+
+    // Issue #297: a Discord alert is dispatched for the SELL-side (STC) broker rejection, carrying
+    // the action, symbol, reason, and identifiers (intent_key / client_order_id).
+    ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
+    verify(webhook).post(msg.capture());
+    assertThat(msg.getValue()).contains("STC (exit)");
+    assertThat(msg.getValue()).contains("TSLA  260529C00435000");
+    assertThat(msg.getValue()).contains("client_order_id too long");
+    assertThat(msg.getValue()).contains(ClientOrderId.forIntent(EXIT_INTENT_KEY));
   }
+
+  @Test
+  void placeOrder_buyBrokerRejects_dispatchesBtoAlert() {
+    OrderIntent intent = entryIntent();
+    JournaledOrder recorded = recordedBuyRow(ENTRY_INTENT_KEY);
+    when(journal.findByIntentKey(ENTRY_INTENT_KEY)).thenReturn(Optional.of(recorded));
+    RuntimeException rejection =
+        new RuntimeException("Alpaca rejected order (403): account blocked");
+    when(broker.placeOrder(any())).thenThrow(rejection);
+
+    assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
+
+    ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
+    verify(webhook).post(msg.capture());
+    assertThat(msg.getValue()).contains("BTO (entry)");
+    assertThat(msg.getValue()).contains("AAPL  260116C00200000");
+    assertThat(msg.getValue()).contains("account blocked");
+    assertThat(msg.getValue()).contains(ClientOrderId.forIntent(ENTRY_INTENT_KEY));
+  }
+
+  @Test
+  void placeOrder_alertWebhookFailure_doesNotMaskBrokerRejection() {
+    OrderIntent intent = exitIntent();
+    JournaledOrder recorded = recordedRow(EXIT_INTENT_KEY);
+    when(journal.findByIntentKey(EXIT_INTENT_KEY)).thenReturn(Optional.of(recorded));
+    ApplicationFailure rejection =
+        ApplicationFailure.newNonRetryableFailure("422 too long", "InvalidRequestError");
+    when(broker.placeOrder(any())).thenThrow(rejection);
+    // The webhook itself blows up — the original broker rejection must STILL be the exception that
+    // propagates (so Temporal keeps its non-retryable classification; no #264 retry storm).
+    org.mockito.Mockito.doThrow(new RuntimeException("discord down"))
+        .when(webhook)
+        .post(anyString());
+
+    assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
+
+    verify(journal).markPlaceFailed(eq(EXIT_INTENT_KEY), anyString());
+  }
+
+  private static final String ENTRY_INTENT_KEY =
+      "t-dev/s-copytrade-v1/sig/chat-messages-769797179992571914-1509927843260268616:0";
 
   private static OrderIntent exitIntent() {
     OrderIntent i = new OrderIntent();
@@ -120,6 +176,47 @@ class ExecActivitiesImplClientOrderIdTest {
         "SELL",
         25L,
         new BigDecimal("1.10"),
+        OrderState.RECORDED,
+        null,
+        OffsetDateTime.parse("2026-05-29T15:31:44Z"),
+        null,
+        OffsetDateTime.parse("2026-05-29T15:31:44Z"),
+        null,
+        null,
+        null,
+        null,
+        null,
+        0L);
+  }
+
+  private static OrderIntent entryIntent() {
+    OrderIntent i = new OrderIntent();
+    i.setSchemaVersion(1L);
+    i.setIntentKey(ENTRY_INTENT_KEY);
+    i.setSignalId("sig-bto");
+    i.setTenantId("dev");
+    i.setStrategyId("copytrade-v1");
+    i.setBrokerTarget(OrderIntent.BrokerTarget.ALPACA_PAPER);
+    i.setOptionSymbol("AAPL  260116C00200000");
+    i.setSide(OrderIntent.Side.BUY);
+    i.setQty(10L);
+    i.setLimitPrice(new BigDecimal("2.50"));
+    i.setRecordedAt(OffsetDateTime.parse("2026-05-29T15:31:44Z"));
+    return i;
+  }
+
+  private static JournaledOrder recordedBuyRow(String intentKey) {
+    return new JournaledOrder(
+        intentKey,
+        "sig-bto",
+        "dev",
+        "copytrade-v1",
+        "alpaca-paper",
+        ClientOrderId.forIntent(intentKey),
+        "AAPL  260116C00200000",
+        "BUY",
+        10L,
+        new BigDecimal("2.50"),
         OrderState.RECORDED,
         null,
         OffsetDateTime.parse("2026-05-29T15:31:44Z"),

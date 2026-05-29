@@ -61,6 +61,17 @@ audit:
   chain-writer:
     enabled: ${AUDIT_CHAIN_WRITER_ENABLED:true}
 
+# Issue #297: non-blocking, best-effort Discord alert on copytrade BTO/STC order failures.
+# OrderFailureAlerter hooks AuditActivitiesImpl.log() AFTER the audit row is written and dispatches
+# a Discord webhook for allowlisted failure kinds. The webhook URL comes from a k8s secret (operator
+# follow-up) — when blank the alerter is a no-op (logs the would-be alert at INFO). A webhook
+# timeout/error is caught and logged, NEVER propagated into the audit write or the trading path.
+alert:
+  discord:
+    webhook-url: ${ALERT_DISCORD_WEBHOOK_URL:}
+    # Comma-separated allowlist of audit kinds that trigger an alert (avoids channel spam).
+    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:SignalRejected,OrphanSTC,EntryExpired}
+
 management:
   endpoints:
     web:

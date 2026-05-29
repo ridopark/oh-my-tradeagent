@@ -77,7 +77,11 @@ class ExecActivitiesImplIT {
     dsl.deleteFrom(table("order_intent_journal")).execute();
     journal = new JooqOrderIntentJournal(dsl);
     broker = new CountingStubBroker();
-    exec = new ExecActivitiesImpl(journal, broker);
+    exec =
+        new ExecActivitiesImpl(
+            journal,
+            broker,
+            new com.ohmytradeagent.exec.alert.BrokerRejectionAlerter(content -> {}, false));
   }
 
   @Test

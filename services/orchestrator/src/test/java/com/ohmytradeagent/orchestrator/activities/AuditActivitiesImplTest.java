@@ -17,6 +17,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter;
 import java.time.OffsetDateTime;
 import java.util.Map;
 import org.jooq.DSLContext;
@@ -53,7 +54,8 @@ class AuditActivitiesImplTest {
     AuditLogChainWriter chainWriter = mock(AuditLogChainWriter.class);
 
     AuditActivitiesImpl activities =
-        new AuditActivitiesImpl(dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ false);
+        new AuditActivitiesImpl(
+            dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ false, noopAlerter());
 
     AuditEvent event = buildEvent();
     assertThatCode(() -> activities.log(event)).doesNotThrowAnyException();
@@ -78,7 +80,8 @@ class AuditActivitiesImplTest {
         .thenThrow(new IllegalArgumentException("test: bad subject"));
 
     AuditActivitiesImpl activities =
-        new AuditActivitiesImpl(dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ true);
+        new AuditActivitiesImpl(
+            dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ true, noopAlerter());
 
     AuditEvent event = buildEvent();
     assertThatCode(() -> activities.log(event)).doesNotThrowAnyException();
@@ -99,6 +102,37 @@ class AuditActivitiesImplTest {
                     e.getLevel() == Level.WARN
                         && e.getFormattedMessage().startsWith("chain-restart-after-failure:"));
     assertThat(warnEmitted).as("chain-restart WARN log must fire").isTrue();
+  }
+
+  @Test
+  void webhookFailureDoesNotBreakAuditWrite() throws Exception {
+    DSLContext dsl = mock(DSLContext.class);
+    AuditLogChainWriter chainWriter = mock(AuditLogChainWriter.class);
+
+    // A real alerter whose webhook ALWAYS throws — simulates Discord being down (the #295 class).
+    // The audit INSERT must still execute and log() must not propagate the failure.
+    OrderFailureAlerter throwingAlerter =
+        new OrderFailureAlerter(
+            content -> {
+              throw new RuntimeException("discord down");
+            },
+            "SignalRejected,OrphanSTC,EntryExpired");
+
+    AuditActivitiesImpl activities =
+        new AuditActivitiesImpl(
+            dsl, objectMapper, chainWriter, /* chainWriterEnabled= */ false, throwingAlerter);
+
+    AuditEvent event = buildEvent();
+    event.setKind("SignalRejected"); // allowlisted → alerter attempts (and fails) the webhook
+    assertThatCode(() -> activities.log(event)).doesNotThrowAnyException();
+
+    // The audit INSERT still ran exactly once despite the webhook blowing up.
+    verify(dsl, times(1)).execute(anyString(), any(Object[].class));
+  }
+
+  /** Empty-allowlist alerter so the pre-existing chain-writer tests exercise only the DB path. */
+  private static OrderFailureAlerter noopAlerter() {
+    return new OrderFailureAlerter(content -> {}, "");
   }
 
   private static AuditEvent buildEvent() {

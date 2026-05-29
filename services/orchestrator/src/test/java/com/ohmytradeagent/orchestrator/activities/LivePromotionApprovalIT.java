@@ -70,7 +70,13 @@ class LivePromotionApprovalIT {
     om = new ObjectMapper().registerModule(new JavaTimeModule());
     DSLContext dsl = DSL.using(runtimeConn, SQLDialect.POSTGRES);
     AuditLogChainWriter writer = new AuditLogChainWriter(om);
-    AuditActivitiesImpl audit = new AuditActivitiesImpl(dsl, om, writer, true);
+    AuditActivitiesImpl audit =
+        new AuditActivitiesImpl(
+            dsl,
+            om,
+            writer,
+            true,
+            new com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter(content -> {}, ""));
     livePromotion = new LivePromotionActivitiesImpl(audit);
   }
 

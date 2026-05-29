@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.activities;
 
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
+import com.ohmytradeagent.exec.alert.BrokerRejectionAlerter;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.ClientOrderId;
@@ -37,10 +38,13 @@ public class ExecActivitiesImpl implements ExecActivities {
 
   private final OrderIntentJournal journal;
   private final OptionsBroker broker;
+  private final BrokerRejectionAlerter rejectionAlerter;
 
-  public ExecActivitiesImpl(OrderIntentJournal journal, OptionsBroker broker) {
+  public ExecActivitiesImpl(
+      OrderIntentJournal journal, OptionsBroker broker, BrokerRejectionAlerter rejectionAlerter) {
     this.journal = journal;
     this.broker = broker;
+    this.rejectionAlerter = rejectionAlerter;
   }
 
   @Override
@@ -90,6 +94,12 @@ public class ExecActivitiesImpl implements ExecActivities {
       } catch (RuntimeException persistFailure) {
         e.addSuppressed(persistFailure);
       }
+      // Issue #297: best-effort Discord alert on the broker rejection that caused the #295 outage.
+      // The alerter never throws and is invoked AFTER the journal write and BEFORE the original
+      // broker exception is rethrown unchanged — it must not alter the exception's
+      // retryable/non-retryable classification that Temporal relies on (the #264 retry-storm
+      // class).
+      rejectionAlerter.onBrokerRejection(intent, clientOrderId, e.getMessage());
       throw e;
     }
 

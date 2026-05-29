@@ -120,7 +120,8 @@ class AuditLogChainWriterIT {
         AuditLogChainWriter chainWriter,
         @org.springframework.beans.factory.annotation.Value("${audit.chain-writer.enabled:true}")
             boolean chainWriterEnabled) {
-      return new AuditActivitiesImpl(dsl, objectMapper, chainWriter, chainWriterEnabled);
+      return new AuditActivitiesImpl(
+          dsl, objectMapper, chainWriter, chainWriterEnabled, noopFailureAlerter());
     }
   }
 
@@ -426,7 +427,8 @@ class AuditLogChainWriterIT {
   @Order(4)
   void disabledFlagWritesNullHashes() throws Exception {
     AuditActivitiesImpl disabledActivities =
-        new AuditActivitiesImpl(dsl, om, chainWriter, /* chainWriterEnabled= */ false);
+        new AuditActivitiesImpl(
+            dsl, om, chainWriter, /* chainWriterEnabled= */ false, noopFailureAlerter());
 
     AuditEvent ev =
         newEvent(
@@ -567,5 +569,10 @@ class AuditLogChainWriterIT {
     ev.setCorrelationId(correlationId);
     ev.setSubject(subject);
     return ev;
+  }
+
+  /** Issue #297: empty-allowlist alerter so this IT exercises only the audit-write path. */
+  private static com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter noopFailureAlerter() {
+    return new com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter(content -> {}, "");
   }
 }

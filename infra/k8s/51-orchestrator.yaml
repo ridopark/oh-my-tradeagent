@@ -92,6 +92,17 @@ spec:
               value: /var/lib/copytrade/snapshot
             - name: ORCHESTRATOR_CAPITAL_PER_STRATEGY
               value: "100000"
+            # Issue #297: non-blocking Discord alert on BTO/STC order failures. The webhook URL is
+            # an operator-provisioned secret. `optional: true` so the pod still boots when the secret
+            # is absent — the alerter is then a no-op (logs the would-be alert) and the trading path
+            # is entirely unaffected. Provisioning the `discord-alert-credentials` Secret with key
+            # ALERT_DISCORD_WEBHOOK_URL is the operator follow-up.
+            - name: ALERT_DISCORD_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: discord-alert-credentials
+                  key: ALERT_DISCORD_WEBHOOK_URL
+                  optional: true
           volumeMounts:
             - name: tenants
               mountPath: /etc/copytrade/tenants
