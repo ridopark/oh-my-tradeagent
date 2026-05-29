@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://oh-my-tradeagent/schemas/adoption-workflow-input.json",
   "title": "AdoptionWorkflowInput",
-  "description": "Issue #285: input to the short-lived AdoptionWorkflow started by api-gateway POST /positions/adopt. Identifies the confirmed orphan (tenant, strategy, occ) to adopt and the operator who triggered it (provenance / audit). broker_target lets the workflow route its broker-truth ReconciliationExecActivity calls to the correct exec task queue (broker-<broker_target>); when absent the workflow resolves it from StrategyConfig.",
+  "description": "Issue #285: input to the short-lived AdoptionWorkflow started by api-gateway POST /positions/adopt. Identifies the confirmed orphan (tenant, strategy, occ) to adopt and the operator who triggered it (provenance / audit). The workflow resolves broker_target from StrategyConfig to route its broker-truth ReconciliationExecActivity calls to the correct exec task queue (broker-<broker_target>); it is not an input field.",
   "type": "object",
   "javaType": "com.ohmytradeagent.contract.AdoptionWorkflowInput",
   "additionalProperties": false,

@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -30,7 +31,9 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import io.temporal.api.enums.v1.IndexedValueType;
+import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import io.temporal.workflow.Workflow;
@@ -120,20 +123,25 @@ class AdoptionWorkflowImplTest {
   }
 
   private AdoptionResult runAdopt() {
-    AdoptionWorkflow wf =
-        env.getWorkflowClient()
-            .newWorkflowStub(
-                AdoptionWorkflow.class,
-                WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
-    return wf.adopt(input());
+    return runAdopt(OCC);
   }
 
-  private AdoptionWorkflowInput input() {
+  private AdoptionResult runAdopt(String occ) {
+    return newAdoptionStub().adopt(input(occ));
+  }
+
+  private AdoptionWorkflow newAdoptionStub() {
+    return env.getWorkflowClient()
+        .newWorkflowStub(
+            AdoptionWorkflow.class, WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+  }
+
+  private AdoptionWorkflowInput input(String occ) {
     AdoptionWorkflowInput in = new AdoptionWorkflowInput();
     in.setSchemaVersion(1L);
     in.setTenantId(TENANT);
     in.setStrategyId(STRATEGY);
-    in.setOcc(OCC);
+    in.setOcc(occ);
     in.setOperatorId(OPERATOR);
     return in;
   }
@@ -274,6 +282,103 @@ class AdoptionWorkflowImplTest {
 
     assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.REFUSED_NO_ANCHOR);
     assertThat(STARTED).isEmpty();
+    verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void compactOperatorOcc_resolvesPaddedOwnerId_isNoop_noDuplicate() {
+    // Issue #246: the operator supplies the broker/audit *compact* OCC, but the live owner's
+    // PositionWorkflow was registered under the *padded* OccSymbol.of form (the journal anchor's
+    // canonical option_symbol). The idempotency probe must run against the padded id rebuilt from
+    // the anchor — not the raw compact operator input — or it misses the owner and double-adopts.
+    String compactOcc = "UNH260618C00400000";
+    BrokerPosition lot = brokerLot(5L, new BigDecimal("3.40"));
+    lot.setOptionSymbol(compactOcc);
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, compactOcc)).thenReturn(lot);
+    // Journal anchor carries the canonical PADDED option_symbol (OCC constant = padded form).
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, compactOcc))
+        .thenReturn(List.of(filledJournalRow()));
+    // The live owner is registered under the padded id; the probe must hit that id to find it.
+    String paddedOwnerId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
+    when(positionLookup.isPositionWorkflowRunning(paddedOwnerId)).thenReturn(true);
+
+    AdoptionResult result = runAdopt(compactOcc);
+
+    // Probe was invoked with the PADDED workflow id rebuilt from the anchor, not the compact input.
+    ArgumentCaptor<String> probeId = ArgumentCaptor.forClass(String.class);
+    verify(positionLookup).isPositionWorkflowRunning(probeId.capture());
+    assertThat(probeId.getValue()).isEqualTo(paddedOwnerId);
+
+    // Live owner found -> no duplicate adoption.
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ALREADY_OWNED);
+    assertThat(STARTED).isEmpty();
+    verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void compactOperatorOcc_openRowFallback_resolvesPaddedAnchor_underPaddingMismatch() {
+    // Issue #246: when there is no FILLED row, resolveAnchor falls back to an open
+    // (RECORDED/SUBMITTED) row. The match must be padding-agnostic: a compact operator OCC must
+    // still resolve an open row whose option_symbol is the padded form (and vice versa).
+    String compactOcc = "UNH260618C00400000";
+    BrokerPosition lot = brokerLot(5L, new BigDecimal("3.40"));
+    lot.setOptionSymbol(compactOcc);
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, compactOcc)).thenReturn(lot);
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, compactOcc)).thenReturn(List.of());
+    // Open row carries the PADDED option_symbol (OCC constant); operator supplied compact.
+    when(exec.journalDumpOpen(TENANT, STRATEGY)).thenReturn(List.of(filledJournalRow()));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
+    when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
+
+    AdoptionResult result = runAdopt(compactOcc);
+
+    // Anchor resolved via the padding-agnostic open-row fallback -> adoption proceeds (not
+    // refused).
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ADOPTED);
+    String paddedWfId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
+    // Owner started under the canonical PADDED id rebuilt from the anchor.
+    assertThat(result.getWorkflowId()).isEqualTo(paddedWfId);
+
+    // Identity + discovery are keyed on the canonical PADDED OCC (not the compact operator input),
+    // matching CopytradeSignalWorkflowImpl's spawn so the adopted owner is discoverable by the same
+    // ContractSymbol Visibility query + Redis cache key the STC lookup uses.
+    PositionWorkflowInput started = STARTED.get(paddedWfId);
+    assertThat(started).isNotNull();
+    assertThat(started.getContractSymbol()).isEqualTo(OCC);
+    verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, OCC, paddedWfId);
+  }
+
+  @Test
+  void nullBrokerTarget_failsFastWithInvalidBrokerTargetError() {
+    // Issue #285: broker_target is resolved from StrategyConfig FIRST so the exec-queue stub can be
+    // built before any broker-truth call. When the config carries a null broker_target there is no
+    // exec task queue to route to, so the workflow must fail fast with a non-retryable
+    // InvalidBrokerTargetError (ExecActivitiesFactory.taskQueueFor) instead of NPEing or hanging on
+    // a StartToCloseTimeout — and before any broker-truth side effect.
+    StrategyConfig noTarget = config(Boolean.FALSE);
+    noTarget.setBrokerTarget(null);
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(noTarget);
+
+    AdoptionWorkflow wf = newAdoptionStub();
+
+    assertThatThrownBy(() -> wf.adopt(input(OCC)))
+        .isInstanceOf(WorkflowFailedException.class)
+        .hasCauseInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> {
+              ApplicationFailure af = (ApplicationFailure) t.getCause();
+              assertThat(af.getType()).isEqualTo("InvalidBrokerTargetError");
+              assertThat(af.isNonRetryable()).isTrue();
+            });
+
+    // Fast-fail happened before any broker-truth call / side effect.
+    assertThat(STARTED).isEmpty();
+    verify(exec, never()).brokerGetPositionByOcc(anyString(), anyString(), anyString());
     verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
     verify(positionLookup, never())
         .cachePositionMapping(anyString(), anyString(), anyString(), anyString());

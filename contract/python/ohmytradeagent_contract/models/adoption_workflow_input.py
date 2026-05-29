@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, conint, constr
 
 class AdoptionWorkflowInput(BaseModel):
     """
-    Issue #285: input to the short-lived AdoptionWorkflow started by api-gateway POST /positions/adopt. Identifies the confirmed orphan (tenant, strategy, occ) to adopt and the operator who triggered it (provenance / audit). broker_target lets the workflow route its broker-truth ReconciliationExecActivity calls to the correct exec task queue (broker-<broker_target>); when absent the workflow resolves it from StrategyConfig.
+    Issue #285: input to the short-lived AdoptionWorkflow started by api-gateway POST /positions/adopt. Identifies the confirmed orphan (tenant, strategy, occ) to adopt and the operator who triggered it (provenance / audit). The workflow resolves broker_target from StrategyConfig to route its broker-truth ReconciliationExecActivity calls to the correct exec task queue (broker-<broker_target>); it is not an input field.
     """
 
     model_config = ConfigDict(
