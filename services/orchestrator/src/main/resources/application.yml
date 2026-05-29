@@ -68,11 +68,22 @@ audit:
 # transaction open (issue #302). The webhook URL comes from a k8s secret (operator follow-up) — when
 # blank the alerter is a no-op (logs the would-be alert at INFO). A webhook timeout/error is caught
 # and logged, NEVER propagated into the audit write or the trading path.
+#
+# Issue #308: SignalFeedAlerter mirrors the FULL signal feed to the SAME webhook via the same
+# after-commit seam — a "received" message on ingest plus an "accepted/rejected/avg-skipped" outcome.
+# It is gated by alert.discord.signal-feed.enabled (ALERT_SIGNAL_FEED_ENABLED, default false) so the
+# high-volume mirror toggles independently of the failure alerts. SignalRejected was dropped from
+# failure-kinds below: the feed alerter owns it now, so a rejected signal posts exactly one message.
 alert:
   discord:
     webhook-url: ${ALERT_DISCORD_WEBHOOK_URL:}
-    # Comma-separated allowlist of audit kinds that trigger an alert (avoids channel spam).
-    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:SignalRejected,OrphanSTC,EntryExpired}
+    # Comma-separated allowlist of audit kinds that trigger a failure alert (avoids channel spam).
+    # SignalRejected intentionally absent (issue #308) — owned by the signal-feed outcome mirror.
+    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired}
+    signal-feed:
+      # Issue #308: mirror every BTO/STC/AVG signal (received + outcome) to the same webhook.
+      # Off by default — opt in via ALERT_SIGNAL_FEED_ENABLED=true. Independent of failure alerts.
+      enabled: ${ALERT_SIGNAL_FEED_ENABLED:false}
 
 management:
   endpoints:

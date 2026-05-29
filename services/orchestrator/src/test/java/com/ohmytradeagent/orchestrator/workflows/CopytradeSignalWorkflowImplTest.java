@@ -389,6 +389,33 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
+  void signalReceived_subjectIsEnrichedWithParsedSignalFields() {
+    // Issue #308: the SignalReceived audit subject must carry the parsed signal fields the Discord
+    // feed mirror renders, in addition to the original signal_id. This fires before any risk gates,
+    // so use a config that rejects so the workflow returns quickly — the assertion is on the
+    // FIRST-emitted SignalReceived event regardless of the downstream outcome.
+    when(strategy.get(anyString(), anyString())).thenReturn(config());
+    when(risk.checkEntryWithLimit(any(), any(), any(), any()))
+        .thenReturn(
+            RiskDecision.rejected(RejectionReason.AUTHOR_NOT_WHITELISTED, "author=stranger"));
+
+    runWorkflow(btoPayload());
+
+    AuditEvent received = capture("SignalReceived");
+    assertThat(received.getSubject())
+        .containsEntry("signal_id", "111:0")
+        .containsEntry("action", "BTO")
+        .containsEntry("ticker", "NVDA")
+        .containsEntry("expiry", "2026-05-16")
+        .containsEntry("strike", "140")
+        .containsEntry("right", "C")
+        .containsEntry("price", "2.30")
+        .containsEntry("author", "acme_trader");
+    // posted_at renders the OffsetDateTime; assert presence + the date portion.
+    assertThat(String.valueOf(received.getSubject().get("posted_at"))).contains("2026-05-13");
+  }
+
+  @Test
   void stcAction_cacheHit_dispatchesExitRequestedAudit() {
     when(strategy.get(anyString(), anyString())).thenReturn(stcConfig());
     when(contract.resolve(any()))

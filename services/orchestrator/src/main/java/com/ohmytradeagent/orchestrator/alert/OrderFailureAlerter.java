@@ -18,10 +18,16 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * <p>{@code AuditActivitiesImpl.log(AuditEvent)} is the single funnel every failure-classified
  * {@code audit_log} row passes through. After the audit row is written, the activity calls {@link
  * #onAuditEvent(AuditEvent)}; this class checks the event's {@code kind} against a configurable
- * allowlist ({@code alert.discord.failure-kinds}, default {@code SignalRejected,OrphanSTC,
- * EntryExpired}) and, on a match, builds a human-readable message from the event (action, symbol,
- * reason, and enough identifiers — {@code signal_id}, {@code option_symbol}, {@code workflow_id} —
- * to find the failure) and dispatches it via the {@link WebhookClient}.
+ * allowlist ({@code alert.discord.failure-kinds}, default {@code OrphanSTC,EntryExpired}) and, on a
+ * match, builds a human-readable message from the event (action, symbol, reason, and enough
+ * identifiers — {@code signal_id}, {@code option_symbol}, {@code workflow_id} — to find the
+ * failure) and dispatches it via the {@link WebhookClient}.
+ *
+ * <p>Issue #308 de-dupe: {@code SignalRejected} was REMOVED from the default allowlist. The full
+ * signal feed (received + accepted/rejected/avg-skipped outcomes) is now mirrored by {@link
+ * SignalFeedAlerter}, which owns {@code SignalRejected} as the outcome:rejected message. Keeping it
+ * here too would post a rejected signal TWICE. {@code OrphanSTC} / {@code EntryExpired} / broker
+ * {@code placeOrder} rejections remain distinct failure alerts owned by this class.
  *
  * <p>Non-allowlisted kinds (e.g. {@code SignalReceived}) are ignored, avoiding channel spam.
  *
@@ -41,7 +47,9 @@ public class OrderFailureAlerter {
 
   private static final Logger log = LoggerFactory.getLogger(OrderFailureAlerter.class);
 
-  private static final String DEFAULT_FAILURE_KINDS = "SignalRejected,OrphanSTC,EntryExpired";
+  // Issue #308: SignalRejected dropped from the default — it is now owned by SignalFeedAlerter's
+  // outcome:rejected mirror so a rejected signal posts exactly one Discord message.
+  private static final String DEFAULT_FAILURE_KINDS = "OrphanSTC,EntryExpired";
 
   /** STC (exit) failure kinds; everything else in the allowlist is treated as a BTO (entry). */
   private static final Set<String> STC_KINDS = Set.of("OrphanSTC");
