@@ -80,10 +80,16 @@ public class ExecActivitiesImpl implements ExecActivities {
       // Issue #295: surface the broker rejection at the DB layer. Without this the row stays
       // RECORDED with last_error=NULL and a broker-side outage (e.g. the 128-char 422) is
       // invisible.
-      // State is left RECORDED so a later retry can still place; then rethrow to preserve
-      // Temporal's
-      // retry/non-retry classification.
-      journal.markPlaceFailed(intent.getIntentKey(), e.getMessage());
+      // State is left RECORDED so a later retry can still place. The persist is best-effort: a
+      // failure here (e.g. DB down) must NOT mask the original broker exception, whose
+      // retryable/non-retryable classification Temporal relies on (a swallowed InvalidRequestError
+      // replaced by a generic DB RuntimeException would retry forever — the #264 retry-storm
+      // class).
+      try {
+        journal.markPlaceFailed(intent.getIntentKey(), e.getMessage());
+      } catch (RuntimeException persistFailure) {
+        e.addSuppressed(persistFailure);
+      }
       throw e;
     }
 

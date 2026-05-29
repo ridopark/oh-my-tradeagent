@@ -103,7 +103,8 @@ class ReconciliationWorkflowImplTest {
   void happyPath_matchingJournalAndBroker_zeroOrphans() {
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-1", "OCC-1", OffsetDateTime.now(ZoneOffset.UTC))));
-    when(exec.brokerListOpenOrders()).thenReturn(List.of(broker("brk-1", "intent-1", "OCC-1")));
+    when(exec.brokerListOpenOrders())
+        .thenReturn(List.of(broker("brk-1", clientOrderIdFor("intent-1"), "OCC-1")));
 
     ReconciliationSummary summary = runWorkflow();
 
@@ -250,7 +251,7 @@ class ReconciliationWorkflowImplTest {
     when(exec.brokerListOpenOrders())
         .thenReturn(
             List.of(
-                broker("brk-1", "intent-1", "OCC-1"),
+                broker("brk-1", clientOrderIdFor("intent-1"), "OCC-1"),
                 broker("brk-stranger", "client-stranger", "OCC-stranger")));
 
     runWorkflow();
@@ -678,13 +679,25 @@ class ReconciliationWorkflowImplTest {
     j.setTenantId("dev");
     j.setStrategyId("copytrade-v1");
     j.setBrokerTarget(JournalEntry.BrokerTarget.PAPER);
-    j.setClientOrderId(intentKey);
+    // Issue #295: the journal's client_order_id is the BOUNDED value (distinct from intent_key),
+    // and recon matches broker↔journal on this — not the intent_key. Use clientOrderIdFor() so a
+    // regression that matches on intent_key would fail these fixtures.
+    j.setClientOrderId(clientOrderIdFor(intentKey));
     j.setOptionSymbol(occ);
     j.setSide(JournalEntry.Side.BUY);
     j.setQty(1L);
     j.setState(JournalEntry.State.RECORDED);
     j.setRecordedAt(recordedAt);
     return j;
+  }
+
+  /**
+   * Issue #295: the broker-facing client_order_id is bounded and distinct from the intent_key. The
+   * orchestrator test does not depend on exec's ClientOrderId util, so mirror its observable
+   * property here: a deterministic value that is NOT equal to the intent_key.
+   */
+  private static String clientOrderIdFor(String intentKey) {
+    return "cid-" + intentKey;
   }
 
   private JournalEntry filledJournal(String intentKey, String signalId, String occ) {
