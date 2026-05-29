@@ -221,9 +221,10 @@ class FillDispatcherImplTest {
   @Test
   void dispatch_unknownBrokerOrder_andUnknownClientOrder_dropsEvent() {
     // #244: a truly unknown fill resolves NEITHER by broker_order_id NOR by the
-    // client_order_id (= intent_key) fallback — only then is it counted unknown and dropped.
+    // client_order_id fallback — only then is it counted unknown and dropped.
+    // #295: the fallback resolves by the bounded client_order_id, not by intent_key.
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.empty());
-    when(journal.findByIntentKey("ck-42")).thenReturn(Optional.empty());
+    when(journal.findByClientOrderId("ck-42")).thenReturn(Optional.empty());
 
     dispatcher.dispatch(FILL);
 
@@ -239,10 +240,12 @@ class FillDispatcherImplTest {
     // #244 ROOT CAUSE: the near-instant-fill race. The WS fill arrives in the ~26ms window AFTER
     // broker.placeOrder returns but BEFORE ExecActivitiesImpl.placeOrder runs
     // markSubmittedIfRecorded(intentKey, brokerOrderId) — so the row has no broker_order_id yet
-    // and findByBrokerOrderId is empty. Because client_order_id == intent_key (set at upsertIntent
-    // and passed to the broker), the dispatcher resolves the row by event.clientOrderId() and
-    // terminalizes the journal to FILLED. WITHOUT this the fill was logged unknown + dropped and
-    // the row stayed stuck SUBMITTED, stranding the position.
+    // and findByBrokerOrderId is empty. The broker echoes the client_order_id, so the dispatcher
+    // resolves the row by event.clientOrderId() and terminalizes the journal to FILLED. WITHOUT
+    // this the fill was logged unknown + dropped and the row stayed stuck SUBMITTED, stranding the
+    // position.
+    // #295: the fallback now resolves by the bounded client_order_id (findByClientOrderId), since
+    // the bounded id no longer equals the intent_key.
     JournaledOrder recordedRow =
         new JournaledOrder(
             "ck-42",
@@ -267,7 +270,7 @@ class FillDispatcherImplTest {
             null,
             1L);
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.empty());
-    when(journal.findByIntentKey("ck-42")).thenReturn(Optional.of(recordedRow));
+    when(journal.findByClientOrderId("ck-42")).thenReturn(Optional.of(recordedRow));
     when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
 
     dispatcher.dispatch(FILL);

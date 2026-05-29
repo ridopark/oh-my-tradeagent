@@ -9,6 +9,7 @@ import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
+import com.ohmytradeagent.exec.broker.ClientOrderId;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
@@ -86,8 +87,10 @@ class ExecActivitiesImplIT {
     OrderIntentResult result = exec.placeOrder(intent);
 
     assertThat(result.getState()).isEqualTo(OrderIntentResult.State.SUBMITTED);
-    assertThat(result.getBrokerOrderId()).isEqualTo("stub-intent-A");
-    assertThat(broker.placeCallsFor("intent-A")).isEqualTo(1);
+    // #295: the StubBroker derives its broker_order_id from the bounded client_order_id it
+    // receives.
+    assertThat(result.getBrokerOrderId()).isEqualTo("stub-" + clientOrderIdFor("intent-A"));
+    assertThat(broker.placeCallsFor(clientOrderIdFor("intent-A"))).isEqualTo(1);
     assertThat(journalRowCount("intent-A")).isEqualTo(1L);
   }
 
@@ -103,8 +106,8 @@ class ExecActivitiesImplIT {
     OrderIntentResult result = exec.placeOrder(intent);
 
     assertThat(result.getState()).isEqualTo(OrderIntentResult.State.SUBMITTED);
-    assertThat(result.getBrokerOrderId()).isEqualTo("stub-intent-A");
-    assertThat(broker.placeCallsFor("intent-A")).isEqualTo(2);
+    assertThat(result.getBrokerOrderId()).isEqualTo("stub-" + clientOrderIdFor("intent-A"));
+    assertThat(broker.placeCallsFor(clientOrderIdFor("intent-A"))).isEqualTo(2);
     assertThat(journalRowCount("intent-A")).isEqualTo(1L);
   }
 
@@ -120,11 +123,11 @@ class ExecActivitiesImplIT {
     OrderIntentResult result = exec.placeOrder(intent);
 
     assertThat(result.getState()).isEqualTo(OrderIntentResult.State.SUBMITTED);
-    assertThat(result.getBrokerOrderId()).isEqualTo("stub-intent-A");
+    assertThat(result.getBrokerOrderId()).isEqualTo("stub-" + clientOrderIdFor("intent-A"));
     assertThat(journalRowCount("intent-A")).isEqualTo(1L);
     // Broker was called twice (once on the failed attempt, once on retry) and
     // returned the same broker_order_id thanks to client_order_id dedup.
-    assertThat(broker.placeCallsFor("intent-A")).isEqualTo(2);
+    assertThat(broker.placeCallsFor(clientOrderIdFor("intent-A"))).isEqualTo(2);
   }
 
   @Test
@@ -134,7 +137,7 @@ class ExecActivitiesImplIT {
 
     exec.placeOrder(intent);
 
-    assertThat(broker.placeCallsFor("intent-A")).isEqualTo(1);
+    assertThat(broker.placeCallsFor(clientOrderIdFor("intent-A"))).isEqualTo(1);
   }
 
   @Test
@@ -170,7 +173,7 @@ class ExecActivitiesImplIT {
         .isEqualTo(OrderState.SUBMITTED);
     // Broker may have been called more than once across threads, but always with
     // the same client_order_id → all returns same broker_order_id.
-    assertThat(broker.placeCallsFor("intent-A")).isGreaterThanOrEqualTo(1);
+    assertThat(broker.placeCallsFor(clientOrderIdFor("intent-A"))).isGreaterThanOrEqualTo(1);
     assertThat(broker.distinctBrokerOrderIds()).isEqualTo(1);
   }
 
@@ -182,14 +185,15 @@ class ExecActivitiesImplIT {
     OrderIntentResult result = exec.cancelOrder("intent-A");
 
     assertThat(result.getState()).isEqualTo(OrderIntentResult.State.CANCELLED);
-    assertThat(broker.getOrderStatus("stub-intent-A")).isEqualTo(BrokerOrderStatus.CANCELLED);
+    assertThat(broker.getOrderStatus("stub-" + clientOrderIdFor("intent-A")))
+        .isEqualTo(BrokerOrderStatus.CANCELLED);
   }
 
   @Test
   void cancelOrder_onAlreadyFilled_keepsSubmittedSetsLastError() {
     OrderIntent intent = intent("intent-A");
     exec.placeOrder(intent);
-    broker.forceStatusForTest("stub-intent-A", BrokerOrderStatus.FILLED);
+    broker.forceStatusForTest("stub-" + clientOrderIdFor("intent-A"), BrokerOrderStatus.FILLED);
 
     OrderIntentResult result = exec.cancelOrder("intent-A");
 
@@ -206,7 +210,8 @@ class ExecActivitiesImplIT {
     OrderIntent intent = intent("intent-A");
     exec.placeOrder(intent);
     OffsetDateTime filledAt = OffsetDateTime.parse("2026-05-19T17:08:11Z");
-    broker.setAlreadyFilled("stub-intent-A", 5L, new BigDecimal("0.84"), filledAt);
+    broker.setAlreadyFilled(
+        "stub-" + clientOrderIdFor("intent-A"), 5L, new BigDecimal("0.84"), filledAt);
 
     OrderIntentResult result = exec.cancelOrder("intent-A");
 
@@ -218,6 +223,12 @@ class ExecActivitiesImplIT {
     assertThat(row.filledQty()).isEqualTo(5L);
     assertThat(row.avgFillPrice()).isEqualByComparingTo(new BigDecimal("0.84"));
     assertThat(row.filledAt()).isEqualTo(filledAt);
+  }
+
+  // #295: the broker receives (and the journal stores) the bounded client_order_id, not the raw
+  // intent_key — so call-count / broker_order_id assertions must key on the bounded value.
+  private static String clientOrderIdFor(String intentKey) {
+    return ClientOrderId.forIntent(intentKey);
   }
 
   private long journalRowCount(String intentKey) {

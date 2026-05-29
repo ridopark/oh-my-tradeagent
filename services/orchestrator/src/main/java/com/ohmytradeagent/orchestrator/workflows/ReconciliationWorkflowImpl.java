@@ -151,7 +151,10 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     OffsetDateTime debounceSince = now.minus(ORPHAN_DEBOUNCE_WINDOW);
     long journalOrphans = 0;
     for (JournalEntry e : journal) {
-      if (brokerClientIds.contains(e.getIntentKey())) {
+      // Issue #295: the broker reports the bounded client_order_id (not the intent_key), and the
+      // journal row carries the SAME bounded value in its client_order_id column — so the
+      // journal↔broker correlation key is the client_order_id on both sides, NOT the intent_key.
+      if (brokerClientIds.contains(e.getClientOrderId())) {
         continue;
       }
       OffsetDateTime recorded = e.getRecordedAt();
@@ -216,14 +219,17 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       }
     }
 
-    Set<String> journalIntentKeys = new LinkedHashSet<>();
+    // Issue #295: match broker open orders to the journal by client_order_id (the bounded value the
+    // broker echoes, persisted in the journal's client_order_id column) — not the intent_key, which
+    // the broker no longer sees.
+    Set<String> journalClientOrderIds = new LinkedHashSet<>();
     for (JournalEntry e : journal) {
-      journalIntentKeys.add(e.getIntentKey());
+      journalClientOrderIds.add(e.getClientOrderId());
     }
 
     long brokerOrphans = 0;
     for (BrokerOpenOrder o : brokerOpen) {
-      if (journalIntentKeys.contains(o.getClientOrderId())) {
+      if (journalClientOrderIds.contains(o.getClientOrderId())) {
         continue;
       }
       // v0: stale_hours unknown (no open-at from broker contract) — document via the audit's

@@ -30,9 +30,10 @@ import org.springframework.web.client.RestClient;
  * Alpaca paper-trading {@link OptionsBroker}. Selected by {@code broker.impl=alpaca-paper}; sends
  * orders to {@code paper-api.alpaca.markets} via the shared {@link RestClient}.
  *
- * <p>Idempotency is delegated to Alpaca: we pass the intent_key as {@code client_order_id}, and a
- * duplicate POST surfaces as a 422 carrying {@code existing_order_id} which we unwrap into a {@code
- * PlaceOrderResponse(brokerOrderId, alreadyExisted=true)}.
+ * <p>Idempotency is delegated to Alpaca via the caller-supplied {@code client_order_id} (issue
+ * #295: a bounded, ≤128-char value derived from the intent_key — Alpaca caps client_order_id at
+ * 128), and a duplicate POST surfaces as a 422 carrying {@code existing_order_id} which we unwrap
+ * into a {@code PlaceOrderResponse(brokerOrderId, alreadyExisted=true)}.
  *
  * <p>Error mapping (only the cases Alpaca lets us classify unambiguously):
  *

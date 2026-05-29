@@ -4,6 +4,7 @@ import static org.jooq.impl.DSL.field;
 import static org.jooq.impl.DSL.table;
 
 import com.ohmytradeagent.contract.OrderIntent;
+import com.ohmytradeagent.exec.broker.ClientOrderId;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -50,7 +51,11 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
                 intent.getTenantId(),
                 intent.getStrategyId(),
                 intent.getBrokerTarget().value(),
-                intent.getIntentKey(),
+                // Issue #295: persist the SAME bounded value the broker receives (ClientOrderId
+                // derives it from intent_key), not the long intent_key — Alpaca caps
+                // client_order_id
+                // at 128 and the WS fill echoes this value for the dispatcher's race fallback.
+                ClientOrderId.forIntent(intent.getIntentKey()),
                 intent.getOptionSymbol(),
                 intent.getSide().value(),
                 intent.getQty(),
@@ -71,6 +76,15 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
       return Optional.empty();
     }
     return Optional.of(mapRow(row));
+  }
+
+  @Override
+  public Optional<JournaledOrder> findByClientOrderId(String clientOrderId) {
+    Record row =
+        dsl.selectFrom(TABLE)
+            .where(field("client_order_id", String.class).eq(clientOrderId))
+            .fetchOne();
+    return row == null ? Optional.empty() : Optional.of(mapRow(row));
   }
 
   @Override
@@ -188,6 +202,19 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
 
   @Override
   public void markCancelFailed(String intentKey, String brokerReason) {
+    OffsetDateTime now = OffsetDateTime.now();
+    dsl.update(TABLE)
+        .set(field("last_error"), brokerReason)
+        .set(field("last_state_at"), now)
+        .set(field("version"), field("version", Long.class).plus(1))
+        .where(field("intent_key", String.class).eq(intentKey))
+        .execute();
+  }
+
+  @Override
+  public void markPlaceFailed(String intentKey, String brokerReason) {
+    // Issue #295: record the broker rejection reason on the place path without changing state —
+    // the row stays RECORDED so a later retry can still transition it to SUBMITTED.
     OffsetDateTime now = OffsetDateTime.now();
     dsl.update(TABLE)
         .set(field("last_error"), brokerReason)

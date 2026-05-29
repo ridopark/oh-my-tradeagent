@@ -163,6 +163,11 @@ class ExecActivitiesImplPlaceOrderValidationTest {
     }
 
     @Override
+    public Optional<JournaledOrder> findByClientOrderId(String clientOrderId) {
+      throw fail();
+    }
+
+    @Override
     public Optional<JournaledOrder> findByBrokerOrderId(String brokerOrderId) {
       throw fail();
     }
@@ -200,6 +205,11 @@ class ExecActivitiesImplPlaceOrderValidationTest {
 
     @Override
     public void markCancelFailed(String intentKey, String brokerReason) {
+      throw fail();
+    }
+
+    @Override
+    public void markPlaceFailed(String intentKey, String brokerReason) {
       throw fail();
     }
 

@@ -23,6 +23,16 @@ public interface OrderIntentJournal {
   Optional<JournaledOrder> findByIntentKey(String intentKey);
 
   /**
+   * Issue #295: resolve a row by its broker-facing {@code client_order_id} (the bounded, hashed
+   * value derived from {@code intent_key}, persisted in the {@code client_order_id} column and
+   * echoed by the broker). Powers the fill-dispatcher's WS submit/fill-race fallback: the broker
+   * echoes the {@code client_order_id}, which is no longer equal to the {@code intent_key}, so the
+   * fallback must resolve by this column rather than by {@code intent_key}. Returns empty for
+   * unknown ids.
+   */
+  Optional<JournaledOrder> findByClientOrderId(String clientOrderId);
+
+  /**
    * Resolve a row by its broker-issued order ID. Used by the fill listener to map an inbound trade
    * update back to the originating intent / workflow. Backed by the V1 partial index {@code
    * order_intent_journal_broker_order_id_idx (broker_order_id) WHERE broker_order_id IS NOT NULL};
@@ -76,6 +86,15 @@ public interface OrderIntentJournal {
    * runbook follow-up.
    */
   void markCancelFailed(String intentKey, String brokerReason);
+
+  /**
+   * Issue #295: records a broker rejection on the place path. Writes {@code last_error} (and bumps
+   * {@code last_state_at} / {@code version}) without changing {@code state} — the row stays {@code
+   * RECORDED} so a later retry can still transition it. Distinct from {@link #markCancelFailed},
+   * which is the cancel-path equivalent. Makes a broker placement failure visible at the DB layer
+   * instead of leaving the row {@code RECORDED} with {@code last_error=NULL}.
+   */
+  void markPlaceFailed(String intentKey, String brokerReason);
 
   /**
    * Records a broker-confirmed fill discovered during a cancel attempt (cancel-on-filled race) or
