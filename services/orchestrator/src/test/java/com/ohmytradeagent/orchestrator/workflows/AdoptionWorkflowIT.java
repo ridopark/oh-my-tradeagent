@@ -93,8 +93,10 @@ class AdoptionWorkflowIT {
   static void initDb() throws Exception {
     Flyway.configure()
         .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
-        // exec-svc owns the order_intent_journal schema (test-scope dep, #285).
-        .locations("classpath:db/migration")
+        // exec-svc owns the order_intent_journal schema (test-scope dep, #285); it lives under
+        // the exec-specific db/exec package so it never collides with the orchestrator's own
+        // db/migration V1 on this shared test classpath.
+        .locations("classpath:db/exec")
         .load()
         .migrate();
     conn =

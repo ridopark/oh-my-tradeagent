@@ -19,7 +19,11 @@ spring:
     sql-dialect: POSTGRES
   flyway:
     enabled: true
-    locations: classpath:db/migration
+    # exec-svc namespaces its migrations under db/exec so they don't collide with the
+    # orchestrator's db/migration V1 when exec-svc is pulled onto orchestrator's test
+    # classpath (AdoptionWorkflowIT, issue #285). Flyway keys schema history by version,
+    # so relocating the same files to a renamed package is a no-op on already-migrated DBs.
+    locations: classpath:db/exec
 
 temporal:
   target: ${TEMPORAL_TARGET:localhost:7233}
