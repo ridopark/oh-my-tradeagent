@@ -141,7 +141,8 @@ class OrderFailureAlerterAfterCommitTest {
 
     @Bean
     OrderFailureAlerter orderFailureAlerter(OrderingWebhookClient webhookClient) {
-      return new OrderFailureAlerter(webhookClient, "SignalRejected,OrphanSTC,EntryExpired");
+      return new OrderFailureAlerter(
+          webhookClient, "SignalRejected,OrphanSTC,EntryExpired", /* signalFeedEnabled= */ true);
     }
 
     @Bean
@@ -168,7 +169,8 @@ class OrderFailureAlerterAfterCommitTest {
 
     @Bean
     OrderFailureAlerter orderFailureAlerter(WebhookClient webhookClient) {
-      return new OrderFailureAlerter(webhookClient, "SignalRejected,OrphanSTC,EntryExpired");
+      return new OrderFailureAlerter(
+          webhookClient, "SignalRejected,OrphanSTC,EntryExpired", /* signalFeedEnabled= */ true);
     }
 
     @Bean

@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.alert;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -29,7 +30,32 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * here too would post a rejected signal TWICE. {@code OrphanSTC} / {@code EntryExpired} / broker
  * {@code placeOrder} rejections remain distinct failure alerts owned by this class.
  *
- * <p>Non-allowlisted kinds (e.g. {@code SignalReceived}) are ignored, avoiding channel spam.
+ * <p>Issue #311: the feed-mirror toggle ({@code alert.discord.signal-feed.enabled} / {@code
+ * ALERT_SIGNAL_FEED_ENABLED}) defaults to OFF in code, which would create a no-alert gap for {@code
+ * SignalRejected} when an operator never sets it. To close that gap, this alerter now AUTOMATICALLY
+ * UNIONS {@code SignalRejected} into its effective allowlist whenever the feed toggle is OFF
+ * (computed once at construction). When the feed toggle is ON, {@link SignalFeedAlerter}'s {@code
+ * outcome:rejected} path owns the rejection alert exclusively, so {@code SignalRejected} stays
+ * absent from this alerter's effective allowlist (de-dupe preserved).
+ *
+ * <p><b>Alerter ownership matrix</b> (rows = audit kinds, columns = feed toggle state):
+ *
+ * <pre>
+ *   kind            | feed-off                            | feed-on
+ *   ----------------|-------------------------------------|--------------------------------------
+ *   SignalReceived  | (ignored)                           | SignalFeedAlerter (received message)
+ *   SignalAccepted  | (ignored)                           | SignalFeedAlerter (outcome:accepted)
+ *   SignalRejected  | OrderFailureAlerter (auto-unioned)  | SignalFeedAlerter (outcome:rejected)
+ *   AvgSkipped      | (ignored)                           | SignalFeedAlerter (AVG skipped)
+ *   OrphanSTC       | OrderFailureAlerter (STC failure)   | OrderFailureAlerter (STC failure)
+ *   EntryExpired    | OrderFailureAlerter (BTO failure)   | OrderFailureAlerter (BTO failure)
+ * </pre>
+ *
+ * <p>The "auto-unioned" cell is the issue #311 regression guard: a rejected signal still posts
+ * exactly ONE Discord message regardless of the toggle state — and never zero.
+ *
+ * <p>Non-allowlisted kinds (e.g. {@code SignalReceived} when the feed is off) are ignored, avoiding
+ * channel spam.
  *
  * <p>NON-BLOCKING GUARANTEE: {@link #onAuditEvent} never throws. The webhook client is itself
  * best-effort, but as a belt-and-suspenders the dispatch is wrapped so that any unexpected error
@@ -49,7 +75,11 @@ public class OrderFailureAlerter {
 
   // Issue #308: SignalRejected dropped from the default — it is now owned by SignalFeedAlerter's
   // outcome:rejected mirror so a rejected signal posts exactly one Discord message.
+  // Issue #311: when the feed toggle is OFF, we union SignalRejected back in at construction so
+  // the no-alert gap can't recur if an operator forgets to flip the feed on.
   private static final String DEFAULT_FAILURE_KINDS = "OrphanSTC,EntryExpired";
+
+  private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
   /** STC (exit) failure kinds; everything else in the allowlist is treated as a BTO (entry). */
   private static final Set<String> STC_KINDS = Set.of("OrphanSTC");
@@ -59,13 +89,21 @@ public class OrderFailureAlerter {
 
   public OrderFailureAlerter(
       WebhookClient webhookClient,
-      @Value("${alert.discord.failure-kinds:" + DEFAULT_FAILURE_KINDS + "}") String failureKinds) {
+      @Value("${alert.discord.failure-kinds:" + DEFAULT_FAILURE_KINDS + "}") String failureKinds,
+      @Value("${alert.discord.signal-feed.enabled:false}") boolean signalFeedEnabled) {
     this.webhookClient = webhookClient;
-    this.failureKinds =
+    Set<String> parsed =
         Arrays.stream(failureKinds.split(","))
             .map(String::trim)
             .filter(s -> !s.isEmpty())
-            .collect(Collectors.toUnmodifiableSet());
+            .collect(Collectors.toCollection(HashSet::new));
+    // Issue #311: when the feed mirror is OFF, ensure SignalRejected has an owner here so the
+    // no-alert gap (#311) cannot recur. When the feed is ON, SignalFeedAlerter owns it and we
+    // must NOT add it here (otherwise a rejected signal would post twice — the #308 invariant).
+    if (!signalFeedEnabled) {
+      parsed.add(SIGNAL_REJECTED_KIND);
+    }
+    this.failureKinds = Set.copyOf(parsed);
   }
 
   /**
