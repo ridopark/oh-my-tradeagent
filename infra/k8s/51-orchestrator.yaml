@@ -105,12 +105,18 @@ spec:
                   optional: true
             # Issue #308: SignalFeedAlerter mirrors the FULL BTO/STC/AVG signal feed (received +
             # accepted/rejected/avg-skipped outcomes) to the SAME discord-alert-credentials webhook
-            # via the same after-commit seam. Off by default so the high-volume mirror is opt-in and
-            # toggles independently of the failure alerts. Set to "true" to enable. A blank/absent
-            # webhook keeps it a no-op (logs would-be alerts) — the trading path is unaffected either
-            # way (non-blocking, exception-swallowing dispatch).
+            # via the same after-commit seam. Off by default in code so the high-volume mirror is
+            # opt-in, but enabled here in the live manifest because SignalFeedAlerter now owns the
+            # SignalRejected outcome alert (issue #308 de-dupe removed it from OrderFailureAlerter's
+            # default failure-kinds allowlist). A blank/absent webhook keeps it a no-op (logs would-be
+            # alerts) — the trading path is unaffected either way (non-blocking, exception-swallowing
+            # dispatch).
+            #
+            # Issue #311: when this is toggled to "false", OrderFailureAlerter automatically unions
+            # SignalRejected back into its effective allowlist so the no-alert gap cannot re-open.
+            # See OrderFailureAlerter Javadoc "Alerter ownership matrix" for the full table.
             - name: ALERT_SIGNAL_FEED_ENABLED
-              value: "false"
+              value: "true"
           volumeMounts:
             - name: tenants
               mountPath: /etc/copytrade/tenants

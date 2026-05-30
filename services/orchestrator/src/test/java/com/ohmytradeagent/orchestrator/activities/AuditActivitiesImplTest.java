@@ -121,7 +121,8 @@ class AuditActivitiesImplTest {
             content -> {
               throw new RuntimeException("discord down");
             },
-            "SignalRejected,OrphanSTC,EntryExpired");
+            "SignalRejected,OrphanSTC,EntryExpired",
+            /* signalFeedEnabled= */ true);
     ApplicationEventPublisher publisher = listenerDrivingPublisher(throwingAlerter);
 
     AuditActivitiesImpl activities =
@@ -159,7 +160,9 @@ class AuditActivitiesImplTest {
     // audit-work path. We record its start ordering; the test does not block on its completion.
     OrderFailureAlerter slowAlerter =
         new OrderFailureAlerter(
-            content -> order.add("dispatch"), "SignalRejected,OrphanSTC,EntryExpired");
+            content -> order.add("dispatch"),
+            "SignalRejected,OrphanSTC,EntryExpired",
+            /* signalFeedEnabled= */ true);
     ApplicationEventPublisher publisher = listenerDrivingPublisher(slowAlerter);
 
     AuditActivitiesImpl activities =
