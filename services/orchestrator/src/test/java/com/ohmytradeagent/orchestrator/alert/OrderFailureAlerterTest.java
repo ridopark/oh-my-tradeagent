@@ -201,6 +201,51 @@ class OrderFailureAlerterTest {
     verify(webhook, never()).post(org.mockito.ArgumentMatchers.anyString());
   }
 
+  // ---- Issue #313 regression guard: operator-misconfig (double-post) is documented behavior ----
+
+  @Test
+  void feedOnWithExplicitSignalRejectedInAllowlistDocumentsOperatorDoublePostMisconfig() {
+    // Issue #313 (follow-up from #311 / PR #312 bot review): documents the
+    // operator-misconfiguration (double-post) scenario where the operator explicitly sets
+    // ALERT_DISCORD_FAILURE_KINDS to include SignalRejected AND leaves
+    // ALERT_SIGNAL_FEED_ENABLED=true. The #311 conditional union only ADDS SignalRejected when
+    // the feed is off; it never REMOVES an operator-explicit entry. So this alerter's effective
+    // allowlist STILL contains SignalRejected and STILL fires exactly one webhook for a
+    // SignalRejected event — and in production, SignalFeedAlerter's outcome:rejected path would
+    // ALSO fire (a second Discord post). That double-post is a known operator misconfig (not a
+    // code bug): the contract is "operator-explicit allowlist wins, even if it duplicates the
+    // feed mirror". SignalFeedAlerter is intentionally OUT OF SCOPE for this test — we only
+    // validate this alerter's contribution (one post via the explicit allowlist), matching the
+    // pattern of the #311 guards above. The double-post in production is the sum of this
+    // alerter's one post plus SignalFeedAlerter's outcome:rejected post, which is exercised in
+    // SignalFeedAlerter's own test suite.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(
+            webhook, "SignalRejected,OrphanSTC,EntryExpired", /* signalFeedEnabled= */ true);
+
+    // Operator-explicit wins: SignalRejected is in the effective allowlist even with feed-on.
+    assertThat(alerter.failureKinds()).contains("SignalRejected");
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("signal_id", "999:0");
+    subject.put("option_symbol", "AAPL260116C00200000");
+    subject.put("reason_code", "AUTHOR_NOT_WHITELISTED");
+    subject.put("reason_detail", "Donald T not on allowlist");
+    AuditEvent event = event("SignalRejected", "wf-313-doublepost", subject);
+
+    alerter.onAuditEvent(event);
+
+    // Exactly one dispatch via THIS alerter (the operator-explicit allowlist path). In
+    // production, SignalFeedAlerter's outcome:rejected mirror would post a second time — that
+    // second post is the documented operator-misconfig double-post and is asserted in
+    // SignalFeedAlerter's own tests, not here.
+    String msg = capture(webhook);
+    assertThat(msg).contains("BTO (entry)");
+    assertThat(msg).contains("AAPL260116C00200000");
+    assertThat(msg).contains("AUTHOR_NOT_WHITELISTED");
+  }
+
   private static String capture(WebhookClient webhook) {
     ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
     verify(webhook, times(1)).post(captor.capture());

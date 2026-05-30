@@ -54,6 +54,13 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * <p>The "auto-unioned" cell is the issue #311 regression guard: a rejected signal still posts
  * exactly ONE Discord message regardless of the toggle state — and never zero.
  *
+ * <p>Issue #313 operator-misconfig (double-post): if an operator explicitly puts {@code
+ * SignalRejected} in {@code ALERT_DISCORD_FAILURE_KINDS} while the feed mirror is ON, BOTH this
+ * alerter (via the explicit allowlist) and {@link SignalFeedAlerter} (via {@code outcome:rejected})
+ * will post — two Discord messages per rejected signal. This is an operator misconfiguration, not a
+ * code bug: operator-explicit allowlist entries always win (the #311 conditional union only ADDS
+ * {@code SignalRejected} when feed-off; it never REMOVES an operator-explicit entry).
+ *
  * <p>Non-allowlisted kinds (e.g. {@code SignalReceived} when the feed is off) are ignored, avoiding
  * channel spam.
  *
