@@ -259,6 +259,9 @@ public class RiskActivitiesImpl implements RiskActivities {
     } else if (brokerTarget == null || brokerTarget.isBlank()) {
       cash = null;
     } else {
+      // Intentional conservative fallback: the visibility seam exposes net-liq (accountEquity), not
+      // the MTM cash term. net-liq >= cash, so using it as the cash proxy can only TIGHTEN the cap
+      // (never loosen it) — safe to substitute when the live cash term is unavailable.
       cash = portfolioSnapshot.accountEquity(brokerTarget);
     }
     if (cash == null || cash.signum() <= 0) {

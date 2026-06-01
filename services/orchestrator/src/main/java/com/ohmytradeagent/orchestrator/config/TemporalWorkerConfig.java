@@ -1,5 +1,6 @@
 package com.ohmytradeagent.orchestrator.config;
 
+import com.ohmytradeagent.orchestrator.activities.AccountSnapshotMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
@@ -74,7 +75,8 @@ public class TemporalWorkerConfig {
       KillSwitchCascadeActivities cascade,
       DailyPnlActivities dailyPnl,
       LivePromotionActivities livePromotion,
-      ReconciliationMetricsActivities reconciliationMetrics) {
+      ReconciliationMetricsActivities reconciliationMetrics,
+      AccountSnapshotMetricsActivities accountSnapshotMetrics) {
     Worker worker = factory.newWorker(taskQueue);
     // Issue #239/#285: AdoptionWorkflow is the operator-triggered orphan-adoption entry point. It
     // runs as a workflow (not an in-process Activity) so its broker-truth
@@ -99,7 +101,8 @@ public class TemporalWorkerConfig {
         cascade,
         dailyPnl,
         livePromotion,
-        reconciliationMetrics);
+        reconciliationMetrics,
+        accountSnapshotMetrics);
     return worker;
   }
 }

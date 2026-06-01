@@ -17,6 +17,7 @@ import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.orchestrator.activities.AccountSnapshotMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
@@ -116,14 +117,14 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // VERSION_TTL_FILLED_ADOPTION / VERSION_BREACH_FILLED_ADOPTION.
   private static final String VERSION_ENTRY_FILLED_OPTION_SYMBOL = "entry-filled-option-symbol-v1";
 
-  // Gate the new account-snapshot dispatch + the 5-arg checkEntryWithLimit overload
-  // that
-  // threads the broker-supplied equity into the notional-cap gate. In-flight v>=1 workflows
-  // recorded
+  // Gate the new account-snapshot dispatch + the 5-arg checkEntryWithLimit overload that
+  // threads the broker-supplied CASH (the #323 cost-basis capital-base component, not net-liq
+  // equity) into the notional-cap gate. In-flight v>=1 workflows recorded
   // a 4-arg CheckEntryWithLimit call (and no AccountSnapshot activity-task) before this landed;
   // replaying them must keep the legacy path or Temporal trips a non-determinism error.
-  // v=DEFAULT_VERSION replays the prior 4-arg call (equity from the PortfolioSnapshot seam); v>=1
-  // dispatches AccountSnapshot and passes the equity down.
+  // v=DEFAULT_VERSION replays the prior 4-arg call (cash from the PortfolioSnapshot seam); v>=1
+  // dispatches AccountSnapshot and passes the cash down. The marker string is a Temporal replay
+  // identifier and must NOT be renamed even though the threaded value is now cash, not equity.
   private static final String VERSION_ACCOUNT_EQUITY_DISPATCH = "account-equity-dispatch-v1";
 
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
@@ -154,6 +155,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       Workflow.newActivityStub(ContractActivities.class, DEFAULT_OPTIONS);
   private final PositionLookupActivities positionLookup =
       Workflow.newActivityStub(PositionLookupActivities.class, DEFAULT_OPTIONS);
+  private final AccountSnapshotMetricsActivities accountSnapshotMetrics =
+      Workflow.newActivityStub(AccountSnapshotMetricsActivities.class, DEFAULT_OPTIONS);
 
   /**
    * Phase 2c.2: built lazily inside {@link #handleBto} / {@link #handleStc} from the loaded {@code
@@ -810,6 +813,24 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     } catch (CanceledFailure cf) {
       throw cf;
     } catch (Exception e) {
+      // Fail-closed dispatch failure (#323): emit a diagnostic warn + the symmetric
+      // accountsnapshot_dispatch_failures_total counter (mirrors the #329 openpositions
+      // value-failures counter) so a persistent broker outage that drives the cash term to the ZERO
+      // sentinel is distinguishable in metrics from a legitimate zero-cash account. The counter
+      // lives in an Activity (replay-safe; MeterRegistry cannot be touched from the deterministic
+      // workflow body); the emit is wrapped non-fatal so a metrics outage cannot change the
+      // fail-closed ZERO outcome below.
+      Workflow.getLogger(CopytradeSignalWorkflowImpl.class)
+          .warn(
+              "accountSnapshot dispatch failed; failing closed to ZERO cash broker_target={} err={}",
+              config.getBrokerTarget().value(),
+              e.getMessage(),
+              e);
+      try {
+        accountSnapshotMetrics.recordDispatchFailure(config.getBrokerTarget().value());
+      } catch (RuntimeException metricsError) {
+        // observability-only; never let a metrics failure flip the fail-closed outcome.
+      }
       return BigDecimal.ZERO;
     }
   }

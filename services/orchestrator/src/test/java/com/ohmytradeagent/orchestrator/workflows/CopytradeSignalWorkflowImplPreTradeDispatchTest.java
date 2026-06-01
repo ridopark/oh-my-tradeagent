@@ -21,6 +21,7 @@ import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
+import com.ohmytradeagent.orchestrator.activities.AccountSnapshotMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
@@ -38,6 +39,7 @@ import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
@@ -75,6 +77,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   private PositionLookupActivities positionLookup;
   private MarketCalendarActivities calendar;
   private SubscribePremiumActivity marketData;
+  private AccountSnapshotMetricsActivities accountSnapshotMetrics;
 
   @BeforeEach
   void setUp() {
@@ -91,6 +94,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     positionLookup = Mockito.mock(PositionLookupActivities.class);
     calendar = Mockito.mock(MarketCalendarActivities.class);
     marketData = Mockito.mock(SubscribePremiumActivity.class);
+    accountSnapshotMetrics = Mockito.mock(AccountSnapshotMetricsActivities.class);
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
     when(calendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
     SubscribePremiumResult ok = new SubscribePremiumResult();
@@ -101,7 +105,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     when(marketData.subscribePremium(any())).thenReturn(ok);
 
     coreWorker.registerActivitiesImplementations(
-        audit, strategy, risk, contract, positionLookup, calendar);
+        audit, strategy, risk, contract, positionLookup, calendar, accountSnapshotMetrics);
     Worker mdWorker = env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
     mdWorker.registerActivitiesImplementations(marketData);
   }
@@ -643,6 +647,78 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     AuditEvent rejected = capture("SignalRejected");
     assertThat(rejected.getSubject()).containsEntry("reason_code", "NOTIONAL_CAP_EXCEEDED");
     assertThat(rejected.getSubject()).containsEntry("outcome", "REJECTED");
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+
+    // #323 observability: the non-CanceledFailure catch branch increments the symmetric
+    // accountsnapshot_dispatch_failures_total counter exactly once via the metrics Activity,
+    // keyed on broker_target — so a persistent broker outage is distinguishable in metrics from a
+    // legitimate zero-cash account.
+    Mockito.verify(accountSnapshotMetrics, Mockito.times(1))
+        .recordDispatchFailure(StrategyConfig.BrokerTarget.ALPACA_PAPER.value());
+  }
+
+  /**
+   * Issue #323: a {@link CanceledFailure} (workflow cancellation surfacing through the {@code
+   * AccountSnapshotActivity} call) must re-throw from {@code dispatchAccountSnapshot} rather than
+   * fail closed to ZERO — and must NOT touch the dispatch-failure counter (cancellation is not a
+   * broker degradation). Pins the {@code catch (CanceledFailure cf) { throw cf; }} branch:
+   * cancelling the running workflow during the (deliberately slow) account snapshot aborts it, and
+   * the counter Activity is never invoked.
+   */
+  @Test
+  void dispatchAccountSnapshot_canceledFailurePropagates_andDoesNotIncrementCounter()
+      throws Exception {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    // Block in the account snapshot long enough for the cancel to land while the activity call is
+    // in flight, so CanceledFailure is thrown into the workflow at the dispatchAccountSnapshot
+    // call.
+    AccountSnapshotActivity slowAccountStub =
+        request -> {
+          try {
+            Thread.sleep(60_000L);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          AccountSnapshotResult r = new AccountSnapshotResult();
+          r.setSchemaVersion(1L);
+          r.setCash(new BigDecimal("123456.78"));
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub, slowAccountStub);
+    env.start();
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+    WorkflowStub stub = WorkflowStub.fromTyped(wf);
+    stub.start(btoPayload());
+    // Let the workflow reach the in-flight account-snapshot activity, then cancel.
+    env.sleep(Duration.ofSeconds(5));
+    stub.cancel();
+
+    assertThatThrownBy(() -> stub.getResult(Void.class))
+        .isInstanceOf(WorkflowFailedException.class);
+
+    // CanceledFailure rethrows — it is NOT the broker-degradation path, so the counter never fires.
+    Mockito.verify(accountSnapshotMetrics, Mockito.never()).recordDispatchFailure(anyString());
     Mockito.verify(exec, Mockito.never()).placeOrder(any());
   }
 
