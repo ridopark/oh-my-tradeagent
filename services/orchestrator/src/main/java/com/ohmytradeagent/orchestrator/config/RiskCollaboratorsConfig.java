@@ -7,6 +7,7 @@ import com.ohmytradeagent.orchestrator.activities.PortfolioSnapshot;
 import com.ohmytradeagent.orchestrator.activities.RiskCollaboratorDefaults;
 import com.ohmytradeagent.orchestrator.activities.SectorResolver;
 import com.ohmytradeagent.orchestrator.activities.VisibilityPortfolioSnapshot;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.client.WorkflowClient;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
@@ -30,8 +31,9 @@ public class RiskCollaboratorsConfig {
    * #noOpPortfolioSnapshot()} (its {@code @ConditionalOnMissingBean} yields to this primary bean).
    */
   @Bean
-  public PortfolioSnapshot visibilityPortfolioSnapshot(WorkflowClient workflowClient) {
-    return new VisibilityPortfolioSnapshot(workflowClient);
+  public PortfolioSnapshot visibilityPortfolioSnapshot(
+      WorkflowClient workflowClient, MeterRegistry meterRegistry) {
+    return new VisibilityPortfolioSnapshot(workflowClient, meterRegistry);
   }
 
   @Bean
