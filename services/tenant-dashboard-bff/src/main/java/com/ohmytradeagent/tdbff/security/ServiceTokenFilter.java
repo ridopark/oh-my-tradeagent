@@ -7,6 +7,8 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
@@ -26,10 +28,22 @@ import org.springframework.web.filter.OncePerRequestFilter;
 public class ServiceTokenFilter extends OncePerRequestFilter {
 
   private static final String BEARER_PREFIX = "Bearer ";
+  // The application.yml fallback used for local dev. Accepting it in production would mean a pod
+  // started without BFF_SHARED_TOKEN silently trusts a value anyone can read from this repo.
+  private static final String INSECURE_DEFAULT_TOKEN = "dev-shared-token";
 
   private final String sharedToken;
 
-  public ServiceTokenFilter(@Value("${bff.service-token}") String sharedToken) {
+  public ServiceTokenFilter(
+      @Value("${bff.service-token}") String sharedToken, Environment environment) {
+    if (INSECURE_DEFAULT_TOKEN.equals(sharedToken)
+        && environment.acceptsProfiles(Profiles.of("prod"))) {
+      // Fail fast at boot rather than run with a well-known token (the k8s Deployment sets the
+      // `prod` profile; local dev runs without it and keeps the default for convenience).
+      throw new IllegalStateException(
+          "bff.service-token is the well-known default under the prod profile — set BFF_SHARED_TOKEN"
+              + " to a real secret");
+    }
     this.sharedToken = sharedToken;
   }
 

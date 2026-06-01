@@ -84,6 +84,11 @@ spec:
           env:
             - name: TENANT_DASHBOARD_BFF_PORT
               value: "8083"
+            # Activates the prod guardrail in ServiceTokenFilter: boot fails if BFF_SHARED_TOKEN is
+            # missing (and thus the well-known dev default would be used) instead of silently
+            # accepting it.
+            - name: SPRING_PROFILES_ACTIVE
+              value: prod
             # Shared Temporal (matches api-gateway): the BFF queries positions and starts the
             # short-lived AccountSnapshotWorkflow on the orchestrator task queue.
             - name: TEMPORAL_TARGET

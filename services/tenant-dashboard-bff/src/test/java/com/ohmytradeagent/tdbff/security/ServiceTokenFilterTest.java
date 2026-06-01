@@ -1,10 +1,13 @@
 package com.ohmytradeagent.tdbff.security;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import jakarta.servlet.ServletException;
 import java.io.IOException;
 import org.junit.jupiter.api.Test;
+import org.springframework.mock.env.MockEnvironment;
 import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -12,7 +15,7 @@ import org.springframework.mock.web.MockHttpServletResponse;
 class ServiceTokenFilterTest {
 
   private static final String TOKEN = "s3cr3t-shared-token";
-  private final ServiceTokenFilter filter = new ServiceTokenFilter(TOKEN);
+  private final ServiceTokenFilter filter = new ServiceTokenFilter(TOKEN, new MockEnvironment());
 
   @Test
   void missingAuthorizationHeader_is401_andDoesNotInvokeChain() throws Exception {
@@ -56,6 +59,20 @@ class ServiceTokenFilterTest {
 
     assertThat(chain.getRequest()).isSameAs(req); // not filtered, passed straight through
     assertThat(res.getStatus()).isEqualTo(200);
+  }
+
+  @Test
+  void wellKnownDefaultToken_underProdProfile_failsBoot() {
+    MockEnvironment prod = new MockEnvironment();
+    prod.setActiveProfiles("prod");
+    assertThatThrownBy(() -> new ServiceTokenFilter("dev-shared-token", prod))
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void wellKnownDefaultToken_withoutProdProfile_isAllowedForLocalDev() {
+    assertThatCode(() -> new ServiceTokenFilter("dev-shared-token", new MockEnvironment()))
+        .doesNotThrowAnyException();
   }
 
   @Test

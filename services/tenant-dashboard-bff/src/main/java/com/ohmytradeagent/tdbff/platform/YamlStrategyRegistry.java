@@ -15,8 +15,10 @@ import org.springframework.stereotype.Component;
 @Component
 public class YamlStrategyRegistry {
 
+  // Thread-safe for concurrent reads; one instance suffices for the singleton bean.
+  private static final ObjectMapper YAML = new ObjectMapper(new YAMLFactory());
+
   private final Path tenantsDir;
-  private final ObjectMapper yaml = new ObjectMapper(new YAMLFactory());
 
   public YamlStrategyRegistry(@Value("${bff.tenants-dir:tenants}") String tenantsDir) {
     this.tenantsDir = Path.of(tenantsDir);
@@ -28,7 +30,7 @@ public class YamlStrategyRegistry {
       throw new StrategyNotFoundException("Strategy YAML not found at " + file.toAbsolutePath());
     }
     try {
-      return yaml.readValue(file.toFile(), StrategyConfig.class);
+      return YAML.readValue(file.toFile(), StrategyConfig.class);
     } catch (IOException e) {
       throw new IllegalStateException("Failed to parse " + file.toAbsolutePath(), e);
     }
