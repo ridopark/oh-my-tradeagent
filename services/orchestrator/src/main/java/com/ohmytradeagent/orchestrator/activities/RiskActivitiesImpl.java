@@ -246,25 +246,14 @@ public class RiskActivitiesImpl implements RiskActivities {
     if (capPct == null) {
       return null;
     }
-    // Prefer the workflow-supplied cash (dispatched from the broker-<broker_target>
-    // AccountSnapshotActivity). When that MTM cash term is unavailable (legacy checkEntry path,
-    // non-dispatch providers, or a missing broker_target) the gate fails closed below: there is no
-    // valid cash proxy, so it rejects rather than guess. Account figures are account-level, so the
-    // seam is keyed on broker_target, never (tenant, strategy).
-    String brokerTarget = brokerTargetValue(ctx.config);
-    BigDecimal cash;
-    if (ctx.accountCash != null) {
-      cash = ctx.accountCash;
-    } else if (brokerTarget == null || brokerTarget.isBlank()) {
-      cash = null;
-    } else {
-      // Fail closed: the only remaining seam (PortfolioSnapshot#accountEquity) exposes net-liq, not
-      // the MTM cash term. net-liq >= cash, so substituting it for cash would ENLARGE capitalBase
-      // (cash + sumOpenNotional) and LOOSEN the cap — admitting notional the real cash term would
-      // reject. net-liq is not a valid cash proxy, so when the MTM cash term is unavailable we
-      // reject via the cash==null guard below rather than substitute it.
-      cash = null;
-    }
+    // The cash term is the workflow-supplied account cash dispatched from the
+    // broker-<broker_target> AccountSnapshotActivity. When it is unavailable (legacy checkEntry
+    // path, non-dispatch providers) the gate fails closed via the guard below rather than
+    // substituting a proxy: the only other account figure on hand is the PortfolioSnapshot
+    // net-liq seam, and net-liq >= cash would ENLARGE capitalBase (cash + sumOpenNotional) and
+    // LOOSEN the cap — admitting notional the real cash term would reject. So net-liq is never read
+    // here; an absent cash term simply rejects.
+    BigDecimal cash = ctx.accountCash;
     if (cash == null || cash.signum() <= 0) {
       return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
     }
@@ -431,15 +420,6 @@ public class RiskActivitiesImpl implements RiskActivities {
    * sized down. Threading {@code contracts} explicitly future-proofs the helper if the gate later
    * switches to a sized count.
    */
-  /**
-   * The {@code broker_target} string the {@link PortfolioSnapshot#accountEquity} seam is keyed on
-   * (equity is account-level). Returns {@code null} when {@code broker_target} is absent — the
-   * seam's no-op default returns ZERO and the notional-cap gate fails closed on it.
-   */
-  private static String brokerTargetValue(StrategyConfig config) {
-    return config.getBrokerTarget() == null ? null : config.getBrokerTarget().value();
-  }
-
   private static BigDecimal entryNotional(BigDecimal price, long contracts) {
     BigDecimal p = price == null ? BigDecimal.ZERO : price;
     return p.multiply(BigDecimal.valueOf(contracts)).multiply(Sizing.CONTRACT_MULTIPLIER);
