@@ -1,0 +1,131 @@
+# Next.js tenant dashboard — the SINGLE public surface for this feature. Deployment + Service +
+# Ingress (Traefik). The browser talks ONLY to this; the server-side calls the off-ingress BFF
+# (58-tenant-dashboard-bff.yaml) over in-cluster HTTP with the shared service token.
+#
+# TLS WARNING (see plan §G): this Ingress uses the plaintext `web` entrypoint to match the rest of
+# the homelab cluster. Social login + session cookies over http:// is acceptable ONLY for a
+# LAN/localhost homelab host. Before any non-localhost/public exposure, move to the `websecure`
+# entrypoint + TLS, set AUTH_URL/cookies to https://, and add an HTTP->HTTPS redirect — Google/
+# Facebook reject non-localhost http:// redirect URIs and the cookie Secure flag is inert over http.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: copytrade
+spec:
+  selector:
+    app: dashboard
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: copytrade
+  labels:
+    app: dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: ghcr.io/ridopark/oh-my-tradeagent-dashboard:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: PORT
+              value: "3000"
+            # Auth.js. AUTH_URL must match the public host below; over http:// it is dev-only (see
+            # the TLS warning above).
+            - name: AUTH_URL
+              value: http://dashboard.homelab.local
+            - name: AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: AUTH_SECRET
+            - name: AUTH_GOOGLE_ID
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: AUTH_GOOGLE_ID
+            - name: AUTH_GOOGLE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: AUTH_GOOGLE_SECRET
+            - name: AUTH_FACEBOOK_ID
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: AUTH_FACEBOOK_ID
+            - name: AUTH_FACEBOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: AUTH_FACEBOOK_SECRET
+            # Identity -> tenant lookup (the `dashboard` DB the BFF owns).
+            - name: DASHBOARD_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: DASHBOARD_DATABASE_URL
+            # Off-ingress BFF: in-cluster ClusterIP DNS + the shared service token.
+            - name: BFF_INTERNAL_URL
+              value: http://tenant-dashboard-bff:8083
+            - name: BFF_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_SHARED_TOKEN
+          readinessProbe:
+            httpGet:
+              path: /signin
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /signin
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dashboard
+  namespace: copytrade
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - host: dashboard.homelab.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dashboard
+                port:
+                  number: 3000

@@ -1,0 +1,55 @@
+package com.ohmytradeagent.tdbff.config;
+
+import com.zaxxer.hikari.HikariDataSource;
+import javax.sql.DataSource;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
+
+/**
+ * Wires the BFF's two read-only datasources by hand — net-new in this codebase (every other service
+ * has a single auto-configured datasource). {@code DataSourceAutoConfiguration} and {@code
+ * JooqAutoConfiguration} are excluded in {@code application.yml} so these qualified beans are the
+ * only datasources/DSLContexts.
+ *
+ * <ul>
+ *   <li>{@code orchestratorDsl} ({@code @Primary}) — reads {@code audit_log} (trades + realized
+ *       PnL).
+ *   <li>{@code execAlpacaPaperDsl} — reads {@code order_intent_journal} (order history).
+ * </ul>
+ *
+ * <p>Both connect as the {@code bff_readonly} role (SELECT-only grants; see the operator runbook),
+ * so even a query bug cannot mutate trading state. Pools are marked {@code read-only} in
+ * application.yml as defense-in-depth.
+ */
+@Configuration
+public class DataSourceConfig {
+
+  @Bean
+  @Primary
+  @ConfigurationProperties("bff.datasource.orchestrator")
+  public DataSource orchestratorDataSource() {
+    return new HikariDataSource();
+  }
+
+  @Bean
+  @ConfigurationProperties("bff.datasource.exec-alpaca-paper")
+  public DataSource execAlpacaPaperDataSource() {
+    return new HikariDataSource();
+  }
+
+  @Bean
+  @Primary
+  public DSLContext orchestratorDsl(DataSource orchestratorDataSource) {
+    return DSL.using(orchestratorDataSource, SQLDialect.POSTGRES);
+  }
+
+  @Bean
+  public DSLContext execAlpacaPaperDsl(DataSource execAlpacaPaperDataSource) {
+    return DSL.using(execAlpacaPaperDataSource, SQLDialect.POSTGRES);
+  }
+}

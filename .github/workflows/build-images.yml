@@ -13,6 +13,7 @@ on:
       - "contract/**"
       - "pom.xml"
       - "infra/docker/**"
+      - "dashboard/**"
       - ".dockerignore"
       - ".github/workflows/build-images.yml"
   pull_request:
@@ -21,6 +22,7 @@ on:
       - "contract/**"
       - "pom.xml"
       - "infra/docker/**"
+      - "dashboard/**"
       - ".dockerignore"
       - ".github/workflows/build-images.yml"
 
@@ -64,10 +66,20 @@ jobs:
             module: api-gateway
             dockerfile: infra/docker/java-service.Dockerfile
             cache_scope: java-builder
+          - service: tenant-dashboard-bff
+            module: tenant-dashboard-bff
+            dockerfile: infra/docker/java-service.Dockerfile
+            cache_scope: java-builder
           - service: signal-source-discord
             module: ""
             dockerfile: services/signal-source-discord/Dockerfile
             cache_scope: signal-source-discord
+          # Next.js dashboard — non-Java, its own cache scope (like signal-source-discord). The Node
+          # Dockerfile uses repo-root context, so SERVICE_MODULE is unused for this row.
+          - service: dashboard
+            module: ""
+            dockerfile: dashboard/Dockerfile
+            cache_scope: dashboard
     steps:
       - uses: actions/checkout@v4
 

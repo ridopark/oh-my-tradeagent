@@ -12,6 +12,7 @@ import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.workflows.AccountSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
@@ -89,7 +90,11 @@ public class TemporalWorkerConfig {
         PositionWorkflowImpl.class,
         KillSwitchWorkflowImpl.class,
         ReconciliationWorkflowImpl.class,
-        AdoptionWorkflowImpl.class);
+        AdoptionWorkflowImpl.class,
+        // Started synchronously by the tenant-dashboard BFF to read broker-account equity; the
+        // workflow dispatches AccountSnapshotActivity to broker-<target> (a Temporal client cannot
+        // dispatch an Activity directly).
+        AccountSnapshotWorkflowImpl.class);
     worker.registerActivitiesImplementations(
         audit,
         auditQuery,
