@@ -60,7 +60,9 @@ class RiskActivitiesPortfolioGatesTest {
 
     portfolioSnapshot = mock(PortfolioSnapshot.class);
     when(portfolioSnapshot.openPositions(anyString(), anyString())).thenReturn(List.of());
-    when(portfolioSnapshot.accountEquity(anyString())).thenReturn(new BigDecimal("100000"));
+    // #323: accountEquity is the net-liq seam, NOT a cash proxy; the notional-cap gate no longer
+    // reads it (the unavailable-cash fallback fails closed). Left unstubbed so any accidental read
+    // surfaces via the explicit verify(...never()).accountEquity(...) assertions below.
 
     dailyTradeCounter = mock(DailyTradeCounter.class);
     when(dailyTradeCounter.count(anyString(), anyString(), any())).thenReturn(0L);
@@ -94,9 +96,15 @@ class RiskActivitiesPortfolioGatesTest {
     c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("20000"))));
-    // cash=100000, sum_open_notional=20000 → base=120000, cap=0.5*120000=60000.
+    // cash=100000 (workflow-supplied), sum_open_notional=20000 → base=120000, cap=0.5*120000=60000.
     // new entry: 1 ctr * 2.30 * 100 = 230. 20000 + 230 = 20230 << 60000 → approve.
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
+    RiskDecision d =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW),
+            c,
+            null,
+            new BigDecimal("2.30"),
+            new BigDecimal("100000"));
     assertThat(d.allowed()).isTrue();
   }
 
@@ -104,12 +112,17 @@ class RiskActivitiesPortfolioGatesTest {
   void notionalCap_rejects_whenCombinedNotionalOverCap() {
     StrategyConfig c = config();
     c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
-    // cash=100 (low), sum_open_notional=49900 → base=50000, cap=0.5*50000=25000.
-    when(portfolioSnapshot.accountEquity(anyString())).thenReturn(new BigDecimal("100"));
+    // cash=100 (low, workflow-supplied), sum_open_notional=49900 → base=50000, cap=0.5*50000=25000.
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("49900"))));
     // new entry notional: 1 * 2.30 * 100 = 230. 49900 + 230 = 50130 > 25000 → reject.
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
+    RiskDecision d =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW),
+            c,
+            null,
+            new BigDecimal("2.30"),
+            new BigDecimal("100"));
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
     assertThat(d.detail()).contains("notional=");
@@ -123,19 +136,29 @@ class RiskActivitiesPortfolioGatesTest {
   void checkEntryWithLimit_notionalCap_usesSlipAdjustedLimit_notMirrorPrice() {
     StrategyConfig c = config();
     c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
-    // #323: cash=50230, sum_open_notional=49770 → base=100000, cap=0.5*100000=50000.
-    when(portfolioSnapshot.accountEquity(anyString())).thenReturn(new BigDecimal("50230"));
+    // #323: cash=50230 (workflow-supplied), sum_open_notional=49770 → base=100000,
+    // cap=0.5*100000=50000.
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("49770"))));
 
     // Mirror baseline: 49770 + (2.30 * 100) = 50000 == cap → approves (compareTo > 0 false).
-    RiskDecision mirror = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
+    RiskDecision mirror =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW),
+            c,
+            null,
+            new BigDecimal("2.30"),
+            new BigDecimal("50230"));
     assertThat(mirror.allowed()).isTrue();
 
     // Slip-adjusted via the new entry-point: 49770 + (3.15 * 100) = 50085 > 50000 → rejects.
     RiskDecision slip =
         risk.checkEntryWithLimit(
-            btoPayload("acme_trader", FIXED_NOW), c, null, new BigDecimal("3.15"), null);
+            btoPayload("acme_trader", FIXED_NOW),
+            c,
+            null,
+            new BigDecimal("3.15"),
+            new BigDecimal("50230"));
     assertThat(slip.allowed()).isFalse();
     assertThat(slip.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
     assertThat(slip.detail()).contains("notional=50085");
@@ -183,24 +206,32 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(d.allowed()).isTrue();
   }
 
+  // #323: the legacy null-cash path (checkEntry / non-dispatch provider) has no MTM cash term, so
+  // the gate fails closed regardless of the net-liq seam — substituting net-liq would loosen the
+  // cap, so it is never read. Both a null cash term (case 1) and a zero one (case 2, via the
+  // dispatched 0) reject with equity_unavailable.
   @Test
-  void notionalCap_failsClosed_whenEquityZeroOrUnavailable() {
+  void notionalCap_failsClosed_whenCashZeroOrUnavailable() {
     StrategyConfig c = config();
     c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
 
-    // Case 1: equity == null (snapshot source unavailable) → fail closed.
-    when(portfolioSnapshot.accountEquity(anyString())).thenReturn(null);
+    // Case 1: cash unavailable (legacy null-cash path) → fail closed, net-liq seam never read.
     RiskDecision dNull = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(dNull.allowed()).isFalse();
     assertThat(dNull.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
     assertThat(dNull.detail()).contains("equity_unavailable");
 
-    // Case 2: equity == 0 (degenerate snapshot) → fail closed.
-    when(portfolioSnapshot.accountEquity(anyString())).thenReturn(BigDecimal.ZERO);
-    RiskDecision dZero = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
+    // Case 2: dispatched cash == 0 (degenerate snapshot) → fail closed.
+    RiskDecision dZero =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW), c, null, new BigDecimal("2.30"), BigDecimal.ZERO);
     assertThat(dZero.allowed()).isFalse();
     assertThat(dZero.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
     assertThat(dZero.detail()).contains("equity_unavailable");
+
+    // The net-liq seam is never consulted as a cash proxy.
+    org.mockito.Mockito.verify(portfolioSnapshot, org.mockito.Mockito.never())
+        .accountEquity(org.mockito.ArgumentMatchers.any());
   }
 
   // A null/blank broker_target can't key the PortfolioSnapshot seam, so equity is unavailable and
@@ -253,20 +284,26 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(reject.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
   }
 
-  // Issue #317/#323: when the workflow supplies null cash (legacy path / non-dispatch provider) the
-  // gate falls back to the PortfolioSnapshot seam, which is keyed on broker_target.
+  // #323 fail-closed fallback: when the workflow supplies null cash (legacy replay / non-dispatch
+  // provider) the MTM cash term is unavailable. The legacy PortfolioSnapshot#accountEquity seam
+  // exposes net-liq, NOT cash, and net-liq >= cash would ENLARGE the capital base (cash +
+  // sum_open_notional) and LOOSEN the cap. So the gate must NOT substitute the seam value — it must
+  // fail closed (reject) on the unavailable cash term. Here the seam mock would return a generous
+  // 100k that, if read as cash, would APPROVE (base=100k, cap=50k > 230). Asserting REJECT proves
+  // the loosening fallback is gone and the seam is never consulted as a cash proxy.
   @Test
-  void checkEntryWithLimit_nullEquity_fallsBackToSnapshotSeamKeyedOnBrokerTarget() {
+  void checkEntryWithLimit_nullCash_failsClosed_doesNotSubstituteNetLiqSeam() {
     StrategyConfig c = config();
     c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
-    // Seam returns broker-target-keyed cash (default mock 100k); no open → base=100k, cap=50k →
-    // approve.
     RiskDecision d =
         risk.checkEntryWithLimit(
             btoPayload("acme_trader", FIXED_NOW), c, null, new BigDecimal("2.30"), null);
-    assertThat(d.allowed()).isTrue();
-    // The seam is consulted with broker_target ("paper"), never tenant/strategy.
-    org.mockito.Mockito.verify(portfolioSnapshot).accountEquity(eq("paper"));
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
+    assertThat(d.detail()).contains("equity_unavailable");
+    // The net-liq seam is never consulted as a cash proxy on the unavailable-cash fallback.
+    org.mockito.Mockito.verify(portfolioSnapshot, org.mockito.Mockito.never())
+        .accountEquity(org.mockito.ArgumentMatchers.any());
   }
 
   // #325 fail-closed contract at the activity boundary: when portfolioSnapshot.openPositions throws
@@ -302,13 +339,19 @@ class RiskActivitiesPortfolioGatesTest {
   void checkNotionalCap_capDetailReflectsCashPlusOpenDenominator() {
     StrategyConfig c = config();
     c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
-    when(portfolioSnapshot.accountEquity(anyString())).thenReturn(new BigDecimal("10000"));
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("30000"))));
-    // base = 10000 + 30000 = 40000, cap = 0.5 * 40000 = 20000. projected = 30000 + 230 = 30230 >
-    // 20000 → reject; the detail must carry cap=20000 (proving the denominator included the 30000
-    // open notional, not just the 10000 cash → bare-cash cap would have been 5000).
-    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
+    // cash=10000 (workflow-supplied), base = 10000 + 30000 = 40000, cap = 0.5 * 40000 = 20000.
+    // projected = 30000 + 230 = 30230 > 20000 → reject; the detail must carry cap=20000 (proving
+    // the denominator included the 30000 open notional, not just the 10000 cash → bare-cash cap
+    // would have been 5000).
+    RiskDecision d =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW),
+            c,
+            null,
+            new BigDecimal("2.30"),
+            new BigDecimal("10000"));
     assertThat(d.allowed()).isFalse();
     assertThat(d.detail()).contains("cap=20000");
     assertThat(d.detail()).contains("notional=30230");

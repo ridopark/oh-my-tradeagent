@@ -247,11 +247,10 @@ public class RiskActivitiesImpl implements RiskActivities {
       return null;
     }
     // Prefer the workflow-supplied cash (dispatched from the broker-<broker_target>
-    // AccountSnapshotActivity). Fall back to the PortfolioSnapshot seam keyed on broker_target for
-    // the legacy checkEntry path and non-dispatch providers (returns the ZERO sentinel → fail
-    // closed). Account figures are account-level, so the seam is keyed on broker_target, never
-    // (tenant, strategy). A null/blank broker_target on the fallback path means we can't key the
-    // seam, so cash is unavailable and the gate fails closed below.
+    // AccountSnapshotActivity). When that MTM cash term is unavailable (legacy checkEntry path,
+    // non-dispatch providers, or a missing broker_target) the gate fails closed below: there is no
+    // valid cash proxy, so it rejects rather than guess. Account figures are account-level, so the
+    // seam is keyed on broker_target, never (tenant, strategy).
     String brokerTarget = brokerTargetValue(ctx.config);
     BigDecimal cash;
     if (ctx.accountCash != null) {
@@ -259,10 +258,12 @@ public class RiskActivitiesImpl implements RiskActivities {
     } else if (brokerTarget == null || brokerTarget.isBlank()) {
       cash = null;
     } else {
-      // Intentional conservative fallback: the visibility seam exposes net-liq (accountEquity), not
-      // the MTM cash term. net-liq >= cash, so using it as the cash proxy can only TIGHTEN the cap
-      // (never loosen it) — safe to substitute when the live cash term is unavailable.
-      cash = portfolioSnapshot.accountEquity(brokerTarget);
+      // Fail closed: the only remaining seam (PortfolioSnapshot#accountEquity) exposes net-liq, not
+      // the MTM cash term. net-liq >= cash, so substituting it for cash would ENLARGE capitalBase
+      // (cash + sumOpenNotional) and LOOSEN the cap — admitting notional the real cash term would
+      // reject. net-liq is not a valid cash proxy, so when the MTM cash term is unavailable we
+      // reject via the cash==null guard below rather than substitute it.
+      cash = null;
     }
     if (cash == null || cash.signum() <= 0) {
       return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
