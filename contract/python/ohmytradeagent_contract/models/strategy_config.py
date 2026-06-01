@@ -141,9 +141,13 @@ class StrategyConfig(BaseModel):
     """
     Phase 5: cool-down window (seconds) blocking new entries after a kill-switch reset. risk.check_entry rejects with KILL_SWITCH_COOLING_DOWN until cooling_down_until elapses. Closes the post-reset signal-backlog stampede vector.
     """
+    notional_cap_pct_of_capital_base: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Issue #336 portfolio-level gate (canonical field): max combined open-position notional + this signal's notional, expressed as a fraction of the MTM-stable cost-basis capital base. Reject with NOTIONAL_CAP_EXCEEDED when (sum_open_notional + new_notional) > notional_cap_pct_of_capital_base * (cash + sum_open_notional). Per #323 the denominator is the cost-basis capital base (cash + sum_open_notional), NOT net-liq equity: numerator and denominator share the same cost-basis open-notional term so the cap is MTM-stable (it neither loosens on an appreciating long-options book nor tightens on a bleeding one, and adds no new market-data dependency). Opt-in: null disables the gate. Complements max_positions, which only bounds the count of concurrent positions, not their total dollar exposure.
+    """
     notional_cap_pct_of_equity: confloat(le=1.0, gt=0.0) | None = None
     """
-    Issue #6 portfolio-level gate: max combined open-position notional + this signal's notional, expressed as a fraction of account equity. Reject with NOTIONAL_CAP_EXCEEDED when (sum_open_notional + new_notional) > notional_cap_pct_of_equity * equity. Opt-in: null disables the gate. Complements max_positions, which only bounds the count of concurrent positions, not their total dollar exposure.
+    DEPRECATED (Issue #336): alias for notional_cap_pct_of_capital_base; retained only so additionalProperties:false still accepts configs that set the old name. Will be removed after the deprecation window (tracked in #338). The denominator was already the cost-basis capital base (cash + sum_open_notional) post-#323 despite the misleading '_of_equity' name; the canonical field name fixes that. If BOTH this and notional_cap_pct_of_capital_base are set to DIFFERENT values the entry is rejected (fail-closed, NOTIONAL_CAP_EXCEEDED detail ambiguous_cap_config). Migrate to notional_cap_pct_of_capital_base.
     """
     same_underlying_count: conint(ge=1) | None = None
     """

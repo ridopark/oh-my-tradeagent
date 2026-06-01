@@ -18,8 +18,11 @@ public enum RejectionReason {
   MAX_POSITIONS_EXCEEDED,
   /**
    * Issue #6 portfolio-level gate. Reject when (sum of open-position notional + this signal's
-   * notional) exceeds {@code StrategyConfig.notional_cap_pct_of_equity * equity}. Complements
-   * {@link #MAX_POSITIONS_EXCEEDED}, which only bounds the count of concurrent positions.
+   * notional) exceeds {@code StrategyConfig.notional_cap_pct_of_capital_base * (cash +
+   * sum_open_notional)}. Complements {@link #MAX_POSITIONS_EXCEEDED}, which only bounds the count
+   * of concurrent positions. Issue #336: {@code notional_cap_pct_of_equity} is a deprecated alias
+   * for {@code notional_cap_pct_of_capital_base}; this reason is also emitted with detail {@code
+   * ambiguous_cap_config} when both fields are set to different values (fail-closed).
    */
   NOTIONAL_CAP_EXCEEDED,
   /**

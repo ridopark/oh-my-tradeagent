@@ -10,6 +10,9 @@ import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.client.WorkflowClient;
 import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
@@ -19,8 +22,12 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -31,15 +38,32 @@ import org.springframework.stereotype.Component;
  * within-cooldown state rejects with the corresponding reason.
  *
  * <p>Issue #6 adds six portfolio-level sub-gates that run after the existing per-order gates:
- * {@code notional_cap_pct_of_equity}, {@code same_underlying_count}, {@code
+ * {@code notional_cap_pct_of_capital_base}, {@code same_underlying_count}, {@code
  * sector_concentration_cap}, {@code daily_trade_count}, {@code drawdown_velocity_threshold}, and
  * {@code pre_trade_check}. Each is strictly opt-in via the corresponding {@code StrategyConfig}
  * field; null/absent config short-circuits the gate so existing strategies remain unchanged.
+ *
+ * <p>Issue #336: the notional-cap field {@code notional_cap_pct_of_capital_base} is canonical;
+ * {@code notional_cap_pct_of_equity} is a DEPRECATED alias resolved by {@link
+ * #resolveNotionalCapPct} — old-only and both-equal paths emit the {@link
+ * #DEPRECATED_EQUITY_FIELD_COUNTER_NAME} counter + a {@code log.warn}; both-set-unequal fails
+ * CLOSED with {@link RejectionReason#NOTIONAL_CAP_EXCEEDED} detail {@code ambiguous_cap_config}.
  */
 @Component
 public class RiskActivitiesImpl implements RiskActivities {
 
   static final Duration FUTURE_DATE_TOLERANCE = Duration.ofSeconds(5);
+
+  /**
+   * Issue #336 deprecation signal. Incremented (and a {@code log.warn} emitted) whenever a strategy
+   * config still sets the deprecated {@code notional_cap_pct_of_equity} alias. Follows the
+   * #329/#331 risk-counter idiom: {@code Counter.builder(...).register(meterRegistry)}, a {@code
+   * _total}-suffixed name, and per-tag caching keyed on the {@code tenant}/{@code strategy} tags.
+   */
+  static final String DEPRECATED_EQUITY_FIELD_COUNTER_NAME =
+      "notional_cap_deprecated_equity_field_total";
+
+  private static final Logger log = LoggerFactory.getLogger(RiskActivitiesImpl.class);
 
   private final PositionCounter positionCounter;
   private final Clock clock;
@@ -49,6 +73,9 @@ public class RiskActivitiesImpl implements RiskActivities {
   private final DailyTradeCounter dailyTradeCounter;
   private final DrawdownVelocitySampler drawdownVelocitySampler;
   private final PreTradeCheckActivity preTradeCheckActivity;
+  private final MeterRegistry meterRegistry;
+  private final ConcurrentMap<String, Counter> deprecatedEquityFieldCounters =
+      new ConcurrentHashMap<>();
 
   /**
    * Test/back-compat constructor: legacy callers that only exercise the per-order gates can omit
@@ -69,7 +96,12 @@ public class RiskActivitiesImpl implements RiskActivities {
         RiskCollaboratorDefaults.permissivePreTradeCheck());
   }
 
-  @Autowired
+  /**
+   * Test/back-compat constructor: the Issue #6 collaborators without a {@link MeterRegistry}. The
+   * Issue #336 deprecation counter falls back to a local {@link SimpleMeterRegistry} so existing
+   * eight-arg test sites stay unchanged while production goes through the {@code @Autowired}
+   * constructor with the Spring-managed registry.
+   */
   public RiskActivitiesImpl(
       PositionCounter positionCounter,
       Clock clock,
@@ -79,6 +111,29 @@ public class RiskActivitiesImpl implements RiskActivities {
       DailyTradeCounter dailyTradeCounter,
       DrawdownVelocitySampler drawdownVelocitySampler,
       PreTradeCheckActivity preTradeCheckActivity) {
+    this(
+        positionCounter,
+        clock,
+        workflowClient,
+        portfolioSnapshot,
+        sectorResolver,
+        dailyTradeCounter,
+        drawdownVelocitySampler,
+        preTradeCheckActivity,
+        new SimpleMeterRegistry());
+  }
+
+  @Autowired
+  public RiskActivitiesImpl(
+      PositionCounter positionCounter,
+      Clock clock,
+      WorkflowClient workflowClient,
+      PortfolioSnapshot portfolioSnapshot,
+      SectorResolver sectorResolver,
+      DailyTradeCounter dailyTradeCounter,
+      DrawdownVelocitySampler drawdownVelocitySampler,
+      PreTradeCheckActivity preTradeCheckActivity,
+      MeterRegistry meterRegistry) {
     this.positionCounter = positionCounter;
     this.clock = clock;
     this.workflowClient = workflowClient;
@@ -87,6 +142,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     this.dailyTradeCounter = dailyTradeCounter;
     this.drawdownVelocitySampler = drawdownVelocitySampler;
     this.preTradeCheckActivity = preTradeCheckActivity;
+    this.meterRegistry = meterRegistry;
   }
 
   @Override
@@ -220,8 +276,9 @@ public class RiskActivitiesImpl implements RiskActivities {
   }
 
   /**
-   * notional_cap_pct_of_equity: reject when {@code (sum_open_notional + new_notional) > cap_pct *
-   * (cash + sum_open_notional)}.
+   * notional_cap_pct_of_capital_base (canonical; {@code notional_cap_pct_of_equity} is a deprecated
+   * alias resolved by {@link #resolveNotionalCapPct}, #336): reject when {@code (sum_open_notional
+   * + new_notional) > cap_pct * (cash + sum_open_notional)}.
    *
    * <p><b>MTM-stable cost-basis denominator (#323).</b> The denominator is the cost-basis capital
    * base {@code cash + sum_open_notional}, NOT the net-liq (MTM) {@code equity} it replaced. Both
@@ -242,7 +299,14 @@ public class RiskActivitiesImpl implements RiskActivities {
    * are no open positions, which is itself a reject (cannot size against a zero base).
    */
   private RiskDecision checkNotionalCap(PortfolioContext ctx) {
-    BigDecimal capPct = ctx.config.getNotionalCapPctOfEquity();
+    BigDecimal capPct;
+    try {
+      capPct = resolveNotionalCapPct(ctx.config);
+    } catch (AmbiguousCapConfigException e) {
+      // Issue #336 fail-closed: both notional_cap fields set to different values. Reject rather
+      // than silently picking one — an ambiguous risk-gate config must never admit a trade.
+      return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "ambiguous_cap_config");
+    }
     if (capPct == null) {
       return null;
     }
@@ -267,6 +331,76 @@ public class RiskActivitiesImpl implements RiskActivities {
           "notional=" + projected.toPlainString() + " cap=" + cap.toPlainString());
     }
     return null;
+  }
+
+  /**
+   * Issue #336: resolve the notional-cap fraction from the canonical {@code
+   * notional_cap_pct_of_capital_base} and the DEPRECATED alias {@code notional_cap_pct_of_equity}.
+   * The returned value flows into {@link #checkNotionalCap}'s gate math unchanged — only the field
+   * <i>source</i> changes here, never the math.
+   *
+   * <ul>
+   *   <li>canonical set, alias null → return canonical (normal path).
+   *   <li>canonical null, alias set → emit the deprecation signal (counter + warn), return alias.
+   *   <li>both set, equal → emit the deprecation signal, return the (equal) value.
+   *   <li>both set, unequal → throw {@link AmbiguousCapConfigException} so the gate fails CLOSED.
+   *   <li>both null → return null (gate disabled — existing opt-in behavior).
+   * </ul>
+   */
+  private BigDecimal resolveNotionalCapPct(StrategyConfig config) {
+    BigDecimal capBase = config.getNotionalCapPctOfCapitalBase();
+    BigDecimal equity = config.getNotionalCapPctOfEquity();
+    if (equity == null) {
+      // capBase != null → canonical path; capBase == null → both null → gate disabled.
+      return capBase;
+    }
+    if (capBase == null) {
+      emitDeprecatedEquityFieldSignal(config);
+      return equity;
+    }
+    if (capBase.compareTo(equity) != 0) {
+      throw new AmbiguousCapConfigException();
+    }
+    emitDeprecatedEquityFieldSignal(config);
+    return capBase;
+  }
+
+  /**
+   * Issue #336 deprecation signal: increment the {@link #DEPRECATED_EQUITY_FIELD_COUNTER_NAME}
+   * Micrometer counter (tagged by tenant/strategy) and {@code log.warn} naming the strategy so
+   * operators see they must migrate to {@code notional_cap_pct_of_capital_base}. {@code
+   * checkNotionalCap} is an {@code @Activity} (not workflow code), so this side effect carries no
+   * Temporal-replay concern.
+   */
+  private void emitDeprecatedEquityFieldSignal(StrategyConfig config) {
+    String tenant = config.getTenantId();
+    String strategy = config.getStrategyId();
+    Counter counter =
+        deprecatedEquityFieldCounters.computeIfAbsent(
+            tenant + "/" + strategy,
+            key ->
+                Counter.builder(DEPRECATED_EQUITY_FIELD_COUNTER_NAME)
+                    .description(
+                        "Strategy configs still setting the deprecated notional_cap_pct_of_equity alias (#336); migrate to notional_cap_pct_of_capital_base.")
+                    .tag("tenant", tenant)
+                    .tag("strategy", strategy)
+                    .register(meterRegistry));
+    counter.increment();
+    log.warn(
+        "DEPRECATED notional_cap_pct_of_equity set for tenant={} strategy={}; migrate to notional_cap_pct_of_capital_base (#336, removal tracked in #338)",
+        tenant,
+        strategy);
+  }
+
+  /**
+   * Issue #336 fail-closed sentinel: thrown by {@link #resolveNotionalCapPct} when BOTH
+   * notional-cap fields are set to different values. Caught in {@link #checkNotionalCap}, which
+   * rejects the entry rather than silently picking one field's value.
+   */
+  private static final class AmbiguousCapConfigException extends RuntimeException {
+    AmbiguousCapConfigException() {
+      super(null, null, false, false);
+    }
   }
 
   private RiskDecision checkSameUnderlyingCount(PortfolioContext ctx) {
