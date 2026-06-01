@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/account-snapshot-request.json",
+  "title": "AccountSnapshotRequest",
+  "description": "Issue #317 account-equity gate input. risk-svc dispatches this to exec-svc's account_snapshot Activity to read the brokerage account's net-liquidation equity for the notional_cap_pct_of_equity gate. Equity is account-level: it is identified solely by broker_target (one credential set / one account per <provider>-<env> exec deployment), so this request carries NO tenant_id/strategy_id — every (tenant, strategy) routing to a given broker_target shares one account and observes the same equity.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.AccountSnapshotRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "broker_target"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version."
+    },
+    "broker_target": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "Routes the account-snapshot Activity to the broker-<value> task queue, mirroring PreTradeCheckRequest.broker_target and OrderIntent.broker_target."
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Optional cross-event correlation key (typically signal_id)."
+    }
+  }
+}

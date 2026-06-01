@@ -92,9 +92,10 @@ public class RiskActivitiesImpl implements RiskActivities {
   @Override
   public RiskDecision checkEntry(
       CopytradeSignalPayload payload, StrategyConfig config, PreTradeCheckResult preTradeResult) {
-    // Legacy path: notional from unadjusted mirror, preserved bit-exact for pre-#111 replays.
+    // Legacy path: notional from unadjusted mirror, preserved bit-exact for pre-#111 replays. No
+    // workflow-supplied equity → gate falls back to the PortfolioSnapshot seam.
     return checkEntryInternal(
-        payload, config, preTradeResult, entryNotional(payload.getPrice(), 1L));
+        payload, config, preTradeResult, entryNotional(payload.getPrice(), 1L), null);
   }
 
   @Override
@@ -102,17 +103,20 @@ public class RiskActivitiesImpl implements RiskActivities {
       CopytradeSignalPayload payload,
       StrategyConfig config,
       PreTradeCheckResult preTradeResult,
-      BigDecimal limit) {
+      BigDecimal limit,
+      BigDecimal accountEquity) {
     // Production callers always pass priced.limit(); fall back to mirror keeps unit-test ergonomic.
     BigDecimal price = limit != null ? limit : payload.getPrice();
-    return checkEntryInternal(payload, config, preTradeResult, entryNotional(price, 1L));
+    return checkEntryInternal(
+        payload, config, preTradeResult, entryNotional(price, 1L), accountEquity);
   }
 
   private RiskDecision checkEntryInternal(
       CopytradeSignalPayload payload,
       StrategyConfig config,
       PreTradeCheckResult preTradeResult,
-      BigDecimal entryNotional) {
+      BigDecimal entryNotional,
+      BigDecimal accountEquity) {
     if (!config.getAuthorWhitelist().contains(payload.getAuthor())) {
       return RiskDecision.rejected(
           RejectionReason.AUTHOR_NOT_WHITELISTED, "author=" + payload.getAuthor());
@@ -147,7 +151,8 @@ public class RiskActivitiesImpl implements RiskActivities {
     // pre-Issue-#6 behavior. Order matters only for which reason wins when multiple gates fail;
     // the order below mirrors the recommendation list in issue #6. Positions are fetched once and
     // shared across the gates that need them (production impl is a Temporal Visibility query).
-    PortfolioContext ctx = new PortfolioContext(payload, config, preTradeResult, entryNotional);
+    PortfolioContext ctx =
+        new PortfolioContext(payload, config, preTradeResult, entryNotional, accountEquity);
     return Stream.<Supplier<RiskDecision>>of(
             () -> checkNotionalCap(ctx),
             () -> checkSameUnderlyingCount(ctx),
@@ -173,17 +178,24 @@ public class RiskActivitiesImpl implements RiskActivities {
     final StrategyConfig config;
     final PreTradeCheckResult preTradeResult;
     final BigDecimal entryNotional;
+    // Issue #317: workflow-supplied net-liquidation equity (from the broker-<target>
+    // AccountSnapshotActivity). Null when not dispatched (legacy checkEntry path / unit tests) —
+    // the
+    // notional-cap gate then falls back to the PortfolioSnapshot seam keyed on broker_target.
+    final BigDecimal accountEquity;
     private List<PortfolioSnapshot.OpenPosition> openPositions;
 
     PortfolioContext(
         CopytradeSignalPayload payload,
         StrategyConfig config,
         PreTradeCheckResult preTradeResult,
-        BigDecimal entryNotional) {
+        BigDecimal entryNotional,
+        BigDecimal accountEquity) {
       this.payload = payload;
       this.config = config;
       this.preTradeResult = preTradeResult;
       this.entryNotional = entryNotional;
+      this.accountEquity = accountEquity;
     }
 
     List<PortfolioSnapshot.OpenPosition> openPositions() {
@@ -206,8 +218,15 @@ public class RiskActivitiesImpl implements RiskActivities {
     if (capPct == null) {
       return null;
     }
+    // Issue #317: prefer the workflow-supplied equity (dispatched from the broker-<broker_target>
+    // AccountSnapshotActivity). Fall back to the PortfolioSnapshot seam keyed on broker_target for
+    // the legacy checkEntry path and non-dispatch providers. Equity is account-level, so the seam
+    // is
+    // keyed on broker_target, never (tenant, strategy).
     BigDecimal equity =
-        portfolioSnapshot.accountEquity(ctx.payload.getTenantId(), ctx.payload.getStrategyId());
+        ctx.accountEquity != null
+            ? ctx.accountEquity
+            : portfolioSnapshot.accountEquity(brokerTargetValue(ctx.config));
     if (equity == null || equity.signum() <= 0) {
       return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
     }
@@ -372,6 +391,15 @@ public class RiskActivitiesImpl implements RiskActivities {
    * sized down. Threading {@code contracts} explicitly future-proofs the helper if the gate later
    * switches to a sized count.
    */
+  /**
+   * Issue #317: the {@code broker_target} string the {@link PortfolioSnapshot#accountEquity} seam
+   * is keyed on (equity is account-level). Returns {@code null} when {@code broker_target} is
+   * absent — the seam's no-op default returns ZERO and the notional-cap gate fails closed on it.
+   */
+  private static String brokerTargetValue(StrategyConfig config) {
+    return config.getBrokerTarget() == null ? null : config.getBrokerTarget().value();
+  }
+
   private static BigDecimal entryNotional(BigDecimal price, long contracts) {
     BigDecimal p = price == null ? BigDecimal.ZERO : price;
     return p.multiply(BigDecimal.valueOf(contracts)).multiply(Sizing.CONTRACT_MULTIPLIER);

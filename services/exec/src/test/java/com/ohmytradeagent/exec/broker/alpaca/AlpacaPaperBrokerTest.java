@@ -418,6 +418,60 @@ class AlpacaPaperBrokerTest {
     assertThat(positions).isEmpty();
   }
 
+  @Test
+  void getAccountEquity_readsEquityFieldNotBuyingPower() throws Exception {
+    // Issue #317: /v2/account returns both `equity` (net liquidation) and `buying_power` as
+    // distinct fields. The notional-cap gate compares against net liquidation, so we must surface
+    // `equity`, never `buying_power`. The two values are deliberately different here so a
+    // regression
+    // that reads the wrong field is caught.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\","
+                    + "\"cash\":\"5000.00\",\"status\":\"ACTIVE\"}"));
+
+    BigDecimal equity = broker.getAccountEquity();
+
+    assertThat(equity).isEqualByComparingTo(new BigDecimal("123456.78"));
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getPath()).isEqualTo("/v2/account");
+    assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
+  }
+
+  @Test
+  void getAccountEquity_unauthorized_throwsAuthErrorNonRetryable() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(401)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"access key verification failed\"}"));
+
+    assertThatThrownBy(() -> broker.getAccountEquity())
+        .isInstanceOf(ApplicationFailure.class)
+        .satisfies(t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("AuthError"));
+  }
+
+  @Test
+  void getAccountEquity_missingEquityField_throwsProtocolError() {
+    // A 200 with no `equity` field is a protocol breach: the gate would otherwise silently
+    // fail-closed on a parse default, masking a real Alpaca contract change.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"id\":\"acct-1\",\"buying_power\":\"999999.00\"}"));
+
+    assertThatThrownBy(() -> broker.getAccountEquity())
+        .isInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));
+  }
+
   private void enqueueStatus(String alpacaStatus) {
     server.enqueue(
         new MockResponse()

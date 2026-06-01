@@ -30,6 +30,14 @@ class StubBrokerTest {
   }
 
   @Test
+  void getAccountEquity_returnsDocumentedZeroSentinel() {
+    // Issue #317: StubBroker has no account endpoint, so it inherits the OptionsBroker default
+    // sentinel (BigDecimal.ZERO). Zero equity makes the notional-cap gate fail closed rather than
+    // passing an unbounded cap.
+    assertThat(broker.getAccountEquity()).isEqualByComparingTo(BigDecimal.ZERO);
+  }
+
+  @Test
   void placeOrder_sameClientOrderId_returnsSameBrokerOrderIdAndAlreadyExistedTrue() {
     broker.placeOrder(request("intent-A"));
 

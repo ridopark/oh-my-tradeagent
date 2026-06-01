@@ -9,10 +9,12 @@ import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
+import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderRequest;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaPositionResponse;
 import io.temporal.failure.ApplicationFailure;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -270,6 +272,25 @@ public class AlpacaPaperBroker implements OptionsBroker {
       out.add(bp);
     }
     return out;
+  }
+
+  @Override
+  public BigDecimal getAccountEquity() {
+    // Issue #317. /v2/account returns the account's net-liquidation `equity` AND `buying_power` as
+    // distinct fields. The notional-cap gate compares against net liquidation, so we read `equity`
+    // (never `buying_power` — on a margin account buying_power can be 2-4x equity, which would let
+    // the cap pass far larger exposure than intended).
+    AlpacaAccountResponse resp;
+    try {
+      resp = client.get().uri("/v2/account").retrieve().body(AlpacaAccountResponse.class);
+    } catch (HttpStatusCodeException e) {
+      throw mapError(e);
+    }
+    if (resp == null || resp.equity() == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca /v2/account returned null/missing equity", "BrokerProtocolError");
+    }
+    return resp.equity();
   }
 
   @Override
