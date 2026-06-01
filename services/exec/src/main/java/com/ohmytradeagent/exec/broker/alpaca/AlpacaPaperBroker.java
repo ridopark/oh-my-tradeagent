@@ -15,6 +15,8 @@ import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderRequest;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaPositionResponse;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -72,12 +74,25 @@ public class AlpacaPaperBroker implements OptionsBroker {
   /** Equity floor below which the PDT day-trade limit applies. */
   private static final BigDecimal PDT_EQUITY_THRESHOLD = new BigDecimal("25000");
 
+  /**
+   * Counter name for the {@code options_buying_power}-absent fallback to raw {@code buying_power}.
+   */
+  static final String BUYING_POWER_FALLBACK_COUNTER_NAME = "alpaca.pretrade.buying_power.fallback";
+
   private final RestClient client;
   private final ObjectMapper mapper;
+  private final Counter buyingPowerFallbackCounter;
 
-  public AlpacaPaperBroker(RestClient alpacaRestClient, ObjectMapper objectMapper) {
+  public AlpacaPaperBroker(
+      RestClient alpacaRestClient, ObjectMapper objectMapper, MeterRegistry meterRegistry) {
     this.client = alpacaRestClient;
     this.mapper = objectMapper;
+    this.buyingPowerFallbackCounter =
+        Counter.builder(BUYING_POWER_FALLBACK_COUNTER_NAME)
+            .description(
+                "Number of pre-trade checks that fell back to raw buying_power because Alpaca "
+                    + "omitted options_buying_power (looser-than-intended funding gate).")
+            .register(meterRegistry);
   }
 
   @Override
@@ -337,6 +352,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
           "Alpaca /v2/account omitted options_buying_power; falling back to raw buying_power for "
               + "the pre-trade gate. On a Reg-T margin account this can be 2-4x the correct options "
               + "buying power → a looser-than-intended margin check.");
+      buyingPowerFallbackCounter.increment();
       buyingPower = acct.buyingPower();
     }
     if (buyingPower == null) {
@@ -380,8 +396,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
     }
     if (acct.daytradeCount() == null) {
       // Fail-closed: a flagged pattern-day-trader account that won't report its day-trade count is
-      // a
-      // protocol breach. Admitting (fail-OPEN) could let a possibly-barred account keep trading.
+      // a protocol breach. Admitting (fail-OPEN) could let a possibly-barred account keep trading.
       // Mirror the null-equity breach below.
       throw ApplicationFailure.newNonRetryableFailure(
           "Alpaca /v2/account returned null/missing daytrade_count for a flagged "
