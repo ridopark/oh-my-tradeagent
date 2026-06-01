@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -46,7 +47,10 @@ class VisibilityPortfolioSnapshotTest {
 
   // The Visibility query filters on the TenantStrategy SA + WorkflowType +
   // ExecutionStatus='Running'
-  // — never a WorkflowId prefix (PLAN.md:120-127).
+  // — never a WorkflowId prefix (PLAN.md:120-127). #323: the single-strategy resolver (default
+  // ctor)
+  // runs exactly ONE equality query — byte-identical to the pre-#323 TenantStrategy='...' equality
+  // filter (inertness preserved; no IN (...) clause).
   @Test
   void openPositions_queriesOnTenantStrategySearchAttribute_notWorkflowIdPrefix() {
     when(client.listExecutions(anyString())).thenReturn(Stream.of());
@@ -56,10 +60,136 @@ class VisibilityPortfolioSnapshotTest {
     ArgumentCaptor<String> q = ArgumentCaptor.forClass(String.class);
     verify(client).listExecutions(q.capture());
     String query = q.getValue();
-    assertThat(query).contains("WorkflowType='PositionWorkflow'");
-    assertThat(query).contains("TenantStrategy='t-acme/s-copytrade-v1'");
-    assertThat(query).contains("ExecutionStatus='Running'");
+    assertThat(query)
+        .isEqualTo(
+            "WorkflowType='PositionWorkflow' AND TenantStrategy='t-acme/s-copytrade-v1' "
+                + "AND ExecutionStatus='Running'");
     assertThat(query).doesNotContain("WorkflowId");
+    assertThat(query).doesNotContain(" IN (");
+  }
+
+  // #323 tenant-account-wide cap basis: the snapshot runs the proven equality query ONCE PER
+  // strategy of the requesting tenant (resolver returns both), unioning the results. Each
+  // per-strategy query is the equality form, never an IN (...) clause. The requesting strategy is
+  // always present.
+  @Test
+  void openPositions_widensQueryToAllTenantStrategies_tenantAccountWide() {
+    VisibilityPortfolioSnapshot wide =
+        new VisibilityPortfolioSnapshot(
+            client, meterRegistry, tenantId -> List.of("copytrade-v1", "copytrade-v2"));
+    when(client.listExecutions(anyString())).thenAnswer(inv -> Stream.of());
+
+    wide.openPositions("acme", "copytrade-v1");
+
+    ArgumentCaptor<String> q = ArgumentCaptor.forClass(String.class);
+    verify(client, times(2)).listExecutions(q.capture());
+    List<String> queries = q.getAllValues();
+    assertThat(queries)
+        .containsExactlyInAnyOrder(
+            "WorkflowType='PositionWorkflow' AND TenantStrategy='t-acme/s-copytrade-v1' "
+                + "AND ExecutionStatus='Running'",
+            "WorkflowType='PositionWorkflow' AND TenantStrategy='t-acme/s-copytrade-v2' "
+                + "AND ExecutionStatus='Running'");
+    assertThat(queries).noneMatch(query -> query.contains(" IN ("));
+  }
+
+  // #323: positions from two strategies of ONE tenant sum across both strategies (account-wide
+  // notional). Drives the union end-to-end through per-strategy equality queries + valuation.
+  @Test
+  void openPositions_aggregatesNotionalAcrossTwoStrategiesOfOneTenant() {
+    VisibilityPortfolioSnapshot wide =
+        new VisibilityPortfolioSnapshot(
+            client, meterRegistry, tenantId -> List.of("copytrade-v1", "copytrade-v2"));
+    // wf-s1 belongs to strategy 1, wf-s2 to strategy 2; each per-strategy equality query returns
+    // its
+    // own execution. Route the right stream to the right query by matching the TenantStrategy
+    // value.
+    stubExecutionsByQuery(
+        Map.of(
+            "t-acme/s-copytrade-v1", "wf-s1",
+            "t-acme/s-copytrade-v2", "wf-s2"),
+        Map.of(
+            "wf-s1", new PositionState("NVDA  250516C00140000", 2L, new BigDecimal("2.00")),
+            "wf-s2", new PositionState("AAPL  250516C00200000", 1L, new BigDecimal("5.00"))));
+
+    List<OpenPosition> positions = wide.openPositions("acme", "copytrade-v1");
+
+    // NVDA 2 ctr @ 2.00 -> 400 ; AAPL 1 ctr @ 5.00 -> 500. Both tenant strategies aggregate.
+    assertThat(positions)
+        .containsExactlyInAnyOrder(
+            new OpenPosition("NVDA", new BigDecimal("400.00")),
+            new OpenPosition("AAPL", new BigDecimal("500.00")));
+  }
+
+  // #323 cross-tenant isolation: every per-strategy query carries the t-<tenant>/ prefix, so a
+  // second tenant's TenantStrategy value can never appear in any query.
+  @Test
+  void openPositions_neverIncludesAnotherTenantInQuery_crossTenantIsolation() {
+    VisibilityPortfolioSnapshot wide =
+        new VisibilityPortfolioSnapshot(
+            client, meterRegistry, tenantId -> List.of("copytrade-v1", "copytrade-v2"));
+    when(client.listExecutions(anyString())).thenAnswer(inv -> Stream.of());
+
+    wide.openPositions("acme", "copytrade-v1");
+
+    ArgumentCaptor<String> q = ArgumentCaptor.forClass(String.class);
+    verify(client, times(2)).listExecutions(q.capture());
+    assertThat(q.getAllValues()).allSatisfy(query -> assertThat(query).doesNotContain("t-other"));
+    assertThat(q.getAllValues()).allSatisfy(query -> assertThat(query).contains("t-acme/"));
+  }
+
+  // #323 inertness: the single-strategy case (resolver returns nothing extra) runs exactly ONE
+  // equality query — the requesting strategy is always unioned in, so the resolved set is never
+  // empty here and the snapshot does not hit the fail-closed empty-set guard.
+  @Test
+  void openPositions_singleStrategy_runsExactlyOneEqualityQuery_inert() {
+    VisibilityPortfolioSnapshot single =
+        new VisibilityPortfolioSnapshot(client, meterRegistry, tenantId -> List.of());
+    when(client.listExecutions(anyString())).thenReturn(Stream.of());
+
+    single.openPositions("acme", "copytrade-v1");
+
+    ArgumentCaptor<String> q = ArgumentCaptor.forClass(String.class);
+    verify(client, times(1)).listExecutions(q.capture());
+    assertThat(q.getValue())
+        .isEqualTo(
+            "WorkflowType='PositionWorkflow' AND TenantStrategy='t-acme/s-copytrade-v1' "
+                + "AND ExecutionStatus='Running'");
+  }
+
+  // #323 fail-closed: when the resolved strategy set is empty — a blank requesting strategy AND an
+  // empty resolver — the snapshot must THROW rather than query nothing and report
+  // sum_open_notional=0 (which would loosen the cap fail-OPEN). The blank requesting id is dropped
+  // and the resolver adds nothing, so the set is genuinely empty and the empty-set guard fires
+  // before any listExecutions call.
+  @Test
+  void openPositions_throwsOnEmptyStrategySet_failClosed() {
+    VisibilityPortfolioSnapshot emptySet =
+        new VisibilityPortfolioSnapshot(client, meterRegistry, tenantId -> List.of());
+
+    assertThatThrownBy(() -> emptySet.openPositions("acme", "  "))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("empty strategy set");
+
+    verify(client, never()).listExecutions(anyString());
+  }
+
+  // #323 fail-closed (#325): a resolver that throws (unreadable tenants tree) must propagate, not
+  // be
+  // swallowed into a match-nothing query that would loosen the cap.
+  @Test
+  void openPositions_propagatesResolverError_failClosed() {
+    VisibilityPortfolioSnapshot wide =
+        new VisibilityPortfolioSnapshot(
+            client,
+            meterRegistry,
+            tenantId -> {
+              throw new IllegalStateException("tenants tree unreadable");
+            });
+
+    assertThatThrownBy(() -> wide.openPositions("acme", "copytrade-v1"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("tenants tree unreadable");
   }
 
   @Test
@@ -342,6 +472,31 @@ class VisibilityPortfolioSnapshotTest {
             .tag("failed_closed", Boolean.toString(failedClosed))
             .counter();
     return counter == null ? 0.0 : counter.count();
+  }
+
+  // Routes each per-strategy equality query (matched by its TenantStrategy value) to a single
+  // workflow id, and stubs that workflow's positionState. Used by the multi-strategy union tests
+  // where listExecutions is called once per strategy and each call must return its own stream.
+  private void stubExecutionsByQuery(
+      Map<String, String> tenantStrategyToWorkflowId,
+      Map<String, PositionState> stateByWorkflowId) {
+    when(client.listExecutions(anyString()))
+        .thenAnswer(
+            inv -> {
+              String query = inv.getArgument(0);
+              return tenantStrategyToWorkflowId.entrySet().stream()
+                  .filter(e -> query.contains("TenantStrategy='" + e.getKey() + "'"))
+                  .map(Map.Entry::getValue)
+                  .map(this::metadata);
+            });
+    stateByWorkflowId.forEach(
+        (wfId, state) -> {
+          WorkflowStub stub = mock(WorkflowStub.class);
+          lenient()
+              .when(stub.query(eq("positionState"), eq(PositionState.class)))
+              .thenReturn(state);
+          when(client.newUntypedWorkflowStub(wfId)).thenReturn(stub);
+        });
   }
 
   private void stubExecutions(Map<String, PositionState> byWorkflowId) {

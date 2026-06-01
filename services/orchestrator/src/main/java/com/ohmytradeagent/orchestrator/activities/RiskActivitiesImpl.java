@@ -104,11 +104,11 @@ public class RiskActivitiesImpl implements RiskActivities {
       StrategyConfig config,
       PreTradeCheckResult preTradeResult,
       BigDecimal limit,
-      BigDecimal accountEquity) {
+      BigDecimal accountCash) {
     // Production callers always pass priced.limit(); fall back to mirror keeps unit-test ergonomic.
     BigDecimal price = limit != null ? limit : payload.getPrice();
     return checkEntryInternal(
-        payload, config, preTradeResult, entryNotional(price, 1L), accountEquity);
+        payload, config, preTradeResult, entryNotional(price, 1L), accountCash);
   }
 
   private RiskDecision checkEntryInternal(
@@ -116,7 +116,7 @@ public class RiskActivitiesImpl implements RiskActivities {
       StrategyConfig config,
       PreTradeCheckResult preTradeResult,
       BigDecimal entryNotional,
-      BigDecimal accountEquity) {
+      BigDecimal accountCash) {
     if (!config.getAuthorWhitelist().contains(payload.getAuthor())) {
       return RiskDecision.rejected(
           RejectionReason.AUTHOR_NOT_WHITELISTED, "author=" + payload.getAuthor());
@@ -152,7 +152,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     // the order below mirrors the recommendation list in issue #6. Positions are fetched once and
     // shared across the gates that need them (production impl is a Temporal Visibility query).
     PortfolioContext ctx =
-        new PortfolioContext(payload, config, preTradeResult, entryNotional, accountEquity);
+        new PortfolioContext(payload, config, preTradeResult, entryNotional, accountCash);
     return Stream.<Supplier<RiskDecision>>of(
             () -> checkNotionalCap(ctx),
             () -> checkSameUnderlyingCount(ctx),
@@ -178,11 +178,12 @@ public class RiskActivitiesImpl implements RiskActivities {
     final StrategyConfig config;
     final PreTradeCheckResult preTradeResult;
     final BigDecimal entryNotional;
-    // Workflow-supplied net-liquidation equity (from the broker-<target>
-    // AccountSnapshotActivity). Null when not dispatched (legacy checkEntry path / unit tests) —
-    // the
-    // notional-cap gate then falls back to the PortfolioSnapshot seam keyed on broker_target.
-    final BigDecimal accountEquity;
+    // Workflow-supplied account cash balance (from the broker-<target> AccountSnapshotActivity
+    // /v2/account 'cash'). Issue #323: this is the cash component of the notional-cap gate's
+    // MTM-stable cost-basis capital base (cash + sum_open_notional), NOT net-liq equity. Null when
+    // not dispatched (legacy checkEntry path / unit tests) — the notional-cap gate then falls back
+    // to the PortfolioSnapshot seam keyed on broker_target (ZERO sentinel → fail closed).
+    final BigDecimal accountCash;
     private List<PortfolioSnapshot.OpenPosition> openPositions;
 
     PortfolioContext(
@@ -190,12 +191,12 @@ public class RiskActivitiesImpl implements RiskActivities {
         StrategyConfig config,
         PreTradeCheckResult preTradeResult,
         BigDecimal entryNotional,
-        BigDecimal accountEquity) {
+        BigDecimal accountCash) {
       this.payload = payload;
       this.config = config;
       this.preTradeResult = preTradeResult;
       this.entryNotional = entryNotional;
-      this.accountEquity = accountEquity;
+      this.accountCash = accountCash;
     }
 
     // WARNING — fail-closed seam (#325, hardening #318). A throw from
@@ -219,35 +220,47 @@ public class RiskActivitiesImpl implements RiskActivities {
   }
 
   /**
-   * notional_cap_pct_of_equity: reject when (sum_open_notional + new_notional) > cap_pct * equity.
-   * Equity == 0 fails closed so a missing/unavailable equity source can't accidentally pass an
-   * unbounded cap.
+   * notional_cap_pct_of_equity: reject when {@code (sum_open_notional + new_notional) > cap_pct *
+   * (cash + sum_open_notional)}.
+   *
+   * <p><b>MTM-stable cost-basis denominator (#323).</b> The denominator is the cost-basis capital
+   * base {@code cash + sum_open_notional}, NOT the net-liq (MTM) {@code equity} it replaced. Both
+   * the numerator's {@code sum_open_notional} (entry premium × remaining qty × multiplier, summed
+   * over the tenant's running book) and the denominator's {@code sum_open_notional} are the SAME
+   * tenant-account-wide cost-basis term — so numerator and denominator move together and the cap is
+   * MTM-stable: it no longer loosens on an appreciating long-options book or tightens on a bleeding
+   * one, and introduces no new market-data dependency. The cash component is threaded from the
+   * broker {@code /v2/account} read ({@code cash}) over the AccountSnapshot dispatch seam; {@code
+   * sum_open_notional} is the tenant-account-wide sum from the #323 {@link
+   * VisibilityPortfolioSnapshot} (a per-strategy {@code TenantStrategy='...'} equality query
+   * unioned across the tenant's strategies).
+   *
+   * <p><b>Fail-closed.</b> A null/zero cash (an unavailable account read, or a pre-#323 producer
+   * that omits {@code cash}) yields a zero-or-undercounted capital base; the gate rejects with
+   * {@code equity_unavailable} rather than passing an unbounded cap — preserving the #317
+   * fail-closed-on-zero contract. The capital base is zero only when BOTH cash is zero AND there
+   * are no open positions, which is itself a reject (cannot size against a zero base).
    */
   private RiskDecision checkNotionalCap(PortfolioContext ctx) {
     BigDecimal capPct = ctx.config.getNotionalCapPctOfEquity();
     if (capPct == null) {
       return null;
     }
-    // Prefer the workflow-supplied equity (dispatched from the broker-<broker_target>
-    // AccountSnapshotActivity). Fall back to the PortfolioSnapshot seam keyed on broker_target for
-    // the legacy checkEntry path and non-dispatch providers. Equity is account-level, so the seam
-    // is
-    // keyed on broker_target, never (tenant, strategy). A null/blank broker_target on the fallback
-    // path means we can't key the seam, so equity is unavailable and the gate fails closed below.
-    String brokerTarget = brokerTargetValue(ctx.config);
-    BigDecimal equity;
-    if (ctx.accountEquity != null) {
-      equity = ctx.accountEquity;
-    } else if (brokerTarget == null || brokerTarget.isBlank()) {
-      equity = null;
-    } else {
-      equity = portfolioSnapshot.accountEquity(brokerTarget);
-    }
-    if (equity == null || equity.signum() <= 0) {
+    // The cash term is the workflow-supplied account cash dispatched from the
+    // broker-<broker_target> AccountSnapshotActivity. When it is unavailable (legacy checkEntry
+    // path, non-dispatch providers) the gate fails closed via the guard below rather than
+    // substituting a proxy: the only other account figure on hand is the PortfolioSnapshot
+    // net-liq seam, and net-liq >= cash would ENLARGE capitalBase (cash + sumOpenNotional) and
+    // LOOSEN the cap — admitting notional the real cash term would reject. So net-liq is never read
+    // here; an absent cash term simply rejects.
+    BigDecimal cash = ctx.accountCash;
+    if (cash == null || cash.signum() <= 0) {
       return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
     }
-    BigDecimal cap = equity.multiply(capPct);
-    BigDecimal projected = sumOpenNotional(ctx).add(ctx.entryNotional);
+    BigDecimal sumOpenNotional = sumOpenNotional(ctx);
+    BigDecimal capitalBase = cash.add(sumOpenNotional);
+    BigDecimal cap = capitalBase.multiply(capPct);
+    BigDecimal projected = sumOpenNotional.add(ctx.entryNotional);
     if (projected.compareTo(cap) > 0) {
       return RiskDecision.rejected(
           RejectionReason.NOTIONAL_CAP_EXCEEDED,
@@ -407,15 +420,6 @@ public class RiskActivitiesImpl implements RiskActivities {
    * sized down. Threading {@code contracts} explicitly future-proofs the helper if the gate later
    * switches to a sized count.
    */
-  /**
-   * The {@code broker_target} string the {@link PortfolioSnapshot#accountEquity} seam is keyed on
-   * (equity is account-level). Returns {@code null} when {@code broker_target} is absent — the
-   * seam's no-op default returns ZERO and the notional-cap gate fails closed on it.
-   */
-  private static String brokerTargetValue(StrategyConfig config) {
-    return config.getBrokerTarget() == null ? null : config.getBrokerTarget().value();
-  }
-
   private static BigDecimal entryNotional(BigDecimal price, long contracts) {
     BigDecimal p = price == null ? BigDecimal.ZERO : price;
     return p.multiply(BigDecimal.valueOf(contracts)).multiply(Sizing.CONTRACT_MULTIPLIER);

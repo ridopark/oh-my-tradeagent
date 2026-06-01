@@ -11,6 +11,7 @@ import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
+import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -472,6 +473,101 @@ class AlpacaPaperBrokerTest {
             .setBody("{\"id\":\"acct-1\",\"buying_power\":\"999999.00\"}"));
 
     assertThatThrownBy(() -> broker.getAccountEquity())
+        .isInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));
+  }
+
+  @Test
+  void getAccountCash_readsCashFieldNotBuyingPowerOrEquity() throws Exception {
+    // Issue #323: the notional-cap gate's MTM-stable denominator is the cost-basis capital base
+    // (cash + sum_open_notional), so the cap reads `cash`. `cash`, `equity`, and `buying_power` are
+    // deliberately distinct so a regression that reads the wrong field is caught.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\","
+                    + "\"cash\":\"5000.00\",\"status\":\"ACTIVE\"}"));
+
+    BigDecimal cash = broker.getAccountCash();
+
+    assertThat(cash).isEqualByComparingTo(new BigDecimal("5000.00"));
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getPath()).isEqualTo("/v2/account");
+  }
+
+  @Test
+  void getAccountCash_missingCashField_throwsProtocolError() {
+    // A 200 with no `cash` field is a protocol breach: the cap gate would otherwise lose its
+    // denominator. Mirror the null-equity breach so the gate fails closed rather than passing an
+    // unbounded cap.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\"}"));
+
+    assertThatThrownBy(() -> broker.getAccountCash())
+        .isInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));
+  }
+
+  @Test
+  void getAccount_readsEquityAndCashFromSingleAccountRequest() throws Exception {
+    // Issue #323 single-fetch: getAccount() must extract BOTH equity and cash from ONE /v2/account
+    // round-trip. The AccountSnapshotActivity reads both per invocation; calling getAccountEquity()
+    // and getAccountCash() separately would issue two GET /v2/account requests. Only one response
+    // is
+    // enqueued, so a second round-trip would fail; we also assert exactly one recorded request.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\","
+                    + "\"cash\":\"5000.00\",\"status\":\"ACTIVE\"}"));
+
+    OptionsBroker.AccountSummary account = broker.getAccount();
+
+    assertThat(account.equity()).isEqualByComparingTo(new BigDecimal("123456.78"));
+    assertThat(account.cash()).isEqualByComparingTo(new BigDecimal("5000.00"));
+
+    assertThat(server.getRequestCount()).isEqualTo(1);
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getPath()).isEqualTo("/v2/account");
+  }
+
+  @Test
+  void getAccount_missingEquityField_throwsProtocolError() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"id\":\"acct-1\",\"cash\":\"5000.00\",\"buying_power\":\"999999.00\"}"));
+
+    assertThatThrownBy(() -> broker.getAccount())
+        .isInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));
+  }
+
+  @Test
+  void getAccount_missingCashField_throwsProtocolError() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\"}"));
+
+    assertThatThrownBy(() -> broker.getAccount())
         .isInstanceOf(ApplicationFailure.class)
         .satisfies(
             t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));

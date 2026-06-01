@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -21,6 +22,7 @@ import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
+import com.ohmytradeagent.orchestrator.activities.AccountSnapshotMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
@@ -38,6 +40,7 @@ import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
@@ -75,6 +78,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   private PositionLookupActivities positionLookup;
   private MarketCalendarActivities calendar;
   private SubscribePremiumActivity marketData;
+  private AccountSnapshotMetricsActivities accountSnapshotMetrics;
 
   @BeforeEach
   void setUp() {
@@ -91,6 +95,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     positionLookup = Mockito.mock(PositionLookupActivities.class);
     calendar = Mockito.mock(MarketCalendarActivities.class);
     marketData = Mockito.mock(SubscribePremiumActivity.class);
+    accountSnapshotMetrics = Mockito.mock(AccountSnapshotMetricsActivities.class);
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
     when(calendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
     SubscribePremiumResult ok = new SubscribePremiumResult();
@@ -101,7 +106,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     when(marketData.subscribePremium(any())).thenReturn(ok);
 
     coreWorker.registerActivitiesImplementations(
-        audit, strategy, risk, contract, positionLookup, calendar);
+        audit, strategy, risk, contract, positionLookup, calendar, accountSnapshotMetrics);
     Worker mdWorker = env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
     mdWorker.registerActivitiesImplementations(marketData);
   }
@@ -524,10 +529,12 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   }
 
   /**
-   * Issue #317: when {@code notional_cap_pct_of_equity} is enabled, the v=1 branch dispatches the
-   * cross-service {@code AccountSnapshotActivity} over the {@code broker-<broker_target>} queue and
-   * threads the returned equity down into {@code risk.checkEntryWithLimit(...)}. Pins both the
-   * dispatch (request keyed solely on broker_target) and the carry-over to the risk gate's 5th arg.
+   * Issue #317/#323: when {@code notional_cap_pct_of_equity} is enabled, the v=1 branch dispatches
+   * the cross-service {@code AccountSnapshotActivity} over the {@code broker-<broker_target>} queue
+   * and threads the returned <b>cash</b> (the cash component of the #323 cost-basis capital base
+   * {@code cash + sum_open_notional}) down into {@code risk.checkEntryWithLimit(...)}. Pins both
+   * the dispatch (request keyed solely on broker_target) and the carry-over to the risk gate's 5th
+   * arg.
    */
   @Test
   void handleBto_dispatchesAccountSnapshot_andThreadsEquityIntoCheckEntryWithLimit() {
@@ -557,7 +564,9 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
           capturedAccountReq.set(request);
           AccountSnapshotResult r = new AccountSnapshotResult();
           r.setSchemaVersion(1L);
-          r.setEquity(new BigDecimal("123456.78"));
+          r.setEquity(new BigDecimal("999999.99"));
+          // #323: the workflow threads CASH (not net-liq equity) into the cap gate.
+          r.setCash(new BigDecimal("123456.78"));
           return r;
         };
     Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
@@ -577,7 +586,8 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
         .isEqualTo(AccountSnapshotRequest.BrokerTarget.ALPACA_PAPER);
     assertThat(accReq.getCorrelationId()).isEqualTo("111:0");
 
-    // The broker-supplied equity is threaded into the risk gate's 5th argument.
+    // The broker-supplied cash (#323 capital-base component) is threaded into the risk gate's 5th
+    // argument — NOT the net-liq equity (999999.99), proving the cap reads cash.
     ArgumentCaptor<BigDecimal> equityCaptor = ArgumentCaptor.forClass(BigDecimal.class);
     verify(risk).checkEntryWithLimit(any(), eq(cfg), any(), any(), equityCaptor.capture());
     assertThat(equityCaptor.getValue()).isEqualByComparingTo(new BigDecimal("123456.78"));
@@ -638,6 +648,147 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     AuditEvent rejected = capture("SignalRejected");
     assertThat(rejected.getSubject()).containsEntry("reason_code", "NOTIONAL_CAP_EXCEEDED");
     assertThat(rejected.getSubject()).containsEntry("outcome", "REJECTED");
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+
+    // #323 observability: the non-CanceledFailure catch branch increments the symmetric
+    // accountsnapshot_dispatch_failures_total counter exactly once via the metrics Activity,
+    // keyed on broker_target — so a persistent broker outage is distinguishable in metrics from a
+    // legitimate zero-cash account.
+    Mockito.verify(accountSnapshotMetrics, Mockito.times(1))
+        .recordDispatchFailure(StrategyConfig.BrokerTarget.ALPACA_PAPER.value());
+  }
+
+  /**
+   * Issue #323: a {@link CanceledFailure} (workflow cancellation surfacing through the {@code
+   * AccountSnapshotActivity} call) must re-throw from {@code dispatchAccountSnapshot} rather than
+   * fail closed to ZERO — and must NOT touch the dispatch-failure counter (cancellation is not a
+   * broker degradation). Pins the {@code catch (CanceledFailure cf) { throw cf; }} branch:
+   * cancelling the running workflow during the (deliberately slow) account snapshot aborts it, and
+   * the counter Activity is never invoked.
+   */
+  @Test
+  void dispatchAccountSnapshot_canceledFailurePropagates_andDoesNotIncrementCounter()
+      throws Exception {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    // Block in the account snapshot long enough for the cancel to land while the activity call is
+    // in flight, so CanceledFailure is thrown into the workflow at the dispatchAccountSnapshot
+    // call.
+    AccountSnapshotActivity slowAccountStub =
+        request -> {
+          try {
+            Thread.sleep(60_000L);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          AccountSnapshotResult r = new AccountSnapshotResult();
+          r.setSchemaVersion(1L);
+          r.setCash(new BigDecimal("123456.78"));
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub, slowAccountStub);
+    env.start();
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+    WorkflowStub stub = WorkflowStub.fromTyped(wf);
+    stub.start(btoPayload());
+    // Let the workflow reach the in-flight account-snapshot activity, then cancel.
+    env.sleep(Duration.ofSeconds(5));
+    stub.cancel();
+
+    assertThatThrownBy(() -> stub.getResult(Void.class))
+        .isInstanceOf(WorkflowFailedException.class);
+
+    // CanceledFailure rethrows — it is NOT the broker-degradation path, so the counter never fires.
+    Mockito.verify(accountSnapshotMetrics, Mockito.never()).recordDispatchFailure(anyString());
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+  }
+
+  /**
+   * Issue #323: the metrics emit inside {@code dispatchAccountSnapshot}'s fail-closed catch is
+   * wrapped in a non-fatal {@code catch (RuntimeException metricsError)} so a metrics outage cannot
+   * flip the fail-closed ZERO outcome. But {@code CanceledFailure} extends {@code
+   * RuntimeException}, so if workflow cancellation lands while the metrics counter Activity is in
+   * flight, that catch would swallow the cancellation and delay it. The guard {@code if
+   * (metricsError instanceof CanceledFailure cf) throw cf;} re-throws instead. Pins it: the
+   * account-snapshot Activity throws (entering the fail-closed catch), the (deliberately slow)
+   * metrics Activity is in flight when the workflow is cancelled, and the resulting CanceledFailure
+   * propagates (workflow fails) rather than being swallowed into a ZERO fail-closed completion.
+   */
+  @Test
+  void dispatchAccountSnapshot_metricsEmitCanceledFailurePropagates() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    // Account snapshot fails -> the workflow enters dispatchAccountSnapshot's fail-closed catch and
+    // dispatches the metrics counter Activity.
+    AccountSnapshotActivity throwingAccountStub =
+        request -> {
+          throw new RuntimeException("broker /v2/account timeout");
+        };
+    // Block in the metrics counter Activity long enough for the cancel to land while that Activity
+    // call is in flight, so CanceledFailure is thrown into the workflow at the
+    // recordDispatchFailure
+    // call — exactly inside the catch (RuntimeException metricsError) block.
+    doAnswer(
+            inv -> {
+              Thread.sleep(60_000L);
+              return null;
+            })
+        .when(accountSnapshotMetrics)
+        .recordDispatchFailure(anyString());
+
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub, throwingAccountStub);
+    env.start();
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+    WorkflowStub stub = WorkflowStub.fromTyped(wf);
+    stub.start(btoPayload());
+    // Let the workflow reach the in-flight metrics counter Activity, then cancel.
+    env.sleep(Duration.ofSeconds(5));
+    stub.cancel();
+
+    // The guard re-throws CanceledFailure rather than swallowing it: the workflow fails (cancels)
+    // instead of swallowing the cancellation and completing on the ZERO fail-closed path.
+    assertThatThrownBy(() -> stub.getResult(Void.class))
+        .isInstanceOf(WorkflowFailedException.class);
     Mockito.verify(exec, Mockito.never()).placeOrder(any());
   }
 

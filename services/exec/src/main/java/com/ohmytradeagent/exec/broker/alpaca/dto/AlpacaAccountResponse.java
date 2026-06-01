@@ -8,11 +8,15 @@ import java.math.BigDecimal;
  * Alpaca {@code /v2/account} response shape, trimmed to the fields exec-svc consumes. Alpaca
  * returns dozens of additional fields; {@link JsonIgnoreProperties} suppresses the unknowns.
  *
- * <p>{@code equity} is the account's net-liquidation value — the figure the {@code
- * notional_cap_pct_of_equity} gate compares against (issue #317). It is intentionally distinct from
- * {@code buyingPower} (which can be 2-4x equity on a margin account); reading the wrong one would
- * let the cap pass far larger exposure than intended, so the equity gate surfaces {@code equity}
- * only.
+ * <p>{@code equity} is the account's net-liquidation value (issue #317). It is intentionally
+ * distinct from {@code buyingPower} (which can be 2-4x equity on a margin account); reading the
+ * wrong one would let the cap pass far larger exposure than intended.
+ *
+ * <p>{@code cash} is the account's cash balance (issue #323). The {@code
+ * notional_cap_pct_of_equity} gate's MTM-stable denominator is the cost-basis capital base {@code
+ * cash + sum_open_notional}, so the gate reads {@code cash} (not net-liq {@code equity}) for its
+ * denominator — keeping numerator and denominator on the same cost basis. Like {@code equity},
+ * {@code cash} is distinct from {@code buyingPower}.
  *
  * <p>The remaining fields back the issue #320 {@code pre_trade_check} gate:
  *
@@ -29,6 +33,7 @@ import java.math.BigDecimal;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record AlpacaAccountResponse(
     @JsonProperty("equity") BigDecimal equity,
+    @JsonProperty("cash") BigDecimal cash,
     @JsonProperty("options_buying_power") BigDecimal optionsBuyingPower,
     @JsonProperty("buying_power") BigDecimal buyingPower,
     @JsonProperty("pattern_day_trader") Boolean patternDayTrader,
