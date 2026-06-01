@@ -52,7 +52,8 @@ public class RealizedPnlCalculator {
     return realized.multiply(MULTIPLIER);
   }
 
-  private static BigDecimal realizePerSymbol(Deque<Lot> entries, Deque<Lot> exits) {
+  // Package-private for direct unit testing of the FIFO match (no Postgres needed).
+  static BigDecimal realizePerSymbol(Deque<Lot> entries, Deque<Lot> exits) {
     BigDecimal realized = BigDecimal.ZERO;
     Lot entry = entries.poll();
     for (Lot exit : exits) {
@@ -71,7 +72,7 @@ public class RealizedPnlCalculator {
     return realized;
   }
 
-  private record Lot(BigDecimal price, long qty) {
+  record Lot(BigDecimal price, long qty) {
     Lot consume(long n) {
       return new Lot(price, qty - n);
     }
