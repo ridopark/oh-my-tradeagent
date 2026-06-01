@@ -21,7 +21,9 @@ import java.math.BigDecimal;
  *       and falls back to {@code buyingPower} when absent.
  *   <li>{@code buyingPower} — general buying power; fallback for the options field.
  *   <li>{@code patternDayTrader} / {@code daytradeCount} — derive {@code pdt_status}.
- *   <li>{@code multiplier} — margin multiplier; backs the {@code margin_sufficient} derivation.
+ *   <li>{@code multiplier} — margin multiplier; retained for observability / potential future use.
+ *       It is NOT used in the current {@code margin_sufficient} computation, which derives from
+ *       {@code options_buying_power} — a figure that already reflects the account multiplier.
  * </ul>
  */
 @JsonIgnoreProperties(ignoreUnknown = true)

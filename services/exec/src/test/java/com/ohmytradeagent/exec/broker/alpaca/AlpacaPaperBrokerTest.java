@@ -535,6 +535,103 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void preTradeCheck_pdtBlocked_whenDaytradeCountEqualsLimitBoundary() {
+    // Boundary: daytrade_count == PDT_DAYTRADE_LIMIT (3) on a flagged sub-$25k account is BLOCKED.
+    // The over-limit BLOCKED test uses 4; this pins the inclusive lower edge (>= 3).
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"buying_power\":\"30000.00\","
+                    + "\"options_buying_power\":\"30000.00\",\"pattern_day_trader\":true,"
+                    + "\"daytrade_count\":3,\"multiplier\":\"2\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
+
+    assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.BLOCKED);
+  }
+
+  @Test
+  void preTradeCheck_pdtOk_whenDaytradeCountJustBelowLimit() {
+    // Boundary: daytrade_count == 2 (one below the 3-trade limit) on a flagged sub-$25k account is
+    // OK — the day-trade limit has not been reached.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"buying_power\":\"30000.00\","
+                    + "\"options_buying_power\":\"30000.00\",\"pattern_day_trader\":true,"
+                    + "\"daytrade_count\":2,\"multiplier\":\"2\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
+
+    assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.OK);
+  }
+
+  @Test
+  void preTradeCheck_pdtOk_whenEquityExactlyAt25kThreshold() {
+    // Boundary: equity == $25,000 exactly is OK — isPdtBlocked uses a strict `<
+    // PDT_EQUITY_THRESHOLD`
+    // comparison, so the threshold value itself is not blocked.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"25000\",\"buying_power\":\"50000.00\","
+                    + "\"options_buying_power\":\"50000.00\",\"pattern_day_trader\":true,"
+                    + "\"daytrade_count\":9,\"multiplier\":\"2\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
+
+    assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.OK);
+  }
+
+  @Test
+  void preTradeCheck_marginSufficient_whenNotionalNull() {
+    // Null estimated_notional exercises the `notional == null ||` fast path: with no notional to
+    // compare, margin_sufficient is true regardless of buying power.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"buying_power\":\"100.00\","
+                    + "\"options_buying_power\":\"100.00\",\"pattern_day_trader\":false,"
+                    + "\"daytrade_count\":0,\"multiplier\":\"2\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(null));
+
+    assertThat(r.getMarginSufficient()).isTrue();
+  }
+
+  @Test
+  void preTradeCheck_pdtFlaggedOverLimitMissingEquity_failsClosedWithProtocolError() {
+    // Fail-closed (fix for the null-equity gap): a flagged pattern-day-trader account over the
+    // day-trade limit whose 200 response omits `equity` cannot be evaluated for the PDT block. It
+    // must fail CLOSED with BrokerProtocolError — never a silent OK that admits a possibly-barred
+    // trade. Mirrors the missing-buying_power / null-equity protocol breaches elsewhere.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"buying_power\":\"30000.00\","
+                    + "\"options_buying_power\":\"30000.00\",\"pattern_day_trader\":true,"
+                    + "\"daytrade_count\":4,\"multiplier\":\"2\"}"));
+
+    assertThatThrownBy(() -> broker.preTradeCheck(preTradeRequest(new BigDecimal("1000"))))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("BrokerProtocolError");
+              assertThat(f.isNonRetryable()).isTrue();
+            });
+  }
+
+  @Test
   void preTradeCheck_pdtOk_whenFlaggedButEquityAtOrAbove25k() {
     // A flagged-and-over-limit account is NOT blocked once equity >= $25k: the PDT rule only gates
     // sub-$25k accounts.

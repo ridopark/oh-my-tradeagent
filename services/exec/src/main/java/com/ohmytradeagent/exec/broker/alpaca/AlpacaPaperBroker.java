@@ -355,6 +355,13 @@ public class AlpacaPaperBroker implements OptionsBroker {
    * BLOCKED when the account is flagged {@code pattern_day_trader}, has used at least {@code
    * PDT_DAYTRADE_LIMIT} (3) day trades, AND equity sits below the $25,000 PDT threshold — the
    * regulatory condition under which a sub-$25k flagged account is barred from further day trades.
+   *
+   * <p>Fail-closed: when the account is flagged AND over the day-trade limit, the BLOCKED decision
+   * hinges entirely on {@code equity}. A 200 missing {@code equity} would otherwise resolve to
+   * {@code false} (fail-OPEN), admitting a trade on an account that may well be PDT-barred. Mirror
+   * the missing-{@code buying_power} / null-{@code equity} protocol breach in {@link
+   * #getAccountEquity()} / {@link #preTradeCheck} and throw a non-retryable {@code
+   * BrokerProtocolError} so the gate fails CLOSED.
    */
   private static boolean isPdtBlocked(AlpacaAccountResponse acct) {
     if (!Boolean.TRUE.equals(acct.patternDayTrader())) {
@@ -363,7 +370,13 @@ public class AlpacaPaperBroker implements OptionsBroker {
     if (acct.daytradeCount() == null || acct.daytradeCount() < PDT_DAYTRADE_LIMIT) {
       return false;
     }
-    return acct.equity() != null && acct.equity().compareTo(PDT_EQUITY_THRESHOLD) < 0;
+    if (acct.equity() == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca /v2/account returned null/missing equity for a flagged over-limit "
+              + "pattern-day-trader account; cannot evaluate PDT block",
+          "BrokerProtocolError");
+    }
+    return acct.equity().compareTo(PDT_EQUITY_THRESHOLD) < 0;
   }
 
   /**
