@@ -198,6 +198,16 @@ public class RiskActivitiesImpl implements RiskActivities {
       this.accountEquity = accountEquity;
     }
 
+    // WARNING — fail-closed seam (#325, hardening #318). A throw from
+    // portfolioSnapshot.openPositions(...) (a Visibility error in VisibilityPortfolioSnapshot) MUST
+    // propagate out of here and fail checkEntry/checkEntryWithLimit so the workflow never reaches
+    // placeOrder. Do NOT wrap this call in try/catch returning List.of(): an empty list means
+    // sum_open_notional=0, which loosens the notional_cap_pct_of_equity cap and flips the gate
+    // fail-OPEN (permitting trades it should reject). Unlike checkKillSwitch
+    // (RiskActivitiesImpl.java ~448-461), which fails closed *explicitly* with
+    // KILL_SWITCH_UNAVAILABLE, this gate fails closed *only by the absence of a catch* here and in
+    // VisibilityPortfolioSnapshot.openPositions(). The null-coalesce below normalizes a null return
+    // to an empty list (a no-op default impl); it is NOT a swallow of a thrown error.
     List<PortfolioSnapshot.OpenPosition> openPositions() {
       if (openPositions == null) {
         List<PortfolioSnapshot.OpenPosition> positions =

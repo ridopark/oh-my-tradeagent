@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.activities;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
@@ -108,6 +109,76 @@ class VisibilityPortfolioSnapshotTest {
     List<OpenPosition> positions = snapshot.openPositions("acme", "copytrade-v1");
 
     assertThat(positions).containsExactly(new OpenPosition("NVDA", new BigDecimal("300.00")));
+  }
+
+  // #325 fail-closed contract: a Visibility error in the listExecutions query must PROPAGATE (not
+  // be
+  // swallowed into List.of()). An empty list → sum_open_notional=0 → loosens the notional cap →
+  // fail-OPEN; the throw is what keeps the gate fail-closed at the activity boundary.
+  @Test
+  void openPositions_propagatesListExecutionsError_failClosed_notEmptyList() {
+    when(client.listExecutions(anyString()))
+        .thenThrow(new RuntimeException("visibility unavailable"));
+
+    assertThatThrownBy(() -> snapshot.openPositions("acme", "copytrade-v1"))
+        .isInstanceOf(RuntimeException.class)
+        .hasMessageContaining("visibility unavailable");
+  }
+
+  // #325 fail-closed contract: if the per-workflow positionState query throws for EVERY listed
+  // position (a correlated Temporal degradation while listExecutions still succeeds), the Task (c)
+  // bound trips — > 50% failed to value — so the snapshot fails closed (throws) rather than
+  // returning an undercounted (here empty) list that would loosen the cap.
+  @Test
+  void openPositions_throwsWhenAllListedPositionsFailToValue_failClosed() {
+    WorkflowExecutionMetadata a = metadata("wf-a");
+    WorkflowExecutionMetadata b = metadata("wf-b");
+    when(client.listExecutions(anyString())).thenReturn(Stream.of(a, b));
+
+    WorkflowStub aStub = mock(WorkflowStub.class);
+    when(aStub.query(eq("positionState"), eq(PositionState.class)))
+        .thenThrow(new RuntimeException("query failed a"));
+    WorkflowStub bStub = mock(WorkflowStub.class);
+    when(bStub.query(eq("positionState"), eq(PositionState.class)))
+        .thenThrow(new RuntimeException("query failed b"));
+    when(client.newUntypedWorkflowStub("wf-a")).thenReturn(aStub);
+    when(client.newUntypedWorkflowStub("wf-b")).thenReturn(bStub);
+
+    assertThatThrownBy(() -> snapshot.openPositions("acme", "copytrade-v1"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("value-failure bound exceeded");
+  }
+
+  // #325 fail-closed bound boundary: 1 value-failure out of 1 listed position is 100% > 50%, so a
+  // single failure on a one-position book fails closed (small-count guard).
+  @Test
+  void openPositions_throwsWhenSingleListedPositionFailsToValue_failClosed() {
+    WorkflowExecutionMetadata only = metadata("wf-only");
+    when(client.listExecutions(anyString())).thenReturn(Stream.of(only));
+
+    WorkflowStub stub = mock(WorkflowStub.class);
+    when(stub.query(eq("positionState"), eq(PositionState.class)))
+        .thenThrow(new RuntimeException("query failed"));
+    when(client.newUntypedWorkflowStub("wf-only")).thenReturn(stub);
+
+    assertThatThrownBy(() -> snapshot.openPositions("acme", "copytrade-v1"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("value-failure bound exceeded");
+  }
+
+  // #325: a legitimate just-closed/blank/null-premium skip must NOT count toward the value-failure
+  // bound — even if EVERY listed position is a legitimate skip, that returns an empty list (no
+  // throw), preserving the existing skip semantics distinct from a query failure.
+  @Test
+  void openPositions_legitimateSkipsDoNotCountTowardFailureBound() {
+    stubExecutions(
+        Map.of(
+            "wf-closed", new PositionState("NVDA  250516C00140000", 0L, new BigDecimal("2.50")),
+            "wf-blank", new PositionState("", 2L, new BigDecimal("2.50"))));
+
+    List<OpenPosition> positions = snapshot.openPositions("acme", "copytrade-v1");
+
+    assertThat(positions).isEmpty();
   }
 
   // Isolation: the snapshot only queries the workflows the (tenant, strategy)-scoped Visibility
