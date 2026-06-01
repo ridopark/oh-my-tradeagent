@@ -13,6 +13,7 @@ import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.failure.ApplicationFailure;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -24,6 +25,7 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
 
 /**
@@ -37,6 +39,7 @@ class AlpacaPaperBrokerTest {
   private MockWebServer server;
   private AlpacaPaperBroker broker;
   private final ObjectMapper mapper = new ObjectMapper();
+  private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
   @BeforeEach
   void start() throws IOException {
@@ -49,7 +52,7 @@ class AlpacaPaperBrokerTest {
             .defaultHeader("APCA-API-SECRET-KEY", "key-secret-for-test")
             .defaultHeader("Accept", "application/json")
             .build();
-    broker = new AlpacaPaperBroker(client, mapper);
+    broker = new AlpacaPaperBroker(client, mapper, meterRegistry);
   }
 
   @AfterEach
@@ -341,7 +344,7 @@ class AlpacaPaperBrokerTest {
             .setBody("{\"message\":\"service unavailable\"}"));
 
     assertThatThrownBy(() -> broker.cancelOrder("alp-12345"))
-        .isInstanceOf(org.springframework.web.client.HttpStatusCodeException.class);
+        .isInstanceOf(HttpStatusCodeException.class);
   }
 
   @Test
@@ -493,6 +496,10 @@ class AlpacaPaperBrokerTest {
     assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("40000.00"));
     assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.OK);
     assertThat(r.getMarginSufficient()).isTrue();
+    // Issue #331: the fallback counter must NOT fire on the happy path (options_buying_power
+    // present), so it is never registered.
+    assertThat(meterRegistry.find(AlpacaPaperBroker.BUYING_POWER_FALLBACK_COUNTER_NAME).counter())
+        .isNull();
 
     RecordedRequest req = server.takeRequest();
     assertThat(req.getMethod()).isEqualTo("GET");
@@ -518,6 +525,14 @@ class AlpacaPaperBrokerTest {
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
     assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("75000.00"));
+    // Issue #331: the fallback also bumps a Micrometer counter so a persistently-looser funding
+    // gate is observable (not just a buried WARN). Asserting count == 1.0 proves the fallback ran.
+    assertThat(
+            meterRegistry
+                .get(AlpacaPaperBroker.BUYING_POWER_FALLBACK_COUNTER_NAME)
+                .counter()
+                .count())
+        .isEqualTo(1.0);
   }
 
   @Test
@@ -558,7 +573,7 @@ class AlpacaPaperBrokerTest {
             .setBody("{\"message\":\"service unavailable\"}"));
 
     assertThatThrownBy(() -> broker.preTradeCheck(preTradeRequest(new BigDecimal("1000"))))
-        .isInstanceOf(org.springframework.web.client.HttpStatusCodeException.class);
+        .isInstanceOf(HttpStatusCodeException.class);
   }
 
   @Test
