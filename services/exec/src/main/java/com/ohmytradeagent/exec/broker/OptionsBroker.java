@@ -113,4 +113,19 @@ public interface OptionsBroker {
   default BigDecimal getAccountEquity() {
     return BigDecimal.ZERO;
   }
+
+  /**
+   * Issue #323 capital-base gate. Returns the brokerage account's cash balance in dollars (Alpaca
+   * {@code /v2/account} {@code cash}, NOT {@code buying_power}). The {@code
+   * notional_cap_pct_of_equity} risk gate's MTM-stable denominator is the cost-basis capital base
+   * {@code cash + sum_open_notional}, so the cap gate reads cash rather than net-liq equity to keep
+   * numerator and denominator on the same cost basis.
+   *
+   * <p>Default returns the documented sentinel {@link BigDecimal#ZERO} so brokers that don't yet
+   * expose an account endpoint degrade cleanly: zero cash makes the cap gate fail closed (reject)
+   * rather than passing an unbounded cap. Brokers with a real account endpoint override this.
+   */
+  default BigDecimal getAccountCash() {
+    return BigDecimal.ZERO;
+  }
 }

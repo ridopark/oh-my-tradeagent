@@ -768,18 +768,23 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   /**
    * Dispatches the cross-service {@code AccountSnapshotActivity} over the {@code
-   * broker-<broker_target>} task queue and returns the account's net-liquidation equity. Returns
-   * {@code null} when the notional-cap gate is disabled (no {@code notional_cap_pct_of_equity}) so
-   * the cross-service round-trip only fires when the strategy enabled the gate.
+   * broker-<broker_target>} task queue and returns the account's <b>cash</b> balance — the cash
+   * component of the notional-cap gate's MTM-stable cost-basis capital base ({@code cash +
+   * sum_open_notional}, issue #323). Returns {@code null} when the notional-cap gate is disabled
+   * (no {@code notional_cap_pct_of_equity}) so the cross-service round-trip only fires when the
+   * strategy enabled the gate.
    *
    * <p>Fail-closed semantics: any exception (after Temporal's own retries), a null/blank {@code
-   * broker_target}, or a null result yields {@code BigDecimal.ZERO}. The downstream {@code
-   * checkNotionalCap} gate rejects on zero/missing equity, so a broker outage rejects entries
-   * rather than passing an unbounded cap — mirroring {@code dispatchPreTradeCheck}.
+   * broker_target}, or a null result/cash yields {@code BigDecimal.ZERO}. The downstream {@code
+   * checkNotionalCap} gate rejects on a zero/missing capital base, so a broker outage (or a
+   * pre-#323 producer that omits {@code cash}) rejects entries rather than passing an unbounded cap
+   * — mirroring {@code dispatchPreTradeCheck}.
    *
    * <p>Determinism: the request is built from {@code config.broker_target + signal_id} only — no
-   * clock reads, no random IDs. Safe to call inside the workflow body. Equity is account-level, so
-   * the request carries no tenant/strategy.
+   * clock reads, no random IDs. Safe to call inside the workflow body. The account figures are
+   * account-level, so the request carries no tenant/strategy. Reading {@code getCash()} instead of
+   * {@code getEquity()} is a field read on the same activity result — no history-shape change, so
+   * it stays within the existing {@code VERSION_ACCOUNT_EQUITY_DISPATCH} gate.
    */
   private BigDecimal dispatchAccountSnapshot(
       CopytradeSignalPayload payload, StrategyConfig config) {
@@ -801,7 +806,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     AccountSnapshotRequest request = buildAccountSnapshotRequest(payload, config);
     try {
       AccountSnapshotResult result = accountStub.accountSnapshot(request);
-      return result == null || result.getEquity() == null ? BigDecimal.ZERO : result.getEquity();
+      return result == null || result.getCash() == null ? BigDecimal.ZERO : result.getCash();
     } catch (CanceledFailure cf) {
       throw cf;
     } catch (Exception e) {

@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, confloat, conint
 
 class AccountSnapshotResult(BaseModel):
     """
-    Issue #317 account-equity gate output. Returned by exec-svc's account_snapshot Activity. Carries the brokerage account's net-liquidation equity (Alpaca /v2/account 'equity', NOT 'buying_power'). risk-svc threads equity into the notional_cap_pct_of_equity gate and fails closed when equity is zero/unavailable. Broker adapters that do not yet expose a real account endpoint return the documented sentinel equity=0 so the field shape stays stable while per-provider backfills land.
+    Issue #317 account-equity gate output. Returned by exec-svc's account_snapshot Activity. Carries the brokerage account's net-liquidation equity (Alpaca /v2/account 'equity', NOT 'buying_power') plus, since issue #323, the account 'cash' component. risk-svc fails closed when the relevant figure is zero/unavailable. Broker adapters that do not yet expose a real account endpoint return the documented sentinels (equity=0, cash absent) so the field shape stays stable while per-provider backfills land.
     """
 
     model_config = ConfigDict(
@@ -17,5 +17,9 @@ class AccountSnapshotResult(BaseModel):
     schema_version: conint(ge=1)
     equity: confloat(ge=0.0)
     """
-    Account net-liquidation equity in dollars at the moment of the check (Alpaca /v2/account 'equity', not buying_power). risk-svc compares (sum_open_notional + new_notional) against notional_cap_pct_of_equity * equity. A zero value means the figure was unavailable; the gate fails closed (rejects) rather than passing an unbounded cap.
+    Account net-liquidation equity in dollars at the moment of the check (Alpaca /v2/account 'equity', not buying_power). Retained for the #317 fail-closed contract and any equity-based consumers. A zero value means the figure was unavailable; consumers fail closed rather than passing an unbounded cap.
+    """
+    cash: confloat(ge=0.0) | None = None
+    """
+    Issue #323: account cash balance in dollars (Alpaca /v2/account 'cash'). The notional_cap_pct_of_equity gate uses the MTM-stable cost-basis capital base (cash + sum_open_notional) as its denominator instead of net-liq equity, so numerator and denominator share the same cost-basis open-notional term. Optional for back-compat with pre-#323 producers/records; a null/absent or zero cash makes the cap gate fail closed (rejects) rather than passing an unbounded cap.
     """

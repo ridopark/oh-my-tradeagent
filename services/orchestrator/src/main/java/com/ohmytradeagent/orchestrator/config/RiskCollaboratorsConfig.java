@@ -5,10 +5,13 @@ import com.ohmytradeagent.orchestrator.activities.DailyTradeCounter;
 import com.ohmytradeagent.orchestrator.activities.DrawdownVelocitySampler;
 import com.ohmytradeagent.orchestrator.activities.PortfolioSnapshot;
 import com.ohmytradeagent.orchestrator.activities.RiskCollaboratorDefaults;
+import com.ohmytradeagent.orchestrator.activities.ScannerTenantStrategies;
 import com.ohmytradeagent.orchestrator.activities.SectorResolver;
 import com.ohmytradeagent.orchestrator.activities.VisibilityPortfolioSnapshot;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.client.WorkflowClient;
+import java.nio.file.Path;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -32,8 +35,14 @@ public class RiskCollaboratorsConfig {
    */
   @Bean
   public PortfolioSnapshot visibilityPortfolioSnapshot(
-      WorkflowClient workflowClient, MeterRegistry meterRegistry) {
-    return new VisibilityPortfolioSnapshot(workflowClient, meterRegistry);
+      WorkflowClient workflowClient,
+      MeterRegistry meterRegistry,
+      @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir) {
+    // #323: the cap basis is tenant-account-wide — the scanner-backed resolver enumerates the
+    // requesting tenant's full strategy set so the TenantStrategy IN (...) clause aggregates all of
+    // the tenant's running PositionWorkflows on the shared broker_target.
+    return new VisibilityPortfolioSnapshot(
+        workflowClient, meterRegistry, new ScannerTenantStrategies(Path.of(tenantsDir)));
   }
 
   @Bean

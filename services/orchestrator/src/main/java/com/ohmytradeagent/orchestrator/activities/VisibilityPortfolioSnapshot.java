@@ -11,28 +11,37 @@ import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Issue #318: Temporal Advanced Visibility–backed {@link PortfolioSnapshot}. Lists running {@code
- * PositionWorkflow} instances for a {@code (tenant, strategy)} scope and values each open position
- * so the {@code same_underlying_count} and {@code notional_cap_pct_of_equity} portfolio gates in
- * {@link RiskActivitiesImpl} observe the real open book (the prior no-op default always reported an
- * empty list, so both gates saw zero positions).
+ * PositionWorkflow} instances for the requesting tenant and values each open position so the {@code
+ * same_underlying_count} and {@code notional_cap_pct_of_equity} portfolio gates in {@link
+ * RiskActivitiesImpl} observe the real open book (the prior no-op default always reported an empty
+ * list, so both gates saw zero positions).
  *
- * <p><b>Visibility query.</b> Filters on the {@code TenantStrategy} custom Search Attribute plus
- * {@code WorkflowType='PositionWorkflow' AND ExecutionStatus='Running'} — never a {@code
- * WorkflowId} prefix (Temporal SQL Visibility has no {@code STARTS_WITH} on {@code WorkflowId};
- * {@code docs/plans/PLAN.md:120-127}). Same SA-filtered shape used by {@link
- * VisibilityPositionCounter} and {@link KillSwitchCascadeActivitiesImpl}; the returned metadata
- * stream is closed via try-with-resources. Isolation is structural: the {@code TenantStrategy} SA
- * scopes the result set, so one {@code (tenant, strategy)}'s positions never leak into another's
- * snapshot.
+ * <p><b>Visibility query (#323 — tenant-account-wide).</b> Filters on the {@code TenantStrategy}
+ * custom Search Attribute plus {@code WorkflowType='PositionWorkflow' AND
+ * ExecutionStatus='Running'} — never a {@code WorkflowId} prefix (Temporal SQL Visibility has no
+ * {@code STARTS_WITH} on {@code WorkflowId}; {@code docs/plans/PLAN.md:120-127}). Per the
+ * operator's #323 design decision a {@code broker_target} is owned by exactly one tenant and the
+ * tenant's strategies share it, so the cap basis is the tenant's <b>whole</b> running book. The
+ * {@code TenantStrategy} filter is therefore an {@code IN (...)} clause over <i>all of the
+ * requesting tenant's strategies</i> ({@link TenantStrategies#strategyIdsForTenant}), not just the
+ * current strategy. The returned metadata stream is closed via try-with-resources. <b>Cross-tenant
+ * isolation is preserved structurally:</b> only the requesting tenant's strategies enter the {@code
+ * IN} list (built with the {@code t-<t>/} prefix on every element), so another tenant's
+ * PositionWorkflows never leak into the snapshot. The single-tenant single-strategy deployment
+ * yields a one-element {@code IN} list — the same result set as the pre-#323 {@code
+ * TenantStrategy='...'} equality filter (inertness).
  *
  * <p><b>{@code openNotional} source — cost basis.</b> Per running {@code PositionWorkflow}, the
  * {@code positionState()} query supplies remaining qty + per-contract entry premium, and notional
@@ -42,13 +51,15 @@ import org.slf4j.LoggerFactory;
  * premium, not live mark. {@code underlyingTicker} is derived from the OCC {@code contractSymbol}
  * via {@link OccSymbol#underlying(String)} (root → underlying).
  *
- * <p><b>MTM-circularity semantics.</b> {@code sum_open_notional} (this numerator) is <b>cost
- * basis</b>, while the cap denominator {@link #accountEquity(String)} equity is <b>net-liq
- * (MTM)</b> — which already includes the unrealized MTM of the same open option longs. Net effect:
- * the {@code notional_cap_pct_of_equity} cap <i>loosens</i> on an appreciating long-options book
- * and <i>tightens</i> on a bleeding one (defensibly — shrink exposure as the book bleeds).
- * Coordinating the account-level vs per-strategy {@code open_notional} basis is tracked in
- * follow-up #323 and is out of scope here.
+ * <p><b>Cost-basis capital base (#323).</b> {@code sum_open_notional} (this numerator) is <b>cost
+ * basis</b> (entry premium × remaining qty × multiplier). As of #323 the {@code
+ * notional_cap_pct_of_equity} cap denominator is the <b>cost-basis capital base</b> {@code cash +
+ * sum_open_notional}, not the net-liq (MTM) equity — so numerator and denominator share the same
+ * cost-basis open-notional term and the cap is MTM-stable (it neither loosens on an appreciating
+ * long-options book nor tightens on a bleeding one, and adds no new market-data dependency). This
+ * snapshot's {@link #accountEquity(String)} fallback still returns the documented ZERO sentinel
+ * (fail-closed); the live capital base is threaded over the broker dispatch seam ({@code cash}
+ * added to the Alpaca {@code /v2/account} read, see {@code RiskActivitiesImpl.checkNotionalCap}).
  *
  * <p>Registered as the {@code @Bean PortfolioSnapshot} in {@link
  * com.ohmytradeagent.orchestrator.config.RiskCollaboratorsConfig}, overriding the
@@ -104,11 +115,28 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
 
   private final WorkflowClient client;
   private final MeterRegistry meterRegistry;
+  private final TenantStrategies tenantStrategies;
   private final ConcurrentMap<String, Counter> valueFailureCounters = new ConcurrentHashMap<>();
 
+  /**
+   * Back-compat / single-strategy constructor: the tenant-strategy resolver collapses to the
+   * requesting strategy only, so the {@code TenantStrategy IN (...)} clause is a one-element list —
+   * the same result set as the pre-#323 equality filter. Used by unit tests and any deployment that
+   * does not wire the scanner-backed {@link TenantStrategies}.
+   */
   public VisibilityPortfolioSnapshot(WorkflowClient client, MeterRegistry meterRegistry) {
+    this(client, meterRegistry, tenantId -> List.of());
+  }
+
+  /**
+   * Issue #323 production constructor: the {@link TenantStrategies} resolver widens the cap basis
+   * to all of the requesting tenant's strategies on the shared {@code broker_target}.
+   */
+  public VisibilityPortfolioSnapshot(
+      WorkflowClient client, MeterRegistry meterRegistry, TenantStrategies tenantStrategies) {
     this.client = client;
     this.meterRegistry = meterRegistry;
+    this.tenantStrategies = tenantStrategies;
   }
 
   /**
@@ -137,11 +165,10 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
    */
   @Override
   public List<OpenPosition> openPositions(String tenantId, String strategyId) {
-    String tenantStrategy = WorkflowIds.tenantStrategy(tenantId, strategyId);
     String query =
-        "WorkflowType='PositionWorkflow' AND TenantStrategy='"
-            + WorkflowIds.escapeForVisibilityQuery(tenantStrategy)
-            + "' AND ExecutionStatus='Running'";
+        "WorkflowType='PositionWorkflow' AND TenantStrategy IN ("
+            + tenantStrategyInList(tenantId, strategyId)
+            + ") AND ExecutionStatus='Running'";
 
     List<OpenPosition> positions = new ArrayList<>();
     int listed = 0;
@@ -185,6 +212,27 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
               + "); failing closed rather than undercounting sum_open_notional");
     }
     return positions;
+  }
+
+  /**
+   * Builds the comma-separated, single-quoted {@code TenantStrategy} value list for the {@code IN
+   * (...)} clause (#323). Resolves the requesting tenant's full strategy set via {@link
+   * TenantStrategies} and always unions in the requesting {@code strategyId} so the snapshot can
+   * never be narrower than the pre-#323 single-strategy filter (and so an empty/missing resolver
+   * result still queries at least the current strategy rather than building a match-nothing query
+   * that would loosen the cap fail-OPEN). Cross-tenant isolation holds because every element is
+   * built with the {@code t-<tenantId>/} prefix from {@link WorkflowIds#tenantStrategy}. A throw
+   * from the resolver (unreadable tenants tree) propagates — fail-closed (#325).
+   */
+  private String tenantStrategyInList(String tenantId, String strategyId) {
+    Set<String> strategyIds = new LinkedHashSet<>();
+    strategyIds.add(strategyId);
+    strategyIds.addAll(tenantStrategies.strategyIdsForTenant(tenantId));
+    return strategyIds.stream()
+        .map(sid -> WorkflowIds.tenantStrategy(tenantId, sid))
+        .map(WorkflowIds::escapeForVisibilityQuery)
+        .map(escaped -> "'" + escaped + "'")
+        .collect(Collectors.joining(", "));
   }
 
   /**

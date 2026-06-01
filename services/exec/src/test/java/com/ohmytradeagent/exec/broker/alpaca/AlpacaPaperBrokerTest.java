@@ -478,6 +478,46 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void getAccountCash_readsCashFieldNotBuyingPowerOrEquity() throws Exception {
+    // Issue #323: the notional-cap gate's MTM-stable denominator is the cost-basis capital base
+    // (cash + sum_open_notional), so the cap reads `cash`. `cash`, `equity`, and `buying_power` are
+    // deliberately distinct so a regression that reads the wrong field is caught.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\","
+                    + "\"cash\":\"5000.00\",\"status\":\"ACTIVE\"}"));
+
+    BigDecimal cash = broker.getAccountCash();
+
+    assertThat(cash).isEqualByComparingTo(new BigDecimal("5000.00"));
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getPath()).isEqualTo("/v2/account");
+  }
+
+  @Test
+  void getAccountCash_missingCashField_throwsProtocolError() {
+    // A 200 with no `cash` field is a protocol breach: the cap gate would otherwise lose its
+    // denominator. Mirror the null-equity breach so the gate fails closed rather than passing an
+    // unbounded cap.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\"}"));
+
+    assertThatThrownBy(() -> broker.getAccountCash())
+        .isInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));
+  }
+
+  @Test
   void preTradeCheck_readsOptionsBuyingPower_whenPresent() throws Exception {
     // Issue #320: the pre-trade gate prefers options_buying_power. Here it is present and distinct
     // from the general buying_power so a regression that reads the wrong field is caught.

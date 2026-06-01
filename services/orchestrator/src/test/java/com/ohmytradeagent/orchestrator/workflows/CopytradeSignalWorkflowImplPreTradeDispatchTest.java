@@ -524,10 +524,12 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   }
 
   /**
-   * Issue #317: when {@code notional_cap_pct_of_equity} is enabled, the v=1 branch dispatches the
-   * cross-service {@code AccountSnapshotActivity} over the {@code broker-<broker_target>} queue and
-   * threads the returned equity down into {@code risk.checkEntryWithLimit(...)}. Pins both the
-   * dispatch (request keyed solely on broker_target) and the carry-over to the risk gate's 5th arg.
+   * Issue #317/#323: when {@code notional_cap_pct_of_equity} is enabled, the v=1 branch dispatches
+   * the cross-service {@code AccountSnapshotActivity} over the {@code broker-<broker_target>} queue
+   * and threads the returned <b>cash</b> (the cash component of the #323 cost-basis capital base
+   * {@code cash + sum_open_notional}) down into {@code risk.checkEntryWithLimit(...)}. Pins both
+   * the dispatch (request keyed solely on broker_target) and the carry-over to the risk gate's 5th
+   * arg.
    */
   @Test
   void handleBto_dispatchesAccountSnapshot_andThreadsEquityIntoCheckEntryWithLimit() {
@@ -557,7 +559,9 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
           capturedAccountReq.set(request);
           AccountSnapshotResult r = new AccountSnapshotResult();
           r.setSchemaVersion(1L);
-          r.setEquity(new BigDecimal("123456.78"));
+          r.setEquity(new BigDecimal("999999.99"));
+          // #323: the workflow threads CASH (not net-liq equity) into the cap gate.
+          r.setCash(new BigDecimal("123456.78"));
           return r;
         };
     Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
@@ -577,7 +581,8 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
         .isEqualTo(AccountSnapshotRequest.BrokerTarget.ALPACA_PAPER);
     assertThat(accReq.getCorrelationId()).isEqualTo("111:0");
 
-    // The broker-supplied equity is threaded into the risk gate's 5th argument.
+    // The broker-supplied cash (#323 capital-base component) is threaded into the risk gate's 5th
+    // argument — NOT the net-liq equity (999999.99), proving the cap reads cash.
     ArgumentCaptor<BigDecimal> equityCaptor = ArgumentCaptor.forClass(BigDecimal.class);
     verify(risk).checkEntryWithLimit(any(), eq(cfg), any(), any(), equityCaptor.capture());
     assertThat(equityCaptor.getValue()).isEqualByComparingTo(new BigDecimal("123456.78"));

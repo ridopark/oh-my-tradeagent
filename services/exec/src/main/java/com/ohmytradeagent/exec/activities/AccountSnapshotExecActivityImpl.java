@@ -31,6 +31,10 @@ public class AccountSnapshotExecActivityImpl implements AccountSnapshotActivity 
     AccountSnapshotResult result = new AccountSnapshotResult();
     result.setSchemaVersion(1L);
     result.setEquity(broker.getAccountEquity());
+    // Issue #323: thread the account cash balance for the notional-cap gate's MTM-stable cost-basis
+    // capital base (cash + sum_open_notional). equity is retained for the #317 fail-closed
+    // contract.
+    result.setCash(broker.getAccountCash());
     return result;
   }
 }

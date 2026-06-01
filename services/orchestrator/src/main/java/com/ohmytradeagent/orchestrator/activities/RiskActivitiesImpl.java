@@ -178,10 +178,12 @@ public class RiskActivitiesImpl implements RiskActivities {
     final StrategyConfig config;
     final PreTradeCheckResult preTradeResult;
     final BigDecimal entryNotional;
-    // Workflow-supplied net-liquidation equity (from the broker-<target>
-    // AccountSnapshotActivity). Null when not dispatched (legacy checkEntry path / unit tests) —
-    // the
-    // notional-cap gate then falls back to the PortfolioSnapshot seam keyed on broker_target.
+    // Workflow-supplied account cash balance (from the broker-<target> AccountSnapshotActivity
+    // /v2/account 'cash'). Issue #323: this is the cash component of the notional-cap gate's
+    // MTM-stable cost-basis capital base (cash + sum_open_notional), NOT net-liq equity. Null when
+    // not dispatched (legacy checkEntry path / unit tests) — the notional-cap gate then falls back
+    // to the PortfolioSnapshot seam keyed on broker_target (ZERO sentinel → fail closed). The field
+    // name is retained for wire/signature stability across the checkEntryWithLimit overload.
     final BigDecimal accountEquity;
     private List<PortfolioSnapshot.OpenPosition> openPositions;
 
@@ -219,35 +221,53 @@ public class RiskActivitiesImpl implements RiskActivities {
   }
 
   /**
-   * notional_cap_pct_of_equity: reject when (sum_open_notional + new_notional) > cap_pct * equity.
-   * Equity == 0 fails closed so a missing/unavailable equity source can't accidentally pass an
-   * unbounded cap.
+   * notional_cap_pct_of_equity: reject when {@code (sum_open_notional + new_notional) > cap_pct *
+   * (cash + sum_open_notional)}.
+   *
+   * <p><b>MTM-stable cost-basis denominator (#323).</b> The denominator is the cost-basis capital
+   * base {@code cash + sum_open_notional}, NOT the net-liq (MTM) {@code equity} it replaced. Both
+   * the numerator's {@code sum_open_notional} (entry premium × remaining qty × multiplier, summed
+   * over the tenant's running book) and the denominator's {@code sum_open_notional} are the SAME
+   * tenant-account-wide cost-basis term — so numerator and denominator move together and the cap is
+   * MTM-stable: it no longer loosens on an appreciating long-options book or tightens on a bleeding
+   * one, and introduces no new market-data dependency. The cash component is threaded from the
+   * broker {@code /v2/account} read ({@code cash}) over the AccountSnapshot dispatch seam; {@code
+   * sum_open_notional} is the tenant-account-wide sum from the #323 {@link
+   * VisibilityPortfolioSnapshot} (TenantStrategy IN [the tenant's strategies]).
+   *
+   * <p><b>Fail-closed.</b> A null/zero cash (an unavailable account read, or a pre-#323 producer
+   * that omits {@code cash}) yields a zero-or-undercounted capital base; the gate rejects with
+   * {@code equity_unavailable} rather than passing an unbounded cap — preserving the #317
+   * fail-closed-on-zero contract. The capital base is zero only when BOTH cash is zero AND there
+   * are no open positions, which is itself a reject (cannot size against a zero base).
    */
   private RiskDecision checkNotionalCap(PortfolioContext ctx) {
     BigDecimal capPct = ctx.config.getNotionalCapPctOfEquity();
     if (capPct == null) {
       return null;
     }
-    // Prefer the workflow-supplied equity (dispatched from the broker-<broker_target>
+    // Prefer the workflow-supplied cash (dispatched from the broker-<broker_target>
     // AccountSnapshotActivity). Fall back to the PortfolioSnapshot seam keyed on broker_target for
-    // the legacy checkEntry path and non-dispatch providers. Equity is account-level, so the seam
-    // is
-    // keyed on broker_target, never (tenant, strategy). A null/blank broker_target on the fallback
-    // path means we can't key the seam, so equity is unavailable and the gate fails closed below.
+    // the legacy checkEntry path and non-dispatch providers (returns the ZERO sentinel → fail
+    // closed). Account figures are account-level, so the seam is keyed on broker_target, never
+    // (tenant, strategy). A null/blank broker_target on the fallback path means we can't key the
+    // seam, so cash is unavailable and the gate fails closed below.
     String brokerTarget = brokerTargetValue(ctx.config);
-    BigDecimal equity;
+    BigDecimal cash;
     if (ctx.accountEquity != null) {
-      equity = ctx.accountEquity;
+      cash = ctx.accountEquity;
     } else if (brokerTarget == null || brokerTarget.isBlank()) {
-      equity = null;
+      cash = null;
     } else {
-      equity = portfolioSnapshot.accountEquity(brokerTarget);
+      cash = portfolioSnapshot.accountEquity(brokerTarget);
     }
-    if (equity == null || equity.signum() <= 0) {
+    if (cash == null || cash.signum() <= 0) {
       return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
     }
-    BigDecimal cap = equity.multiply(capPct);
-    BigDecimal projected = sumOpenNotional(ctx).add(ctx.entryNotional);
+    BigDecimal sumOpenNotional = sumOpenNotional(ctx);
+    BigDecimal capitalBase = cash.add(sumOpenNotional);
+    BigDecimal cap = capitalBase.multiply(capPct);
+    BigDecimal projected = sumOpenNotional.add(ctx.entryNotional);
     if (projected.compareTo(cap) > 0) {
       return RiskDecision.rejected(
           RejectionReason.NOTIONAL_CAP_EXCEEDED,
