@@ -616,7 +616,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
               return equity != null && equity.signum() > 0
                   ? RiskDecision.approved()
                   : RiskDecision.rejected(
-                      RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
+                      RejectionReason.NOTIONAL_CAP_EXCEEDED, "cash_unavailable");
             });
 
     PreTradeCheckActivity preTradeStub =

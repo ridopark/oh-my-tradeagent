@@ -209,7 +209,7 @@ class RiskActivitiesPortfolioGatesTest {
   // #323: the legacy null-cash path (checkEntry / non-dispatch provider) has no MTM cash term, so
   // the gate fails closed regardless of the net-liq seam — substituting net-liq would loosen the
   // cap, so it is never read. Both a null cash term (case 1) and a zero one (case 2, via the
-  // dispatched 0) reject with equity_unavailable.
+  // dispatched 0) reject with cash_unavailable.
   @Test
   void notionalCap_failsClosed_whenCashZeroOrUnavailable() {
     StrategyConfig c = config();
@@ -219,7 +219,7 @@ class RiskActivitiesPortfolioGatesTest {
     RiskDecision dNull = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(dNull.allowed()).isFalse();
     assertThat(dNull.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
-    assertThat(dNull.detail()).contains("equity_unavailable");
+    assertThat(dNull.detail()).contains("cash_unavailable");
 
     // Case 2: dispatched cash == 0 (degenerate snapshot) → fail closed.
     RiskDecision dZero =
@@ -227,7 +227,7 @@ class RiskActivitiesPortfolioGatesTest {
             btoPayload("acme_trader", FIXED_NOW), c, null, new BigDecimal("2.30"), BigDecimal.ZERO);
     assertThat(dZero.allowed()).isFalse();
     assertThat(dZero.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
-    assertThat(dZero.detail()).contains("equity_unavailable");
+    assertThat(dZero.detail()).contains("cash_unavailable");
 
     // The net-liq seam is never consulted as a cash proxy.
     org.mockito.Mockito.verify(portfolioSnapshot, org.mockito.Mockito.never())
@@ -247,7 +247,7 @@ class RiskActivitiesPortfolioGatesTest {
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
-    assertThat(d.detail()).contains("equity_unavailable");
+    assertThat(d.detail()).contains("cash_unavailable");
     // The seam is never consulted when broker_target can't key it.
     org.mockito.Mockito.verify(portfolioSnapshot, org.mockito.Mockito.never())
         .accountEquity(org.mockito.ArgumentMatchers.any());
@@ -300,7 +300,7 @@ class RiskActivitiesPortfolioGatesTest {
             btoPayload("acme_trader", FIXED_NOW), c, null, new BigDecimal("2.30"), null);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
-    assertThat(d.detail()).contains("equity_unavailable");
+    assertThat(d.detail()).contains("cash_unavailable");
     // The net-liq seam is never consulted as a cash proxy on the unavailable-cash fallback.
     org.mockito.Mockito.verify(portfolioSnapshot, org.mockito.Mockito.never())
         .accountEquity(org.mockito.ArgumentMatchers.any());
