@@ -128,4 +128,23 @@ public interface OptionsBroker {
   default BigDecimal getAccountCash() {
     return BigDecimal.ZERO;
   }
+
+  /**
+   * Combined account read for the notional-cap gate (issue #323). Returns equity AND cash from a
+   * single account fetch so the {@code AccountSnapshotActivity} does not pay two {@code
+   * /v2/account} round-trips per invocation (one for equity, one for cash). The gate's MTM-stable
+   * denominator is {@code cash + sum_open_notional} (cost basis) while {@code equity} is retained
+   * for the #317 fail-closed contract.
+   *
+   * <p>Default composes the two single-field getters so brokers that don't expose a real account
+   * endpoint keep the documented {@code ZERO} sentinel behavior (fail closed). Brokers that hit a
+   * live account endpoint (Alpaca {@code /v2/account}) override this to fetch the account once and
+   * extract both fields.
+   */
+  default AccountSummary getAccount() {
+    return new AccountSummary(getAccountEquity(), getAccountCash());
+  }
+
+  /** Equity + cash from one account read (issue #323). Both in account-currency dollars. */
+  record AccountSummary(BigDecimal equity, BigDecimal cash) {}
 }

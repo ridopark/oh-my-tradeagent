@@ -2,6 +2,8 @@ package com.ohmytradeagent.exec.activities;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.AccountSnapshotRequest;
@@ -20,7 +22,8 @@ class AccountSnapshotExecActivityImplTest {
   @Test
   void accountSnapshot_surfacesBrokerEquityAndSchemaVersion() {
     OptionsBroker broker = mock(OptionsBroker.class);
-    when(broker.getAccountEquity()).thenReturn(new BigDecimal("123456.78"));
+    when(broker.getAccount())
+        .thenReturn(new OptionsBroker.AccountSummary(new BigDecimal("123456.78"), null));
     AccountSnapshotExecActivityImpl impl = new AccountSnapshotExecActivityImpl(broker);
 
     AccountSnapshotRequest req = new AccountSnapshotRequest();
@@ -39,8 +42,10 @@ class AccountSnapshotExecActivityImplTest {
   @Test
   void accountSnapshot_surfacesBrokerCash() {
     OptionsBroker broker = mock(OptionsBroker.class);
-    when(broker.getAccountEquity()).thenReturn(new BigDecimal("123456.78"));
-    when(broker.getAccountCash()).thenReturn(new BigDecimal("42000.00"));
+    when(broker.getAccount())
+        .thenReturn(
+            new OptionsBroker.AccountSummary(
+                new BigDecimal("123456.78"), new BigDecimal("42000.00")));
     AccountSnapshotExecActivityImpl impl = new AccountSnapshotExecActivityImpl(broker);
 
     AccountSnapshotRequest req = new AccountSnapshotRequest();
@@ -50,5 +55,27 @@ class AccountSnapshotExecActivityImplTest {
     AccountSnapshotResult result = impl.accountSnapshot(req);
 
     assertThat(result.getCash()).isEqualByComparingTo(new BigDecimal("42000.00"));
+  }
+
+  // Issue #323 single-fetch: the activity must read equity AND cash from ONE broker account read
+  // (getAccount) — not via separate getAccountEquity()/getAccountCash() calls, each of which would
+  // issue its own /v2/account round-trip. Verify getAccount is the only broker interaction.
+  @Test
+  void accountSnapshot_readsAccountOnce_singleBrokerFetch() {
+    OptionsBroker broker = mock(OptionsBroker.class);
+    when(broker.getAccount())
+        .thenReturn(
+            new OptionsBroker.AccountSummary(
+                new BigDecimal("123456.78"), new BigDecimal("42000.00")));
+    AccountSnapshotExecActivityImpl impl = new AccountSnapshotExecActivityImpl(broker);
+
+    AccountSnapshotRequest req = new AccountSnapshotRequest();
+    req.setSchemaVersion(1L);
+    req.setBrokerTarget(AccountSnapshotRequest.BrokerTarget.ALPACA_PAPER);
+
+    impl.accountSnapshot(req);
+
+    verify(broker).getAccount();
+    verifyNoMoreInteractions(broker);
   }
 }

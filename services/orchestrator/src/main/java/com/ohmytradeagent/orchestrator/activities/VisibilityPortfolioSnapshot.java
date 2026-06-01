@@ -16,7 +16,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,15 +32,18 @@ import org.slf4j.LoggerFactory;
  * ExecutionStatus='Running'} — never a {@code WorkflowId} prefix (Temporal SQL Visibility has no
  * {@code STARTS_WITH} on {@code WorkflowId}; {@code docs/plans/PLAN.md:120-127}). Per the
  * operator's #323 design decision a {@code broker_target} is owned by exactly one tenant and the
- * tenant's strategies share it, so the cap basis is the tenant's <b>whole</b> running book. The
- * {@code TenantStrategy} filter is therefore an {@code IN (...)} clause over <i>all of the
- * requesting tenant's strategies</i> ({@link TenantStrategies#strategyIdsForTenant}), not just the
- * current strategy. The returned metadata stream is closed via try-with-resources. <b>Cross-tenant
- * isolation is preserved structurally:</b> only the requesting tenant's strategies enter the {@code
- * IN} list (built with the {@code t-<t>/} prefix on every element), so another tenant's
- * PositionWorkflows never leak into the snapshot. The single-tenant single-strategy deployment
- * yields a one-element {@code IN} list — the same result set as the pre-#323 {@code
- * TenantStrategy='...'} equality filter (inertness).
+ * tenant's strategies share it, so the cap basis is the tenant's <b>whole</b> running book. Rather
+ * than a single unvalidated {@code TenantStrategy IN (...)} clause (which would fail-OPEN if it
+ * silently returned empty), the snapshot resolves <i>all of the requesting tenant's strategies</i>
+ * ({@link TenantStrategies#strategyIdsForTenant}, always including the requesting strategy) and
+ * runs the <b>proven equality query</b> {@code TenantStrategy='t-<t>/s-<sid>'} <b>once per
+ * strategy</b>, unioning the positions in code (deduped by workflow id). Each metadata stream is
+ * closed via try-with-resources. <b>Cross-tenant isolation is preserved structurally:</b> every
+ * per-strategy query carries the {@code t-<t>/} prefix, so another tenant's PositionWorkflows never
+ * leak into the snapshot. The single-tenant single-strategy deployment runs exactly one equality
+ * query — byte-identical to the pre-#323 {@code TenantStrategy='...'} equality filter (inertness).
+ * An empty resolved strategy set or a throw from ANY per-strategy query fails the snapshot CLOSED
+ * (#325).
  *
  * <p><b>{@code openNotional} source — cost basis.</b> Per running {@code PositionWorkflow}, the
  * {@code positionState()} query supplies remaining qty + per-contract entry premium, and notional
@@ -120,9 +122,9 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
 
   /**
    * Back-compat / single-strategy constructor: the tenant-strategy resolver collapses to the
-   * requesting strategy only, so the {@code TenantStrategy IN (...)} clause is a one-element list —
-   * the same result set as the pre-#323 equality filter. Used by unit tests and any deployment that
-   * does not wire the scanner-backed {@link TenantStrategies}.
+   * requesting strategy only, so the snapshot runs exactly one {@code TenantStrategy='...'}
+   * equality query — byte-identical to the pre-#323 equality filter. Used by unit tests and any
+   * deployment that does not wire the scanner-backed {@link TenantStrategies}.
    */
   public VisibilityPortfolioSnapshot(WorkflowClient client, MeterRegistry meterRegistry) {
     this(client, meterRegistry, tenantId -> List.of());
@@ -165,31 +167,64 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
    */
   @Override
   public List<OpenPosition> openPositions(String tenantId, String strategyId) {
-    String query =
-        "WorkflowType='PositionWorkflow' AND TenantStrategy IN ("
-            + tenantStrategyInList(tenantId, strategyId)
-            + ") AND ExecutionStatus='Running'";
+    // Resolve the tenant's strategy set (#323) and run the PROVEN equality query per strategy,
+    // unioning the results in code — rather than a single unvalidated TenantStrategy IN (...)
+    // clause
+    // that would fail-OPEN if it silently returned empty. The requesting strategy is always present
+    // so the snapshot can never be narrower than the pre-#323 single-strategy filter; a single
+    // strategy collapses to exactly one equality query, byte-identical to the pre-#323 behavior.
+    Set<String> strategyIds = resolveTenantStrategyIds(tenantId, strategyId);
+    if (strategyIds.isEmpty()) {
+      // Fail CLOSED (#325): an empty strategy set means we cannot know the tenant's running book.
+      // Returning an empty position list would report sum_open_notional=0, loosening the cap
+      // fail-OPEN. Treat as visibility-unavailable and reject.
+      throw new IllegalStateException(
+          "openPositions resolved an empty strategy set for tenant="
+              + tenantId
+              + " strategy="
+              + strategyId
+              + "; failing closed rather than querying nothing and undercounting sum_open_notional");
+    }
 
+    // Dedupe the unioned positions by workflow id: each PositionWorkflow belongs to exactly one
+    // (tenant, strategy), so the per-strategy equality queries are disjoint — the LinkedHashSet is
+    // a
+    // belt-and-suspenders guard against a Visibility race returning the same execution twice.
     List<OpenPosition> positions = new ArrayList<>();
+    Set<String> seenWorkflowIds = new LinkedHashSet<>();
     int listed = 0;
     int valueFailures = 0;
-    try (Stream<WorkflowExecutionMetadata> stream = client.listExecutions(query)) {
-      var it = stream.iterator();
-      while (it.hasNext()) {
-        WorkflowExecutionMetadata md = it.next();
-        String wfId = md.getExecution().getWorkflowId();
-        listed++;
-        ValueResult result = valuePosition(wfId, tenantId, strategyId);
-        if (result.failed()) {
-          valueFailures++;
-        } else if (result.position() != null) {
-          positions.add(result.position());
+    for (String sid : strategyIds) {
+      // The exact pre-#323 proven equality query. A throw here (Visibility error on ANY
+      // per-strategy
+      // query) propagates — fail closed (#325).
+      String query =
+          "WorkflowType='PositionWorkflow' AND TenantStrategy='"
+              + WorkflowIds.escapeForVisibilityQuery(WorkflowIds.tenantStrategy(tenantId, sid))
+              + "' AND ExecutionStatus='Running'";
+      try (Stream<WorkflowExecutionMetadata> stream = client.listExecutions(query)) {
+        var it = stream.iterator();
+        while (it.hasNext()) {
+          WorkflowExecutionMetadata md = it.next();
+          String wfId = md.getExecution().getWorkflowId();
+          if (!seenWorkflowIds.add(wfId)) {
+            continue;
+          }
+          listed++;
+          ValueResult result = valuePosition(wfId, tenantId, strategyId);
+          if (result.failed()) {
+            valueFailures++;
+          } else if (result.position() != null) {
+            positions.add(result.position());
+          }
         }
       }
     }
 
     // Task (c) fail-closed bound (#325): a correlated value-query degradation that drops too many
     // listed positions must fail the snapshot (throw) rather than undercount and loosen the cap.
+    // The
+    // bound's listed/valueFailures counts span the UNIONED book across all the tenant's strategies.
     // See failsClosed / RELATIVE_FAILURE_THRESHOLD_MULTIPLIER for the relative threshold plus the
     // small-book floor and rationale.
     boolean failedClosed = listed > 0 && failsClosed(listed, valueFailures);
@@ -215,24 +250,26 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
   }
 
   /**
-   * Builds the comma-separated, single-quoted {@code TenantStrategy} value list for the {@code IN
-   * (...)} clause (#323). Resolves the requesting tenant's full strategy set via {@link
-   * TenantStrategies} and always unions in the requesting {@code strategyId} so the snapshot can
-   * never be narrower than the pre-#323 single-strategy filter (and so an empty/missing resolver
-   * result still queries at least the current strategy rather than building a match-nothing query
-   * that would loosen the cap fail-OPEN). Cross-tenant isolation holds because every element is
-   * built with the {@code t-<tenantId>/} prefix from {@link WorkflowIds#tenantStrategy}. A throw
-   * from the resolver (unreadable tenants tree) propagates — fail-closed (#325).
+   * Resolves the requesting tenant's strategy id set (#323). Always unions in the requesting {@code
+   * strategyId} so the snapshot can never be narrower than the pre-#323 single-strategy filter (and
+   * so the requesting strategy is always queried even if the resolver omits it). Each id later
+   * drives a separate {@code TenantStrategy='t-<tenant>/s-<sid>'} equality query, unioned in code —
+   * the proven equality form, never an unvalidated {@code IN (...)} clause. Cross-tenant isolation
+   * holds because every per-strategy query is built with the {@code t-<tenantId>/} prefix from
+   * {@link WorkflowIds#tenantStrategy}, so another tenant's PositionWorkflows can never enter the
+   * snapshot. A throw from the resolver (unreadable tenants tree) propagates — fail-closed (#325).
    */
-  private String tenantStrategyInList(String tenantId, String strategyId) {
+  private Set<String> resolveTenantStrategyIds(String tenantId, String strategyId) {
     Set<String> strategyIds = new LinkedHashSet<>();
-    strategyIds.add(strategyId);
-    strategyIds.addAll(tenantStrategies.strategyIdsForTenant(tenantId));
-    return strategyIds.stream()
-        .map(sid -> WorkflowIds.tenantStrategy(tenantId, sid))
-        .map(WorkflowIds::escapeForVisibilityQuery)
-        .map(escaped -> "'" + escaped + "'")
-        .collect(Collectors.joining(", "));
+    if (strategyId != null && !strategyId.isBlank()) {
+      strategyIds.add(strategyId);
+    }
+    for (String sid : tenantStrategies.strategyIdsForTenant(tenantId)) {
+      if (sid != null && !sid.isBlank()) {
+        strategyIds.add(sid);
+      }
+    }
+    return strategyIds;
   }
 
   /**

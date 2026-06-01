@@ -233,7 +233,8 @@ public class RiskActivitiesImpl implements RiskActivities {
    * one, and introduces no new market-data dependency. The cash component is threaded from the
    * broker {@code /v2/account} read ({@code cash}) over the AccountSnapshot dispatch seam; {@code
    * sum_open_notional} is the tenant-account-wide sum from the #323 {@link
-   * VisibilityPortfolioSnapshot} (TenantStrategy IN [the tenant's strategies]).
+   * VisibilityPortfolioSnapshot} (a per-strategy {@code TenantStrategy='...'} equality query
+   * unioned across the tenant's strategies).
    *
    * <p><b>Fail-closed.</b> A null/zero cash (an unavailable account read, or a pre-#323 producer
    * that omits {@code cash}) yields a zero-or-undercounted capital base; the gate rejects with

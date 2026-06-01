@@ -11,6 +11,7 @@ import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
+import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -512,6 +513,61 @@ class AlpacaPaperBrokerTest {
                 "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\"}"));
 
     assertThatThrownBy(() -> broker.getAccountCash())
+        .isInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));
+  }
+
+  @Test
+  void getAccount_readsEquityAndCashFromSingleAccountRequest() throws Exception {
+    // Issue #323 single-fetch: getAccount() must extract BOTH equity and cash from ONE /v2/account
+    // round-trip. The AccountSnapshotActivity reads both per invocation; calling getAccountEquity()
+    // and getAccountCash() separately would issue two GET /v2/account requests. Only one response
+    // is
+    // enqueued, so a second round-trip would fail; we also assert exactly one recorded request.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\","
+                    + "\"cash\":\"5000.00\",\"status\":\"ACTIVE\"}"));
+
+    OptionsBroker.AccountSummary account = broker.getAccount();
+
+    assertThat(account.equity()).isEqualByComparingTo(new BigDecimal("123456.78"));
+    assertThat(account.cash()).isEqualByComparingTo(new BigDecimal("5000.00"));
+
+    assertThat(server.getRequestCount()).isEqualTo(1);
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getPath()).isEqualTo("/v2/account");
+  }
+
+  @Test
+  void getAccount_missingEquityField_throwsProtocolError() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"id\":\"acct-1\",\"cash\":\"5000.00\",\"buying_power\":\"999999.00\"}"));
+
+    assertThatThrownBy(() -> broker.getAccount())
+        .isInstanceOf(ApplicationFailure.class)
+        .satisfies(
+            t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));
+  }
+
+  @Test
+  void getAccount_missingCashField_throwsProtocolError() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\"}"));
+
+    assertThatThrownBy(() -> broker.getAccount())
         .isInstanceOf(ApplicationFailure.class)
         .satisfies(
             t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));

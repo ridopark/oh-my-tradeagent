@@ -11,9 +11,9 @@ import java.util.List;
  *
  * <p>Cross-tenant isolation is preserved structurally: only the <i>current</i> tenant's strategies
  * are ever returned, so another tenant's PositionWorkflows never enter the snapshot. The
- * single-tenant single-strategy deployment yields a one-element list, which collapses the {@code
- * TenantStrategy IN (...)} clause to a single value — the same result set as the pre-#323 {@code
- * TenantStrategy='...'} equality filter (inertness).
+ * single-tenant single-strategy deployment yields a one-element list, so the snapshot runs exactly
+ * one {@code TenantStrategy='...'} equality query — byte-identical to the pre-#323 equality filter
+ * (inertness).
  *
  * <p><b>Fail-CLOSED contract (#325).</b> A resolver backed by the tenants tree must let an I/O
  * error (unreadable tenants dir) <b>propagate</b>, not swallow it into an empty list: an empty

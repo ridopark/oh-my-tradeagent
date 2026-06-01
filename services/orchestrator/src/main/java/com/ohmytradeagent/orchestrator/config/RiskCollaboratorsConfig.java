@@ -39,8 +39,9 @@ public class RiskCollaboratorsConfig {
       MeterRegistry meterRegistry,
       @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir) {
     // #323: the cap basis is tenant-account-wide — the scanner-backed resolver enumerates the
-    // requesting tenant's full strategy set so the TenantStrategy IN (...) clause aggregates all of
-    // the tenant's running PositionWorkflows on the shared broker_target.
+    // requesting tenant's full strategy set so the snapshot runs the proven TenantStrategy='...'
+    // equality query once per strategy and unions all of the tenant's running PositionWorkflows on
+    // the shared broker_target.
     return new VisibilityPortfolioSnapshot(
         workflowClient, meterRegistry, new ScannerTenantStrategies(Path.of(tenantsDir)));
   }

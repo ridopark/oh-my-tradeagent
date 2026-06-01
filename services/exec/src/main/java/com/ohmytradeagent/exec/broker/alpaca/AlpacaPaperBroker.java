@@ -326,6 +326,26 @@ public class AlpacaPaperBroker implements OptionsBroker {
     return resp.cash();
   }
 
+  @Override
+  public AccountSummary getAccount() {
+    // Issue #323: read /v2/account ONCE and extract both equity and cash. The
+    // AccountSnapshotActivity needs both for the notional-cap gate (equity for the #317 fail-closed
+    // contract, cash for the cost-basis capital base cash + sum_open_notional); calling the two
+    // single-field getters separately would pay two /v2/account round-trips per invocation. Both
+    // null-field breaches mirror getAccountEquity/getAccountCash so a missing field fails the gate
+    // CLOSED rather than passing an unbounded cap.
+    AlpacaAccountResponse resp = fetchAccount();
+    if (resp.equity() == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca /v2/account returned null/missing equity", "BrokerProtocolError");
+    }
+    if (resp.cash() == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca /v2/account returned null/missing cash", "BrokerProtocolError");
+    }
+    return new AccountSummary(resp.equity(), resp.cash());
+  }
+
   /**
    * Issue #320 portfolio-level pre-trade gate. Reads {@code /v2/account} once (via the shared
    * {@link #fetchAccount()} helper that also backs {@link #getAccountEquity()} — exactly one
