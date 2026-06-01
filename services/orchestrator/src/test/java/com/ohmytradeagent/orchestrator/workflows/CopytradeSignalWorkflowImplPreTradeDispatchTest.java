@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -719,6 +720,75 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
 
     // CanceledFailure rethrows — it is NOT the broker-degradation path, so the counter never fires.
     Mockito.verify(accountSnapshotMetrics, Mockito.never()).recordDispatchFailure(anyString());
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+  }
+
+  /**
+   * Issue #323: the metrics emit inside {@code dispatchAccountSnapshot}'s fail-closed catch is
+   * wrapped in a non-fatal {@code catch (RuntimeException metricsError)} so a metrics outage cannot
+   * flip the fail-closed ZERO outcome. But {@code CanceledFailure} extends {@code
+   * RuntimeException}, so if workflow cancellation lands while the metrics counter Activity is in
+   * flight, that catch would swallow the cancellation and delay it. The guard {@code if
+   * (metricsError instanceof CanceledFailure cf) throw cf;} re-throws instead. Pins it: the
+   * account-snapshot Activity throws (entering the fail-closed catch), the (deliberately slow)
+   * metrics Activity is in flight when the workflow is cancelled, and the resulting CanceledFailure
+   * propagates (workflow fails) rather than being swallowed into a ZERO fail-closed completion.
+   */
+  @Test
+  void dispatchAccountSnapshot_metricsEmitCanceledFailurePropagates() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    // Account snapshot fails -> the workflow enters dispatchAccountSnapshot's fail-closed catch and
+    // dispatches the metrics counter Activity.
+    AccountSnapshotActivity throwingAccountStub =
+        request -> {
+          throw new RuntimeException("broker /v2/account timeout");
+        };
+    // Block in the metrics counter Activity long enough for the cancel to land while that Activity
+    // call is in flight, so CanceledFailure is thrown into the workflow at the
+    // recordDispatchFailure
+    // call — exactly inside the catch (RuntimeException metricsError) block.
+    doAnswer(
+            inv -> {
+              Thread.sleep(60_000L);
+              return null;
+            })
+        .when(accountSnapshotMetrics)
+        .recordDispatchFailure(anyString());
+
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub, throwingAccountStub);
+    env.start();
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+    WorkflowStub stub = WorkflowStub.fromTyped(wf);
+    stub.start(btoPayload());
+    // Let the workflow reach the in-flight metrics counter Activity, then cancel.
+    env.sleep(Duration.ofSeconds(5));
+    stub.cancel();
+
+    // The guard re-throws CanceledFailure rather than swallowing it: the workflow fails (cancels)
+    // instead of swallowing the cancellation and completing on the ZERO fail-closed path.
+    assertThatThrownBy(() -> stub.getResult(Void.class))
+        .isInstanceOf(WorkflowFailedException.class);
     Mockito.verify(exec, Mockito.never()).placeOrder(any());
   }
 

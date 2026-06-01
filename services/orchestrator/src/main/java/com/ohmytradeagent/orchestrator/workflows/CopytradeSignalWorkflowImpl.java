@@ -829,6 +829,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       try {
         accountSnapshotMetrics.recordDispatchFailure(config.getBrokerTarget().value());
       } catch (RuntimeException metricsError) {
+        if (metricsError instanceof CanceledFailure cf) throw cf;
         // observability-only; never let a metrics failure flip the fail-closed outcome.
       }
       return BigDecimal.ZERO;
