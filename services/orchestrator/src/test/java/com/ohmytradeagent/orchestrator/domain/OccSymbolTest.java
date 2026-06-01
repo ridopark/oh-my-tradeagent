@@ -98,4 +98,21 @@ class OccSymbolTest {
   void compact_isIdempotentOnAlreadyCompact() {
     assertThat(OccSymbol.compact("UNH260618C00400000")).isEqualTo("UNH260618C00400000");
   }
+
+  @Test
+  void underlying_extractsRootFromPaddedOcc() {
+    assertThat(OccSymbol.underlying("NVDA  260516C00140000")).isEqualTo("NVDA");
+    assertThat(OccSymbol.underlying("F     260109C00012000")).isEqualTo("F");
+  }
+
+  @Test
+  void underlying_extractsRootFromCompactOcc() {
+    assertThat(OccSymbol.underlying("NVDA260516C00140000")).isEqualTo("NVDA");
+    assertThat(OccSymbol.underlying("UNH260618C00400000")).isEqualTo("UNH");
+  }
+
+  @Test
+  void underlying_nullSafe() {
+    assertThat(OccSymbol.underlying(null)).isNull();
+  }
 }

@@ -274,6 +274,11 @@ class AdoptionWorkflowIT {
     }
 
     @Override
+    public PositionState positionState() {
+      return null;
+    }
+
+    @Override
     public void forceCloseValidator(ForceCloseRequest request) {}
 
     @Override
