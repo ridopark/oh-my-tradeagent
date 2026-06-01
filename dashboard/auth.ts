@@ -28,6 +28,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return user != null;
     },
     async jwt({ token, account }) {
+      // Already resolved on a prior request — skip the redundant DB round-trip.
+      if (token.tenantId) {
+        return token;
+      }
       // On initial sign-in, resolve and stamp the tenant_id onto the token.
       if (account?.provider && account.providerAccountId) {
         const user = await findTenantForIdentity(

@@ -9,9 +9,20 @@ import { auth } from "@/auth";
 const BFF_URL = process.env.BFF_INTERNAL_URL ?? "http://localhost:8083";
 const BFF_TOKEN = process.env.BFF_SHARED_TOKEN ?? "";
 
+if (!BFF_TOKEN) {
+  // Misconfiguration: without the shared token every BFF call gets a 401. Surface it loudly rather
+  // than letting it look like an auth bug at request time.
+  console.error(
+    "BFF_SHARED_TOKEN is empty — all tenant-dashboard-bff calls will be rejected (401).",
+  );
+}
+
 export class NotAuthenticatedError extends Error {}
 
 async function bffGet<T>(path: string): Promise<T> {
+  if (!BFF_TOKEN) {
+    throw new Error("BFF_SHARED_TOKEN is not configured");
+  }
   const session = await auth();
   const tenantId = session?.tenantId;
   if (!tenantId) {

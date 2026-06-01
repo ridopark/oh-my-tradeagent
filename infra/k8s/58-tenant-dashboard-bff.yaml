@@ -173,3 +173,27 @@ spec:
                 path: dev/tenant.yaml
               - key: copytrade-v1.yaml
                 path: dev/strategies/copytrade-v1.yaml
+---
+# Enforce the off-ingress trust boundary at the network layer. ClusterIP already blocks external
+# traffic, but without a policy ANY pod in the namespace could reach the BFF on 8083 and (with the
+# shared token) spoof a tenant. This restricts ingress to the Next.js dashboard pod only.
+# Note: k3s's NetworkPolicy controller (kube-router) permits health-probe traffic from the hosting
+# node, so the kubelet readiness/liveness probes on 8083 continue to work without an explicit rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-dashboard-bff-allow-dashboard-only
+  namespace: copytrade
+spec:
+  podSelector:
+    matchLabels:
+      app: tenant-dashboard-bff
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: dashboard
+      ports:
+        - protocol: TCP
+          port: 8083

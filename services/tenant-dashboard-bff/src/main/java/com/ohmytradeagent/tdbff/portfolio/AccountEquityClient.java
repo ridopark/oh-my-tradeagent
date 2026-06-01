@@ -7,6 +7,8 @@ import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -62,9 +64,13 @@ public class AccountEquityClient {
     try {
       WorkflowStub stub = client.newUntypedWorkflowStub(WORKFLOW_TYPE, opts);
       stub.start(request);
-      AccountSnapshotResult result = stub.getResult(AccountSnapshotResult.class);
+      // Bounded wait so an unreachable Temporal service / down task queue cannot pin a Spring MVC
+      // request thread indefinitely. 90s covers the workflow's 60s scheduleToCloseTimeout plus
+      // margin; on timeout we degrade to null like any other snapshot-unavailable case.
+      AccountSnapshotResult result =
+          stub.getResult(90, TimeUnit.SECONDS, AccountSnapshotResult.class);
       return result == null ? null : result.getEquity();
-    } catch (RuntimeException e) {
+    } catch (TimeoutException | RuntimeException e) {
       log.warn(
           "AccountSnapshotWorkflow failed broker_target={} err={}", brokerTarget, e.getMessage());
       return null;
