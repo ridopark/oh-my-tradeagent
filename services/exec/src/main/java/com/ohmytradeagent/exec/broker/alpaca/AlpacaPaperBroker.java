@@ -3,6 +3,8 @@ package com.ohmytradeagent.exec.broker.alpaca;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.contract.BrokerPosition;
+import com.ohmytradeagent.contract.PreTradeCheckRequest;
+import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
@@ -63,6 +65,12 @@ import org.springframework.web.client.RestClient;
 public class AlpacaPaperBroker implements OptionsBroker {
 
   private static final Logger log = LoggerFactory.getLogger(AlpacaPaperBroker.class);
+
+  /** Regulatory PDT day-trade limit for sub-$25k margin accounts. */
+  private static final int PDT_DAYTRADE_LIMIT = 3;
+
+  /** Equity floor below which the PDT day-trade limit applies. */
+  private static final BigDecimal PDT_EQUITY_THRESHOLD = new BigDecimal("25000");
 
   private final RestClient client;
   private final ObjectMapper mapper;
@@ -280,17 +288,112 @@ public class AlpacaPaperBroker implements OptionsBroker {
     // distinct fields. The notional-cap gate compares against net liquidation, so we read `equity`
     // (never `buying_power` — on a margin account buying_power can be 2-4x equity, which would let
     // the cap pass far larger exposure than intended).
+    AlpacaAccountResponse resp = fetchAccount();
+    if (resp.equity() == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca /v2/account returned null/missing equity", "BrokerProtocolError");
+    }
+    return resp.equity();
+  }
+
+  /**
+   * Issue #320 portfolio-level pre-trade gate. Reads {@code /v2/account} once (via the shared
+   * {@link #fetchAccount()} helper that also backs {@link #getAccountEquity()} — exactly one
+   * round-trip per invocation) and derives real {@code buying_power} / {@code pdt_status} / {@code
+   * margin_sufficient} for the orchestrator's opt-in risk gate.
+   *
+   * <ul>
+   *   <li>{@code buying_power} ← {@code options_buying_power}, falling back to {@code buying_power}
+   *       when the options field is absent. A 200 carrying neither is a protocol breach → fail
+   *       closed with {@code BrokerProtocolError}.
+   *   <li>{@code pdt_status} ← {@code BLOCKED} only when the account is flagged {@code
+   *       pattern_day_trader}, has used {@code daytrade_count >= 3} day trades (the regulatory
+   *       sub-$25k limit), AND equity is below $25,000; otherwise {@code OK}. {@code FLAGGED} is
+   *       intentionally not emitted — the risk gate treats it as a non-gating warning, and an
+   *       under-limit flagged account is allowed to keep trading.
+   *   <li>{@code margin_sufficient} ← false when the requested {@code estimated_notional} exceeds
+   *       the available buying power (options buying power already reflects the account {@code
+   *       multiplier}); true otherwise.
+   * </ul>
+   *
+   * <p>{@code allowed} is always true on a successful read — the field-level signals (buying power,
+   * PDT, margin) are what the orchestrator's {@code checkPreTradeCheck} gate evaluates. A broker
+   * exception (401/5xx) maps through {@link #mapError} to a non-retryable {@link
+   * ApplicationFailure} so the workflow's fail-closed path rejects rather than admitting an
+   * unchecked entry.
+   */
+  @Override
+  public PreTradeCheckResult preTradeCheck(PreTradeCheckRequest request) {
+    AlpacaAccountResponse acct = fetchAccount();
+
+    BigDecimal buyingPower =
+        acct.optionsBuyingPower() != null ? acct.optionsBuyingPower() : acct.buyingPower();
+    if (buyingPower == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca /v2/account returned neither options_buying_power nor buying_power",
+          "BrokerProtocolError");
+    }
+
+    BigDecimal notional = request.getEstimatedNotional();
+    boolean marginSufficient = notional == null || buyingPower.compareTo(notional) >= 0;
+
+    PreTradeCheckResult.PdtStatus pdtStatus =
+        isPdtBlocked(acct)
+            ? PreTradeCheckResult.PdtStatus.BLOCKED
+            : PreTradeCheckResult.PdtStatus.OK;
+
+    PreTradeCheckResult r = new PreTradeCheckResult();
+    r.setSchemaVersion(1L);
+    r.setAllowed(true);
+    r.setBuyingPower(buyingPower);
+    r.setPdtStatus(pdtStatus);
+    r.setMarginSufficient(marginSufficient);
+    return r;
+  }
+
+  /**
+   * BLOCKED when the account is flagged {@code pattern_day_trader}, has used at least {@code
+   * PDT_DAYTRADE_LIMIT} (3) day trades, AND equity sits below the $25,000 PDT threshold — the
+   * regulatory condition under which a sub-$25k flagged account is barred from further day trades.
+   *
+   * <p>Fail-closed: when the account is flagged AND over the day-trade limit, the BLOCKED decision
+   * hinges entirely on {@code equity}. A 200 missing {@code equity} would otherwise resolve to
+   * {@code false} (fail-OPEN), admitting a trade on an account that may well be PDT-barred. Mirror
+   * the missing-{@code buying_power} / null-{@code equity} protocol breach in {@link
+   * #getAccountEquity()} / {@link #preTradeCheck} and throw a non-retryable {@code
+   * BrokerProtocolError} so the gate fails CLOSED.
+   */
+  private static boolean isPdtBlocked(AlpacaAccountResponse acct) {
+    if (!Boolean.TRUE.equals(acct.patternDayTrader())) {
+      return false;
+    }
+    if (acct.daytradeCount() == null || acct.daytradeCount() < PDT_DAYTRADE_LIMIT) {
+      return false;
+    }
+    if (acct.equity() == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca /v2/account returned null/missing equity for a flagged over-limit "
+              + "pattern-day-trader account; cannot evaluate PDT block",
+          "BrokerProtocolError");
+    }
+    return acct.equity().compareTo(PDT_EQUITY_THRESHOLD) < 0;
+  }
+
+  /**
+   * Single shared {@code /v2/account} fetch + error mapping, reused by every account-backed gate.
+   */
+  private AlpacaAccountResponse fetchAccount() {
     AlpacaAccountResponse resp;
     try {
       resp = client.get().uri("/v2/account").retrieve().body(AlpacaAccountResponse.class);
     } catch (HttpStatusCodeException e) {
       throw mapError(e);
     }
-    if (resp == null || resp.equity() == null) {
+    if (resp == null) {
       throw ApplicationFailure.newNonRetryableFailure(
-          "Alpaca /v2/account returned null/missing equity", "BrokerProtocolError");
+          "Alpaca /v2/account returned null body", "BrokerProtocolError");
     }
-    return resp.equity();
+    return resp;
   }
 
   @Override
