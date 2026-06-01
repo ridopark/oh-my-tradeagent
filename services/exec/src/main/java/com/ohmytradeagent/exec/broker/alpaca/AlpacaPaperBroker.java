@@ -381,8 +381,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
     if (acct.daytradeCount() == null) {
       // Fail-closed: a flagged pattern-day-trader account that won't report its day-trade count is
       // a
-      // protocol breach. Admitting here (fail-OPEN) could let a possibly-barred account keep
-      // trading.
+      // protocol breach. Admitting (fail-OPEN) could let a possibly-barred account keep trading.
       // Mirror the null-equity breach below.
       throw ApplicationFailure.newNonRetryableFailure(
           "Alpaca /v2/account returned null/missing daytrade_count for a flagged "
