@@ -17,8 +17,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * the sole possible caller — so the {@code X-Tenant-Id} it injects (after verifying the social
  * identity) can be trusted.
  *
- * <p>Actuator health/readiness/liveness probes are exempt so Kubernetes can probe the pod without
- * the shared token.
+ * <p>All {@code /actuator/} endpoints are exempt so Kubernetes can probe health/readiness/liveness
+ * and a cluster-internal Prometheus can scrape {@code /actuator/prometheus} without the shared
+ * token. Safe because the service is ClusterIP-only and NetworkPolicy-restricted, and the exposed
+ * set (health, info, prometheus) carries no secrets.
  */
 @Component
 public class ServiceTokenFilter extends OncePerRequestFilter {
@@ -34,7 +36,7 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   @Override
   protected boolean shouldNotFilter(HttpServletRequest request) {
     String path = request.getRequestURI();
-    return path != null && path.startsWith("/actuator/health");
+    return path != null && path.startsWith("/actuator/");
   }
 
   @Override

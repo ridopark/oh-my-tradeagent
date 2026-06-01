@@ -82,10 +82,14 @@ public class RealizedPnlCalculator {
     if (!ALLOWED_QTY_KEYS.contains(qtyKey)) {
       throw new IllegalArgumentException("unsupported qtyKey: " + qtyKey);
     }
+    // Resolve to a compile-time literal so the SQL is built ONLY from constants; the whitelist
+    // above
+    // is then a contract check, not the sole barrier against a caller key reaching the query.
+    String qtyCol = "filled_qty".equals(qtyKey) ? "filled_qty" : "qty_filled";
     String sql =
         "SELECT (subject->>'avg_fill_price')::numeric AS price, "
             + "(subject->>'"
-            + qtyKey
+            + qtyCol
             + "')::numeric AS qty, "
             + "subject->>'option_symbol' AS option_symbol "
             + "FROM audit_log "
@@ -93,7 +97,7 @@ public class RealizedPnlCalculator {
             + "AND (occurred_at AT TIME ZONE 'America/New_York')::date = ? "
             + "AND subject->>'avg_fill_price' IS NOT NULL "
             + "AND subject->>'"
-            + qtyKey
+            + qtyCol
             + "' IS NOT NULL "
             + "ORDER BY occurred_at ASC, event_id ASC";
     Result<Record> rows = orchestratorDsl.fetch(sql, tenantId, strategyId, kind, tradingDay);

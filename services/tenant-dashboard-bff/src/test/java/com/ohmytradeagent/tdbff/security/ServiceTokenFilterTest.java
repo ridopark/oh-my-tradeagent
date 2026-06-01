@@ -58,6 +58,18 @@ class ServiceTokenFilterTest {
     assertThat(res.getStatus()).isEqualTo(200);
   }
 
+  @Test
+  void actuatorPrometheus_isExemptSoScrapesNeedNoToken() throws Exception {
+    MockHttpServletRequest req = new MockHttpServletRequest("GET", "/actuator/prometheus");
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(chain.getRequest()).isSameAs(req); // exempt — a Prometheus scrape passes through
+    assertThat(res.getStatus()).isEqualTo(200);
+  }
+
   private MockHttpServletResponse run(String uri, String authHeader)
       throws ServletException, IOException {
     MockHttpServletRequest req = new MockHttpServletRequest("GET", uri);

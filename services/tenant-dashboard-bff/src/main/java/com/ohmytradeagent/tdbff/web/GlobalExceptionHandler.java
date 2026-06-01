@@ -3,10 +3,13 @@ package com.ohmytradeagent.tdbff.web;
 import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter.BrokerNotConfiguredException;
 import java.time.format.DateTimeParseException;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 /**
  * Maps the small set of BFF exceptions to HTTP status codes. A missing {@code X-Tenant-Id} is a 401
@@ -14,7 +17,9 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  * broker_target} is a 404; malformed query params are 400.
  */
 @RestControllerAdvice
-public class GlobalExceptionHandler {
+public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
+
+  private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
   @ExceptionHandler(TenantContext.MissingTenantException.class)
   public ResponseEntity<Map<String, Object>> missingTenant(TenantContext.MissingTenantException e) {
@@ -44,5 +49,15 @@ public class GlobalExceptionHandler {
   private static ResponseEntity<Map<String, Object>> badRequestResponse(String detail) {
     return ResponseEntity.status(HttpStatus.BAD_REQUEST)
         .body(Map.of("error", "bad_request", "detail", detail));
+  }
+
+  // Catch-all for anything not mapped above (and not a framework exception — those keep their
+  // proper status via ResponseEntityExceptionHandler). Log server-side; return a generic body so a
+  // stack trace / internal detail never reaches the client.
+  @ExceptionHandler(Exception.class)
+  public ResponseEntity<Map<String, Object>> internalError(Exception e) {
+    log.error("unhandled exception in tenant-dashboard-bff", e);
+    return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+        .body(Map.of("error", "internal_error"));
   }
 }

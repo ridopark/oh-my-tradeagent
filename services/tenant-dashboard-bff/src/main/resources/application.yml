@@ -41,6 +41,11 @@ bff:
 
 server:
   port: ${TENANT_DASHBOARD_BFF_PORT:8083}
+  error:
+    # Never leak stack traces or exception messages in error responses (defence in depth; the
+    # catch-all in GlobalExceptionHandler returns a generic body anyway).
+    include-stacktrace: never
+    include-message: never
 
 temporal:
   target: ${TEMPORAL_TARGET:localhost:7233}
