@@ -54,12 +54,68 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
 
   private static final Logger log = LoggerFactory.getLogger(VisibilityPortfolioSnapshot.class);
 
+  /**
+   * Task (c) fail-closed bound (#325). A correlated Temporal degradation can leave {@code
+   * listExecutions} succeeding while the per-workflow {@code positionState} query fails for many
+   * listed positions, which would drop those positions from {@code sum_open_notional} and silently
+   * <i>loosen</i> the {@code notional_cap_pct_of_equity} cap (undercounting open exposure → permits
+   * trades it should reject). To keep that failure mode fail-closed we throw instead of returning
+   * an undercounted list once the listed positions fail to <i>value</i> badly enough. Only genuine
+   * value-failures ({@link ValueResult#failure()} — a Running workflow that cannot answer its state
+   * query, a degradation signal) count; legitimate just-closed/blank/null-premium <i>skips</i>
+   * ({@link ValueResult#skip()}) do NOT.
+   *
+   * <p>The bound combines two rules (see {@link #failsClosed}):
+   *
+   * <ul>
+   *   <li><b>Relative >50% threshold (larger books).</b> With {@code N} listed running positions
+   *       and {@code F} value-failures, throw when {@code F * 2 > N} (strictly more than half of
+   *       listed positions failed to value). A bare {@code >} (not {@code >=}) keeps the
+   *       exactly-50% boundary best-effort on larger books, where a single isolated query race is
+   *       proportionally small.
+   *   <li><b>Small-book floor (1–2 positions).</b> On a 1- or 2-position book, <i>any</i> single
+   *       genuine value-failure fails closed. On such a tiny book one missed position is up to a
+   *       full position's notional — materially loosening the cap — and the relative threshold
+   *       alone leaves a hole at exactly 50% (1-of-2: {@code 2 > 2} is false), so the floor closes
+   *       it. Benign skips still do not count, so an all-skips tiny book stays best-effort (empty
+   *       list).
+   * </ul>
+   */
+  private static final int RELATIVE_FAILURE_THRESHOLD_MULTIPLIER = 2;
+
+  /** Books with at most this many listed positions fall under the small-book floor. */
+  private static final int SMALL_BOOK_MAX_POSITIONS = 2;
+
   private final WorkflowClient client;
 
   public VisibilityPortfolioSnapshot(WorkflowClient client) {
     this.client = client;
   }
 
+  /**
+   * Whether the value-failure tally over a non-empty listed book must fail the snapshot closed.
+   * Trips when either the relative {@code >50%} threshold is exceeded or — on a 1–2 position book —
+   * at least one genuine value-failure occurred (the small-book floor). See {@link
+   * #RELATIVE_FAILURE_THRESHOLD_MULTIPLIER} for the full rule and rationale.
+   */
+  private static boolean failsClosed(int listed, int valueFailures) {
+    boolean exceedsRelativeThreshold =
+        (long) valueFailures * RELATIVE_FAILURE_THRESHOLD_MULTIPLIER > listed;
+    boolean tripsSmallBookFloor = listed <= SMALL_BOOK_MAX_POSITIONS && valueFailures >= 1;
+    return exceedsRelativeThreshold || tripsSmallBookFloor;
+  }
+
+  /**
+   * WARNING — fail-closed seam (#325, hardening #318). This method must let a Visibility error (the
+   * {@code listExecutions} query or the stream iteration) <b>propagate</b>. Do NOT wrap the body in
+   * {@code try { ... } catch (Exception e) { return List.of(); }}: an empty list means {@code
+   * sum_open_notional=0}, which <b>loosens</b> the {@code notional_cap_pct_of_equity} cap and flips
+   * the gate <b>fail-OPEN</b> (it would then permit trades it should reject). The fail-closed
+   * guarantee relies on the throwable reaching {@code RiskActivitiesImpl.PortfolioContext
+   * .openPositions()} and failing the {@code checkEntry}/{@code checkEntryWithLimit} activity so
+   * the workflow never reaches {@code placeOrder}. The per-position {@link #valuePosition} swallow
+   * is deliberately bounded below (Task (c)) for the same reason.
+   */
   @Override
   public List<OpenPosition> openPositions(String tenantId, String strategyId) {
     String tenantStrategy = WorkflowIds.tenantStrategy(tenantId, strategyId);
@@ -69,27 +125,53 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
             + "' AND ExecutionStatus='Running'";
 
     List<OpenPosition> positions = new ArrayList<>();
+    int listed = 0;
+    int valueFailures = 0;
     try (Stream<WorkflowExecutionMetadata> stream = client.listExecutions(query)) {
       var it = stream.iterator();
       while (it.hasNext()) {
         WorkflowExecutionMetadata md = it.next();
         String wfId = md.getExecution().getWorkflowId();
-        OpenPosition pos = valuePosition(wfId, tenantId, strategyId);
-        if (pos != null) {
-          positions.add(pos);
+        listed++;
+        ValueResult result = valuePosition(wfId, tenantId, strategyId);
+        if (result.failed()) {
+          valueFailures++;
+        } else if (result.position() != null) {
+          positions.add(result.position());
         }
       }
+    }
+
+    // Task (c) fail-closed bound (#325): a correlated value-query degradation that drops too many
+    // listed positions must fail the snapshot (throw) rather than undercount and loosen the cap.
+    // See failsClosed / RELATIVE_FAILURE_THRESHOLD_MULTIPLIER for the relative threshold plus the
+    // small-book floor and rationale.
+    if (listed > 0 && failsClosed(listed, valueFailures)) {
+      throw new IllegalStateException(
+          "openPositions value-failure bound exceeded: "
+              + valueFailures
+              + " of "
+              + listed
+              + " listed positions failed to value (tenant="
+              + tenantId
+              + " strategy="
+              + strategyId
+              + "); failing closed rather than undercounting sum_open_notional");
     }
     return positions;
   }
 
   /**
    * Query one running {@code PositionWorkflow} for its open state and turn it into an {@link
-   * OpenPosition}. Best-effort: a workflow that just closed (or whose query races termination) is
-   * skipped rather than failing the whole snapshot — the gate then sees one fewer position, which
-   * is the safe direction for an opt-in cap.
+   * OpenPosition}. Best-effort within the Task (c) bound: a workflow that just closed (or whose
+   * query races termination) is skipped rather than failing the whole snapshot — the gate then sees
+   * one fewer position. The returned {@link ValueResult} distinguishes a genuine
+   * value-<i>failure</i> (the {@code catch} branch — counted toward the fail-closed bound in {@link
+   * #openPositions}) from a legitimate <i>skip</i> ({@code null} position for a
+   * closed/blank/null-premium workflow — NOT counted), so a correlated query degradation fails
+   * closed while an isolated close stays best-effort.
    */
-  private OpenPosition valuePosition(String wfId, String tenantId, String strategyId) {
+  private ValueResult valuePosition(String wfId, String tenantId, String strategyId) {
     try {
       WorkflowStub stub = client.newUntypedWorkflowStub(wfId);
       PositionState state = stub.query("positionState", PositionState.class);
@@ -98,14 +180,15 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
           || state.contractSymbol().isBlank()
           || state.remainingQty() <= 0
           || state.entryPremium() == null) {
-        return null;
+        return ValueResult.skip();
       }
       BigDecimal openNotional =
           state
               .entryPremium()
               .multiply(BigDecimal.valueOf(state.remainingQty()))
               .multiply(Sizing.CONTRACT_MULTIPLIER);
-      return new OpenPosition(OccSymbol.underlying(state.contractSymbol()), openNotional);
+      return ValueResult.valued(
+          new OpenPosition(OccSymbol.underlying(state.contractSymbol()), openNotional));
     } catch (RuntimeException e) {
       log.warn(
           "positionState query failed wf={} tenant={} strategy={} err={}",
@@ -113,7 +196,26 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
           tenantId,
           strategyId,
           e.getMessage());
-      return null;
+      return ValueResult.failure();
+    }
+  }
+
+  /**
+   * Outcome of valuing one listed position. A {@code failed} value-query (the {@code catch} branch)
+   * counts toward the Task (c) fail-closed bound; a legitimate skip ({@code null} position) does
+   * not.
+   */
+  private record ValueResult(OpenPosition position, boolean failed) {
+    static ValueResult valued(OpenPosition position) {
+      return new ValueResult(position, false);
+    }
+
+    static ValueResult skip() {
+      return new ValueResult(null, false);
+    }
+
+    static ValueResult failure() {
+      return new ValueResult(null, true);
     }
   }
 

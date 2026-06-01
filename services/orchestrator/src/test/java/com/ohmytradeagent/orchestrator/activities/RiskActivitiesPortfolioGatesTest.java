@@ -259,6 +259,31 @@ class RiskActivitiesPortfolioGatesTest {
     org.mockito.Mockito.verify(portfolioSnapshot).accountEquity(eq("paper"));
   }
 
+  // #325 fail-closed contract at the activity boundary: when portfolioSnapshot.openPositions throws
+  // (a Visibility error in VisibilityPortfolioSnapshot) with the notional-cap gate enabled, the
+  // throwable must PROPAGATE out of checkEntryWithLimit — i.e. the gate must NOT swallow it into an
+  // allowed/NOTIONAL_CAP-evaluated decision. Propagation fails the activity so the workflow never
+  // reaches placeOrder (fail-closed); swallowing it would flip the gate fail-OPEN.
+  @Test
+  void checkEntryWithLimit_propagatesWhenOpenPositionsThrows_failClosed() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // gate enabled
+    when(portfolioSnapshot.openPositions(anyString(), anyString()))
+        .thenThrow(new IllegalStateException("visibility unavailable"));
+
+    assertThat(
+            org.assertj.core.api.Assertions.catchThrowable(
+                () ->
+                    risk.checkEntryWithLimit(
+                        btoPayload("acme_trader", FIXED_NOW),
+                        c,
+                        null,
+                        new BigDecimal("2.30"),
+                        new BigDecimal("100000"))))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("visibility unavailable");
+  }
+
   // ----- same_underlying_count -----
 
   @Test
