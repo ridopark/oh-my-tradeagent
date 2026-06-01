@@ -164,4 +164,68 @@ class YamlStrategyRegistryTest {
     assertThat(cfg.getMaxSlippagePct()).isNull();
     assertThat(cfg.getRepegAfterMs()).isNull();
   }
+
+  @Test
+  void issue336_loadsDeprecatedNotionalCapEquityAlias(@TempDir Path tenantsDir) throws Exception {
+    // Issue #336: a config using the DEPRECATED notional_cap_pct_of_equity alias must still load
+    // (the field is retained in the additionalProperties:false schema so old configs deserialize).
+    Path file = tenantsDir.resolve("dev/strategies/copytrade-v1.yaml");
+    Files.createDirectories(file.getParent());
+    Files.writeString(
+        file,
+        """
+        schema_version: 1
+        tenant_id: dev
+        strategy_id: copytrade-v1
+        broker_target: paper
+        author_whitelist:
+          - acme_trader
+        max_signal_age_bto_secs: 30
+        max_signal_age_stc_secs: 60
+        max_positions: 5
+        capital_weight: 0.2
+        min_contracts: 1
+        max_contracts: 5
+        notional_cap_pct_of_equity: 0.40
+        """);
+
+    YamlStrategyRegistry registry = new YamlStrategyRegistry(tenantsDir.toString());
+    StrategyConfig cfg = registry.get("dev", "copytrade-v1");
+
+    assertThat(cfg.getNotionalCapPctOfEquity())
+        .isEqualByComparingTo(new java.math.BigDecimal("0.40"));
+    assertThat(cfg.getNotionalCapPctOfCapitalBase()).isNull();
+  }
+
+  @Test
+  void issue336_loadsCanonicalNotionalCapCapitalBaseField(@TempDir Path tenantsDir)
+      throws Exception {
+    // Issue #336: a config using the canonical notional_cap_pct_of_capital_base field loads.
+    Path file = tenantsDir.resolve("dev/strategies/copytrade-v1.yaml");
+    Files.createDirectories(file.getParent());
+    Files.writeString(
+        file,
+        """
+        schema_version: 1
+        tenant_id: dev
+        strategy_id: copytrade-v1
+        broker_target: paper
+        author_whitelist:
+          - acme_trader
+        max_signal_age_bto_secs: 30
+        max_signal_age_stc_secs: 60
+        max_positions: 5
+        capital_weight: 0.2
+        min_contracts: 1
+        max_contracts: 5
+        notional_cap_pct_of_capital_base: 0.40
+        """);
+
+    YamlStrategyRegistry registry = new YamlStrategyRegistry(tenantsDir.toString());
+    StrategyConfig cfg = registry.get("dev", "copytrade-v1");
+
+    assertThat(cfg.getNotionalCapPctOfCapitalBase())
+        .isEqualByComparingTo(new java.math.BigDecimal("0.40"));
+    assertThat(cfg.getNotionalCapPctOfEquity()).isNull();
+  }
 }
