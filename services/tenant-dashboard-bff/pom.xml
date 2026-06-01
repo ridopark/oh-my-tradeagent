@@ -111,6 +111,21 @@
           </execution>
         </executions>
       </plugin>
+      <!-- Run *IT classes (Testcontainers, gated on RUN_DB_ITS) under verify, matching the other
+           service modules (exec/orchestrator/audit/market-data). Without this the BFF's ITs were
+           dormant. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 </project>
