@@ -237,7 +237,7 @@ public class RiskActivitiesImpl implements RiskActivities {
    *
    * <p><b>Fail-closed.</b> A null/zero cash (an unavailable account read, or a pre-#323 producer
    * that omits {@code cash}) yields a zero-or-undercounted capital base; the gate rejects with
-   * {@code equity_unavailable} rather than passing an unbounded cap — preserving the #317
+   * {@code cash_unavailable} rather than passing an unbounded cap — preserving the #317
    * fail-closed-on-zero contract. The capital base is zero only when BOTH cash is zero AND there
    * are no open positions, which is itself a reject (cannot size against a zero base).
    */
@@ -255,7 +255,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     // here; an absent cash term simply rejects.
     BigDecimal cash = ctx.accountCash;
     if (cash == null || cash.signum() <= 0) {
-      return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
+      return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "cash_unavailable");
     }
     BigDecimal sumOpenNotional = sumOpenNotional(ctx);
     BigDecimal capitalBase = cash.add(sumOpenNotional);
