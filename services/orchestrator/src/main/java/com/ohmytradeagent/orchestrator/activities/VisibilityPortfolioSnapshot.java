@@ -4,12 +4,16 @@ import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.domain.OccSymbol;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import com.ohmytradeagent.orchestrator.workflows.PositionState;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -86,10 +90,25 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
   /** Books with at most this many listed positions fall under the small-book floor. */
   private static final int SMALL_BOOK_MAX_POSITIONS = 2;
 
-  private final WorkflowClient client;
+  /**
+   * Issue #329 observability-only counter. Incremented by the per-call {@code valueFailures} tally
+   * whenever {@code valueFailures > 0}, tagged {@code tenant}/{@code strategy}/{@code
+   * failed_closed} ({@code true} when the {@link #failsClosed} bound tripped and the call threw,
+   * {@code false} when the failures stayed under the bound and the call returned a best-effort
+   * list). Surfaces correlated near-boundary value-query degradation (e.g. exactly 50% on a larger
+   * book, or 1-of-3) that would otherwise drop positions from {@code sum_open_notional} silently.
+   * This is purely a signal — it does NOT influence the gate decision, the {@link #failsClosed}
+   * bound, the relative threshold, or the small-book floor.
+   */
+  static final String VALUE_FAILURES_COUNTER_NAME = "openpositions_value_failures_total";
 
-  public VisibilityPortfolioSnapshot(WorkflowClient client) {
+  private final WorkflowClient client;
+  private final MeterRegistry meterRegistry;
+  private final ConcurrentMap<String, Counter> valueFailureCounters = new ConcurrentHashMap<>();
+
+  public VisibilityPortfolioSnapshot(WorkflowClient client, MeterRegistry meterRegistry) {
     this.client = client;
+    this.meterRegistry = meterRegistry;
   }
 
   /**
@@ -146,7 +165,14 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
     // listed positions must fail the snapshot (throw) rather than undercount and loosen the cap.
     // See failsClosed / RELATIVE_FAILURE_THRESHOLD_MULTIPLIER for the relative threshold plus the
     // small-book floor and rationale.
-    if (listed > 0 && failsClosed(listed, valueFailures)) {
+    boolean failedClosed = listed > 0 && failsClosed(listed, valueFailures);
+
+    // Issue #329 observability-only emit: surface any genuine value-failures (regardless of whether
+    // the fail-closed bound tripped) so near-boundary degradation episodes are visible rather than
+    // silent. Gated on valueFailures > 0; does NOT alter the gate decision below.
+    recordValueFailures(tenantId, strategyId, failedClosed, valueFailures);
+
+    if (failedClosed) {
       throw new IllegalStateException(
           "openPositions value-failure bound exceeded: "
               + valueFailures
@@ -159,6 +185,41 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
               + "); failing closed rather than undercounting sum_open_notional");
     }
     return positions;
+  }
+
+  /**
+   * Issue #329 observability-only emit. When the per-call {@code valueFailures} tally is non-zero,
+   * increment {@link #VALUE_FAILURES_COUNTER_NAME} by that count, tagged {@code tenant}/{@code
+   * strategy}/{@code failed_closed}. Counters are cached per {@code (tenant, strategy,
+   * failed_closed)} tag combination (Micrometer dedupes by name+tags anyway; caching avoids the
+   * lookup-and-register cost). Tag cardinality is bounded — no per-workflow / per-correlation
+   * labels. A no-op when {@code valueFailures == 0}, so an all-good / all-legitimate-skips book
+   * emits nothing.
+   */
+  private void recordValueFailures(
+      String tenantId, String strategyId, boolean failedClosed, int valueFailures) {
+    if (valueFailures <= 0) {
+      return;
+    }
+    String key = tenantId + "|" + strategyId + "|" + failedClosed;
+    Counter counter =
+        valueFailureCounters.computeIfAbsent(
+            key,
+            k ->
+                Counter.builder(VALUE_FAILURES_COUNTER_NAME)
+                    .description(
+                        "Per-position openPositions value-query failures (#329 observability; does not affect the gate decision).")
+                    .tag("tenant", tenantId)
+                    .tag("strategy", strategyId)
+                    .tag("failed_closed", Boolean.toString(failedClosed))
+                    .register(meterRegistry));
+    counter.increment(valueFailures);
+    log.warn(
+        "openPositions value-failures observed tenant={} strategy={} value_failures={} failed_closed={}",
+        tenantId,
+        strategyId,
+        valueFailures,
+        failedClosed);
   }
 
   /**

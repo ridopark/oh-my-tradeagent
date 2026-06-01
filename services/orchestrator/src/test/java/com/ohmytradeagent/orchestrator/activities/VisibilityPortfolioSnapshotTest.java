@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.orchestrator.activities.PortfolioSnapshot.OpenPosition;
 import com.ohmytradeagent.orchestrator.workflows.PositionState;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
@@ -33,12 +34,14 @@ import org.mockito.ArgumentCaptor;
 class VisibilityPortfolioSnapshotTest {
 
   private WorkflowClient client;
+  private SimpleMeterRegistry meterRegistry;
   private VisibilityPortfolioSnapshot snapshot;
 
   @BeforeEach
   void setUp() {
     client = mock(WorkflowClient.class);
-    snapshot = new VisibilityPortfolioSnapshot(client);
+    meterRegistry = new SimpleMeterRegistry();
+    snapshot = new VisibilityPortfolioSnapshot(client, meterRegistry);
   }
 
   // The Visibility query filters on the TenantStrategy SA + WorkflowType +
@@ -239,7 +242,107 @@ class VisibilityPortfolioSnapshotTest {
     assertThat(snapshot.accountEquity("alpaca-paper")).isEqualByComparingTo(BigDecimal.ZERO);
   }
 
+  // #329 observability: a best-effort value-failure (1 of 3 listed, below the fail-closed bound)
+  // increments openpositions_value_failures_total by the failure count, tagged failed_closed=false.
+  // Reuses the best-effort book from openPositions_querySkipsWorkflowThatFailedTheQuery_bestEffort.
+  @Test
+  void openPositions_emitsValueFailuresCounter_bestEffort_failedClosedFalse() {
+    WorkflowExecutionMetadata good1 = metadata("wf-good-1");
+    WorkflowExecutionMetadata good2 = metadata("wf-good-2");
+    WorkflowExecutionMetadata bad = metadata("wf-bad");
+    when(client.listExecutions(anyString())).thenReturn(Stream.of(bad, good1, good2));
+
+    WorkflowStub good1Stub = mock(WorkflowStub.class);
+    when(good1Stub.query(eq("positionState"), eq(PositionState.class)))
+        .thenReturn(new PositionState("NVDA  250516C00140000", 1L, new BigDecimal("3.00")));
+    WorkflowStub good2Stub = mock(WorkflowStub.class);
+    when(good2Stub.query(eq("positionState"), eq(PositionState.class)))
+        .thenReturn(new PositionState("AAPL  250516C00200000", 2L, new BigDecimal("1.50")));
+    WorkflowStub badStub = mock(WorkflowStub.class);
+    when(badStub.query(eq("positionState"), eq(PositionState.class)))
+        .thenThrow(new RuntimeException("workflow not found"));
+    when(client.newUntypedWorkflowStub("wf-good-1")).thenReturn(good1Stub);
+    when(client.newUntypedWorkflowStub("wf-good-2")).thenReturn(good2Stub);
+    when(client.newUntypedWorkflowStub("wf-bad")).thenReturn(badStub);
+
+    snapshot.openPositions("acme", "copytrade-v1");
+
+    assertThat(valueFailureCount("acme", "copytrade-v1", false)).isEqualTo(1.0);
+    assertThat(valueFailureCount("acme", "copytrade-v1", true)).isEqualTo(0.0);
+  }
+
+  // #329 observability: when the fail-closed bound trips (here all listed positions fail to value),
+  // the counter still fires — by the full failure count, tagged failed_closed=true — even though
+  // the
+  // call also throws. The emit happens before the throw so the degradation is observable.
+  @Test
+  void openPositions_emitsValueFailuresCounter_failClosed_failedClosedTrue() {
+    WorkflowExecutionMetadata a = metadata("wf-a");
+    WorkflowExecutionMetadata b = metadata("wf-b");
+    when(client.listExecutions(anyString())).thenReturn(Stream.of(a, b));
+
+    WorkflowStub aStub = mock(WorkflowStub.class);
+    when(aStub.query(eq("positionState"), eq(PositionState.class)))
+        .thenThrow(new RuntimeException("query failed a"));
+    WorkflowStub bStub = mock(WorkflowStub.class);
+    when(bStub.query(eq("positionState"), eq(PositionState.class)))
+        .thenThrow(new RuntimeException("query failed b"));
+    when(client.newUntypedWorkflowStub("wf-a")).thenReturn(aStub);
+    when(client.newUntypedWorkflowStub("wf-b")).thenReturn(bStub);
+
+    assertThatThrownBy(() -> snapshot.openPositions("acme", "copytrade-v1"))
+        .isInstanceOf(IllegalStateException.class);
+
+    assertThat(valueFailureCount("acme", "copytrade-v1", true)).isEqualTo(2.0);
+    assertThat(valueFailureCount("acme", "copytrade-v1", false)).isEqualTo(0.0);
+  }
+
+  // #329 observability: an all-good book has zero value-failures, so the counter never registers
+  // (no
+  // emit) — gating on valueFailures > 0 keeps the signal quiet on the happy path.
+  @Test
+  void openPositions_doesNotEmitValueFailuresCounter_allGoodBook() {
+    stubExecutions(
+        Map.of(
+            "wf-nvda", new PositionState("NVDA  250516C00140000", 3L, new BigDecimal("2.50")),
+            "wf-aapl", new PositionState("AAPL  250516C00200000", 1L, new BigDecimal("4.00"))));
+
+    snapshot.openPositions("acme", "copytrade-v1");
+
+    assertThat(
+            meterRegistry.find(VisibilityPortfolioSnapshot.VALUE_FAILURES_COUNTER_NAME).counter())
+        .isNull();
+  }
+
+  // #329 observability: legitimate just-closed/blank/null-premium skips are NOT value-failures, so
+  // an
+  // all-skips book also emits nothing — distinguishing benign skips from genuine query degradation.
+  @Test
+  void openPositions_doesNotEmitValueFailuresCounter_allLegitimateSkips() {
+    stubExecutions(
+        Map.of(
+            "wf-closed", new PositionState("NVDA  250516C00140000", 0L, new BigDecimal("2.50")),
+            "wf-blank", new PositionState("", 2L, new BigDecimal("2.50"))));
+
+    snapshot.openPositions("acme", "copytrade-v1");
+
+    assertThat(
+            meterRegistry.find(VisibilityPortfolioSnapshot.VALUE_FAILURES_COUNTER_NAME).counter())
+        .isNull();
+  }
+
   // ----- helpers -----
+
+  private double valueFailureCount(String tenant, String strategy, boolean failedClosed) {
+    var counter =
+        meterRegistry
+            .find(VisibilityPortfolioSnapshot.VALUE_FAILURES_COUNTER_NAME)
+            .tag("tenant", tenant)
+            .tag("strategy", strategy)
+            .tag("failed_closed", Boolean.toString(failedClosed))
+            .counter();
+    return counter == null ? 0.0 : counter.count();
+  }
 
   private void stubExecutions(Map<String, PositionState> byWorkflowId) {
     Stream<WorkflowExecutionMetadata> stream = byWorkflowId.keySet().stream().map(this::metadata);

@@ -327,6 +327,28 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(d.allowed()).isTrue();
   }
 
+  // #329 fail-closed contract for same_underlying_count (mirrors the #325 notional_cap test): with
+  // ONLY this gate enabled, an openPositions throw (a Visibility error) must PROPAGATE out of
+  // checkEntry — the gate must NOT swallow it into an allowed/SAME_UNDERLYING_LIMIT-evaluated
+  // decision. checkSameUnderlyingCount reads the same ctx.openPositions() seam as checkNotionalCap,
+  // so the same fail-closed propagation must hold; this pins it so a future local try/catch can't
+  // silently regress it.
+  @Test
+  void checkEntry_sameUnderlying_propagatesWhenOpenPositionsThrows_failClosed() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfEquity(null); // ONLY same_underlying_count enabled
+    c.setSectorConcentrationCap(null);
+    c.setSameUnderlyingCount(2L);
+    when(portfolioSnapshot.openPositions(anyString(), anyString()))
+        .thenThrow(new IllegalStateException("visibility unavailable"));
+
+    assertThat(
+            org.assertj.core.api.Assertions.catchThrowable(
+                () -> risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null)))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("visibility unavailable");
+  }
+
   // ----- sector_concentration_cap -----
 
   @Test
@@ -400,6 +422,32 @@ class RiskActivitiesPortfolioGatesTest {
                 new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("1000"))));
     RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(d.allowed()).isTrue();
+  }
+
+  // #329 fail-closed contract for sector_concentration_cap (mirrors the #325 notional_cap test):
+  // with ONLY this gate enabled, an openPositions throw must PROPAGATE out of checkEntry rather
+  // than
+  // being swallowed into an allowed/SECTOR_CONCENTRATION_EXCEEDED-evaluated decision.
+  // checkSectorConcentration reads the same ctx.openPositions() seam, so the fail-closed
+  // propagation
+  // must hold; this pins it against a future local try/catch silently regressing it.
+  @Test
+  void checkEntry_sectorConcentration_propagatesWhenOpenPositionsThrows_failClosed() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfEquity(null); // ONLY sector_concentration_cap enabled
+    c.setSameUnderlyingCount(null);
+    c.setSectorConcentrationCap(2L);
+    Map<String, String> sectors = new HashMap<>();
+    sectors.put("NVDA", "tech");
+    c.setSectorOverrides(sectors);
+    when(portfolioSnapshot.openPositions(anyString(), anyString()))
+        .thenThrow(new IllegalStateException("visibility unavailable"));
+
+    assertThat(
+            org.assertj.core.api.Assertions.catchThrowable(
+                () -> risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null)))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("visibility unavailable");
   }
 
   // ----- daily_trade_count -----
