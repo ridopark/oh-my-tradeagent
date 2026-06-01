@@ -75,22 +75,24 @@ public class AlpacaPaperBroker implements OptionsBroker {
   private static final BigDecimal PDT_EQUITY_THRESHOLD = new BigDecimal("25000");
 
   /**
-   * Counter incremented each time {@link #preTradeCheck} takes the {@code options_buying_power}
-   * -absent fallback to raw {@code buying_power}. A persistently-looser funding gate is then
-   * observable as a non-zero rate, not just a buried WARN line.
+   * Counter name for the {@code options_buying_power}-absent fallback to raw {@code buying_power}.
    */
-  static final String BUYING_POWER_FALLBACK_COUNTER_NAME =
-      "alpaca_pretrade_buying_power_fallback_total";
+  static final String BUYING_POWER_FALLBACK_COUNTER_NAME = "alpaca.pretrade.buying_power.fallback";
 
   private final RestClient client;
   private final ObjectMapper mapper;
-  private final MeterRegistry meterRegistry;
+  private final Counter buyingPowerFallbackCounter;
 
   public AlpacaPaperBroker(
       RestClient alpacaRestClient, ObjectMapper objectMapper, MeterRegistry meterRegistry) {
     this.client = alpacaRestClient;
     this.mapper = objectMapper;
-    this.meterRegistry = meterRegistry;
+    this.buyingPowerFallbackCounter =
+        Counter.builder(BUYING_POWER_FALLBACK_COUNTER_NAME)
+            .description(
+                "Number of pre-trade checks that fell back to raw buying_power because Alpaca "
+                    + "omitted options_buying_power (looser-than-intended funding gate).")
+            .register(meterRegistry);
   }
 
   @Override
@@ -350,12 +352,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
           "Alpaca /v2/account omitted options_buying_power; falling back to raw buying_power for "
               + "the pre-trade gate. On a Reg-T margin account this can be 2-4x the correct options "
               + "buying power → a looser-than-intended margin check.");
-      Counter.builder(BUYING_POWER_FALLBACK_COUNTER_NAME)
-          .description(
-              "Number of pre-trade checks that fell back to raw buying_power because Alpaca "
-                  + "omitted options_buying_power (looser-than-intended funding gate).")
-          .register(meterRegistry)
-          .increment();
+      buyingPowerFallbackCounter.increment();
       buyingPower = acct.buyingPower();
     }
     if (buyingPower == null) {

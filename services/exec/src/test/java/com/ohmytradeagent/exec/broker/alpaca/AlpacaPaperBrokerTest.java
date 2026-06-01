@@ -496,10 +496,14 @@ class AlpacaPaperBrokerTest {
     assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("40000.00"));
     assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.OK);
     assertThat(r.getMarginSufficient()).isTrue();
-    // Issue #331: the fallback counter must NOT fire on the happy path (options_buying_power
-    // present), so it is never registered.
-    assertThat(meterRegistry.find(AlpacaPaperBroker.BUYING_POWER_FALLBACK_COUNTER_NAME).counter())
-        .isNull();
+    // The fallback counter must NOT fire on the happy path (options_buying_power present), so it
+    // stays at zero.
+    assertThat(
+            meterRegistry
+                .get(AlpacaPaperBroker.BUYING_POWER_FALLBACK_COUNTER_NAME)
+                .counter()
+                .count())
+        .isEqualTo(0.0);
 
     RecordedRequest req = server.takeRequest();
     assertThat(req.getMethod()).isEqualTo("GET");
@@ -525,8 +529,8 @@ class AlpacaPaperBrokerTest {
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
     assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("75000.00"));
-    // Issue #331: the fallback also bumps a Micrometer counter so a persistently-looser funding
-    // gate is observable (not just a buried WARN). Asserting count == 1.0 proves the fallback ran.
+    // The fallback also bumps a Micrometer counter so a persistently-looser funding gate is
+    // observable (not just a buried WARN). Asserting count == 1.0 proves the fallback ran.
     assertThat(
             meterRegistry
                 .get(AlpacaPaperBroker.BUYING_POWER_FALLBACK_COUNTER_NAME)
