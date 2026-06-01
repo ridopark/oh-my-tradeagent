@@ -20,9 +20,6 @@ if (!BFF_TOKEN) {
 export class NotAuthenticatedError extends Error {}
 
 async function bffGet<T>(path: string): Promise<T> {
-  if (!BFF_TOKEN) {
-    throw new Error("BFF_SHARED_TOKEN is not configured");
-  }
   const session = await auth();
   const tenantId = session?.tenantId;
   if (!tenantId) {

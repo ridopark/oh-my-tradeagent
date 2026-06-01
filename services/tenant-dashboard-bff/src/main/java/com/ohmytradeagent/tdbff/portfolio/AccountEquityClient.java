@@ -32,6 +32,9 @@ public class AccountEquityClient {
 
   private static final Logger log = LoggerFactory.getLogger(AccountEquityClient.class);
   private static final String WORKFLOW_TYPE = "AccountSnapshotWorkflow";
+  // Bounds the blocking getResult so an unreachable Temporal service can't pin a request thread.
+  // Covers the workflow's 60s scheduleToCloseTimeout (AccountSnapshotWorkflowImpl) plus margin.
+  private static final long RESULT_TIMEOUT_SECONDS = 90;
 
   private final WorkflowClient client;
   private final String orchestratorTaskQueue;
@@ -64,11 +67,11 @@ public class AccountEquityClient {
     try {
       WorkflowStub stub = client.newUntypedWorkflowStub(WORKFLOW_TYPE, opts);
       stub.start(request);
-      // Bounded wait so an unreachable Temporal service / down task queue cannot pin a Spring MVC
-      // request thread indefinitely. 90s covers the workflow's 60s scheduleToCloseTimeout plus
-      // margin; on timeout we degrade to null like any other snapshot-unavailable case.
+      // Bounded wait (RESULT_TIMEOUT_SECONDS) so an unreachable Temporal service / down task queue
+      // cannot pin a Spring MVC request thread indefinitely; on timeout we degrade to null like any
+      // other snapshot-unavailable case.
       AccountSnapshotResult result =
-          stub.getResult(90, TimeUnit.SECONDS, AccountSnapshotResult.class);
+          stub.getResult(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS, AccountSnapshotResult.class);
       return result == null ? null : result.getEquity();
     } catch (TimeoutException | RuntimeException e) {
       log.warn(
