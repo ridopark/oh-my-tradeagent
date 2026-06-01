@@ -66,8 +66,8 @@ public class AccountEquityClient {
             .setTaskQueue(orchestratorTaskQueue)
             .setWorkflowId("account-snapshot/" + brokerTarget + "/" + UUID.randomUUID())
             .build();
+    WorkflowStub stub = client.newUntypedWorkflowStub(WORKFLOW_TYPE, opts);
     try {
-      WorkflowStub stub = client.newUntypedWorkflowStub(WORKFLOW_TYPE, opts);
       stub.start(request);
       // Bounded wait (RESULT_TIMEOUT_SECONDS) so an unreachable Temporal service / down task queue
       // cannot pin a Spring MVC request thread indefinitely; on timeout we degrade to null like any
@@ -75,7 +75,22 @@ public class AccountEquityClient {
       AccountSnapshotResult result =
           stub.getResult(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS, AccountSnapshotResult.class);
       return result == null ? null : result.getEquity();
-    } catch (TimeoutException | RuntimeException e) {
+    } catch (TimeoutException e) {
+      // We stopped waiting, but the workflow is still running. Cancel it so it doesn't linger as an
+      // orphan — holding an orchestrator worker slot and re-hitting the broker account endpoint —
+      // long after this request already degraded to null.
+      log.warn(
+          "AccountSnapshotWorkflow timed out broker_target={}; cancelling orphan", brokerTarget);
+      try {
+        stub.cancel();
+      } catch (RuntimeException cancelErr) {
+        log.warn(
+            "AccountSnapshotWorkflow cancel failed broker_target={} err={}",
+            brokerTarget,
+            cancelErr.getMessage());
+      }
+      return null;
+    } catch (RuntimeException e) {
       log.warn(
           "AccountSnapshotWorkflow failed broker_target={} err={}", brokerTarget, e.getMessage());
       return null;
