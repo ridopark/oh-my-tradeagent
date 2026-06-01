@@ -589,9 +589,8 @@ class AlpacaPaperBrokerTest {
   @Test
   void preTradeCheck_unauthorized_failsClosedWithAuthError() {
     // Issue #320 criterion 6: a broker exception (401/5xx) on /v2/account fails closed — the
-    // override raises a non-retryable ApplicationFailure mirroring getAccountEquity's mapping so
-    // the
-    // workflow's fail-closed path rejects.
+    // override raises a non-retryable ApplicationFailure mirroring getAccountEquity's mapping, so
+    // the workflow's fail-closed path rejects.
     server.enqueue(
         new MockResponse()
             .setResponseCode(401)
