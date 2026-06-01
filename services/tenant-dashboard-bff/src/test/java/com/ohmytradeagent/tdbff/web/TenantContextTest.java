@@ -31,4 +31,12 @@ class TenantContextTest {
     assertThatThrownBy(() -> ctx.tenantId(req))
         .isInstanceOf(TenantContext.MissingTenantException.class);
   }
+
+  @Test
+  void pathTraversalHeader_throws_soItNeverReachesFilesystemResolution() {
+    MockHttpServletRequest req = new MockHttpServletRequest();
+    req.addHeader("X-Tenant-Id", "../../etc/passwd");
+    assertThatThrownBy(() -> ctx.tenantId(req))
+        .isInstanceOf(TenantContext.MissingTenantException.class);
+  }
 }
