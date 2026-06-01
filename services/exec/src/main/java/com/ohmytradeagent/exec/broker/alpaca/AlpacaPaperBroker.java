@@ -326,8 +326,19 @@ public class AlpacaPaperBroker implements OptionsBroker {
   public PreTradeCheckResult preTradeCheck(PreTradeCheckRequest request) {
     AlpacaAccountResponse acct = fetchAccount();
 
-    BigDecimal buyingPower =
-        acct.optionsBuyingPower() != null ? acct.optionsBuyingPower() : acct.buyingPower();
+    BigDecimal buyingPower;
+    if (acct.optionsBuyingPower() != null) {
+      buyingPower = acct.optionsBuyingPower();
+    } else {
+      // Fallback: Alpaca normally always returns options_buying_power once options are enabled.
+      // Raw buying_power on a Reg-T margin account can be 2-4x the correct options figure, so this
+      // path yields a looser-than-intended gate. Log a WARN for observability.
+      log.warn(
+          "Alpaca /v2/account omitted options_buying_power; falling back to raw buying_power for "
+              + "the pre-trade gate. On a Reg-T margin account this can be 2-4x the correct options "
+              + "buying power → a looser-than-intended margin check.");
+      buyingPower = acct.buyingPower();
+    }
     if (buyingPower == null) {
       throw ApplicationFailure.newNonRetryableFailure(
           "Alpaca /v2/account returned neither options_buying_power nor buying_power",
@@ -367,7 +378,19 @@ public class AlpacaPaperBroker implements OptionsBroker {
     if (!Boolean.TRUE.equals(acct.patternDayTrader())) {
       return false;
     }
-    if (acct.daytradeCount() == null || acct.daytradeCount() < PDT_DAYTRADE_LIMIT) {
+    if (acct.daytradeCount() == null) {
+      // Fail-closed: a flagged pattern-day-trader account that won't report its day-trade count is
+      // a
+      // protocol breach. Admitting (fail-OPEN) could let a possibly-barred account keep trading.
+      // Mirror the null-equity breach below.
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca /v2/account returned null/missing daytrade_count for a flagged "
+              + "pattern-day-trader account; cannot evaluate PDT block",
+          "BrokerProtocolError");
+    }
+    if (acct.daytradeCount() < PDT_DAYTRADE_LIMIT) {
+      // INTENTIONAL under-limit admit: a flagged account that has not yet used the regulatory
+      // sub-$25k day-trade limit (3) is allowed to keep trading. Do NOT "fix" this to fail closed.
       return false;
     }
     if (acct.equity() == null) {
