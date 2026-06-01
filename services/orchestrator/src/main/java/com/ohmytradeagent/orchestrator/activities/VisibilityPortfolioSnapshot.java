@@ -60,22 +60,49 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
    * listed positions, which would drop those positions from {@code sum_open_notional} and silently
    * <i>loosen</i> the {@code notional_cap_pct_of_equity} cap (undercounting open exposure → permits
    * trades it should reject). To keep that failure mode fail-closed we throw instead of returning
-   * an undercounted list once too large a fraction of the listed positions fail to <i>value</i>
-   * (genuine value-failures only — legitimate just-closed/blank/null-premium skips do NOT count).
+   * an undercounted list once the listed positions fail to <i>value</i> badly enough. Only genuine
+   * value-failures ({@link ValueResult#failure()} — a Running workflow that cannot answer its state
+   * query, a degradation signal) count; legitimate just-closed/blank/null-premium <i>skips</i>
+   * ({@link ValueResult#skip()}) do NOT.
    *
-   * <p>Rule: with {@code N} listed running positions and {@code F} value-failures, throw when
-   * {@code F * 2 > N} (i.e. <b>strictly more than 50%</b> of listed positions failed to value).
-   * This is a single rule that also covers the small-count case: 1 failure out of 1 listed ({@code
-   * 2 > 1}) fails closed, while 1 failure out of 2 listed ({@code 2 > 2} is false) stays
-   * best-effort — preserving the existing best-effort skip for an isolated query race. A bare
-   * {@code >} (not {@code >=}) keeps the exactly-50% boundary best-effort.
+   * <p>The bound combines two rules (see {@link #failsClosed}):
+   *
+   * <ul>
+   *   <li><b>Relative >50% threshold (larger books).</b> With {@code N} listed running positions
+   *       and {@code F} value-failures, throw when {@code F * 2 > N} (strictly more than half of
+   *       listed positions failed to value). A bare {@code >} (not {@code >=}) keeps the
+   *       exactly-50% boundary best-effort on larger books, where a single isolated query race is
+   *       proportionally small.
+   *   <li><b>Small-book floor (1–2 positions).</b> On a 1- or 2-position book, <i>any</i> single
+   *       genuine value-failure fails closed. On such a tiny book one missed position is up to a
+   *       full position's notional — materially loosening the cap — and the relative threshold
+   *       alone leaves a hole at exactly 50% (1-of-2: {@code 2 > 2} is false), so the floor closes
+   *       it. Benign skips still do not count, so an all-skips tiny book stays best-effort (empty
+   *       list).
+   * </ul>
    */
-  private static final int VALUE_FAILURE_NUMERATOR_MULTIPLIER = 2;
+  private static final int RELATIVE_FAILURE_THRESHOLD_MULTIPLIER = 2;
+
+  /** Books with at most this many listed positions fall under the small-book floor. */
+  private static final int SMALL_BOOK_MAX_POSITIONS = 2;
 
   private final WorkflowClient client;
 
   public VisibilityPortfolioSnapshot(WorkflowClient client) {
     this.client = client;
+  }
+
+  /**
+   * Whether the value-failure tally over a non-empty listed book must fail the snapshot closed.
+   * Trips when either the relative {@code >50%} threshold is exceeded or — on a 1–2 position book —
+   * at least one genuine value-failure occurred (the small-book floor). See {@link
+   * #RELATIVE_FAILURE_THRESHOLD_MULTIPLIER} for the full rule and rationale.
+   */
+  private static boolean failsClosed(int listed, int valueFailures) {
+    boolean exceedsRelativeThreshold =
+        (long) valueFailures * RELATIVE_FAILURE_THRESHOLD_MULTIPLIER > listed;
+    boolean tripsSmallBookFloor = listed <= SMALL_BOOK_MAX_POSITIONS && valueFailures >= 1;
+    return exceedsRelativeThreshold || tripsSmallBookFloor;
   }
 
   /**
@@ -115,11 +142,11 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
       }
     }
 
-    // Task (c) fail-closed bound (#325): a correlated value-query degradation that drops more than
-    // half the listed positions must fail the snapshot (throw) rather than undercount and loosen
-    // the
-    // cap. See VALUE_FAILURE_NUMERATOR_MULTIPLIER for the exact rule and rationale.
-    if (listed > 0 && (long) valueFailures * VALUE_FAILURE_NUMERATOR_MULTIPLIER > listed) {
+    // Task (c) fail-closed bound (#325): a correlated value-query degradation that drops too many
+    // listed positions must fail the snapshot (throw) rather than undercount and loosen the cap.
+    // See failsClosed / RELATIVE_FAILURE_THRESHOLD_MULTIPLIER for the relative threshold plus the
+    // small-book floor and rationale.
+    if (listed > 0 && failsClosed(listed, valueFailures)) {
       throw new IllegalStateException(
           "openPositions value-failure bound exceeded: "
               + valueFailures

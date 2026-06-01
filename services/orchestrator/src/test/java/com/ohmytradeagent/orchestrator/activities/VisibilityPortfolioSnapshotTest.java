@@ -90,14 +90,52 @@ class VisibilityPortfolioSnapshotTest {
     assertThat(positions).containsExactly(new OpenPosition("MSFT", new BigDecimal("200.00")));
   }
 
+  // #325 best-effort contract on a larger book: 1 genuine value-failure out of 3 listed (33% < 50%,
+  // and listed > 2 so the small-book floor does not apply) stays best-effort — the failed position
+  // is skipped and the surviving two are returned. This preserves "an isolated transient query
+  // failure on a larger book skips and continues" rather than failing the whole snapshot.
   @Test
   void openPositions_querySkipsWorkflowThatFailedTheQuery_bestEffort() {
+    WorkflowExecutionMetadata good1 = metadata("wf-good-1");
+    WorkflowExecutionMetadata good2 = metadata("wf-good-2");
+    WorkflowExecutionMetadata bad = metadata("wf-bad");
+    when(client.listExecutions(anyString())).thenReturn(Stream.of(bad, good1, good2));
+
+    WorkflowStub good1Stub = mock(WorkflowStub.class);
+    when(good1Stub.query(eq("positionState"), eq(PositionState.class)))
+        .thenReturn(new PositionState("NVDA  250516C00140000", 1L, new BigDecimal("3.00")));
+    WorkflowStub good2Stub = mock(WorkflowStub.class);
+    when(good2Stub.query(eq("positionState"), eq(PositionState.class)))
+        .thenReturn(new PositionState("AAPL  250516C00200000", 2L, new BigDecimal("1.50")));
+    WorkflowStub badStub = mock(WorkflowStub.class);
+    when(badStub.query(eq("positionState"), eq(PositionState.class)))
+        .thenThrow(new RuntimeException("workflow not found"));
+
+    when(client.newUntypedWorkflowStub("wf-good-1")).thenReturn(good1Stub);
+    when(client.newUntypedWorkflowStub("wf-good-2")).thenReturn(good2Stub);
+    when(client.newUntypedWorkflowStub("wf-bad")).thenReturn(badStub);
+
+    List<OpenPosition> positions = snapshot.openPositions("acme", "copytrade-v1");
+
+    assertThat(positions)
+        .containsExactlyInAnyOrder(
+            new OpenPosition("NVDA", new BigDecimal("300.00")),
+            new OpenPosition("AAPL", new BigDecimal("300.00")));
+  }
+
+  // #325 small-book floor: 1 genuine value-failure out of 2 listed positions is exactly 50% (below
+  // the relative >50% threshold) but on a 1-2 position book a single missed position is up to a
+  // full position's notional, materially loosening the cap — so the small-book floor fails it
+  // closed (throws) rather than returning the surviving position with an undercounted notional.
+  @Test
+  void openPositions_throwsWhenOneOfTwoListedPositionsFailsToValue_smallBookFloor() {
     WorkflowExecutionMetadata good = metadata("wf-good");
     WorkflowExecutionMetadata bad = metadata("wf-bad");
     when(client.listExecutions(anyString())).thenReturn(Stream.of(bad, good));
 
     WorkflowStub goodStub = mock(WorkflowStub.class);
-    when(goodStub.query(eq("positionState"), eq(PositionState.class)))
+    lenient()
+        .when(goodStub.query(eq("positionState"), eq(PositionState.class)))
         .thenReturn(new PositionState("NVDA  250516C00140000", 1L, new BigDecimal("3.00")));
     WorkflowStub badStub = mock(WorkflowStub.class);
     when(badStub.query(eq("positionState"), eq(PositionState.class)))
@@ -106,9 +144,9 @@ class VisibilityPortfolioSnapshotTest {
     when(client.newUntypedWorkflowStub("wf-good")).thenReturn(goodStub);
     when(client.newUntypedWorkflowStub("wf-bad")).thenReturn(badStub);
 
-    List<OpenPosition> positions = snapshot.openPositions("acme", "copytrade-v1");
-
-    assertThat(positions).containsExactly(new OpenPosition("NVDA", new BigDecimal("300.00")));
+    assertThatThrownBy(() -> snapshot.openPositions("acme", "copytrade-v1"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("value-failure bound exceeded");
   }
 
   // #325 fail-closed contract: a Visibility error in the listExecutions query must PROPAGATE (not
