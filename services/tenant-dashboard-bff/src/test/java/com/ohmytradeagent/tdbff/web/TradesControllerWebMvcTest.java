@@ -1,7 +1,6 @@
 package com.ohmytradeagent.tdbff.web;
 
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.when;
@@ -14,6 +13,7 @@ import com.ohmytradeagent.tdbff.trades.TradesReader;
 import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -37,6 +37,12 @@ class TradesControllerWebMvcTest {
   @MockitoBean private TradesReader reader;
   @MockitoBean private TenantStrategyResolver strategyResolver;
 
+  @BeforeEach
+  void resolveTenantStrategies() {
+    // tenant `acme` maps to one strategy; the 401 test never reaches this (lenient @MockitoBean).
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+  }
+
   @Test
   void missingTenantHeaderIs401() throws Exception {
     // A tenant-facing read must never fall back to `dev`: absent X-Tenant-Id -> 401, not 200.
@@ -47,8 +53,7 @@ class TradesControllerWebMvcTest {
 
   @Test
   void returnsTenantScopedTrades() throws Exception {
-    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
-    when(reader.trades(eq("acme"), anyList(), isNull(), anyInt()))
+    when(reader.trades(eq("acme"), eq(List.of("s1")), isNull(), anyInt()))
         .thenReturn(List.of(Map.of("event_id", "e1", "kind", "EntryFilled")));
 
     mvc.perform(get("/api/trades").header("X-Tenant-Id", "acme"))
@@ -60,10 +65,9 @@ class TradesControllerWebMvcTest {
 
   @Test
   void malformedSinceIs400() throws Exception {
-    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
     // A bad `since` reaches OffsetDateTime.parse in the reader and throws DateTimeParseException;
     // GlobalExceptionHandler must map it to 400, not 500.
-    when(reader.trades(eq("acme"), anyList(), eq("not-a-date"), anyInt()))
+    when(reader.trades(eq("acme"), eq(List.of("s1")), eq("not-a-date"), anyInt()))
         .thenThrow(
             new DateTimeParseException("Text 'not-a-date' could not be parsed", "not-a-date", 0));
 
