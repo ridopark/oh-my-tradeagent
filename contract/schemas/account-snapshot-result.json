@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/account-snapshot-result.json",
+  "title": "AccountSnapshotResult",
+  "description": "Issue #317 account-equity gate output. Returned by exec-svc's account_snapshot Activity. Carries the brokerage account's net-liquidation equity (Alpaca /v2/account 'equity', NOT 'buying_power'). risk-svc threads equity into the notional_cap_pct_of_equity gate and fails closed when equity is zero/unavailable. Broker adapters that do not yet expose a real account endpoint return the documented sentinel equity=0 so the field shape stays stable while per-provider backfills land.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.AccountSnapshotResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "equity"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "equity": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Account net-liquidation equity in dollars at the moment of the check (Alpaca /v2/account 'equity', not buying_power). risk-svc compares (sum_open_notional + new_notional) against notional_cap_pct_of_equity * equity. A zero value means the figure was unavailable; the gate fails closed (rejects) rather than passing an unbounded cap."
+    }
+  }
+}

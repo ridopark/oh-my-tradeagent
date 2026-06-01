@@ -32,7 +32,7 @@ public final class RiskCollaboratorDefaults {
       }
 
       @Override
-      public BigDecimal accountEquity(String tenantId, String strategyId) {
+      public BigDecimal accountEquity(String brokerTarget) {
         return BigDecimal.ZERO;
       }
     };

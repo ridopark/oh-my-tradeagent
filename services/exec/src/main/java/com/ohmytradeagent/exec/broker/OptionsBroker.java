@@ -94,4 +94,23 @@ public interface OptionsBroker {
     r.setMarginSufficient(true);
     return r;
   }
+
+  /**
+   * Account-equity gate. Returns the brokerage account's net-liquidation equity in dollars (Alpaca
+   * {@code /v2/account} {@code equity}, NOT {@code buying_power}). The {@code
+   * notional_cap_pct_of_equity} risk gate compares {@code (sum_open_notional + new_notional)}
+   * against {@code pct * equity}.
+   *
+   * <p>Default returns the documented sentinel {@link BigDecimal#ZERO} so brokers that don't yet
+   * expose an account endpoint (the in-memory {@link
+   * com.ohmytradeagent.exec.broker.stub.StubBroker}) degrade cleanly: zero equity makes the risk
+   * gate fail closed (reject) rather than passing an unbounded cap. Brokers that expose a real
+   * account endpoint (Alpaca {@code /v2/account}) override this to query their venue.
+   *
+   * <p>The risk gate is also opt-in via {@code StrategyConfig.notional_cap_pct_of_equity}, so a
+   * deployment running the default impl never surprises a strategy that didn't enable the gate.
+   */
+  default BigDecimal getAccountEquity() {
+    return BigDecimal.ZERO;
+  }
 }

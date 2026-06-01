@@ -1,5 +1,7 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
+import com.ohmytradeagent.contract.AccountSnapshotRequest;
+import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
@@ -12,6 +14,7 @@ import com.ohmytradeagent.contract.PreTradeCheckRequest;
 import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
@@ -30,6 +33,7 @@ import com.ohmytradeagent.orchestrator.domain.Sizing;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.api.enums.v1.ParentClosePolicy;
 import io.temporal.common.RetryOptions;
+import io.temporal.failure.CanceledFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.ExternalWorkflowStub;
@@ -111,6 +115,16 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // option_symbol key) and stay deterministic; only new executions (v>=1) emit it. Mirrors
   // VERSION_TTL_FILLED_ADOPTION / VERSION_BREACH_FILLED_ADOPTION.
   private static final String VERSION_ENTRY_FILLED_OPTION_SYMBOL = "entry-filled-option-symbol-v1";
+
+  // Gate the new account-snapshot dispatch + the 5-arg checkEntryWithLimit overload
+  // that
+  // threads the broker-supplied equity into the notional-cap gate. In-flight v>=1 workflows
+  // recorded
+  // a 4-arg CheckEntryWithLimit call (and no AccountSnapshot activity-task) before this landed;
+  // replaying them must keep the legacy path or Temporal trips a non-determinism error.
+  // v=DEFAULT_VERSION replays the prior 4-arg call (equity from the PortfolioSnapshot seam); v>=1
+  // dispatches AccountSnapshot and passes the equity down.
+  private static final String VERSION_ACCOUNT_EQUITY_DISPATCH = "account-equity-dispatch-v1";
 
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
@@ -229,7 +243,20 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         // landed.
         decision = risk.checkEntry(payload, config, preTradeResult);
       } else {
-        decision = risk.checkEntryWithLimit(payload, config, preTradeResult, priced.limit());
+        // Dispatch the broker-<broker_target> account read and thread the equity into
+        // the notional-cap gate. Replay-gated: in-flight v>=1 histories that recorded the 4-arg
+        // CheckEntryWithLimit call keep the legacy path (equity from the PortfolioSnapshot seam).
+        int accountEquityVersion =
+            Workflow.getVersion(VERSION_ACCOUNT_EQUITY_DISPATCH, Workflow.DEFAULT_VERSION, 1);
+        if (accountEquityVersion == Workflow.DEFAULT_VERSION) {
+          decision =
+              risk.checkEntryWithLimit(payload, config, preTradeResult, priced.limit(), null);
+        } else {
+          BigDecimal accountEquity = dispatchAccountSnapshot(payload, config);
+          decision =
+              risk.checkEntryWithLimit(
+                  payload, config, preTradeResult, priced.limit(), accountEquity);
+        }
       }
     }
     if (!decision.allowed()) {
@@ -707,6 +734,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     PreTradeCheckRequest request = buildPreTradeCheckRequest(payload, config, estimatedLimitPrice);
     try {
       return preTradeStub.preTradeCheck(request);
+    } catch (CanceledFailure cf) {
+      throw cf;
     } catch (Exception e) {
       return PreTradeCheckSentinels.dispatchFailed(e.getClass().getSimpleName());
     }
@@ -733,6 +762,65 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     r.setQty(minContracts == null ? 1L : Math.max(1L, minContracts));
     BigDecimal limit = estimatedLimitPrice == null ? BigDecimal.ZERO : estimatedLimitPrice;
     r.setEstimatedNotional(limit.multiply(Sizing.CONTRACT_MULTIPLIER));
+    r.setCorrelationId(payload.getSignalId());
+    return r;
+  }
+
+  /**
+   * Dispatches the cross-service {@code AccountSnapshotActivity} over the {@code
+   * broker-<broker_target>} task queue and returns the account's net-liquidation equity. Returns
+   * {@code null} when the notional-cap gate is disabled (no {@code notional_cap_pct_of_equity}) so
+   * the cross-service round-trip only fires when the strategy enabled the gate.
+   *
+   * <p>Fail-closed semantics: any exception (after Temporal's own retries), a null/blank {@code
+   * broker_target}, or a null result yields {@code BigDecimal.ZERO}. The downstream {@code
+   * checkNotionalCap} gate rejects on zero/missing equity, so a broker outage rejects entries
+   * rather than passing an unbounded cap — mirroring {@code dispatchPreTradeCheck}.
+   *
+   * <p>Determinism: the request is built from {@code config.broker_target + signal_id} only — no
+   * clock reads, no random IDs. Safe to call inside the workflow body. Equity is account-level, so
+   * the request carries no tenant/strategy.
+   */
+  private BigDecimal dispatchAccountSnapshot(
+      CopytradeSignalPayload payload, StrategyConfig config) {
+    if (config.getNotionalCapPctOfEquity() == null) {
+      return null;
+    }
+    if (config.getBrokerTarget() == null) {
+      return BigDecimal.ZERO;
+    }
+    AccountSnapshotActivity accountStub =
+        Workflow.newActivityStub(
+            AccountSnapshotActivity.class,
+            ActivityOptions.newBuilder()
+                .setTaskQueue(ExecActivitiesFactory.taskQueueFor(config.getBrokerTarget().value()))
+                .setStartToCloseTimeout(Duration.ofSeconds(15))
+                .setScheduleToCloseTimeout(Duration.ofSeconds(60))
+                .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
+                .build());
+    AccountSnapshotRequest request = buildAccountSnapshotRequest(payload, config);
+    try {
+      AccountSnapshotResult result = accountStub.accountSnapshot(request);
+      return result == null || result.getEquity() == null ? BigDecimal.ZERO : result.getEquity();
+    } catch (CanceledFailure cf) {
+      throw cf;
+    } catch (Exception e) {
+      return BigDecimal.ZERO;
+    }
+  }
+
+  /**
+   * Builds the {@link AccountSnapshotRequest} the workflow dispatches to exec-svc. Equity is
+   * account-level (tenant/strategy-independent), so the request is keyed solely on {@code
+   * broker_target}; {@code correlation_id} is the deterministic {@code signal_id} so audit traces
+   * stitch end-to-end.
+   */
+  private static AccountSnapshotRequest buildAccountSnapshotRequest(
+      CopytradeSignalPayload payload, StrategyConfig config) {
+    AccountSnapshotRequest r = new AccountSnapshotRequest();
+    r.setSchemaVersion(1L);
+    r.setBrokerTarget(
+        AccountSnapshotRequest.BrokerTarget.fromValue(config.getBrokerTarget().value()));
     r.setCorrelationId(payload.getSignalId());
     return r;
   }

@@ -60,8 +60,7 @@ class RiskActivitiesPortfolioGatesTest {
 
     portfolioSnapshot = mock(PortfolioSnapshot.class);
     when(portfolioSnapshot.openPositions(anyString(), anyString())).thenReturn(List.of());
-    when(portfolioSnapshot.accountEquity(anyString(), anyString()))
-        .thenReturn(new BigDecimal("100000"));
+    when(portfolioSnapshot.accountEquity(anyString())).thenReturn(new BigDecimal("100000"));
 
     dailyTradeCounter = mock(DailyTradeCounter.class);
     when(dailyTradeCounter.count(anyString(), anyString(), any())).thenReturn(0L);
@@ -128,7 +127,7 @@ class RiskActivitiesPortfolioGatesTest {
     // Slip-adjusted via the new entry-point: 49770 + (3.15 * 100) = 50085 > 50000 → rejects.
     RiskDecision slip =
         risk.checkEntryWithLimit(
-            btoPayload("acme_trader", FIXED_NOW), c, null, new BigDecimal("3.15"));
+            btoPayload("acme_trader", FIXED_NOW), c, null, new BigDecimal("3.15"), null);
     assertThat(slip.allowed()).isFalse();
     assertThat(slip.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
     assertThat(slip.detail()).contains("notional=50085");
@@ -145,7 +144,7 @@ class RiskActivitiesPortfolioGatesTest {
     res.setBuyingPower(new BigDecimal("250"));
     RiskDecision d =
         risk.checkEntryWithLimit(
-            btoPayload("acme_trader", FIXED_NOW), c, res, new BigDecimal("3.15"));
+            btoPayload("acme_trader", FIXED_NOW), c, res, new BigDecimal("3.15"), null);
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
     assertThat(d.detail()).contains("buying_power=250");
@@ -162,7 +161,7 @@ class RiskActivitiesPortfolioGatesTest {
     res.setBuyingPower(new BigDecimal("315.00"));
     RiskDecision d =
         risk.checkEntryWithLimit(
-            btoPayload("acme_trader", FIXED_NOW), c, res, new BigDecimal("3.15"));
+            btoPayload("acme_trader", FIXED_NOW), c, res, new BigDecimal("3.15"), null);
     assertThat(d.allowed()).isTrue();
   }
 
@@ -182,18 +181,82 @@ class RiskActivitiesPortfolioGatesTest {
     c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
 
     // Case 1: equity == null (snapshot source unavailable) → fail closed.
-    when(portfolioSnapshot.accountEquity(anyString(), anyString())).thenReturn(null);
+    when(portfolioSnapshot.accountEquity(anyString())).thenReturn(null);
     RiskDecision dNull = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(dNull.allowed()).isFalse();
     assertThat(dNull.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
     assertThat(dNull.detail()).contains("equity_unavailable");
 
     // Case 2: equity == 0 (degenerate snapshot) → fail closed.
-    when(portfolioSnapshot.accountEquity(anyString(), anyString())).thenReturn(BigDecimal.ZERO);
+    when(portfolioSnapshot.accountEquity(anyString())).thenReturn(BigDecimal.ZERO);
     RiskDecision dZero = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
     assertThat(dZero.allowed()).isFalse();
     assertThat(dZero.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
     assertThat(dZero.detail()).contains("equity_unavailable");
+  }
+
+  // A null/blank broker_target can't key the PortfolioSnapshot seam, so equity is unavailable and
+  // the gate must fail closed (reject) rather than passing null into the seam. The seam mock would
+  // return a generous 100k equity if consulted — proving the gate short-circuits before it.
+  @Test
+  void notionalCap_failsClosed_whenBrokerTargetNull() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setBrokerTarget(null);
+
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
+    assertThat(d.detail()).contains("equity_unavailable");
+    // The seam is never consulted when broker_target can't key it.
+    org.mockito.Mockito.verify(portfolioSnapshot, org.mockito.Mockito.never())
+        .accountEquity(org.mockito.ArgumentMatchers.any());
+  }
+
+  // Issue #317: the workflow-supplied equity (5th arg of checkEntryWithLimit) takes precedence over
+  // the PortfolioSnapshot seam. Here the snapshot would APPROVE (100k equity → 50k cap) but the
+  // dispatched equity (400 → 200 cap) REJECTS, proving the gate reads the threaded value.
+  @Test
+  void checkEntryWithLimit_usesWorkflowSuppliedEquity_overSnapshotSeam() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // 50% cap
+    // Dispatched equity 1000 → 500 cap. new notional 230 < 500 → approve.
+    RiskDecision approve =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW),
+            c,
+            null,
+            new BigDecimal("2.30"),
+            new BigDecimal("1000"));
+    assertThat(approve.allowed()).isTrue();
+
+    // Shrink the dispatched equity so the cap bites even though the snapshot seam is generous
+    // (100k).
+    RiskDecision reject =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW),
+            c,
+            null,
+            new BigDecimal("2.30"),
+            new BigDecimal("400")); // 400 → 200 cap. 230 > 200 → reject.
+    assertThat(reject.allowed()).isFalse();
+    assertThat(reject.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
+  }
+
+  // Issue #317: when the workflow supplies null equity (legacy path / non-dispatch provider) the
+  // gate falls back to the PortfolioSnapshot seam, which is now keyed on broker_target.
+  @Test
+  void checkEntryWithLimit_nullEquity_fallsBackToSnapshotSeamKeyedOnBrokerTarget() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    // Seam returns the broker-target-keyed equity (default mock 100k → 50k cap) → approve.
+    RiskDecision d =
+        risk.checkEntryWithLimit(
+            btoPayload("acme_trader", FIXED_NOW), c, null, new BigDecimal("2.30"), null);
+    assertThat(d.allowed()).isTrue();
+    // The seam is consulted with broker_target ("paper"), never tenant/strategy.
+    org.mockito.Mockito.verify(portfolioSnapshot).accountEquity(eq("paper"));
   }
 
   // ----- same_underlying_count -----

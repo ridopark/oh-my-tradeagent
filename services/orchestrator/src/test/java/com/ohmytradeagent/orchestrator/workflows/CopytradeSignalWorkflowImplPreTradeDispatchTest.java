@@ -9,6 +9,8 @@ import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.AccountSnapshotRequest;
+import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.OrderIntent;
@@ -17,6 +19,7 @@ import com.ohmytradeagent.contract.PreTradeCheckRequest;
 import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
+import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
@@ -115,7 +118,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(contract.resolve(any())).thenReturn(resolved());
     // Workflow's v=1 branch now calls checkEntryWithLimit.
-    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any()))
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
         .thenReturn(RiskDecision.approved());
 
     AtomicInteger preTradeCalls = new AtomicInteger();
@@ -153,7 +156,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
 
     ArgumentCaptor<PreTradeCheckResult> resultCaptor =
         ArgumentCaptor.forClass(PreTradeCheckResult.class);
-    verify(risk).checkEntryWithLimit(any(), eq(cfg), resultCaptor.capture(), any());
+    verify(risk).checkEntryWithLimit(any(), eq(cfg), resultCaptor.capture(), any(), any());
     PreTradeCheckResult captured = resultCaptor.getValue();
     assertThat(captured).isNotNull();
     assertThat(captured.getAllowed()).isTrue();
@@ -183,7 +186,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(contract.resolve(any())).thenReturn(resolved());
-    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any()))
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
         .thenReturn(RiskDecision.approved());
 
     AtomicReference<PreTradeCheckRequest> capturedRequest = new AtomicReference<>();
@@ -230,7 +233,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(contract.resolve(any())).thenReturn(resolved());
-    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any()))
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
         .thenReturn(RiskDecision.approved());
 
     PreTradeCheckActivity preTradeStub =
@@ -254,7 +257,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     runWorkflow(p);
 
     ArgumentCaptor<BigDecimal> limitCaptor = ArgumentCaptor.forClass(BigDecimal.class);
-    verify(risk).checkEntryWithLimit(any(), eq(cfg), any(), limitCaptor.capture());
+    verify(risk).checkEntryWithLimit(any(), eq(cfg), any(), limitCaptor.capture(), any());
     assertThat(limitCaptor.getValue()).isEqualByComparingTo(new BigDecimal("3.15"));
   }
 
@@ -263,7 +266,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     StrategyConfig cfg = configWithPreTradeEnabled();
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(contract.resolve(any())).thenReturn(resolved());
-    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any()))
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
         .thenReturn(
             RiskDecision.rejected(
                 RejectionReason.PRE_TRADE_CHECK_FAILED,
@@ -284,7 +287,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     // "RuntimeException". The dispatch_failed prefix is the stable contract.
     ArgumentCaptor<PreTradeCheckResult> resultCaptor =
         ArgumentCaptor.forClass(PreTradeCheckResult.class);
-    verify(risk).checkEntryWithLimit(any(), eq(cfg), resultCaptor.capture(), any());
+    verify(risk).checkEntryWithLimit(any(), eq(cfg), resultCaptor.capture(), any(), any());
     PreTradeCheckResult sentinel = resultCaptor.getValue();
     assertThat(sentinel).isNotNull();
     assertThat(sentinel.getAllowed()).isFalse();
@@ -316,7 +319,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     StrategyConfig cfg = configWithPreTradeEnabled();
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(contract.resolve(any())).thenReturn(resolved());
-    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any()))
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
         .thenReturn(
             RiskDecision.rejected(
                 RejectionReason.PRE_TRADE_CHECK_FAILED,
@@ -336,7 +339,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
 
     ArgumentCaptor<PreTradeCheckResult> resultCaptor =
         ArgumentCaptor.forClass(PreTradeCheckResult.class);
-    verify(risk).checkEntryWithLimit(any(), eq(cfg), resultCaptor.capture(), any());
+    verify(risk).checkEntryWithLimit(any(), eq(cfg), resultCaptor.capture(), any(), any());
     PreTradeCheckResult sentinel = resultCaptor.getValue();
     assertThat(sentinel).isNotNull();
     assertThat(sentinel.getAllowed()).isFalse();
@@ -411,7 +414,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(contract.resolve(any())).thenReturn(resolved());
-    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any()))
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
         .thenReturn(RiskDecision.approved());
 
     PreTradeCheckActivity preTradeStub =
@@ -437,7 +440,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     verify(risk, Mockito.times(1)).assertPreTradeCheckRoutable(cfg);
     ArgumentCaptor<PreTradeCheckResult> resultCaptor =
         ArgumentCaptor.forClass(PreTradeCheckResult.class);
-    verify(risk).checkEntryWithLimit(any(), eq(cfg), resultCaptor.capture(), any());
+    verify(risk).checkEntryWithLimit(any(), eq(cfg), resultCaptor.capture(), any(), any());
     assertThat(resultCaptor.getValue()).isNotNull();
   }
 
@@ -518,6 +521,124 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     } finally {
       localEnv.close();
     }
+  }
+
+  /**
+   * Issue #317: when {@code notional_cap_pct_of_equity} is enabled, the v=1 branch dispatches the
+   * cross-service {@code AccountSnapshotActivity} over the {@code broker-<broker_target>} queue and
+   * threads the returned equity down into {@code risk.checkEntryWithLimit(...)}. Pins both the
+   * dispatch (request keyed solely on broker_target) and the carry-over to the risk gate's 5th arg.
+   */
+  @Test
+  void handleBto_dispatchesAccountSnapshot_andThreadsEquityIntoCheckEntryWithLimit() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    AtomicInteger accountCalls = new AtomicInteger();
+    AtomicReference<AccountSnapshotRequest> capturedAccountReq = new AtomicReference<>();
+    AccountSnapshotActivity accountStub =
+        request -> {
+          accountCalls.incrementAndGet();
+          capturedAccountReq.set(request);
+          AccountSnapshotResult r = new AccountSnapshotResult();
+          r.setSchemaVersion(1L);
+          r.setEquity(new BigDecimal("123456.78"));
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub, accountStub);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-K"));
+    env.start();
+
+    runWorkflow(btoPayload());
+
+    // Account snapshot was dispatched exactly once, keyed solely on broker_target (no
+    // tenant/strat).
+    assertThat(accountCalls.get()).isEqualTo(1);
+    AccountSnapshotRequest accReq = capturedAccountReq.get();
+    assertThat(accReq).isNotNull();
+    assertThat(accReq.getBrokerTarget())
+        .isEqualTo(AccountSnapshotRequest.BrokerTarget.ALPACA_PAPER);
+    assertThat(accReq.getCorrelationId()).isEqualTo("111:0");
+
+    // The broker-supplied equity is threaded into the risk gate's 5th argument.
+    ArgumentCaptor<BigDecimal> equityCaptor = ArgumentCaptor.forClass(BigDecimal.class);
+    verify(risk).checkEntryWithLimit(any(), eq(cfg), any(), any(), equityCaptor.capture());
+    assertThat(equityCaptor.getValue()).isEqualByComparingTo(new BigDecimal("123456.78"));
+  }
+
+  /**
+   * When the {@code AccountSnapshotActivity} throws (after Temporal exhausts its retries), {@code
+   * dispatchAccountSnapshot} fails closed to {@code BigDecimal.ZERO}, which threads into the risk
+   * gate's 5th arg. The notional-cap gate rejects on zero/unavailable equity, so the workflow emits
+   * a {@code SignalRejected} ({@code NOTIONAL_CAP_EXCEEDED}) audit rather than throwing — pinning
+   * the catch -> ZERO -> gate-rejects path end-to-end so a broker outage rejects entries instead of
+   * passing an unbounded cap.
+   */
+  @Test
+  void handleBto_failsClosed_whenAccountSnapshotActivityThrows() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+    // Mirror the real notional-cap gate's fail-closed behaviour: zero/unavailable equity rejects.
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenAnswer(
+            inv -> {
+              BigDecimal equity = inv.getArgument(4);
+              return equity != null && equity.signum() > 0
+                  ? RiskDecision.approved()
+                  : RiskDecision.rejected(
+                      RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
+            });
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    AccountSnapshotActivity throwingAccountStub =
+        request -> {
+          throw new RuntimeException("broker /v2/account timeout");
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub, throwingAccountStub);
+    env.start();
+
+    runWorkflow(btoPayload());
+
+    // The swallowed exception fails closed to ZERO equity, threaded into the risk gate's 5th arg.
+    ArgumentCaptor<BigDecimal> equityCaptor = ArgumentCaptor.forClass(BigDecimal.class);
+    verify(risk).checkEntryWithLimit(any(), eq(cfg), any(), any(), equityCaptor.capture());
+    assertThat(equityCaptor.getValue()).isEqualByComparingTo(BigDecimal.ZERO);
+
+    // The gate rejects on the unavailable equity -> fail-closed SignalRejected audit, no order.
+    AuditEvent rejected = capture("SignalRejected");
+    assertThat(rejected.getSubject()).containsEntry("reason_code", "NOTIONAL_CAP_EXCEEDED");
+    assertThat(rejected.getSubject()).containsEntry("outcome", "REJECTED");
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
   }
 
   // ----- helpers -----

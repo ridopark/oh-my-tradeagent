@@ -28,12 +28,20 @@ public interface RiskActivities {
    *
    * <p>{@code limit} should be non-null in production. The implementation falls back to {@code
    * payload.getPrice()} when {@code limit} is null to keep the unit-test surface ergonomic.
+   *
+   * <p>{@code accountEquity} is the workflow-supplied net-liquidation equity dispatched from the
+   * {@code broker-<broker_target>} {@code AccountSnapshotActivity} (mirroring how {@code
+   * preTradeResult} is threaded down). When non-null it feeds the {@code
+   * notional_cap_pct_of_equity} gate directly; when null the gate falls back to {@link
+   * PortfolioSnapshot#accountEquity} keyed on {@code broker_target} (the seam for tests /
+   * non-dispatch providers). The gate already fails closed on a zero/missing figure.
    */
   RiskDecision checkEntryWithLimit(
       CopytradeSignalPayload payload,
       StrategyConfig config,
       PreTradeCheckResult preTradeResult,
-      BigDecimal limit);
+      BigDecimal limit,
+      BigDecimal accountEquity);
 
   /**
    * Throws a non-retryable {@code PreTradeCheckMisconfigured} {@link
