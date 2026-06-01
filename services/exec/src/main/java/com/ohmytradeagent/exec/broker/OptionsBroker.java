@@ -96,8 +96,8 @@ public interface OptionsBroker {
   }
 
   /**
-   * Issue #317 account-equity gate. Returns the brokerage account's net-liquidation equity in
-   * dollars (Alpaca {@code /v2/account} {@code equity}, NOT {@code buying_power}). The {@code
+   * Account-equity gate. Returns the brokerage account's net-liquidation equity in dollars (Alpaca
+   * {@code /v2/account} {@code equity}, NOT {@code buying_power}). The {@code
    * notional_cap_pct_of_equity} risk gate compares {@code (sum_open_notional + new_notional)}
    * against {@code pct * equity}.
    *

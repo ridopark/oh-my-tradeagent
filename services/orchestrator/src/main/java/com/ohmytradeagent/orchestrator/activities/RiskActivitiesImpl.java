@@ -178,7 +178,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     final StrategyConfig config;
     final PreTradeCheckResult preTradeResult;
     final BigDecimal entryNotional;
-    // Issue #317: workflow-supplied net-liquidation equity (from the broker-<target>
+    // Workflow-supplied net-liquidation equity (from the broker-<target>
     // AccountSnapshotActivity). Null when not dispatched (legacy checkEntry path / unit tests) —
     // the
     // notional-cap gate then falls back to the PortfolioSnapshot seam keyed on broker_target.
@@ -218,15 +218,21 @@ public class RiskActivitiesImpl implements RiskActivities {
     if (capPct == null) {
       return null;
     }
-    // Issue #317: prefer the workflow-supplied equity (dispatched from the broker-<broker_target>
+    // Prefer the workflow-supplied equity (dispatched from the broker-<broker_target>
     // AccountSnapshotActivity). Fall back to the PortfolioSnapshot seam keyed on broker_target for
     // the legacy checkEntry path and non-dispatch providers. Equity is account-level, so the seam
     // is
-    // keyed on broker_target, never (tenant, strategy).
-    BigDecimal equity =
-        ctx.accountEquity != null
-            ? ctx.accountEquity
-            : portfolioSnapshot.accountEquity(brokerTargetValue(ctx.config));
+    // keyed on broker_target, never (tenant, strategy). A null/blank broker_target on the fallback
+    // path means we can't key the seam, so equity is unavailable and the gate fails closed below.
+    String brokerTarget = brokerTargetValue(ctx.config);
+    BigDecimal equity;
+    if (ctx.accountEquity != null) {
+      equity = ctx.accountEquity;
+    } else if (brokerTarget == null || brokerTarget.isBlank()) {
+      equity = null;
+    } else {
+      equity = portfolioSnapshot.accountEquity(brokerTarget);
+    }
     if (equity == null || equity.signum() <= 0) {
       return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
     }
@@ -392,9 +398,9 @@ public class RiskActivitiesImpl implements RiskActivities {
    * switches to a sized count.
    */
   /**
-   * Issue #317: the {@code broker_target} string the {@link PortfolioSnapshot#accountEquity} seam
-   * is keyed on (equity is account-level). Returns {@code null} when {@code broker_target} is
-   * absent — the seam's no-op default returns ZERO and the notional-cap gate fails closed on it.
+   * The {@code broker_target} string the {@link PortfolioSnapshot#accountEquity} seam is keyed on
+   * (equity is account-level). Returns {@code null} when {@code broker_target} is absent — the
+   * seam's no-op default returns ZERO and the notional-cap gate fails closed on it.
    */
   private static String brokerTargetValue(StrategyConfig config) {
     return config.getBrokerTarget() == null ? null : config.getBrokerTarget().value();

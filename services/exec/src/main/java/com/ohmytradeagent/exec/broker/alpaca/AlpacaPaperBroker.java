@@ -276,7 +276,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
 
   @Override
   public BigDecimal getAccountEquity() {
-    // Issue #317. /v2/account returns the account's net-liquidation `equity` AND `buying_power` as
+    // /v2/account returns the account's net-liquidation `equity` AND `buying_power` as
     // distinct fields. The notional-cap gate compares against net liquidation, so we read `equity`
     // (never `buying_power` — on a margin account buying_power can be 2-4x equity, which would let
     // the cap pass far larger exposure than intended).

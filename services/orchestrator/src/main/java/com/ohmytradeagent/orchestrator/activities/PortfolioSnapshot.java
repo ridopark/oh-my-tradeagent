@@ -25,10 +25,10 @@ public interface PortfolioSnapshot {
    * Account equity (dollars) for the brokerage account behind {@code brokerTarget}, which the
    * {@code notional_cap_pct_of_equity} gate compares against.
    *
-   * <p>Issue #317: equity is <b>account-level</b>, not per {@code (tenant, strategy)}. exec-svc is
-   * deployed once per {@code <provider>-<env>} pair (one credential set / one brokerage account),
-   * so every {@code (tenant, strategy)} routing to a given {@code broker_target} shares one account
-   * and observes the same equity. Open positions stay per {@code (tenant, strategy)} (see {@link
+   * <p>Equity is <b>account-level</b>, not per {@code (tenant, strategy)}. exec-svc is deployed
+   * once per {@code <provider>-<env>} pair (one credential set / one brokerage account), so every
+   * {@code (tenant, strategy)} routing to a given {@code broker_target} shares one account and
+   * observes the same equity. Open positions stay per {@code (tenant, strategy)} (see {@link
    * #openPositions}); only equity is re-keyed.
    *
    * <p>Returns zero when the figure is unavailable; the gate fails closed on a zero equity (cannot

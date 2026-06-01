@@ -33,6 +33,7 @@ import com.ohmytradeagent.orchestrator.domain.Sizing;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.api.enums.v1.ParentClosePolicy;
 import io.temporal.common.RetryOptions;
+import io.temporal.failure.CanceledFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.ExternalWorkflowStub;
@@ -115,7 +116,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // VERSION_TTL_FILLED_ADOPTION / VERSION_BREACH_FILLED_ADOPTION.
   private static final String VERSION_ENTRY_FILLED_OPTION_SYMBOL = "entry-filled-option-symbol-v1";
 
-  // Issue #317: gate the new account-snapshot dispatch + the 5-arg checkEntryWithLimit overload
+  // Gate the new account-snapshot dispatch + the 5-arg checkEntryWithLimit overload
   // that
   // threads the broker-supplied equity into the notional-cap gate. In-flight v>=1 workflows
   // recorded
@@ -242,7 +243,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         // landed.
         decision = risk.checkEntry(payload, config, preTradeResult);
       } else {
-        // Issue #317: dispatch the broker-<broker_target> account read and thread the equity into
+        // Dispatch the broker-<broker_target> account read and thread the equity into
         // the notional-cap gate. Replay-gated: in-flight v>=1 histories that recorded the 4-arg
         // CheckEntryWithLimit call keep the legacy path (equity from the PortfolioSnapshot seam).
         int accountEquityVersion =
@@ -733,6 +734,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     PreTradeCheckRequest request = buildPreTradeCheckRequest(payload, config, estimatedLimitPrice);
     try {
       return preTradeStub.preTradeCheck(request);
+    } catch (CanceledFailure cf) {
+      throw cf;
     } catch (Exception e) {
       return PreTradeCheckSentinels.dispatchFailed(e.getClass().getSimpleName());
     }
@@ -764,7 +767,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   /**
-   * Issue #317: dispatches the cross-service {@code AccountSnapshotActivity} over the {@code
+   * Dispatches the cross-service {@code AccountSnapshotActivity} over the {@code
    * broker-<broker_target>} task queue and returns the account's net-liquidation equity. Returns
    * {@code null} when the notional-cap gate is disabled (no {@code notional_cap_pct_of_equity}) so
    * the cross-service round-trip only fires when the strategy enabled the gate.
@@ -799,6 +802,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     try {
       AccountSnapshotResult result = accountStub.accountSnapshot(request);
       return result == null || result.getEquity() == null ? BigDecimal.ZERO : result.getEquity();
+    } catch (CanceledFailure cf) {
+      throw cf;
     } catch (Exception e) {
       return BigDecimal.ZERO;
     }

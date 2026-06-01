@@ -7,11 +7,11 @@ import com.ohmytradeagent.exec.broker.OptionsBroker;
 import org.springframework.stereotype.Component;
 
 /**
- * Issue #317 account-equity gate impl. Thin wrapper around {@link OptionsBroker#getAccountEquity}
- * so each broker adapter can override the behavior independently (Alpaca calls /v2/account, Tradier
- * uses /v1/accounts/{id}/balances, etc.). Stateless; safe under Temporal Activity retry semantics.
- * The orchestrator's notional-cap gate fails closed on any exception or zero equity, so a broker
- * outage rejects entries rather than allowing them.
+ * Account-equity gate impl. Thin wrapper around {@link OptionsBroker#getAccountEquity} so each
+ * broker adapter can override the behavior independently (Alpaca calls /v2/account, Tradier uses
+ * /v1/accounts/{id}/balances, etc.). Stateless; safe under Temporal Activity retry semantics. The
+ * orchestrator's notional-cap gate fails closed on any exception or zero equity, so a broker outage
+ * rejects entries rather than allowing them.
  *
  * <p>Equity is account-level (one credential set per exec deployment), so the request carries no
  * tenant/strategy — it is identified solely by the {@code broker_target} that routed the dispatch

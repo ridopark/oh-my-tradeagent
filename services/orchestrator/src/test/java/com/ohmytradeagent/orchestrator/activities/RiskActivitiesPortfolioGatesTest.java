@@ -195,6 +195,25 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(dZero.detail()).contains("equity_unavailable");
   }
 
+  // A null/blank broker_target can't key the PortfolioSnapshot seam, so equity is unavailable and
+  // the gate must fail closed (reject) rather than passing null into the seam. The seam mock would
+  // return a generous 100k equity if consulted — proving the gate short-circuits before it.
+  @Test
+  void notionalCap_failsClosed_whenBrokerTargetNull() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setBrokerTarget(null);
+
+    RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
+    assertThat(d.detail()).contains("equity_unavailable");
+    // The seam is never consulted when broker_target can't key it.
+    org.mockito.Mockito.verify(portfolioSnapshot, org.mockito.Mockito.never())
+        .accountEquity(org.mockito.ArgumentMatchers.any());
+  }
+
   // Issue #317: the workflow-supplied equity (5th arg of checkEntryWithLimit) takes precedence over
   // the PortfolioSnapshot seam. Here the snapshot would APPROVE (100k equity → 50k cap) but the
   // dispatched equity (400 → 200 cap) REJECTS, proving the gate reads the threaded value.

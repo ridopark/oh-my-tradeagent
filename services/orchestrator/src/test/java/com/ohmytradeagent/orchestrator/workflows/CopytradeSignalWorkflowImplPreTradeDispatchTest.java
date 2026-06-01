@@ -583,6 +583,64 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     assertThat(equityCaptor.getValue()).isEqualByComparingTo(new BigDecimal("123456.78"));
   }
 
+  /**
+   * When the {@code AccountSnapshotActivity} throws (after Temporal exhausts its retries), {@code
+   * dispatchAccountSnapshot} fails closed to {@code BigDecimal.ZERO}, which threads into the risk
+   * gate's 5th arg. The notional-cap gate rejects on zero/unavailable equity, so the workflow emits
+   * a {@code SignalRejected} ({@code NOTIONAL_CAP_EXCEEDED}) audit rather than throwing — pinning
+   * the catch -> ZERO -> gate-rejects path end-to-end so a broker outage rejects entries instead of
+   * passing an unbounded cap.
+   */
+  @Test
+  void handleBto_failsClosed_whenAccountSnapshotActivityThrows() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+    // Mirror the real notional-cap gate's fail-closed behaviour: zero/unavailable equity rejects.
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenAnswer(
+            inv -> {
+              BigDecimal equity = inv.getArgument(4);
+              return equity != null && equity.signum() > 0
+                  ? RiskDecision.approved()
+                  : RiskDecision.rejected(
+                      RejectionReason.NOTIONAL_CAP_EXCEEDED, "equity_unavailable");
+            });
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    AccountSnapshotActivity throwingAccountStub =
+        request -> {
+          throw new RuntimeException("broker /v2/account timeout");
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub, throwingAccountStub);
+    env.start();
+
+    runWorkflow(btoPayload());
+
+    // The swallowed exception fails closed to ZERO equity, threaded into the risk gate's 5th arg.
+    ArgumentCaptor<BigDecimal> equityCaptor = ArgumentCaptor.forClass(BigDecimal.class);
+    verify(risk).checkEntryWithLimit(any(), eq(cfg), any(), any(), equityCaptor.capture());
+    assertThat(equityCaptor.getValue()).isEqualByComparingTo(BigDecimal.ZERO);
+
+    // The gate rejects on the unavailable equity -> fail-closed SignalRejected audit, no order.
+    AuditEvent rejected = capture("SignalRejected");
+    assertThat(rejected.getSubject()).containsEntry("reason_code", "NOTIONAL_CAP_EXCEEDED");
+    assertThat(rejected.getSubject()).containsEntry("outcome", "REJECTED");
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+  }
+
   // ----- helpers -----
 
   /**

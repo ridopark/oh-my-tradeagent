@@ -5,10 +5,10 @@ import com.ohmytradeagent.contract.AccountSnapshotResult;
 import io.temporal.activity.ActivityInterface;
 
 /**
- * Issue #317 cross-service contract owned by exec-svc (one impl per &lt;provider&gt;-&lt;env&gt;
- * pair). risk-svc dispatches the call to the {@code broker-<broker_target>} task queue, matching
- * the routing already in place for {@link PreTradeCheckActivity}, {@link
- * ReconciliationExecActivity}, and {@code placeOrder}.
+ * Cross-service contract owned by exec-svc (one impl per &lt;provider&gt;-&lt;env&gt; pair).
+ * risk-svc dispatches the call to the {@code broker-<broker_target>} task queue, matching the
+ * routing already in place for {@link PreTradeCheckActivity}, {@link ReconciliationExecActivity},
+ * and {@code placeOrder}.
  *
  * <p>Semantics: the broker adapter reports the account's net-liquidation {@code equity} (Alpaca
  * {@code /v2/account} {@code equity}, NOT {@code buying_power}). Equity is account-level —
