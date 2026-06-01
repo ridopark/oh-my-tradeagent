@@ -502,7 +502,11 @@ class AlpacaPaperBrokerTest {
 
   @Test
   void preTradeCheck_fallsBackToBuyingPower_whenOptionsFieldAbsent() {
-    // Issue #320 criterion 2: when options_buying_power is absent, fall back to buying_power.
+    // Issue #320 criterion 2: when options_buying_power is absent, fall back to buying_power. Issue
+    // #327 task 3: this fallback branch also logs a WARN (raw buying_power on a Reg-T margin
+    // account
+    // can be 2-4x the correct options figure → looser gate). Asserting getBuyingPower() equals the
+    // raw buying_power value confirms the fallback (WARN) branch ran.
     server.enqueue(
         new MockResponse()
             .setResponseCode(200)
@@ -514,6 +518,47 @@ class AlpacaPaperBrokerTest {
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
     assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("75000.00"));
+  }
+
+  @Test
+  void preTradeCheck_pdtFlaggedNullDaytradeCount_failsClosedWithProtocolError() {
+    // Fail-closed (issue #327 task 1): a flagged pattern-day-trader account whose 200 response
+    // omits
+    // `daytrade_count` cannot be evaluated for the PDT block. It must fail CLOSED with
+    // BrokerProtocolError rather than silently admitting (fail-OPEN) — mirroring the null-equity
+    // protocol breach for an over-limit flagged account.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"buying_power\":\"30000.00\","
+                    + "\"options_buying_power\":\"30000.00\",\"pattern_day_trader\":true,"
+                    + "\"multiplier\":\"2\"}"));
+
+    assertThatThrownBy(() -> broker.preTradeCheck(preTradeRequest(new BigDecimal("1000"))))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("BrokerProtocolError");
+              assertThat(f.isNonRetryable()).isTrue();
+            });
+  }
+
+  @Test
+  void preTradeCheck_serverError_failsClosed() {
+    // Fail-closed (issue #327 task 2): a 5xx on /v2/account must NOT yield an allowed result. The
+    // mapError 5xx path re-throws HttpStatusCodeException so Temporal's bounded retry → reject
+    // applies. Mirrors preTradeCheck_unauthorized_failsClosedWithAuthError and the
+    // cancelOrder_503_isRetryable 5xx assertion shape.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(503)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"service unavailable\"}"));
+
+    assertThatThrownBy(() -> broker.preTradeCheck(preTradeRequest(new BigDecimal("1000"))))
+        .isInstanceOf(org.springframework.web.client.HttpStatusCodeException.class);
   }
 
   @Test
