@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.contract.BrokerPosition;
+import com.ohmytradeagent.contract.PreTradeCheckRequest;
+import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
@@ -470,6 +472,188 @@ class AlpacaPaperBrokerTest {
         .isInstanceOf(ApplicationFailure.class)
         .satisfies(
             t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));
+  }
+
+  @Test
+  void preTradeCheck_readsOptionsBuyingPower_whenPresent() throws Exception {
+    // Issue #320: the pre-trade gate prefers options_buying_power. Here it is present and distinct
+    // from the general buying_power so a regression that reads the wrong field is caught.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"buying_power\":\"100000.00\","
+                    + "\"options_buying_power\":\"40000.00\",\"pattern_day_trader\":false,"
+                    + "\"daytrade_count\":0,\"multiplier\":\"2\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
+
+    assertThat(r.getAllowed()).isTrue();
+    assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("40000.00"));
+    assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.OK);
+    assertThat(r.getMarginSufficient()).isTrue();
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getPath()).isEqualTo("/v2/account");
+    assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
+  }
+
+  @Test
+  void preTradeCheck_fallsBackToBuyingPower_whenOptionsFieldAbsent() {
+    // Issue #320 criterion 2: when options_buying_power is absent, fall back to buying_power.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"buying_power\":\"75000.00\","
+                    + "\"pattern_day_trader\":false,\"daytrade_count\":0,\"multiplier\":\"2\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
+
+    assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("75000.00"));
+  }
+
+  @Test
+  void preTradeCheck_pdtBlocked_whenFlaggedOverLimitOnSub25kAccount() {
+    // Issue #320 criterion 3: pattern_day_trader flagged + daytrade_count over the 3-trade limit on
+    // a sub-$25k account derives BLOCKED.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"buying_power\":\"30000.00\","
+                    + "\"options_buying_power\":\"30000.00\",\"pattern_day_trader\":true,"
+                    + "\"daytrade_count\":4,\"multiplier\":\"2\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
+
+    assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.BLOCKED);
+  }
+
+  @Test
+  void preTradeCheck_pdtOk_whenFlaggedButEquityAtOrAbove25k() {
+    // A flagged-and-over-limit account is NOT blocked once equity >= $25k: the PDT rule only gates
+    // sub-$25k accounts.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"30000.00\",\"buying_power\":\"60000.00\","
+                    + "\"options_buying_power\":\"60000.00\",\"pattern_day_trader\":true,"
+                    + "\"daytrade_count\":9,\"multiplier\":\"4\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
+
+    assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.OK);
+  }
+
+  @Test
+  void preTradeCheck_marginInsufficient_whenNotionalExceedsBuyingPower() {
+    // Issue #320 criterion 4: margin_sufficient is false when the requested notional exceeds the
+    // available buying power.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"5000.00\",\"buying_power\":\"5000.00\","
+                    + "\"options_buying_power\":\"500.00\",\"pattern_day_trader\":false,"
+                    + "\"daytrade_count\":0,\"multiplier\":\"1\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
+
+    assertThat(r.getMarginSufficient()).isFalse();
+  }
+
+  @Test
+  void preTradeCheck_marginSufficient_whenBuyingPowerCoversNotional() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"buying_power\":\"100000.00\","
+                    + "\"options_buying_power\":\"100000.00\",\"pattern_day_trader\":false,"
+                    + "\"daytrade_count\":0,\"multiplier\":\"2\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
+
+    assertThat(r.getMarginSufficient()).isTrue();
+  }
+
+  @Test
+  void preTradeCheck_unauthorized_failsClosedWithAuthError() {
+    // Issue #320 criterion 6: a broker exception (401/5xx) on /v2/account fails closed — the
+    // override raises a non-retryable ApplicationFailure mirroring getAccountEquity's mapping so
+    // the
+    // workflow's fail-closed path rejects.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(401)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"access key verification failed\"}"));
+
+    assertThatThrownBy(() -> broker.preTradeCheck(preTradeRequest(new BigDecimal("1000"))))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("AuthError");
+              assertThat(f.isNonRetryable()).isTrue();
+            });
+  }
+
+  @Test
+  void preTradeCheck_missingBuyingPowerFields_failsClosedWithProtocolError() {
+    // A 200 with neither options_buying_power nor buying_power is a protocol breach: the gate must
+    // fail closed rather than silently passing a null buying power.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"id\":\"acct-1\",\"equity\":\"50000.00\"}"));
+
+    assertThatThrownBy(() -> broker.preTradeCheck(preTradeRequest(new BigDecimal("1000"))))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> assertThat(f.getType()).isEqualTo("BrokerProtocolError"));
+  }
+
+  @Test
+  void preTradeCheck_issuesExactlyOneAccountRequest() throws Exception {
+    // Issue #320 criterion 8: a single preTradeCheck invocation issues exactly one /v2/account
+    // request — no second round-trip per signal.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"buying_power\":\"100000.00\","
+                    + "\"options_buying_power\":\"100000.00\",\"pattern_day_trader\":false,"
+                    + "\"daytrade_count\":0,\"multiplier\":\"2\"}"));
+
+    broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
+
+    assertThat(server.getRequestCount()).isEqualTo(1);
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getPath()).isEqualTo("/v2/account");
+  }
+
+  private static PreTradeCheckRequest preTradeRequest(BigDecimal estimatedNotional) {
+    PreTradeCheckRequest req = new PreTradeCheckRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId("t1");
+    req.setStrategyId("s1");
+    req.setBrokerTarget(PreTradeCheckRequest.BrokerTarget.ALPACA_PAPER);
+    req.setOptionSymbol("NVDA260516C00140000");
+    req.setSide(PreTradeCheckRequest.Side.BUY);
+    req.setQty(1L);
+    req.setEstimatedNotional(estimatedNotional);
+    return req;
   }
 
   private void enqueueStatus(String alpacaStatus) {
