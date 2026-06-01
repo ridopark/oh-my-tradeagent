@@ -20,6 +20,25 @@ public record OccSymbol(String value) {
     return s == null ? null : s.replace(" ", "");
   }
 
+  /**
+   * Extract the underlying ticker (root) from an OCC option symbol. The 21-char OCC form is {@code
+   * <root padded to 6 with %-6s><yyMMdd><C|P><8-digit strike>}; the root is the leading 6 chars
+   * with the {@code %-6s} space-padding stripped. Accepts the compact (unpadded) broker form too —
+   * it strips spaces first, then takes everything before the 6-digit expiry / right / strike tail.
+   * Null-safe: returns {@code null} for {@code null} input.
+   */
+  public static String underlying(String occ) {
+    if (occ == null) {
+      return null;
+    }
+    String compact = occ.replace(" ", "");
+    // The fixed tail is yyMMdd (6) + right (1) + strike (8) = 15 chars; the root is the remainder.
+    if (compact.length() <= 15) {
+      return compact;
+    }
+    return compact.substring(0, compact.length() - 15);
+  }
+
   public static OccSymbol of(String root, LocalDate expiry, BigDecimal strike, String right) {
     if (root == null || root.isBlank() || root.length() > 6) {
       throw new IllegalArgumentException("root must be 1..6 chars, got: " + root);

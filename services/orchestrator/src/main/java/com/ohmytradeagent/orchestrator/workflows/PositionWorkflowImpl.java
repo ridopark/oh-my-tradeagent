@@ -843,6 +843,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         ticksReceived);
   }
 
+  @Override
+  public PositionState positionState() {
+    // input may be null if the query races run() before `this.input = in` (same guard the
+    // killswitch-state read uses); report an empty contract + zero qty in that window.
+    if (input == null) {
+      return new PositionState("", 0L, null);
+    }
+    return new PositionState(input.getContractSymbol(), remainingQty, input.getEntryPremium());
+  }
+
   private void processOne(PartialExitRequest req) {
     double fraction = req.getFraction().doubleValue();
     long qtyToClose;

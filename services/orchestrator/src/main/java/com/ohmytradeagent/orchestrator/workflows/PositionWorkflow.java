@@ -60,6 +60,15 @@ public interface PositionWorkflow {
   TrailingState trailingState();
 
   /**
+   * Issue #318: open-position state for the portfolio-level risk gates. Synchronous, non-mutating —
+   * exposes the OCC contract, remaining (post-partial) qty, and per-contract entry premium so the
+   * Visibility-backed {@link com.ohmytradeagent.orchestrator.activities.PortfolioSnapshot} can
+   * value the open book.
+   */
+  @QueryMethod
+  PositionState positionState();
+
+  /**
    * Phase 5 operator-initiated force-close. Validator rejects blank {@code operator_id} or {@code
    * reason}. Handler enqueues a synthetic exit directive and returns immediately (does not block on
    * broker fills). On already-closed positions ({@code remainingQty == 0}), returns {@code

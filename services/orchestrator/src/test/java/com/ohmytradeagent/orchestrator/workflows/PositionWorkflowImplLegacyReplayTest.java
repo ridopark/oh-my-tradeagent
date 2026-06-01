@@ -375,6 +375,11 @@ class PositionWorkflowImplLegacyReplayTest {
     }
 
     @Override
+    public PositionState positionState() {
+      return new PositionState("", 0L, null);
+    }
+
+    @Override
     public void forceCloseValidator(ForceCloseRequest request) {}
 
     @Override

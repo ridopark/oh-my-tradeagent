@@ -6,6 +6,8 @@ import com.ohmytradeagent.orchestrator.activities.DrawdownVelocitySampler;
 import com.ohmytradeagent.orchestrator.activities.PortfolioSnapshot;
 import com.ohmytradeagent.orchestrator.activities.RiskCollaboratorDefaults;
 import com.ohmytradeagent.orchestrator.activities.SectorResolver;
+import com.ohmytradeagent.orchestrator.activities.VisibilityPortfolioSnapshot;
+import io.temporal.client.WorkflowClient;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -20,6 +22,17 @@ import org.springframework.context.annotation.Configuration;
  */
 @Configuration
 public class RiskCollaboratorsConfig {
+
+  /**
+   * Issue #318: Temporal Advanced Visibility–backed PortfolioSnapshot — lists running
+   * PositionWorkflows for the {@code (tenant, strategy)} scope so the {@code same_underlying_count}
+   * and {@code notional_cap_pct_of_equity} gates observe the real open book. Overrides {@link
+   * #noOpPortfolioSnapshot()} (its {@code @ConditionalOnMissingBean} yields to this primary bean).
+   */
+  @Bean
+  public PortfolioSnapshot visibilityPortfolioSnapshot(WorkflowClient workflowClient) {
+    return new VisibilityPortfolioSnapshot(workflowClient);
+  }
 
   @Bean
   @ConditionalOnMissingBean
