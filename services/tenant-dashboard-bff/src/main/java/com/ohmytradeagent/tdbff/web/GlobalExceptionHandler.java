@@ -1,6 +1,7 @@
 package com.ohmytradeagent.tdbff.web;
 
 import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter.BrokerNotConfiguredException;
+import java.time.format.DateTimeParseException;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -31,5 +32,14 @@ public class GlobalExceptionHandler {
   public ResponseEntity<Map<String, Object>> badRequest(IllegalArgumentException e) {
     return ResponseEntity.status(HttpStatus.BAD_REQUEST)
         .body(Map.of("error", "bad_request", "detail", String.valueOf(e.getMessage())));
+  }
+
+  // A malformed `since` (e.g. /api/trades?since=not-a-date) reaches OffsetDateTime.parse and throws
+  // DateTimeParseException — which extends DateTimeException, NOT IllegalArgumentException, so it
+  // would otherwise fall through to a 500. It's bad client input: map it to 400.
+  @ExceptionHandler(DateTimeParseException.class)
+  public ResponseEntity<Map<String, Object>> badTimestamp(DateTimeParseException e) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+        .body(Map.of("error", "bad_request", "detail", "invalid timestamp: " + e.getMessage()));
   }
 }

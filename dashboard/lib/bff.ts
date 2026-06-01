@@ -8,6 +8,10 @@ import { auth } from "@/auth";
 // the identity.
 const BFF_URL = process.env.BFF_INTERNAL_URL ?? "http://localhost:8083";
 const BFF_TOKEN = process.env.BFF_SHARED_TOKEN ?? "";
+// Upper bound on a single BFF call so an unreachable/slow BFF can't hang a page render. Sits above
+// the BFF's own ~8s equity wait (AccountEquityClient.RESULT_TIMEOUT_SECONDS) so a legitimate
+// /api/portfolio response is never cut off.
+const BFF_TIMEOUT_MS = 12_000;
 
 if (!BFF_TOKEN) {
   // Misconfiguration: without the shared token every BFF call gets a 401. Surface it loudly rather
@@ -32,6 +36,8 @@ async function bffGet<T>(path: string): Promise<T> {
     },
     // Dashboard reads are always live — never serve a cached tenant's data.
     cache: "no-store",
+    // Abort a hung/unreachable BFF rather than block the server-rendered page indefinitely.
+    signal: AbortSignal.timeout(BFF_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`BFF ${path} -> ${res.status}`);

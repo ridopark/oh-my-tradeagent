@@ -32,9 +32,11 @@ public class AccountEquityClient {
 
   private static final Logger log = LoggerFactory.getLogger(AccountEquityClient.class);
   private static final String WORKFLOW_TYPE = "AccountSnapshotWorkflow";
-  // Bounds the blocking getResult so an unreachable Temporal service can't pin a request thread.
-  // Covers the workflow's 60s scheduleToCloseTimeout (AccountSnapshotWorkflowImpl) plus margin.
-  private static final long RESULT_TIMEOUT_SECONDS = 90;
+  // Client-side wait bound for the blocking getResult. Kept short (not the workflow's full 60s
+  // scheduleToCloseTimeout) so the portfolio PAGE stays responsive: a healthy account snapshot
+  // returns in well under a second, and if it doesn't we degrade to null (equity unavailable)
+  // rather than make the user wait. The workflow's own 60s timeout still bounds it server-side.
+  private static final long RESULT_TIMEOUT_SECONDS = 8;
 
   private final WorkflowClient client;
   private final String orchestratorTaskQueue;

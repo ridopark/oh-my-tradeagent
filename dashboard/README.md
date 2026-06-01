@@ -34,6 +34,17 @@ VALUES ('google', '<your-google-sub>', 'you@example.com', 'dev');
 The BFF must be running (`mvn -pl services/tenant-dashboard-bff spring-boot:run`) and reachable at
 `BFF_INTERNAL_URL`.
 
+## Auth.js version (next-auth v5-beta)
+
+We pin `next-auth@5.0.0-beta.20` (exact, no caret — beta releases can carry breaking changes, so
+the lockfile + exact pin freeze it). This whole app is built on the v5 App-Router API: the
+`NextAuth({...}) → { handlers, auth, signIn, signOut }` export, the `auth.config.ts` edge/Node split
+that lets `middleware.ts` run in the Edge runtime, and the `auth()` session accessor used by
+`lib/bff.ts`. Stable **v4 has no first-class App-Router support** (it centres on `getServerSession` +
+`pages/api`), so moving to v4 would be a backward rewrite, not a de-risking. Auth.js v5 is widely run
+in production despite the `beta` label. Decision: **stay on v5, exact-pinned**; revisit when v5 GAs
+(bump the pin) — tracked as a watch item, not a blocker.
+
 ## TLS
 
 Over `http://localhost` dev works. Any non-localhost exposure requires HTTPS (OAuth redirect URIs +
