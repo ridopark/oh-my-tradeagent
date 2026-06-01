@@ -30,8 +30,7 @@ public class GlobalExceptionHandler {
 
   @ExceptionHandler(IllegalArgumentException.class)
   public ResponseEntity<Map<String, Object>> badRequest(IllegalArgumentException e) {
-    return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-        .body(Map.of("error", "bad_request", "detail", String.valueOf(e.getMessage())));
+    return badRequestResponse(String.valueOf(e.getMessage()));
   }
 
   // A malformed `since` (e.g. /api/trades?since=not-a-date) reaches OffsetDateTime.parse and throws
@@ -39,7 +38,11 @@ public class GlobalExceptionHandler {
   // would otherwise fall through to a 500. It's bad client input: map it to 400.
   @ExceptionHandler(DateTimeParseException.class)
   public ResponseEntity<Map<String, Object>> badTimestamp(DateTimeParseException e) {
+    return badRequestResponse("invalid timestamp: " + e.getMessage());
+  }
+
+  private static ResponseEntity<Map<String, Object>> badRequestResponse(String detail) {
     return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-        .body(Map.of("error", "bad_request", "detail", "invalid timestamp: " + e.getMessage()));
+        .body(Map.of("error", "bad_request", "detail", detail));
   }
 }
