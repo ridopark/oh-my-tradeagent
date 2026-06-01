@@ -104,11 +104,11 @@ public class RiskActivitiesImpl implements RiskActivities {
       StrategyConfig config,
       PreTradeCheckResult preTradeResult,
       BigDecimal limit,
-      BigDecimal accountEquity) {
+      BigDecimal accountCash) {
     // Production callers always pass priced.limit(); fall back to mirror keeps unit-test ergonomic.
     BigDecimal price = limit != null ? limit : payload.getPrice();
     return checkEntryInternal(
-        payload, config, preTradeResult, entryNotional(price, 1L), accountEquity);
+        payload, config, preTradeResult, entryNotional(price, 1L), accountCash);
   }
 
   private RiskDecision checkEntryInternal(
@@ -116,7 +116,7 @@ public class RiskActivitiesImpl implements RiskActivities {
       StrategyConfig config,
       PreTradeCheckResult preTradeResult,
       BigDecimal entryNotional,
-      BigDecimal accountEquity) {
+      BigDecimal accountCash) {
     if (!config.getAuthorWhitelist().contains(payload.getAuthor())) {
       return RiskDecision.rejected(
           RejectionReason.AUTHOR_NOT_WHITELISTED, "author=" + payload.getAuthor());
@@ -152,7 +152,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     // the order below mirrors the recommendation list in issue #6. Positions are fetched once and
     // shared across the gates that need them (production impl is a Temporal Visibility query).
     PortfolioContext ctx =
-        new PortfolioContext(payload, config, preTradeResult, entryNotional, accountEquity);
+        new PortfolioContext(payload, config, preTradeResult, entryNotional, accountCash);
     return Stream.<Supplier<RiskDecision>>of(
             () -> checkNotionalCap(ctx),
             () -> checkSameUnderlyingCount(ctx),
@@ -182,9 +182,8 @@ public class RiskActivitiesImpl implements RiskActivities {
     // /v2/account 'cash'). Issue #323: this is the cash component of the notional-cap gate's
     // MTM-stable cost-basis capital base (cash + sum_open_notional), NOT net-liq equity. Null when
     // not dispatched (legacy checkEntry path / unit tests) — the notional-cap gate then falls back
-    // to the PortfolioSnapshot seam keyed on broker_target (ZERO sentinel → fail closed). The field
-    // name is retained for wire/signature stability across the checkEntryWithLimit overload.
-    final BigDecimal accountEquity;
+    // to the PortfolioSnapshot seam keyed on broker_target (ZERO sentinel → fail closed).
+    final BigDecimal accountCash;
     private List<PortfolioSnapshot.OpenPosition> openPositions;
 
     PortfolioContext(
@@ -192,12 +191,12 @@ public class RiskActivitiesImpl implements RiskActivities {
         StrategyConfig config,
         PreTradeCheckResult preTradeResult,
         BigDecimal entryNotional,
-        BigDecimal accountEquity) {
+        BigDecimal accountCash) {
       this.payload = payload;
       this.config = config;
       this.preTradeResult = preTradeResult;
       this.entryNotional = entryNotional;
-      this.accountEquity = accountEquity;
+      this.accountCash = accountCash;
     }
 
     // WARNING — fail-closed seam (#325, hardening #318). A throw from
@@ -255,8 +254,8 @@ public class RiskActivitiesImpl implements RiskActivities {
     // seam, so cash is unavailable and the gate fails closed below.
     String brokerTarget = brokerTargetValue(ctx.config);
     BigDecimal cash;
-    if (ctx.accountEquity != null) {
-      cash = ctx.accountEquity;
+    if (ctx.accountCash != null) {
+      cash = ctx.accountCash;
     } else if (brokerTarget == null || brokerTarget.isBlank()) {
       cash = null;
     } else {

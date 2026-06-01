@@ -211,7 +211,7 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
             continue;
           }
           listed++;
-          ValueResult result = valuePosition(wfId, tenantId, strategyId);
+          ValueResult result = valuePosition(wfId, tenantId, sid);
           if (result.failed()) {
             valueFailures++;
           } else if (result.position() != null) {

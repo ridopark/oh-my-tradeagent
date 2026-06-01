@@ -252,10 +252,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
           decision =
               risk.checkEntryWithLimit(payload, config, preTradeResult, priced.limit(), null);
         } else {
-          BigDecimal accountEquity = dispatchAccountSnapshot(payload, config);
+          BigDecimal accountCash = dispatchAccountSnapshot(payload, config);
           decision =
               risk.checkEntryWithLimit(
-                  payload, config, preTradeResult, priced.limit(), accountEquity);
+                  payload, config, preTradeResult, priced.limit(), accountCash);
         }
       }
     }
