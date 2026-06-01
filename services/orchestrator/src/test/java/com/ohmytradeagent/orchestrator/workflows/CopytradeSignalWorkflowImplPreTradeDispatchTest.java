@@ -14,6 +14,7 @@ import com.ohmytradeagent.contract.AccountSnapshotRequest;
 import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
+import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PreTradeCheckRequest;
@@ -659,6 +660,223 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   }
 
   /**
+   * Issue #336 regression guard: a config that sets ONLY the canonical {@code
+   * notional_cap_pct_of_capital_base} (the {@code notional_cap_pct_of_equity} alias null — the
+   * migration end-state) MUST still dispatch the {@code AccountSnapshotActivity} and run the cap
+   * against the real broker cash. Pre-fix the workflow's dispatch guard tested {@code
+   * getNotionalCapPctOfEquity() == null} only, so this config returned null cash, the snapshot
+   * never fired, and {@code checkNotionalCap} rejected EVERY BTO with {@code cash_unavailable} (the
+   * new field was non-functional). This test wires a <b>real</b> {@link RiskActivitiesImpl} so
+   * {@code checkNotionalCap} actually evaluates — asserting the snapshot IS dispatched and the cap
+   * APPROVES on the math with the threaded cash (order placed), NOT a blanket {@code
+   * cash_unavailable} reject. {@code RiskActivitiesNotionalCapResolverTest} passes cash straight
+   * into checkEntryWithLimit and structurally cannot catch this guard gap.
+   */
+  @Test
+  void handleBto_newOnlyCapBaseConfig_dispatchesAccountSnapshot_andCapEvaluatesWithRealCash() {
+    env.close(); // rebuild with a real RiskActivitiesImpl so checkNotionalCap runs for real.
+    TestWorkflowEnvironment localEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      Worker coreWorker = localEnv.newWorker(CORE_QUEUE);
+      coreWorker.registerWorkflowImplementationTypes(
+          CopytradeSignalWorkflowImpl.class, PositionWorkflowImpl.class);
+
+      RiskActivitiesImpl realRisk = realRiskWithUntrippedKillSwitch();
+      StrategyActivities localStrategy = Mockito.mock(StrategyActivities.class);
+      AuditActivities localAudit = Mockito.mock(AuditActivities.class);
+      ContractActivities localContract = Mockito.mock(ContractActivities.class);
+      ExecActivities localExec = Mockito.mock(ExecActivities.class);
+      PositionLookupActivities localPositionLookup = Mockito.mock(PositionLookupActivities.class);
+      MarketCalendarActivities localCalendar = Mockito.mock(MarketCalendarActivities.class);
+      SubscribePremiumActivity localMarketData = Mockito.mock(SubscribePremiumActivity.class);
+      AccountSnapshotMetricsActivities localMetrics =
+          Mockito.mock(AccountSnapshotMetricsActivities.class);
+      when(localCalendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+      when(localCalendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+      SubscribePremiumResult ok = new SubscribePremiumResult();
+      ok.setSchemaVersion(1L);
+      ok.setSubscriptionId("sub-test");
+      ok.setSubscribedAt(OffsetDateTime.now());
+      ok.setStatus(SubscribePremiumResult.Status.SUBSCRIBED);
+      when(localMarketData.subscribePremium(any())).thenReturn(ok);
+
+      // NEW-ONLY config: canonical capital_base set, deprecated equity alias null. preTradeCheck
+      // disabled so the gate runs purely on the notional-cap math against the dispatched cash.
+      StrategyConfig cfg = configWithPreTradeEnabled();
+      cfg.setPreTradeCheckEnabled(false);
+      cfg.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
+      cfg.setNotionalCapPctOfEquity(null);
+      when(localStrategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+      when(localStrategy.capitalForStrategy("dev", "copytrade-v1"))
+          .thenReturn(new BigDecimal("100000"));
+      when(localContract.resolve(any())).thenReturn(resolved());
+      when(localExec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-K"));
+      when(localExec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-K"));
+
+      coreWorker.registerActivitiesImplementations(
+          localAudit,
+          localStrategy,
+          realRisk,
+          localContract,
+          localPositionLookup,
+          localCalendar,
+          localMetrics);
+
+      PreTradeCheckActivity preTradeStub =
+          request -> {
+            PreTradeCheckResult r = new PreTradeCheckResult();
+            r.setSchemaVersion(1L);
+            r.setAllowed(true);
+            r.setBuyingPower(new BigDecimal("50000"));
+            r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+            r.setMarginSufficient(true);
+            return r;
+          };
+      AtomicInteger accountCalls = new AtomicInteger();
+      AccountSnapshotActivity accountStub =
+          request -> {
+            accountCalls.incrementAndGet();
+            AccountSnapshotResult r = new AccountSnapshotResult();
+            r.setSchemaVersion(1L);
+            r.setCash(new BigDecimal("123456.78")); // real cash -> cap = 0.50 * 123456.78
+            return r;
+          };
+      Worker brokerWorker =
+          localEnv.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+      brokerWorker.registerActivitiesImplementations(localExec, preTradeStub, accountStub);
+      Worker mdWorker = localEnv.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
+      mdWorker.registerActivitiesImplementations(localMarketData);
+      localEnv.start();
+
+      localEnv
+          .getWorkflowClient()
+          .newWorkflowStub(
+              CopytradeSignalWorkflow.class,
+              WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build())
+          .process(btoPayload());
+
+      // The cap is enabled by the canonical field alone -> the snapshot fired (the regression: it
+      // did not, before the fix).
+      assertThat(accountCalls.get())
+          .as("AccountSnapshot must dispatch when only notional_cap_pct_of_capital_base is set")
+          .isEqualTo(1);
+
+      // The cap EVALUATED on the math with real cash (230 projected << 0.50*123456.78 cap) and
+      // APPROVED — NOT the blanket cash_unavailable reject the pre-fix guard produced. Proven by an
+      // accepted signal + a placed order.
+      ArgumentCaptor<AuditEvent> auditCaptor = ArgumentCaptor.forClass(AuditEvent.class);
+      verify(localAudit, atLeastOnce()).log(auditCaptor.capture());
+      assertThat(auditCaptor.getAllValues())
+          .noneSatisfy(
+              e ->
+                  assertThat(e.getKind())
+                      .as("must not reject; cap should evaluate with real cash")
+                      .isEqualTo("SignalRejected"));
+      assertThat(auditCaptor.getAllValues())
+          .anySatisfy(e -> assertThat(e.getKind()).isEqualTo("SignalAccepted"));
+      Mockito.verify(localExec).placeOrder(any());
+    } finally {
+      localEnv.close();
+    }
+  }
+
+  /**
+   * Issue #336 regression guard (companion to the approve case): a NEW-ONLY {@code
+   * notional_cap_pct_of_capital_base} config with a tiny cash term must reject on the cap MATH
+   * ({@code notional=.. cap=..}), proving the gate truly evaluated against the dispatched cash —
+   * NOT the blanket {@code cash_unavailable} sentinel a non-dispatched (null-cash) gate emits.
+   */
+  @Test
+  void handleBto_newOnlyCapBaseConfig_capMathRejects_withRealCash_notCashUnavailable() {
+    env.close();
+    TestWorkflowEnvironment localEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      Worker coreWorker = localEnv.newWorker(CORE_QUEUE);
+      coreWorker.registerWorkflowImplementationTypes(
+          CopytradeSignalWorkflowImpl.class, PositionWorkflowImpl.class);
+
+      RiskActivitiesImpl realRisk = realRiskWithUntrippedKillSwitch();
+      StrategyActivities localStrategy = Mockito.mock(StrategyActivities.class);
+      AuditActivities localAudit = Mockito.mock(AuditActivities.class);
+      ContractActivities localContract = Mockito.mock(ContractActivities.class);
+      ExecActivities localExec = Mockito.mock(ExecActivities.class);
+      PositionLookupActivities localPositionLookup = Mockito.mock(PositionLookupActivities.class);
+      MarketCalendarActivities localCalendar = Mockito.mock(MarketCalendarActivities.class);
+      SubscribePremiumActivity localMarketData = Mockito.mock(SubscribePremiumActivity.class);
+      AccountSnapshotMetricsActivities localMetrics =
+          Mockito.mock(AccountSnapshotMetricsActivities.class);
+      when(localCalendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+      when(localCalendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+
+      StrategyConfig cfg = configWithPreTradeEnabled();
+      cfg.setPreTradeCheckEnabled(false);
+      cfg.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
+      cfg.setNotionalCapPctOfEquity(null);
+      when(localStrategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+      when(localStrategy.capitalForStrategy("dev", "copytrade-v1"))
+          .thenReturn(new BigDecimal("100000"));
+      when(localContract.resolve(any())).thenReturn(resolved());
+
+      coreWorker.registerActivitiesImplementations(
+          localAudit,
+          localStrategy,
+          realRisk,
+          localContract,
+          localPositionLookup,
+          localCalendar,
+          localMetrics);
+
+      PreTradeCheckActivity preTradeStub =
+          request -> {
+            PreTradeCheckResult r = new PreTradeCheckResult();
+            r.setSchemaVersion(1L);
+            r.setAllowed(true);
+            r.setBuyingPower(new BigDecimal("50000"));
+            r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+            r.setMarginSufficient(true);
+            return r;
+          };
+      // Tiny cash -> cap = 0.50 * 100 = 50, projected 1-contract notional 230 > 50 -> math reject.
+      AccountSnapshotActivity accountStub =
+          request -> {
+            AccountSnapshotResult r = new AccountSnapshotResult();
+            r.setSchemaVersion(1L);
+            r.setCash(new BigDecimal("100"));
+            return r;
+          };
+      Worker brokerWorker =
+          localEnv.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+      brokerWorker.registerActivitiesImplementations(localExec, preTradeStub, accountStub);
+      localEnv.start();
+
+      localEnv
+          .getWorkflowClient()
+          .newWorkflowStub(
+              CopytradeSignalWorkflow.class,
+              WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build())
+          .process(btoPayload());
+
+      ArgumentCaptor<AuditEvent> auditCaptor = ArgumentCaptor.forClass(AuditEvent.class);
+      verify(localAudit, atLeastOnce()).log(auditCaptor.capture());
+      AuditEvent rejected =
+          auditCaptor.getAllValues().stream()
+              .filter(e -> "SignalRejected".equals(e.getKind()))
+              .reduce((a, b) -> b)
+              .orElseThrow(() -> new AssertionError("expected a SignalRejected audit"));
+      assertThat(rejected.getSubject()).containsEntry("reason_code", "NOTIONAL_CAP_EXCEEDED");
+      // The cap MATH ran against the dispatched cash -> reason_detail is the notional/cap pair, NOT
+      // the cash_unavailable sentinel the pre-fix (null-cash) path emitted.
+      assertThat((String) rejected.getSubject().get("reason_detail"))
+          .startsWith("notional=")
+          .contains("cap=")
+          .doesNotContain("cash_unavailable");
+      Mockito.verify(localExec, Mockito.never()).placeOrder(any());
+    } finally {
+      localEnv.close();
+    }
+  }
+
+  /**
    * Issue #323: a {@link CanceledFailure} (workflow cancellation surfacing through the {@code
    * AccountSnapshotActivity} call) must re-throw from {@code dispatchAccountSnapshot} rather than
    * fail closed to ZERO — and must NOT touch the dispatch-failure counter (cancellation is not a
@@ -807,6 +1025,32 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
         (tenant, strategy) -> 0L,
         clock,
         Mockito.mock(WorkflowClient.class),
+        RiskCollaboratorDefaults.permissivePortfolioSnapshot(),
+        SectorResolver.CONFIG_BACKED,
+        RiskCollaboratorDefaults.zeroDailyTradeCounter(),
+        RiskCollaboratorDefaults.zeroDrawdownSampler(),
+        RiskCollaboratorDefaults.permissivePreTradeCheck());
+  }
+
+  /**
+   * Builds a real {@link RiskActivitiesImpl} whose kill-switch read returns an UNTRIPPED state, so
+   * checkEntryWithLimit reaches the notional-cap gate instead of failing closed on a missing
+   * KillSwitchWorkflow. Clock is fixed to the payload's posted_at so the signal-age gate passes;
+   * permissive collaborator defaults zero out the other Issue #6 gates, leaving the notional-cap
+   * math (against the workflow-dispatched cash) as the binding constraint.
+   */
+  private static RiskActivitiesImpl realRiskWithUntrippedKillSwitch() {
+    Clock clock = Clock.fixed(Instant.parse("2026-05-13T17:22:31Z"), ZoneOffset.UTC);
+    WorkflowClient client = Mockito.mock(WorkflowClient.class);
+    KillSwitchWorkflow ksStub = Mockito.mock(KillSwitchWorkflow.class);
+    KillSwitchState untripped = new KillSwitchState();
+    untripped.setTripped(false);
+    when(ksStub.killswitchState()).thenReturn(untripped);
+    when(client.newWorkflowStub(eq(KillSwitchWorkflow.class), anyString())).thenReturn(ksStub);
+    return new RiskActivitiesImpl(
+        (tenant, strategy) -> 0L,
+        clock,
+        client,
         RiskCollaboratorDefaults.permissivePortfolioSnapshot(),
         SectorResolver.CONFIG_BACKED,
         RiskCollaboratorDefaults.zeroDailyTradeCounter(),

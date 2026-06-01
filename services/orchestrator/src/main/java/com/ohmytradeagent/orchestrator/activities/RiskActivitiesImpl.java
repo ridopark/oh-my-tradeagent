@@ -9,6 +9,7 @@ import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
+import com.ohmytradeagent.orchestrator.domain.StrategyConfigs;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -350,8 +351,13 @@ public class RiskActivitiesImpl implements RiskActivities {
   private BigDecimal resolveNotionalCapPct(StrategyConfig config) {
     BigDecimal capBase = config.getNotionalCapPctOfCapitalBase();
     BigDecimal equity = config.getNotionalCapPctOfEquity();
+    // Both null → gate disabled. Shared with the workflow's AccountSnapshot-dispatch guard via
+    // StrategyConfigs.notionalCapConfigured so enablement never diverges (#336 regression guard).
+    if (!StrategyConfigs.notionalCapConfigured(config)) {
+      return null;
+    }
     if (equity == null) {
-      // capBase != null → canonical path; capBase == null → both null → gate disabled.
+      // capBase != null → canonical path.
       return capBase;
     }
     if (capBase == null) {

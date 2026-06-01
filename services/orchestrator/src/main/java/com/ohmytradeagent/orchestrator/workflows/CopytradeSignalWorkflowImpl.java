@@ -31,6 +31,7 @@ import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
 import com.ohmytradeagent.orchestrator.domain.KeywordPartialMatcher;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
+import com.ohmytradeagent.orchestrator.domain.StrategyConfigs;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.api.enums.v1.ParentClosePolicy;
 import io.temporal.common.RetryOptions;
@@ -774,8 +775,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    * broker-<broker_target>} task queue and returns the account's <b>cash</b> balance — the cash
    * component of the notional-cap gate's MTM-stable cost-basis capital base ({@code cash +
    * sum_open_notional}, issue #323). Returns {@code null} when the notional-cap gate is disabled
-   * (no {@code notional_cap_pct_of_equity}) so the cross-service round-trip only fires when the
-   * strategy enabled the gate.
+   * (BOTH {@code notional_cap_pct_of_capital_base} and {@code notional_cap_pct_of_equity} null, per
+   * {@link StrategyConfigs#notionalCapConfigured}) so the cross-service round-trip only fires when
+   * the strategy enabled the gate.
    *
    * <p>Fail-closed semantics: any exception (after Temporal's own retries), a null/blank {@code
    * broker_target}, or a null result/cash yields {@code BigDecimal.ZERO}. The downstream {@code
@@ -791,7 +793,22 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    */
   private BigDecimal dispatchAccountSnapshot(
       CopytradeSignalPayload payload, StrategyConfig config) {
-    if (config.getNotionalCapPctOfEquity() == null) {
+    // Enablement mirrors RiskActivitiesImpl#resolveNotionalCapPct (#336): the cap (and so the cash
+    // dispatch) is on when EITHER the canonical notional_cap_pct_of_capital_base OR the deprecated
+    // notional_cap_pct_of_equity is set. Pre-#336 this tested equity-only, so a config that set
+    // ONLY
+    // the new canonical field (the migration end-state) skipped the dispatch and checkNotionalCap
+    // rejected every BTO with cash_unavailable. Sharing StrategyConfigs.notionalCapConfigured keeps
+    // guard and resolver in lockstep.
+    //
+    // Replay-safe by construction (no new Workflow.getVersion marker needed): `config` reaches this
+    // method as the deterministically recorded result of the strategy.get() Activity (read once in
+    // process(), threaded down — never re-resolved here on replay). A history recorded before #336
+    // physically cannot carry notional_cap_pct_of_capital_base (the field did not exist when that
+    // Activity result was serialized), so for any pre-existing execution capBase is null on replay
+    // and this guard reduces to the old equity-only decision — the command stream is unchanged. The
+    // new branch is reachable only by executions whose history was recorded post-#336.
+    if (!StrategyConfigs.notionalCapConfigured(config)) {
       return null;
     }
     if (config.getBrokerTarget() == null) {
