@@ -1,0 +1,32 @@
+# Local-dev Postgres for the Next.js dashboard. Stands up ONLY the `dashboard` identity->tenant DB
+# that lib/db.ts reads (DASHBOARD_DB_* / DASHBOARD_READONLY_PASSWORD in .env.local) — not the BFF's
+# orchestrator/exec read-only datasources, which are a separate concern (run the BFF for those).
+#
+#   Up:    docker compose -f dashboard/docker-compose.yml up -d
+#   Down:  docker compose -f dashboard/docker-compose.yml down       # keep data
+#   Reset: docker compose -f dashboard/docker-compose.yml down -v     # wipe + re-run init
+#
+# db-init/ runs ONCE on a fresh volume: it mirrors the BFF's Flyway V1 (dashboard_user table) and
+# V2 (SELECT-only dashboard_readonly role) so the web app can connect standalone, no BFF required.
+# Source of truth for the real schema is still services/tenant-dashboard-bff/.../db/dashboard/*.sql.
+services:
+  dashboard-db:
+    image: postgres:16
+    container_name: dashboard-db
+    environment:
+      POSTGRES_USER: dashboard_admin
+      POSTGRES_PASSWORD: dashboard_admin
+      POSTGRES_DB: dashboard
+    ports:
+      - "5432:5432"
+    volumes:
+      - dashboard-db-data:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dashboard_admin -d dashboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  dashboard-db-data:

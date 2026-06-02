@@ -17,6 +17,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     // Runs AFTER Google/Facebook verifies the identity. account.provider is the provider; the stable
     // verified subject is account.providerAccountId (OAuth `sub`).
     async signIn({ account }) {
+      // Local-dev bypass — the dev-login provider only EXISTS when double-gated in auth.config.ts,
+      // so reaching here already means dev mode. Grant without a dashboard_user lookup.
+      if (account?.provider === "dev-login") {
+        return true;
+      }
       if (!account?.provider || !account.providerAccountId) {
         return false;
       }
@@ -30,6 +35,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     async jwt({ token, account }) {
       // Already resolved on a prior request — skip the redundant DB round-trip.
       if (token.tenantId) {
+        return token;
+      }
+      // Dev-login maps straight to a fixed tenant (default "dev") — no DB lookup.
+      if (account?.provider === "dev-login") {
+        token.tenantId = process.env.AUTH_DEV_TENANT ?? "dev";
         return token;
       }
       // On initial sign-in, resolve and stamp the tenant_id onto the token.

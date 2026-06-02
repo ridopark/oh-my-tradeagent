@@ -1,4 +1,5 @@
 import { signIn, auth } from "@/auth";
+import { devLoginEnabled } from "@/auth.config";
 import { redirect } from "next/navigation";
 
 // Social sign-in. An already-authenticated user is bounced to the portfolio. The signIn callback
@@ -49,6 +50,19 @@ export default async function SignInPage({
             Continue with Facebook
           </button>
         </form>
+
+        {devLoginEnabled && (
+          <form
+            action={async () => {
+              "use server";
+              await signIn("dev-login", { redirectTo: "/portfolio" });
+            }}
+          >
+            <button className="w-full rounded border border-amber-400 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100">
+              Dev login (local only)
+            </button>
+          </form>
+        )}
       </div>
     </main>
   );

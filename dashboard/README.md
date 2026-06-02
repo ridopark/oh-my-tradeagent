@@ -16,23 +16,72 @@ off-ingress `tenant-dashboard-bff` over in-cluster HTTP behind a shared service 
   service token. Never import from a client component.
 - `app/{portfolio,positions,trades,orders}/page.tsx` — server components that fetch via `lib/bff.ts`.
 
-## Local dev
+## Local development
+
+### Fastest: one command (Dev login, no OAuth)
+
+From the repo root:
 
 ```bash
-cp .env.example .env.local   # fill AUTH_*, DASHBOARD_DB_*/DASHBOARD_READONLY_PASSWORD, BFF_SHARED_TOKEN
-npm install
-npm run dev                  # http://localhost:3000
+make dashboard-dev
 ```
 
-Seed a `dashboard_user` row mapping your Google identity to a tenant so login succeeds:
+This brings up the compose infra (postgres + temporal), runs the BFF (`mvn spring-boot:run`, which
+Flyway-creates `dashboard_user` + the `dashboard_readonly` role) and the Next.js dev server, all
+wired together with a passwordless **Dev login** — open <http://localhost:3000> and click
+**"Dev login (local only)"**. Ctrl-C stops the BFF + web (the compose infra is left up;
+`docker compose -f infra/docker-compose.yml down` to stop it). See
+`scripts/dev/dashboard-dev.sh` for the exact wiring.
+
+> **Data is empty locally.** Trades/orders/positions render empty (no trading system is populating
+> `audit_log` / `order_intent_journal`, and there are no live `PositionWorkflow`s). The portfolio
+> page waits ~8s for the account-snapshot workflow to time out (no orchestrator worker) before
+> rendering. The point is a working full stack, not sample data.
+
+### Dev login — how it's gated
+
+The Dev login provider is **double-gated** so it can never reach production (`auth.config.ts`):
+it is added only when `AUTH_DEV_LOGIN === "true"` **and** `NODE_ENV !== "production"` (Next.js sets
+`production` on every prod build/run). It maps straight to `AUTH_DEV_TENANT` (default `dev`) with no
+`dashboard_user` lookup. Never set `AUTH_DEV_LOGIN` in a deployed environment.
+
+### Manual run (à la carte)
+
+```bash
+docker compose -f infra/docker-compose.yml up -d postgres temporal
+# BFF (separate terminal). DASHBOARD_READONLY_PASSWORD has no default — set it:
+DASHBOARD_READONLY_PASSWORD=dashboard_readonly_dev BFF_SHARED_TOKEN=dev-shared-token \
+  mvn -pl services/tenant-dashboard-bff -am spring-boot:run
+# Web (separate terminal):
+cd dashboard && cp .env.example .env.local && npm install && npm run dev   # http://localhost:3000
+```
+
+### Frontend-only (no Java BFF)
+
+To iterate on the UI without running the BFF/Temporal, stand up just the `dashboard` identity DB and
+run the web server. `make dashboard-dev` is still the way to exercise the real data path.
+
+```bash
+docker compose -f dashboard/docker-compose.yml up -d   # standalone `dashboard` DB (port 5432)
+cd dashboard && npm run dev
+```
+
+It binds the same `:5432` as the full `infra/docker-compose.yml`, so run **one or the other**, not
+both. The data pages still call the BFF, so they'll error until a BFF is reachable — this mode is for
+the sign-in/layout/styling, not the data path.
+
+### Real Google/Facebook login (instead of Dev login)
+
+Set `AUTH_DEV_LOGIN=false` (or unset it) in `.env.local` and fill `AUTH_GOOGLE_ID/SECRET` (and/or
+`AUTH_FACEBOOK_*`). Create an OAuth client in the Google Cloud / Meta console with the redirect URI
+`http://localhost:3000/api/auth/callback/{google,facebook}` (localhost `http://` is allowed in dev).
+Then seed a `dashboard_user` row for your verified identity so login resolves to a tenant (otherwise
+it's denied):
 
 ```sql
 INSERT INTO dashboard_user (provider, subject, email, tenant_id)
 VALUES ('google', '<your-google-sub>', 'you@example.com', 'dev');
 ```
-
-The BFF must be running (`mvn -pl services/tenant-dashboard-bff spring-boot:run`) and reachable at
-`BFF_INTERNAL_URL`.
 
 ## Auth.js version (next-auth v5-beta)
 

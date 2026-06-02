@@ -3,14 +3,21 @@
 # Python). Anything added here should be a thin developer-experience
 # wrapper, not a parallel build system.
 
-.PHONY: hooks help
+.PHONY: hooks help dashboard-dev
 
 help:
 	@echo "Available targets:"
-	@echo "  hooks   Install git hooks from contract/python/git-hooks/"
-	@echo "          into .git/hooks/. Installs pre-commit (schema regen drift,"
-	@echo "          issue #68) and pre-push (audit KindRegistryGuard, issue"
-	@echo "          #213). Idempotent. Run once after clone."
+	@echo "  hooks          Install git hooks from contract/python/git-hooks/"
+	@echo "                 into .git/hooks/. Installs pre-commit (schema regen drift,"
+	@echo "                 issue #68) and pre-push (audit KindRegistryGuard, issue"
+	@echo "                 #213). Idempotent. Run once after clone."
+	@echo "  dashboard-dev  Run the tenant dashboard locally end-to-end (compose infra +"
+	@echo "                 BFF + Next.js, with passwordless Dev login). Ctrl-C to stop."
+
+# Thin wrapper: full local tenant-dashboard stack from source. See the script header
+# and dashboard/README.md §'Local development' for what it does and its caveats.
+dashboard-dev:
+	@./scripts/dev/dashboard-dev.sh
 
 # Install local git hooks. Each hook is opt-in DX (CI is still the source
 # of truth) and respects the standard `--no-verify` bypass.
