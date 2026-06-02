@@ -119,14 +119,11 @@ before the `tenant-dashboard-bff` / `dashboard` pods will start.
    openssl rand -hex 32      # DASHBOARD_READONLY_PASSWORD
    ```
    Fill `AUTH_GOOGLE_ID/SECRET` + `AUTH_FACEBOOK_ID/SECRET` from the Google Cloud / Meta
-   consoles (redirect URI `https://<host>/api/auth/callback/{google,facebook}`). Then:
-   ```sh
-   scp infra/secrets-template/secrets.local.yaml ridopark@192.168.10.123:/tmp/s.yaml
-   ssh ridopark@192.168.10.123 'kubectl apply -f /tmp/s.yaml && rm /tmp/s.yaml'
-   ```
-   `DASHBOARD_READONLY_PASSWORD` is the **single source** of the read-only DB password —
-   the BFF's Flyway creates the `dashboard_readonly` role with it, and the Next.js pod
-   connects with it. A missing value fails the BFF boot (no default) — fix-fast by design.
+   consoles (redirect URI `https://<host>/api/auth/callback/{google,facebook}`). Apply
+   `secrets.local.yaml` the same way as step 4 of **First-time deploy** above (scp + `kubectl
+   apply`). `DASHBOARD_READONLY_PASSWORD` is the **single source** of the read-only DB password
+   — the BFF's Flyway creates the `dashboard_readonly` role with it, and the Next.js pod connects
+   with it. A missing value fails the BFF boot (no default) — fail-fast by design.
 
 3. **Apply the manifests** (or let the deploy pipeline do it) — `58-tenant-dashboard-bff.yaml`
    (ClusterIP + NetworkPolicy, no Ingress) and `59-dashboard.yaml` (public Ingress). On
