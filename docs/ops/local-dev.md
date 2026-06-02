@@ -46,8 +46,9 @@ Run the whole flow — Discord signal → orchestrator → exec on your **local*
    ```
 
 3. **Run the Java services** (each via `mvn`, sourcing the same env so they use the local Alpaca
-   account + output webhook). orchestrator/market-data DB + Temporal default to `localhost`; exec's
-   `EXEC_DB_URL` (no default) comes from `.env.local`:
+   account + output webhook). DB hosts + Temporal default to `localhost`; the boot-required bits
+   (`EXEC_DB_URL`, `ORCHESTRATOR_DB_USER/PASS` superuser override, `DASHBOARD_READONLY_PASSWORD`,
+   `APCA_*`) all come from `.env.local`:
    ```sh
    set -a; . infra/.env.local; set +a          # export APCA_*, ALERT_DISCORD_WEBHOOK_URL, ...
    mvn -pl services/orchestrator   -am spring-boot:run    # creates orchestrator.audit_log via Flyway
