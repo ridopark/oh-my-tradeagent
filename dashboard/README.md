@@ -18,6 +18,10 @@ off-ingress `tenant-dashboard-bff` over in-cluster HTTP behind a shared service 
 
 ## Local development
 
+This covers running the **dashboard** locally. To run the **full trading pipeline** locally against a
+sandboxed Alpaca account + test Discord channels (so the dashboard shows real, non-seeded data), see
+[`docs/ops/local-dev.md`](../docs/ops/local-dev.md).
+
 ### Fastest: one command (Dev login, no OAuth)
 
 From the repo root:
