@@ -11,30 +11,30 @@ export function DataTable({
   empty?: string;
 }) {
   if (rows.length === 0) {
-    return <p className="text-sm text-slate-500">{empty}</p>;
+    return <p className="text-sm text-slate-400">{empty}</p>;
   }
   return (
-    <div className="overflow-x-auto rounded border border-slate-200 bg-white">
-      <table className="min-w-full divide-y divide-slate-200 text-sm">
-        <thead className="bg-slate-50">
+    <div className="overflow-x-auto rounded border border-slate-800 bg-slate-900">
+      <table className="min-w-full divide-y divide-slate-800 text-sm">
+        <thead className="bg-slate-800/50">
           <tr>
             {columns.map((c) => (
               <th
                 key={c.key}
-                className="px-3 py-2 text-left font-medium text-slate-600"
+                className="px-3 py-2 text-left font-medium text-slate-400"
               >
                 {c.label}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-slate-100">
+        <tbody className="divide-y divide-slate-800">
           {rows.map((row, i) => {
             const r = row as Record<string, unknown>;
             return (
-              <tr key={i} className="hover:bg-slate-50">
+              <tr key={i} className="hover:bg-slate-800/50">
                 {columns.map((c) => (
-                  <td key={c.key} className="px-3 py-2 text-slate-700">
+                  <td key={c.key} className="px-3 py-2 text-slate-200">
                     {format(r[c.key])}
                   </td>
                 ))}

@@ -12,8 +12,8 @@ export default async function OrdersPage() {
     <>
       <Nav tenantId={session?.tenantId} />
       <main className="mx-auto max-w-6xl px-4 py-6">
-        <h1 className="mb-1 text-xl font-semibold text-slate-800">Order History</h1>
-        <p className="mb-4 text-sm text-slate-500">
+        <h1 className="mb-1 text-xl font-semibold text-slate-100">Order History</h1>
+        <p className="mb-4 text-sm text-slate-400">
           All order-journal states, newest first.
         </p>
         <DataTable

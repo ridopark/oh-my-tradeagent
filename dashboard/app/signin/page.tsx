@@ -18,13 +18,13 @@ export default async function SignInPage({
 
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-6">
-      <h1 className="mb-2 text-2xl font-semibold text-slate-800">Tenant Dashboard</h1>
-      <p className="mb-6 text-sm text-slate-500">
+      <h1 className="mb-2 text-2xl font-semibold text-slate-100">Tenant Dashboard</h1>
+      <p className="mb-6 text-sm text-slate-400">
         Sign in to view your positions, trades, order history, and portfolio.
       </p>
 
       {denied && (
-        <div className="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div className="mb-4 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
           This account is not provisioned for any tenant. Contact your operator.
         </div>
       )}
@@ -36,7 +36,7 @@ export default async function SignInPage({
             await signIn("google", { redirectTo: "/portfolio" });
           }}
         >
-          <button className="w-full rounded border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50">
+          <button className="w-full rounded border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-100 hover:bg-slate-800">
             Continue with Google
           </button>
         </form>
@@ -46,7 +46,7 @@ export default async function SignInPage({
             await signIn("facebook", { redirectTo: "/portfolio" });
           }}
         >
-          <button className="w-full rounded border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50">
+          <button className="w-full rounded border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-100 hover:bg-slate-800">
             Continue with Facebook
           </button>
         </form>
@@ -58,7 +58,7 @@ export default async function SignInPage({
               await signIn("dev-login", { redirectTo: "/portfolio" });
             }}
           >
-            <button className="w-full rounded border border-amber-400 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100">
+            <button className="w-full rounded border border-amber-500/50 bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-300 hover:bg-amber-500/20">
               Dev login (local only)
             </button>
           </form>

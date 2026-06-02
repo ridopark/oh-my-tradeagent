@@ -12,8 +12,8 @@ export default async function PortfolioPage() {
     <>
       <Nav tenantId={session?.tenantId} />
       <main className="mx-auto max-w-6xl px-4 py-6">
-        <h1 className="mb-1 text-xl font-semibold text-slate-800">Portfolio</h1>
-        <p className="mb-4 text-sm text-slate-500">Trading day {p.trading_day} (America/New_York).</p>
+        <h1 className="mb-1 text-xl font-semibold text-slate-100">Portfolio</h1>
+        <p className="mb-4 text-sm text-slate-400">Trading day {p.trading_day} (America/New_York).</p>
 
         <section className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Stat
@@ -29,7 +29,7 @@ export default async function PortfolioPage() {
         </section>
 
         <section className="mb-6">
-          <h2 className="mb-2 text-sm font-semibold text-slate-700">Account equity</h2>
+          <h2 className="mb-2 text-sm font-semibold text-slate-200">Account equity</h2>
           <DataTable
             empty="No broker accounts."
             columns={[
@@ -38,11 +38,11 @@ export default async function PortfolioPage() {
             ]}
             rows={p.account_equity}
           />
-          <p className="mt-2 text-xs text-slate-400">{p.account_equity_scope}</p>
+          <p className="mt-2 text-xs text-slate-500">{p.account_equity_scope}</p>
         </section>
 
         <section className="mb-6">
-          <h2 className="mb-2 text-sm font-semibold text-slate-700">Open positions</h2>
+          <h2 className="mb-2 text-sm font-semibold text-slate-200">Open positions</h2>
           <DataTable
             empty="No open positions."
             columns={[
@@ -56,7 +56,7 @@ export default async function PortfolioPage() {
           />
         </section>
 
-        <p className="text-xs text-slate-400">{p.unrealized_pnl_note}</p>
+        <p className="text-xs text-slate-500">{p.unrealized_pnl_note}</p>
       </main>
     </>
   );
@@ -72,10 +72,10 @@ function Stat({
   note?: string;
 }) {
   return (
-    <div className="rounded border border-slate-200 bg-white px-4 py-3">
-      <div className="text-xs uppercase tracking-wide text-slate-400">{label}</div>
-      <div className="mt-1 text-lg font-semibold text-slate-800">{value}</div>
-      {note && <div className="mt-1 text-xs text-slate-400">{note}</div>}
+    <div className="rounded border border-slate-800 bg-slate-900 px-4 py-3">
+      <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="mt-1 text-lg font-semibold text-slate-100">{value}</div>
+      {note && <div className="mt-1 text-xs text-slate-500">{note}</div>}
     </div>
   );
 }
