@@ -3,7 +3,7 @@
 # Python). Anything added here should be a thin developer-experience
 # wrapper, not a parallel build system.
 
-.PHONY: hooks help dashboard-dev
+.PHONY: hooks help dashboard-dev dashboard-seed
 
 help:
 	@echo "Available targets:"
@@ -13,11 +13,17 @@ help:
 	@echo "                 #213). Idempotent. Run once after clone."
 	@echo "  dashboard-dev  Run the tenant dashboard locally end-to-end (compose infra +"
 	@echo "                 BFF + Next.js, with passwordless Dev login). Ctrl-C to stop."
+	@echo "  dashboard-seed Insert sample trades/orders into the local Postgres so the"
+	@echo "                 dashboard shows data (run while the infra is up). Idempotent."
 
 # Thin wrapper: full local tenant-dashboard stack from source. See the script header
 # and dashboard/README.md §'Local development' for what it does and its caveats.
 dashboard-dev:
 	@./scripts/dev/dashboard-dev.sh
+
+# Seed sample audit_log + order_intent_journal rows into the local Postgres.
+dashboard-seed:
+	@./scripts/dev/dashboard-seed.sh
 
 # Install local git hooks. Each hook is opt-in DX (CI is still the source
 # of truth) and respects the standard `--no-verify` bypass.

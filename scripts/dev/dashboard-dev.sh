@@ -29,6 +29,9 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
+echo "==> seeding sample data (audit_log + order_intent_journal)"
+scripts/dev/dashboard-seed.sh || echo "    (seed failed — continuing; Trades/Orders may be empty)"
+
 bff_pid="" ; web_pid=""
 cleanup() {
   echo; echo "==> stopping dashboard + BFF (infra left running)"

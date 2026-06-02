@@ -33,10 +33,13 @@ wired together with a passwordless **Dev login** — open <http://localhost:3000
 `docker compose -f infra/docker-compose.yml down` to stop it). See
 `scripts/dev/dashboard-dev.sh` for the exact wiring.
 
-> **Data is empty locally.** Trades/orders/positions render empty (no trading system is populating
-> `audit_log` / `order_intent_journal`, and there are no live `PositionWorkflow`s). The portfolio
-> page waits ~8s for the account-snapshot workflow to time out (no orchestrator worker) before
-> rendering. The point is a working full stack, not sample data.
+> **Sample data is seeded automatically.** `make dashboard-dev` runs `scripts/dev/seed.sql` (via
+> `make dashboard-seed`), which creates the `audit_log` + `order_intent_journal` read tables — absent
+> here because orchestrator-svc / exec-svc aren't running — and inserts sample fills/orders for
+> tenant `dev`, so **Trades, Orders, and Portfolio realized-PnL show data**. **Positions** stay empty
+> (they come from live Temporal `PositionWorkflow`s) and the Portfolio page waits ~8s for the
+> account-snapshot workflow to time out (no orchestrator worker) before rendering. Re-seed anytime
+> with `make dashboard-seed` (idempotent).
 
 ### Dev login — how it's gated
 
