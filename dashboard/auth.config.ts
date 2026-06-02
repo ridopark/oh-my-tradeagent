@@ -1,3 +1,8 @@
+// next-auth is intentionally pinned to v5-beta (Auth.js v5). This app is built on the v5 App-Router
+// API (the auth.config edge/Node split below; NextAuth()'s {handlers,auth,...} export in auth.ts);
+// stable v4 has no first-class App-Router support, so a downgrade would be a backward rewrite. The
+// version is exact-pinned (no caret) to freeze beta drift. Rationale: dashboard/README.md §"Auth.js
+// version". Upgrade to v5 GA is tracked in issue #345.
 import type { NextAuthConfig } from "next-auth";
 import Google from "next-auth/providers/google";
 import Facebook from "next-auth/providers/facebook";
