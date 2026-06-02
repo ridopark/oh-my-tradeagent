@@ -21,9 +21,12 @@ spring:
     locations: classpath:db/dashboard
     placeholders:
       # Injected into V2__dashboard_readonly_role.sql at migration time so the dashboard_readonly
-      # role is created with its real password (never a repo-readable literal). Prod sets
-      # DASHBOARD_READONLY_PASSWORD from the dashboard-secrets Secret; local dev uses the default.
-      dashboard_readonly_password: ${DASHBOARD_READONLY_PASSWORD:dashboard_readonly_dev}
+      # role is created with its real password (never a repo-readable literal). NO default on
+      # purpose: an unset DASHBOARD_READONLY_PASSWORD fails placeholder resolution at boot — BEFORE
+      # Flyway runs — so the role is never created with a known fallback. Set it from the
+      # dashboard-secrets Secret in prod; export it locally when running the BFF against a real
+      # dashboard DB (unit tests and the ITs never run this migration).
+      dashboard_readonly_password: ${DASHBOARD_READONLY_PASSWORD}
 
 # Read-only application datasources. Credentials are the dedicated bff_readonly role per DB (see the
 # operator runbook); SELECT-only grants mean even a query bug cannot mutate trading state.
