@@ -6,9 +6,15 @@
 --   2. INSERTs a few sample fills/orders for tenant `dev` / strategy `copytrade-v1` so Trades, Orders,
 --      and the realized-PnL on Portfolio render real data. (Positions come from live Temporal
 --      PositionWorkflows — still empty locally.)
--- Idempotent: tables use IF NOT EXISTS; rows are guarded by a sentinel correlation_id so re-running
--- (or `make dashboard-seed`) does not duplicate. Schema mirrors the real migrations — keep roughly
--- in sync with services/{orchestrator,exec}/.../db; only the columns the BFF reads are created.
+-- Idempotent: tables use IF NOT EXISTS; rows are guarded by a sentinel correlation_id/intent_key so
+-- re-running (or `make dashboard-seed`) does not duplicate.
+--
+-- These CREATE TABLEs are a deliberate SUBSET of the real Flyway migrations
+-- (services/orchestrator/.../db/migration/V2__audit_log.sql and
+-- services/exec/.../db/exec/V1__order_intent_journal.sql) — only the columns the BFF reads, no
+-- indexes/CHECKs/schema_history. Keep the read columns in sync with those migrations. CAVEAT: do NOT
+-- point the real orchestrator-svc/exec-svc at a seeded DB — their Flyway would collide with these
+-- pre-existing, baseline-less tables. This seed is for the lightweight dashboard-only local stack.
 
 -- ============================ orchestrator DB: audit_log ============================
 \connect orchestrator
