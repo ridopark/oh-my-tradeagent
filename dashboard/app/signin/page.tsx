@@ -1,6 +1,7 @@
 import { signIn, auth } from "@/auth";
 import { devLoginEnabled } from "@/auth.config";
 import { redirect } from "next/navigation";
+import { SubmitButton } from "@/components/SubmitButton";
 
 // Social sign-in. An already-authenticated user is bounced to the portfolio. The signIn callback
 // (auth.ts) denies any identity without a dashboard_user row, so a successful provider login can
@@ -36,9 +37,9 @@ export default async function SignInPage({
             await signIn("google", { redirectTo: "/portfolio" });
           }}
         >
-          <button className="w-full rounded border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-100 hover:bg-slate-800">
+          <SubmitButton className="w-full rounded border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-100 hover:bg-slate-800">
             Continue with Google
-          </button>
+          </SubmitButton>
         </form>
         <form
           action={async () => {
@@ -46,9 +47,9 @@ export default async function SignInPage({
             await signIn("facebook", { redirectTo: "/portfolio" });
           }}
         >
-          <button className="w-full rounded border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-100 hover:bg-slate-800">
+          <SubmitButton className="w-full rounded border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-100 hover:bg-slate-800">
             Continue with Facebook
-          </button>
+          </SubmitButton>
         </form>
 
         {devLoginEnabled && (
@@ -58,9 +59,9 @@ export default async function SignInPage({
               await signIn("dev-login", { redirectTo: "/portfolio" });
             }}
           >
-            <button className="w-full rounded border border-amber-500/50 bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-300 hover:bg-amber-500/20">
+            <SubmitButton className="w-full rounded border border-amber-500/50 bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-300 hover:bg-amber-500/20">
               Dev login (local only)
-            </button>
+            </SubmitButton>
           </form>
         )}
       </div>
