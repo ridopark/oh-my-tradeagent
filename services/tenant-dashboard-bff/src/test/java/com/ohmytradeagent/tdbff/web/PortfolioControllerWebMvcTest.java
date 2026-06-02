@@ -1,10 +1,12 @@
 package com.ohmytradeagent.tdbff.web;
 
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.ohmytradeagent.tdbff.portfolio.PortfolioService;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -27,5 +29,16 @@ class PortfolioControllerWebMvcTest {
     mvc.perform(get("/api/portfolio"))
         .andExpect(status().isUnauthorized())
         .andExpect(jsonPath("$.error").value("missing_tenant"));
+  }
+
+  @Test
+  void returnsTenantScopedPortfolio() throws Exception {
+    when(service.portfolio("acme"))
+        .thenReturn(Map.of("tenant_id", "acme", "open_positions_count", 0));
+
+    mvc.perform(get("/api/portfolio").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.tenant_id").value("acme"))
+        .andExpect(jsonPath("$.open_positions_count").value(0));
   }
 }

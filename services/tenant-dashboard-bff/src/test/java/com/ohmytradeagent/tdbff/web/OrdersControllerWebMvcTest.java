@@ -1,10 +1,13 @@
 package com.ohmytradeagent.tdbff.web;
 
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.ohmytradeagent.tdbff.orders.OrdersReader;
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -27,5 +30,18 @@ class OrdersControllerWebMvcTest {
     mvc.perform(get("/api/orders"))
         .andExpect(status().isUnauthorized())
         .andExpect(jsonPath("$.error").value("missing_tenant"));
+  }
+
+  @Test
+  void returnsTenantScopedOrders() throws Exception {
+    // Controller passes the default limit (100) when no `limit` param is supplied.
+    when(reader.orders("acme", 100))
+        .thenReturn(List.of(Map.of("intent_key", "ok1", "state", "FILLED")));
+
+    mvc.perform(get("/api/orders").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.tenant_id").value("acme"))
+        .andExpect(jsonPath("$.count").value(1))
+        .andExpect(jsonPath("$.items[0].intent_key").value("ok1"));
   }
 }

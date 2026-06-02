@@ -44,7 +44,8 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
   // would otherwise fall through to a 500. It's bad client input: map it to 400.
   @ExceptionHandler(DateTimeParseException.class)
   public ResponseEntity<Map<String, Object>> badTimestamp(DateTimeParseException e) {
-    return badRequestResponse("invalid timestamp: " + e.getMessage());
+    // Fixed message — don't reflect the caller's raw input back in the response body.
+    return badRequestResponse("invalid 'since' timestamp; expected ISO-8601");
   }
 
   private static ResponseEntity<Map<String, Object>> badRequestResponse(String detail) {

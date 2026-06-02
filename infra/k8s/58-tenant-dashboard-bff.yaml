@@ -78,6 +78,17 @@ spec:
         - name: tenant-dashboard-bff
           image: ghcr.io/ridopark/oh-my-tradeagent-tenant-dashboard-bff:latest
           imagePullPolicy: Always
+          # Least-privilege runtime. The image already runs as UID 10001 (java-service.Dockerfile);
+          # make it explicit + drop caps and privilege escalation. readOnlyRootFilesystem is omitted
+          # (Spring writes to /tmp) — would need a writable emptyDir mount.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 8083
               name: http
