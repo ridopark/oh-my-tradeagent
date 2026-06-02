@@ -93,7 +93,13 @@ export interface Portfolio {
   sum_open_notional: string | number;
   sum_open_notional_basis: string;
   realized_pnl_today: string | number;
-  account_equity: { broker_target: string; equity: string | number | null }[];
+  // account_number is present only when the BFF's dev flag (bff.expose-broker-account-number) is on
+  // — never in prod. Used purely to verify which brokerage account a broker_target maps to.
+  account_equity: {
+    broker_target: string;
+    equity: string | number | null;
+    account_number?: string;
+  }[];
   account_equity_scope: string;
   unrealized_pnl: null;
   unrealized_pnl_note: string;

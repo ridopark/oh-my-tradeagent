@@ -23,7 +23,7 @@ class AccountSnapshotExecActivityImplTest {
   void accountSnapshot_surfacesBrokerEquityAndSchemaVersion() {
     OptionsBroker broker = mock(OptionsBroker.class);
     when(broker.getAccount())
-        .thenReturn(new OptionsBroker.AccountSummary(new BigDecimal("123456.78"), null));
+        .thenReturn(new OptionsBroker.AccountSummary(new BigDecimal("123456.78"), null, null));
     AccountSnapshotExecActivityImpl impl = new AccountSnapshotExecActivityImpl(broker);
 
     AccountSnapshotRequest req = new AccountSnapshotRequest();
@@ -34,6 +34,8 @@ class AccountSnapshotExecActivityImplTest {
 
     assertThat(result.getEquity()).isEqualByComparingTo(new BigDecimal("123456.78"));
     assertThat(result.getSchemaVersion()).isEqualTo(1L);
+    // A null broker accountNumber simply leaves the optional field absent.
+    assertThat(result.getAccountNumber()).isNull();
   }
 
   // Issue #323: the activity must also surface the broker's getAccountCash() as the result `cash`
@@ -45,7 +47,7 @@ class AccountSnapshotExecActivityImplTest {
     when(broker.getAccount())
         .thenReturn(
             new OptionsBroker.AccountSummary(
-                new BigDecimal("123456.78"), new BigDecimal("42000.00")));
+                new BigDecimal("123456.78"), new BigDecimal("42000.00"), "PA3ER05HLHMB"));
     AccountSnapshotExecActivityImpl impl = new AccountSnapshotExecActivityImpl(broker);
 
     AccountSnapshotRequest req = new AccountSnapshotRequest();
@@ -55,6 +57,8 @@ class AccountSnapshotExecActivityImplTest {
     AccountSnapshotResult result = impl.accountSnapshot(req);
 
     assertThat(result.getCash()).isEqualByComparingTo(new BigDecimal("42000.00"));
+    // Informational account_number flows through from the broker summary to the result.
+    assertThat(result.getAccountNumber()).isEqualTo("PA3ER05HLHMB");
   }
 
   // Issue #323 single-fetch: the activity must read equity AND cash from ONE broker account read
@@ -66,7 +70,7 @@ class AccountSnapshotExecActivityImplTest {
     when(broker.getAccount())
         .thenReturn(
             new OptionsBroker.AccountSummary(
-                new BigDecimal("123456.78"), new BigDecimal("42000.00")));
+                new BigDecimal("123456.78"), new BigDecimal("42000.00"), null));
     AccountSnapshotExecActivityImpl impl = new AccountSnapshotExecActivityImpl(broker);
 
     AccountSnapshotRequest req = new AccountSnapshotRequest();

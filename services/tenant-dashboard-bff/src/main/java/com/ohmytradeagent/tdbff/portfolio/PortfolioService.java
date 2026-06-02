@@ -13,6 +13,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 /**
@@ -26,6 +27,9 @@ import org.springframework.stereotype.Service;
  *       RealizedPnlCalculator} for the documented intraday-match limitation.
  *   <li>{@code account_equity} — broker-account net-liq, SHARED across all tenants on a {@code
  *       broker_target}; {@code account_equity_scope} states it is NOT the tenant's portfolio value.
+ *       Each row may also carry an informational {@code account_number} (the brokerage account
+ *       identity for dashboard verification) — optional and dev-gated behind {@code
+ *       bff.expose-broker-account-number} (default false, so it is never exposed in prod).
  * </ul>
  *
  * <p>Unrealized / mark-to-market P&L is out of scope (no quote source) — omitted, not faked.
@@ -40,18 +44,23 @@ public class PortfolioService {
   private final AccountEquityClient accountEquity;
   private final TenantStrategyResolver strategyResolver;
   private final YamlStrategyRegistry strategyRegistry;
+  // Dev-only gate: when true, account_equity rows also carry the informational brokerage
+  // account_number for dashboard verification. Default false so it is NEVER exposed in prod.
+  private final boolean exposeBrokerAccountNumber;
 
   public PortfolioService(
       PositionsReader positionsReader,
       RealizedPnlCalculator realizedPnl,
       AccountEquityClient accountEquity,
       TenantStrategyResolver strategyResolver,
-      YamlStrategyRegistry strategyRegistry) {
+      YamlStrategyRegistry strategyRegistry,
+      @Value("${bff.expose-broker-account-number:false}") boolean exposeBrokerAccountNumber) {
     this.positionsReader = positionsReader;
     this.realizedPnl = realizedPnl;
     this.accountEquity = accountEquity;
     this.strategyResolver = strategyResolver;
     this.strategyRegistry = strategyRegistry;
+    this.exposeBrokerAccountNumber = exposeBrokerAccountNumber;
   }
 
   public Map<String, Object> portfolio(String tenantId) {
@@ -84,10 +93,15 @@ public class PortfolioService {
     }
     List<Map<String, Object>> equityByBroker = new ArrayList<>();
     for (String brokerTarget : brokerTargets) {
-      BigDecimal equity = accountEquity.equityFor(brokerTarget);
+      AccountEquityClient.BrokerAccount acct = accountEquity.snapshotFor(brokerTarget);
       Map<String, Object> m = new LinkedHashMap<>();
       m.put("broker_target", brokerTarget);
-      m.put("equity", equity);
+      m.put("equity", acct.equity());
+      // Informational account identity, dev-gated. Never exposed in prod (flag defaults false) and
+      // omitted when the broker adapter / degraded snapshot carries no account number.
+      if (exposeBrokerAccountNumber && acct.accountNumber() != null) {
+        m.put("account_number", acct.accountNumber());
+      }
       equityByBroker.add(m);
     }
 

@@ -343,7 +343,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
       throw ApplicationFailure.newNonRetryableFailure(
           "Alpaca /v2/account returned null/missing cash", "BrokerProtocolError");
     }
-    return new AccountSummary(resp.equity(), resp.cash());
+    return new AccountSummary(resp.equity(), resp.cash(), resp.accountNumber());
   }
 
   /**

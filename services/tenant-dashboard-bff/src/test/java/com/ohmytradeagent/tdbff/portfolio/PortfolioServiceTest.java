@@ -26,7 +26,7 @@ class PortfolioServiceTest {
 
   private final PortfolioService service =
       new PortfolioService(
-          positionsReader, realizedPnl, accountEquity, strategyResolver, strategyRegistry);
+          positionsReader, realizedPnl, accountEquity, strategyResolver, strategyRegistry, false);
 
   @Test
   @SuppressWarnings("unchecked")
@@ -46,7 +46,9 @@ class PortfolioServiceTest {
         .thenReturn(new BigDecimal("50.00"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(strategyRegistry.brokerTarget("acme", "s2")).thenReturn("alpaca-paper"); // same -> union
-    when(accountEquity.equityFor("alpaca-paper")).thenReturn(new BigDecimal("10000.00"));
+    when(accountEquity.snapshotFor("alpaca-paper"))
+        .thenReturn(
+            new AccountEquityClient.BrokerAccount(new BigDecimal("10000.00"), "PA3ER05HLHMB"));
 
     Map<String, Object> body = service.portfolio("acme");
 
@@ -61,6 +63,8 @@ class PortfolioServiceTest {
     assertThat(equity).hasSize(1);
     assertThat(equity.get(0)).containsEntry("broker_target", "alpaca-paper");
     assertThat(equity.get(0)).containsEntry("equity", new BigDecimal("10000.00"));
+    // Flag defaults false -> the informational account_number is NOT exposed even when present.
+    assertThat(equity.get(0)).doesNotContainKey("account_number");
     // Honest-labeling fields are always present.
     assertThat(body).containsEntry("unrealized_pnl", null);
     assertThat(body.get("account_equity_scope")).asString().contains("NOT this tenant's");
@@ -75,8 +79,10 @@ class PortfolioServiceTest {
         .thenReturn(BigDecimal.ZERO);
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(strategyRegistry.brokerTarget("acme", "s2")).thenReturn("tradier-paper");
-    when(accountEquity.equityFor("alpaca-paper")).thenReturn(new BigDecimal("100"));
-    when(accountEquity.equityFor("tradier-paper")).thenReturn(new BigDecimal("200"));
+    when(accountEquity.snapshotFor("alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
+    when(accountEquity.snapshotFor("tradier-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("200"), null));
 
     Map<String, Object> body = service.portfolio("acme");
 
@@ -85,5 +91,34 @@ class PortfolioServiceTest {
     assertThat(equity)
         .extracting(m -> m.get("broker_target"))
         .containsExactly("alpaca-paper", "tradier-paper");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void exposesAccountNumberOnlyWhenTheDevFlagIsEnabled() {
+    // Same fixture, two flag states: FALSE omits account_number; TRUE includes it.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme")).thenReturn(List.of());
+    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(BigDecimal.ZERO);
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("alpaca-paper"))
+        .thenReturn(
+            new AccountEquityClient.BrokerAccount(new BigDecimal("10000.00"), "PA3ER05HLHMB"));
+
+    PortfolioService flagOff =
+        new PortfolioService(
+            positionsReader, realizedPnl, accountEquity, strategyResolver, strategyRegistry, false);
+    var offRows = (List<Map<String, Object>>) flagOff.portfolio("acme").get("account_equity");
+    assertThat(offRows).hasSize(1);
+    assertThat(offRows.get(0)).containsEntry("equity", new BigDecimal("10000.00"));
+    assertThat(offRows.get(0)).doesNotContainKey("account_number");
+
+    PortfolioService flagOn =
+        new PortfolioService(
+            positionsReader, realizedPnl, accountEquity, strategyResolver, strategyRegistry, true);
+    var onRows = (List<Map<String, Object>>) flagOn.portfolio("acme").get("account_equity");
+    assertThat(onRows).hasSize(1);
+    assertThat(onRows.get(0)).containsEntry("account_number", "PA3ER05HLHMB");
   }
 }

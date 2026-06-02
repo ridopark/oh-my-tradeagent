@@ -50,12 +50,22 @@ public class AccountEquityClient {
   }
 
   /**
-   * Net-liquidation equity for the account behind {@code brokerTarget}, or {@code null} when the
-   * snapshot is unavailable (a read-only view degrades gracefully rather than failing the whole
-   * portfolio page). The broker adapter returns the sentinel {@code equity=0} when it has no real
-   * account endpoint — surfaced as-is.
+   * Net-liquidation equity plus the informational brokerage account identity from a SINGLE account
+   * snapshot. {@code accountNumber} is the Alpaca {@code /v2/account 'account_number'} — surfaced
+   * only for dashboard account verification, never a credential and never used by any gate. Both
+   * fields are nullable: a degraded/unavailable snapshot yields {@code new BrokerAccount(null,
+   * null)}, and a broker adapter with no real account endpoint may carry a null account number.
    */
-  public BigDecimal equityFor(String brokerTarget) {
+  public record BrokerAccount(BigDecimal equity, String accountNumber) {}
+
+  /**
+   * Equity + informational account identity for the account behind {@code brokerTarget}, read from
+   * one {@code AccountSnapshotWorkflow} round-trip. Never {@code null}: on any
+   * timeout/error/degrade it returns {@code new BrokerAccount(null, null)} (a read-only view
+   * degrades gracefully rather than failing the whole portfolio page). The broker adapter returns
+   * the sentinel {@code equity=0} when it has no real account endpoint — surfaced as-is.
+   */
+  public BrokerAccount snapshotFor(String brokerTarget) {
     AccountSnapshotRequest request = new AccountSnapshotRequest();
     request.setSchemaVersion(1L);
     request.setBrokerTarget(AccountSnapshotRequest.BrokerTarget.fromValue(brokerTarget));
@@ -74,7 +84,9 @@ public class AccountEquityClient {
       // other snapshot-unavailable case.
       AccountSnapshotResult result =
           stub.getResult(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS, AccountSnapshotResult.class);
-      return result == null ? null : result.getEquity();
+      return result == null
+          ? new BrokerAccount(null, null)
+          : new BrokerAccount(result.getEquity(), result.getAccountNumber());
     } catch (TimeoutException e) {
       // We stopped waiting, but the workflow is still running. Cancel it so it doesn't linger as an
       // orphan — holding an orchestrator worker slot and re-hitting the broker account endpoint —
@@ -89,11 +101,11 @@ public class AccountEquityClient {
             brokerTarget,
             cancelErr.getMessage());
       }
-      return null;
+      return new BrokerAccount(null, null);
     } catch (RuntimeException e) {
       log.warn(
           "AccountSnapshotWorkflow failed broker_target={} err={}", brokerTarget, e.getMessage());
-      return null;
+      return new BrokerAccount(null, null);
     }
   }
 }

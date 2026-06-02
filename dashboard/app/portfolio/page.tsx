@@ -34,6 +34,11 @@ export default async function PortfolioPage() {
             empty="No broker accounts."
             columns={[
               { key: "broker_target", label: "Broker" },
+              // The BFF only emits account_number under its dev flag (never in prod), so show the
+              // column only when present — confirms which brokerage account a broker_target maps to.
+              ...(p.account_equity.some((a) => a.account_number)
+                ? [{ key: "account_number", label: "Account" }]
+                : []),
               { key: "equity", label: "Equity" },
             ]}
             rows={p.account_equity}

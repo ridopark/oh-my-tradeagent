@@ -530,13 +530,16 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"buying_power\":\"999999.00\","
+                "{\"id\":\"acct-1\",\"account_number\":\"PA3ER05HLHMB\","
+                    + "\"equity\":\"123456.78\",\"buying_power\":\"999999.00\","
                     + "\"cash\":\"5000.00\",\"status\":\"ACTIVE\"}"));
 
     OptionsBroker.AccountSummary account = broker.getAccount();
 
     assertThat(account.equity()).isEqualByComparingTo(new BigDecimal("123456.78"));
     assertThat(account.cash()).isEqualByComparingTo(new BigDecimal("5000.00"));
+    // Informational account_number is mapped through (not used by any gate).
+    assertThat(account.accountNumber()).isEqualTo("PA3ER05HLHMB");
 
     assertThat(server.getRequestCount()).isEqualTo(1);
     RecordedRequest req = server.takeRequest();

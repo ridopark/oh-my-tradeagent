@@ -13,6 +13,7 @@ import com.ohmytradeagent.contract.AccountSnapshotResult;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
+import java.math.BigDecimal;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
@@ -27,15 +28,34 @@ class AccountEquityClientTest {
   }
 
   @Test
+  void returnsEquityAndAccountNumberFromASingleSnapshot() throws Exception {
+    WorkflowClient client = mock(WorkflowClient.class);
+    WorkflowStub stub = stubReturning(client);
+    AccountSnapshotResult result = new AccountSnapshotResult();
+    result.setSchemaVersion(1L);
+    result.setEquity(new BigDecimal("10000.00"));
+    result.setAccountNumber("PA3ER05HLHMB");
+    when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
+        .thenReturn(result);
+
+    var acct = new AccountEquityClient(client, "orchestrator-core").snapshotFor("alpaca-paper");
+
+    assertThat(acct.equity()).isEqualByComparingTo(new BigDecimal("10000.00"));
+    assertThat(acct.accountNumber()).isEqualTo("PA3ER05HLHMB");
+    verify(stub, never()).cancel();
+  }
+
+  @Test
   void timeoutCancelsTheOrphanAndDegradesToNull() throws Exception {
     WorkflowClient client = mock(WorkflowClient.class);
     WorkflowStub stub = stubReturning(client);
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
         .thenThrow(new TimeoutException("waited past the bound"));
 
-    var equity = new AccountEquityClient(client, "orchestrator-core").equityFor("alpaca-paper");
+    var acct = new AccountEquityClient(client, "orchestrator-core").snapshotFor("alpaca-paper");
 
-    assertThat(equity).isNull();
+    assertThat(acct.equity()).isNull();
+    assertThat(acct.accountNumber()).isNull();
     verify(stub).cancel(); // the still-running workflow must not be left as an orphan
   }
 
@@ -46,9 +66,10 @@ class AccountEquityClientTest {
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
         .thenThrow(new IllegalStateException("temporal unreachable"));
 
-    var equity = new AccountEquityClient(client, "orchestrator-core").equityFor("alpaca-paper");
+    var acct = new AccountEquityClient(client, "orchestrator-core").snapshotFor("alpaca-paper");
 
-    assertThat(equity).isNull();
+    assertThat(acct.equity()).isNull();
+    assertThat(acct.accountNumber()).isNull();
     verify(stub, never()).cancel(); // cancel is timeout-only; a start/connect failure has no orphan
   }
 }

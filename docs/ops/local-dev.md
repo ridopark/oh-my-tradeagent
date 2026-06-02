@@ -21,6 +21,7 @@ cp infra/.env.local.example infra/.env.local
 | `BROKER_IMPL=alpaca-paper` | exec-svc | **required for real orders** — the default `stub` is in-memory and places nothing on Alpaca |
 | `ALERT_SIGNAL_FEED_ENABLED=true` | orchestrator | post the full signal feed (received + accepted/rejected) to the webhook — default `false` is silent |
 | `EXEC_FILL_LISTENER_ENABLED=true` (+ `EXEC_FILL_LISTENER_POLL_ENABLED=true`) | exec-svc | ingest broker fills so a BTO fill opens a PositionWorkflow (Positions/Portfolio populate) |
+| `BFF_EXPOSE_BROKER_ACCOUNT_NUMBER=true` | tenant-dashboard-bff | **dev-only** — adds an "Account" column on the Portfolio page showing the broker `account_number`, to confirm which Alpaca account is wired. NEVER set in prod (the broker account is shared across tenants) |
 
 `infra/.env.local` is already gitignored (`*.env.local`) — never commit real values.
 

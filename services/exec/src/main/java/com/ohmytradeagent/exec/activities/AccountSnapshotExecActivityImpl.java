@@ -37,6 +37,9 @@ public class AccountSnapshotExecActivityImpl implements AccountSnapshotActivity 
     OptionsBroker.AccountSummary account = broker.getAccount();
     result.setEquity(account.equity());
     result.setCash(account.cash());
+    // Informational account identity for the tenant dashboard (not used by any gate). Null-safe: a
+    // null accountNumber simply leaves the optional field absent.
+    result.setAccountNumber(account.accountNumber());
     return result;
   }
 }
