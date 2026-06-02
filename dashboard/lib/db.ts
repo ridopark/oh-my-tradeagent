@@ -3,6 +3,10 @@ import { Pool } from "pg";
 
 // Connection pool for the `dashboard` DB (dashboard_user lookups only). Server-only — never bundled
 // into client components. The BFF owns the schema (Flyway); this app only reads the mapping table.
+//
+// Built from discrete fields rather than a connection URL so the password has a SINGLE source:
+// DASHBOARD_READONLY_PASSWORD is the same value the BFF's Flyway uses to create the dashboard_readonly
+// role — no separate URL to keep in sync. Connects as the SELECT-only role; in-cluster plaintext.
 declare global {
   // eslint-disable-next-line no-var
   var __dashboardPool: Pool | undefined;
@@ -11,7 +15,11 @@ declare global {
 const pool =
   global.__dashboardPool ??
   new Pool({
-    connectionString: process.env.DASHBOARD_DATABASE_URL,
+    host: process.env.DASHBOARD_DB_HOST ?? "localhost",
+    port: Number(process.env.DASHBOARD_DB_PORT ?? "5432"),
+    database: process.env.DASHBOARD_DB_NAME ?? "dashboard",
+    user: process.env.DASHBOARD_DB_USER ?? "dashboard_readonly",
+    password: process.env.DASHBOARD_READONLY_PASSWORD,
     max: 4,
   });
 

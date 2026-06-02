@@ -132,8 +132,8 @@ spec:
                   name: postgres-credentials
                   key: POSTGRES_PASSWORD
             # Injected into V2's CREATE ROLE so dashboard_readonly is created with its real password
-            # (no repo-readable literal window). MUST equal the password embedded in the Next.js
-            # DASHBOARD_DATABASE_URL (59-dashboard.yaml) so the web app can connect.
+            # (no repo-readable literal window). The Next.js pod reads the SAME dashboard-secrets key
+            # (59-dashboard.yaml) to connect — single source, so the two cannot drift.
             - name: DASHBOARD_READONLY_PASSWORD
               valueFrom:
                 secretKeyRef:

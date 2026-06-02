@@ -88,12 +88,20 @@ spec:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: AUTH_FACEBOOK_SECRET
-            # Identity -> tenant lookup (the `dashboard` DB the BFF owns).
-            - name: DASHBOARD_DATABASE_URL
+            # Identity -> tenant lookup (the `dashboard` DB the BFF owns). Discrete fields so the
+            # password is single-sourced from DASHBOARD_READONLY_PASSWORD (same value the BFF Flyway
+            # creates the dashboard_readonly role with) — no URL to keep in sync.
+            - name: DASHBOARD_DB_HOST
+              value: postgres
+            - name: DASHBOARD_DB_NAME
+              value: dashboard
+            - name: DASHBOARD_DB_USER
+              value: dashboard_readonly
+            - name: DASHBOARD_READONLY_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: dashboard-secrets
-                  key: DASHBOARD_DATABASE_URL
+                  key: DASHBOARD_READONLY_PASSWORD
             # Off-ingress BFF: in-cluster ClusterIP DNS + the shared service token.
             - name: BFF_INTERNAL_URL
               value: http://tenant-dashboard-bff:8083

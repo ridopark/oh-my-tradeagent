@@ -19,7 +19,7 @@ off-ingress `tenant-dashboard-bff` over in-cluster HTTP behind a shared service 
 ## Local dev
 
 ```bash
-cp .env.example .env.local   # fill AUTH_*, DASHBOARD_DATABASE_URL, BFF_SHARED_TOKEN
+cp .env.example .env.local   # fill AUTH_*, DASHBOARD_DB_*/DASHBOARD_READONLY_PASSWORD, BFF_SHARED_TOKEN
 npm install
 npm run dev                  # http://localhost:3000
 ```
