@@ -41,8 +41,9 @@ wired together with a passwordless **Dev login** — open <http://localhost:3000
 ### Dev login — how it's gated
 
 The Dev login provider is **double-gated** so it can never reach production (`auth.config.ts`):
-it is added only when `AUTH_DEV_LOGIN === "true"` **and** `NODE_ENV !== "production"` (Next.js sets
-`production` on every prod build/run). It maps straight to `AUTH_DEV_TENANT` (default `dev`) with no
+it is added only when `AUTH_DEV_LOGIN === "true"` **and** `NODE_ENV === "development"` — a positive
+signal that fails closed (`next dev` sets `development`; `next build`/`next start` set `production`;
+an unset value is also rejected). It maps straight to `AUTH_DEV_TENANT` (default `dev`) with no
 `dashboard_user` lookup. Never set `AUTH_DEV_LOGIN` in a deployed environment.
 
 ### Manual run (à la carte)

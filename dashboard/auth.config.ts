@@ -10,12 +10,14 @@ import Credentials from "next-auth/providers/credentials";
 
 // LOCAL-DEV ONLY: a passwordless "Dev login" so the dashboard can be exercised end-to-end without
 // configuring Google/Facebook. DOUBLE-GATED so it can never reach production:
-//   1. only enabled when AUTH_DEV_LOGIN === "true", AND
-//   2. never when NODE_ENV === "production" (Next.js sets this on every prod build/run).
+//   1. AUTH_DEV_LOGIN === "true", AND
+//   2. NODE_ENV === "development" — a POSITIVE signal that FAILS CLOSED. `next dev` sets it to
+//      "development"; `next build`/`next start` (prod) set "production"; and an unset/odd value is
+//      also rejected. (Checking !== "production" would re-enable on an unset NODE_ENV — don't.)
 // auth.ts maps this provider straight to AUTH_DEV_TENANT (default "dev") with NO dashboard_user
 // lookup — so it grants a real session. Keep both gates; either alone would be a backdoor.
 export const devLoginEnabled =
-  process.env.AUTH_DEV_LOGIN === "true" && process.env.NODE_ENV !== "production";
+  process.env.AUTH_DEV_LOGIN === "true" && process.env.NODE_ENV === "development";
 
 const devLogin = Credentials({
   id: "dev-login",
