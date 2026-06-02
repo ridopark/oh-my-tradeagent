@@ -66,6 +66,8 @@ on:
           - market-data
           - api-gateway
           - signal-source-discord
+          - tenant-dashboard-bff
+          - dashboard
 
 permissions:
   contents: read
@@ -85,7 +87,7 @@ env:
   # `oh-my-tradeagent-exec` image which the `exec-alpaca-paper` Deployment
   # pulls. Build-name ≠ Deployment-name is intentional — see
   # `infra/k8s/52-exec-alpaca-paper.yaml`.
-  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord"
+  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord tenant-dashboard-bff dashboard"
 
 jobs:
   preflight:

@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
 
+# Discord renders each chat message as <li id="chat-messages-<channel>-<id>">.
+# Single source of truth for this selector — imported by the watcher and the
+# bootstrap (and used by _EXTRACT_JS below) so a Discord DOM change is one edit here.
+MESSAGES_LI_SELECTOR = 'li[id^="chat-messages-"]'
+
 
 @dataclass(frozen=True)
 class RawMessage:

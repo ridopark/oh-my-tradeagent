@@ -1,0 +1,77 @@
+spring:
+  application:
+    name: tenant-dashboard-bff-svc
+  # This service wires TWO read-only datasources by hand (orchestrator + exec_<broker>), so the
+  # single-datasource auto-config must be off — otherwise Spring tries to build one DataSource from
+  # spring.datasource and a single auto DSLContext, which collides with our qualified beans.
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jooq.JooqAutoConfiguration
+  jooq:
+    sql-dialect: POSTGRES
+  # Flyway runs ONLY against the `dashboard` DB (the one schema this service owns — dashboard_user).
+  # It gets its own url/user so it never touches the read-only orchestrator/exec datasources. The
+  # app datasources connect as bff_readonly and must never run DDL.
+  flyway:
+    enabled: true
+    url: ${DASHBOARD_DB_URL:jdbc:postgresql://localhost:5432/dashboard}
+    user: ${DASHBOARD_DB_USER:temporal}
+    password: ${DASHBOARD_DB_PASS:temporal}
+    locations: classpath:db/dashboard
+    placeholders:
+      # Injected into V2__dashboard_readonly_role.sql at migration time so the dashboard_readonly
+      # role is created with its real password (never a repo-readable literal). NO default on
+      # purpose: an unset DASHBOARD_READONLY_PASSWORD fails placeholder resolution at boot — BEFORE
+      # Flyway runs — so the role is never created with a known fallback. Set it from the
+      # dashboard-secrets Secret in prod; export it locally when running the BFF against a real
+      # dashboard DB (unit tests and the ITs never run this migration).
+      dashboard_readonly_password: ${DASHBOARD_READONLY_PASSWORD}
+
+# Read-only application datasources. Credentials are the dedicated bff_readonly role per DB (see the
+# operator runbook); SELECT-only grants mean even a query bug cannot mutate trading state.
+bff:
+  service-token: ${BFF_SHARED_TOKEN:dev-shared-token}
+  tenants-dir: ${BFF_TENANTS_DIR:tenants}
+  datasource:
+    orchestrator:
+      jdbc-url: ${BFF_ORCHESTRATOR_DB_URL:jdbc:postgresql://localhost:5432/orchestrator}
+      username: ${BFF_ORCHESTRATOR_DB_USER:temporal}
+      password: ${BFF_ORCHESTRATOR_DB_PASS:temporal}
+      maximum-pool-size: 4
+      read-only: true
+    exec-alpaca-paper:
+      jdbc-url: ${BFF_EXEC_ALPACA_PAPER_DB_URL:jdbc:postgresql://localhost:5432/exec_alpaca_paper}
+      username: ${BFF_EXEC_ALPACA_PAPER_DB_USER:temporal}
+      password: ${BFF_EXEC_ALPACA_PAPER_DB_PASS:temporal}
+      maximum-pool-size: 4
+      read-only: true
+
+server:
+  port: ${TENANT_DASHBOARD_BFF_PORT:8083}
+  error:
+    # Never leak stack traces or exception messages in error responses (defence in depth; the
+    # catch-all in GlobalExceptionHandler returns a generic body anyway).
+    include-stacktrace: never
+    include-message: never
+
+temporal:
+  target: ${TEMPORAL_TARGET:localhost:7233}
+  namespace: ${TEMPORAL_NAMESPACE:default}
+  # Task queue the orchestrator worker polls; the BFF starts the short-lived AccountSnapshotWorkflow
+  # on it (the workflow itself dispatches the AccountSnapshotActivity to broker-<target>).
+  orchestrator-task-queue: ${TEMPORAL_ORCHESTRATOR_TASK_QUEUE:orchestrator-core}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{tenant_id:-}] %logger{36} - %msg%n"

@@ -1,0 +1,223 @@
+# Tenant-facing read-only BFF. CRITICAL: ClusterIP Service ONLY — NO Ingress. This off-ingress
+# posture IS the trust boundary: the browser can never reach the BFF, so the only caller is the
+# Next.js dashboard server (59-dashboard.yaml), which injects a verified X-Tenant-Id behind the
+# shared service token (BFF_SHARED_TOKEN). The BFF reads trading state as the SELECT-only
+# bff_readonly role; it owns only the `dashboard` schema (Flyway).
+apiVersion: v1
+kind: Service
+metadata:
+  name: tenant-dashboard-bff
+  namespace: copytrade
+spec:
+  selector:
+    app: tenant-dashboard-bff
+  ports:
+    - port: 8083
+      targetPort: 8083
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tenant-dashboard-bff
+  namespace: copytrade
+  labels:
+    app: tenant-dashboard-bff
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tenant-dashboard-bff
+  template:
+    metadata:
+      labels:
+        app: tenant-dashboard-bff
+    spec:
+      # Block Ready until audit_log exists in the orchestrator DB (same first-deploy race the
+      # api-gateway guards, 54-api-gateway.yaml): the BFF reads audit_log and would 500 the trades/
+      # portfolio endpoints until orchestrator-svc's Flyway V2 lands on a clean cluster boot.
+      initContainers:
+        - name: wait-for-audit-log
+          image: postgres:16
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: orchestrator
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "wait-for-audit-log: polling orchestrator.audit_log existence"
+              until [ "$(psql -tA -c "SELECT to_regclass('public.audit_log') IS NOT NULL")" = "t" ]; do
+                echo "  audit_log not yet present (orchestrator-svc Flyway V2 pending); retrying in 3s"
+                sleep 3
+              done
+              echo "wait-for-audit-log: audit_log present; BFF may proceed"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      containers:
+        - name: tenant-dashboard-bff
+          image: ghcr.io/ridopark/oh-my-tradeagent-tenant-dashboard-bff:latest
+          imagePullPolicy: Always
+          # Least-privilege runtime. The image already runs as UID 10001 (java-service.Dockerfile);
+          # make it explicit + drop caps and privilege escalation. readOnlyRootFilesystem is omitted
+          # (Spring writes to /tmp) — would need a writable emptyDir mount.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - containerPort: 8083
+              name: http
+          env:
+            - name: TENANT_DASHBOARD_BFF_PORT
+              value: "8083"
+            # Activates the prod guardrail in ServiceTokenFilter: boot fails if BFF_SHARED_TOKEN is
+            # missing (and thus the well-known dev default would be used) instead of silently
+            # accepting it.
+            - name: SPRING_PROFILES_ACTIVE
+              value: prod
+            # Shared Temporal (matches api-gateway): the BFF queries positions and starts the
+            # short-lived AccountSnapshotWorkflow on the orchestrator task queue.
+            - name: TEMPORAL_TARGET
+              value: temporal-frontend.temporal.svc.cluster.local:7233
+            - name: TEMPORAL_NAMESPACE
+              value: copytrade
+            - name: TEMPORAL_ORCHESTRATOR_TASK_QUEUE
+              value: orchestrator-core
+            # Strategy/broker_target resolution reads the mounted tenants tree (same ConfigMap as
+            # orchestrator).
+            - name: BFF_TENANTS_DIR
+              value: /etc/copytrade/tenants
+            # Shared service token — the only credential the Next.js server presents.
+            - name: BFF_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_SHARED_TOKEN
+            # `dashboard` DB (Flyway owner — the one schema this service owns).
+            - name: DASHBOARD_DB_URL
+              value: jdbc:postgresql://postgres:5432/dashboard
+            - name: DASHBOARD_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: DASHBOARD_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            # Injected into V2's CREATE ROLE so dashboard_readonly is created with its real password
+            # (no repo-readable literal window). The Next.js pod reads the SAME dashboard-secrets key
+            # (59-dashboard.yaml) to connect — single source, so the two cannot drift.
+            - name: DASHBOARD_READONLY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: DASHBOARD_READONLY_PASSWORD
+            # Read-only (bff_readonly) connections to trading-state DBs — SELECT-only grants.
+            - name: BFF_ORCHESTRATOR_DB_URL
+              value: jdbc:postgresql://postgres:5432/orchestrator
+            - name: BFF_ORCHESTRATOR_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_ORCHESTRATOR_DB_USER
+            - name: BFF_ORCHESTRATOR_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_ORCHESTRATOR_DB_PASS
+            - name: BFF_EXEC_ALPACA_PAPER_DB_URL
+              value: jdbc:postgresql://postgres:5432/exec_alpaca_paper
+            - name: BFF_EXEC_ALPACA_PAPER_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_EXEC_ALPACA_PAPER_DB_USER
+            - name: BFF_EXEC_ALPACA_PAPER_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_EXEC_ALPACA_PAPER_DB_PASS
+          volumeMounts:
+            - name: tenants
+              mountPath: /etc/copytrade/tenants
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8083
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8083
+            initialDelaySeconds: 90
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi
+      volumes:
+        - name: tenants
+          configMap:
+            name: tenants-config
+            # Same flat-key → nested-path rebuild the orchestrator uses (40-tenants-config.yaml).
+            items:
+              - key: tenant.yaml
+                path: dev/tenant.yaml
+              - key: copytrade-v1.yaml
+                path: dev/strategies/copytrade-v1.yaml
+---
+# Enforce the off-ingress trust boundary at the network layer. ClusterIP already blocks external
+# traffic, but without a policy ANY pod in the namespace could reach the BFF on 8083 and (with the
+# shared token) spoof a tenant. This restricts ingress to the Next.js dashboard pod only.
+# Note: k3s's NetworkPolicy controller (kube-router) permits health-probe traffic from the hosting
+# node, so the kubelet readiness/liveness probes on 8083 continue to work without an explicit rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-dashboard-bff-allow-dashboard-only
+  namespace: copytrade
+spec:
+  podSelector:
+    matchLabels:
+      app: tenant-dashboard-bff
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: dashboard
+      ports:
+        - protocol: TCP
+          port: 8083

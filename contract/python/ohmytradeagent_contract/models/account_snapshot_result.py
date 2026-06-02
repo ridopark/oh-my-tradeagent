@@ -23,3 +23,7 @@ class AccountSnapshotResult(BaseModel):
     """
     Issue #323: account cash balance in dollars (Alpaca /v2/account 'cash'). The notional_cap_pct_of_equity gate uses the MTM-stable cost-basis capital base (cash + sum_open_notional) as its denominator instead of net-liq equity, so numerator and denominator share the same cost-basis open-notional term. Optional for back-compat with pre-#323 producers/records; a null/absent or zero cash makes the cap gate fail closed (rejects) rather than passing an unbounded cap.
     """
+    account_number: str | None = None
+    """
+    Informational brokerage account identifier (Alpaca /v2/account 'account_number', e.g. PA3ER05HLHMB). NOT a credential and NOT used by any risk gate — surfaced only for dashboard account verification. Optional/absent for broker adapters or records that predate this field.
+    """

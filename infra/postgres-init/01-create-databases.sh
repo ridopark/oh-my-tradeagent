@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Postgres init script (runs on first cluster boot, before Temporal auto-setup).
 #
-# Creates the per-broker-env databases that the plan calls for (line 95:
-# "Postgres OrderIntentJournal per broker env"). Each exec-svc-* service points
-# its DataSource at its own database; orchestrator-svc continues to share the
-# 'temporal' database with the Temporal cluster.
+# Creates the dedicated `orchestrator` (audit_log), `dashboard` (dashboard_user),
+# and per-broker-env (order_intent_journal) databases. Each exec-svc-* service
+# points its DataSource at its own database. Keep this in lockstep with the
+# inlined copy in infra/k8s/10-postgres.yaml (the k8s ConfigMap) — both must
+# create the same set of databases.
 #
 # Idempotent: skipped automatically by Postgres-image init mechanics on
 # subsequent boots because /docker-entrypoint-initdb.d only fires for fresh
@@ -21,6 +22,14 @@ create_db_if_missing() {
 EOSQL
   echo "  ensured database: $db"
 }
+
+# Issue #56: dedicated `orchestrator` DB for audit_log + option_symbol_cache
+# (separate from Temporal's `temporal` DB, which Temporal auto-setup creates).
+create_db_if_missing orchestrator
+
+# Tenant dashboard identity binding (dashboard_user). Owned by tenant-dashboard-bff-svc's
+# Flyway. Separate DB so the read-only BFF never holds DDL rights on the trading-state DBs.
+create_db_if_missing dashboard
 
 # Phase 2c.2 onward: one database per <provider>-<env> whitelisted in the
 # strategy-config contract schema (contract/schemas/strategy-config.json

@@ -16,6 +16,7 @@
     <module>services/market-data</module>
     <module>services/api-gateway</module>
     <module>services/audit</module>
+    <module>services/tenant-dashboard-bff</module>
   </modules>
 
   <properties>

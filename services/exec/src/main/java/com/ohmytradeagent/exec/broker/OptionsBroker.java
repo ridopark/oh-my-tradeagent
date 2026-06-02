@@ -142,9 +142,13 @@ public interface OptionsBroker {
    * extract both fields.
    */
   default AccountSummary getAccount() {
-    return new AccountSummary(getAccountEquity(), getAccountCash());
+    return new AccountSummary(getAccountEquity(), getAccountCash(), null);
   }
 
-  /** Equity + cash from one account read (issue #323). Both in account-currency dollars. */
-  record AccountSummary(BigDecimal equity, BigDecimal cash) {}
+  /**
+   * Equity + cash from one account read (issue #323). Both in account-currency dollars. {@code
+   * accountNumber} is informational (brokerage account identity for the tenant dashboard),
+   * nullable, and not used by any gate.
+   */
+  record AccountSummary(BigDecimal equity, BigDecimal cash, String accountNumber) {}
 }

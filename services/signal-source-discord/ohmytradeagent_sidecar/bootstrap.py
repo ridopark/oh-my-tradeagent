@@ -13,17 +13,96 @@ Run once from the host:
 
 Press Enter in the terminal once you see the channel messages in the
 browser window to save state and exit.
+
+Token capture: Discord deletes its auth token from ``localStorage`` once the
+web app finishes loading (an anti-token-theft measure), so a plain
+``storage_state`` save captures an *unauthenticated* session and the headless
+watcher lands on the login page. We therefore extract the live token from the
+running app (Discord's webpack module exposes ``getToken``) and write it back
+into the saved ``localStorage`` under the ``token`` key — exactly where the app
+reads it on startup — so the headless context authenticates on load.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import pathlib
 import sys
 
 from dotenv import load_dotenv
+from playwright.async_api import TimeoutError as PWTimeoutError
 from playwright.async_api import async_playwright
+
+from .discord_dom import MESSAGES_LI_SELECTOR
+
+DISCORD_ORIGIN = "https://discord.com"
+
+# Pull the live auth token out of the running Discord web app. localStorage has
+# already been stripped by the time the channel renders, so we ask Discord's own
+# webpack module for it (the module whose default export has getToken()). Falls
+# back to a raw localStorage read in case this build hasn't stripped it yet.
+# Returns {token, seen}: `token` is the captured auth token (or null) and `seen`
+# is the shape/length of every getToken() result (values redacted) — so a failed
+# grab is debuggable from the same single walk, without another interactive login.
+_TOKEN_GRABBER = """
+() => {
+  // A real Discord token is a longish string: 3 dot-separated parts, or the
+  // mfa.* form. Several modules expose a getToken(); only this shape is the
+  // auth token (others return short/unrelated values — e.g. a 2-char locale).
+  const looksLikeToken = (t) =>
+    typeof t === 'string' && t.length >= 50 &&
+    (t.split('.').length === 3 || t.indexOf('mfa.') === 0);
+  const seen = [];
+  let token = null;
+  try {
+    if (window.webpackChunkdiscord_app) {
+      window.webpackChunkdiscord_app.push([
+        [Symbol('omta')], {},
+        (req) => {
+          for (const id of Object.keys(req.c || {})) {
+            try {
+              const exp = req.c[id] && req.c[id].exports;
+              const d = exp && (exp.default || exp);
+              if (d && typeof d.getToken === 'function') {
+                const t = d.getToken();
+                seen.push(typeof t === 'string' ? ('str:' + t.length) :
+                          (t === null ? 'null' : typeof t));
+                if (looksLikeToken(t)) token = t;
+              }
+            } catch (e) {}
+          }
+        },
+      ]);
+    }
+    if (!token && window.localStorage) {
+      const raw = window.localStorage.getItem('token');
+      if (raw) {
+        try { const t = JSON.parse(raw); if (looksLikeToken(t)) token = t; }
+        catch (e) { if (looksLikeToken(raw)) token = raw; }
+      }
+    }
+  } catch (e) {}
+  return { token: token, seen: seen };
+}
+"""
+
+
+def _inject_token(state: dict, token: str) -> None:
+    """Write the token into the saved storage_state's discord.com localStorage.
+
+    Discord persists the token as ``localStorage.setItem('token', JSON.stringify(token))``
+    — a quoted JSON string — so we mirror that encoding.
+    """
+    origins = state.setdefault("origins", [])
+    origin = next((o for o in origins if o.get("origin") == DISCORD_ORIGIN), None)
+    if origin is None:
+        origin = {"origin": DISCORD_ORIGIN, "localStorage": []}
+        origins.append(origin)
+    ls = [e for e in origin.get("localStorage", []) if e.get("name") != "token"]
+    ls.append({"name": "token", "value": json.dumps(token)})
+    origin["localStorage"] = ls
 
 
 async def main() -> None:
@@ -45,13 +124,42 @@ async def main() -> None:
         page = await context.new_page()
         await page.goto(channel_url)
         print(
-            "\nLog into Discord (including 2FA) in the browser window.\n"
-            "Navigate to the target channel if it did not auto-open.\n"
-            "Press Enter here once messages are visible — this will save the\n"
-            "session and exit.\n"
+            "\nLog into Discord (including 2FA) in the browser window that just opened.\n"
+            "Once the channel's messages render, the session is captured automatically\n"
+            "— no Enter needed. Waiting up to 5 minutes for login...\n",
+            flush=True,
         )
-        await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
-        await context.storage_state(path=str(storage_path))
+        # Auto-detect a logged-in, rendered channel instead of a manual Enter (which
+        # was easy to hit before/after the token was available). A single long wait —
+        # NO periodic re-navigation, which would reload the page out from under the
+        # operator mid-login. After login Discord returns to the requested channel_url;
+        # if it lands elsewhere, the operator can click into the channel and this still
+        # fires once messages render.
+        try:
+            await page.wait_for_selector(MESSAGES_LI_SELECTOR, timeout=300000)
+        except PWTimeoutError:
+            print(
+                "Timed out (5 min) waiting for the channel to render after login.",
+                file=sys.stderr,
+            )
+
+        grab = await page.evaluate(_TOKEN_GRABBER) or {}
+        token = grab.get("token")
+        state = await context.storage_state()
+        if token:
+            _inject_token(state, token)
+            print(f"Captured Discord auth token (len={len(token)}); injected into session.")
+        else:
+            # `seen` lists the shape/length of every getToken() result (values
+            # redacted) so a failed grab is diagnosable without another login.
+            print(
+                "WARNING: could not capture the Discord auth token — the headless "
+                "watcher will NOT authenticate. getToken() result shapes seen: "
+                f"{grab.get('seen', [])}. Make sure you are fully logged in before "
+                "this runs, then re-run.",
+                file=sys.stderr,
+            )
+        storage_path.write_text(json.dumps(state))
         print(f"Saved storage state to {storage_path}")
         await browser.close()
 

@@ -9,6 +9,7 @@ author_whitelist:
   - Edtrader
   - TB22
   - beendoubleyou
+  - ridopark # local-dev test author (harmless in homelab — ridopark does not post in its source channel)
 # Issue #3: per-side signal-age defaults. The legacy unified `max_signal_age_secs`
 # (1800s) produced systematic adverse selection on options. BTO tolerates ~30s
 # before premium has moved enough to invalidate the entry; STC tolerates ~60s

@@ -38,4 +38,9 @@ public record AlpacaAccountResponse(
     @JsonProperty("buying_power") BigDecimal buyingPower,
     @JsonProperty("pattern_day_trader") Boolean patternDayTrader,
     @JsonProperty("daytrade_count") Integer daytradeCount,
-    @JsonProperty("multiplier") BigDecimal multiplier) {}
+    @JsonProperty("multiplier") BigDecimal multiplier,
+    /**
+     * Informational brokerage account identity for the tenant dashboard (Alpaca {@code
+     * account_number}). NOT a credential and NOT used by any gate.
+     */
+    @JsonProperty("account_number") String accountNumber) {}

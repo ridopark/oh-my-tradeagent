@@ -27,6 +27,10 @@ data:
     # StatefulSet env below still auto-creates for Temporal's own auto-setup).
     create_db_if_missing orchestrator
 
+    # Tenant dashboard identity binding (dashboard_user). Owned by tenant-dashboard-bff-svc's
+    # Flyway. Separate DB so the read-only BFF never holds DDL rights on the trading-state DBs.
+    create_db_if_missing dashboard
+
     # Phase 2c.2 onward: one database per <provider>-<env> whitelisted in the
     # strategy-config contract schema (contract/schemas/strategy-config.json
     # broker_target enum), excluding the two legacy bare paper/live values
