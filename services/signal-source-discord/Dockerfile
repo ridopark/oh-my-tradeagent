@@ -22,6 +22,14 @@ RUN uv sync --frozen --no-dev
 # Now the application source. Layer ordering keeps deps cached between source edits.
 COPY services/signal-source-discord/ohmytradeagent_sidecar /app/services/signal-source-discord/ohmytradeagent_sidecar
 
+# The state volume mounts at /app/state. Create it owned by pwuser *before*
+# dropping privileges: Docker copies this directory's ownership onto a fresh
+# named volume on first mount, so the non-root runtime user can write
+# storage_state.json / heartbeat. Without it, a fresh local volume is root-owned
+# and both the bootstrap and the watcher fail with EACCES. (k8s sidesteps this
+# via fsGroup; a plain docker-compose volume does not.)
+RUN mkdir -p /app/state && chown pwuser:pwuser /app/state
+
 # Non-root user; Playwright's base image already provisions one named "pwuser".
 USER pwuser
 
