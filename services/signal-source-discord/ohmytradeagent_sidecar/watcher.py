@@ -28,7 +28,7 @@ from ohmytradeagent_contract.models.copytrade_signal_payload import (
 )
 from playwright.async_api import Page, async_playwright
 
-from .discord_dom import extract_recent
+from .discord_dom import MESSAGES_LI_SELECTOR, extract_recent
 from .emitter import Emitter
 from .parser import ParsedSignal, parse_message
 
@@ -108,7 +108,7 @@ class Watcher:
             self._log.info("navigating to %s", self._channel_url)
             await page.goto(self._channel_url, wait_until="domcontentloaded")
             await page.wait_for_selector(
-                'li[id^="chat-messages-"]', timeout=self.DOM_READY_TIMEOUT_MS
+                MESSAGES_LI_SELECTOR, timeout=self.DOM_READY_TIMEOUT_MS
             )
 
             # Seed the LRU with currently-visible message IDs so a fresh

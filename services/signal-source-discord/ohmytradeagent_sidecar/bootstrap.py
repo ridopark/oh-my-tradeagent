@@ -35,9 +35,7 @@ from dotenv import load_dotenv
 from playwright.async_api import TimeoutError as PWTimeoutError
 from playwright.async_api import async_playwright
 
-# Discord renders each message as <li id="chat-messages-...">; its presence means
-# we are logged in AND the channel has loaded.
-_MESSAGES_SELECTOR = 'li[id^="chat-messages-"]'
+from .discord_dom import MESSAGES_LI_SELECTOR
 
 DISCORD_ORIGIN = "https://discord.com"
 
@@ -45,6 +43,9 @@ DISCORD_ORIGIN = "https://discord.com"
 # already been stripped by the time the channel renders, so we ask Discord's own
 # webpack module for it (the module whose default export has getToken()). Falls
 # back to a raw localStorage read in case this build hasn't stripped it yet.
+# Returns {token, seen}: `token` is the captured auth token (or null) and `seen`
+# is the shape/length of every getToken() result (values redacted) — so a failed
+# grab is debuggable from the same single walk, without another interactive login.
 _TOKEN_GRABBER = """
 () => {
   // A real Discord token is a longish string: 3 dot-separated parts, or the
@@ -53,8 +54,9 @@ _TOKEN_GRABBER = """
   const looksLikeToken = (t) =>
     typeof t === 'string' && t.length >= 50 &&
     (t.split('.').length === 3 || t.indexOf('mfa.') === 0);
+  const seen = [];
+  let token = null;
   try {
-    let token = null;
     if (window.webpackChunkdiscord_app) {
       window.webpackChunkdiscord_app.push([
         [Symbol('omta')], {},
@@ -65,6 +67,8 @@ _TOKEN_GRABBER = """
               const d = exp && (exp.default || exp);
               if (d && typeof d.getToken === 'function') {
                 const t = d.getToken();
+                seen.push(typeof t === 'string' ? ('str:' + t.length) :
+                          (t === null ? 'null' : typeof t));
                 if (looksLikeToken(t)) token = t;
               }
             } catch (e) {}
@@ -79,40 +83,8 @@ _TOKEN_GRABBER = """
         catch (e) { if (looksLikeToken(raw)) token = raw; }
       }
     }
-    return token;
-  } catch (e) {
-    return null;
-  }
-}
-"""
-
-# Diagnostic companion to _TOKEN_GRABBER: returns the shape/length of every
-# getToken() result seen (values redacted) so a failed grab is debuggable
-# without forcing another interactive login.
-_TOKEN_DIAG = """
-() => {
-  const out = [];
-  try {
-    if (window.webpackChunkdiscord_app) {
-      window.webpackChunkdiscord_app.push([
-        [Symbol('omtad')], {},
-        (req) => {
-          for (const id of Object.keys(req.c || {})) {
-            try {
-              const exp = req.c[id] && req.c[id].exports;
-              const d = exp && (exp.default || exp);
-              if (d && typeof d.getToken === 'function') {
-                const t = d.getToken();
-                out.push(typeof t === 'string' ? ('str:' + t.length) :
-                         (t === null ? 'null' : typeof t));
-              }
-            } catch (e) {}
-          }
-        },
-      ]);
-    }
   } catch (e) {}
-  return out;
+  return { token: token, seen: seen };
 }
 """
 
@@ -164,26 +136,27 @@ async def main() -> None:
         # if it lands elsewhere, the operator can click into the channel and this still
         # fires once messages render.
         try:
-            await page.wait_for_selector(_MESSAGES_SELECTOR, timeout=300000)
+            await page.wait_for_selector(MESSAGES_LI_SELECTOR, timeout=300000)
         except PWTimeoutError:
             print(
                 "Timed out (5 min) waiting for the channel to render after login.",
                 file=sys.stderr,
             )
 
-        token = await page.evaluate(_TOKEN_GRABBER)
+        grab = await page.evaluate(_TOKEN_GRABBER) or {}
+        token = grab.get("token")
         state = await context.storage_state()
         if token:
             _inject_token(state, token)
             print(f"Captured Discord auth token (len={len(token)}); injected into session.")
         else:
-            # Surface the lengths of every getToken() result we saw (values redacted)
-            # so a failed grab can be diagnosed without another interactive login.
-            diag = await page.evaluate(_TOKEN_DIAG)
+            # `seen` lists the shape/length of every getToken() result (values
+            # redacted) so a failed grab is diagnosable without another login.
             print(
                 "WARNING: could not capture the Discord auth token — the headless "
-                "watcher will NOT authenticate. getToken() result lengths seen: "
-                f"{diag}. Make sure you are fully logged in before this runs, then re-run.",
+                "watcher will NOT authenticate. getToken() result shapes seen: "
+                f"{grab.get('seen', [])}. Make sure you are fully logged in before "
+                "this runs, then re-run.",
                 file=sys.stderr,
             )
         storage_path.write_text(json.dumps(state))
