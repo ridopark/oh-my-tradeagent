@@ -93,6 +93,66 @@ registers the `TenantStrategy` + `ContractSymbol` Search Attributes. Idempotent.
    This walks the Playwright bootstrap flow once; cookies land in
    `/app/state/storage_state.json` (PVC-backed).
 
+## Tenant dashboard (adding to an already-running cluster)
+
+The deploy pipeline applies the Deployments/Services/Ingress and rolls pods, but it
+**never creates Secrets or databases**. On an existing cluster the postgres init script
+does **not** re-run (`/docker-entrypoint-initdb.d` only fires on a fresh volume), so the
+`dashboard` DB and the `dashboard-secrets` Secret must be provisioned **once, by hand**,
+before the `tenant-dashboard-bff` / `dashboard` pods will start.
+
+1. **Create the `dashboard` database** (the BFF's Flyway connects to it at boot; without
+   it the BFF crash-loops):
+   ```sh
+   # sh -c so $POSTGRES_USER expands inside the pod (from postgres-credentials), not your shell:
+   kubectl -n copytrade exec statefulset/postgres -- \
+     sh -c 'psql -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE dashboard OWNER \"$POSTGRES_USER\";"'
+   ```
+   (Skip if the cluster was initialised fresh after this change — `10-postgres.yaml` then
+   creates it automatically.)
+
+2. **Add the `dashboard-secrets` block** to `secrets.local.yaml` and apply it. Generate
+   strong values:
+   ```sh
+   openssl rand -base64 32   # AUTH_SECRET
+   openssl rand -hex 32      # BFF_SHARED_TOKEN
+   openssl rand -hex 32      # DASHBOARD_READONLY_PASSWORD
+   ```
+   Fill `AUTH_GOOGLE_ID/SECRET` + `AUTH_FACEBOOK_ID/SECRET` from the Google Cloud / Meta
+   consoles (redirect URI `https://<host>/api/auth/callback/{google,facebook}`). Then:
+   ```sh
+   scp infra/secrets-template/secrets.local.yaml ridopark@192.168.10.123:/tmp/s.yaml
+   ssh ridopark@192.168.10.123 'kubectl apply -f /tmp/s.yaml && rm /tmp/s.yaml'
+   ```
+   `DASHBOARD_READONLY_PASSWORD` is the **single source** of the read-only DB password —
+   the BFF's Flyway creates the `dashboard_readonly` role with it, and the Next.js pod
+   connects with it. A missing value fails the BFF boot (no default) — fix-fast by design.
+
+3. **Apply the manifests** (or let the deploy pipeline do it) — `58-tenant-dashboard-bff.yaml`
+   (ClusterIP + NetworkPolicy, no Ingress) and `59-dashboard.yaml` (public Ingress). On
+   first BFF boot, Flyway auto-creates `dashboard_user` + `dashboard_readonly`.
+
+4. **Provision dashboard logins** — there is no self-service signup; map each social
+   identity to a tenant (login is denied otherwise):
+   ```sh
+   # Interactive psql avoids shell/SQL quote-nesting; -U resolves in-pod via sh -c:
+   kubectl -n copytrade exec -it statefulset/postgres -- sh -c 'psql -U "$POSTGRES_USER" -d dashboard'
+   # then at the psql prompt:
+   #   INSERT INTO dashboard_user (provider, subject, email, tenant_id)
+   #   VALUES ('google', '<google-sub>', 'you@example.com', 'dev');
+   ```
+
+5. **Verify**:
+   ```sh
+   kubectl -n copytrade get pods -l app=tenant-dashboard-bff -l app=dashboard
+   kubectl -n copytrade exec deploy/tenant-dashboard-bff -- curl -sf localhost:8083/actuator/health
+   ```
+
+> **Launch blockers before real login (not localhost):** TLS on the dashboard Ingress
+> (currently plaintext `web` entrypoint — issue #343) and the Google/Facebook OAuth
+> redirect URIs. Google/Facebook reject non-`localhost` `http://` redirects, and the
+> Auth.js session cookie is `Secure` (inert over HTTP).
+
 ## Dry-run validation (PR-time)
 
 Two layers, both run before merge:
