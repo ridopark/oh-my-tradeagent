@@ -87,11 +87,13 @@ public class OrdersReader {
             DSL.field("limit_price"),
             DSL.field("state"),
             DSL.field("broker_order_id"),
-            DSL.field("recorded_at"),
-            DSL.field("submitted_at"),
+            // Type the TIMESTAMPTZ columns so jOOQ returns OffsetDateTime (untyped DSL.field yields
+            // java.sql.Timestamp, which the cross-broker re-sort in byRecordedAtDesc can't cast).
+            DSL.field("recorded_at", OffsetDateTime.class),
+            DSL.field("submitted_at", OffsetDateTime.class),
             DSL.field("filled_qty"),
             DSL.field("avg_fill_price"),
-            DSL.field("filled_at"),
+            DSL.field("filled_at", OffsetDateTime.class),
             DSL.field("last_error"))
         .from(DSL.table("order_intent_journal"))
         .where(DSL.field("tenant_id").eq(tenantId).and(DSL.field("strategy_id").in(strategyIds)))

@@ -91,20 +91,19 @@ class OrdersReaderIT {
   }
 
   @Test
-  void scopesToRequestedTenantAndStrategyOnly() {
-    insert("ok1", "dev", "s1", "2026-05-14T14:00:00Z");
+  void scopesToRequestedTenantAndStrategy_andSortsNewestFirst() {
+    // TWO in-scope rows so the cross-broker re-sort in orders() actually runs (a 1-element list
+    // never invokes the comparator — that gap hid a Timestamp->OffsetDateTime ClassCastException).
+    insert("ok-old", "dev", "s1", "2026-05-14T14:00:00Z");
+    insert("ok-new", "dev", "s1", "2026-05-14T18:00:00Z");
     insert("leak", "other", "s1", "2026-05-14T15:00:00Z"); // different tenant
-    insert(
-        "wrong-strat",
-        "dev",
-        "s2",
-        "2026-05-14T16:00:00Z"); // tenant's strategy not in resolved set
+    insert("wrong-strat", "dev", "s2", "2026-05-14T16:00:00Z"); // strategy not in resolved set
 
     List<Map<String, Object>> items = reader.orders("dev", 100);
 
-    assertThat(items).hasSize(1);
-    assertThat(items.get(0).get("intent_key")).isEqualTo("ok1");
-    assertThat(items.get(0).get("strategy_id")).isEqualTo("s1");
+    assertThat(items).hasSize(2);
+    // newest first — exercises byRecordedAtDesc on the OffsetDateTime-typed recorded_at column.
+    assertThat(items).extracting(m -> m.get("intent_key")).containsExactly("ok-new", "ok-old");
   }
 
   private void insert(String intentKey, String tenant, String strategy, String recordedAtIso) {

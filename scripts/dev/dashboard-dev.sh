@@ -29,6 +29,10 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
+echo "==> registering Temporal search attributes (TenantStrategy/ContractSymbol — Positions/Portfolio need them)"
+docker compose -f infra/docker-compose.yml up temporal-bootstrap >/dev/null 2>&1 \
+  || echo "    (search-attribute bootstrap failed — Positions/Portfolio may 500)"
+
 echo "==> seeding sample data (audit_log + order_intent_journal)"
 scripts/dev/dashboard-seed.sh || echo "    (seed failed — continuing; Trades/Orders may be empty)"
 
@@ -42,7 +46,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "==> BFF tenant-dashboard-bff :8083 (Flyway creates dashboard_user + dashboard_readonly)"
-( cd services/tenant-dashboard-bff && mvn -q spring-boot:run ) &
+# BFF_TENANTS_DIR is absolute: the BFF runs with cwd=the module dir, so the relative default
+# "tenants" would resolve to services/tenant-dashboard-bff/tenants (which doesn't exist).
+( cd services/tenant-dashboard-bff && BFF_TENANTS_DIR="$ROOT/tenants" mvn -q spring-boot:run ) &
 bff_pid=$!
 
 echo "==> waiting for BFF health"
