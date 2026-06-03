@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
@@ -37,6 +39,7 @@ import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -69,7 +72,7 @@ class PositionWorkflowImplTest {
 
     // Default calendar: no EOD/expiry pressure
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
-    when(calendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+    when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
     // Default market-data: subscription succeeds.
     when(marketData.subscribePremium(any())).thenReturn(subscribedResult());
 
@@ -380,10 +383,12 @@ class PositionWorkflowImplTest {
   @Test
   void expiryTimer_forceFlattensRemaining() throws Exception {
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
-    when(calendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ofMillis(200));
+    when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ofMillis(200));
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-expiry");
+    // input(3) leaves force_close_0dte_et null -> the workflow must call the activity with a null
+    // closeTime, preserving the legacy 15:30 ET default path (Issue #15 null-passthrough).
     WorkflowStub.fromTyped(stub).start(input(3));
     confirmEntry(stub, 3L);
 
@@ -394,6 +399,41 @@ class PositionWorkflowImplTest {
     AuditEvent req = captureKind("ExpiryForceFlattenRequested");
     assertThat(asLong(req.getSubject().get("remaining_qty"))).isEqualTo(3L);
     captureKind("ExpiryForceFlattened");
+    // Null force_close_0dte_et must reach the activity as null (legacy 15:30 ET default).
+    verify(calendar).durationUntilExpiryCloseEt(any(), isNull());
+  }
+
+  @Test
+  void expiryTimer_configuredForceClose0dte_drivesFlattenAsMarketOrder() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ofMillis(200));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-expiry-cfg");
+    PositionWorkflowInput in = input(3);
+    in.setForceClose0dteEt("14:45"); // Issue #15: per-strategy 0DTE force-flat time.
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 3L);
+
+    env.sleep(Duration.ofMinutes(1));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    captureKind("ExpiryForceFlattenRequested");
+    captureKind("ExpiryForceFlattened");
+
+    // The configured "14:45" must be parsed and passed to the calendar activity as LocalTime.
+    verify(calendar).durationUntilExpiryCloseEt(any(), eq(LocalTime.of(14, 45)));
+
+    // The expiry flatten stays a MARKET order: the SELL OrderIntent has no limit price.
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent flatten =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow();
+    assertThat(flatten.getLimitPrice()).isNull();
   }
 
   @Test

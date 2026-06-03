@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.activities;
 import io.temporal.activity.ActivityInterface;
 import java.time.Duration;
 import java.time.LocalDate;
+import java.time.LocalTime;
 
 /**
  * Computes deterministic-from-workflow durations to EOD and to option expiry close in ET.
@@ -19,11 +20,18 @@ public interface MarketCalendarActivities {
   Duration durationUntilEodEt();
 
   /**
-   * Duration from "now" to 15:30 ET on {@code expiry}; ZERO if expiry is not today or already past.
-   * Phase 3 only arms an expiry timer for 0DTE; future-dated expiries return ZERO so the workflow
-   * can treat "no expiry timer" uniformly.
+   * Duration from "now" to {@code closeTime} ET on {@code expiry}; ZERO if expiry is not today or
+   * already past. Phase 3 only arms an expiry timer for 0DTE; future-dated expiries return ZERO so
+   * the workflow can treat "no expiry timer" uniformly.
+   *
+   * <p>Issue #15: {@code closeTime} is the per-strategy {@code force_close_0dte_et} override. A
+   * null {@code closeTime} preserves the legacy 15:30 ET default. The method name (and therefore
+   * the Temporal activity type name {@code DurationUntilExpiryCloseEt}) is unchanged from the
+   * original single-arg signature, so in-flight PositionWorkflow replays match the recorded
+   * ActivityTaskScheduled command — the added argument flows only through the (replay-ignored)
+   * activity input payload and needs no Workflow.getVersion gate.
    */
-  Duration durationUntilExpiryCloseEt(LocalDate expiry);
+  Duration durationUntilExpiryCloseEt(LocalDate expiry, LocalTime closeTime);
 
   /**
    * Whether the US equity options market is currently open. Phase 5 KISS: Monday-Friday 09:30-16:00

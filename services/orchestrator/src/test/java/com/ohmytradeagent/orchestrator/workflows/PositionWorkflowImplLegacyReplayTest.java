@@ -163,7 +163,7 @@ class PositionWorkflowImplLegacyReplayTest {
       // Generous EOD so the timer never fires; ZERO expiry so no expiry timer is armed (matching
       // PositionWorkflowImplTest's calendar stubs). The partial exit drives the close.
       when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
-      when(calendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+      when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
       when(legacyExec.placeOrder(any())).thenReturn(submitted());
 
       worker.registerActivitiesImplementations(audit, calendar);
@@ -316,7 +316,10 @@ class PositionWorkflowImplLegacyReplayTest {
       java.time.LocalDate expiryDate =
           PositionWorkflowImpl.expiryDateFromOcc(in.getContractSymbol());
       if (expiryDate != null) {
-        expiryIn = calendar.durationUntilExpiryCloseEt(expiryDate);
+        // Issue #15: the legacy stream called the single-arg activity (15:30 ET default). The
+        // activity TYPE NAME (DurationUntilExpiryCloseEt) is unchanged by the added arg, so passing
+        // null here reproduces the legacy command/value and the recorded history still matches.
+        expiryIn = calendar.durationUntilExpiryCloseEt(expiryDate, null);
       }
       if (!eodIn.isZero() && !eodIn.isNegative()) {
         Workflow.newTimer(eodIn);

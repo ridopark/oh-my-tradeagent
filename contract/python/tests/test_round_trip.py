@@ -24,6 +24,7 @@ from ohmytradeagent_contract.models.copytrade_signal_payload import (
 )
 from ohmytradeagent_contract.models.fill_signal_payload import FillSignalPayload
 from ohmytradeagent_contract.models.partial_exit_request import PartialExitRequest
+from ohmytradeagent_contract.models.position_workflow_input import PositionWorkflowInput
 from ohmytradeagent_contract.models.pre_trade_check_request import (
     PreTradeCheckRequest,
     Side,
@@ -273,6 +274,42 @@ def test_strategy_config_force_close_bad_format_rejected() -> None:
     for bad in ("15:0", "25:00", "15:60", "1500", "noon"):
         with pytest.raises(ValidationError) as exc_info:
             StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, "force_close_0dte_et": bad})
+        assert "force_close_0dte_et" in str(exc_info.value)
+
+
+_POSITION_WORKFLOW_INPUT_BASE = {
+    "schema_version": 1,
+    "tenant_id": "dev",
+    "strategy_id": "copytrade-v1",
+    "entry_signal_id": "entry-1",
+    "contract_symbol": "NVDA250516C00140000",
+    "qty": 3,
+    "entry_premium": 2.30,
+}
+
+
+def test_position_workflow_input_force_close_0dte_round_trip() -> None:
+    """Issue #15: force_close_0dte_et parses, round-trips, and absent → None (legacy 15:30 path)."""
+    data = {**_POSITION_WORKFLOW_INPUT_BASE, "force_close_0dte_et": "14:00"}
+    model = PositionWorkflowInput.model_validate(data)
+    assert model.force_close_0dte_et == "14:00"
+    reloaded = PositionWorkflowInput.model_validate_json(
+        model.model_dump_json(by_alias=True, exclude_none=True)
+    )
+    assert reloaded.force_close_0dte_et == "14:00"
+
+    # Absent case (pre-change in-flight inputs) must validate cleanly and default to None.
+    absent = PositionWorkflowInput.model_validate(_POSITION_WORKFLOW_INPUT_BASE)
+    assert absent.force_close_0dte_et is None
+
+
+def test_position_workflow_input_force_close_0dte_bad_format_rejected() -> None:
+    """Issue #15: HH:MM regex rejects malformed force_close_0dte_et values."""
+    for bad in ("14:0", "25:00", "14:60", "1400", "2pm"):
+        with pytest.raises(ValidationError) as exc_info:
+            PositionWorkflowInput.model_validate(
+                {**_POSITION_WORKFLOW_INPUT_BASE, "force_close_0dte_et": bad}
+            )
         assert "force_close_0dte_et" in str(exc_info.value)
 
 
