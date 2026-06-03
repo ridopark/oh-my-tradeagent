@@ -19,4 +19,19 @@ public interface WebhookClient {
    * @param content the message body to deliver
    */
   void post(String content);
+
+  /**
+   * Post a rich {@link WebhookEmbed} to the configured webhook. Same best-effort contract as {@link
+   * #post(String)}: blank URL is a no-op and transport failures are swallowed-and-logged, never
+   * propagated to the caller.
+   *
+   * <p>Default is a no-op so that text-only alerters (which never build embeds) need not implement
+   * it and {@link WebhookClient} stays usable as a single-method lambda at those call sites. The
+   * real Discord transport overrides this.
+   *
+   * @param embed the embed to deliver
+   */
+  default void postEmbed(WebhookEmbed embed) {
+    // No-op by default; the Discord transport overrides this.
+  }
 }
