@@ -91,6 +91,48 @@ class DiscordWebhookClientTest {
     assertThat(body).contains("\"description\":\"line1\\nline2\"");
   }
 
+  @Test
+  void postEmbedSerializesStackedFieldsAndOmitsBlankDescription() throws Exception {
+    HttpClient http = Mockito.mock(HttpClient.class);
+    @SuppressWarnings("unchecked")
+    HttpResponse<Void> resp = Mockito.mock(HttpResponse.class);
+    Mockito.when(resp.statusCode()).thenReturn(204);
+    Mockito.when(
+            http.send(
+                Mockito.any(HttpRequest.class), Mockito.<HttpResponse.BodyHandler<Void>>any()))
+        .thenReturn(resp);
+    DiscordWebhookClient client =
+        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+
+    client.postEmbed(
+        new WebhookEmbed(
+            "🚨 FAILED",
+            null,
+            15548997,
+            "workflow_id: wf-1 | tenant/strategy: dev/copytrade-v1",
+            java.util.List.of(
+                new WebhookEmbed.Field(
+                    "symbol",
+                    "[AAPL 260116C00200000](https://finance.yahoo.com/quote/AAPL%20%20260116C00200000/)",
+                    false),
+                new WebhookEmbed.Field("reason", "DAILY_LOSS_LIMIT", false))));
+
+    ArgumentCaptor<HttpRequest> captor = ArgumentCaptor.forClass(HttpRequest.class);
+    Mockito.verify(http).send(captor.capture(), Mockito.<HttpResponse.BodyHandler<Void>>any());
+    String body = bodyOf(captor.getValue());
+
+    assertThat(body).contains("\"color\":15548997");
+    assertThat(body).contains("\"fields\":[{");
+    assertThat(body).contains("\"name\":\"symbol\"");
+    assertThat(body)
+        .contains(
+            "\"value\":\"[AAPL 260116C00200000](https://finance.yahoo.com/quote/AAPL%20%20260116C00200000/)\"");
+    assertThat(body).contains("\"inline\":false");
+    assertThat(body).contains("\"name\":\"reason\"");
+    // A null/blank description is omitted entirely (alerts use fields, not a description).
+    assertThat(body).doesNotContain("\"description\"");
+  }
+
   /** Drains the request's BodyPublisher into a UTF-8 string. */
   private static String bodyOf(HttpRequest request) {
     Flow.Publisher<ByteBuffer> publisher = request.bodyPublisher().orElseThrow();

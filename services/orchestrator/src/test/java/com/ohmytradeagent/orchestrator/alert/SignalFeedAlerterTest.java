@@ -2,7 +2,7 @@ package com.ohmytradeagent.orchestrator.alert;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -11,6 +11,7 @@ import static org.mockito.Mockito.verify;
 import com.ohmytradeagent.contract.AuditEvent;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -43,16 +44,18 @@ class SignalFeedAlerterTest {
 
     alerter.onAuditEvent(event);
 
-    String msg = capture(webhook);
-    assertThat(msg).contains("received");
-    assertThat(msg).contains("BTO");
-    assertThat(msg).contains("NVDA");
-    assertThat(msg).contains("2026-05-16");
-    assertThat(msg).contains("140");
-    assertThat(msg).contains("C");
-    assertThat(msg).contains("2.30");
-    assertThat(msg).contains("acme_trader");
-    assertThat(msg).contains("111:0");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("received").contains("BTO").contains("NVDA");
+    assertThat(embed.color()).isEqualTo(5793266); // blurple / info
+    // The contract field is the Yahoo link constructed from ticker+expiry+strike+right.
+    assertThat(field(embed, "contract"))
+        .isEqualTo(
+            "[NVDA 260516C00140000]"
+                + "(https://finance.yahoo.com/quote/NVDA%20%20260516C00140000/)");
+    assertThat(field(embed, "price")).isEqualTo("2.30");
+    assertThat(field(embed, "author")).isEqualTo("acme_trader");
+    assertThat(field(embed, "signal_id")).isEqualTo("111:0");
+    assertThat(embed.fields()).allMatch(f -> !f.inline());
   }
 
   @Test
@@ -68,11 +71,11 @@ class SignalFeedAlerterTest {
 
     alerter.onAuditEvent(event);
 
-    String msg = capture(webhook);
-    assertThat(msg).contains("received");
-    assertThat(msg).contains("STC");
-    assertThat(msg).contains("TSLA");
-    assertThat(msg).contains("222:1");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("received").contains("STC").contains("TSLA");
+    assertThat(field(embed, "signal_id")).isEqualTo("222:1");
+    // No expiry/strike → contract degrades to readable plain text (no link, never throws).
+    assertThat(field(embed, "contract")).doesNotContain("finance.yahoo.com").contains("TSLA");
   }
 
   @Test
@@ -88,10 +91,8 @@ class SignalFeedAlerterTest {
 
     alerter.onAuditEvent(event);
 
-    String msg = capture(webhook);
-    assertThat(msg).contains("received");
-    assertThat(msg).contains("AVG");
-    assertThat(msg).contains("SPY");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("received").contains("AVG").contains("SPY");
   }
 
   @Test
@@ -108,11 +109,12 @@ class SignalFeedAlerterTest {
 
     alerter.onAuditEvent(event);
 
-    String msg = capture(webhook);
-    assertThat(msg).contains("accepted");
-    assertThat(msg).contains("NVDA260516C00140000");
-    assertThat(msg).contains("3");
-    assertThat(msg).contains("2.30");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("accepted");
+    assertThat(embed.color()).isEqualTo(5763719); // green / success
+    // The resolved option_symbol becomes a Yahoo link.
+    assertThat(field(embed, "symbol")).contains("NVDA%20%20260516C00140000");
+    assertThat(field(embed, "accepted")).contains("3").contains("2.30");
   }
 
   @Test
@@ -129,11 +131,35 @@ class SignalFeedAlerterTest {
 
     alerter.onAuditEvent(event);
 
-    String msg = capture(webhook);
-    assertThat(msg).contains("rejected");
-    assertThat(msg).contains("DAILY_LOSS_LIMIT");
-    assertThat(msg).contains("tenant daily loss exceeded");
-    assertThat(msg).contains("111:0");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("rejected");
+    assertThat(embed.color()).isEqualTo(15548997); // red / failure
+    assertThat(field(embed, "rejected")).contains("DAILY_LOSS_LIMIT", "tenant daily loss exceeded");
+    assertThat(field(embed, "signal_id")).isEqualTo("111:0");
+  }
+
+  @Test
+  void rejectedConstructsContractFromPartsWhenNoResolvedSymbol() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("signal_id", "111:0");
+    subject.put("ticker", "NFLX");
+    subject.put("expiry", "260918");
+    subject.put("strike", "100");
+    subject.put("right", "C");
+    subject.put("reason_code", "AUTHOR_NOT_WHITELISTED");
+    AuditEvent event = event("SignalRejected", "wf-rej-3", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    // No option_symbol → constructed from parts (the plan's matrix), Yahoo-linked.
+    assertThat(field(embed, "contract"))
+        .isEqualTo(
+            "[NFLX 260918C00100000]"
+                + "(https://finance.yahoo.com/quote/NFLX%20%20260918C00100000/)");
   }
 
   @Test
@@ -148,10 +174,11 @@ class SignalFeedAlerterTest {
 
     alerter.onAuditEvent(event);
 
-    String msg = capture(webhook);
-    assertThat(msg).contains("AVG skipped");
-    assertThat(msg).contains("skip_avg_true");
-    assertThat(msg).contains("333:0");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("AVG skipped");
+    assertThat(embed.color()).isEqualTo(16705372); // yellow / warn
+    assertThat(field(embed, "note")).isEqualTo("skip_avg_true");
+    assertThat(field(embed, "signal_id")).isEqualTo("333:0");
   }
 
   /**
@@ -168,7 +195,7 @@ class SignalFeedAlerterTest {
     AuditEvent event = event("SignalRejected", "wf-rej-2", Map.of("signal_id", "111:0"));
     alerter.onAuditEvent(event);
 
-    verify(webhook, times(1)).post(anyString());
+    verify(webhook, times(1)).postEmbed(any());
   }
 
   @Test
@@ -181,7 +208,7 @@ class SignalFeedAlerterTest {
     alerter.onAuditEvent(event("OrphanSTC", "wf-1", Map.of("signal_id", "111:0")));
     alerter.onAuditEvent(event("EntryExpired", "wf-1", Map.of("signal_id", "111:0")));
 
-    verify(webhook, never()).post(anyString());
+    verify(webhook, never()).postEmbed(any());
   }
 
   @Test
@@ -194,7 +221,7 @@ class SignalFeedAlerterTest {
     alerter.onAuditEvent(event("SignalAccepted", "wf-1", Map.of("signal_id", "111:0")));
     alerter.onAuditEvent(event("AvgSkipped", "wf-1", Map.of("signal_id", "111:0")));
 
-    verify(webhook, never()).post(anyString());
+    verify(webhook, never()).postEmbed(any());
     assertThat(alerter.enabled()).isFalse();
   }
 
@@ -203,7 +230,7 @@ class SignalFeedAlerterTest {
     WebhookClient webhook = mock(WebhookClient.class);
     org.mockito.Mockito.doThrow(new RuntimeException("webhook boom"))
         .when(webhook)
-        .post(anyString());
+        .postEmbed(any());
     SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
 
     AuditEvent event = event("SignalReceived", "wf-1", Map.of("signal_id", "111:0"));
@@ -223,13 +250,21 @@ class SignalFeedAlerterTest {
     assertThatCode(() -> alerter.onAuditEvent(nullSubject)).doesNotThrowAnyException();
 
     // null-kind must not dispatch; null-subject (feed kind) still dispatches with n/a fields.
-    verify(webhook, times(1)).post(anyString());
+    verify(webhook, times(1)).postEmbed(any());
   }
 
-  private static String capture(WebhookClient webhook) {
-    ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-    verify(webhook, times(1)).post(captor.capture());
+  private static WebhookEmbed capture(WebhookClient webhook) {
+    ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
+    verify(webhook, times(1)).postEmbed(captor.capture());
     return captor.getValue();
+  }
+
+  /** Returns the single field with {@code name}, failing if absent or duplicated. */
+  private static String field(WebhookEmbed embed, String name) {
+    List<WebhookEmbed.Field> matches =
+        embed.fields().stream().filter(f -> f.name().equals(name)).toList();
+    assertThat(matches).as("field " + name).hasSize(1);
+    return matches.get(0).value();
   }
 
   private static AuditEvent event(String kind, String workflowId, Map<String, Object> subject) {

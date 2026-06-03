@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.exec.alert.BrokerRejectionAlerter;
 import com.ohmytradeagent.exec.alert.WebhookClient;
+import com.ohmytradeagent.exec.alert.WebhookEmbed;
 import com.ohmytradeagent.exec.broker.ClientOrderId;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
@@ -103,14 +104,17 @@ class ExecActivitiesImplClientOrderIdTest {
     // The row is NOT prematurely marked SUBMITTED when the broker call failed.
     verify(journal, never()).markSubmittedIfRecorded(anyString(), anyString());
 
-    // Issue #297: a Discord alert is dispatched for the SELL-side (STC) broker rejection, carrying
-    // the action, symbol, reason, and identifiers (intent_key / client_order_id).
-    ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
-    verify(webhook).post(msg.capture());
-    assertThat(msg.getValue()).contains("STC (exit)");
-    assertThat(msg.getValue()).contains("TSLA  260529C00435000");
-    assertThat(msg.getValue()).contains("client_order_id too long");
-    assertThat(msg.getValue()).contains(ClientOrderId.forIntent(EXIT_INTENT_KEY));
+    // Issue #297: a Discord rich-embed alert is dispatched for the SELL-side (STC) broker
+    // rejection,
+    // carrying the action, Yahoo-linked symbol, reason, and identifiers.
+    ArgumentCaptor<WebhookEmbed> embedCaptor = ArgumentCaptor.forClass(WebhookEmbed.class);
+    verify(webhook).postEmbed(embedCaptor.capture());
+    WebhookEmbed embed = embedCaptor.getValue();
+    assertThat(embed.title()).contains("STC (exit)");
+    assertThat(fieldValue(embed, "symbol")).contains("TSLA%20%20260529C00435000");
+    assertThat(fieldValue(embed, "reason")).contains("client_order_id too long");
+    assertThat(fieldValue(embed, "client_order_id"))
+        .isEqualTo(ClientOrderId.forIntent(EXIT_INTENT_KEY));
   }
 
   @Test
@@ -124,12 +128,14 @@ class ExecActivitiesImplClientOrderIdTest {
 
     assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
 
-    ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
-    verify(webhook).post(msg.capture());
-    assertThat(msg.getValue()).contains("BTO (entry)");
-    assertThat(msg.getValue()).contains("AAPL  260116C00200000");
-    assertThat(msg.getValue()).contains("account blocked");
-    assertThat(msg.getValue()).contains(ClientOrderId.forIntent(ENTRY_INTENT_KEY));
+    ArgumentCaptor<WebhookEmbed> embedCaptor = ArgumentCaptor.forClass(WebhookEmbed.class);
+    verify(webhook).postEmbed(embedCaptor.capture());
+    WebhookEmbed embed = embedCaptor.getValue();
+    assertThat(embed.title()).contains("BTO (entry)");
+    assertThat(fieldValue(embed, "symbol")).contains("AAPL%20%20260116C00200000");
+    assertThat(fieldValue(embed, "reason")).contains("account blocked");
+    assertThat(fieldValue(embed, "client_order_id"))
+        .isEqualTo(ClientOrderId.forIntent(ENTRY_INTENT_KEY));
   }
 
   @Test
@@ -144,7 +150,7 @@ class ExecActivitiesImplClientOrderIdTest {
     // propagates (so Temporal keeps its non-retryable classification; no #264 retry storm).
     org.mockito.Mockito.doThrow(new RuntimeException("discord down"))
         .when(webhook)
-        .post(anyString());
+        .postEmbed(any());
 
     assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
 
@@ -209,6 +215,14 @@ class ExecActivitiesImplClientOrderIdTest {
     i.setLimitPrice(new BigDecimal("2.50"));
     i.setRecordedAt(OffsetDateTime.parse("2026-05-29T15:31:44Z"));
     return i;
+  }
+
+  private static String fieldValue(WebhookEmbed embed, String name) {
+    return embed.fields().stream()
+        .filter(f -> f.name().equals(name))
+        .map(WebhookEmbed.Field::value)
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("missing field " + name));
   }
 
   private static JournaledOrder recordedBuyRow(String intentKey) {

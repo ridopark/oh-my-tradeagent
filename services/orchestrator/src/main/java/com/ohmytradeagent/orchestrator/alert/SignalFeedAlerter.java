@@ -1,6 +1,11 @@
 package com.ohmytradeagent.orchestrator.alert;
 
+import static com.ohmytradeagent.orchestrator.alert.AlertSubjects.rawSubject;
+
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.identity.YahooOptionLink;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -90,19 +95,19 @@ public class SignalFeedAlerter {
       if (event == null || event.getKind() == null) {
         return;
       }
-      String message = buildMessage(event);
-      if (message == null) {
+      WebhookEmbed embed = buildEmbed(event);
+      if (embed == null) {
         return;
       }
-      webhookClient.post(message);
+      webhookClient.postEmbed(embed);
     } catch (RuntimeException e) {
       // Defensive: a notification must never break the audit write / trading path.
       log.warn("signal-feed-alert build/dispatch failed kind={}", safeKind(event), e);
     }
   }
 
-  /** Returns the formatted message for a signal-feed kind, or {@code null} for any other kind. */
-  private String buildMessage(AuditEvent event) {
+  /** Returns the embed for a signal-feed kind, or {@code null} for any other kind. */
+  private WebhookEmbed buildEmbed(AuditEvent event) {
     return switch (event.getKind()) {
       case KIND_SIGNAL_RECEIVED -> buildReceived(event);
       case KIND_SIGNAL_ACCEPTED -> buildAccepted(event);
@@ -112,86 +117,107 @@ public class SignalFeedAlerter {
     };
   }
 
-  private String buildReceived(AuditEvent event) {
+  /**
+   * Signal received (blurple/info): the contract field is constructed from
+   * ticker+expiry+strike+right (this path may not have a resolved {@code option_symbol}) into a
+   * Yahoo link, falling back to readable plain text when any part is missing.
+   */
+  private WebhookEmbed buildReceived(AuditEvent event) {
     Map<String, Object> s = event.getSubject();
-    StringBuilder sb = new StringBuilder();
-    sb.append(":satellite: Signal received — ")
-        .append(subjectStr(s, "action"))
-        .append(' ')
-        .append(subjectStr(s, "ticker"))
-        .append('\n')
-        .append("contract: ")
-        .append(subjectStr(s, "expiry"))
-        .append(' ')
-        .append(subjectStr(s, "strike"))
-        .append(subjectStr(s, "right"))
-        .append('\n')
-        .append("price: ")
-        .append(subjectStr(s, "price"))
-        .append('\n')
-        .append("author: ")
-        .append(subjectStr(s, "author"))
-        .append('\n')
-        .append("posted_at: ")
-        .append(subjectStr(s, "posted_at"))
-        .append('\n');
-    appendCommonTail(sb, event);
-    return sb.toString();
+    String title =
+        ":satellite: Signal received — " + subjectStr(s, "action") + " " + subjectStr(s, "ticker");
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("contract", contractLinkFromParts(s), false));
+    fields.add(new WebhookEmbed.Field("price", subjectStr(s, "price"), false));
+    fields.add(new WebhookEmbed.Field("author", subjectStr(s, "author"), false));
+    fields.add(new WebhookEmbed.Field("posted_at", subjectStr(s, "posted_at"), false));
+    addCommonFields(fields, event);
+    return new WebhookEmbed(title, null, AlertColors.BLURPLE, footer(event), fields);
   }
 
-  private String buildAccepted(AuditEvent event) {
+  /** Signal accepted (green/success): the resolved {@code option_symbol} becomes a Yahoo link. */
+  private WebhookEmbed buildAccepted(AuditEvent event) {
     Map<String, Object> s = event.getSubject();
-    StringBuilder sb = new StringBuilder();
-    sb.append(":white_check_mark: Signal accepted — BTO (entry)")
-        .append('\n')
-        .append("symbol: ")
-        .append(subjectStr(s, "option_symbol"))
-        .append('\n')
-        .append("accepted ×")
-        .append(subjectStr(s, "contracts"))
-        .append(" @ ref_premium ")
-        .append(subjectStr(s, "ref_premium"))
-        .append('\n');
-    appendCommonTail(sb, event);
-    return sb.toString();
+    String title = ":white_check_mark: Signal accepted — BTO (entry)";
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(
+        new WebhookEmbed.Field(
+            "symbol", YahooOptionLink.markdown(rawSubject(s, "option_symbol")), false));
+    fields.add(
+        new WebhookEmbed.Field(
+            "accepted",
+            "×" + subjectStr(s, "contracts") + " @ ref_premium " + subjectStr(s, "ref_premium"),
+            false));
+    addCommonFields(fields, event);
+    return new WebhookEmbed(title, null, AlertColors.GREEN, footer(event), fields);
   }
 
-  private String buildRejected(AuditEvent event) {
+  /**
+   * Signal rejected (red/failure): prefers a resolved {@code option_symbol}, else constructs the
+   * contract from ticker+expiry+strike+right (per the plan's color matrix), else plain text.
+   */
+  private WebhookEmbed buildRejected(AuditEvent event) {
     Map<String, Object> s = event.getSubject();
-    StringBuilder sb = new StringBuilder();
-    sb.append(":no_entry: Signal rejected — BTO (entry)")
-        .append('\n')
-        .append("rejected: ")
-        .append(reasonOf(s))
-        .append('\n');
-    appendCommonTail(sb, event);
-    return sb.toString();
+    String title = ":no_entry: Signal rejected — BTO (entry)";
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("contract", rejectedContractLink(s), false));
+    fields.add(new WebhookEmbed.Field("rejected", reasonOf(s), false));
+    addCommonFields(fields, event);
+    return new WebhookEmbed(title, null, AlertColors.RED, footer(event), fields);
   }
 
-  private String buildAvgSkipped(AuditEvent event) {
+  /** AVG skipped (yellow/warn): no contract in the subject, so no Yahoo link. */
+  private WebhookEmbed buildAvgSkipped(AuditEvent event) {
     Map<String, Object> s = event.getSubject();
-    StringBuilder sb = new StringBuilder();
-    sb.append(":fast_forward: AVG skipped")
-        .append('\n')
-        .append("note: ")
-        .append(subjectStr(s, "note"))
-        .append('\n');
-    appendCommonTail(sb, event);
-    return sb.toString();
+    String title = ":fast_forward: AVG skipped";
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("note", subjectStr(s, "note"), false));
+    addCommonFields(fields, event);
+    return new WebhookEmbed(title, null, AlertColors.YELLOW, footer(event), fields);
   }
 
-  /** Appends the identifiers common to every feed message so a signal can be traced end-to-end. */
-  private static void appendCommonTail(StringBuilder sb, AuditEvent event) {
-    sb.append("signal_id: ")
-        .append(subjectStr(event.getSubject(), "signal_id"))
-        .append('\n')
-        .append("workflow_id: ")
-        .append(orNa(event.getWorkflowId()))
-        .append('\n')
-        .append("tenant/strategy: ")
-        .append(orNa(event.getTenantId()))
-        .append('/')
-        .append(orNa(event.getStrategyId()));
+  /** Builds the Yahoo link from ticker+expiry+strike+right parts (signal-received path). */
+  private static String contractLinkFromParts(Map<String, Object> s) {
+    return YahooOptionLink.markdownFromParts(
+        rawSubject(s, "ticker"),
+        rawSubject(s, "expiry"),
+        rightChar(rawSubject(s, "right")),
+        rawSubject(s, "strike"));
+  }
+
+  /**
+   * Rejected-path contract: prefer a resolved {@code option_symbol} when present, else construct
+   * from ticker+expiry+strike+right, else plain text.
+   */
+  private static String rejectedContractLink(Map<String, Object> s) {
+    String resolved = rawSubject(s, "option_symbol");
+    if (resolved != null && !resolved.isBlank()) {
+      return YahooOptionLink.markdown(resolved);
+    }
+    return contractLinkFromParts(s);
+  }
+
+  /** The signal_id field common to every feed message so a signal can be traced end-to-end. */
+  private static void addCommonFields(List<WebhookEmbed.Field> fields, AuditEvent event) {
+    fields.add(
+        new WebhookEmbed.Field("signal_id", subjectStr(event.getSubject(), "signal_id"), false));
+  }
+
+  /** Low-signal trace (workflow_id + tenant/strategy) demoted to the footer. */
+  private static String footer(AuditEvent event) {
+    return "workflow_id: "
+        + orNa(event.getWorkflowId())
+        + " | tenant/strategy: "
+        + orNa(event.getTenantId())
+        + "/"
+        + orNa(event.getStrategyId());
+  }
+
+  private static char rightChar(String right) {
+    if (right == null || right.isBlank()) {
+      return ' ';
+    }
+    return right.trim().charAt(0);
   }
 
   private static String reasonOf(Map<String, Object> subject) {
