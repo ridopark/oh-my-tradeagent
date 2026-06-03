@@ -77,6 +77,20 @@ spec:
                 secretKeyRef:
                   name: sidecar-config
                   key: STRATEGY_ID
+            # Watchlist mirror (Option B): read a SECOND channel and emit
+            # WatchlistMirrorWorkflow once per ET day. Disabled by default; the
+            # channel URL comes from the same `sidecar-config` Secret.
+            - name: WATCHLIST_MIRROR_ENABLED
+              value: "false"
+            - name: WATCHLIST_POLL_INTERVAL_SECS
+              value: "45"
+            - name: WATCHLIST_AUTHOR
+              value: "TradingTheTrend"
+            - name: DISCORD_WATCHLIST_CHANNEL_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sidecar-config
+                  key: DISCORD_WATCHLIST_CHANNEL_URL
           volumeMounts:
             - name: state
               mountPath: /app/state

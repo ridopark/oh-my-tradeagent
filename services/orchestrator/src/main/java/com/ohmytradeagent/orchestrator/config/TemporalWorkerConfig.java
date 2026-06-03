@@ -12,12 +12,14 @@ import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.activities.WatchlistMirrorActivities;
 import com.ohmytradeagent.orchestrator.workflows.AccountSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.WatchlistMirrorWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
 import io.temporal.serviceclient.WorkflowServiceStubs;
@@ -77,7 +79,8 @@ public class TemporalWorkerConfig {
       DailyPnlActivities dailyPnl,
       LivePromotionActivities livePromotion,
       ReconciliationMetricsActivities reconciliationMetrics,
-      AccountSnapshotMetricsActivities accountSnapshotMetrics) {
+      AccountSnapshotMetricsActivities accountSnapshotMetrics,
+      WatchlistMirrorActivities watchlistMirror) {
     Worker worker = factory.newWorker(taskQueue);
     // Issue #239/#285: AdoptionWorkflow is the operator-triggered orphan-adoption entry point. It
     // runs as a workflow (not an in-process Activity) so its broker-truth
@@ -94,7 +97,11 @@ public class TemporalWorkerConfig {
         // Started synchronously by the tenant-dashboard BFF to read broker-account equity; the
         // workflow dispatches AccountSnapshotActivity to broker-<target> (a Temporal client cannot
         // dispatch an Activity directly).
-        AccountSnapshotWorkflowImpl.class);
+        AccountSnapshotWorkflowImpl.class,
+        // Net-new single-step workflow: mirrors the verbatim daily watchlist to the trade-alert
+        // Discord webhook. The signal-source-discord sidecar starts it by the type name
+        // "WatchlistMirrorWorkflow" on this same orchestrator-core queue.
+        WatchlistMirrorWorkflowImpl.class);
     worker.registerActivitiesImplementations(
         audit,
         auditQuery,
@@ -107,7 +114,8 @@ public class TemporalWorkerConfig {
         dailyPnl,
         livePromotion,
         reconciliationMetrics,
-        accountSnapshotMetrics);
+        accountSnapshotMetrics,
+        watchlistMirror);
     return worker;
   }
 }

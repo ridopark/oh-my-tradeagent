@@ -10,8 +10,9 @@ import sys
 
 from dotenv import load_dotenv
 
-from .emitter import TemporalEmitter
+from .emitter import TemporalEmitter, TemporalWatchlistEmitter
 from .watcher import Watcher
+from .watchlist_watcher import WatchlistWatcher
 
 
 def _setup_logging(level: str) -> logging.Logger:
@@ -44,6 +45,14 @@ async def _amain() -> None:
     state_dir = pathlib.Path(os.getenv("STATE_DIR", "./state"))
     poll_interval = float(os.getenv("POLL_INTERVAL_SECS", "1.0"))
 
+    watchlist_enabled = (
+        os.getenv("WATCHLIST_MIRROR_ENABLED", "false").strip().lower() == "true"
+    )
+    if watchlist_enabled:
+        watchlist_channel_url = _required("DISCORD_WATCHLIST_CHANNEL_URL")
+        watchlist_poll_interval = float(os.getenv("WATCHLIST_POLL_INTERVAL_SECS", "45"))
+        watchlist_author = os.getenv("WATCHLIST_AUTHOR", "TradingTheTrend")
+
     state_dir.mkdir(parents=True, exist_ok=True)
 
     log.info(
@@ -65,8 +74,42 @@ async def _amain() -> None:
         log=log,
         poll_interval_secs=poll_interval,
     )
+
+    signal_task = asyncio.create_task(watcher.run(), name="signal-watcher")
+    tasks = [signal_task]
+    watchlist_task: asyncio.Task[None] | None = None
+    if watchlist_enabled:
+        # Reuse the SAME connected Temporal client + task queue — no second dial.
+        watchlist_emitter = TemporalWatchlistEmitter(emitter.client, emitter.task_queue)
+        watchlist_watcher = WatchlistWatcher(
+            channel_url=watchlist_channel_url,
+            state_dir=state_dir,
+            emitter=watchlist_emitter,
+            tenant_id=tenant_id,
+            strategy_id=strategy_id,
+            author=watchlist_author,
+            log=log,
+            poll_interval_secs=watchlist_poll_interval,
+        )
+        log.info("watchlist mirror enabled (channel=%s author=%s)",
+                 watchlist_channel_url, watchlist_author)
+        watchlist_task = asyncio.create_task(watchlist_watcher.run(), name="watchlist-watcher")
+        tasks.append(watchlist_task)
+
     try:
-        await watcher.run()
+        # return_exceptions=True so the watchlist watcher stays ISOLATED. But the
+        # signal watcher is trading-critical: if IT crashes we re-raise so the
+        # process exits non-zero and k8s restarts the pod (matching the old
+        # `await watcher.run()`). A watchlist crash is only logged.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        by_task = dict(zip(tasks, results))
+        watchlist_result = by_task.get(watchlist_task) if watchlist_task else None
+        if isinstance(watchlist_result, Exception):
+            log.error("watchlist watcher ended with error: %r", watchlist_result)
+        signal_result = by_task[signal_task]
+        if isinstance(signal_result, Exception):
+            log.error("signal watcher ended with error: %r", signal_result)
+            raise signal_result
     finally:
         await emitter.close()
 
