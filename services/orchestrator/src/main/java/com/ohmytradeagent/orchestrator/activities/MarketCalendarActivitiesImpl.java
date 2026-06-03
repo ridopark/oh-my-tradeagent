@@ -35,12 +35,14 @@ public class MarketCalendarActivitiesImpl implements MarketCalendarActivities {
   }
 
   @Override
-  public Duration durationUntilExpiryCloseEt(LocalDate expiry) {
+  public Duration durationUntilExpiryCloseEt(LocalDate expiry, LocalTime closeTime) {
+    // Issue #15: null closeTime preserves the legacy 15:30 ET default.
+    LocalTime effectiveClose = closeTime != null ? closeTime : EXPIRY_CLOSE_TIME;
     ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
     if (!expiry.equals(now.toLocalDate())) {
       return Duration.ZERO;
     }
-    ZonedDateTime close = now.with(EXPIRY_CLOSE_TIME).withSecond(0).withNano(0);
+    ZonedDateTime close = now.with(effectiveClose).withSecond(0).withNano(0);
     if (!now.isBefore(close)) {
       return Duration.ZERO;
     }

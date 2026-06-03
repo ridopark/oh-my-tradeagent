@@ -444,6 +444,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // mirrors an external author) skip the 15:55 ET EOD timer in PositionWorkflowImpl. Null is
     // passed through unchanged; PositionWorkflowImpl treats null as the default-true policy.
     posInput.setEodForceFlatten(config.getEodForceFlatten());
+    // Issue #15: carry force_close_0dte_et so the child's 0DTE expiry-close timer fires at the
+    // per-strategy time. Null/absent passes through unchanged; PositionWorkflowImpl defaults to
+    // 15:30.
+    posInput.setForceClose0dteEt(config.getForceClose0dteEt());
     // Issue #205: carry min_partial_qty_behavior so PositionWorkflow's runner-quantum gate can
     // decide between SKIP (default) and FULL_CLOSE when a partial signal would round to zero
     // contracts. Null/absent passes through unchanged; PositionWorkflowImpl treats null as SKIP.

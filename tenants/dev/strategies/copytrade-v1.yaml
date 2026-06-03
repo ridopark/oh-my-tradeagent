@@ -66,3 +66,7 @@ reset_cooldown_secs: 60
 # exits. Any future strategy that mirrors an external author MUST also set this
 # to false. This is policy, not a tunable.
 eod_force_flatten: false
+# Issue #15: flatten 0DTE expiry-day positions at 2:45pm ET while market-maker quotes
+# still exist, so the (intentionally) MARKET flatten order fills. By 15:30 ET the
+# deep-OTM/illiquid contract often has no live quote and the market order is rejected.
+force_close_0dte_et: "14:45"

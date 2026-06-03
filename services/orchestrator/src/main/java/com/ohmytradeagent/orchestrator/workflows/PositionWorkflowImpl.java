@@ -25,6 +25,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayDeque;
@@ -406,7 +407,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     Duration expiryIn = Duration.ZERO;
     LocalDate expiryDate = expiryDateFromOcc(in.getContractSymbol());
     if (expiryDate != null) {
-      expiryIn = calendar.durationUntilExpiryCloseEt(expiryDate);
+      // Issue #15: drive the 0DTE expiry-close timer from the per-strategy force_close_0dte_et
+      // override (carried over from StrategyConfig). LocalTime.parse is deterministic/replay-safe;
+      // null/blank falls back to the activity's legacy 15:30 ET default so pre-change in-flight
+      // replays (whose input lacks this field) keep firing at 15:30.
+      String fc = in.getForceClose0dteEt();
+      LocalTime closeTime = (fc == null || fc.isBlank()) ? null : LocalTime.parse(fc);
+      expiryIn = calendar.durationUntilExpiryCloseEt(expiryDate, closeTime);
     }
 
     if (armEodTimer && !eodIn.isZero() && !eodIn.isNegative()) {

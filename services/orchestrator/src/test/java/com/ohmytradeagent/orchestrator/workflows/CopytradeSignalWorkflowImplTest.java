@@ -10,11 +10,17 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.FillSignalPayload;
+import com.ohmytradeagent.contract.ForceCloseRequest;
+import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
+import com.ohmytradeagent.contract.PartialExitRequest;
+import com.ohmytradeagent.contract.PositionWorkflowInput;
+import com.ohmytradeagent.contract.PremiumTick;
 import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
@@ -35,6 +41,7 @@ import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
+import io.temporal.workflow.Workflow;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -44,6 +51,7 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -84,7 +92,7 @@ class CopytradeSignalWorkflowImplTest {
     calendar = Mockito.mock(MarketCalendarActivities.class);
     marketData = Mockito.mock(SubscribePremiumActivity.class);
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
-    when(calendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+    when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
     SubscribePremiumResult ok = new SubscribePremiumResult();
     ok.setSchemaVersion(1L);
     ok.setSubscriptionId("sub-test");
@@ -1059,5 +1067,160 @@ class CopytradeSignalWorkflowImplTest {
     cfg.setPendingTtlLiveSecs(null);
 
     assertThat(impl.selectPendingTtlSecs(cfg)).isEqualTo(90L);
+  }
+
+  // ---------- Issue #15: force_close_0dte_et passthrough onto the child PositionWorkflowInput ----
+
+  @Test
+  void startPositionWorkflow_carriesForceClose0dteEt_whenConfigured() throws Exception {
+    PositionWorkflowInput child = runBtoCapturingChildInput("14:45");
+    assertThat(child.getForceClose0dteEt()).isEqualTo("14:45");
+  }
+
+  @Test
+  void startPositionWorkflow_passesNullForceClose0dteEt_whenAbsent() throws Exception {
+    PositionWorkflowInput child = runBtoCapturingChildInput(null);
+    // Null passthrough preserves the legacy 15:30 ET default in PositionWorkflowImpl.
+    assertThat(child.getForceClose0dteEt()).isNull();
+  }
+
+  /**
+   * Drives the BTO happy path through {@link CopytradeSignalWorkflowImpl#startPositionWorkflow} on
+   * a dedicated env whose child PositionWorkflow is a {@link RecordingPositionWorkflowImpl}, then
+   * returns the captured child {@link PositionWorkflowInput}. {@code forceClose0dteEt} is the
+   * StrategyConfig.force_close_0dte_et value under test (null exercises the absent/legacy path).
+   */
+  private PositionWorkflowInput runBtoCapturingChildInput(String forceClose0dteEt)
+      throws Exception {
+    RecordingPositionWorkflowImpl.STARTED.clear();
+    RecordingPositionWorkflowImpl.FILLS.clear();
+
+    TestWorkflowEnvironment localEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      localEnv.registerSearchAttribute(
+          "TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      localEnv.registerSearchAttribute(
+          "ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      Worker core = localEnv.newWorker(CORE_QUEUE);
+      // Register the recording fake (not the real PositionWorkflowImpl) so the child input is
+      // captured at start without running the full position lifecycle.
+      core.registerWorkflowImplementationTypes(
+          CopytradeSignalWorkflowImpl.class, RecordingPositionWorkflowImpl.class);
+
+      AuditActivities localAudit = Mockito.mock(AuditActivities.class);
+      StrategyActivities localStrategy = Mockito.mock(StrategyActivities.class);
+      RiskActivities localRisk = Mockito.mock(RiskActivities.class);
+      ContractActivities localContract = Mockito.mock(ContractActivities.class);
+      ExecActivities localExec = Mockito.mock(ExecActivities.class);
+      PositionLookupActivities localLookup = Mockito.mock(PositionLookupActivities.class);
+      MarketCalendarActivities localCalendar = Mockito.mock(MarketCalendarActivities.class);
+      when(localCalendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+      when(localCalendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
+
+      StrategyConfig cfg = config();
+      cfg.setForceClose0dteEt(forceClose0dteEt);
+      when(localStrategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+      when(localStrategy.capitalForStrategy("dev", "copytrade-v1"))
+          .thenReturn(new BigDecimal("100000"));
+      when(localRisk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+          .thenReturn(RiskDecision.approved());
+      when(localContract.resolve(any()))
+          .thenReturn(
+              new ContractResolveResult(
+                  "NVDA  260516C00140000",
+                  "NVDA",
+                  LocalDate.of(2026, 5, 16),
+                  new BigDecimal("140"),
+                  "C",
+                  ContractResolveResult.SOURCE_GENERATED));
+
+      core.registerActivitiesImplementations(
+          localAudit, localStrategy, localRisk, localContract, localLookup, localCalendar);
+      Worker broker = localEnv.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+      when(localExec.placeOrder(any())).thenReturn(submittedResult("intent-fc", "brk-fc"));
+      broker.registerActivitiesImplementations(localExec);
+      localEnv.start();
+
+      CopytradeSignalWorkflow wf =
+          localEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  CopytradeSignalWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setTaskQueue(CORE_QUEUE)
+                      .setWorkflowId("fc-bto-" + forceClose0dteEt)
+                      .build());
+      WorkflowStub.fromTyped(wf).start(btoPayload());
+
+      // Forward the BTO fill so the parent spawns the child PositionWorkflow.
+      long deadline = System.currentTimeMillis() + 10_000;
+      FillSignalPayload fill =
+          new FillSignalPayload()
+              .withBrokerOrderId("brk-fc")
+              .withFilledQty(5L)
+              .withAvgFillPrice(new BigDecimal("0.84"))
+              .withFilledAt(OffsetDateTime.parse("2026-05-24T17:00:00Z"));
+      wf.onFill(fill);
+
+      WorkflowStub.fromTyped(wf).getResult(String.class);
+
+      // The recording child stores its start input keyed by workflow id; exactly one is expected.
+      while (RecordingPositionWorkflowImpl.STARTED.isEmpty()
+          && System.currentTimeMillis() < deadline) {
+        Thread.sleep(50);
+      }
+      assertThat(RecordingPositionWorkflowImpl.STARTED).hasSize(1);
+      return RecordingPositionWorkflowImpl.STARTED.values().iterator().next();
+    } finally {
+      localEnv.close();
+    }
+  }
+
+  /** Light PositionWorkflow double: records the start input and parks until terminated. */
+  public static final class RecordingPositionWorkflowImpl implements PositionWorkflow {
+    static final Map<String, PositionWorkflowInput> STARTED = new ConcurrentHashMap<>();
+    static final Map<String, FillSignalPayload> FILLS = new ConcurrentHashMap<>();
+
+    @Override
+    public String run(PositionWorkflowInput input) {
+      STARTED.put(Workflow.getInfo().getWorkflowId(), input);
+      Workflow.await(() -> FILLS.containsKey(Workflow.getInfo().getWorkflowId()));
+      return input.getEntrySignalId();
+    }
+
+    @Override
+    public void partialExit(PartialExitRequest req) {}
+
+    @Override
+    public void onFill(FillSignalPayload event) {
+      FILLS.put(Workflow.getInfo().getWorkflowId(), event);
+    }
+
+    @Override
+    public void armChandelier(ArmChandelierPayload payload) {}
+
+    @Override
+    public void chandelierTick(PremiumTick tick) {}
+
+    @Override
+    public void riskBreach(RiskBreachPayload payload) {}
+
+    @Override
+    public TrailingState trailingState() {
+      return null;
+    }
+
+    @Override
+    public PositionState positionState() {
+      return null;
+    }
+
+    @Override
+    public void forceCloseValidator(ForceCloseRequest request) {}
+
+    @Override
+    public ForceCloseResult forceClose(ForceCloseRequest request) {
+      return null;
+    }
   }
 }

@@ -75,3 +75,9 @@ class PositionWorkflowInput(BaseModel):
     """
     Issue #212: bounded wait (seconds) inside PositionWorkflow.processOne() for the broker fill confirmation on a placed exit order (issue #204 exit-fill timeout). Carried over from the spawning CopytradeSignalWorkflow's StrategyConfig — paper broker_targets receive pending_ttl_paper_secs, live broker_targets receive pending_ttl_live_secs. Optional/null treated as the legacy 90L default to preserve pre-#212 behavior for replays of positions spawned before this field existed. PositionWorkflowImpl gates consumption behind Workflow.getVersion('ttl-from-input', DEFAULT, 1) so in-flight pre-#212 workflows continue with the hardcoded 90s constant on replay.
     """
+    force_close_0dte_et: constr(pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$") | None = (
+        None
+    )
+    """
+    Issue #15: wall-clock time (HH:MM in US/Eastern) carried over from the spawning CopytradeSignalWorkflow's StrategyConfig.force_close_0dte_et. Governs the time at which PositionWorkflow's 0DTE expiry-close flatten timer fires (the flatten stays a MARKET order). Optional/null/absent treated as the legacy 15:30 ET default to preserve pre-change behavior for replays of positions spawned before this field existed; no Workflow.getVersion gate is required because the value flows only through MarketCalendarActivities.durationUntilExpiryCloseEt's (replay-ignored) activity input and the unchanged timer-arming command sequence.
+    """

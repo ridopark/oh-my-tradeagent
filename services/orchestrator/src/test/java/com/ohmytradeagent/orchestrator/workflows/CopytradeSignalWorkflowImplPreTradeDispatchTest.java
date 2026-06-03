@@ -98,7 +98,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     marketData = Mockito.mock(SubscribePremiumActivity.class);
     accountSnapshotMetrics = Mockito.mock(AccountSnapshotMetricsActivities.class);
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
-    when(calendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+    when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
     SubscribePremiumResult ok = new SubscribePremiumResult();
     ok.setSchemaVersion(1L);
     ok.setSubscriptionId("sub-test");
@@ -481,7 +481,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
       MarketCalendarActivities localCalendar = Mockito.mock(MarketCalendarActivities.class);
       SubscribePremiumActivity localMarketData = Mockito.mock(SubscribePremiumActivity.class);
       when(localCalendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
-      when(localCalendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+      when(localCalendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
 
       StrategyConfig cfg = configWithPreTradeEnabled();
       when(localStrategy.get("dev", "copytrade-v1")).thenReturn(cfg);
@@ -692,7 +692,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
       AccountSnapshotMetricsActivities localMetrics =
           Mockito.mock(AccountSnapshotMetricsActivities.class);
       when(localCalendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
-      when(localCalendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+      when(localCalendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
       SubscribePremiumResult ok = new SubscribePremiumResult();
       ok.setSchemaVersion(1L);
       ok.setSubscriptionId("sub-test");
@@ -806,7 +806,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
       AccountSnapshotMetricsActivities localMetrics =
           Mockito.mock(AccountSnapshotMetricsActivities.class);
       when(localCalendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
-      when(localCalendar.durationUntilExpiryCloseEt(any())).thenReturn(Duration.ZERO);
+      when(localCalendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
 
       StrategyConfig cfg = configWithPreTradeEnabled();
       cfg.setPreTradeCheckEnabled(false);

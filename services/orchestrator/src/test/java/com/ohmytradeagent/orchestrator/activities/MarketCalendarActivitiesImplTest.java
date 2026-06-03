@@ -6,6 +6,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
@@ -46,7 +47,8 @@ class MarketCalendarActivitiesImplTest {
     MarketCalendarActivitiesImpl svc =
         new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 16, 10, 0));
 
-    Duration d = svc.durationUntilExpiryCloseEt(LocalDate.of(2026, 5, 16));
+    // Issue #15: null closeTime preserves the legacy 15:30 ET default.
+    Duration d = svc.durationUntilExpiryCloseEt(LocalDate.of(2026, 5, 16), null);
 
     // 5h30m from 10:00 to 15:30
     assertThat(d).isEqualTo(Duration.ofHours(5).plusMinutes(30));
@@ -59,7 +61,7 @@ class MarketCalendarActivitiesImplTest {
     MarketCalendarActivitiesImpl svc =
         new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 10, 0));
 
-    Duration d = svc.durationUntilExpiryCloseEt(LocalDate.of(2026, 5, 16));
+    Duration d = svc.durationUntilExpiryCloseEt(LocalDate.of(2026, 5, 16), null);
 
     assertThat(d).isEqualTo(Duration.ZERO);
   }
@@ -69,7 +71,40 @@ class MarketCalendarActivitiesImplTest {
     MarketCalendarActivitiesImpl svc =
         new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 16, 16, 0));
 
-    Duration d = svc.durationUntilExpiryCloseEt(LocalDate.of(2026, 5, 16));
+    Duration d = svc.durationUntilExpiryCloseEt(LocalDate.of(2026, 5, 16), null);
+
+    assertThat(d).isEqualTo(Duration.ZERO);
+  }
+
+  // ---------- Issue #15: configurable force_close_0dte_et close time ----------
+
+  @Test
+  void expiry_configuredFourteenHundred_beforeTwoPm_returnsPositive() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 16, 10, 0));
+
+    Duration d = svc.durationUntilExpiryCloseEt(LocalDate.of(2026, 5, 16), LocalTime.of(14, 0));
+
+    // 4h from 10:00 to 14:00
+    assertThat(d).isEqualTo(Duration.ofHours(4));
+  }
+
+  @Test
+  void expiry_configuredFourteenHundred_afterTwoPm_returnsZero() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 16, 14, 30));
+
+    Duration d = svc.durationUntilExpiryCloseEt(LocalDate.of(2026, 5, 16), LocalTime.of(14, 0));
+
+    assertThat(d).isEqualTo(Duration.ZERO);
+  }
+
+  @Test
+  void expiry_configuredFourteenHundred_dateInFuture_returnsZero() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 10, 0));
+
+    Duration d = svc.durationUntilExpiryCloseEt(LocalDate.of(2026, 5, 16), LocalTime.of(14, 0));
 
     assertThat(d).isEqualTo(Duration.ZERO);
   }
