@@ -1,5 +1,7 @@
 package com.ohmytradeagent.orchestrator.alert;
 
+import static com.ohmytradeagent.orchestrator.alert.AlertSubjects.rawSubject;
+
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.identity.YahooOptionLink;
 import java.util.ArrayList;
@@ -174,15 +176,6 @@ public class OrderFailureAlerter {
             + orNa(event.getStrategyId());
 
     return new WebhookEmbed(title, null, AlertColors.RED, footer, fields);
-  }
-
-  /** Raw subject value (may be {@code null}) — for the Yahoo helper, which handles null itself. */
-  private static String rawSubject(Map<String, Object> subject, String key) {
-    if (subject == null) {
-      return null;
-    }
-    Object value = subject.get(key);
-    return value == null ? null : String.valueOf(value);
   }
 
   private static String reasonOf(String kind, Map<String, Object> subject) {

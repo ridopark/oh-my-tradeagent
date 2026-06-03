@@ -100,7 +100,10 @@ public class DiscordWebhookClient implements WebhookClient {
       }
       sb.append(']');
     }
-    sb.append(",\"footer\":{\"text\":").append(jsonString(embed.footer())).append("}}]}");
+    if (embed.footer() != null && !embed.footer().isBlank()) {
+      sb.append(",\"footer\":{\"text\":").append(jsonString(embed.footer())).append("}");
+    }
+    sb.append("}]}");
     return sb.toString();
   }
 
