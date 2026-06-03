@@ -91,6 +91,10 @@ spec:
                 secretKeyRef:
                   name: sidecar-config
                   key: DISCORD_WATCHLIST_CHANNEL_URL
+                  # Absent key → "" so the pod still starts (the signal path is
+                  # trading-critical). WATCHLIST_MIRROR_ENABLED gates _required(),
+                  # so the feature never runs with an empty URL.
+                  optional: true
           volumeMounts:
             - name: state
               mountPath: /app/state

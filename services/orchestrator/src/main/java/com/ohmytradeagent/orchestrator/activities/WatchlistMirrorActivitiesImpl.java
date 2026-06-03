@@ -42,7 +42,7 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
    */
   static String format(WatchlistMirrorPayload payload) {
     String header =
-        "📋 Watchlist — " + String.valueOf(payload.getEtDate()) + " — via " + payload.getAuthor();
+        "📋 Watchlist — " + payload.getEtDate().toString() + " — via " + payload.getAuthor();
 
     String rawText = payload.getRawText() == null ? "" : payload.getRawText();
     // Fence-injection guard: neutralize literal fences by inserting a zero-width space so the body

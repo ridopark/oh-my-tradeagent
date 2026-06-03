@@ -122,6 +122,10 @@ async def _amain() -> None:
     finally:
         if watchlist_task is not None:
             watchlist_task.cancel()
+            try:
+                await watchlist_task
+            except asyncio.CancelledError:
+                pass
         await emitter.close()
 
 
