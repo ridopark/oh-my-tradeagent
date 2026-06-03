@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.activities;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -35,10 +36,9 @@ final class WatchlistParser {
   record ParseResult(List<TickerWatch> rows, boolean clean) {}
 
   static ParseResult parse(String rawText) {
-    List<String> tickerOrder = new ArrayList<>();
-    // Mutable accumulators keyed by ticker, preserving first-seen order via tickerOrder.
-    List<Leg> calls = new ArrayList<>();
-    List<Leg> puts = new ArrayList<>();
+    // Mutable per-ticker accumulator keyed by ticker; LinkedHashMap preserves first-seen order.
+    // Each value is a 2-slot array: index 0 = call leg, index 1 = put leg.
+    LinkedHashMap<String, Leg[]> byTicker = new LinkedHashMap<>();
     boolean clean = true;
     String currentTicker = null;
 
@@ -63,30 +63,18 @@ final class WatchlistParser {
           clean = false;
           continue;
         }
-        int idx = tickerOrder.indexOf(currentTicker);
-        if (idx < 0) {
-          tickerOrder.add(currentTicker);
-          calls.add(null);
-          puts.add(null);
-          idx = tickerOrder.size() - 1;
-        }
+        Leg[] legs = byTicker.computeIfAbsent(currentTicker, k -> new Leg[2]);
         Leg leg =
             new Leg(
                 m.group(2),
                 Character.toLowerCase(m.group(3).charAt(0)),
                 new BigDecimal(m.group(5)));
-        if ("<".equals(m.group(4))) {
-          puts.set(idx, leg);
-        } else {
-          calls.set(idx, leg);
-        }
+        legs["<".equals(m.group(4)) ? 1 : 0] = leg;
       }
     }
 
-    List<TickerWatch> rows = new ArrayList<>(tickerOrder.size());
-    for (int i = 0; i < tickerOrder.size(); i++) {
-      rows.add(new TickerWatch(tickerOrder.get(i), calls.get(i), puts.get(i)));
-    }
+    List<TickerWatch> rows = new ArrayList<>(byTicker.size());
+    byTicker.forEach((ticker, legs) -> rows.add(new TickerWatch(ticker, legs[0], legs[1])));
     return new ParseResult(List.copyOf(rows), clean);
   }
 

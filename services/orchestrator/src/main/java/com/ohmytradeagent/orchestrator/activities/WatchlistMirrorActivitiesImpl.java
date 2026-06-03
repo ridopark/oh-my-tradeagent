@@ -80,12 +80,10 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
   static String renderTable(List<TickerWatch> rows) {
     String[] tickerCol = new String[rows.size()];
     String[] callCol = new String[rows.size()];
-    String[] putCol = new String[rows.size()];
     for (int i = 0; i < rows.size(); i++) {
       TickerWatch w = rows.get(i);
       tickerCol[i] = w.ticker();
       callCol[i] = formatLeg(w.call());
-      putCol[i] = formatLeg(w.put());
     }
 
     int tickerWidth = maxWidth("TICKER", tickerCol);
@@ -103,20 +101,12 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
           .append("  ")
           .append(pad(callCol[i], callWidth))
           .append("  ")
-          .append(putCol[i]);
+          .append(formatLeg(rows.get(i).put()));
     }
 
-    String table = sb.toString();
-    String fenced = FENCE + "\n" + table + "\n" + FENCE;
-    if (fenced.length() > EMBED_DESC_MAX) {
-      int budget = EMBED_DESC_MAX - (FENCE.length() * 2 + 2) - TRUNCATION_MARKER.length();
-      if (budget < 0) {
-        budget = 0;
-      }
-      table = table.substring(0, Math.min(table.length(), budget)) + TRUNCATION_MARKER;
-      fenced = FENCE + "\n" + table + "\n" + FENCE;
-    }
-    return fenced;
+    // Overhead = open-fence + "\n" + "\n" + close-fence.
+    String table = truncate(sb.toString(), EMBED_DESC_MAX, FENCE.length() * 2 + 2);
+    return FENCE + "\n" + table + "\n" + FENCE;
   }
 
   private static String formatLeg(Leg leg) {
@@ -164,14 +154,19 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
     String suffix = "\n" + FENCE;
     int overhead = prefix.length() + suffix.length();
 
-    if (overhead + body.length() > DISCORD_MAX) {
-      int budget = DISCORD_MAX - overhead - TRUNCATION_MARKER.length();
-      if (budget < 0) {
-        budget = 0;
-      }
-      body = body.substring(0, Math.min(body.length(), budget)) + TRUNCATION_MARKER;
-    }
+    return prefix + truncate(body, DISCORD_MAX, overhead) + suffix;
+  }
 
-    return prefix + body + suffix;
+  /**
+   * Truncates {@code body} (appending {@link #TRUNCATION_MARKER}) only when {@code overhead +
+   * body.length()} would exceed {@code max}; otherwise returns {@code body} unchanged. The budget
+   * is clamped non-negative so a pathological overhead never throws.
+   */
+  private static String truncate(String body, int max, int overhead) {
+    if (overhead + body.length() <= max) {
+      return body;
+    }
+    int budget = Math.max(0, max - overhead - TRUNCATION_MARKER.length());
+    return body.substring(0, Math.min(body.length(), budget)) + TRUNCATION_MARKER;
   }
 }
