@@ -32,6 +32,7 @@ data:
       - Edtrader
       - TB22
       - beendoubleyou
+      - ridopark # local-dev test author (harmless in homelab — does not post in its source channel)
     # Issue #3: per-side signal-age defaults replace the legacy unified
     # max_signal_age_secs (1800s) that produced adverse selection on options.
     max_signal_age_bto_secs: 30
@@ -55,7 +56,18 @@ data:
       trim: 0.25
     pending_ttl_paper_secs: 90
     pending_ttl_live_secs: 30
+    # Issue #16: governs partial_exit when remaining_qty <= 1; skip = log + no-op.
+    min_partial_qty_behavior: skip
     trail_on_partial: true
     trail_giveback_pct: 0.15
     daily_loss_threshold: 2500.00
     reset_cooldown_secs: 60
+    # Issue #202: Copytrade mirrors a Discord author; the only normal exit is an STC
+    # message from the author. Never EOD-flatten — would diverge from the author's
+    # actual position and break mirror fidelity. The expiry-close timer (0DTE) still
+    # closes positions that expire today; chandelier trail, risk-breach, and operator
+    # force_close remain as emergency exits. Any strategy mirroring an external author
+    # MUST set this to false. This is policy, not a tunable. (Dropped here once before,
+    # which re-armed the blanket 15:55 ET flatten and closed a non-0DTE copytrade
+    # position — keep in sync with tenants/dev/strategies/copytrade-v1.yaml.)
+    eod_force_flatten: false

@@ -284,6 +284,7 @@ class PositionWorkflowImplTest {
     // from StrategyConfig.broker_target and threaded onto PositionWorkflowInput.
     PositionWorkflowInput in = input(4);
     in.setBrokerTarget(PositionWorkflowInput.BrokerTarget.ALPACA_PAPER);
+    in.setEodForceFlatten(Boolean.TRUE); // opt into the blanket EOD flatten to drive this path
 
     PositionWorkflow stub = newStub("pos-flatten-broker-target");
     WorkflowStub.fromTyped(stub).start(in);
@@ -358,7 +359,9 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-eod");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE); // opt into the blanket EOD flatten to drive this path
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
 
     // Let virtual time advance past EOD
@@ -400,7 +403,9 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-eod-inflight");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE); // opt into the blanket EOD flatten to drive this path
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
 
     // Queue an STC but never deliver the fill — exit is in-flight when EOD fires.
@@ -937,26 +942,40 @@ class PositionWorkflowImplTest {
   }
 
   /**
-   * Issue #202: null {@code eod_force_flatten} is treated as true to preserve back-compat for
-   * pre-#202 replays — the EOD timer still arms.
+   * Issue #202 hardening (VERSION_EOD_FLATTEN_OPT_IN, v&gt;=1): a null {@code eod_force_flatten} is
+   * fail-CLOSED — the blanket 15:55 ET EOD timer does NOT arm. This is the defense that would have
+   * prevented the incident where the tenants ConfigMap dropped {@code eod_force_flatten} and the
+   * resulting null silently re-armed the flatten, closing a non-0DTE copytrade position. The
+   * position instead rides to STC (the expiry-close timer still handles 0DTE physical expiry).
    */
   @Test
-  void eodTimer_armsWhenEodForceFlattenNull() throws Exception {
+  void eodTimer_skipsArmingWhenEodForceFlattenNull() throws Exception {
+    // EOD timer would fire ~immediately if armed.
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-null-eod-flatten");
     PositionWorkflowInput in = input(3);
-    // eod_force_flatten left null — the default-true contract.
+    // eod_force_flatten left null — must be treated as "do not arm" (fail-closed).
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
 
+    // Advance virtual time well past the would-be EOD trigger to prove the timer is not armed.
     env.sleep(Duration.ofMinutes(1));
 
-    WorkflowStub.fromTyped(stub).getResult(String.class);
+    // STC closes the position — the only normal exit path when EOD is not armed.
+    stub.partialExit(partialExitRequest("sig-stc-null", "pos-null-eod-flatten", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-stc-null", 3L, new BigDecimal("3.10")));
 
-    captureKind("EodForceFlattenRequested");
-    captureKind("EodForceFlattened");
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-null-eod-flatten");
+
+    // No EOD force-flatten audit fired.
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(captor.capture());
+    List<String> kinds = captor.getAllValues().stream().map(AuditEvent::getKind).toList();
+    assertThat(kinds).doesNotContain("EodForceFlattenRequested", "EodForceFlattened");
   }
 
   // ---------- Issue #203: phantom position — defer PositionEntered until first onFill ----------
@@ -1615,7 +1634,9 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-eod-during-retry");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE); // opt into the blanket EOD flatten to drive this path
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
 
     // First STC: never deliver the fill — original will time out at the default 90s TTL.

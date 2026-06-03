@@ -36,7 +36,7 @@ jobs:
             exit 0
           fi
           if git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-              | grep -qE '^(infra/k8s/|\.github/workflows/ci\.yml$)'; then
+              | grep -qE '^(infra/k8s/|tenants/|\.github/workflows/ci\.yml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -63,6 +63,16 @@ jobs:
         run: |
           kubeconform -strict -kubernetes-version 1.35.0 \
             -summary infra/k8s/
+
+      - name: tenants ConfigMap drift vs tenants/dev/*
+        if: steps.changed.outputs.run == 'true'
+        # The tenants-config ConfigMap embeds verbatim copies of tenants/dev/*;
+        # a hand-maintained copy drifts. This is the guard 40-tenants-config.yaml's
+        # header comment promised — it once dropped eod_force_flatten: false and
+        # re-armed the EOD flatten on a copytrade position (Issue #202).
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/check-tenants-configmap-drift.py
 
   java:
     name: Java (mvn verify + spotless)

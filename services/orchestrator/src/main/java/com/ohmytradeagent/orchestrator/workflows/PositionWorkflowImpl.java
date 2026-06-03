@@ -194,6 +194,19 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_EXIT_FILLED_OPTION_SYMBOL = "exit-filled-option-symbol-v1";
 
   /**
+   * Issue #202 hardening replay gate. The blanket 15:55 ET EOD flatten is a per-strategy opt-IN: a
+   * copytrade author-mirror must ride to its STC and must never be force-flattened. Pre-this-patch
+   * the arming treated a {@code null} {@code eod_force_flatten} as {@code true} ("fail open"), so
+   * when the tenants ConfigMap drifted and dropped the key the flatten silently re-armed and closed
+   * a non-0DTE copytrade position. v&gt;=1 is fail-CLOSED: arm only when the flag is explicitly
+   * {@code true}; null/false do not arm. v=DEFAULT_VERSION (in-flight workflows started before this
+   * patch) keep the legacy null-as-true semantics so their EOD-timer command replays identically.
+   * The expiry-close timer is unaffected (0DTE physical expiry is not a tunable), so "EOD close
+   * only when the contract expires today" still holds regardless of this flag.
+   */
+  private static final String VERSION_EOD_FLATTEN_OPT_IN = "eod-flatten-opt-in";
+
+  /**
    * Issue #203 / #212 fallback: bounded wait for the first onFill before the workflow gives up and
    * emits PositionNeverFilled. Matches {@code pending_ttl_paper_secs} in {@code copytrade-v1.yaml}
    * (90s paper default). Used (a) for v=DEFAULT_VERSION replays under {@link
@@ -377,10 +390,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // Issue #202: copytrade strategies set eod_force_flatten=false because the only
     // normal exit for an author-mirror position is an STC message from the Discord
     // author; forcing a flatten at 15:55 ET would diverge from the author's actual
-    // position. Null is treated as true to preserve pre-#202 behavior for replays
-    // of positions spawned before this field existed. The expiry-close timer below
-    // still arms unconditionally (0DTE physical expiry is not a tunable).
-    boolean armEodTimer = !Boolean.FALSE.equals(in.getEodForceFlatten());
+    // position. v>=1 (VERSION_EOD_FLATTEN_OPT_IN) is fail-CLOSED: the blanket EOD timer
+    // arms only on an EXPLICIT eod_force_flatten=true, so a missing/null flag (e.g. the
+    // tenants ConfigMap dropping the key) can no longer silently re-arm the flatten. The
+    // legacy null-as-true branch is retained only for v=DEFAULT_VERSION in-flight replays.
+    // The expiry-close timer below still arms unconditionally (0DTE physical expiry is not
+    // a tunable), so 0DTE positions are still closed at expiry regardless of this flag.
+    boolean armEodTimer =
+        Workflow.getVersion(VERSION_EOD_FLATTEN_OPT_IN, Workflow.DEFAULT_VERSION, 1)
+                == Workflow.DEFAULT_VERSION
+            ? !Boolean.FALSE.equals(in.getEodForceFlatten())
+            : Boolean.TRUE.equals(in.getEodForceFlatten());
 
     Duration eodIn = calendar.durationUntilEodEt();
     Duration expiryIn = Duration.ZERO;
