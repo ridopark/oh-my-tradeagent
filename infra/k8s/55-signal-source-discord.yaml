@@ -78,10 +78,12 @@ spec:
                   name: sidecar-config
                   key: STRATEGY_ID
             # Watchlist mirror (Option B): read a SECOND channel and emit
-            # WatchlistMirrorWorkflow once per ET day. Disabled by default; the
-            # channel URL comes from the same `sidecar-config` Secret.
+            # WatchlistMirrorWorkflow once per ET day. The channel URL comes from
+            # the same `sidecar-config` Secret. Enabled on homelab; if the secret
+            # key is absent the sidecar logs a warning and runs without the mirror
+            # (it never crashes the trading-critical signal path — see main.py).
             - name: WATCHLIST_MIRROR_ENABLED
-              value: "false"
+              value: "true"
             - name: WATCHLIST_POLL_INTERVAL_SECS
               value: "45"
             - name: WATCHLIST_AUTHOR
