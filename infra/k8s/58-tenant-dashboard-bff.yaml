@@ -164,6 +164,13 @@ spec:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: BFF_EXEC_ALPACA_PAPER_DB_PASS
+            # Surfaces the broker account_number on the Portfolio page (an "Account" column).
+            # Marked dev-only because a broker_target's Alpaca account is SHARED across all tenants
+            # on that target — exposing it leaks one account's id to every tenant. Safe HERE only
+            # because this homelab is effectively single-tenant (one operator's own paper account).
+            # Do NOT copy this into a real multi-tenant prod manifest.
+            - name: BFF_EXPOSE_BROKER_ACCOUNT_NUMBER
+              value: "true"
           volumeMounts:
             - name: tenants
               mountPath: /etc/copytrade/tenants
