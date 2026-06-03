@@ -119,18 +119,40 @@ before the `tenant-dashboard-bff` / `dashboard` pods will start.
    openssl rand -hex 32      # DASHBOARD_READONLY_PASSWORD
    ```
    Fill `AUTH_GOOGLE_ID/SECRET` + `AUTH_FACEBOOK_ID/SECRET` from the Google Cloud / Meta
-   consoles (redirect URI `https://<host>/api/auth/callback/{google,facebook}`). Apply
+   consoles (redirect URI `https://dashboard.192.168.10.123.nip.io/api/auth/callback/{google,facebook}`
+   — must be **https**, which step 3 provides). Apply
    `secrets.local.yaml` the same way as step 4 of **First-time deploy** above (scp + `kubectl
    apply`). `DASHBOARD_READONLY_PASSWORD` is the **single source** of the read-only DB password
    — the BFF's Flyway creates the `dashboard_readonly` role with it, and the Next.js pod connects
    with it. A missing value fails the BFF boot (no default) — fail-fast by design.
 
-3. **Apply the manifests** (or let the deploy pipeline do it) — `58-tenant-dashboard-bff.yaml`
-   (ClusterIP + NetworkPolicy, no Ingress) and `59-dashboard.yaml` (public Ingress). On
-   first BFF boot, Flyway auto-creates `dashboard_user` + `dashboard_readonly`.
+3. **Provision the TLS cert** (`dashboard-tls`) — `59-dashboard.yaml` terminates TLS at Traefik with
+   this Secret (the dashboard needs https: Google/Facebook reject non-localhost `http://` redirects).
+   The homelab IP is not publicly resolvable, so Let's Encrypt can't validate it — use a homelab
+   CA-signed wildcard cert for the nip.io hosts. Keep `ca.key` private; import `ca.crt` into each
+   operator's browser/OS trust store once so the cert is trusted without a warning:
+   ```sh
+   # one-time local CA (reusable for every *.192.168.10.123.nip.io host, e.g. temporal)
+   openssl req -x509 -newkey rsa:4096 -nodes -keyout ca.key -out ca.crt -days 3650 \
+     -subj "/CN=Homelab Local CA/O=Homelab" -sha256
+   # wildcard server cert signed by the CA
+   openssl req -newkey rsa:2048 -nodes -keyout tls.key -out tls.csr \
+     -subj "/CN=*.192.168.10.123.nip.io" -addext "subjectAltName=DNS:*.192.168.10.123.nip.io"
+   openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+     -out tls.crt -days 825 -sha256 -copy_extensions copyall
+   kubectl -n copytrade create secret tls dashboard-tls --cert=tls.crt --key=tls.key
+   ```
 
-4. **Provision dashboard logins** — there is no self-service signup; map each social
-   identity to a tenant (login is denied otherwise):
+4. **Apply the manifests** (or let the deploy pipeline do it) — `58-tenant-dashboard-bff.yaml`
+   (ClusterIP + NetworkPolicy, no Ingress) and `59-dashboard.yaml` (https Ingress on the nip.io
+   host). On first BFF boot, Flyway auto-creates `dashboard_user` + `dashboard_readonly`.
+
+5. **Provision dashboard logins** — dev-login is compiled out of the prod image (it is gated on a
+   build-time `NODE_ENV=development`), so login is Google/Facebook only, and there is no self-service
+   signup: each social identity must be mapped to a tenant or login is denied. Get the stable
+   `<google-sub>` from one denied first login — temporarily `ALTER DATABASE dashboard SET
+   log_min_duration_statement=0`, attempt the login, read `parameters: $2 = '<sub>'` from the
+   `postgres-0` log, then `RESET` it — and insert the mapping:
    ```sh
    # Interactive psql avoids shell/SQL quote-nesting; -U resolves in-pod via sh -c:
    kubectl -n copytrade exec -it statefulset/postgres -- sh -c 'psql -U "$POSTGRES_USER" -d dashboard'
@@ -139,16 +161,12 @@ before the `tenant-dashboard-bff` / `dashboard` pods will start.
    #   VALUES ('google', '<google-sub>', 'you@example.com', 'dev');
    ```
 
-5. **Verify**:
+6. **Verify**:
    ```sh
    kubectl -n copytrade get pods -l app=tenant-dashboard-bff -l app=dashboard
    kubectl -n copytrade exec deploy/tenant-dashboard-bff -- curl -sf localhost:8083/actuator/health
+   curl --cacert ca.crt -sf https://dashboard.192.168.10.123.nip.io/signin -o /dev/null && echo OK
    ```
-
-> **Launch blockers before real login (not localhost):** TLS on the dashboard Ingress
-> (currently plaintext `web` entrypoint — issue #343) and the Google/Facebook OAuth
-> redirect URIs. Google/Facebook reject non-`localhost` `http://` redirects, and the
-> Auth.js session cookie is `Secure` (inert over HTTP).
 
 ## Dry-run validation (PR-time)
 

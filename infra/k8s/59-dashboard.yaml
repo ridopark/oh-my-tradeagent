@@ -1,12 +1,14 @@
 # Next.js tenant dashboard — the SINGLE public surface for this feature. Deployment + Service +
-# Ingress (Traefik). The browser talks ONLY to this; the server-side calls the off-ingress BFF
+# Ingress (Traefik, TLS). The browser talks ONLY to this; the server-side calls the off-ingress BFF
 # (58-tenant-dashboard-bff.yaml) over in-cluster HTTP with the shared service token.
 #
-# TLS WARNING (see plan §G): this Ingress uses the plaintext `web` entrypoint to match the rest of
-# the homelab cluster. Social login + session cookies over http:// is acceptable ONLY for a
-# LAN/localhost homelab host. Before any non-localhost/public exposure, move to the `websecure`
-# entrypoint + TLS, set AUTH_URL/cookies to https://, and add an HTTP->HTTPS redirect — Google/
-# Facebook reject non-localhost http:// redirect URIs and the cookie Secure flag is inert over http.
+# TLS (plan §G): terminated at Traefik on the `websecure` entrypoint using the operator-provisioned
+# `dashboard-tls` secret — a homelab-CA-signed wildcard cert for *.192.168.10.123.nip.io (the nip.io
+# host resolves to the LAN IP with no /etc/hosts entry; provisioning steps in infra/k8s/README.md).
+# https is REQUIRED here, unlike the http-only operator services: Google/Facebook reject non-localhost
+# http:// redirect URIs, and the session cookie's Secure flag is only honored over https. The homelab
+# CA is not publicly trusted — operators import it into their browser/OS once. For a publicly
+# resolvable host, swap in a real cert (cert-manager + Let's Encrypt) and keep the rest unchanged.
 apiVersion: v1
 kind: Service
 metadata:
@@ -59,10 +61,14 @@ spec:
           env:
             - name: PORT
               value: "3000"
-            # Auth.js. AUTH_URL must match the public host below; over http:// it is dev-only (see
-            # the TLS warning above).
+            # Auth.js. AUTH_URL must match the public https host on the Ingress below — it builds the
+            # OAuth callback URLs and is the trusted origin for the session cookie.
             - name: AUTH_URL
-              value: http://dashboard.homelab.local
+              value: https://dashboard.192.168.10.123.nip.io
+            # Auth.js v5 runs behind Traefik (not Vercel), so trust the proxied Host header when
+            # constructing callback URLs.
+            - name: AUTH_TRUST_HOST
+              value: "true"
             - name: AUTH_SECRET
               valueFrom:
                 secretKeyRef:
@@ -136,10 +142,17 @@ metadata:
   name: dashboard
   namespace: copytrade
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
 spec:
+  # TLS terminated with the operator-provisioned `dashboard-tls` secret (homelab-CA wildcard for
+  # *.192.168.10.123.nip.io — see infra/k8s/README.md). nip.io resolves the host to the LAN IP.
+  tls:
+    - hosts:
+        - dashboard.192.168.10.123.nip.io
+      secretName: dashboard-tls
   rules:
-    - host: dashboard.homelab.local
+    - host: dashboard.192.168.10.123.nip.io
       http:
         paths:
           - path: /
