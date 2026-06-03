@@ -63,8 +63,18 @@ async def _amain() -> None:
     watchlist_enabled = (
         os.getenv("WATCHLIST_MIRROR_ENABLED", "false").strip().lower() == "true"
     )
+    watchlist_channel_url = os.getenv("DISCORD_WATCHLIST_CHANNEL_URL", "").strip()
+    if watchlist_enabled and not watchlist_channel_url:
+        # Enabled but no channel configured (e.g. the optional sidecar-config
+        # secret key is absent → empty string). Degrade gracefully rather than
+        # crash: a missing watchlist URL must never take down the trading-critical
+        # signal sidecar. The mirror simply stays off until the URL is provided.
+        log.warning(
+            "WATCHLIST_MIRROR_ENABLED=true but DISCORD_WATCHLIST_CHANNEL_URL is "
+            "unset — watchlist mirror disabled"
+        )
+        watchlist_enabled = False
     if watchlist_enabled:
-        watchlist_channel_url = _required("DISCORD_WATCHLIST_CHANNEL_URL")
         watchlist_poll_interval = float(os.getenv("WATCHLIST_POLL_INTERVAL_SECS", "45"))
         watchlist_author = os.getenv("WATCHLIST_AUTHOR", "TradingTheTrend")
 
