@@ -26,7 +26,7 @@ from ohmytradeagent_contract.models.copytrade_signal_payload import (
     CopytradeSignalPayload,
     Right,
 )
-from playwright.async_api import Page, async_playwright
+from playwright.async_api import Page
 
 from .discord_dom import MESSAGES_LI_SELECTOR, extract_recent
 from .emitter import Emitter
@@ -64,7 +64,8 @@ class _BoundedSeenLRU:
 
 
 class Watcher:
-    """Polling loop. Construct with a configured Emitter and state dir; call run()."""
+    """Polling loop. Construct with a configured Emitter and state dir; call
+    run_on_page() with a page from the caller-owned browser."""
 
     DEFAULT_LRU_CAPACITY = 500
     INITIAL_SCRAPE_LIMIT = 50
@@ -91,41 +92,34 @@ class Watcher:
         self._log = log
         self._poll_interval = poll_interval_secs
         self._heartbeat_path = state_dir / "heartbeat"
-        self._storage_state_path = state_dir / "storage_state.json"
         self._seen = _BoundedSeenLRU(lru_capacity)
 
-    async def run(self) -> None:
-        if not self._storage_state_path.exists():
-            raise RuntimeError(
-                f"storage_state.json missing at {self._storage_state_path} "
-                "— run bootstrap first (see README)"
-            )
+    async def run_on_page(self, page: Page) -> None:
+        """Run the poll loop on a caller-owned page. ``main`` owns the browser
+        and context so the signal and watchlist watchers share ONE Chromium
+        (two tabs) — a second browser would roughly double memory.
+        """
+        self._log.info("navigating to %s", self._channel_url)
+        await page.goto(self._channel_url, wait_until="domcontentloaded")
+        await page.wait_for_selector(
+            MESSAGES_LI_SELECTOR, timeout=self.DOM_READY_TIMEOUT_MS
+        )
 
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            context = await browser.new_context(storage_state=str(self._storage_state_path))
-            page = await context.new_page()
-            self._log.info("navigating to %s", self._channel_url)
-            await page.goto(self._channel_url, wait_until="domcontentloaded")
-            await page.wait_for_selector(
-                MESSAGES_LI_SELECTOR, timeout=self.DOM_READY_TIMEOUT_MS
-            )
+        # Seed the LRU with currently-visible message IDs so a fresh
+        # process doesn't replay the channel backlog. Identical to the
+        # reference's "seed seen_ids on startup" behaviour.
+        initial = await extract_recent(page, limit=self.INITIAL_SCRAPE_LIMIT)
+        for m in initial:
+            self._seen.add(m.message_id)
+        self._log.info("seeded %d existing messages", len(self._seen))
 
-            # Seed the LRU with currently-visible message IDs so a fresh
-            # process doesn't replay the channel backlog. Identical to the
-            # reference's "seed seen_ids on startup" behaviour.
-            initial = await extract_recent(page, limit=self.INITIAL_SCRAPE_LIMIT)
-            for m in initial:
-                self._seen.add(m.message_id)
-            self._log.info("seeded %d existing messages", len(self._seen))
-
-            while True:
-                try:
-                    await self._tick(page)
-                except Exception:  # noqa: BLE001
-                    self._log.exception("tick error")
-                self._heartbeat_path.touch()
-                await asyncio.sleep(self._poll_interval)
+        while True:
+            try:
+                await self._tick(page)
+            except Exception:  # noqa: BLE001
+                self._log.exception("tick error")
+            self._heartbeat_path.touch()
+            await asyncio.sleep(self._poll_interval)
 
     async def _tick(self, page: Page) -> None:
         msgs = await extract_recent(page, limit=self.TICK_SCRAPE_LIMIT)

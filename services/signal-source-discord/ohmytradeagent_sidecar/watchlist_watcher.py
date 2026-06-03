@@ -7,7 +7,8 @@ ET calendar day, durable across pod restarts. This sidecar does NOT post to
 Discord; the Java orchestrator does.
 
 Mirrors ``watcher.py``'s seams: the per-tick logic lives in ``process`` so it
-is unit-testable without a browser; ``run`` owns the Playwright loop. The
+is unit-testable without a browser; ``run_on_page`` runs the poll loop on a
+page that ``main`` owns (one browser shared with the signal watcher). The
 ``DailyMirrorState`` file is the durable once-per-day gate; Temporal's
 REJECT_DUPLICATE keyed on source_message_id is the hard dedupe backstop.
 
@@ -24,7 +25,7 @@ import logging
 import pathlib
 from datetime import date
 
-from playwright.async_api import Page, async_playwright
+from playwright.async_api import Page
 
 from .discord_dom import MESSAGES_LI_SELECTOR, RawMessage, extract_recent
 from .emitter import WatchlistEmitter
@@ -35,7 +36,8 @@ from ohmytradeagent_contract.models.watchlist_mirror_payload import WatchlistMir
 
 
 class WatchlistWatcher:
-    """Polling loop for the watchlist channel. Construct, then call run()."""
+    """Polling loop for the watchlist channel. Construct, then call
+    run_on_page() with a page from the caller-owned browser."""
 
     TICK_SCRAPE_LIMIT = 25
     DOM_READY_TIMEOUT_MS = 30_000
@@ -62,7 +64,6 @@ class WatchlistWatcher:
         self._poll_interval = poll_interval_secs
         # Separate from the signal watcher's "heartbeat" (the liveness probe).
         self._heartbeat_path = state_dir / "watchlist_heartbeat"
-        self._storage_state_path = state_dir / "storage_state.json"
         self._state = DailyMirrorState(state_dir / "watchlist_state.json")
         # In-process memo of the ET date we've confirmed mirrored, so we don't
         # re-read the state file every tick. Reset on ET day-rollover.
@@ -111,30 +112,23 @@ class WatchlistWatcher:
             )
             return
 
-    async def run(self) -> None:
-        if not self._storage_state_path.exists():
-            raise RuntimeError(
-                f"storage_state.json missing at {self._storage_state_path} "
-                "— run bootstrap first (see README)"
-            )
+    async def run_on_page(self, page: Page) -> None:
+        """Run the watchlist poll loop on a caller-owned page. Shares the signal
+        watcher's browser (one Chromium, two tabs) — ``main`` owns the context.
+        """
+        self._log.info("navigating to watchlist channel %s", self._channel_url)
+        await page.goto(self._channel_url, wait_until="domcontentloaded")
+        await page.wait_for_selector(
+            MESSAGES_LI_SELECTOR, timeout=self.DOM_READY_TIMEOUT_MS
+        )
 
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            context = await browser.new_context(storage_state=str(self._storage_state_path))
-            page = await context.new_page()
-            self._log.info("navigating to watchlist channel %s", self._channel_url)
-            await page.goto(self._channel_url, wait_until="domcontentloaded")
-            await page.wait_for_selector(
-                MESSAGES_LI_SELECTOR, timeout=self.DOM_READY_TIMEOUT_MS
-            )
-
-            while True:
-                try:
-                    await self._tick(page)
-                except Exception:  # noqa: BLE001
-                    self._log.exception("watchlist tick error")
-                self._heartbeat_path.touch()
-                await asyncio.sleep(self._poll_interval)
+        while True:
+            try:
+                await self._tick(page)
+            except Exception:  # noqa: BLE001
+                self._log.exception("watchlist tick error")
+            self._heartbeat_path.touch()
+            await asyncio.sleep(self._poll_interval)
 
     async def _tick(self, page: Page) -> None:
         # Cheap gate first: if we've already mirrored today, skip the expensive
