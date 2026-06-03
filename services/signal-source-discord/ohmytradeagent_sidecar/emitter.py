@@ -15,9 +15,10 @@ needs to log "deduped" and move on.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from ohmytradeagent_contract.models.copytrade_signal_payload import CopytradeSignalPayload
+from ohmytradeagent_contract.models.watchlist_mirror_payload import WatchlistMirrorPayload
 from ohmytradeagent_contract.search_attributes import TENANT_STRATEGY_KEY
 from temporalio.client import Client
 from temporalio.common import (
@@ -29,6 +30,8 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 
 WORKFLOW_TYPE = "CopytradeSignalWorkflow"
+# Must match the Java workflow interface name exactly.
+WATCHLIST_WORKFLOW_TYPE = "WatchlistMirrorWorkflow"
 
 
 @dataclass(frozen=True)
@@ -46,8 +49,52 @@ def workflow_id_for(payload: CopytradeSignalPayload) -> str:
     return f"t-{payload.tenant_id}/s-{payload.strategy_id}/sig/{payload.signal_id}"
 
 
-def tenant_strategy_sa(payload: CopytradeSignalPayload) -> str:
+def tenant_strategy_sa(payload: Any) -> str:
+    """tenant/strategy search-attribute value. Accepts any payload exposing
+    ``tenant_id``/``strategy_id`` (CopytradeSignalPayload or WatchlistMirrorPayload).
+    """
     return f"t-{payload.tenant_id}/s-{payload.strategy_id}"
+
+
+def watchlist_workflow_id_for(payload: WatchlistMirrorPayload) -> str:
+    """Deterministic workflow ID for a watchlist mirror. Keyed on
+    source_message_id so REJECT_DUPLICATE dedupes re-reads of the same message.
+    """
+    return f"t-{payload.tenant_id}/s-{payload.strategy_id}/watchlist/{payload.source_message_id}"
+
+
+async def _start_workflow_deduped(
+    client: Client,
+    task_queue: str,
+    workflow_type: str,
+    wf_id: str,
+    sa_value: str,
+    payload: Any,
+) -> EmitResult:
+    """Start a workflow with REJECT_DUPLICATE, mapping an already-started race
+    to ``EmitResult(deduped=True)``. Shared by the signal and watchlist emitters.
+
+    The payload is a pydantic model; temporalio serializes it via its default
+    DataConverter into JSON whose field names match the contract schema
+    (snake_case). The Java side deserializes via Jackson into the generated DTO.
+    No bespoke serialization shim — DRY across languages.
+    """
+    sa = TypedSearchAttributes(
+        [SearchAttributePair(TENANT_STRATEGY_KEY, sa_value)]
+    )
+    payload_dict = payload.model_dump(by_alias=True, mode="json")
+    try:
+        await client.start_workflow(
+            workflow_type,
+            payload_dict,
+            id=wf_id,
+            task_queue=task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+            search_attributes=sa,
+        )
+        return EmitResult(workflow_id=wf_id, deduped=False)
+    except WorkflowAlreadyStartedError:
+        return EmitResult(workflow_id=wf_id, deduped=True)
 
 
 class Emitter(Protocol):
@@ -65,6 +112,17 @@ class TemporalEmitter:
         self._client = client
         self._task_queue = task_queue
 
+    @property
+    def client(self) -> Client:
+        """The connected Temporal client, so a second emitter (e.g. the
+        watchlist emitter) can reuse this one connection (no new dial).
+        """
+        return self._client
+
+    @property
+    def task_queue(self) -> str:
+        return self._task_queue
+
     @classmethod
     async def connect(
         cls,
@@ -76,27 +134,14 @@ class TemporalEmitter:
         return cls(client, task_queue)
 
     async def emit(self, payload: CopytradeSignalPayload) -> EmitResult:
-        wf_id = workflow_id_for(payload)
-        sa = TypedSearchAttributes(
-            [SearchAttributePair(TENANT_STRATEGY_KEY, tenant_strategy_sa(payload))]
+        return await _start_workflow_deduped(
+            self._client,
+            self._task_queue,
+            WORKFLOW_TYPE,
+            workflow_id_for(payload),
+            tenant_strategy_sa(payload),
+            payload,
         )
-        # The payload is a pydantic model; temporalio serializes it via its
-        # default DataConverter into JSON whose field names match the contract
-        # schema (snake_case). The Java side deserializes via Jackson into the
-        # generated DTO. No bespoke serialization shim — DRY across languages.
-        payload_dict = payload.model_dump(by_alias=True, mode="json")
-        try:
-            await self._client.start_workflow(
-                WORKFLOW_TYPE,
-                payload_dict,
-                id=wf_id,
-                task_queue=self._task_queue,
-                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-                search_attributes=sa,
-            )
-            return EmitResult(workflow_id=wf_id, deduped=False)
-        except WorkflowAlreadyStartedError:
-            return EmitResult(workflow_id=wf_id, deduped=True)
 
     async def close(self) -> None:
         # temporalio.Client has no explicit close; the gRPC channel is owned by
@@ -119,6 +164,60 @@ class InMemoryEmitter:
 
     async def emit(self, payload: CopytradeSignalPayload) -> EmitResult:
         wf_id = workflow_id_for(payload)
+        if wf_id in self._seen:
+            return EmitResult(workflow_id=wf_id, deduped=True)
+        self._seen.add(wf_id)
+        self.emitted.append(payload)
+        return EmitResult(workflow_id=wf_id, deduped=False)
+
+    async def close(self) -> None:
+        return None
+
+
+class WatchlistEmitter(Protocol):
+    """Watchlist watcher's only outbound dependency. Single-method Protocol (ISP)."""
+
+    async def emit(self, payload: WatchlistMirrorPayload) -> EmitResult: ...
+
+    async def close(self) -> None: ...
+
+
+class TemporalWatchlistEmitter:
+    """Production emitter: starts a WatchlistMirrorWorkflow per daily watchlist.
+
+    Reuses an already-connected ``Client`` and task queue (constructed from
+    ``TemporalEmitter.client``) so no second Temporal connection is opened.
+    """
+
+    def __init__(self, client: Client, task_queue: str) -> None:
+        self._client = client
+        self._task_queue = task_queue
+
+    async def emit(self, payload: WatchlistMirrorPayload) -> EmitResult:
+        return await _start_workflow_deduped(
+            self._client,
+            self._task_queue,
+            WATCHLIST_WORKFLOW_TYPE,
+            watchlist_workflow_id_for(payload),
+            tenant_strategy_sa(payload),
+            payload,
+        )
+
+    async def close(self) -> None:
+        # The gRPC channel is owned by the shared TemporalEmitter connection;
+        # nothing to tear down here (kept for Protocol symmetry).
+        return None
+
+
+class InMemoryWatchlistEmitter:
+    """Test double: records emits and replays dedupe semantics in-process."""
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+        self.emitted: list[WatchlistMirrorPayload] = []
+
+    async def emit(self, payload: WatchlistMirrorPayload) -> EmitResult:
+        wf_id = watchlist_workflow_id_for(payload)
         if wf_id in self._seen:
             return EmitResult(workflow_id=wf_id, deduped=True)
         self._seen.add(wf_id)
