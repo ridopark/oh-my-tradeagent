@@ -70,6 +70,15 @@ async def _amain() -> None:
 
     state_dir.mkdir(parents=True, exist_ok=True)
 
+    # Fail fast on a missing Discord session BEFORE dialing Temporal, so we never
+    # leave a connected emitter unclosed (its close() lives in the finally below).
+    storage_state_path = state_dir / "storage_state.json"
+    if not storage_state_path.exists():
+        raise RuntimeError(
+            f"storage_state.json missing at {storage_state_path} "
+            "— run bootstrap first (see README)"
+        )
+
     log.info(
         "starting sidecar (tenant=%s strategy=%s target=%s task_queue=%s)",
         tenant_id,
@@ -106,13 +115,6 @@ async def _amain() -> None:
         )
         log.info("watchlist mirror enabled (channel=%s author=%s)",
                  watchlist_channel_url, watchlist_author)
-
-    storage_state_path = state_dir / "storage_state.json"
-    if not storage_state_path.exists():
-        raise RuntimeError(
-            f"storage_state.json missing at {storage_state_path} "
-            "— run bootstrap first (see README)"
-        )
 
     try:
         # ONE browser + context shared by both watchers — each gets its own

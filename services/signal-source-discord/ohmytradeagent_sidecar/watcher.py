@@ -64,7 +64,8 @@ class _BoundedSeenLRU:
 
 
 class Watcher:
-    """Polling loop. Construct with a configured Emitter and state dir; call run()."""
+    """Polling loop. Construct with a configured Emitter and state dir; call
+    run_on_page() with a page from the caller-owned browser."""
 
     DEFAULT_LRU_CAPACITY = 500
     INITIAL_SCRAPE_LIMIT = 50

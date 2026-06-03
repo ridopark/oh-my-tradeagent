@@ -7,7 +7,8 @@ ET calendar day, durable across pod restarts. This sidecar does NOT post to
 Discord; the Java orchestrator does.
 
 Mirrors ``watcher.py``'s seams: the per-tick logic lives in ``process`` so it
-is unit-testable without a browser; ``run`` owns the Playwright loop. The
+is unit-testable without a browser; ``run_on_page`` runs the poll loop on a
+page that ``main`` owns (one browser shared with the signal watcher). The
 ``DailyMirrorState`` file is the durable once-per-day gate; Temporal's
 REJECT_DUPLICATE keyed on source_message_id is the hard dedupe backstop.
 
@@ -35,7 +36,8 @@ from ohmytradeagent_contract.models.watchlist_mirror_payload import WatchlistMir
 
 
 class WatchlistWatcher:
-    """Polling loop for the watchlist channel. Construct, then call run()."""
+    """Polling loop for the watchlist channel. Construct, then call
+    run_on_page() with a page from the caller-owned browser."""
 
     TICK_SCRAPE_LIMIT = 25
     DOM_READY_TIMEOUT_MS = 30_000
