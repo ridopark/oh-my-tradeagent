@@ -126,7 +126,16 @@ class OrderFailureAlerterAfterCommitTest {
 
     @Override
     public void post(String content) {
-      dispatched.add(content);
+      record(content);
+    }
+
+    @Override
+    public void postEmbed(WebhookEmbed embed) {
+      record(embed.title());
+    }
+
+    private void record(String hint) {
+      dispatched.add(hint);
       dispatchedAfterCommitBoundary = commitBoundaryReached;
     }
   }
@@ -162,8 +171,16 @@ class OrderFailureAlerterAfterCommitTest {
 
     @Bean
     WebhookClient webhookClient() {
-      return content -> {
-        throw new RuntimeException("discord down");
+      return new WebhookClient() {
+        @Override
+        public void post(String content) {
+          throw new RuntimeException("discord down");
+        }
+
+        @Override
+        public void postEmbed(WebhookEmbed embed) {
+          throw new RuntimeException("discord down");
+        }
       };
     }
 

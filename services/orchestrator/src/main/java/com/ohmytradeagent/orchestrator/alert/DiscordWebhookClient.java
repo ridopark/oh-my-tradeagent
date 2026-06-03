@@ -6,6 +6,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,6 +31,12 @@ import org.springframework.stereotype.Component;
 public class DiscordWebhookClient implements WebhookClient {
 
   private static final Logger log = LoggerFactory.getLogger(DiscordWebhookClient.class);
+
+  /** Discord embed limits (defensive truncation only — alerts carry ≤6 short fields). */
+  private static final int MAX_FIELDS = 25;
+
+  private static final int MAX_FIELD_NAME = 256;
+  private static final int MAX_FIELD_VALUE = 1024;
 
   private final String webhookUrl;
   private final HttpClient httpClient;
@@ -57,17 +64,54 @@ public class DiscordWebhookClient implements WebhookClient {
 
   @Override
   public void postEmbed(WebhookEmbed embed) {
-    String body =
-        "{\"embeds\":[{\"title\":"
-            + jsonString(embed.title())
-            + ",\"description\":"
-            + jsonString(embed.description())
-            + ",\"color\":"
-            + embed.color()
-            + ",\"footer\":{\"text\":"
-            + jsonString(embed.footer())
-            + "}}]}";
-    send(body, embed.title());
+    send(embedBody(embed), embed.title());
+  }
+
+  /**
+   * Serializes a {@link WebhookEmbed} into the Discord {@code {"embeds":[{...}]}} payload. Respects
+   * Discord's embed limits with defensive truncation (the watchlist already has a truncate
+   * precedent): at most {@value #MAX_FIELDS} fields, field {@code name} ≤ {@value #MAX_FIELD_NAME}
+   * and {@code value} ≤ {@value #MAX_FIELD_VALUE} chars. {@code description} is omitted entirely
+   * when blank so an alert built from fields does not carry an empty description.
+   */
+  static String embedBody(WebhookEmbed embed) {
+    StringBuilder sb = new StringBuilder();
+    sb.append("{\"embeds\":[{\"title\":").append(jsonString(embed.title()));
+    if (embed.description() != null && !embed.description().isBlank()) {
+      sb.append(",\"description\":").append(jsonString(embed.description()));
+    }
+    sb.append(",\"color\":").append(embed.color());
+    List<WebhookEmbed.Field> fields = embed.fields();
+    if (fields != null && !fields.isEmpty()) {
+      sb.append(",\"fields\":[");
+      int count = Math.min(fields.size(), MAX_FIELDS);
+      for (int i = 0; i < count; i++) {
+        WebhookEmbed.Field f = fields.get(i);
+        if (i > 0) {
+          sb.append(',');
+        }
+        sb.append("{\"name\":")
+            .append(jsonString(truncate(f.name(), MAX_FIELD_NAME)))
+            .append(",\"value\":")
+            .append(jsonString(truncate(f.value(), MAX_FIELD_VALUE)))
+            .append(",\"inline\":")
+            .append(f.inline())
+            .append('}');
+      }
+      sb.append(']');
+    }
+    sb.append(",\"footer\":{\"text\":").append(jsonString(embed.footer())).append("}}]}");
+    return sb.toString();
+  }
+
+  /**
+   * Caps {@code value} to {@code max} chars (blank/null → empty); defensive against Discord limits.
+   */
+  private static String truncate(String value, int max) {
+    if (value == null) {
+      return "";
+    }
+    return value.length() <= max ? value : value.substring(0, max);
   }
 
   /**

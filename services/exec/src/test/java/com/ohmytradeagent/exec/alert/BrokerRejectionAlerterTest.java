@@ -2,7 +2,6 @@ package com.ohmytradeagent.exec.alert;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -10,6 +9,7 @@ import static org.mockito.Mockito.verify;
 
 import com.ohmytradeagent.contract.OrderIntent;
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -18,42 +18,52 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 
 /**
- * Issue #297 / #302: exec broker-rejection alerter — action by side, toggle, non-blocking safety,
- * and async (issue #302) dispatch. Tests use a synchronous ({@code Runnable::run}) executor where
- * the {@code post} interaction must be deterministically observable; the async-specific tests use a
- * real executor to prove the caller is never blocked by a slow/throwing webhook.
+ * Issue #297 / #302: exec broker-rejection alerter — now posting a Discord rich embed (red accent,
+ * stacked fields, Yahoo-linked contract). Tests use a synchronous ({@code Runnable::run}) executor
+ * where the {@code postEmbed} interaction must be deterministically observable; the async-specific
+ * tests use a real executor to prove the caller is never blocked by a slow/throwing webhook.
  */
 class BrokerRejectionAlerterTest {
 
   @Test
-  void buyRejectionDispatchesBtoAlertWithSymbolReasonAndIds() {
+  void buyRejectionDispatchesRedBtoEmbedWithYahooLinkedSymbolReasonAndIds() {
     WebhookClient webhook = mock(WebhookClient.class);
     BrokerRejectionAlerter alerter = new BrokerRejectionAlerter(webhook, true, Runnable::run);
 
     alerter.onBrokerRejection(
         intent(OrderIntent.Side.BUY), "coid-abc", "Alpaca rejected (403): account blocked");
 
-    ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
-    verify(webhook, times(1)).post(msg.capture());
-    assertThat(msg.getValue()).contains("BTO (entry)");
-    assertThat(msg.getValue()).contains("AAPL  260116C00200000");
-    assertThat(msg.getValue()).contains("account blocked");
-    assertThat(msg.getValue()).contains("intent-key-1");
-    assertThat(msg.getValue()).contains("coid-abc");
+    WebhookEmbed embed = captureEmbed(webhook);
+    assertThat(embed.title()).contains("BTO (entry)");
+    assertThat(embed.color()).isEqualTo(15548997); // red
+    // The contract field is a clickable Yahoo link over the padded OCC.
+    WebhookEmbed.Field symbol = fieldByName(embed, "symbol");
+    assertThat(symbol.value())
+        .isEqualTo(
+            "[AAPL 260116C00200000]"
+                + "(https://finance.yahoo.com/quote/AAPL%20%20260116C00200000/)");
+    assertThat(fieldByName(embed, "reason").value()).contains("account blocked");
+    assertThat(fieldByName(embed, "intent_key").value()).isEqualTo("intent-key-1");
+    assertThat(fieldByName(embed, "client_order_id").value()).isEqualTo("coid-abc");
+    // Low-signal trace demoted to the footer.
+    assertThat(embed.footer()).contains("dev/copytrade-v1");
+    // All fields are stacked (inline=false).
+    assertThat(embed.fields()).allMatch(f -> !f.inline());
   }
 
   @Test
-  void sellRejectionDispatchesStcAlert() {
+  void sellRejectionDispatchesStcEmbed() {
     WebhookClient webhook = mock(WebhookClient.class);
     BrokerRejectionAlerter alerter = new BrokerRejectionAlerter(webhook, true, Runnable::run);
 
     alerter.onBrokerRejection(intent(OrderIntent.Side.SELL), "coid-xyz", "422 too long");
 
-    ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
-    verify(webhook, times(1)).post(msg.capture());
-    assertThat(msg.getValue()).contains("STC (exit)");
+    WebhookEmbed embed = captureEmbed(webhook);
+    assertThat(embed.title()).contains("STC (exit)");
+    assertThat(embed.color()).isEqualTo(15548997);
   }
 
   @Test
@@ -63,13 +73,15 @@ class BrokerRejectionAlerterTest {
 
     alerter.onBrokerRejection(intent(OrderIntent.Side.BUY), "coid", "reason");
 
-    verify(webhook, never()).post(anyString());
+    verify(webhook, never()).postEmbed(ArgumentMatchers.any());
   }
 
   @Test
   void webhookFailureDoesNotPropagate() {
     WebhookClient webhook = mock(WebhookClient.class);
-    org.mockito.Mockito.doThrow(new RuntimeException("boom")).when(webhook).post(anyString());
+    org.mockito.Mockito.doThrow(new RuntimeException("boom"))
+        .when(webhook)
+        .postEmbed(ArgumentMatchers.any());
     BrokerRejectionAlerter alerter = new BrokerRejectionAlerter(webhook, true, Runnable::run);
 
     assertThatCode(() -> alerter.onBrokerRejection(intent(OrderIntent.Side.BUY), "coid", "reason"))
@@ -82,23 +94,31 @@ class BrokerRejectionAlerterTest {
     BrokerRejectionAlerter alerter = new BrokerRejectionAlerter(webhook, true, Runnable::run);
 
     assertThatCode(() -> alerter.onBrokerRejection(null, null, null)).doesNotThrowAnyException();
-    verify(webhook, times(1)).post(anyString());
+    WebhookEmbed embed = captureEmbed(webhook);
+    // Malformed/absent symbol → plain text, never a link, never a throw.
+    assertThat(fieldByName(embed, "symbol").value()).isEqualTo("n/a");
   }
 
   @Test
   void slowWebhookDoesNotBlockTheCaller() throws Exception {
     // Issue #302: a hung/slow webhook (~5s in prod) must NOT be consumed inline on the rejection
     // path. With a real async executor, onBrokerRejection returns promptly even though the webhook
-    // post is still blocked.
+    // postEmbed is still blocked.
     CountDownLatch postEntered = new CountDownLatch(1);
     CountDownLatch releasePost = new CountDownLatch(1);
     WebhookClient slowWebhook =
-        content -> {
-          postEntered.countDown();
-          try {
-            releasePost.await(5, TimeUnit.SECONDS);
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        new WebhookClient() {
+          @Override
+          public void post(String content) {}
+
+          @Override
+          public void postEmbed(WebhookEmbed embed) {
+            postEntered.countDown();
+            try {
+              releasePost.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
           }
         };
     ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -109,9 +129,7 @@ class BrokerRejectionAlerterTest {
       alerter.onBrokerRejection(intent(OrderIntent.Side.BUY), "coid", "reason");
       long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
-      // The call returned without waiting on the (still-blocked) webhook post.
       assertThat(elapsedMs).isLessThan(1_000);
-      // And the post genuinely ran on the async thread (not the caller thread).
       assertThat(postEntered.await(2, TimeUnit.SECONDS)).isTrue();
     } finally {
       releasePost.countDown();
@@ -126,12 +144,18 @@ class BrokerRejectionAlerterTest {
     AtomicBoolean threw = new AtomicBoolean(false);
     CountDownLatch dispatchDone = new CountDownLatch(1);
     WebhookClient throwingWebhook =
-        content -> {
-          try {
-            threw.set(true);
-            throw new RuntimeException("discord down");
-          } finally {
-            dispatchDone.countDown();
+        new WebhookClient() {
+          @Override
+          public void post(String content) {}
+
+          @Override
+          public void postEmbed(WebhookEmbed embed) {
+            try {
+              threw.set(true);
+              throw new RuntimeException("discord down");
+            } finally {
+              dispatchDone.countDown();
+            }
           }
         };
     ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -162,7 +186,20 @@ class BrokerRejectionAlerterTest {
 
     assertThatCode(() -> alerter.onBrokerRejection(intent(OrderIntent.Side.BUY), "coid", "reason"))
         .doesNotThrowAnyException();
-    verify(webhook, never()).post(anyString());
+    verify(webhook, never()).postEmbed(ArgumentMatchers.any());
+  }
+
+  private static WebhookEmbed captureEmbed(WebhookClient webhook) {
+    ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
+    verify(webhook, times(1)).postEmbed(captor.capture());
+    return captor.getValue();
+  }
+
+  private static WebhookEmbed.Field fieldByName(WebhookEmbed embed, String name) {
+    List<WebhookEmbed.Field> matches =
+        embed.fields().stream().filter(f -> f.name().equals(name)).toList();
+    assertThat(matches).as("field " + name).hasSize(1);
+    return matches.get(0);
   }
 
   private static OrderIntent intent(OrderIntent.Side side) {

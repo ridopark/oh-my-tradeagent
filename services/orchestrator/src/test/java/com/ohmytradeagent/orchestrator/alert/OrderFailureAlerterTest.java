@@ -30,7 +30,7 @@ class OrderFailureAlerterTest {
   private static final String PRODUCTION_DEFAULT_ALLOWLIST = "OrphanSTC,EntryExpired";
 
   @Test
-  void signalRejectedDispatchesBtoAlertWithActionSymbolReasonAndIds() {
+  void signalRejectedDispatchesRedBtoEmbedWithYahooLinkedSymbolReasonAndIds() {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
 
@@ -43,17 +43,23 @@ class OrderFailureAlerterTest {
 
     alerter.onAuditEvent(event);
 
-    String msg = capture(webhook);
-    assertThat(msg).contains("BTO (entry)");
-    assertThat(msg).contains("AAPL260116C00200000");
-    assertThat(msg).contains("DAILY_LOSS_LIMIT");
-    assertThat(msg).contains("tenant daily loss exceeded");
-    assertThat(msg).contains("111:0");
-    assertThat(msg).contains("wf-sig-1");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("BTO (entry)");
+    assertThat(embed.color()).isEqualTo(15548997); // red
+    // The contract field is a clickable Yahoo link over the padded OCC.
+    assertThat(field(embed, "symbol"))
+        .isEqualTo(
+            "[AAPL 260116C00200000]"
+                + "(https://finance.yahoo.com/quote/AAPL%20%20260116C00200000/)");
+    assertThat(field(embed, "reason")).contains("DAILY_LOSS_LIMIT", "tenant daily loss exceeded");
+    assertThat(field(embed, "signal_id")).isEqualTo("111:0");
+    // workflow_id demoted to the footer.
+    assertThat(embed.footer()).contains("wf-sig-1");
+    assertThat(embed.fields()).allMatch(f -> !f.inline());
   }
 
   @Test
-  void orphanStcDispatchesStcAlert() {
+  void orphanStcDispatchesStcEmbed() {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
 
@@ -64,15 +70,15 @@ class OrderFailureAlerterTest {
 
     alerter.onAuditEvent(event);
 
-    String msg = capture(webhook);
-    assertThat(msg).contains("STC (exit)");
-    assertThat(msg).contains("TSLA260116P00100000");
-    assertThat(msg).contains("222:1");
-    assertThat(msg).contains("wf-orphan-2");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("STC (exit)");
+    assertThat(field(embed, "symbol")).contains("TSLA%20%20260116P00100000");
+    assertThat(field(embed, "signal_id")).isEqualTo("222:1");
+    assertThat(embed.footer()).contains("wf-orphan-2");
   }
 
   @Test
-  void entryExpiredDispatchesBtoAlertWithKindAsReason() {
+  void entryExpiredDispatchesBtoEmbedWithKindAsReason() {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
 
@@ -83,12 +89,13 @@ class OrderFailureAlerterTest {
 
     alerter.onAuditEvent(event);
 
-    String msg = capture(webhook);
-    assertThat(msg).contains("BTO (entry)");
-    assertThat(msg).contains("SPY260116C00500000");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("BTO (entry)");
+    assertThat(field(embed, "symbol")).contains("SPY%20%20%20260116C00500000");
     // EntryExpired carries no reason_code; the kind is surfaced as the reason.
-    assertThat(msg).contains("EntryExpired");
-    assertThat(msg).contains("333:0");
+    assertThat(field(embed, "reason")).isEqualTo("EntryExpired");
+    assertThat(field(embed, "kind")).isEqualTo("EntryExpired");
+    assertThat(field(embed, "signal_id")).isEqualTo("333:0");
   }
 
   @Test
@@ -100,7 +107,7 @@ class OrderFailureAlerterTest {
 
     alerter.onAuditEvent(event);
 
-    verify(webhook, never()).post(org.mockito.ArgumentMatchers.anyString());
+    verify(webhook, never()).postEmbed(org.mockito.ArgumentMatchers.any());
   }
 
   @Test
@@ -110,10 +117,10 @@ class OrderFailureAlerterTest {
     OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, "EntryFilled", true);
 
     alerter.onAuditEvent(event("SignalRejected", "wf-5", Map.of("signal_id", "555:0")));
-    verify(webhook, never()).post(org.mockito.ArgumentMatchers.anyString());
+    verify(webhook, never()).postEmbed(org.mockito.ArgumentMatchers.any());
 
     alerter.onAuditEvent(event("EntryFilled", "wf-5", Map.of("signal_id", "555:0")));
-    verify(webhook, times(1)).post(org.mockito.ArgumentMatchers.anyString());
+    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.any());
   }
 
   @Test
@@ -123,7 +130,7 @@ class OrderFailureAlerterTest {
     // be belt-and-suspenders non-blocking regardless).
     org.mockito.Mockito.doThrow(new RuntimeException("webhook boom"))
         .when(webhook)
-        .post(org.mockito.ArgumentMatchers.anyString());
+        .postEmbed(org.mockito.ArgumentMatchers.any());
     OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
 
     AuditEvent event = event("SignalRejected", "wf-6", Map.of("signal_id", "666:0"));
@@ -144,7 +151,7 @@ class OrderFailureAlerterTest {
 
     // null-kind must not dispatch; null-subject (allowlisted kind) still dispatches with n/a
     // fields.
-    verify(webhook, times(1)).post(org.mockito.ArgumentMatchers.anyString());
+    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.any());
   }
 
   // ---- Issue #311 regression guards: feed-toggle ⇄ effective allowlist invariant ----
@@ -174,10 +181,10 @@ class OrderFailureAlerterTest {
     alerter.onAuditEvent(event);
 
     // Exactly one dispatch (the #311 no-alert gap is closed).
-    String msg = capture(webhook);
-    assertThat(msg).contains("BTO (entry)");
-    assertThat(msg).contains("AAPL260116C00200000");
-    assertThat(msg).contains("AUTHOR_NOT_WHITELISTED");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("BTO (entry)");
+    assertThat(field(embed, "symbol")).contains("AAPL%20%20260116C00200000");
+    assertThat(field(embed, "reason")).contains("AUTHOR_NOT_WHITELISTED");
   }
 
   @Test
@@ -198,7 +205,7 @@ class OrderFailureAlerterTest {
     // And dispatching a SignalRejected event must NOT trigger this alerter (it goes to
     // SignalFeedAlerter instead in production).
     alerter.onAuditEvent(event("SignalRejected", "wf-311-dedupe", Map.of("signal_id", "888:0")));
-    verify(webhook, never()).post(org.mockito.ArgumentMatchers.anyString());
+    verify(webhook, never()).postEmbed(org.mockito.ArgumentMatchers.any());
   }
 
   // ---- Issue #313 regression guard: operator-misconfig (double-post) is documented behavior ----
@@ -240,16 +247,24 @@ class OrderFailureAlerterTest {
     // production, SignalFeedAlerter's outcome:rejected mirror would post a second time — that
     // second post is the documented operator-misconfig double-post and is asserted in
     // SignalFeedAlerter's own tests, not here.
-    String msg = capture(webhook);
-    assertThat(msg).contains("BTO (entry)");
-    assertThat(msg).contains("AAPL260116C00200000");
-    assertThat(msg).contains("AUTHOR_NOT_WHITELISTED");
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("BTO (entry)");
+    assertThat(field(embed, "symbol")).contains("AAPL%20%20260116C00200000");
+    assertThat(field(embed, "reason")).contains("AUTHOR_NOT_WHITELISTED");
   }
 
-  private static String capture(WebhookClient webhook) {
-    ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-    verify(webhook, times(1)).post(captor.capture());
+  private static WebhookEmbed capture(WebhookClient webhook) {
+    ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
+    verify(webhook, times(1)).postEmbed(captor.capture());
     return captor.getValue();
+  }
+
+  /** Returns the single field with {@code name}, failing if absent or duplicated. */
+  private static String field(WebhookEmbed embed, String name) {
+    java.util.List<WebhookEmbed.Field> matches =
+        embed.fields().stream().filter(f -> f.name().equals(name)).toList();
+    assertThat(matches).as("field " + name).hasSize(1);
+    return matches.get(0).value();
   }
 
   private static AuditEvent event(String kind, String workflowId, Map<String, Object> subject) {

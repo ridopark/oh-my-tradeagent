@@ -1,6 +1,9 @@
 package com.ohmytradeagent.exec.alert;
 
 import com.ohmytradeagent.contract.OrderIntent;
+import com.ohmytradeagent.contract.identity.YahooOptionLink;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -84,9 +87,9 @@ public class BrokerRejectionAlerter {
     // Build the message on the caller thread (cheap, deterministic) but POST asynchronously so the
     // webhook timeout never blocks the broker/order path. A failure to even enqueue (queue full /
     // executor rejected) is swallowed — dropping a notification beats blocking the order path.
-    final String message;
+    final WebhookEmbed embed;
     try {
-      message = buildMessage(intent, clientOrderId, reason);
+      embed = buildEmbed(intent, clientOrderId, reason);
     } catch (RuntimeException e) {
       log.warn("broker-rejection-alert build failed intent_key={}", safeIntentKey(intent), e);
       return;
@@ -95,7 +98,7 @@ public class BrokerRejectionAlerter {
       dispatchExecutor.execute(
           () -> {
             try {
-              webhookClient.post(message);
+              webhookClient.postEmbed(embed);
             } catch (RuntimeException e) {
               // Defensive: an error on the dispatch thread must never surface — the order path has
               // already moved on and is rethrowing the original broker exception.
@@ -138,26 +141,34 @@ public class BrokerRejectionAlerter {
     return executor;
   }
 
-  private static String buildMessage(OrderIntent intent, String clientOrderId, String reason) {
+  /** Discord red (0xED4245) as the decimal RGB integer — failure/rejection accent. */
+  private static final int DISCORD_RED = 15548997;
+
+  /**
+   * Builds the red broker-rejection embed: title carries the action, the contract symbol field is a
+   * Yahoo-linked OCC (plain text on a malformed symbol — never throws), and the operator-actionable
+   * ids ({@code intent_key}, {@code client_order_id}) are stacked fields. The low-signal
+   * tenant/strategy trace is demoted to the footer.
+   */
+  private static WebhookEmbed buildEmbed(OrderIntent intent, String clientOrderId, String reason) {
     String action = actionFor(intent);
-    String symbol = intent == null ? "n/a" : orNa(intent.getOptionSymbol());
-    StringBuilder sb = new StringBuilder();
-    sb.append(":rotating_light: Copytrade order FAILED — ")
-        .append(action)
-        .append(" (broker rejection)")
-        .append('\n')
-        .append("symbol: ")
-        .append(symbol)
-        .append('\n')
-        .append("reason: ")
-        .append(orNa(reason))
-        .append('\n')
-        .append("intent_key: ")
-        .append(safeIntentKey(intent))
-        .append('\n')
-        .append("client_order_id: ")
-        .append(orNa(clientOrderId));
-    return sb.toString();
+    String title = ":rotating_light: Copytrade order FAILED — " + action + " (broker rejection)";
+    String symbol = intent == null ? null : intent.getOptionSymbol();
+
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("symbol", YahooOptionLink.markdown(symbol), false));
+    fields.add(new WebhookEmbed.Field("reason", orNa(reason), false));
+    fields.add(new WebhookEmbed.Field("intent_key", safeIntentKey(intent), false));
+    fields.add(new WebhookEmbed.Field("client_order_id", orNa(clientOrderId), false));
+
+    return new WebhookEmbed(title, DISCORD_RED, footerFor(intent), fields);
+  }
+
+  /** Low-signal trace ids demoted to the footer (tenant/strategy). */
+  private static String footerFor(OrderIntent intent) {
+    String tenant = intent == null ? null : intent.getTenantId();
+    String strategy = intent == null ? null : intent.getStrategyId();
+    return "tenant/strategy: " + orNa(tenant) + "/" + orNa(strategy);
   }
 
   private static String actionFor(OrderIntent intent) {

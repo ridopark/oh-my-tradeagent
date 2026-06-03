@@ -19,6 +19,8 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.orchestrator.alert.AuditEventCommitted;
 import com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter;
+import com.ohmytradeagent.orchestrator.alert.WebhookClient;
+import com.ohmytradeagent.orchestrator.alert.WebhookEmbed;
 import java.time.OffsetDateTime;
 import java.util.Map;
 import org.jooq.DSLContext;
@@ -118,8 +120,16 @@ class AuditActivitiesImplTest {
     // log() nor break the audit INSERT.
     OrderFailureAlerter throwingAlerter =
         new OrderFailureAlerter(
-            content -> {
-              throw new RuntimeException("discord down");
+            new WebhookClient() {
+              @Override
+              public void post(String content) {
+                throw new RuntimeException("discord down");
+              }
+
+              @Override
+              public void postEmbed(WebhookEmbed embed) {
+                throw new RuntimeException("discord down");
+              }
             },
             "SignalRejected,OrphanSTC,EntryExpired",
             /* signalFeedEnabled= */ true);
@@ -160,7 +170,17 @@ class AuditActivitiesImplTest {
     // audit-work path. We record its start ordering; the test does not block on its completion.
     OrderFailureAlerter slowAlerter =
         new OrderFailureAlerter(
-            content -> order.add("dispatch"),
+            new WebhookClient() {
+              @Override
+              public void post(String content) {
+                order.add("dispatch");
+              }
+
+              @Override
+              public void postEmbed(WebhookEmbed embed) {
+                order.add("dispatch");
+              }
+            },
             "SignalRejected,OrphanSTC,EntryExpired",
             /* signalFeedEnabled= */ true);
     ApplicationEventPublisher publisher = listenerDrivingPublisher(slowAlerter);

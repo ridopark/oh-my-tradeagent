@@ -1,8 +1,11 @@
 package com.ohmytradeagent.orchestrator.alert;
 
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.identity.YahooOptionLink;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -135,44 +138,54 @@ public class OrderFailureAlerter {
       if (event == null || event.getKind() == null || !failureKinds.contains(event.getKind())) {
         return;
       }
-      webhookClient.post(buildMessage(event));
+      webhookClient.postEmbed(buildEmbed(event));
     } catch (RuntimeException e) {
       // Defensive: a notification must never break the audit write / trading path.
       log.warn("order-failure-alert build/dispatch failed kind={}", safeKind(event), e);
     }
   }
 
-  private String buildMessage(AuditEvent event) {
+  /** Discord red (0xED4245) as the decimal RGB integer — failure accent for every order failure. */
+  private static final int DISCORD_RED = 15548997;
+
+  /**
+   * Builds the red order-failure embed: title carries the action, the contract symbol field is a
+   * Yahoo-linked OCC (plain text on a malformed/absent symbol — never throws), {@code kind} /
+   * {@code reason} / {@code signal_id} are operator-actionable stacked fields, and the low-signal
+   * trace ({@code workflow_id}, tenant/strategy) is demoted to the footer.
+   */
+  private WebhookEmbed buildEmbed(AuditEvent event) {
     Map<String, Object> subject = event.getSubject();
     String action = STC_KINDS.contains(event.getKind()) ? "STC (exit)" : "BTO (entry)";
-    String symbol = subjectStr(subject, "option_symbol");
     String reason = reasonOf(event.getKind(), subject);
-    String signalId = subjectStr(subject, "signal_id");
+    String symbolRaw = rawSubject(subject, "option_symbol");
 
-    StringBuilder sb = new StringBuilder();
-    sb.append(":rotating_light: Copytrade order FAILED — ")
-        .append(action)
-        .append('\n')
-        .append("kind: ")
-        .append(event.getKind())
-        .append('\n')
-        .append("symbol: ")
-        .append(symbol)
-        .append('\n')
-        .append("reason: ")
-        .append(reason)
-        .append('\n')
-        .append("signal_id: ")
-        .append(signalId)
-        .append('\n')
-        .append("workflow_id: ")
-        .append(orNa(event.getWorkflowId()))
-        .append('\n')
-        .append("tenant/strategy: ")
-        .append(orNa(event.getTenantId()))
-        .append('/')
-        .append(orNa(event.getStrategyId()));
-    return sb.toString();
+    String title = ":rotating_light: Copytrade order FAILED — " + action;
+
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("kind", String.valueOf(event.getKind()), false));
+    fields.add(new WebhookEmbed.Field("symbol", YahooOptionLink.markdown(symbolRaw), false));
+    fields.add(new WebhookEmbed.Field("reason", reason, false));
+    fields.add(new WebhookEmbed.Field("signal_id", subjectStr(subject, "signal_id"), false));
+
+    String footer =
+        "workflow_id: "
+            + orNa(event.getWorkflowId())
+            + " | tenant/strategy: "
+            + orNa(event.getTenantId())
+            + "/"
+            + orNa(event.getStrategyId());
+
+    return new WebhookEmbed(title, null, DISCORD_RED, footer, fields);
+  }
+
+  /** Raw subject value (may be {@code null}) — for the Yahoo helper, which handles null itself. */
+  private static String rawSubject(Map<String, Object> subject, String key) {
+    if (subject == null) {
+      return null;
+    }
+    Object value = subject.get(key);
+    return value == null ? null : String.valueOf(value);
   }
 
   private static String reasonOf(String kind, Map<String, Object> subject) {
