@@ -3,11 +3,13 @@ package com.ohmytradeagent.orchestrator.activities;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.ohmytradeagent.contract.WatchlistMirrorPayload;
 import com.ohmytradeagent.orchestrator.alert.WebhookClient;
+import com.ohmytradeagent.orchestrator.alert.WebhookEmbed;
 import java.time.LocalDate;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -72,6 +74,60 @@ class WatchlistMirrorActivitiesImplTest {
   }
 
   @Test
+  void cleanParseablePayloadPostsRichEmbedTable() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+
+    String raw =
+        "SPY   762c  >  761.00\n"
+            + "753p  <  754.00\n"
+            + "SHOP  121c  >  120.00\n"
+            + "TSLA  430c  >  425.00\n"
+            + "410p  <  413.00";
+    activity.postWatchlistAlert(payload(raw));
+
+    WebhookEmbed embed = captureEmbed(webhook);
+    // Raw fallback path must NOT fire when the parse is clean.
+    verify(webhook, never()).post(org.mockito.ArgumentMatchers.anyString());
+
+    assertThat(embed.title()).contains("Jun 3, 2026");
+    assertThat(embed.color()).isEqualTo(5763719);
+    assertThat(embed.footer()).contains("TradingTheTrend");
+
+    String desc = embed.description();
+    assertThat(desc).startsWith("```");
+    assertThat(desc).endsWith("```");
+    assertThat(desc).contains("SPY");
+    assertThat(desc).contains("762C");
+    assertThat(desc).contains("761.00");
+    assertThat(desc).contains("753P");
+    assertThat(desc).contains("754.00");
+    // SHOP has no put leg -> em-dash placeholder.
+    assertThat(desc).contains("—");
+  }
+
+  @Test
+  void unparseableRawTextFallsBackToRawPost() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+
+    activity.postWatchlistAlert(payload("lol no setups today"));
+
+    String content = capture(webhook);
+    verify(webhook, never()).postEmbed(org.mockito.ArgumentMatchers.any());
+    assertThat(content).contains("```\nlol no setups today\n```");
+  }
+
+  @Test
+  void doesNotThrowOnParseablePayload() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+
+    assertThatCode(() -> activity.postWatchlistAlert(payload("SPY 762c > 761.00")))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
   void doesNotThrow() {
     WebhookClient webhook = mock(WebhookClient.class);
     WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
@@ -82,6 +138,12 @@ class WatchlistMirrorActivitiesImplTest {
   private static String capture(WebhookClient webhook) {
     ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
     verify(webhook, times(1)).post(captor.capture());
+    return captor.getValue();
+  }
+
+  private static WebhookEmbed captureEmbed(WebhookClient webhook) {
+    ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
+    verify(webhook, times(1)).postEmbed(captor.capture());
     return captor.getValue();
   }
 

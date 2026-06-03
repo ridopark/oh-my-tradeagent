@@ -52,32 +52,56 @@ public class DiscordWebhookClient implements WebhookClient {
 
   @Override
   public void post(String content) {
+    send("{\"content\":" + jsonString(content) + "}", content);
+  }
+
+  @Override
+  public void postEmbed(WebhookEmbed embed) {
+    String body =
+        "{\"embeds\":[{\"title\":"
+            + jsonString(embed.title())
+            + ",\"description\":"
+            + jsonString(embed.description())
+            + ",\"color\":"
+            + embed.color()
+            + ",\"footer\":{\"text\":"
+            + jsonString(embed.footer())
+            + "}}]}";
+    send(body, embed.title());
+  }
+
+  /**
+   * Shared best-effort HTTP send. {@code jsonBody} is the fully-built request payload; {@code
+   * logHint} is a short identifier echoed in WARN logs (the plain content or the embed title). A
+   * blank URL is a no-op and EVERY failure mode (timeout, non-2xx, interruption, any exception) is
+   * caught and logged — never rethrown, so the trading/audit path is never disrupted.
+   */
+  private void send(String jsonBody, String logHint) {
     if (webhookUrl == null || webhookUrl.isBlank()) {
       // No secret provisioned (operator follow-up). Log so the alert is still visible in stdout.
-      log.info("discord-alert (no webhook configured): {}", content);
+      log.info("discord-alert (no webhook configured): {}", logHint);
       return;
     }
     try {
-      String body = "{\"content\":" + jsonString(content) + "}";
       HttpRequest request =
           HttpRequest.newBuilder()
               .uri(URI.create(webhookUrl))
               .timeout(requestTimeout)
               .header("Content-Type", "application/json")
-              .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+              .POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8))
               .build();
       HttpResponse<Void> response =
           httpClient.send(request, HttpResponse.BodyHandlers.discarding());
       int status = response.statusCode();
       if (status < 200 || status >= 300) {
-        log.warn("discord-alert non-2xx status={} content={}", status, content);
+        log.warn("discord-alert non-2xx status={} content={}", status, logHint);
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      log.warn("discord-alert interrupted content={}", content, e);
+      log.warn("discord-alert interrupted content={}", logHint, e);
     } catch (Exception e) {
       // Best-effort: never propagate. A down/slow webhook must not break the trading path.
-      log.warn("discord-alert dispatch failed content={}", content, e);
+      log.warn("discord-alert dispatch failed content={}", logHint, e);
     }
   }
 
