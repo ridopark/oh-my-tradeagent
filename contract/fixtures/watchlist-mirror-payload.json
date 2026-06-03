@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "copytrade-v1",
+  "et_date": "2026-06-03",
+  "author": "TradingTheTrend",
+  "raw_text": "SPY         762c      >       761.00\n                  753p     <      754.00\n\nSHOP       121c        >     120.00\n\nTSLA         430c        >      425.00\n                    410p        <       413.00",
+  "source_message_id": "1234567890123456789"
+}

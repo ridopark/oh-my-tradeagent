@@ -39,6 +39,7 @@ from ohmytradeagent_contract.models.subscribe_premium_result import (
     Status,
     SubscribePremiumResult,
 )
+from ohmytradeagent_contract.models.watchlist_mirror_payload import WatchlistMirrorPayload
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
@@ -59,6 +60,24 @@ def test_copytrade_signal_payload_round_trips() -> None:
     assert model.action == Action.bto
     assert model.ticker == "NVDA"
     assert model.right == Right.c
+
+    serialized = json.loads(model.model_dump_json(by_alias=True))
+    assert serialized == original
+
+
+def test_watchlist_mirror_payload_round_trips() -> None:
+    original = _load("watchlist-mirror-payload.json")
+
+    model = WatchlistMirrorPayload.model_validate(original)
+
+    assert model.schema_version == 1
+    assert model.tenant_id == "dev"
+    assert model.strategy_id == "copytrade-v1"
+    assert model.et_date.isoformat() == "2026-06-03"
+    assert model.author == "TradingTheTrend"
+    assert model.source_message_id == "1234567890123456789"
+    # raw_text is carried verbatim, including newlines and irregular spacing.
+    assert model.raw_text == original["raw_text"]
 
     serialized = json.loads(model.model_dump_json(by_alias=True))
     assert serialized == original

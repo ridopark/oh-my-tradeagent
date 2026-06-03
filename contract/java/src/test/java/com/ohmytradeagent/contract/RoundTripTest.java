@@ -154,6 +154,26 @@ class RoundTripTest {
   }
 
   @Test
+  void watchlistMirrorPayload_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("watchlist-mirror-payload.json"));
+
+    WatchlistMirrorPayload deserialized = mapper.readValue(json, WatchlistMirrorPayload.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getTenantId()).isEqualTo("dev");
+    assertThat(deserialized.getStrategyId()).isEqualTo("copytrade-v1");
+    assertThat(deserialized.getEtDate().toString()).isEqualTo("2026-06-03");
+    assertThat(deserialized.getAuthor()).isEqualTo("TradingTheTrend");
+    assertThat(deserialized.getSourceMessageId()).isEqualTo("1234567890123456789");
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
+
+  @Test
   void preTradeCheckRequest_roundTrips() throws Exception {
     String json = Files.readString(FIXTURES.resolve("pre-trade-check-request.json"));
 

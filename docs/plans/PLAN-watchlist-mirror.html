@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan — Daily Options Watchlist Mirror</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a21; --panel2: #1e222b; --ink: #e6e8ec;
+    --muted: #9aa3b2; --line: #2a2f3a; --accent: #5b9dff; --good: #3fb950;
+    --warn: #d29922; --bad: #f85149; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 40px 24px 96px; }
+  header.title { border-bottom: 1px solid var(--line); padding-bottom: 20px; margin-bottom: 8px; }
+  h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.02em; }
+  .sub { color: var(--muted); font-size: 15px; }
+  .tag {
+    display: inline-block; font: 12px/1 var(--mono); padding: 4px 8px; border-radius: 6px;
+    background: var(--panel2); color: var(--accent); border: 1px solid var(--line); margin-right: 6px;
+  }
+  h2 { font-size: 21px; margin: 40px 0 12px; border-top: 1px solid var(--line); padding-top: 28px; }
+  h3 { font-size: 17px; margin: 24px 0 8px; color: #cdd3dd; }
+  p { margin: 10px 0; }
+  ul, ol { margin: 8px 0; padding-left: 22px; }
+  li { margin: 5px 0; }
+  code { font: 13.5px var(--mono); background: var(--panel2); padding: 2px 6px; border-radius: 5px; color: #d7e3ff; }
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px; overflow-x: auto; font: 13px/1.55 var(--mono); color: #d7dbe3;
+  }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin: 14px 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+  .rec { border-left: 3px solid var(--good); }
+  .alt { border-left: 3px solid var(--muted); }
+  .locked { border-left: 3px solid var(--accent); }
+  .pill { font: 11px/1 var(--mono); padding: 3px 7px; border-radius: 20px; vertical-align: middle; }
+  .pill.good { background: rgba(63,185,80,.15); color: var(--good); border: 1px solid rgba(63,185,80,.4); }
+  .pill.warn { background: rgba(210,153,34,.15); color: var(--warn); border: 1px solid rgba(210,153,34,.4); }
+  .pill.bad  { background: rgba(248,81,73,.15); color: var(--bad); border: 1px solid rgba(248,81,73,.4); }
+  .pill.lock { background: rgba(91,157,255,.15); color: var(--accent); border: 1px solid rgba(91,157,255,.4); }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14.5px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+  td.k { color: var(--accent); font-family: var(--mono); white-space: nowrap; }
+  .flow {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px; font: 13px/1.7 var(--mono); color: #cdd3dd; white-space: pre; overflow-x: auto;
+  }
+  .note { color: var(--muted); font-size: 14px; }
+  .q { background: var(--panel2); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+       border-radius: 8px; padding: 12px 16px; margin: 10px 0; }
+  .q b { color: var(--accent); }
+  .seq li { margin: 10px 0; } .seq b { color: #cdd3dd; }
+  .checklist li::marker { color: var(--good); }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 28px 0; }
+  .small { font-size: 13px; color: var(--muted); }
+  .lockrow { display:flex; gap:10px; align-items:flex-start; margin:6px 0; }
+  .lockrow .pill { margin-top:2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="title">
+  <h1>Daily Options Watchlist Mirror</h1>
+  <div class="sub">Copy the daily options-watchlist post and re-publish it to our trade-alert Discord channel.</div>
+  <div style="margin-top:12px">
+    <span class="tag">scope: read + repost</span>
+    <span class="tag">read: signal-source-discord</span>
+    <span class="tag">post: existing alert webhook</span>
+    <span class="tag">status: PROPOSAL</span>
+    <span class="tag">date: 2026-06-03</span>
+  </div>
+</header>
+
+<h2>1 &middot; Goal</h2>
+<p>
+  Each trading morning, <code>TradingTheTrend</code> posts an options "watchlist" — conditional
+  breakout/breakdown levels — in the source channel <code>769790224921395200 / 769797819770732554</code>.
+  We want it <b>automatically mirrored into our existing trade-alert Discord channel</b> (the same place
+  order-failure and signal-feed alerts already go), cleanly, once per day.
+</p>
+<p>Read-then-repost only. No trades; independent of the copytrade signal path.</p>
+
+<h2>2 &middot; Locked decisions</h2>
+<div class="card locked">
+  <div class="lockrow"><span class="pill lock">Q1</span><div><b>Posting mechanism:</b> reuse the <b>existing trade-alert webhook</b>
+    (<code>ALERT_DISCORD_WEBHOOK_URL</code>, secret <code>discord-alert-credentials</code>) — the same channel/transport
+    trade alerts already use. <b>No new webhook.</b></div></div>
+  <div class="lockrow"><span class="pill lock">Q2</span><div><b>Source:</b> the watchlist lives in a <b>different</b> channel
+    than the copytrade signal channel → a dedicated <code>DISCORD_WATCHLIST_CHANNEL_URL</code> + a second reader.</div></div>
+  <div class="lockrow"><span class="pill lock">Q3</span><div><b>v1 fidelity:</b> <b>raw-faithful passthrough</b> — mirror the
+    text as posted; no watchlist parser in v1.</div></div>
+  <div class="lockrow"><span class="pill lock">Q4</span><div><b>Timing:</b> post <b>on detection</b> (no held/scheduled send).</div></div>
+  <div class="lockrow"><span class="pill lock">Q5</span><div><b>Bridge (§6):</b> <b>Option B</b> — sidecar emits a tiny Temporal workflow → orchestrator
+    activity reuses the existing <code>WebhookClient.post()</code>. Truly the same mechanism; webhook secret stays in the Java services; durable delivery.</div></div>
+</div>
+
+<h2>3 &middot; What already exists</h2>
+<table>
+  <tr><th>Capability</th><th>Today</th></tr>
+  <tr><td class="k">Read any channel</td><td><span class="pill good">have</span> The Python sidecar <code>signal-source-discord</code> scrapes a Discord channel via Playwright (<code>extract_recent()</code>), polling one channel (<code>DISCORD_CHANNEL_URL</code>) ~1s.</td></tr>
+  <tr><td class="k">Outbound alert → Discord</td><td><span class="pill good">have</span> The <b>Java</b> services post alerts via <code>DiscordWebhookClient.post(content)</code> → <code>{"content": ...}</code> to <code>ALERT_DISCORD_WEBHOOK_URL</code>. Used by <code>OrderFailureAlerter</code>, <code>SignalFeedAlerter</code> (orchestrator) &amp; <code>BrokerRejectionAlerter</code> (exec). Best-effort, non-blocking, no-op when URL blank.</td></tr>
+  <tr><td class="k">Feed-mirror precedent</td><td><span class="pill good">have</span> <code>SignalFeedAlerter</code> already mirrors "what the sidecar saw" into the alert channel — but it fires off <b>audit events from trading workflows</b>, which a watchlist is not.</td></tr>
+  <tr><td class="k">Sidecar → Java transport</td><td><span class="pill good">have</span> The sidecar <code>emitter.py</code> starts Temporal workflows (<code>CopytradeSignalWorkflow</code>). This is the only existing channel from sidecar into the Java side.</td></tr>
+  <tr><td class="k">Sidecar outbound HTTP</td><td><span class="pill bad">missing</span> The sidecar is read-only — no HTTP client, no webhook code.</td></tr>
+  <tr><td class="k">Watch a 2nd channel</td><td><span class="pill bad">missing</span> The watcher is hard-wired to one channel URL.</td></tr>
+</table>
+<p class="note">
+  The crux: the watchlist is <b>read</b> by the Python sidecar, but the alert <b>mechanism</b> lives in Java.
+  Bridging that gap is the one open design choice — see §6.
+</p>
+
+<h2>4 &middot; The watchlist format</h2>
+<p>Today's post (verbatim). Note it is <b>not</b> the <code>BTO/STC</code> grammar the bot parses — so v1 doesn't try to:</p>
+<pre>TradingTheTrend — 8:19 AM
+SPY         762c      &gt;       761.00
+                  753p     &lt;      754.00
+
+SHOP       121c        &gt;     120.00
+
+ORCL        250c      &gt;     247.00
+
+UNH         385c        &gt;     381.00
+
+TSM          455c        &gt;     450.00
+
+TSLA         430c        &gt;      425.00
+                    410p        &lt;       413.00</pre>
+<ul>
+  <li>Ticker blocks; <b>continuation lines omit the ticker</b> (<code>753p</code>→SPY, <code>410p</code>→TSLA).</li>
+  <li><code>&gt;</code> = call if underlying trades above the level; <code>&lt;</code> = put if below. Watch levels, not orders.</li>
+  <li>Irregular whitespace. v1 passthrough preserves it; v2 (later) could parse + prettify with a raw fallback.</li>
+</ul>
+
+<h2>5 &middot; Proposed flow</h2>
+<div class="flow">Discord "options-watchlist" channel   (source — read only)
+        │  Playwright scrape (reuse extract_recent)
+        ▼
+  WatchlistWatcher  (NEW, in the sidecar) — slow poll ~45s of DISCORD_WATCHLIST_CHANNEL_URL
+        │   detect: author == TradingTheTrend  AND  watchlist-shaped  AND  not already mirrored today
+        │
+        ▼  ── bridge to the Java alert mechanism (see §6 — the one open choice) ──
+        │
+        ▼
+  DiscordWebhookClient.post(formatted)  ──HTTPS──>  ALERT_DISCORD_WEBHOOK_URL  (our trade-alert channel)
+        │
+        └─ record "mirrored YYYY-MM-DD (ET)" to durable PVC state → post once/day, survives restarts</div>
+
+<h2>6 &middot; The one open choice — how the sidecar reaches the alert webhook</h2>
+<p>"Use the same mechanism as trade alerts" can mean two things. They differ on <b>where the webhook secret lives</b> and <b>how much plumbing</b> we add. I recommend <b>Option B</b>.</p>
+<div class="grid2">
+  <div class="card rec">
+    <div><span class="pill good">RECOMMENDED — Option B</span> <b>Route through the Java alerter</b></div>
+    <p class="small">Sidecar detects the watchlist → emits a tiny Temporal workflow (like it already emits signals) carrying the raw text → a new orchestrator activity calls the <b>existing</b> <code>WebhookClient.post()</code>.</p>
+    <ul class="small">
+      <li>+ Literally the same mechanism — reuses <code>DiscordWebhookClient</code> (DRY); mirrors the <code>SignalFeedAlerter</code> pattern.</li>
+      <li>+ Webhook secret <b>stays in the Java services only</b> — never enters the browser-automation pod (better hygiene).</li>
+      <li>+ Durable delivery + retry for free via Temporal; a sidecar restart mid-send is covered.</li>
+      <li>− More plumbing: 1 contract payload + 1 small workflow + 1 activity (all established patterns here).</li>
+    </ul>
+  </div>
+  <div class="card alt">
+    <div><span class="pill warn">LIGHTER — Option A</span> <b>Post from the sidecar directly</b></div>
+    <p class="small">Add <code>httpx</code> to the sidecar; POST the same <code>{"content": ...}</code> straight to <code>ALERT_DISCORD_WEBHOOK_URL</code>.</p>
+    <ul class="small">
+      <li>+ Smallest code (~1 file); no Java/contract/workflow changes.</li>
+      <li>− Re-implements the webhook transport → a <b>second</b> mechanism, not "the same" one.</li>
+      <li>− Moves the alert-webhook secret <b>into the sidecar pod</b> (the larger attack surface).</li>
+      <li>− No durable retry; best-effort only.</li>
+    </ul>
+  </div>
+</div>
+<p class="small">Both honour Q1 (same destination webhook), Q4 (post on detection), and need no change to the trading path.</p>
+
+<h2>7 &middot; Components to build</h2>
+<h3>Shared (both options)</h3>
+<ul>
+  <li><b>config</b> — sidecar env: <code>DISCORD_WATCHLIST_CHANNEL_URL</code>, <code>WATCHLIST_AUTHOR</code> (default <code>TradingTheTrend</code>), <code>WATCHLIST_POLL_INTERVAL_SECS</code> (default 45), <code>WATCHLIST_MIRROR_ENABLED</code> (default false → opt-in).</li>
+  <li><b>watchlist detector</b> (sidecar) — author gate + loose shape heuristic (≥2 lines of <code>TICKER … &gt;/&lt; price</code>) so chit-chat isn't mirrored.</li>
+  <li><b>WatchlistWatcher</b> (sidecar) — second slow poller reusing <code>extract_recent</code>; runs concurrently with the signal watcher via <code>asyncio.gather</code> behind the enable flag; heartbeat preserved. <b>Reuses the existing Discord token</b> — the auth is a portable user-account session in <code>storage_state.json</code> (not server-scoped), so it opens the watchlist channel with no second login/token, provided the account is a member of that channel's server. <span class="small">Prod server <code>769790224921395200</code>: already a member (it ingests <code>TradingTheTrend</code>'s signals there). Dev server <code>878725319178207302</code>: confirm the account is invited.</span></li>
+  <li><b>durable state</b> — "last mirrored date / message_id" on the existing <code>/app/state</code> PVC → once/day, restart-safe.</li>
+  <li><b>formatter</b> — wrap the raw text in a fenced block with a header ("📋 Watchlist — Jun 3, 2026 — via TradingTheTrend").</li>
+</ul>
+<h3>Option B adds</h3>
+<ul>
+  <li><b>contract</b> — a small <code>WatchlistMirror</code> payload schema (date, author, raw_text, source message_id).</li>
+  <li><b>sidecar emitter</b> — start a <code>WatchlistMirrorWorkflow</code> (id keyed on the source message_id → Temporal dedupe).</li>
+  <li><b>orchestrator</b> — <code>WatchlistMirrorWorkflow</code> (one step) → <code>postWatchlistAlert</code> activity → existing <code>WebhookClient.post(formatted)</code>. No new schema ownership, no DB.</li>
+</ul>
+<h3>Option A adds</h3>
+<ul>
+  <li><b>sidecar publisher</b> — add <code>httpx</code>; <code>AlertPublisher.post()</code> → <code>ALERT_DISCORD_WEBHOOK_URL</code>; mount that secret into the sidecar.</li>
+</ul>
+<p class="small">Guardrail (repo CLAUDE.md): keep to the above — no speculative multi-author/multi-channel/scheduler. Signal path untouched.</p>
+
+<h2>8 &middot; Config &amp; secrets</h2>
+<ul>
+  <li><b>Reuse</b> <code>ALERT_DISCORD_WEBHOOK_URL</code> / secret <code>discord-alert-credentials</code> — already wired into the Java services. Option B needs <b>no</b> secret change; Option A mounts that secret into the sidecar too.</li>
+  <li><b>Add</b> <code>DISCORD_WATCHLIST_CHANNEL_URL</code> to <code>sidecar-config</code> + <code>infra/secrets-template/secrets.template.yaml</code> (<code>__SET_BY_OPERATOR__</code> placeholder). Concrete per-environment values:
+    <table style="margin-top:8px">
+      <tr><th>Env</th><th><code>DISCORD_WATCHLIST_CHANNEL_URL</code></th></tr>
+      <tr><td class="k">prod (homelab)</td><td><code>https://discord.com/channels/769790224921395200/769797819770732554</code></td></tr>
+      <tr><td class="k">dev (local)</td><td><code>https://discord.com/channels/878725319178207302/1511747186654969956</code></td></tr>
+    </table>
+    <span class="small">Same <code>https://discord.com/channels/&lt;server&gt;/&lt;channel&gt;</code> shape the existing <code>DISCORD_CHANNEL_URL</code> uses. Prod = the live watchlist channel; dev = a separate test server/channel so local runs never touch the real feed.</span>
+  </li>
+  <li><b>Add</b> non-secret tunables to the sidecar Deployment env in <code>infra/k8s/55-signal-source-discord.yaml</code>; wire locally via <code>infra/docker-compose.yml</code> + <code>.env</code>.</li>
+  <li class="small">Note: <code>sidecar-config</code> is operator-provisioned and not applied by <code>deploy.yml</code> → adding the channel key is a manual <code>kubectl apply</code> on homelab.</li>
+</ul>
+
+<h2>9 &middot; Build sequence</h2>
+<ol class="seq">
+  <li><b>Detector + state + formatter</b> (sidecar) — author/shape classification, durable "mirrored today", header format. <span class="small">verify: chit-chat vs. watchlist classified right; restart doesn't re-post.</span></li>
+  <li><b>WatchlistWatcher</b> wired behind <code>WATCHLIST_MIRROR_ENABLED</code>, concurrent with the signal watcher. <span class="small">verify: signal path unchanged; heartbeat green.</span></li>
+  <li><b>Bridge</b> — <i>Option B:</i> contract payload + <code>WatchlistMirrorWorkflow</code> + <code>postWatchlistAlert</code> activity reusing <code>WebhookClient</code>; <i>Option A:</i> <code>httpx</code> publisher to the webhook. <span class="small">verify: today's sample → exactly one message in the alert channel.</span></li>
+  <li><b>Infra</b> — secret/template key, deployment env, compose; <code>spotless:apply</code> for any Java (Option B). <span class="small">verify: kubeconform + manual homelab apply.</span></li>
+  <li><b>v2 fast-follow</b> — tolerant watchlist parser → prettified embed with guaranteed raw fallback + tests.</li>
+</ol>
+
+<h2>10 &middot; End-to-end verification</h2>
+<ul class="checklist">
+  <li>Post the sample as <code>TradingTheTrend</code> in a test source channel → within one poll, exactly one clean mirror appears in the trade-alert channel.</li>
+  <li>Post again / restart the pod → <b>no</b> duplicate that day.</li>
+  <li>Non-watchlist chatter from the same author → <b>not</b> mirrored.</li>
+  <li>Copytrade signal flow (BTO/STC → Temporal) unchanged with the flag off, unaffected with it on.</li>
+  <li>Webhook URL never logged or committed; lives only in the operator secret.</li>
+</ul>
+
+<h2>11 &middot; Out of scope (v1)</h2>
+<p class="small">
+  Acting on watchlist levels (no orders/price triggers); edit back-sync if the author edits the post;
+  multiple authors/channels; scheduled send timing; two-way interaction; a real Discord bot account.
+</p>
+
+<hr>
+<h2>All decisions locked — ready to build</h2>
+<div class="q"><b>Decided:</b> reuse the existing trade-alert webhook (Q1); dedicated watchlist channel + 2nd reader (Q2);
+raw passthrough for v1 (Q3); post on detection (Q4); <b>route through the Java alerter — Option B</b> (Q5).
+Build per §7 "Shared + Option B adds" and the §9 sequence.</div>
+
+<p class="small" style="margin-top:24px">File: <code>docs/plans/PLAN-watchlist-mirror.html</code> — open in a browser for the formatted view.</p>
+
+</div>
+</body>
+</html>
