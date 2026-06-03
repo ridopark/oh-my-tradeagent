@@ -58,12 +58,6 @@ public class SignalFeedAlerter {
   private static final String KIND_SIGNAL_REJECTED = "SignalRejected";
   private static final String KIND_AVG_SKIPPED = "AvgSkipped";
 
-  // Severity-appropriate Discord accent colors (decimal RGB) per the plan's color matrix.
-  private static final int DISCORD_BLURPLE = 5793266; // info — signal received
-  private static final int DISCORD_GREEN = 5763719; // success — signal accepted
-  private static final int DISCORD_RED = 15548997; // failure — signal rejected
-  private static final int DISCORD_YELLOW = 16705372; // warn — AVG skipped
-
   private final WebhookClient webhookClient;
   private final boolean enabled;
 
@@ -136,7 +130,7 @@ public class SignalFeedAlerter {
     fields.add(new WebhookEmbed.Field("author", subjectStr(s, "author"), false));
     fields.add(new WebhookEmbed.Field("posted_at", subjectStr(s, "posted_at"), false));
     addCommonFields(fields, event);
-    return new WebhookEmbed(title, null, DISCORD_BLURPLE, footer(event), fields);
+    return new WebhookEmbed(title, null, AlertColors.BLURPLE, footer(event), fields);
   }
 
   /** Signal accepted (green/success): the resolved {@code option_symbol} becomes a Yahoo link. */
@@ -153,7 +147,7 @@ public class SignalFeedAlerter {
             "×" + subjectStr(s, "contracts") + " @ ref_premium " + subjectStr(s, "ref_premium"),
             false));
     addCommonFields(fields, event);
-    return new WebhookEmbed(title, null, DISCORD_GREEN, footer(event), fields);
+    return new WebhookEmbed(title, null, AlertColors.GREEN, footer(event), fields);
   }
 
   /**
@@ -167,7 +161,7 @@ public class SignalFeedAlerter {
     fields.add(new WebhookEmbed.Field("contract", rejectedContractLink(s), false));
     fields.add(new WebhookEmbed.Field("rejected", reasonOf(s), false));
     addCommonFields(fields, event);
-    return new WebhookEmbed(title, null, DISCORD_RED, footer(event), fields);
+    return new WebhookEmbed(title, null, AlertColors.RED, footer(event), fields);
   }
 
   /** AVG skipped (yellow/warn): no contract in the subject, so no Yahoo link. */
@@ -177,7 +171,7 @@ public class SignalFeedAlerter {
     List<WebhookEmbed.Field> fields = new ArrayList<>();
     fields.add(new WebhookEmbed.Field("note", subjectStr(s, "note"), false));
     addCommonFields(fields, event);
-    return new WebhookEmbed(title, null, DISCORD_YELLOW, footer(event), fields);
+    return new WebhookEmbed(title, null, AlertColors.YELLOW, footer(event), fields);
   }
 
   /** Builds the Yahoo link from ticker+expiry+strike+right parts (signal-received path). */

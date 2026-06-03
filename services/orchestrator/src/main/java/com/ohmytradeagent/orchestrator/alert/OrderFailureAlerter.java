@@ -145,9 +145,6 @@ public class OrderFailureAlerter {
     }
   }
 
-  /** Discord red (0xED4245) as the decimal RGB integer — failure accent for every order failure. */
-  private static final int DISCORD_RED = 15548997;
-
   /**
    * Builds the red order-failure embed: title carries the action, the contract symbol field is a
    * Yahoo-linked OCC (plain text on a malformed/absent symbol — never throws), {@code kind} /
@@ -176,7 +173,7 @@ public class OrderFailureAlerter {
             + "/"
             + orNa(event.getStrategyId());
 
-    return new WebhookEmbed(title, null, DISCORD_RED, footer, fields);
+    return new WebhookEmbed(title, null, AlertColors.RED, footer, fields);
   }
 
   /** Raw subject value (may be {@code null}) — for the Yahoo helper, which handles null itself. */

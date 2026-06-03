@@ -1,6 +1,9 @@
 package com.ohmytradeagent.contract.identity;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.Locale;
+import java.util.regex.Pattern;
 
 /**
  * Builds a clickable Yahoo Finance option link from an OCC option symbol, for use in Discord
@@ -24,6 +27,19 @@ import java.math.BigDecimal;
 public final class YahooOptionLink {
 
   private static final String QUOTE_PREFIX = "https://finance.yahoo.com/quote/";
+
+  /**
+   * Compact (space-stripped, uppercased) OCC: a 1-6 char alphanumeric root, then {@code YYMMDD},
+   * then {@code C}/{@code P}, then exactly 8 strike digits. The month/day numeric sanity (a regex
+   * can't express 1-12 / 1-31) is checked separately after a match.
+   */
+  private static final Pattern OCC = Pattern.compile("[A-Z0-9]{1,6}\\d{6}[CP]\\d{8}");
+
+  /** The OCC root component on its own (1-6 alphanumeric), for validating the from-parts ticker. */
+  private static final Pattern ROOT = Pattern.compile("[A-Z0-9]{1,6}");
+
+  /** Collapses any run of whitespace to a single space (plain-text display rendering). */
+  private static final Pattern WS = Pattern.compile("\\s+");
 
   private YahooOptionLink() {}
 
@@ -73,45 +89,22 @@ public final class YahooOptionLink {
       return null;
     }
     // The OCC block carries trailing padding spaces after the root; compact form drops them.
-    String compact = occSymbol.replace(" ", "").toUpperCase(java.util.Locale.ROOT);
-    if (!isValidOcc(compact)) {
-      return null;
-    }
-    return compact;
+    String compact = occSymbol.replace(" ", "").toUpperCase(Locale.ROOT);
+    return isValidOcc(compact) ? compact : null;
   }
 
   /**
-   * Validates a compact (space-stripped) OCC: a 1-6 char alphanumeric root, then {@code YYMMDD},
-   * then {@code C}/{@code P}, then exactly 8 strike digits — and a sane month/day.
+   * Validates a compact (space-stripped, uppercased) OCC via {@link #OCC} plus the month/day
+   * numeric sanity the pattern can't express.
    */
   private static boolean isValidOcc(String compact) {
-    // Tail is always 15 chars: 6 (YYMMDD) + 1 (C/P) + 8 (strike). Root is the 1-6 char remainder.
-    if (compact.length() < 16 || compact.length() > 21) {
+    if (!OCC.matcher(compact).matches()) {
       return false;
     }
-    int tailStart = compact.length() - 15;
-    String root = compact.substring(0, tailStart);
-    for (int i = 0; i < root.length(); i++) {
-      char c = root.charAt(i);
-      if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
-        return false;
-      }
-    }
-    String yymmdd = compact.substring(tailStart, tailStart + 6);
-    if (!isAllDigits(yymmdd)) {
-      return false;
-    }
-    int mm = Integer.parseInt(yymmdd.substring(2, 4));
-    int dd = Integer.parseInt(yymmdd.substring(4, 6));
-    if (mm < 1 || mm > 12 || dd < 1 || dd > 31) {
-      return false;
-    }
-    char right = compact.charAt(tailStart + 6);
-    if (right != 'C' && right != 'P') {
-      return false;
-    }
-    String strike = compact.substring(tailStart + 7);
-    return strike.length() == 8 && isAllDigits(strike);
+    int yymmddStart = compact.length() - 15;
+    int mm = Integer.parseInt(compact.substring(yymmddStart + 2, yymmddStart + 4));
+    int dd = Integer.parseInt(compact.substring(yymmddStart + 4, yymmddStart + 6));
+    return mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31;
   }
 
   /** Builds the compact 21-char OCC from parts, or {@code null} when any part is invalid. */
@@ -119,8 +112,8 @@ public final class YahooOptionLink {
     if (ticker == null || ticker.isBlank()) {
       return null;
     }
-    String root = ticker.trim().toUpperCase(java.util.Locale.ROOT);
-    if (root.length() > 6 || !isAlnum(root)) {
+    String root = ticker.trim().toUpperCase(Locale.ROOT);
+    if (!ROOT.matcher(root).matches()) {
       return null;
     }
     String yymmdd = toYymmdd(yymmddOrDate);
@@ -135,29 +128,31 @@ public final class YahooOptionLink {
     if (strikeDigits == null) {
       return null;
     }
-    String occ = root + yymmdd + r + strikeDigits;
-    // Re-validate via the canonical path so the two entry points agree on what is valid.
-    return isValidOcc(occ) ? occ : null;
+    // Every part was validated above (root charset, mm/dd sanity in toYymmdd, C/P, 8-digit strike),
+    // so the assembled OCC is valid by construction — no re-validation needed.
+    return root + yymmdd + r + strikeDigits;
   }
 
-  /** Accepts a 6-digit {@code YYMMDD} or an ISO {@code YYYY-MM-DD}; returns {@code YYMMDD}. */
+  /**
+   * Accepts a 6-digit {@code YYMMDD} or an ISO {@code YYYY-MM-DD}; returns a {@code YYMMDD} whose
+   * month/day pass the same sanity bounds as {@link #isValidOcc}, else {@code null}.
+   */
   private static String toYymmdd(String value) {
     if (value == null) {
       return null;
     }
     String v = value.trim();
-    if (v.length() == 6 && isAllDigits(v)) {
-      return v;
+    String yymmdd;
+    if (v.matches("\\d{6}")) {
+      yymmdd = v;
+    } else if (v.matches("\\d{4}-\\d{2}-\\d{2}")) {
+      yymmdd = v.substring(2, 4) + v.substring(5, 7) + v.substring(8, 10);
+    } else {
+      return null;
     }
-    if (v.length() == 10 && v.charAt(4) == '-' && v.charAt(7) == '-') {
-      String yy = v.substring(2, 4);
-      String mm = v.substring(5, 7);
-      String dd = v.substring(8, 10);
-      if (isAllDigits(yy) && isAllDigits(mm) && isAllDigits(dd)) {
-        return yy + mm + dd;
-      }
-    }
-    return null;
+    int mm = Integer.parseInt(yymmdd.substring(2, 4));
+    int dd = Integer.parseInt(yymmdd.substring(4, 6));
+    return (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) ? yymmdd : null;
   }
 
   /** strike × 1000 as 8 zero-padded digits, or {@code null} on a malformed/over-long strike. */
@@ -181,20 +176,17 @@ public final class YahooOptionLink {
     if (scaled.stripTrailingZeros().scale() > 0) {
       return null;
     }
-    java.math.BigInteger thousandths = scaled.toBigIntegerExact();
-    String digits = thousandths.toString();
-    if (digits.length() > 8) {
+    BigInteger thousandths = scaled.toBigIntegerExact();
+    if (thousandths.toString().length() > 8) {
       return null;
     }
-    return "0".repeat(8 - digits.length()) + digits;
+    return String.format("%08d", thousandths);
   }
 
   /** Human-readable display of a (compact) OCC: {@code TICKER YYMMDDC00100000} single-spaced. */
   private static String displayFromOcc(String compact) {
     int tailStart = compact.length() - 15;
-    String root = compact.substring(0, tailStart);
-    String tail = compact.substring(tailStart);
-    return root + " " + tail;
+    return compact.substring(0, tailStart) + " " + compact.substring(tailStart);
   }
 
   /**
@@ -211,9 +203,8 @@ public final class YahooOptionLink {
   /** Re-pads a compact OCC to the canonical 21-char block (root right-padded to 6 with spaces). */
   private static String padded21(String compactOcc) {
     int tailStart = compactOcc.length() - 15;
-    String root = compactOcc.substring(0, tailStart);
-    String tail = compactOcc.substring(tailStart);
-    return root + " ".repeat(6 - root.length()) + tail;
+    return String.format("%-6s", compactOcc.substring(0, tailStart))
+        + compactOcc.substring(tailStart);
   }
 
   /**
@@ -223,7 +214,7 @@ public final class YahooOptionLink {
     if (occSymbol == null || occSymbol.isBlank()) {
       return "n/a";
     }
-    return occSymbol.trim().replaceAll("\\s+", " ");
+    return WS.matcher(occSymbol.trim()).replaceAll(" ");
   }
 
   /** Plain-text fallback for the from-parts path when the OCC can't be built. */
@@ -232,7 +223,7 @@ public final class YahooOptionLink {
     if (ticker == null || ticker.isBlank()) {
       return "n/a";
     }
-    StringBuilder sb = new StringBuilder(ticker.trim().toUpperCase(java.util.Locale.ROOT));
+    StringBuilder sb = new StringBuilder(ticker.trim().toUpperCase(Locale.ROOT));
     if (yymmddOrDate != null && !yymmddOrDate.isBlank()) {
       sb.append(' ').append(yymmddOrDate.trim());
     }
@@ -243,24 +234,5 @@ public final class YahooOptionLink {
       sb.append(Character.toUpperCase(right));
     }
     return sb.toString();
-  }
-
-  private static boolean isAllDigits(String s) {
-    for (int i = 0; i < s.length(); i++) {
-      if (!Character.isDigit(s.charAt(i))) {
-        return false;
-      }
-    }
-    return !s.isEmpty();
-  }
-
-  private static boolean isAlnum(String s) {
-    for (int i = 0; i < s.length(); i++) {
-      char c = s.charAt(i);
-      if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
-        return false;
-      }
-    }
-    return !s.isEmpty();
   }
 }
