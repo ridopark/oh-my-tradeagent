@@ -9,6 +9,7 @@ import pathlib
 import sys
 
 from dotenv import load_dotenv
+from playwright.async_api import async_playwright
 
 from .emitter import TemporalEmitter, TemporalWatchlistEmitter
 from .watcher import Watcher
@@ -89,8 +90,7 @@ async def _amain() -> None:
         poll_interval_secs=poll_interval,
     )
 
-    signal_task = asyncio.create_task(watcher.run(), name="signal-watcher")
-    watchlist_task: asyncio.Task[None] | None = None
+    watchlist_watcher: WatchlistWatcher | None = None
     if watchlist_enabled:
         # Reuse the SAME connected Temporal client + task queue — no second dial.
         watchlist_emitter = TemporalWatchlistEmitter(emitter.client, emitter.task_queue)
@@ -106,26 +106,52 @@ async def _amain() -> None:
         )
         log.info("watchlist mirror enabled (channel=%s author=%s)",
                  watchlist_channel_url, watchlist_author)
-        watchlist_task = asyncio.create_task(watchlist_watcher.run(), name="watchlist-watcher")
-        # ISOLATION: the watchlist watcher is best-effort. If it dies, log it —
-        # never let it take down the process. (.run() loops forever, so this only
-        # fires on an unexpected escape; the watchlist stays down until restart.)
-        watchlist_task.add_done_callback(_log_if_failed(log, "watchlist watcher"))
+
+    storage_state_path = state_dir / "storage_state.json"
+    if not storage_state_path.exists():
+        raise RuntimeError(
+            f"storage_state.json missing at {storage_state_path} "
+            "— run bootstrap first (see README)"
+        )
 
     try:
-        # The signal watcher is trading-critical: await IT directly so a crash
-        # propagates immediately and the process exits non-zero for k8s to
-        # restart (exactly the old `await watcher.run()` semantics). We do NOT
-        # gather() over both — gather waits for ALL tasks, and the forever-running
-        # watchlist task would otherwise mask a signal-watcher crash indefinitely.
-        await signal_task
-    finally:
-        if watchlist_task is not None:
-            watchlist_task.cancel()
+        # ONE browser + context shared by both watchers — each gets its own
+        # page (tab). A second Chromium would roughly double memory and OOM the
+        # homelab sidecar's 1Gi limit (see PLAN-watchlist-mirror).
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(storage_state=str(storage_state_path))
+
+            signal_page = await context.new_page()
+            signal_task = asyncio.create_task(
+                watcher.run_on_page(signal_page), name="signal-watcher"
+            )
+
+            watchlist_task: asyncio.Task[None] | None = None
+            if watchlist_watcher is not None:
+                watchlist_page = await context.new_page()
+                watchlist_task = asyncio.create_task(
+                    watchlist_watcher.run_on_page(watchlist_page), name="watchlist-watcher"
+                )
+                # ISOLATION: the watchlist watcher is best-effort. If it dies, log
+                # it — never let it take down the process.
+                watchlist_task.add_done_callback(_log_if_failed(log, "watchlist watcher"))
+
             try:
-                await watchlist_task
-            except asyncio.CancelledError:
-                pass
+                # The signal watcher is trading-critical: await IT directly so a
+                # crash propagates immediately and the process exits non-zero for
+                # k8s to restart. We do NOT gather() over both — gather waits for
+                # ALL tasks, and the forever-running watchlist task would
+                # otherwise mask a signal-watcher crash indefinitely.
+                await signal_task
+            finally:
+                if watchlist_task is not None:
+                    watchlist_task.cancel()
+                    try:
+                        await watchlist_task
+                    except asyncio.CancelledError:
+                        pass
+    finally:
         await emitter.close()
 
 
