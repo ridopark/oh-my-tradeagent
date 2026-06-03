@@ -32,6 +32,20 @@ def _required(name: str) -> str:
     return val
 
 
+def _log_if_failed(log: logging.Logger, name: str):
+    """Done-callback that logs a non-cancellation task failure. Used to isolate
+    the best-effort watchlist watcher so its crash never propagates."""
+
+    def _cb(task: "asyncio.Task[None]") -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("%s ended with error: %r", name, exc)
+
+    return _cb
+
+
 async def _amain() -> None:
     load_dotenv()
     log = _setup_logging(os.getenv("LOG_LEVEL", "info"))
@@ -76,7 +90,6 @@ async def _amain() -> None:
     )
 
     signal_task = asyncio.create_task(watcher.run(), name="signal-watcher")
-    tasks = [signal_task]
     watchlist_task: asyncio.Task[None] | None = None
     if watchlist_enabled:
         # Reuse the SAME connected Temporal client + task queue — no second dial.
@@ -94,23 +107,21 @@ async def _amain() -> None:
         log.info("watchlist mirror enabled (channel=%s author=%s)",
                  watchlist_channel_url, watchlist_author)
         watchlist_task = asyncio.create_task(watchlist_watcher.run(), name="watchlist-watcher")
-        tasks.append(watchlist_task)
+        # ISOLATION: the watchlist watcher is best-effort. If it dies, log it —
+        # never let it take down the process. (.run() loops forever, so this only
+        # fires on an unexpected escape; the watchlist stays down until restart.)
+        watchlist_task.add_done_callback(_log_if_failed(log, "watchlist watcher"))
 
     try:
-        # return_exceptions=True so the watchlist watcher stays ISOLATED. But the
-        # signal watcher is trading-critical: if IT crashes we re-raise so the
-        # process exits non-zero and k8s restarts the pod (matching the old
-        # `await watcher.run()`). A watchlist crash is only logged.
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        by_task = dict(zip(tasks, results))
-        watchlist_result = by_task.get(watchlist_task) if watchlist_task else None
-        if isinstance(watchlist_result, Exception):
-            log.error("watchlist watcher ended with error: %r", watchlist_result)
-        signal_result = by_task[signal_task]
-        if isinstance(signal_result, Exception):
-            log.error("signal watcher ended with error: %r", signal_result)
-            raise signal_result
+        # The signal watcher is trading-critical: await IT directly so a crash
+        # propagates immediately and the process exits non-zero for k8s to
+        # restart (exactly the old `await watcher.run()` semantics). We do NOT
+        # gather() over both — gather waits for ALL tasks, and the forever-running
+        # watchlist task would otherwise mask a signal-watcher crash indefinitely.
+        await signal_task
     finally:
+        if watchlist_task is not None:
+            watchlist_task.cancel()
         await emitter.close()
 
 
