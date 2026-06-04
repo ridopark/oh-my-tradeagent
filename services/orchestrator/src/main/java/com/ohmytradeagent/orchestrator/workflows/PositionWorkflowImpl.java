@@ -1085,10 +1085,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
       if (lastFillEvent != null) {
         applyExitFill(req, lastFillEvent);
-        exitInFlight = false;
-        currentInFlightBrokerOrderId = null;
-        currentInFlightSignalId = null;
-        currentInFlightIntentKey = null;
+        releaseExitInFlightLatches();
         if (remainingQty == 0 && closeReason == null) {
           closeReason = "normal_stc";
         }
@@ -1152,10 +1149,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                     targetRemaining));
             // The original filled late and satisfied the intent: place NO retry order and release
             // the in-flight latch exactly like the drop path below.
-            exitInFlight = false;
-            currentInFlightBrokerOrderId = null;
-            currentInFlightSignalId = null;
-            currentInFlightIntentKey = null;
+            releaseExitInFlightLatches();
             return;
           }
         }
@@ -1163,10 +1157,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
           retryCount++;
           continue; // Issue #216: place the retry order with a fresh limit price + intent_key.
         }
-        exitInFlight = false;
-        currentInFlightBrokerOrderId = null;
-        currentInFlightSignalId = null;
-        currentInFlightIntentKey = null;
+        releaseExitInFlightLatches();
       }
       // On EOD/expiry/risk_breach/force_close pre-emption (filledInTime=true but lastFillEvent
       // still null) we leave exitInFlight/currentInFlightSignalId set so flattenRemaining() can
@@ -1263,6 +1254,18 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * responsibility: the reconcile path nulls {@code lastFillEvent} immediately after this call so a
    * late fill is never double-counted between the normal path and the reconcile.
    */
+  /**
+   * Clear the exit in-flight latch + the tracked broker-order/signal/intent keys. Called when an
+   * exit resolves and no further retry order is pending (fill complete, retry skipped/satisfied, or
+   * retries exhausted). Pure state reset — no Temporal command, so it is replay-neutral.
+   */
+  private void releaseExitInFlightLatches() {
+    exitInFlight = false;
+    currentInFlightBrokerOrderId = null;
+    currentInFlightSignalId = null;
+    currentInFlightIntentKey = null;
+  }
+
   private void applyExitFill(PartialExitRequest req, FillSignalPayload fillEvent) {
     long filled = fillEvent.getFilledQty();
     remainingQty -= filled;
