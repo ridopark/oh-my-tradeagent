@@ -1723,6 +1723,155 @@ class PositionWorkflowImplTest {
         .anyMatch(k -> k.endsWith(":exit:sig-eod-retry:retry"));
   }
 
+  /**
+   * VERSION_EXIT_RETRY_LATE_FILL_RECONCILE (a): a timed-out exit order fills LATE during the
+   * best-effort cancel. The buffered onFill is delivered when the cancelOrder activity returns; the
+   * reconcile decrements remainingQty by the late fill (3 of 3), so the computed retry qty is 0 —
+   * the workflow must SKIP the retry (place NO {@code :retry} order), emit exactly one
+   * PartialExitFilled and one PartialExitRetrySkippedSatisfied, and leave remainingQty correct. The
+   * pre-patch bug discarded the late fill and re-sent the full qtyToClose → naked short.
+   */
+  @Test
+  void processOne_exitFillTimeoutRetry_lateFillSatisfiesIntent_skipsRetryNoOverSell()
+      throws Exception {
+    PositionWorkflow stub = newStub("pos-late-fill-satisfies");
+    // cancelOrder delivers the LATE original fill while the workflow is blocked in the activity, so
+    // lastFillEvent != null at the reconcile point (buffered-during-cancel timing, deterministic).
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString()))
+        .thenAnswer(
+            inv -> {
+              stub.onFill(fill("brk-late", 3L, new BigDecimal("2.79")));
+              return cancelledResult();
+            });
+
+    WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
+
+    // STC fraction=0.5 on remaining=5 → qtyToClose=ceil(2.5)=3, targetRemaining=2.
+    stub.partialExit(partialExitRequest("sig-late", "pos-late-fill-satisfies", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Fire the original's 90s TTL: timeout → cancel (delivers the late fill) → reconcile → skip.
+    env.sleep(Duration.ofSeconds(120));
+
+    // Drain the runner (remaining should be 2) so the workflow terminates cleanly.
+    stub.partialExit(partialExitRequest("sig-drain", "pos-late-fill-satisfies", 1.0));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-drain", 2L, new BigDecimal("2.81")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // No :retry-suffixed OrderIntent was EVER placed — the anti-naked-short guarantee.
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeast(1)).placeOrder(intentCaptor.capture());
+    assertThat(intentCaptor.getAllValues().stream().map(OrderIntent::getIntentKey))
+        .as("no retry order may be placed when the late fill satisfied the intent")
+        .noneMatch(k -> k != null && k.endsWith(":retry"));
+    // No placed exit intent ever exceeds the live remaining at placement time.
+    assertThat(intentCaptor.getAllValues().stream().map(OrderIntent::getQty))
+        .allMatch(q -> q <= 5L);
+
+    // Exactly one PartialExitFilled for the late original fill (qty 3, remaining_after 2).
+    List<AuditEvent> partialFills = captureAll("PartialExitFilled");
+    assertThat(partialFills).hasSize(2);
+    assertThat(partialFills.get(0).getSubject())
+        .containsEntry("signal_id", "sig-late")
+        .containsEntry("broker_order_id", "brk-late");
+    assertThat(asLong(partialFills.get(0).getSubject().get("qty_filled"))).isEqualTo(3L);
+    assertThat(asLong(partialFills.get(0).getSubject().get("remaining_qty_after"))).isEqualTo(2L);
+
+    // Exactly one skip-satisfied audit with the captured target.
+    List<AuditEvent> skips = captureAll("PartialExitRetrySkippedSatisfied");
+    assertThat(skips).hasSize(1);
+    assertThat(skips.get(0).getSubject()).containsEntry("signal_id", "sig-late");
+    assertThat(asLong(skips.get(0).getSubject().get("remaining_qty"))).isEqualTo(2L);
+    assertThat(asLong(skips.get(0).getSubject().get("target_remaining"))).isEqualTo(2L);
+
+    // No second timeout (the skip path returns without re-awaiting).
+    assertThat(captureAll("PartialExitFillTimeout")).hasSize(1);
+    // The late fill is reflected by EXACTLY ONE PartialExitFilled for sig-late (no double-count).
+    assertThat(
+            partialFills.stream().filter(e -> "sig-late".equals(e.getSubject().get("signal_id"))))
+        .hasSize(1);
+  }
+
+  /**
+   * VERSION_EXIT_RETRY_LATE_FILL_RECONCILE (b): a partial late fill clamps the retry to the exact
+   * remainder. Position 6, fraction 0.5 → qtyToClose=3, targetRemaining=3. The original fills only
+   * 1 late → remaining 5 → retry qty must be EXACTLY 2 (5−3), NOT ceil(5*0.5)=3. Proves the retry
+   * is sized off the captured target, not re-derived from the fraction.
+   */
+  @Test
+  void processOne_exitFillTimeoutRetry_partialLateFill_clampsRetryToRemainder() throws Exception {
+    PositionWorkflow stub = newStub("pos-partial-late-fill");
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // First cancel (original timeout) delivers a PARTIAL late fill of 1; the retry order then fills
+    // the remaining 2. cancelOrder is only invoked on the original timeout in this scenario.
+    when(exec.cancelOrder(anyString()))
+        .thenAnswer(
+            inv -> {
+              stub.onFill(fill("brk-late-partial", 1L, new BigDecimal("2.77")));
+              return cancelledResult();
+            });
+
+    WorkflowStub.fromTyped(stub).start(input(6));
+    confirmEntry(stub, 6L);
+
+    // STC fraction=0.5 on remaining=6 → qtyToClose=3, targetRemaining=3.
+    stub.partialExit(partialExitRequest("sig-partial", "pos-partial-late-fill", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Original times out → cancel delivers the late partial fill of 1 → remaining 5 → retry qty=2.
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+
+    // Deliver the retry fill of 2 → remaining 3 == target.
+    stub.onFill(fill("brk-retry-partial", 2L, new BigDecimal("2.80")));
+
+    // Drain the runner (remaining 3) so the workflow terminates cleanly.
+    stub.partialExit(partialExitRequest("sig-partial-drain", "pos-partial-late-fill", 1.0));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-partial-drain", 3L, new BigDecimal("2.82")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // The :retry OrderIntent qty must be EXACTLY 2 (remainder), not 3 (ceil of fraction).
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeast(2)).placeOrder(intentCaptor.capture());
+    OrderIntent retryIntent =
+        intentCaptor.getAllValues().stream()
+            .filter(i -> i.getIntentKey() != null && i.getIntentKey().endsWith(":retry"))
+            .reduce((a, b) -> b)
+            .orElseThrow(() -> new AssertionError("no :retry intent placed"));
+    assertThat(retryIntent.getQty())
+        .as("retry qty must clamp to remaining - target (2), not ceil(remaining*fraction) (3)")
+        .isEqualTo(2L);
+
+    // Exactly one retry-requested audit (the clamp does not suppress the retry here).
+    assertThat(captureAll("PartialExitRetryRequested")).hasSize(1);
+    // No skip-satisfied audit (retry was needed).
+    assertThat(captureAll("PartialExitRetrySkippedSatisfied")).isEmpty();
+
+    // Two PartialExitFilled entries for sig-partial: 1 (late) then 2 (retry).
+    List<AuditEvent> sigPartialFills =
+        captureAll("PartialExitFilled").stream()
+            .filter(e -> "sig-partial".equals(e.getSubject().get("signal_id")))
+            .toList();
+    assertThat(sigPartialFills).hasSize(2);
+    assertThat(asLong(sigPartialFills.get(0).getSubject().get("qty_filled"))).isEqualTo(1L);
+    assertThat(asLong(sigPartialFills.get(0).getSubject().get("remaining_qty_after")))
+        .isEqualTo(5L);
+    assertThat(asLong(sigPartialFills.get(1).getSubject().get("qty_filled"))).isEqualTo(2L);
+    assertThat(asLong(sigPartialFills.get(1).getSubject().get("remaining_qty_after")))
+        .isEqualTo(3L);
+    // Double-count guard: the late fill (qty 1) appears in EXACTLY one PartialExitFilled.
+    assertThat(
+            captureAll("PartialExitFilled").stream()
+                .filter(e -> "brk-late-partial".equals(e.getSubject().get("broker_order_id"))))
+        .hasSize(1);
+  }
+
   // ---------- helpers ----------
 
   private PositionWorkflow newStub(String workflowId) {

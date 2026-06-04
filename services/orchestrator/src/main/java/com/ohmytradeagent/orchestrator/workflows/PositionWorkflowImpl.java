@@ -103,6 +103,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // exit cycle. Registered in AuditEventKinds.ALL_KINDS only.
   private static final String KIND_PARTIAL_EXIT_RETRY_REQUESTED = "PartialExitRetryRequested";
 
+  // Exit-retry late-fill reconcile audit kind (VERSION_EXIT_RETRY_LATE_FILL_RECONCILE v>=1):
+  // emitted by processOne()'s v=1 timeout branch when, AFTER the best-effort cancel of a timed-out
+  // exit order, a LATE fill of the original order is reconciled and already satisfies the exit
+  // intent (computed retry qty <= 0). The workflow places NO retry order and releases the in-flight
+  // latch. Observability-only — NOT a lifecycle/fill event (the real fill is the PartialExitFilled
+  // audit emitted alongside it); registered in AuditEventKinds.ALL_KINDS only (NOT in
+  // PARTIAL_EXIT_FILL_KINDS) so it does not inflate the realized-P&L ledger.
+  private static final String KIND_PARTIAL_EXIT_RETRY_SKIPPED_SATISFIED =
+      "PartialExitRetrySkippedSatisfied";
+
   private static final String VERSION_CHANDELIER = "chandelier-v1";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
   private static final String VERSION_FORCE_CLOSE = "force-close-v1";
@@ -206,6 +216,23 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * only when the contract expires today" still holds regardless of this flag.
    */
   private static final String VERSION_EOD_FLATTEN_OPT_IN = "eod-flatten-opt-in";
+
+  /**
+   * Exit-retry late-fill reconcile gate. The #216 retry loop cancels a timed-out exit limit order
+   * and retries with the SAME qtyToClose. But the original order can fill LATE — its onFill signal
+   * buffers and is delivered when the timeout-branch {@code exec.cancelOrder} activity completes.
+   * Pre-this-patch the retry-iteration top reset {@code lastFillEvent = null}, DISCARDING that
+   * buffered fill, so {@code remainingQty} stayed stale and the retry re-sent the full qty → naked
+   * short → Alpaca 403 "uncovered". v&gt;=1 reconciles after the cancel: it applies any late fill
+   * exactly once, recomputes the retry qty from {@code remainingQty - targetRemaining} (inherently
+   * ≤ remainingQty — the anti-naked-short guarantee), and SKIPs the retry (emitting {@link
+   * #KIND_PARTIAL_EXIT_RETRY_SKIPPED_SATISFIED}) when the late fill already satisfied the intent.
+   * v=DEFAULT_VERSION (in-flight workflows started before this patch) keep the original
+   * discard-and-retry-with-qtyToClose behavior; the only new command on v=0 is the appended
+   * getVersion marker (resolving to DEFAULT_VERSION for legacy histories).
+   */
+  private static final String VERSION_EXIT_RETRY_LATE_FILL_RECONCILE =
+      "exit-retry-late-fill-reconcile";
 
   /**
    * Issue #203 / #212 fallback: bounded wait for the first onFill before the workflow gives up and
@@ -919,6 +946,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       qtyToClose = Math.min(remainingQty, (long) Math.ceil(remainingQty * fraction));
     }
 
+    // Exit target captured BEFORE any fill mutates remainingQty (pure local, no command — unused on
+    // VERSION_EXIT_RETRY_LATE_FILL_RECONCILE v=0). The retry under v>=1 drives remainingQty back
+    // down to this target rather than re-sending the full qtyToClose; on v=0 retryQty stays ==
+    // qtyToClose so the retry exitIntent is byte-identical.
+    long targetRemaining = remainingQty - qtyToClose;
+    long retryQty = qtyToClose;
+
     auditLog(
         KIND_PARTIAL_EXIT_REQUESTED,
         subject(
@@ -949,6 +983,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // chain for replay safety; v>=1 (new executions) use the corrected lastTick → ref → peak chain.
     int sourceOrderVersion =
         Workflow.getVersion(VERSION_EXIT_RETRY_SOURCE_ORDER, Workflow.DEFAULT_VERSION, 1);
+    // Exit-retry late-fill reconcile gate. v=0 keeps the discard-and-retry-with-qtyToClose behavior
+    // (only the appended getVersion marker is a new command; it resolves to DEFAULT_VERSION for
+    // legacy histories). v>=1 reconciles any late fill after the timeout-branch cancel.
+    int lateFillReconcileVersion =
+        Workflow.getVersion(VERSION_EXIT_RETRY_LATE_FILL_RECONCILE, Workflow.DEFAULT_VERSION, 1);
     int retryCount = 0;
     long exitFillTtlSecs = 0L;
 
@@ -1007,7 +1046,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                 source,
                 "intent_key",
                 intentKey));
-        intent = exitIntent(req, qtyToClose, intentKey, freshLimit);
+        // VERSION_EXIT_RETRY_LATE_FILL_RECONCILE: retryQty is clamped to remainingQty - target
+        // after
+        // a late fill is reconciled in the timeout branch; on v=0 it stays == qtyToClose so this
+        // exitIntent is byte-identical.
+        intent = exitIntent(req, retryQty, intentKey, freshLimit);
       }
 
       lastFillEvent = null;
@@ -1041,32 +1084,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       }
 
       if (lastFillEvent != null) {
-        long filled = lastFillEvent.getFilledQty();
-        remainingQty -= filled;
-        Map<String, Object> exitSubject =
-            subject(
-                "signal_id",
-                req.getSignalId(),
-                "qty_filled",
-                filled,
-                "remaining_qty_after",
-                remainingQty,
-                "broker_order_id",
-                lastFillEvent.getBrokerOrderId(),
-                "avg_fill_price",
-                lastFillEvent.getAvgFillPrice());
-        // Issue #276: emit the per-symbol correlation key so the DailyPnl FIFO grouping matches
-        // this exit against its OWN symbol's entry basis. Replay-gated so legacy PositionWorkflow
-        // histories reproduce the old subject (no option_symbol) deterministically.
-        if (Workflow.getVersion(VERSION_EXIT_FILLED_OPTION_SYMBOL, Workflow.DEFAULT_VERSION, 1)
-            >= 1) {
-          exitSubject.put("option_symbol", input.getContractSymbol());
-        }
-        auditLog(KIND_PARTIAL_EXIT_FILLED, exitSubject);
-        exitInFlight = false;
-        currentInFlightBrokerOrderId = null;
-        currentInFlightSignalId = null;
-        currentInFlightIntentKey = null;
+        applyExitFill(req, lastFillEvent);
+        releaseExitInFlightLatches();
         if (remainingQty == 0 && closeReason == null) {
           closeReason = "normal_stc";
         }
@@ -1101,14 +1120,44 @@ public class PositionWorkflowImpl implements PositionWorkflow {
           // Cancel is best-effort; the broker may have already filled or rejected the order.
           // Reconciliation closes the loop on the real broker-side state.
         }
+        // VERSION_EXIT_RETRY_LATE_FILL_RECONCILE v>=1: the original exit order can fill LATE — its
+        // onFill signal buffers during the in-flight cancelOrder activity above and is delivered
+        // (lastFillEvent != null) when this workflow task resumes. Pre-this-patch the retry
+        // iteration top reset lastFillEvent=null and DISCARDED that fill, so remainingQty stayed
+        // stale and the retry re-sent the full qtyToClose → naked short → Alpaca 403. Reconcile it
+        // here exactly once, then drive the retry to the captured target instead of re-sending the
+        // full qty.
+        if (lateFillReconcileVersion >= 1) {
+          if (lastFillEvent != null) {
+            applyExitFill(req, lastFillEvent);
+            lastFillEvent =
+                null; // processed exactly once — never re-counted on the retry iteration
+          }
+          // remainingQty - targetRemaining is inherently <= remainingQty (the anti-naked-short
+          // guarantee): clamped at 0 below, never re-ceil'd. If the late fill already drove
+          // remainingQty down to (or past) the target, no retry is needed.
+          retryQty = Math.max(0, remainingQty - targetRemaining);
+          if (retryQty <= 0) {
+            auditLog(
+                KIND_PARTIAL_EXIT_RETRY_SKIPPED_SATISFIED,
+                subject(
+                    "signal_id",
+                    req.getSignalId(),
+                    "remaining_qty",
+                    remainingQty,
+                    "target_remaining",
+                    targetRemaining));
+            // The original filled late and satisfied the intent: place NO retry order and release
+            // the in-flight latch exactly like the drop path below.
+            releaseExitInFlightLatches();
+            return;
+          }
+        }
         if (retryCount < maxRetries) {
           retryCount++;
           continue; // Issue #216: place the retry order with a fresh limit price + intent_key.
         }
-        exitInFlight = false;
-        currentInFlightBrokerOrderId = null;
-        currentInFlightSignalId = null;
-        currentInFlightIntentKey = null;
+        releaseExitInFlightLatches();
       }
       // On EOD/expiry/risk_breach/force_close pre-emption (filledInTime=true but lastFillEvent
       // still null) we leave exitInFlight/currentInFlightSignalId set so flattenRemaining() can
@@ -1193,6 +1242,52 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               "reason", reason,
               "note", "orphan_until_phase_5_reconcile"));
     }
+  }
+
+  /**
+   * Apply a single exit fill: decrement {@code remainingQty} and emit the {@link
+   * #KIND_PARTIAL_EXIT_FILLED} audit (with the option_symbol correlation key under {@link
+   * #VERSION_EXIT_FILLED_OPTION_SYMBOL} v&gt;=1). Shared by the normal-path fill block and the
+   * VERSION_EXIT_RETRY_LATE_FILL_RECONCILE timeout-branch reconcile so the two audits are
+   * byte-identical. Does NOT touch the in-flight latches or {@code closeReason} — the caller owns
+   * lifecycle transitions. Idempotency (process each fill exactly once) is the caller's
+   * responsibility: the reconcile path nulls {@code lastFillEvent} immediately after this call so a
+   * late fill is never double-counted between the normal path and the reconcile.
+   */
+  /**
+   * Clear the exit in-flight latch + the tracked broker-order/signal/intent keys. Called when an
+   * exit resolves and no further retry order is pending (fill complete, retry skipped/satisfied, or
+   * retries exhausted). Pure state reset — no Temporal command, so it is replay-neutral.
+   */
+  private void releaseExitInFlightLatches() {
+    exitInFlight = false;
+    currentInFlightBrokerOrderId = null;
+    currentInFlightSignalId = null;
+    currentInFlightIntentKey = null;
+  }
+
+  private void applyExitFill(PartialExitRequest req, FillSignalPayload fillEvent) {
+    long filled = fillEvent.getFilledQty();
+    remainingQty -= filled;
+    Map<String, Object> exitSubject =
+        subject(
+            "signal_id",
+            req.getSignalId(),
+            "qty_filled",
+            filled,
+            "remaining_qty_after",
+            remainingQty,
+            "broker_order_id",
+            fillEvent.getBrokerOrderId(),
+            "avg_fill_price",
+            fillEvent.getAvgFillPrice());
+    // Issue #276: emit the per-symbol correlation key so the DailyPnl FIFO grouping matches this
+    // exit against its OWN symbol's entry basis. Replay-gated so legacy PositionWorkflow histories
+    // reproduce the old subject (no option_symbol) deterministically.
+    if (Workflow.getVersion(VERSION_EXIT_FILLED_OPTION_SYMBOL, Workflow.DEFAULT_VERSION, 1) >= 1) {
+      exitSubject.put("option_symbol", input.getContractSymbol());
+    }
+    auditLog(KIND_PARTIAL_EXIT_FILLED, exitSubject);
   }
 
   private OrderIntent exitIntent(
