@@ -16,9 +16,9 @@ import java.util.regex.Pattern;
  * {@code YYMMDD}, then {@code C}/{@code P}, then strike×1000 as 8 zero-padded digits — uppercase.
  * Example: {@code NFLX 260918C00100000}.
  *
- * <p>Yahoo's quote URL is {@code https://finance.yahoo.com/quote/<OCC>/}. The OCC's padding spaces
- * are NOT valid in a clickable Discord markdown link href, so they are percent-encoded as {@code
- * %20}; the visible display text stays human-readable (single-spaced, trimmed).
+ * <p>Yahoo's quote URL uses the COMPACT OCC with padding spaces stripped, e.g. {@code
+ * https://finance.yahoo.com/quote/NFLX260918C00100000/}. The space-bearing/padded form is not a
+ * valid Yahoo symbol and 404s. The visible display text stays human-readable (single-spaced).
  *
  * <p>NON-THROWING CONTRACT (the #295/#297 non-blocking rule): a notification must never throw. When
  * the OCC cannot be built/validated, {@link #markdown(String)} / {@link #markdownFromParts} return
@@ -190,21 +190,14 @@ public final class YahooOptionLink {
   }
 
   /**
-   * Builds a Discord markdown link. The href carries the canonical 21-char OCC — root padded with
-   * trailing spaces to 6 chars — with those padding spaces percent-encoded as {@code %20} (raw
-   * spaces are not clickable in a Discord markdown link). The display text stays human-readable
-   * (single-spaced, no padding).
+   * Builds a Discord markdown link. The href carries the COMPACT (space-stripped) OCC — the symbol
+   * form Yahoo's quote URL expects, e.g. {@code RDDT260612C00172500}. The padded 21-char form with
+   * {@code %20} spaces is NOT a valid Yahoo symbol (it 404s). The display text stays human-readable
+   * (single-spaced).
    */
   private static String link(String display, String compactOcc) {
-    String href = QUOTE_PREFIX + padded21(compactOcc).replace(" ", "%20") + "/";
+    String href = QUOTE_PREFIX + compactOcc + "/";
     return "[" + display + "](" + href + ")";
-  }
-
-  /** Re-pads a compact OCC to the canonical 21-char block (root right-padded to 6 with spaces). */
-  private static String padded21(String compactOcc) {
-    int tailStart = compactOcc.length() - 15;
-    return String.format("%-6s", compactOcc.substring(0, tailStart))
-        + compactOcc.substring(tailStart);
   }
 
   /**

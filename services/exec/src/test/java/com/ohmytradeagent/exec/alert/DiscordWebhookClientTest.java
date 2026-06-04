@@ -67,7 +67,7 @@ class DiscordWebhookClientTest {
             List.of(
                 new WebhookEmbed.Field(
                     "symbol",
-                    "[AAPL 260116C00200000](https://finance.yahoo.com/quote/AAPL%20%20260116C00200000/)",
+                    "[AAPL 260116C00200000](https://finance.yahoo.com/quote/AAPL260116C00200000/)",
                     false),
                 new WebhookEmbed.Field("reason", "422 too long", false))));
 
@@ -84,7 +84,7 @@ class DiscordWebhookClientTest {
     assertThat(body).contains("\"name\":\"symbol\"");
     assertThat(body)
         .contains(
-            "\"value\":\"[AAPL 260116C00200000](https://finance.yahoo.com/quote/AAPL%20%20260116C00200000/)\"");
+            "\"value\":\"[AAPL 260116C00200000](https://finance.yahoo.com/quote/AAPL260116C00200000/)\"");
     assertThat(body).contains("\"inline\":false");
     assertThat(body).contains("\"name\":\"reason\"");
     // A fields-only embed carries no description key.
