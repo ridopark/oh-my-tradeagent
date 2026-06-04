@@ -216,6 +216,13 @@ class InMemoryWatchlistEmitter:
         self._seen: set[str] = set()
         self.emitted: list[WatchlistMirrorPayload] = []
 
+    def preseed(self, workflow_id: str) -> None:
+        """Mark a workflow id as already-started, so a subsequent emit of the
+        same id reports ``deduped=True`` — simulates Temporal already holding a
+        workflow from before a process restart.
+        """
+        self._seen.add(workflow_id)
+
     async def emit(self, payload: WatchlistMirrorPayload) -> EmitResult:
         wf_id = watchlist_workflow_id_for(payload)
         if wf_id in self._seen:

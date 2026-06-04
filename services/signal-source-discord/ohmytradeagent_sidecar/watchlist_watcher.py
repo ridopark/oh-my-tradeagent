@@ -29,6 +29,7 @@ from playwright.async_api import Page
 
 from .discord_dom import MESSAGES_LI_SELECTOR, RawMessage, extract_recent
 from .emitter import WatchlistEmitter
+from .watcher import _BoundedSeenLRU
 from .watchlist_detector import is_watchlist
 from .watchlist_state import DailyMirrorState, et_today
 
@@ -68,6 +69,10 @@ class WatchlistWatcher:
         # In-process memo of the ET date we've confirmed mirrored, so we don't
         # re-read the state file every tick. Reset on ET day-rollover.
         self._mirrored_date: str | None = None
+        # Per-process seen-set so a stale watchlist that keeps re-appearing
+        # (e.g. after the midnight gate opens but before today's post lands) is
+        # emitted at most once, not every poll tick.
+        self._seen = _BoundedSeenLRU(200)
 
     def _already_mirrored_today(self, et_date: str) -> bool:
         if self._mirrored_date == et_date:
@@ -90,6 +95,9 @@ class WatchlistWatcher:
                 continue
             if not is_watchlist(m.content):
                 continue
+            if m.message_id in self._seen:
+                continue
+            self._seen.add(m.message_id)
             payload = WatchlistMirrorPayload(
                 schema_version=1,
                 tenant_id=self._tenant_id,
@@ -100,15 +108,24 @@ class WatchlistWatcher:
                 source_message_id=m.message_id,
             )
             result = await self._emitter.emit(payload)
+            if result.deduped:
+                # Temporal already has this message's workflow — it's a stale
+                # re-find (e.g. yesterday's watchlist still newest right after
+                # the midnight gate opens). Do NOT consume today's slot; keep
+                # scanning for a genuinely new post.
+                self._log.info(
+                    "watchlist already mirrored (msg=%s) — stale, not consuming today's slot",
+                    m.message_id,
+                )
+                continue
             self._state.record(et_date=et_date, source_message_id=m.message_id)
             self._mirrored_date = et_date
             self._log.info(
-                "mirrored watchlist for %s from %s (msg=%s workflow_id=%s deduped=%s)",
+                "mirrored watchlist for %s from %s (msg=%s workflow_id=%s)",
                 et_date,
                 m.author,
                 m.message_id,
                 result.workflow_id,
-                result.deduped,
             )
             return
 
