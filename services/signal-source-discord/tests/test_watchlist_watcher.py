@@ -108,3 +108,62 @@ async def test_workflow_id_shape(tmp_path: pathlib.Path) -> None:
     assert (
         watchlist_workflow_id_for(p) == "t-dev/s-copytrade-v1/watchlist/msg-1"
     )
+
+
+def _wf_id_for_msg(message_id: str) -> str:
+    return f"t-dev/s-copytrade-v1/watchlist/{message_id}"
+
+
+async def test_midnight_stale_across_restart_does_not_consume_today(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression for the midnight race (homelab incident 2026-06-04).
+
+    At midnight ET the gate opens for the new day, but the channel's newest
+    watchlist is still yesterday's. The watcher re-finds it; Temporal already
+    has that workflow (from before the restart) → deduped=True. The day's slot
+    must NOT be consumed, so the real morning post still mirrors.
+    """
+    emitter = InMemoryWatchlistEmitter()
+    # Simulate Temporal already holding the stale message from before restart.
+    emitter.preseed(_wf_id_for_msg("stale-yesterday"))
+    w = _make_watcher(tmp_path, emitter)
+
+    await w.process([_msg("stale-yesterday")], et_date="2026-06-04")
+    # The stale re-find was deduped — it must NOT have consumed today's slot.
+    assert emitter.emitted == []
+    assert w._state.already_mirrored_today("2026-06-04") is False  # type: ignore[attr-defined]
+
+    # The real morning post (different id) arrives and IS mirrored + recorded.
+    await w.process([_msg("real-morning")], et_date="2026-06-04")
+    assert len(emitter.emitted) == 1
+    assert emitter.emitted[0].source_message_id == "real-morning"
+    assert w._state.already_mirrored_today("2026-06-04") is True  # type: ignore[attr-defined]
+
+
+async def test_seen_set_emits_stale_message_only_once_across_ticks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Until a real post arrives, the same stale watchlist must be emitted at
+    most once per process run (in-process seen-set), not every 45s tick.
+    """
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(tmp_path, emitter)
+
+    await w.process([_msg("stale")], et_date="2026-06-04")
+    await w.process([_msg("stale")], et_date="2026-06-04")
+
+    # The stale message was a fresh id here, so the FIRST tick emits it. The
+    # deduped path then leaves the day open; the SECOND tick must be skipped by
+    # the seen-set rather than re-emitting. emit() was called exactly once.
+    assert len(emitter.emitted) == 1
+
+
+async def test_brand_new_watchlist_mirrors_and_records_first_try(
+    tmp_path: pathlib.Path,
+) -> None:
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(tmp_path, emitter)
+    await w.process([_msg("msg-1")], et_date="2026-06-04")
+    assert len(emitter.emitted) == 1
+    assert w._state.already_mirrored_today("2026-06-04") is True  # type: ignore[attr-defined]
