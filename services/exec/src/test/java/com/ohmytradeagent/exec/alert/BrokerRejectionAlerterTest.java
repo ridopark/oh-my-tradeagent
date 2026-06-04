@@ -43,8 +43,7 @@ class BrokerRejectionAlerterTest {
     WebhookEmbed.Field symbol = fieldByName(embed, "symbol");
     assertThat(symbol.value())
         .isEqualTo(
-            "[AAPL 260116C00200000]"
-                + "(https://finance.yahoo.com/quote/AAPL%20%20260116C00200000/)");
+            "[AAPL 260116C00200000]" + "(https://finance.yahoo.com/quote/AAPL260116C00200000/)");
     assertThat(fieldByName(embed, "reason").value()).contains("account blocked");
     assertThat(fieldByName(embed, "intent_key").value()).isEqualTo("intent-key-1");
     assertThat(fieldByName(embed, "client_order_id").value()).isEqualTo("coid-abc");

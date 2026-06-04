@@ -49,8 +49,7 @@ class OrderFailureAlerterTest {
     // The contract field is a clickable Yahoo link over the padded OCC.
     assertThat(field(embed, "symbol"))
         .isEqualTo(
-            "[AAPL 260116C00200000]"
-                + "(https://finance.yahoo.com/quote/AAPL%20%20260116C00200000/)");
+            "[AAPL 260116C00200000]" + "(https://finance.yahoo.com/quote/AAPL260116C00200000/)");
     assertThat(field(embed, "reason")).contains("DAILY_LOSS_LIMIT", "tenant daily loss exceeded");
     assertThat(field(embed, "signal_id")).isEqualTo("111:0");
     // workflow_id demoted to the footer.
@@ -72,7 +71,7 @@ class OrderFailureAlerterTest {
 
     WebhookEmbed embed = capture(webhook);
     assertThat(embed.title()).contains("STC (exit)");
-    assertThat(field(embed, "symbol")).contains("TSLA%20%20260116P00100000");
+    assertThat(field(embed, "symbol")).contains("TSLA260116P00100000");
     assertThat(field(embed, "signal_id")).isEqualTo("222:1");
     assertThat(embed.footer()).contains("wf-orphan-2");
   }
@@ -91,7 +90,7 @@ class OrderFailureAlerterTest {
 
     WebhookEmbed embed = capture(webhook);
     assertThat(embed.title()).contains("BTO (entry)");
-    assertThat(field(embed, "symbol")).contains("SPY%20%20%20260116C00500000");
+    assertThat(field(embed, "symbol")).contains("SPY260116C00500000");
     // EntryExpired carries no reason_code; the kind is surfaced as the reason.
     assertThat(field(embed, "reason")).isEqualTo("EntryExpired");
     assertThat(field(embed, "kind")).isEqualTo("EntryExpired");
@@ -183,7 +182,7 @@ class OrderFailureAlerterTest {
     // Exactly one dispatch (the #311 no-alert gap is closed).
     WebhookEmbed embed = capture(webhook);
     assertThat(embed.title()).contains("BTO (entry)");
-    assertThat(field(embed, "symbol")).contains("AAPL%20%20260116C00200000");
+    assertThat(field(embed, "symbol")).contains("AAPL260116C00200000");
     assertThat(field(embed, "reason")).contains("AUTHOR_NOT_WHITELISTED");
   }
 
@@ -249,7 +248,7 @@ class OrderFailureAlerterTest {
     // SignalFeedAlerter's own tests, not here.
     WebhookEmbed embed = capture(webhook);
     assertThat(embed.title()).contains("BTO (entry)");
-    assertThat(field(embed, "symbol")).contains("AAPL%20%20260116C00200000");
+    assertThat(field(embed, "symbol")).contains("AAPL260116C00200000");
     assertThat(field(embed, "reason")).contains("AUTHOR_NOT_WHITELISTED");
   }
 

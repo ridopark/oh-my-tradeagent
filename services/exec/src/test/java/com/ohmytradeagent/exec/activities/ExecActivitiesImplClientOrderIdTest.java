@@ -111,7 +111,7 @@ class ExecActivitiesImplClientOrderIdTest {
     verify(webhook).postEmbed(embedCaptor.capture());
     WebhookEmbed embed = embedCaptor.getValue();
     assertThat(embed.title()).contains("STC (exit)");
-    assertThat(fieldValue(embed, "symbol")).contains("TSLA%20%20260529C00435000");
+    assertThat(fieldValue(embed, "symbol")).contains("TSLA260529C00435000");
     assertThat(fieldValue(embed, "reason")).contains("client_order_id too long");
     assertThat(fieldValue(embed, "client_order_id"))
         .isEqualTo(ClientOrderId.forIntent(EXIT_INTENT_KEY));
@@ -132,7 +132,7 @@ class ExecActivitiesImplClientOrderIdTest {
     verify(webhook).postEmbed(embedCaptor.capture());
     WebhookEmbed embed = embedCaptor.getValue();
     assertThat(embed.title()).contains("BTO (entry)");
-    assertThat(fieldValue(embed, "symbol")).contains("AAPL%20%20260116C00200000");
+    assertThat(fieldValue(embed, "symbol")).contains("AAPL260116C00200000");
     assertThat(fieldValue(embed, "reason")).contains("account blocked");
     assertThat(fieldValue(embed, "client_order_id"))
         .isEqualTo(ClientOrderId.forIntent(ENTRY_INTENT_KEY));

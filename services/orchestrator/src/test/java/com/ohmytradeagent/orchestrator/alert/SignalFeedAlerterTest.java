@@ -50,8 +50,7 @@ class SignalFeedAlerterTest {
     // The contract field is the Yahoo link constructed from ticker+expiry+strike+right.
     assertThat(field(embed, "contract"))
         .isEqualTo(
-            "[NVDA 260516C00140000]"
-                + "(https://finance.yahoo.com/quote/NVDA%20%20260516C00140000/)");
+            "[NVDA 260516C00140000]" + "(https://finance.yahoo.com/quote/NVDA260516C00140000/)");
     assertThat(field(embed, "price")).isEqualTo("2.30");
     assertThat(field(embed, "author")).isEqualTo("acme_trader");
     assertThat(field(embed, "signal_id")).isEqualTo("111:0");
@@ -113,7 +112,7 @@ class SignalFeedAlerterTest {
     assertThat(embed.title()).contains("accepted");
     assertThat(embed.color()).isEqualTo(5763719); // green / success
     // The resolved option_symbol becomes a Yahoo link.
-    assertThat(field(embed, "symbol")).contains("NVDA%20%20260516C00140000");
+    assertThat(field(embed, "symbol")).contains("NVDA260516C00140000");
     assertThat(field(embed, "accepted")).contains("3").contains("2.30");
   }
 
@@ -158,8 +157,7 @@ class SignalFeedAlerterTest {
     // No option_symbol → constructed from parts (the plan's matrix), Yahoo-linked.
     assertThat(field(embed, "contract"))
         .isEqualTo(
-            "[NFLX 260918C00100000]"
-                + "(https://finance.yahoo.com/quote/NFLX%20%20260918C00100000/)");
+            "[NFLX 260918C00100000]" + "(https://finance.yahoo.com/quote/NFLX260918C00100000/)");
   }
 
   @Test

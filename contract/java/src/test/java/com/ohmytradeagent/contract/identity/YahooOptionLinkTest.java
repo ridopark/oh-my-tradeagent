@@ -7,9 +7,9 @@ import java.math.BigDecimal;
 import org.junit.jupiter.api.Test;
 
 /**
- * OCC → Yahoo Finance link helper. The href carries the canonical padded 21-char OCC with {@code
- * %20}-encoded spaces; the display text is human-readable; malformed/absent input degrades to plain
- * text (never throws — the #295/#297 non-blocking rule).
+ * OCC → Yahoo Finance link helper. The href carries the COMPACT (space-stripped) OCC — the symbol
+ * form Yahoo's quote URL expects; the display text is human-readable; malformed/absent input
+ * degrades to plain text (never throws — the #295/#297 non-blocking rule).
  */
 class YahooOptionLinkTest {
 
@@ -19,33 +19,32 @@ class YahooOptionLinkTest {
     String md = YahooOptionLink.markdown("NFLX  260918C00100000");
     assertThat(md)
         .isEqualTo(
-            "[NFLX 260918C00100000]"
-                + "(https://finance.yahoo.com/quote/NFLX%20%20260918C00100000/)");
+            "[NFLX 260918C00100000]" + "(https://finance.yahoo.com/quote/NFLX260918C00100000/)");
   }
 
   @Test
-  void compactOccIsPaddedInHrefAndReadableInDisplay() {
-    // A compact (no-padding) OCC still produces the padded %20 href and a single-spaced display.
+  void hrefIsCompactWhileDisplayIsReadable() {
+    // The href is the compact (no-space) OCC Yahoo expects; the display stays single-spaced.
     String md = YahooOptionLink.markdown("AAPL260116C00200000");
     assertThat(md)
         .isEqualTo(
-            "[AAPL 260116C00200000]"
-                + "(https://finance.yahoo.com/quote/AAPL%20%20260116C00200000/)");
+            "[AAPL 260116C00200000]" + "(https://finance.yahoo.com/quote/AAPL260116C00200000/)");
   }
 
   @Test
   void putRightIsPreserved() {
     String md = YahooOptionLink.markdown("TSLA260116P00100000");
-    assertThat(md).contains("quote/TSLA%20%20260116P00100000/");
+    assertThat(md).contains("quote/TSLA260116P00100000/");
     assertThat(md).contains("[TSLA 260116P00100000]");
   }
 
   @Test
-  void sixCharRootHasNoPaddingSpaces() {
-    // A full 6-char root leaves no padding, so the href has no %20 between root and tail.
+  void paddedRootIsStrippedInHref() {
+    // A padded OCC (root < 6 chars) must yield a compact, space-free Yahoo href.
     String md = YahooOptionLink.markdown("ABCDEF260116C00100000");
     assertThat(md).contains("quote/ABCDEF260116C00100000/");
     assertThat(md).contains("[ABCDEF 260116C00100000]");
+    assertThat(md).doesNotContain("%20");
   }
 
   @Test
@@ -54,8 +53,7 @@ class YahooOptionLinkTest {
     String md = YahooOptionLink.markdownFromParts("TSLA", "260603", 'C', "435");
     assertThat(md)
         .isEqualTo(
-            "[TSLA 260603C00435000]"
-                + "(https://finance.yahoo.com/quote/TSLA%20%20260603C00435000/)");
+            "[TSLA 260603C00435000]" + "(https://finance.yahoo.com/quote/TSLA260603C00435000/)");
   }
 
   @Test
@@ -63,7 +61,7 @@ class YahooOptionLinkTest {
     // ISO expiry + a fractional strike (137.5 → 137500 → 00137500).
     String md =
         YahooOptionLink.markdownFromParts("NVDA", "2026-05-16", 'c', new BigDecimal("137.5"));
-    assertThat(md).contains("quote/NVDA%20%20260516C00137500/");
+    assertThat(md).contains("quote/NVDA260516C00137500/");
     assertThat(md).contains("[NVDA 260516C00137500]");
   }
 
