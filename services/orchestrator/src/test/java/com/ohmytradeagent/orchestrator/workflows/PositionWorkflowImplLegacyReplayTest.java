@@ -102,6 +102,20 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Pins the exit-retry late-fill reconcile version-marker literal so a rename fails loudly. The
+   * literal is part of the workflow's replay contract: a getVersion change-point keyed on a changed
+   * string re-resolves to DEFAULT_VERSION for legacy histories, which would silently alter v=0
+   * behavior.
+   */
+  @Test
+  void versionExitRetryLateFillReconcileConstantNameIsStable() throws Exception {
+    Field marker =
+        PositionWorkflowImpl.class.getDeclaredField("VERSION_EXIT_RETRY_LATE_FILL_RECONCILE");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("exit-retry-late-fill-reconcile");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#276 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The recorded {@code PartialExitFilled} subject has no
    * {@code option_symbol} key; the current impl's v=DEFAULT_VERSION branch must reproduce that

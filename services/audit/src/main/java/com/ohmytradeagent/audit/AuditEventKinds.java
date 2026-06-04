@@ -155,6 +155,14 @@ public final class AuditEventKinds {
           // second timeout, after which the STC is dropped) closes the cycle. Intentionally
           // placed in ALL_KINDS only, not in PARTIAL_EXIT_REQUEST_KINDS or _FILL_KINDS.
           "PartialExitRetryRequested",
+          // Exit-retry late-fill reconcile (VERSION_EXIT_RETRY_LATE_FILL_RECONCILE): emitted by
+          // PositionWorkflowImpl when a timed-out exit order fills LATE during the best-effort
+          // cancel and that late fill already satisfies the exit intent, so the retry is SKIPPED
+          // (no order placed). Observability-only — the actual fill is the accompanying
+          // PartialExitFilled audit; intentionally placed in ALL_KINDS only, NOT in
+          // PARTIAL_EXIT_FILL_KINDS (it must not inflate the realized-P&L ledger atop the real
+          // PartialExitFilled) nor any terminal/fill group.
+          "PartialExitRetrySkippedSatisfied",
           // Issue #205: emitted by PositionWorkflowImpl when a partial-exit signal lands on a
           // remainingQty<=1 runner with floor(qty * fraction)==0 and config selects SKIP. Also
           // classified in PARTIAL_EXIT_FILL_KINDS (it fulfills the partial-exit request by
