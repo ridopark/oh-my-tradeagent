@@ -307,6 +307,7 @@ class CopytradeSignalWorkflowImplTest {
     String posWfId = WorkflowIds.position("dev", "copytrade-v1", "NVDA  260516C00140000", "111:0");
     when(positionLookup.findPositionWorkflowId("dev", "copytrade-v1", "NVDA  260516C00140000"))
         .thenReturn(posWfId);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
 
     CopytradeSignalPayload stc = btoPayload();
     stc.setAction(CopytradeSignalPayload.Action.STC);
@@ -451,6 +452,7 @@ class CopytradeSignalWorkflowImplTest {
 
     when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
         .thenReturn(posWfId);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
 
     CopytradeSignalPayload p = btoPayload();
     p.setAction(CopytradeSignalPayload.Action.STC);
@@ -496,6 +498,7 @@ class CopytradeSignalWorkflowImplTest {
 
     when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
         .thenReturn(posWfId);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
 
     CopytradeSignalPayload p = btoPayload();
     p.setAction(CopytradeSignalPayload.Action.STC);
@@ -539,6 +542,7 @@ class CopytradeSignalWorkflowImplTest {
 
     when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
         .thenReturn(posWfId);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
 
     CopytradeSignalPayload p = btoPayload();
     p.setAction(CopytradeSignalPayload.Action.STC);
@@ -552,6 +556,95 @@ class CopytradeSignalWorkflowImplTest {
     assertThat(
             all.getAllValues().stream().anyMatch(e -> "ChandelierArmRequested".equals(e.getKind())))
         .isFalse();
+  }
+
+  @Test
+  void stcAction_cachedPositionWorkflowNotRunning_emitsOrphanStc() {
+    // GAP regression: a stale Redis mapping returns a non-null but DEAD (Failed/terminal)
+    // PositionWorkflow id. Change point A (preventive guard) must short-circuit BEFORE the
+    // ExitRequested audit and BEFORE signalling the dead workflow, emitting OrphanSTC and letting
+    // the CopytradeSignalWorkflow COMPLETE. Without the fix the handler emits ExitRequested then
+    // signals a dead id, the SignalExternalWorkflowException propagates, and the workflow FAILS.
+    when(strategy.get(anyString(), anyString())).thenReturn(stcConfig());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+
+    String deadWfId = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-dead";
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(deadWfId);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setAction(CopytradeSignalPayload.Action.STC);
+    p.setTail("half out");
+    p.setSignalId("dead-pos-1");
+    // A FAILED workflow throws WorkflowFailedException out of runWorkflow; reaching this line
+    // proves the workflow COMPLETED.
+    runWorkflow(p);
+
+    AuditEvent orphan = capture("OrphanSTC");
+    assertThat(orphan.getSubject())
+        .containsEntry("signal_id", "dead-pos-1")
+        .containsEntry("option_symbol", "NVDA  260516C00140000")
+        .containsEntry("position_workflow_id", deadWfId)
+        .containsEntry("reason", "position_workflow_not_running");
+
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    assertThat(all.getAllValues().stream().anyMatch(e -> "ExitRequested".equals(e.getKind())))
+        .isFalse();
+  }
+
+  @Test
+  void stcAction_signalDispatchThrows_emitsOrphanStcAndCompletes() {
+    // Defense-in-depth (change point B): the running-guard passes (isPositionWorkflowRunning=true)
+    // but the partialExit dispatch still throws SignalExternalWorkflowException (TOCTOU race / the
+    // workflow died between the guard and the signal). The handler must catch it SPECIFICALLY,
+    // emit OrphanSTC with an "error" key, and COMPLETE. ExitRequested IS emitted here (the guard
+    // passed before dispatch), which distinguishes this from the change-point-A path.
+    when(strategy.get(anyString(), anyString())).thenReturn(stcConfig());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+
+    // A workflow id that was NEVER started: the guard mock says RUNNING, but the actual external
+    // signal command fails on the test server with SignalExternalWorkflowException.
+    String neverStartedWfId = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-never-started";
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(neverStartedWfId);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setAction(CopytradeSignalPayload.Action.STC);
+    p.setTail("half out");
+    p.setSignalId("dispatch-throws-1");
+    runWorkflow(p);
+
+    AuditEvent orphan = capture("OrphanSTC");
+    assertThat(orphan.getSubject())
+        .containsEntry("signal_id", "dispatch-throws-1")
+        .containsEntry("option_symbol", "NVDA  260516C00140000")
+        .containsEntry("position_workflow_id", neverStartedWfId)
+        .containsEntry("reason", "signal_dispatch_failed");
+    assertThat(orphan.getSubject()).containsKey("error");
+
+    // ExitRequested was emitted BEFORE the failed dispatch (guard passed) — distinguishes from
+    // the change-point-A path which short-circuits before ExitRequested.
+    AuditEvent exit = capture("ExitRequested");
+    assertThat(exit.getSubject()).containsEntry("signal_id", "dispatch-throws-1");
   }
 
   // ---------- Phase 5: risk_breach ----------
@@ -692,6 +785,7 @@ class CopytradeSignalWorkflowImplTest {
     String posWfId = WorkflowIds.position("dev", "copytrade-v1", "NVDA  260516C00140000", "111:0");
     when(positionLookup.findPositionWorkflowId("dev", "copytrade-v1", "NVDA  260516C00140000"))
         .thenReturn(posWfId);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
 
     CopytradeSignalPayload stc = btoPayload();
     stc.setAction(CopytradeSignalPayload.Action.STC);
