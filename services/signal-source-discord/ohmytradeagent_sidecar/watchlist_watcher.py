@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
-from datetime import date
+from datetime import date, datetime
 
 from playwright.async_api import Page
 
@@ -31,9 +31,29 @@ from .discord_dom import MESSAGES_LI_SELECTOR, RawMessage, extract_recent
 from .emitter import WatchlistEmitter
 from .watcher import _BoundedSeenLRU
 from .watchlist_detector import is_watchlist
-from .watchlist_state import DailyMirrorState, et_today
+from .watchlist_state import _ET, DailyMirrorState, et_today
 
 from ohmytradeagent_contract.models.watchlist_mirror_payload import WatchlistMirrorPayload
+
+
+def _posted_et_date(timestamp_iso: str) -> str | None:
+    """ET calendar date (ISO ``YYYY-MM-DD``) of a Discord posted timestamp, or
+    ``None`` if the timestamp is missing or unparseable.
+
+    Uses the same ``America/New_York`` zone as ``et_today`` so the posted date
+    and "today" are compared in one consistent calendar.
+    """
+    if not timestamp_iso:
+        return None
+    try:
+        # Discord emits e.g. "2026-06-05T13:00:00.000Z"; normalize the trailing
+        # 'Z' that older Pythons' fromisoformat rejects.
+        dt = datetime.fromisoformat(timestamp_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(_ET).date().isoformat()
 
 
 class WatchlistWatcher:
@@ -98,6 +118,33 @@ class WatchlistWatcher:
             if m.message_id in self._seen:
                 continue
             self._seen.add(m.message_id)
+            # Posted-date gate: a watchlist-shaped message whose POSTED ET date
+            # is not today is a prior-day watchlist still in scrollback (e.g. at
+            # midnight ET, before today's post lands). Mirroring it would
+            # mislabel it with today's date and consume the day, blocking the
+            # real post. Missing/unparseable timestamp → fail closed (skip), as
+            # re-posting a stale watchlist is strictly worse than skipping a rare
+            # timestamp-less message.
+            posted_et = _posted_et_date(m.timestamp_iso)
+            if posted_et is None:
+                # A watchlist-shaped message with no parseable timestamp is
+                # unexpected (the signal path relies on it too) — fail closed.
+                self._log.warning(
+                    "skipping watchlist (msg=%s) — missing/unparseable timestamp",
+                    m.message_id,
+                )
+                continue
+            if posted_et != et_date:
+                # Expected/common: a prior-day watchlist still in scrollback (e.g.
+                # the newest one at midnight ET, before today's post lands). Skip
+                # quietly so we don't mislabel it with today's date + burn the day.
+                self._log.debug(
+                    "skipping stale watchlist (msg=%s) — posted ET %s != today %s",
+                    m.message_id,
+                    posted_et,
+                    et_date,
+                )
+                continue
             payload = WatchlistMirrorPayload(
                 schema_version=1,
                 tenant_id=self._tenant_id,

@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import pathlib
 
+import pytest
+
 from ohmytradeagent_sidecar.discord_dom import RawMessage
 from ohmytradeagent_sidecar.emitter import (
     InMemoryWatchlistEmitter,
@@ -22,11 +24,19 @@ AUTHOR = "TradingTheTrend"
 WATCHLIST = "SPY 762c > 761.00\nQQQ 480p < 481.00"
 
 
-def _msg(message_id: str, *, author: str = AUTHOR, content: str = WATCHLIST) -> RawMessage:
+def _msg(
+    message_id: str,
+    *,
+    author: str = AUTHOR,
+    content: str = WATCHLIST,
+    timestamp_iso: str | None = "2026-06-03T15:00:00Z",
+) -> RawMessage:
+    # Default posted-time → 2026-06-03 in America/New_York (11:00 EDT), so the
+    # existing emit-tests (et_date="2026-06-03") still pass the posted-date gate.
     return RawMessage(
         message_id=message_id,
         author=author,
-        timestamp_iso="2026-06-03T13:35:00Z",
+        timestamp_iso=timestamp_iso or "",
         content=content,
     )
 
@@ -129,13 +139,21 @@ async def test_midnight_stale_across_restart_does_not_consume_today(
     emitter.preseed(_wf_id_for_msg("stale-yesterday"))
     w = _make_watcher(tmp_path, emitter)
 
-    await w.process([_msg("stale-yesterday")], et_date="2026-06-04")
+    # Both messages are posted-today (this test exercises the deduped-skip path,
+    # not the posted-date gate); give them today's ET timestamp.
+    await w.process(
+        [_msg("stale-yesterday", timestamp_iso="2026-06-04T15:00:00Z")],
+        et_date="2026-06-04",
+    )
     # The stale re-find was deduped — it must NOT have consumed today's slot.
     assert emitter.emitted == []
     assert w._state.already_mirrored_today("2026-06-04") is False  # type: ignore[attr-defined]
 
     # The real morning post (different id) arrives and IS mirrored + recorded.
-    await w.process([_msg("real-morning")], et_date="2026-06-04")
+    await w.process(
+        [_msg("real-morning", timestamp_iso="2026-06-04T15:00:00Z")],
+        et_date="2026-06-04",
+    )
     assert len(emitter.emitted) == 1
     assert emitter.emitted[0].source_message_id == "real-morning"
     assert w._state.already_mirrored_today("2026-06-04") is True  # type: ignore[attr-defined]
@@ -150,8 +168,8 @@ async def test_seen_set_emits_stale_message_only_once_across_ticks(
     emitter = InMemoryWatchlistEmitter()
     w = _make_watcher(tmp_path, emitter)
 
-    await w.process([_msg("stale")], et_date="2026-06-04")
-    await w.process([_msg("stale")], et_date="2026-06-04")
+    await w.process([_msg("stale", timestamp_iso="2026-06-04T15:00:00Z")], et_date="2026-06-04")
+    await w.process([_msg("stale", timestamp_iso="2026-06-04T15:00:00Z")], et_date="2026-06-04")
 
     # The stale message was a fresh id here, so the FIRST tick emits it. The
     # deduped path then leaves the day open; the SECOND tick must be skipped by
@@ -164,6 +182,79 @@ async def test_brand_new_watchlist_mirrors_and_records_first_try(
 ) -> None:
     emitter = InMemoryWatchlistEmitter()
     w = _make_watcher(tmp_path, emitter)
-    await w.process([_msg("msg-1")], et_date="2026-06-04")
+    await w.process([_msg("msg-1", timestamp_iso="2026-06-04T15:00:00Z")], et_date="2026-06-04")
     assert len(emitter.emitted) == 1
     assert w._state.already_mirrored_today("2026-06-04") is True  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Posted-date gate (second midnight-race manifestation): a watchlist-shaped
+# message whose POSTED ET date != today is a prior-day watchlist in scrollback
+# and must NOT be mirrored / mislabeled with today's date.
+# ---------------------------------------------------------------------------
+
+
+async def test_stale_prior_day_watchlist_is_not_mirrored(tmp_path: pathlib.Path) -> None:
+    """Regression: at midnight ET the newest watchlist is still yesterday's and
+    has never been mirrored (so it is NOT deduped). The posted-date gate must
+    skip it and leave the day open so the real ~8:20am post still mirrors.
+    """
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(tmp_path, emitter)
+
+    # Posted 2026-06-04 (ET), processed on 2026-06-05.
+    await w.process(
+        [_msg("stale", timestamp_iso="2026-06-04T13:00:00Z")], et_date="2026-06-05"
+    )
+    assert emitter.emitted == []
+    assert w._state.already_mirrored_today("2026-06-05") is False  # type: ignore[attr-defined]
+
+    # A subsequent today-dated watchlist still mirrors (day stayed open).
+    await w.process(
+        [_msg("today", timestamp_iso="2026-06-05T13:00:00Z")], et_date="2026-06-05"
+    )
+    assert len(emitter.emitted) == 1
+    assert emitter.emitted[0].source_message_id == "today"
+    assert w._state.already_mirrored_today("2026-06-05") is True  # type: ignore[attr-defined]
+
+
+async def test_todays_watchlist_after_skipping_stale_one(tmp_path: pathlib.Path) -> None:
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(tmp_path, emitter)
+
+    # Scrollback order: stale prior-day watchlist first, then today's.
+    await w.process(
+        [
+            _msg("stale", timestamp_iso="2026-06-04T13:00:00Z"),
+            _msg("today", timestamp_iso="2026-06-05T13:00:00Z"),
+        ],
+        et_date="2026-06-05",
+    )
+    assert len(emitter.emitted) == 1
+    assert emitter.emitted[0].source_message_id == "today"
+    assert w._state.already_mirrored_today("2026-06-05") is True  # type: ignore[attr-defined]
+
+
+async def test_todays_watchlist_mirrors(tmp_path: pathlib.Path) -> None:
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(tmp_path, emitter)
+    await w.process(
+        [_msg("msg-1", timestamp_iso="2026-06-05T13:00:00Z")], et_date="2026-06-05"
+    )
+    assert len(emitter.emitted) == 1
+    assert w._state.already_mirrored_today("2026-06-05") is True  # type: ignore[attr-defined]
+
+
+async def test_missing_timestamp_is_skipped(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(tmp_path, emitter)
+
+    caplog.set_level(logging.WARNING, logger="test")
+    await w.process(
+        [_msg("no-ts", timestamp_iso=None)], et_date="2026-06-05"
+    )
+    assert emitter.emitted == []
+    assert w._state.already_mirrored_today("2026-06-05") is False  # type: ignore[attr-defined]
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
