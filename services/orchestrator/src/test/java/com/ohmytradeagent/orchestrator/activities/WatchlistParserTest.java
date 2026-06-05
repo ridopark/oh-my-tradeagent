@@ -99,18 +99,70 @@ class WatchlistParserTest {
   }
 
   @Test
-  void garbageAmongValidPlaysMarksResultNotClean() {
+  void markerlessCommentaryAmongValidPlaysIsTolerated() {
+    // Marker-less prose (no comparator, no strike+right token) is ignorable chatter now, so a
+    // valid play alongside a friendly comment stays clean (renders the embed, not raw fallback).
     ParseResult result =
         WatchlistParser.parse("SPY 762c > 761.00\nthis is random commentary about the market");
+
+    assertThat(result.clean()).isTrue();
+    assertThat(result.rows()).extracting(TickerWatch::ticker).containsExactly("SPY");
+  }
+
+  @Test
+  void malformedLevelAmongValidPlaysMarksResultNotClean() {
+    // A line that DOES carry a comparator but is a broken level still flips clean=false.
+    ParseResult result = WatchlistParser.parse("SPY 762c > 761.00\nfoo > bar baz");
 
     assertThat(result.clean()).isFalse();
   }
 
   @Test
-  void nullOrBlankIsCleanWithNoRows() {
-    assertThat(WatchlistParser.parse(null).clean()).isTrue();
+  void nullOrBlankIsNotCleanWithNoRows() {
+    // clean now requires ≥1 parsed row, so an empty watchlist is not clean (→ raw fallback). The
+    // caller already double-guards on non-empty rows, so behavior is unchanged for empty input.
+    assertThat(WatchlistParser.parse(null).clean()).isFalse();
     assertThat(WatchlistParser.parse(null).rows()).isEmpty();
     assertThat(WatchlistParser.parse("   \n\n").rows()).isEmpty();
-    assertThat(WatchlistParser.parse("   \n\n").clean()).isTrue();
+    assertThat(WatchlistParser.parse("   \n\n").clean()).isFalse();
+  }
+
+  @Test
+  void parse_watchlistWithTrailingGreeting_isCleanAndIgnoresChatter() {
+    // Real sample + a trailing friendly sign-off and blank lines: the greeting carries no
+    // comparator and no strike+right token, so it is ignorable chatter — it must not flip clean.
+    ParseResult result = WatchlistParser.parse(SAMPLE + "\n\nGood luck @everyone\n\n");
+
+    assertThat(result.clean()).isTrue();
+    assertThat(result.rows())
+        .extracting(TickerWatch::ticker)
+        .containsExactly("SPY", "SHOP", "ORCL", "UNH", "TSM", "TSLA");
+  }
+
+  @Test
+  void parse_malformedLevelLineWithComparator_staysUncleanForRawFallback() {
+    // Has a comparator but does not fully parse — must still flip clean=false so a real level is
+    // never silently dropped (raw fallback preserved).
+    ParseResult result = WatchlistParser.parse("SPY 762c > 761.00\nSPY > 761");
+
+    assertThat(result.clean()).isFalse();
+  }
+
+  @Test
+  void parse_strikeRightTokenWithoutComparator_staysUncleanForRawFallback() {
+    // A line with a <number><c|p> strike+right token but NO comparator still does not fully parse,
+    // yet it is level-ish (a dropped direction) — must stay unclean so the raw fallback fires.
+    ParseResult result = WatchlistParser.parse("SPY 762c > 761.00\nSPY 745p 748.00");
+
+    assertThat(result.clean()).isFalse();
+  }
+
+  @Test
+  void parse_chatterOnlyWithNoRows_isNotClean() {
+    // Pure chatter with no parsed rows: clean requires at least one row.
+    ParseResult result = WatchlistParser.parse("Good luck @everyone\nhello there");
+
+    assertThat(result.clean()).isFalse();
+    assertThat(result.rows()).isEmpty();
   }
 }

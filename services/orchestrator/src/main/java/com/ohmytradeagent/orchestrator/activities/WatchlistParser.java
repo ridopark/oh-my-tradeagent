@@ -27,6 +27,11 @@ final class WatchlistParser {
       Pattern.compile(
           "^\\s*([A-Z]{1,6}\\s+)?(\\d+(?:\\.\\d+)?)\\s*([cpCP])\\s*([<>])\\s*(\\d+(?:\\.\\d+)?)\\s*$");
 
+  /**
+   * A {@code <number><c|p>} strike+right token (case-insensitive), used to detect level-ish lines.
+   */
+  private static final Pattern STRIKE_RIGHT = Pattern.compile("\\d+(?:\\.\\d+)?[cpCP]");
+
   private WatchlistParser() {}
 
   record Leg(String strike, char right, BigDecimal trigger) {}
@@ -49,7 +54,10 @@ final class WatchlistParser {
         }
         Matcher m = PLAY.matcher(line);
         if (!m.matches()) {
-          if (!isAuthorHeader(line)) {
+          // A non-level line only flips clean=false when it looks like a (malformed) level —
+          // i.e. it is NOT the author header and NOT ignorable chatter. This never silently drops
+          // a genuine level (a comparator / strike+right token still triggers the raw fallback).
+          if (!isIgnorableChatter(line)) {
             clean = false;
           }
           continue;
@@ -75,7 +83,25 @@ final class WatchlistParser {
 
     List<TickerWatch> rows = new ArrayList<>(byTicker.size());
     byTicker.forEach((ticker, legs) -> rows.add(new TickerWatch(ticker, legs[0], legs[1])));
-    return new ParseResult(List.copyOf(rows), clean);
+    // clean iff every non-blank line was a valid level / header / ignorable chatter AND ≥1 row.
+    return new ParseResult(List.copyOf(rows), clean && !rows.isEmpty());
+  }
+
+  /**
+   * A trimmed non-blank line is ignorable "chatter" (does not flip {@code clean=false}) iff it is
+   * the author/time header, OR it carries NEITHER a {@code >}/{@code <} comparator NOR a {@code
+   * <number><c|p>} strike+right token. Greetings, emoji, sign-offs ("Good luck @everyone") are
+   * ignorable; a line that DOES carry a comparator or strike+right token but did not fully parse is
+   * NOT ignorable, so it still triggers the raw fallback (a genuine level is never silently
+   * dropped).
+   */
+  private static boolean isIgnorableChatter(String line) {
+    if (isAuthorHeader(line)) {
+      return true;
+    }
+    boolean hasComparator = line.indexOf('>') >= 0 || line.indexOf('<') >= 0;
+    boolean hasStrikeRight = STRIKE_RIGHT.matcher(line).find();
+    return !hasComparator && !hasStrikeRight;
   }
 
   /**

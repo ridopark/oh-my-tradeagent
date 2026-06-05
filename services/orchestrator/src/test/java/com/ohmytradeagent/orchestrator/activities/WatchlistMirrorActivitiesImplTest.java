@@ -73,18 +73,23 @@ class WatchlistMirrorActivitiesImplTest {
     assertThat(content).endsWith("```");
   }
 
+  /** The real watchlist shape: SPY/QQQ call+put, MSFT put-only, ABBV/SCHW/USB call-only. */
+  private static final String REAL_SAMPLE =
+      "SPY   756c  >  755.30\n"
+          + "745p  <  748.00\n"
+          + "QQQ   512c  >  511.00\n"
+          + "505p  <  507.50\n"
+          + "MSFT  420p  <  424.00\n"
+          + "ABBV  185c  >  184.00\n"
+          + "SCHW  78c   >  77.50\n"
+          + "USB   45c   >  44.80";
+
   @Test
-  void cleanParseablePayloadPostsRichEmbedTable() {
+  void cleanParseablePayloadPostsPerPlayEmbed() {
     WebhookClient webhook = mock(WebhookClient.class);
     WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
 
-    String raw =
-        "SPY   762c  >  761.00\n"
-            + "753p  <  754.00\n"
-            + "SHOP  121c  >  120.00\n"
-            + "TSLA  430c  >  425.00\n"
-            + "410p  <  413.00";
-    activity.postWatchlistAlert(payload(raw));
+    activity.postWatchlistAlert(payload(REAL_SAMPLE));
 
     WebhookEmbed embed = captureEmbed(webhook);
     // Raw fallback path must NOT fire when the parse is clean.
@@ -95,15 +100,38 @@ class WatchlistMirrorActivitiesImplTest {
     assertThat(embed.footer()).contains("TradingTheTrend");
 
     String desc = embed.description();
-    assertThat(desc).startsWith("```");
-    assertThat(desc).endsWith("```");
-    assertThat(desc).contains("SPY");
-    assertThat(desc).contains("762C");
-    assertThat(desc).contains("761.00");
-    assertThat(desc).contains("753P");
-    assertThat(desc).contains("754.00");
-    // SHOP has no put leg -> em-dash placeholder.
-    assertThat(desc).contains("—");
+    // Per-play lines, both legs of SPY, correct emoji/direction/trigger.
+    assertThat(desc).contains("📈 **SPY 756C** — breaks above 755.30");
+    assertThat(desc).contains("📉 **SPY 745P** — breaks below 748.00");
+    assertThat(desc).contains("📈 **QQQ 512C** — breaks above 511.00");
+    assertThat(desc).contains("📉 **QQQ 505P** — breaks below 507.50");
+    // MSFT is put-only: emits exactly its put line, NO call line, NO em-dash placeholder.
+    assertThat(desc).contains("📉 **MSFT 420P** — breaks below 424.00");
+    assertThat(desc).doesNotContain("📈 **MSFT");
+    // Call-only tickers emit only their call line.
+    assertThat(desc).contains("📈 **ABBV 185C** — breaks above 184.00");
+    assertThat(desc).contains("📈 **SCHW 78C** — breaks above 77.50");
+    assertThat(desc).contains("📈 **USB 45C** — breaks above 44.80");
+    // One-sided tickers emit exactly one line (no placeholder leg line). The em-dash is only ever
+    // the play→trigger separator inside a real line, never a standalone missing-leg placeholder:
+    // exactly one em-dash per emitted leg line, so its count equals the number of legs (8 legs:
+    // SPY 2, QQQ 2, MSFT 1, ABBV 1, SCHW 1, USB 1).
+    assertThat(countOccurrences(desc, "—")).isEqualTo(8);
+    // No code fence — the embed uses its full width.
+    assertThat(desc).doesNotContain("```");
+  }
+
+  @Test
+  void trailingGreetingStillRendersEmbedNotRawFallback() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+
+    // Part A: a trailing "Good luck @everyone" is ignorable chatter → still a clean embed.
+    activity.postWatchlistAlert(payload(REAL_SAMPLE + "\n\nGood luck @everyone"));
+
+    WebhookEmbed embed = captureEmbed(webhook);
+    verify(webhook, never()).post(org.mockito.ArgumentMatchers.anyString());
+    assertThat(embed.description()).contains("📈 **SPY 756C** — breaks above 755.30");
   }
 
   @Test
