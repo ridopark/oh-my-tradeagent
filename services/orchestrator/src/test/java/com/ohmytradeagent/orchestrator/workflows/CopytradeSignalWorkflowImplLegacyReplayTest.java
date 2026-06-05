@@ -135,6 +135,20 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Pins the STC-running-guard version marker. The handleStc preventive/defense-in-depth guards are
+   * fenced behind {@code Workflow.getVersion(VERSION_STC_RUNNING_GUARD, DEFAULT, 1)} so v=0
+   * in-flight handleStc replays emit a byte-identical command stream (no isPositionWorkflowRunning
+   * activity, bare-signal branch). Renaming the literal would silently re-version live executions;
+   * this test fails loudly on that. Mirrors {@link #versionPreTradeDispatchConstantNameIsStable}.
+   */
+  @Test
+  void versionStcRunningGuardConstantNameIsStable() throws Exception {
+    Field marker = CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_STC_RUNNING_GUARD");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("stc-running-guard-v1");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#111 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The SDK's deterministic replay engine walks the
    * recorded events, calls into the current workflow code, and compares scheduled activity commands

@@ -35,10 +35,12 @@ import com.ohmytradeagent.orchestrator.domain.StrategyConfigs;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.api.enums.v1.ParentClosePolicy;
 import io.temporal.common.RetryOptions;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.failure.CanceledFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.ExternalWorkflowStub;
+import io.temporal.workflow.SignalExternalWorkflowException;
 import io.temporal.workflow.Workflow;
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -71,6 +73,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private static final String KIND_SIGNAL_ABORTED_BY_RISK_BREACH = "SignalAbortedByRiskBreach";
 
   private static final String REASON_TTL_EXPIRED = "ttl_expired";
+  // Issue: orphan-STC alerting. handleStc's stale Redis lookup can return a DEAD (terminal)
+  // PositionWorkflow id; these reason codes tag the OrphanSTC audit emitted instead of crashing.
+  private static final String REASON_POSITION_WF_NOT_RUNNING = "position_workflow_not_running";
+  private static final String REASON_SIGNAL_DISPATCH_FAILED = "signal_dispatch_failed";
   private static final String VERSION_POSITION_HANDOFF = "position-handoff";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
   // Issue #165 phase 2: gate the FILLED branch in handleTtlExpired so pre-fix replay histories
@@ -127,6 +133,16 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // dispatches AccountSnapshot and passes the cash down. The marker string is a Temporal replay
   // identifier and must NOT be renamed even though the threaded value is now cash, not equity.
   private static final String VERSION_ACCOUNT_EQUITY_DISPATCH = "account-equity-dispatch-v1";
+
+  // Issue: orphan-STC alerting. Gate the two STC running-guards (preventive: check
+  // isPositionWorkflowRunning before ExitRequested+dispatch; defense-in-depth: catch
+  // SignalExternalWorkflowException around partialExit) behind a single marker so v=0 in-flight
+  // handleStc replays are BYTE-IDENTICAL. v=DEFAULT_VERSION: the preventive guard short-circuits
+  // via
+  // && (no isPositionWorkflowRunning activity scheduled) and the dispatch takes the bare-signal
+  // branch — identical command stream. v>=1: both guards active so a stale Redis mapping to a dead
+  // PositionWorkflow emits OrphanSTC instead of crashing the CopytradeSignalWorkflow.
+  private static final String VERSION_STC_RUNNING_GUARD = "stc-running-guard-v1";
 
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
@@ -522,6 +538,25 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       return payload.getSignalId();
     }
 
+    int stcGuardVersion =
+        Workflow.getVersion(VERSION_STC_RUNNING_GUARD, Workflow.DEFAULT_VERSION, 1);
+
+    // Change point A (preventive): a stale Redis mapping can return a non-null but DEAD (terminal)
+    // PositionWorkflow id. Verify it's RUNNING before emitting ExitRequested or signalling it. The
+    // && short-circuit guarantees v=0 schedules NO isPositionWorkflowRunning activity (the v=0
+    // command stream stays byte-identical).
+    if (stcGuardVersion >= 1 && !positionLookup.isPositionWorkflowRunning(positionId)) {
+      logAudit(
+          payload,
+          KIND_ORPHAN_STC,
+          subject(
+              "signal_id", payload.getSignalId(),
+              "option_symbol", occ,
+              "position_workflow_id", positionId,
+              "reason", REASON_POSITION_WF_NOT_RUNNING));
+      return payload.getSignalId();
+    }
+
     double fraction =
         KeywordPartialMatcher.match(
             payload.getTail(),
@@ -553,7 +588,40 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "fraction", fraction));
 
     ExternalWorkflowStub stub = Workflow.newUntypedExternalWorkflowStub(positionId);
-    stub.signal("partialExit", req);
+    // Change point B (defense-in-depth): even past the running-guard the target can die between the
+    // guard and the signal (TOCTOU). v=0 keeps the bare single command (byte-identical replay);
+    // v>=1
+    // catches the dispatch failure and emits OrphanSTC instead of crashing.
+    //
+    // The catch is narrow by construction: the try wraps ONLY the single stub.signal command, so
+    // the
+    // only exception that can originate here is a signal-external-workflow dispatch failure. The
+    // Temporal Java SDK 1.27 surfaces a NOT_FOUND/terminal target as
+    // io.temporal.failure.ApplicationFailure (type SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_FAILED_*),
+    // converted from the server Failure proto by DataConverter.failureToException — NOT as
+    // SignalExternalWorkflowException (the SDK only constructs that type on the cancel-external
+    // path
+    // in this version). We catch both so the production crash is actually prevented; we
+    // deliberately
+    // do NOT catch bare RuntimeException so genuine bugs still fail the workflow loudly.
+    if (stcGuardVersion == Workflow.DEFAULT_VERSION) {
+      stub.signal("partialExit", req);
+    } else {
+      try {
+        stub.signal("partialExit", req);
+      } catch (SignalExternalWorkflowException | ApplicationFailure e) {
+        logAudit(
+            payload,
+            KIND_ORPHAN_STC,
+            subject(
+                "signal_id", payload.getSignalId(),
+                "option_symbol", occ,
+                "position_workflow_id", positionId,
+                "reason", REASON_SIGNAL_DISPATCH_FAILED,
+                "error", String.valueOf(e.getMessage())));
+        return payload.getSignalId();
+      }
+    }
 
     // Phase 4: arm CHANDELIER_TRAIL when the strategy opts in.
     if (Boolean.TRUE.equals(config.getTrailOnPartial())) {
