@@ -67,14 +67,16 @@ class AlpacaMarketDataTest {
 
   @Test
   void snapshotQuote_happyPath_extractsBidAskAndMid() throws Exception {
+    // Alpaca keys the snapshot response by the COMPACT OCC it received (no space-padding).
     server.enqueue(
         new MockResponse()
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"snapshots\":{\"NVDA  260516C00140000\":{\"latestQuote\":"
+                "{\"snapshots\":{\"NVDA260516C00140000\":{\"latestQuote\":"
                     + "{\"bp\":1.20,\"ap\":1.30,\"t\":\"2026-05-15T17:22:31.123Z\"}}}}"));
 
+    // Caller passes the space-padded canonical OCC; the provider must compact it for Alpaca.
     Optional<Quote> q = provider.snapshotQuote("NVDA  260516C00140000");
 
     assertThat(q).isPresent();
@@ -86,6 +88,10 @@ class AlpacaMarketDataTest {
     RecordedRequest req = server.takeRequest();
     assertThat(req.getMethod()).isEqualTo("GET");
     assertThat(req.getPath()).startsWith("/v1beta1/options/snapshots");
+    // Regression guard: the request must carry the COMPACT symbol — a padded OCC 400s
+    // ("invalid symbol") at Alpaca and silently degrades bounded limits to marketable.
+    assertThat(req.getPath()).contains("NVDA260516C00140000");
+    assertThat(req.getPath()).doesNotContain("%20").doesNotContain("+");
     assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
   }
 
