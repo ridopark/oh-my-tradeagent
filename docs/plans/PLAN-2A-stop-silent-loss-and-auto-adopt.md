@@ -48,17 +48,21 @@ MARKET — but R-AA-3 makes it a bounded LIMIT that can rest **unfilled**, re-op
 silent-loss class via the **TRY** branch (an accepted-but-unfilled limit), which a catch-only guard
 never covers.
 Fix (version-gated, long-lived workflow):
-- On the **bounded scheduled paths**, after `exec.placeOrder` do **not** zero `remainingQty`.
+- **Remove the wholesale `remainingQty=0` at ~1293.** After `exec.placeOrder` on the bounded paths,
   `Workflow.await` on `lastFillEvent` up to a TTL (mirror `processOne` ~1133-1162) and decrement
-  `remainingQty` **only from the actual fill**. On TTL timeout: reprice marketable/at-bid (within
-  the expiry-day collapse, R-AA-3) or keep the workflow **alive and re-armed** — never zero and
-  emit POSITION_CLOSED on mere placement.
-- On a placement **failure** (placeOrder throws): keep the workflow alive/re-armed; reserve a
-  *visible* `ApplicationFailure` only for a genuinely non-retryable invariant violation. Never a
-  silent normal completion.
+  `remainingQty` **only from the actual fill**. On TTL timeout: reprice marketable/at-bid (R-AA-3
+  expiry collapse) or keep the workflow **alive and re-armed** — never zero on mere placement.
+- **Restructure the run()-tail / EOD-expiry epilogue (~595-613) into a guarded loop**, not
+  straight-line flatten-once → unconditional `KIND_POSITION_CLOSED`: gate POSITION_CLOSED on
+  `remainingQty==0`; on a bounded-flatten TTL timeout **re-arm/re-place** rather than `return`;
+  the ONLY terminal conditions that let `run()` return are broker-confirmed zero OR a *visible*
+  non-retryable `ApplicationFailure`. **All five flatten callers** (the three in-loop `continue`
+  paths + the two post-loop eod/expiry) share the "zeroed only on fill" contract, so the in-loop
+  paths still reach a **conditional** POSITION_CLOSED.
 - **Redefined invariant:** `KIND_POSITION_CLOSED ⟹ broker-confirmed remaining == 0`.
-- **Tests:** placed-but-unfilled bounded limit (workflow stays alive, no POSITION_CLOSED);
-  partial-fill-then-rest; the broker-confirmed-zero invariant.
+- **Tests (incl. the ~595 epilogue path specifically, not just processOne):** placed-but-unfilled
+  bounded limit → workflow stays alive, no POSITION_CLOSED; partial-fill-then-rest; the
+  broker-confirmed-zero invariant.
 
 ## R-AA-2 — Quote-snapshot activity (anchor for bounded sells)
 The market-data `Quote(bid,mid,ask)` record lives OUTSIDE the contract module and is not a shareable
@@ -79,14 +83,24 @@ code: **any reason ∉ {`risk_breach`, `force_close`} is bounded**; those two ar
 - **bounded (eod / expiry / chandelier / future `expiry_lead`)** → a **bounded marketable LIMIT**,
   placed then **fill-awaited per R-AA-1** (remainingQty zeroed only on the broker fill): anchor on
   the live
-  bid from R-AA-2 (fallback mid → chandelier `lastTickPremium`/`peakPremium` → ref), placed
-  marketable (at/through the bid) but bounded by `exit_floor_abs`/`exit_floor_pct`.
-  - `exit_floor` **fail-safe**: null/absent/unresolvable, or a floor that sits above the live bid →
-    fall back to a marketable exit (never "no sell"); emit a loud config-error audit.
-  - **Expiry session** → collapse the floor to a marketable/near-zero level (`expiry_day_floor`,
-    default ~$0.01 or a limit at the live bid) so the lot always sells.
+  bid from R-AA-2 (anchor chain: **live bid → mid → chandelier `lastTickPremium`/`peakPremium` →
+  ref → expiry-session marketable**), placed marketable (at/through the bid) but bounded by
+  `exit_floor_abs`/`exit_floor_pct`.
+  - `exit_floor` **fail-safe**: null/absent/unresolvable, or a floor above the live bid → fall back
+    to a marketable exit (never "no sell"); loud config-error audit.
+  - **Quote-activity FAILURE (not just null)** on a scheduled/expiry path → fall back to
+    **marketable**, NOT to a stale ref-premium limit; emit the loud availability audit. Give
+    `GetOptionQuoteActivity` an explicit start-to-close + bounded retry so it can't wedge the
+    flatten.
+  - **Expiry session** → `expiry_day_floor` is strictly a price FLOOR applied **only when a live
+    bid exists**; when `bid <= 0` go **fully marketable**. A contract with **no live bid expires
+    worthless regardless** — that is out of scope of the sell guarantee (do NOT rest a $0.01 limit
+    that never fills). Reword: "a bounded marketable sell is *placed at/through the live bid* before
+    expiry."
 - **risk_breach / force_close (immediacy)** → keep an **exit-NOW** semantic (MARKET, or an explicit
-  emergency cross-the-bid band) — unchanged certainty for the kill-switch / operator path.
+  emergency cross-the-bid band) — unchanged certainty for the kill-switch / operator path. (Code
+  literals: `eod`/`expiry`/`chandelier_trail`/`risk_breach`/`force_close` — note `chandelier_trail`,
+  not `chandelier`; route by the negative set `∉ {risk_breach, force_close}`.)
 - Version-gated; **per-reason `limitPrice` assertions** in tests (success criterion does NOT compel
   `limitPrice != null` on the immediacy paths).
 
@@ -101,24 +115,31 @@ recon doesn't block). **Do NOT** use `ExternalWorkflowStub.start()` and **do NOT
   `setWorkflowIdReusePolicy` + `setParentClosePolicy` but **no conflict-policy setter** (that's
   client-side `WorkflowOptions` only), and no reuse policy makes a start against a *currently-RUNNING*
   id a silent no-op — it throws. So:
-  - **Post-complete no-op:** set the child's `WorkflowIdReusePolicy = REJECT_DUPLICATE` (a completed
-    adoption id is not re-run).
-  - **In-flight no-op:** a recon-side **PRECHECK before `Async.function` start** — reuse
-    `isPositionWorkflowRunning` (ReconciliationWorkflowImpl ~279 / AdoptionWorkflowImpl:131) PLUS an
-    explicit "adoption already running" check keyed on `WorkflowIds.adoption(...)`. Skip the start if
-    either is live.
-  - The residual sub-second TOCTOU (child-already-started for the adoption id) is a **benign
-    REFUSED/ALREADY_ADOPTING no-op** — distinct from, and NOT, the forbidden client-side
-    `WorkflowExecutionAlreadyStarted` catch of the mechanism rule above.
-  - Test both windows (in-flight AND post-complete collision) in a `TestWorkflowEnvironment`;
-    confirm the ABANDON-child PositionWorkflow survives recon-cycle completion.
-- **Over-sell gate (prevents the #357 settling-close race):** auto-adopt only when (a) a FILLED
-  journal anchor exists, AND (b) **no open/pending SELL order** at the broker for that OCC
-  (cross-check recon's already-fetched broker open orders ~143, matched on `option_symbol`+`side`).
-  Gates (a)+(b) cover the place→settle window — a resting flatten SELL is visible as an open order,
-  so a separate quiet-period sub-gate is **dropped** (`BrokerOpenOrder` carries no timestamp to
-  implement it anyway; if ever needed, source it from recon audit history, not the broker order).
-  Manual force-close stays authoritative.
+  - **Use `WorkflowIdReusePolicy = ALLOW_DUPLICATE`** and rely SOLELY on the two-window precheck
+    below. (NOT `REJECT_DUPLICATE`: `WorkflowIds.adoption` keys on `(tenant,strategy,occ)` ONLY
+    [WorkflowIds.java:46-48], so REJECT_DUPLICATE would *permanently* block re-adopting an OCC that
+    is adopted → managed → later re-orphaned with the lot still held. ALLOW_DUPLICATE matches the
+    code's own `ALREADY_OWNED` intent and the precheck already covers churn.)
+  - **In-flight + post-complete no-op = the recon-side PRECHECK before `Async.function` start:**
+    skip if `isPositionWorkflowRunning(posWfId)` (Recon ~279 / AdoptionWorkflowImpl:131) OR the
+    adoption id keyed on `WorkflowIds.adoption(...)` is already running.
+  - The residual sub-second TOCTOU child-already-started is a **benign no-op**; **swallow the failed
+    child-start Promise** (do NOT propagate it to recon `run()`) — distinct from the forbidden
+    client-side `WorkflowExecutionAlreadyStarted` catch. Test that the swallow holds.
+  - Test both windows (in-flight AND post-complete) in a `TestWorkflowEnvironment`; confirm the
+    ABANDON-child PositionWorkflow survives recon-cycle completion.
+- **Over-sell gate — `R-AA-1` is the real #357 defense; gate (b) is a backstop:** auto-adopt only
+  when (a) a FILLED journal anchor exists, AND (b) **no open/pending SELL order** at the broker for
+  that OCC (recon's broker-open-orders ~143, matched on `side` + OCC **normalized via
+  `OccSymbol.compact()` on BOTH sides** — padded-vs-compact mismatch would defeat the gate, cf. the
+  %20-padding bug in 16e4c6e). **Caveat:** `AlpacaPaperBroker` does NOT override `listOpenOrders()`
+  today (only the `List.of()` default at OptionsBroker.java:62), so gate (b) is **currently inert on
+  Alpaca**. The real settling-close protection is **R-AA-1**: the workflow now stays *running* until
+  a broker-confirmed fill, so `isPositionWorkflowRunning` stays true across the place→settle window
+  and no filled-orphan is emitted to adopt against. Track implementing
+  `AlpacaPaperBroker.listOpenOrders()` (GET `/v2/orders?status=open` → `BrokerOpenOrder` incl.
+  `side`) as a named **fast-follow** so gate (b) becomes a real broker-independent backstop. Manual
+  force-close stays authoritative.
 - recon-side version gating is **convention-only** (short-lived scheduled executions).
 - `journal_status='missing'` (no anchor) is **not** auto-adopted → stays a loud page (Plan-1 B3).
 
@@ -139,16 +160,33 @@ flatten machinery with non-null config.
   `flattenRemaining` emits `qty_flattened` with no fill price → **force-flatten exits contribute
   ZERO realized P&L**, so the daily-loss kill-switch silently **under-counts** losses on exactly the
   eod/expiry/chandelier paths that close losing lots. Decision (single P&L source): once the flatten
-  awaits a real fill (R-AA-1), **route that fill through `applyExitFill` → `PartialExitFilled`**
-  (carrying `avg_fill_price`+`qty_filled`); keep `EodForceFlattened`/`ExpiryForceFlattened` as
-  P&L-neutral **lifecycle markers**. Test: a flatten exit produces realized P&L **exactly once**.
+  awaits a real fill (R-AA-1), **route that fill through `PartialExitFilled`**; keep
+  `EodForceFlattened`/`ExpiryForceFlattened` as P&L-neutral **lifecycle markers**.
+  - Seam: `applyExitFill` reads `req.getSignalId()` from a `PartialExitRequest` the flatten path
+    lacks → **extract a shared fill-applier `(qty_filled, avg_fill_price, option_symbol, signal_id)`**
+    used by both partial-exit and flatten (or synthesize a `flatten-<reason>` signal_id). The emitted
+    `PartialExitFilled` MUST carry `avg_fill_price` + `qty_filled` + `option_symbol` (under the
+    existing option-symbol version gate) so DailyPnl FIFO grouping (DailyPnlActivitiesImpl ~171-179)
+    matches the entry basis.
+  - The audit-completeness verifier must **tolerate a flatten-origin `PartialExitFilled` with no
+    preceding `PartialExitRequested`** (no MissingTerminalClose / double-terminal regression).
+  - Any `applyExitFill` signature change is replayed code → **version-gated**. Test: a flatten exit
+    produces realized P&L **exactly once**.
 - **Audit kinds:** every new kind in `AuditEventKinds.ALL_KINDS` (KindRegistryGuardTest) + correct
   lifecycle subgroup; the flatten fill rides `PARTIAL_EXIT_FILL_KINDS` (one source, no double-count).
-- **ExecActivitiesFactory** `forTarget`: `startToCloseTimeout` 15s→30s and **extend the existing
-  `RetryOptions`** (it already sets `maxAttempts=5` at ~71; add `initialInterval`/
-  `backoffCoefficient`/`maximumInterval`). Note this stub is shared by all three exec activities, not
-  just placeOrder. No version gate (plain options). *Reduces* (not removes) the dup-422 trigger;
-  complements Plan-1 B1.
+- **ExecActivitiesFactory** `forTarget`: **extend the existing `RetryOptions`** (already
+  `maxAttempts=5` at ~71; add `initialInterval`/`backoffCoefficient`/`maximumInterval`). This stub is
+  **shared by all three exec activities** (placeOrder + cancelOrder + reads) — do NOT blanket-raise
+  start-to-close to 30s (it would slow the cancel/read paths the over-sell gate relies on near
+  expiry): either keep cancel/reads snappy with modest backoff only, or split the stub so only
+  placeOrder gets the longer timeout. No version gate (plain options). *Reduces* (not removes) the
+  dup-422 trigger; complements Plan-1 B1.
+- **Determinism — marker placement:** new `Workflow.getVersion` markers append at the END of any
+  pre-existing recorded command sequence for a decision point, never interleaved. Extend
+  `PositionWorkflowImplLegacyReplayTest` (mirror the `VERSION_EXIT_RETRY_LATE_FILL_RECONCILE`
+  constant-name guard ~106-119) with a v=0 byte-identical replay assertion per new gate. (Temporal
+  1.27 replay ignores activity-input payload divergence — the guard is specifically about marker
+  placement/ordering.)
 - **Metrics:** `recon.auto_adopt.{initiated,refused_not_held,already_owned}`,
   `position.flatten.{limit_filled,unfilled_at_floor_marketable_fallback}` — a benign
   `REFUSED_NOT_HELD` (just-closed lot racing adopt) is NOT an alert.
@@ -161,7 +199,9 @@ flatten machinery with non-null config.
   actual fill, never by placement (R-AA-1).
 - **Determinism:** version-gate the long-lived PositionWorkflow changes (R-AA-1, R-AA-3, R-AA-2's
   call site); recon changes are convention-only. No `Instant.now`/`UUID`/`Math.random`.
-- **No over-sell:** R-AA-4's broker-open-SELL + quiet-period gate; adoption's existing guards.
+- **No over-sell:** primarily **R-AA-1** (workflow stays running until broker-confirmed fill →
+  `isPositionWorkflowRunning` true across place→settle, no filled-orphan to adopt against); gate (b)
+  is a backstop, currently inert on Alpaca until `listOpenOrders()` lands; adoption's existing guards.
 
 ## Tests (TDD)
 - R-AA-1: `POSITION_CLOSED` invariant test (flatten throws → workflow stays alive/visibly fails,
@@ -184,10 +224,19 @@ flatten machinery with non-null config.
    only on the fill; risk_breach/force_close keep exit-NOW; a **same-day / expiry-session** lot
    sells before/at expiry (expiry-day collapse) — no ride-to-$0. (Multi-day lots that have no
    trigger today are covered by **2B's** flatten timer; 2A does not claim them.)
-4. An orphaned **filled** position is auto-adopted within one recon cycle via an ABANDON child,
-   idempotent across cycles, and never spawned against an open SELL / settling close.
+4. An orphaned **filled** position is **re-attached to a managing workflow** within one recon cycle
+   via an ABANDON child (and, if expiry-day, sold via the bounded flatten), idempotent across cycles,
+   never spawned against a settling close. (Multi-day adopted lots get their sell *deadline* only
+   once 2B's flatten timer ships — see the rollout note.)
 5. Long-lived PositionWorkflow changes version-gated (v=0 byte-identical); recon convention-only.
 6. New config carried by in-code defaults; pod effective-config verified.
+
+## Rollout / residual risk
+Until **2B** ships, a **multi-day** lot whose STC never fills relies on operator force-close / the
+Plan-1 B3 `PositionOrphan(filled)` page as the only sell backstop (2A bounds/guarantees the
+same-day & expiry-session paths and re-attaches orphans, but the multi-day *timer* is 2B). Treat 2B
+as the **immediate follow-on, not optional**. Named fast-follow inside/after 2A:
+`AlpacaPaperBroker.listOpenOrders()` so over-sell gate (b) becomes a real broker-independent backstop.
 
 ## Spotless / CI
 `mvn -pl services/orchestrator,services/exec spotless:apply` pre-commit; new `KIND_*` in ALL_KINDS.

@@ -34,9 +34,12 @@ precheck.
   acceptable for v1.
 - In `PositionWorkflowImpl`, arm a flatten timer at `expiry_close − flatten_lead_minutes` for every
   lot, independent of `eod_force_flatten`. On fire → 2A's bounded flatten with `reason=expiry_lead`,
-  which 2A's **classification router** already treats as bounded (it's ∉ {risk_breach, force_close})
-  — no edit to 2A switch code. Register the `expiry_lead` audit kind(s) here (or reuse the existing
-  `Expiry*` kinds) so the new arm doesn't emit an unregistered kind (KindRegistryGuardTest).
+  which 2A's **classification router** already treats as bounded (it's ∉ {`risk_breach`,
+  `force_close`}) — no edit to 2A switch code. **Audit kind decision:** today `flattenRemaining`'s
+  reason `else`-branch falls through to the **EOD** kinds, so register a **dedicated `expiry_lead`
+  KIND pair** (PascalCase-alphanumeric per KindRegistryGuard, added to `ALL_KINDS`) and route it
+  explicitly — do NOT silently reuse `Eod*`/`Expiry*` via fallthrough (that would mislabel the
+  lifecycle event).
 - **Version-gated** (genuinely long-lived multi-day workflow; in-flight executions replay across a
   redeploy). New config `flatten_lead_minutes` (default e.g. 30) — plumbed at BOTH config sites
   (CopytradeSignalWorkflowImpl + AdoptionWorkflowImpl.buildInput) with an in-code default.
@@ -50,13 +53,15 @@ Redesign the `processOne` exit retry from a single attempt into a bounded steppe
 - Each step's limit is anchored on a fresh `GetOptionQuoteActivity` bid/mid (2A) and **bounded by
   `exit_floor`** (fail-safe identical to 2A); walks toward the market in `exit_reprice_tick` steps
   up to `exit_reprice_steps`, then stops (the scheduled flatten timer from R-AB-1 is the backstop).
-- Extract a **shared bounded-reprice method** with an explicit `deadline = expiry − safety_margin`,
-  used by both `processOne` and the flatten path (today they don't share it — this is a refactor).
-  `targetRemaining` is captured **once** in the shared method; per-step `client_order_id`s use the
-  deterministic loop counter with a distinct `:reprice-N` prefix (separate from flatten keys) so no
-  two steps reuse an id — preserving replay determinism and the #357 naked-short guard across steps.
-- Version-gated; **per-caller replay tests** (all flatten callers now emit a different looped
-  command sequence; assert no client_order_id reuse across steps).
+- **Factor the place→await-fill→decrement-from-fill helper in 2A R-AA-1 from the start**; 2B's
+  reprice LOOP then *wraps* that helper rather than re-extracting 2A-owned code (clean split
+  boundary). `targetRemaining` is captured **once** in the helper; per-step `client_order_id`s use
+  the deterministic loop counter with a distinct `:reprice-N` prefix (separate from flatten keys) so
+  no two steps reuse an id — preserving replay determinism and the #357 naked-short guard.
+- **Pin the deadline:** the reprice deadline terminates **at or before** the R-AB-1 flatten-lead
+  trigger, so the bounded flatten is unambiguously the **final owner** (no overlapping double-place).
+- Version-gated (a second gate layered over 2A's single-shot await); **per-caller replay tests** +
+  an assertion of **no double-place / no client_order_id reuse across the double gate**.
 
 ## R-AB-3 — Entry fill-rate (within the willing-to-pay cap)
 - Set `max_slippage_abs`/`max_slippage_pct` in copytrade-v1 (currently absent → exact-mirror
