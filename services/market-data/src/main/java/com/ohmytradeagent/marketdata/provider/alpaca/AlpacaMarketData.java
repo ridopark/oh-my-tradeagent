@@ -116,16 +116,23 @@ public class AlpacaMarketData implements MarketDataProvider {
 
   @Override
   public Optional<Quote> snapshotQuote(String occSymbol) {
+    // Alpaca's options data API requires the COMPACT OCC (regex ^[A-Z]{1,5}\d{6,7}[CP]\d{8}$ — no
+    // space-padding); our internal canonical form is space-padded (e.g. "SPY   260609P00731000").
+    // Strip padding for both the request symbol AND the response key (Alpaca echoes the symbol it
+    // received), but return the Quote keyed by the caller's original symbol. Without this, every
+    // snapshot 400s ("invalid symbol") and bounded-limit flatten/reprice silently falls back to
+    // marketable. cf. the same padded-vs-compact class in JooqOrderIntentJournal / commit 16e4c6e.
+    String compact = occSymbol.replace(" ", "");
     try {
       JsonNode body =
           rest.get()
-              .uri("/v1beta1/options/snapshots?symbols={s}", occSymbol)
+              .uri("/v1beta1/options/snapshots?symbols={s}", compact)
               .retrieve()
               .body(JsonNode.class);
       if (body == null) {
         return Optional.empty();
       }
-      JsonNode latestQuote = body.path("snapshots").path(occSymbol).path("latestQuote");
+      JsonNode latestQuote = body.path("snapshots").path(compact).path("latestQuote");
       if (latestQuote.isMissingNode() || latestQuote.isNull()) {
         return Optional.empty();
       }
