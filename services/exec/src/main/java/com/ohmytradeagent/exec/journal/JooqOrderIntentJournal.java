@@ -245,6 +245,50 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
     return updated == 1;
   }
 
+  @Override
+  public boolean markExpired(String intentKey) {
+    OffsetDateTime now = OffsetDateTime.now();
+    int updated =
+        dsl.update(TABLE)
+            .set(field("state"), OrderState.EXPIRED.name())
+            .set(field("last_error"), "broker terminal: EXPIRED")
+            .set(field("last_state_at"), now)
+            .set(field("version"), field("version", Long.class).plus(1))
+            .where(field("intent_key", String.class).eq(intentKey))
+            .and(field("state", String.class).eq(OrderState.SUBMITTED.name()))
+            .execute();
+    return updated == 1;
+  }
+
+  @Override
+  public boolean markBrokerRejected(String intentKey, String reason) {
+    OffsetDateTime now = OffsetDateTime.now();
+    int updated =
+        dsl.update(TABLE)
+            .set(field("state"), OrderState.ERRORED.name())
+            .set(field("last_error"), reason)
+            .set(field("last_state_at"), now)
+            .set(field("version"), field("version", Long.class).plus(1))
+            .where(field("intent_key", String.class).eq(intentKey))
+            .and(field("state", String.class).eq(OrderState.SUBMITTED.name()))
+            .execute();
+    return updated == 1;
+  }
+
+  @Override
+  public boolean markCancelledIfSubmitted(String intentKey) {
+    OffsetDateTime now = OffsetDateTime.now();
+    int updated =
+        dsl.update(TABLE)
+            .set(field("state"), OrderState.CANCELLED.name())
+            .set(field("last_state_at"), now)
+            .set(field("version"), field("version", Long.class).plus(1))
+            .where(field("intent_key", String.class).eq(intentKey))
+            .and(field("state", String.class).eq(OrderState.SUBMITTED.name()))
+            .execute();
+    return updated == 1;
+  }
+
   private static JournaledOrder mapRow(Record r) {
     return new JournaledOrder(
         r.get("intent_key", String.class),

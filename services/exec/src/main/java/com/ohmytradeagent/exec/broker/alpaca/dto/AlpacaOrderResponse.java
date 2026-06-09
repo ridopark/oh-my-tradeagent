@@ -16,7 +16,8 @@ import java.time.OffsetDateTime;
  *   <li>{@code new} / {@code accepted} / {@code pending_new} / {@code accepted_for_bidding} → OPEN
  *   <li>{@code partially_filled} → OPEN (parent stays open until terminal fill)
  *   <li>{@code filled} → FILLED
- *   <li>{@code canceled} / {@code expired} / {@code replaced} → CANCELLED
+ *   <li>{@code canceled} / {@code replaced} → CANCELLED
+ *   <li>{@code expired} → EXPIRED
  *   <li>{@code rejected} → REJECTED
  *   <li>anything else (including {@code suspended}) → UNKNOWN
  * </ul>

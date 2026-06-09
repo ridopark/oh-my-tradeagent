@@ -119,6 +119,83 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void placeOrder_duplicateClientOrderId_noExistingId_liveLookup_returnsAlreadyExisted()
+      throws Exception {
+    // B1: a retried placement re-POSTs the same client_order_id; Alpaca answers 422
+    // "client_order_id must be unique" WITHOUT existing_order_id. The adapter must NOT crash
+    // (non-retryable InvalidRequestError) — it resolves the prior order by client_order_id and,
+    // because that order is LIVE, returns alreadyExisted=true so the workflow proceeds to the fill.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"client_order_id must be unique\"}"));
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"alp-live-7\",\"client_order_id\":\"intent-A\",\"status\":\"accepted\"}"));
+
+    PlaceOrderResponse r = broker.placeOrder(request("intent-A"));
+
+    assertThat(r.brokerOrderId()).isEqualTo("alp-live-7");
+    assertThat(r.alreadyExisted()).isTrue();
+
+    server.takeRequest(); // POST /v2/orders
+    RecordedRequest lookup = server.takeRequest();
+    assertThat(lookup.getMethod()).isEqualTo("GET");
+    assertThat(lookup.getPath())
+        .isEqualTo("/v2/orders:by_client_order_id?client_order_id=intent-A");
+  }
+
+  @Test
+  void placeOrder_duplicateClientOrderId_noExistingId_terminalLookup_rethrowsRetryable() {
+    // B1 strict live-only: the by-cid lookup surfaces a TERMINAL order (canceled/expired).
+    // Returning
+    // alreadyExisted=true would strand the workflow awaiting a fill that never comes, so the
+    // adapter
+    // rethrows the ORIGINAL 422 as a retryable HttpStatusCodeException (NOT a non-retryable crash)
+    // —
+    // a fresh placement can then proceed, falling through to the B2 backstop if it keeps colliding.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"client_order_id must be unique\"}"));
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"alp-dead-7\",\"client_order_id\":\"intent-A\",\"status\":\"expired\"}"));
+
+    assertThatThrownBy(() -> broker.placeOrder(request("intent-A")))
+        .isInstanceOf(HttpStatusCodeException.class)
+        .isNotInstanceOf(ApplicationFailure.class);
+  }
+
+  @Test
+  void placeOrder_duplicateClientOrderId_noExistingId_lookupNotFound_rethrowsRetryable() {
+    // B1: the by-cid lookup returns nothing (404 / sub-second visibility window). The adapter must
+    // rethrow the original 422 as retryable so Temporal retries — NEVER a non-retryable crash.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"client_order_id must be unique\"}"));
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(404)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"order not found\"}"));
+
+    assertThatThrownBy(() -> broker.placeOrder(request("intent-A")))
+        .isInstanceOf(HttpStatusCodeException.class)
+        .isNotInstanceOf(ApplicationFailure.class);
+  }
+
+  @Test
   void placeOrder_unauthorized_throwsAuthErrorNonRetryable() {
     server.enqueue(
         new MockResponse()
@@ -355,6 +432,7 @@ class AlpacaPaperBrokerTest {
     enqueueStatus("partially_filled");
     enqueueStatus("filled");
     enqueueStatus("canceled");
+    enqueueStatus("replaced");
     enqueueStatus("expired");
     enqueueStatus("rejected");
     enqueueStatus("some_future_status");
@@ -363,8 +441,12 @@ class AlpacaPaperBrokerTest {
     assertThat(broker.getOrderStatus("alp-1")).isEqualTo(BrokerOrderStatus.OPEN);
     assertThat(broker.getOrderStatus("alp-1")).isEqualTo(BrokerOrderStatus.OPEN);
     assertThat(broker.getOrderStatus("alp-1")).isEqualTo(BrokerOrderStatus.FILLED);
+    // canceled → CANCELLED
     assertThat(broker.getOrderStatus("alp-1")).isEqualTo(BrokerOrderStatus.CANCELLED);
+    // replaced still → CANCELLED
     assertThat(broker.getOrderStatus("alp-1")).isEqualTo(BrokerOrderStatus.CANCELLED);
+    // Part A: expired now maps to its own EXPIRED terminal (was CANCELLED).
+    assertThat(broker.getOrderStatus("alp-1")).isEqualTo(BrokerOrderStatus.EXPIRED);
     assertThat(broker.getOrderStatus("alp-1")).isEqualTo(BrokerOrderStatus.REJECTED);
     assertThat(broker.getOrderStatus("alp-1")).isEqualTo(BrokerOrderStatus.UNKNOWN);
   }

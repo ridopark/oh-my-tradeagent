@@ -48,6 +48,9 @@ import org.springframework.web.client.RestClient;
  *   <li>403 carrying {@code insufficient_buying_power} → {@code InsufficientFundsError}
  *       (non-retryable)
  *   <li>422 carrying {@code existing_order_id} → idempotent re-place (handled, not an error)
+ *   <li>422 {@code "client_order_id must be unique"} (no {@code existing_order_id}) → resolve the
+ *       prior order via {@code GET /v2/orders:by_client_order_id}; a live hit → idempotent
+ *       re-place, otherwise rethrow the original 422 retryable (never a non-retryable crash)
  *   <li>4xx with {@code invalid|unknown|contract|symbol} in the message → {@code
  *       InvalidContractError} (non-retryable)
  *   <li>everything else → bubble up as the Spring {@code HttpStatusCodeException}; Temporal retries
@@ -79,9 +82,25 @@ public class AlpacaPaperBroker implements OptionsBroker {
    */
   static final String BUYING_POWER_FALLBACK_COUNTER_NAME = "alpaca.pretrade.buying_power.fallback";
 
+  /**
+   * Counter name for a duplicate {@code client_order_id} 422 (no {@code existing_order_id}) that
+   * was resolved to a LIVE order via the by-client-order-id lookup → {@code alreadyExisted=true}.
+   */
+  static final String DUPLICATE_CID_RESOLVED_COUNTER_NAME =
+      "alpaca.placeorder.duplicate_cid_resolved";
+
+  /**
+   * Counter name for a duplicate {@code client_order_id} 422 whose by-client-order-id lookup found
+   * no live order (empty / terminal / transient failure) → the original 422 is rethrown retryable.
+   */
+  static final String DUPLICATE_CID_RETHROW_COUNTER_NAME =
+      "alpaca.placeorder.duplicate_cid_rethrow";
+
   private final RestClient client;
   private final ObjectMapper mapper;
   private final Counter buyingPowerFallbackCounter;
+  private final Counter duplicateCidResolvedCounter;
+  private final Counter duplicateCidRethrowCounter;
 
   public AlpacaPaperBroker(
       RestClient alpacaRestClient, ObjectMapper objectMapper, MeterRegistry meterRegistry) {
@@ -92,6 +111,18 @@ public class AlpacaPaperBroker implements OptionsBroker {
             .description(
                 "Number of pre-trade checks that fell back to raw buying_power because Alpaca "
                     + "omitted options_buying_power (looser-than-intended funding gate).")
+            .register(meterRegistry);
+    this.duplicateCidResolvedCounter =
+        Counter.builder(DUPLICATE_CID_RESOLVED_COUNTER_NAME)
+            .description(
+                "Number of duplicate client_order_id 422s (no existing_order_id) resolved to a "
+                    + "live order via the by-client-order-id lookup (idempotent re-place).")
+            .register(meterRegistry);
+    this.duplicateCidRethrowCounter =
+        Counter.builder(DUPLICATE_CID_RETHROW_COUNTER_NAME)
+            .description(
+                "Number of duplicate client_order_id 422s whose by-client-order-id lookup found no "
+                    + "live order (empty/terminal/transient) → original 422 rethrown retryable.")
             .register(meterRegistry);
   }
 
@@ -143,7 +174,94 @@ public class AlpacaPaperBroker implements OptionsBroker {
       if (existingId != null) {
         return new PlaceOrderResponse(existingId, true);
       }
+      // A retried placement (at-least-once Activity semantics) can re-POST the same
+      // client_order_id; Alpaca answers 422 "client_order_id must be unique" WITHOUT an
+      // existing_order_id field. That is a NORMAL consequence of retry, not a permanent
+      // request-shape error, so it must never become a non-retryable failure (which would crash the
+      // calling workflow and orphan the live position). Resolve the prior order by its
+      // client_order_id and re-derive the idempotent response.
+      if (isClientOrderIdUniquenessConflict(e)) {
+        PlaceOrderResponse resolved = resolveDuplicateByClientOrderId(e, request.clientOrderId());
+        if (resolved != null) {
+          return resolved;
+        }
+        // Lookup found no live order (empty/404/terminal/transient failure) — rethrow the ORIGINAL
+        // 422 as retryable so Temporal retries. NEVER convert this into a non-retryable failure.
+        duplicateCidRethrowCounter.increment();
+        throw e;
+      }
       throw mapError(e);
+    }
+  }
+
+  /**
+   * Returns true if the 422 body indicates a {@code client_order_id} uniqueness conflict. Matches
+   * the raw body case-insensitively for both {@code client_order_id} and {@code unique}, mirroring
+   * how {@link #mapError} builds its haystack — Alpaca's wording ("client_order_id must be unique")
+   * may surface in either the human-readable {@code message} or the structured fields.
+   */
+  private boolean isClientOrderIdUniquenessConflict(HttpStatusCodeException e) {
+    if (e.getStatusCode().value() != 422) {
+      return false;
+    }
+    String body = e.getResponseBodyAsString();
+    if (body == null) {
+      return false;
+    }
+    String haystack = body.toLowerCase(Locale.ROOT);
+    return haystack.contains("client_order_id") && haystack.contains("unique");
+  }
+
+  /**
+   * Strict live-only duplicate resolution: looks up the order by its {@code client_order_id} and
+   * returns a {@code PlaceOrderResponse(id, alreadyExisted=true)} ONLY when the looked-up order is
+   * still LIVE (broker status maps to {@link BrokerOrderStatus#OPEN} or {@link
+   * BrokerOrderStatus#FILLED}). Returns null in every other case — empty/404, transient lookup
+   * failure, or a TERMINAL order (canceled/expired/rejected) — so the caller rethrows the original
+   * retryable 422. Returning {@code alreadyExisted=true} on a dead order would strand the workflow
+   * awaiting a fill that never comes, so a terminal lookup deliberately falls through to retry.
+   */
+  private PlaceOrderResponse resolveDuplicateByClientOrderId(
+      HttpStatusCodeException original, String clientOrderId) {
+    AlpacaOrderResponse looked;
+    try {
+      looked = getOrderByClientOrderId(clientOrderId);
+    } catch (HttpStatusCodeException lookupErr) {
+      // Transient lookup failure (e.g. 5xx, or a sub-second visibility window) — let the caller
+      // rethrow the original 422 so Temporal retries.
+      return null;
+    }
+    if (looked == null || looked.id() == null || looked.status() == null) {
+      return null;
+    }
+    BrokerOrderStatus status = mapStatus(looked.status());
+    boolean live = status == BrokerOrderStatus.OPEN || status == BrokerOrderStatus.FILLED;
+    if (!live) {
+      return null;
+    }
+    duplicateCidResolvedCounter.increment();
+    return new PlaceOrderResponse(looked.id(), true);
+  }
+
+  /**
+   * GET {@code /v2/orders:by_client_order_id?client_order_id={cid}} → the order Alpaca holds for
+   * this {@code client_order_id}, or null on 404 / empty. Used by the duplicate-422 fallback to
+   * resolve the order a prior (retried) POST already created.
+   */
+  private AlpacaOrderResponse getOrderByClientOrderId(String clientOrderId) {
+    try {
+      return client
+          .get()
+          .uri(
+              uriBuilder ->
+                  uriBuilder
+                      .path("/v2/orders:by_client_order_id")
+                      .queryParam("client_order_id", clientOrderId)
+                      .build())
+          .retrieve()
+          .body(AlpacaOrderResponse.class);
+    } catch (HttpClientErrorException.NotFound e) {
+      return null;
     }
   }
 
@@ -505,7 +623,8 @@ public class AlpacaPaperBroker implements OptionsBroker {
           "done_for_day" ->
           BrokerOrderStatus.OPEN;
       case "filled" -> BrokerOrderStatus.FILLED;
-      case "canceled", "expired", "replaced" -> BrokerOrderStatus.CANCELLED;
+      case "canceled", "replaced" -> BrokerOrderStatus.CANCELLED;
+      case "expired" -> BrokerOrderStatus.EXPIRED;
       case "rejected" -> BrokerOrderStatus.REJECTED;
       default -> BrokerOrderStatus.UNKNOWN;
     };

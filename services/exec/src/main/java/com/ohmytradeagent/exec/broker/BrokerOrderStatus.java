@@ -4,6 +4,7 @@ public enum BrokerOrderStatus {
   OPEN,
   FILLED,
   CANCELLED,
+  EXPIRED,
   REJECTED,
   UNKNOWN
 }
