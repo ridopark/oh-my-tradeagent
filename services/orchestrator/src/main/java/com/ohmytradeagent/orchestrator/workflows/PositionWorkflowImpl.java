@@ -317,17 +317,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    */
   private static final String VERSION_FLATTEN_BOUNDED_LIMIT = "flatten-bounded-limit";
 
-  /**
-   * Plan-2A R-AA-6 replay gate. The (now fill-awaited) scheduled-flatten fill is routed through the
-   * SHARED fill-applier that emits {@link #KIND_PARTIAL_EXIT_FILLED} (carrying {@code
-   * avg_fill_price}+{@code qty_filled}+{@code option_symbol} under the existing {@link
-   * #VERSION_EXIT_FILLED_OPTION_SYMBOL} gate) so {@code DailyPnlActivitiesImpl} enters the flatten
-   * fill into realized P&amp;L (the daily-loss kill-switch no longer under-counts losses on the
-   * eod/expiry/chandelier paths). {@code EodForceFlattened}/{@code ExpiryForceFlattened} stay
-   * P&amp;L-neutral lifecycle markers. Only consulted inside the v&gt;=1 branch of {@link
-   * #VERSION_FLATTEN_FILL_AWAIT}, so legacy replays never record this marker.
-   */
-  private static final String VERSION_FLATTEN_REALIZED_PNL = "flatten-realized-pnl";
+  // Plan-2A R-AA-6 (realized-P&L for flatten fills) needs no separate gate: the flatten fill is
+  // routed through the shared emitExitFill -> PartialExitFilled only inside the v>=1 branch of
+  // VERSION_FLATTEN_FILL_AWAIT, so legacy replays never reach it.
 
   /**
    * Issue #203 / #212 fallback: bounded wait for the first onFill before the workflow gives up and

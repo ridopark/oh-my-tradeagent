@@ -135,14 +135,6 @@ class PositionWorkflowImplLegacyReplayTest {
     assertThat((String) marker.get(null)).isEqualTo("flatten-bounded-limit");
   }
 
-  /** Plan-2A R-AA-6: pins the realized-P&L gate literal. */
-  @Test
-  void versionFlattenRealizedPnlConstantNameIsStable() throws Exception {
-    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_FLATTEN_REALIZED_PNL");
-    marker.setAccessible(true);
-    assertThat((String) marker.get(null)).isEqualTo("flatten-realized-pnl");
-  }
-
   /**
    * The main replay assertion: replays the pre-#276 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The recorded {@code PartialExitFilled} subject has no
