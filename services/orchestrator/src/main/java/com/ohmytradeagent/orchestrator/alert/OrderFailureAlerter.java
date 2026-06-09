@@ -188,15 +188,7 @@ public class OrderFailureAlerter {
     fields.add(new WebhookEmbed.Field("reason", reason, false));
     fields.add(new WebhookEmbed.Field("signal_id", subjectStr(subject, "signal_id"), false));
 
-    String footer =
-        "workflow_id: "
-            + orNa(event.getWorkflowId())
-            + " | tenant/strategy: "
-            + orNa(event.getTenantId())
-            + "/"
-            + orNa(event.getStrategyId());
-
-    return new WebhookEmbed(title, null, AlertColors.RED, footer, fields);
+    return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
   }
 
   /**
@@ -215,10 +207,7 @@ public class OrderFailureAlerter {
     String qty = subjectStr(subject, "qty");
     String journalStatus = subjectStr(subject, "journal_status");
     // The recon orphan identifier is journal_entry_signal_id; fall back to signal_id for safety.
-    String orphanSignalId = subjectStr(subject, "journal_entry_signal_id");
-    if ("n/a".equals(orphanSignalId)) {
-      orphanSignalId = subjectStr(subject, "signal_id");
-    }
+    String orphanSignalId = subjectStrFallback(subject, "journal_entry_signal_id", "signal_id");
 
     String title =
         ":warning: Orphaned position — broker holds "
@@ -237,15 +226,24 @@ public class OrderFailureAlerter {
         new WebhookEmbed.Field(
             "expected_workflow_id", subjectStr(subject, "expected_workflow_id"), false));
 
-    String footer =
-        "workflow_id: "
-            + orNa(event.getWorkflowId())
-            + " | tenant/strategy: "
-            + orNa(event.getTenantId())
-            + "/"
-            + orNa(event.getStrategyId());
+    return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
 
-    return new WebhookEmbed(title, null, AlertColors.RED, footer, fields);
+  /** Shared embed footer: low-signal trace (workflow_id, tenant/strategy) for both embed shapes. */
+  private static String buildFooter(AuditEvent event) {
+    return "workflow_id: "
+        + orNa(event.getWorkflowId())
+        + " | tenant/strategy: "
+        + orNa(event.getTenantId())
+        + "/"
+        + orNa(event.getStrategyId());
+  }
+
+  /** {@link #subjectStr} on {@code primary}, falling back to {@code fallback} when it is absent. */
+  private static String subjectStrFallback(
+      Map<String, Object> subject, String primary, String fallback) {
+    String value = subjectStr(subject, primary);
+    return "n/a".equals(value) ? subjectStr(subject, fallback) : value;
   }
 
   private static String reasonOf(String kind, Map<String, Object> subject) {
