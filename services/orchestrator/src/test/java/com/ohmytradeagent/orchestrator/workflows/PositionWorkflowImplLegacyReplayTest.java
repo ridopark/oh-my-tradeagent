@@ -136,6 +136,32 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Plan-2B R-AB-1: pins the expiry-lead-flatten gate literal. This getVersion change-point keys
+   * the arm-vs-no-arm fork for the guaranteed multi-day flatten timer; a renamed string re-resolves
+   * to DEFAULT_VERSION for legacy histories (which never recorded the lead timer), silently
+   * re-arming it on in-flight workflows and tripping a NonDeterministicWorkflowError.
+   */
+  @Test
+  void versionExpiryLeadFlattenConstantNameIsStable() throws Exception {
+    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_EXPIRY_LEAD_FLATTEN");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("expiry-lead-flatten");
+  }
+
+  /**
+   * Plan-2B R-AB-2: pins the stepped-reprice gate literal. This getVersion change-point keys the
+   * single-shot-retry-vs-stepped-reprice fork in processOne; a renamed string re-resolves to
+   * DEFAULT_VERSION for legacy histories, silently reverting the stepped reprice on in-flight
+   * workflows.
+   */
+  @Test
+  void versionExitSteppedRepriceConstantNameIsStable() throws Exception {
+    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_EXIT_STEPPED_REPRICE");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("exit-stepped-reprice");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#276 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The recorded {@code PartialExitFilled} subject has no
    * {@code option_symbol} key; the current impl's v=DEFAULT_VERSION branch must reproduce that

@@ -109,6 +109,81 @@ class MarketCalendarActivitiesImplTest {
     assertThat(d).isEqualTo(Duration.ZERO);
   }
 
+  // ---------- Plan-2B R-AB-1: durationUntilExpiryFlattenEt (multi-day flatten lead) ----------
+
+  @Test
+  void flatten_multiDayExpiry_returnsPositiveDuration() {
+    // 2026-05-14 is a Thursday; expiry 2026-05-16 is a Saturday — so the trigger rolls back to
+    // Friday 2026-05-15. With closeTime=15:30 and lead=30, trigger = Fri 15:00 ET.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 10, 0));
+
+    Duration d = svc.durationUntilExpiryFlattenEt(LocalDate.of(2026, 5, 15), 30L, null);
+
+    // 2026-05-15 is a Friday: trigger = 15:30 - 30m = 15:00 ET. From Thu 10:00 to Fri 15:00 = 29h.
+    assertThat(d).isPositive();
+    assertThat(d).isEqualTo(Duration.ofHours(29));
+  }
+
+  @Test
+  void flatten_sameDayBeforeLead_returnsPositive() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 15, 10, 0));
+
+    // Fri 2026-05-15, close 15:30 default, lead 30 -> trigger 15:00. From 10:00 = 5h.
+    Duration d = svc.durationUntilExpiryFlattenEt(LocalDate.of(2026, 5, 15), 30L, null);
+
+    assertThat(d).isEqualTo(Duration.ofHours(5));
+  }
+
+  @Test
+  void flatten_pastLeadTrigger_returnsZero() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 15, 15, 30));
+
+    // Already past the 15:00 trigger.
+    Duration d = svc.durationUntilExpiryFlattenEt(LocalDate.of(2026, 5, 15), 30L, null);
+
+    assertThat(d).isEqualTo(Duration.ZERO);
+  }
+
+  @Test
+  void flatten_configuredCloseTime_honored() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 15, 10, 0));
+
+    // closeTime 14:45, lead 30 -> trigger 14:15 ET. From Fri 10:00 = 4h15m.
+    Duration d =
+        svc.durationUntilExpiryFlattenEt(LocalDate.of(2026, 5, 15), 30L, LocalTime.of(14, 45));
+
+    assertThat(d).isEqualTo(Duration.ofHours(4).plusMinutes(15));
+  }
+
+  @Test
+  void flatten_saturdayExpiry_rollsBackToFriday() {
+    // Expiry on Saturday 2026-05-16 rolls back to Friday 2026-05-15. Clock = Mon 2026-05-11 10:00.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 11, 10, 0));
+
+    Duration dSat = svc.durationUntilExpiryFlattenEt(LocalDate.of(2026, 5, 16), 30L, null);
+    Duration dFri = svc.durationUntilExpiryFlattenEt(LocalDate.of(2026, 5, 15), 30L, null);
+
+    // Saturday expiry arms at the same instant as the prior Friday's trigger.
+    assertThat(dSat).isEqualTo(dFri);
+    assertThat(dSat).isPositive();
+  }
+
+  @Test
+  void flatten_zeroLead_armsAtCloseTime() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 15, 10, 0));
+
+    // lead=0 -> trigger == closeTime (15:30). From Fri 10:00 = 5h30m.
+    Duration d = svc.durationUntilExpiryFlattenEt(LocalDate.of(2026, 5, 15), 0L, null);
+
+    assertThat(d).isEqualTo(Duration.ofHours(5).plusMinutes(30));
+  }
+
   @Test
   void isMarketOpen_weekdayDuringSession_returnsTrue() {
     // 2026-05-14 is a Thursday

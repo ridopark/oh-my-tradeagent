@@ -60,6 +60,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String KIND_EOD_FORCE_FLATTEN_FAILED = "EodForceFlattenFailed";
   private static final String KIND_EXPIRY_FORCE_FLATTEN_REQUESTED = "ExpiryForceFlattenRequested";
   private static final String KIND_EXPIRY_FORCE_FLATTENED = "ExpiryForceFlattened";
+
+  // Plan-2B R-AB-1 audit kinds: a guaranteed bounded flatten timer armed at (expiry_close -
+  // flatten_lead_minutes) ET for EVERY lot (multi-day included) fired with reason=expiry_lead.
+  // Dedicated kinds (not the Eod* fallthrough) so the lead-flatten lifecycle event is labeled
+  // correctly. ExpiryLeadFlattenRequested mirrors the *ForceFlattenRequested cause markers;
+  // ExpiryLeadForceFlattened is the broker-confirmed terminal marker (P&L rides the accompanying
+  // PartialExitFilled emitted by emitExitFill).
+  private static final String KIND_EXPIRY_LEAD_FLATTEN_REQUESTED = "ExpiryLeadFlattenRequested";
+  private static final String KIND_EXPIRY_LEAD_FORCE_FLATTENED = "ExpiryLeadForceFlattened";
+
   private static final String KIND_POSITION_CLOSED = "PositionClosed";
 
   // Phase 4 audit kinds
@@ -317,6 +327,52 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    */
   private static final String VERSION_FLATTEN_BOUNDED_LIMIT = "flatten-bounded-limit";
 
+  /**
+   * Plan-2B R-AB-1 replay gate. Arms a GUARANTEED bounded flatten timer at {@code (expiry_close -
+   * flatten_lead_minutes)} ET for EVERY lot — multi-day included — so a position with no STC is
+   * sold via the bounded reason-scoped flatten (reason={@code expiry_lead}) before expiry rather
+   * than ridden to $0 (the QQQ-725 ride-to-expiry class). Independent of {@code eod_force_flatten}
+   * (which only governs the blanket 15:55 ET sweep) and of the 0DTE-only {@code
+   * durationUntilExpiryCloseEt} timer. The timer-arm command (a {@code
+   * durationUntilExpiryFlattenEt} Activity call + a {@code Workflow.newTimer}) is recorded ONLY
+   * under v&gt;=1, so legacy histories — which never recorded it — replay through the
+   * v=DEFAULT_VERSION branch byte-identically (the only new command on v=0 is this appended
+   * getVersion marker, resolving to DEFAULT_VERSION). The fire is routed through 2A's existing
+   * bounded flatten with reason={@code expiry_lead}, which 2A's classification router already
+   * treats as bounded (it is ∉ {{@code risk_breach}, {@code force_close}}) — no edit to 2A's
+   * switch. Long-lived multi-day workflow: in-flight executions replay across a redeploy, so the
+   * gate is mandatory.
+   */
+  private static final String VERSION_EXPIRY_LEAD_FLATTEN = "expiry-lead-flatten";
+
+  /**
+   * Plan-2B R-AB-2 replay gate (a second gate layered over 2A's single-shot exit machinery).
+   * Redesigns {@link #processOne(PartialExitRequest)}'s exit retry from a single attempt (the #216
+   * {@code maxRetries=1} path) into a BOUNDED STEPPED reprice: up to {@code exit_reprice_steps}
+   * re-places, each anchored on a fresh {@link GetOptionQuoteActivity} bid/mid and bounded by
+   * {@code exit_floor} (the same fail-safe as 2A's flatten), walking toward the market by {@code
+   * exit_reprice_tick} per step. Each step RE-RUNS the existing late-fill reconcile BEFORE
+   * re-placing so {@code remainingQty} is recomputed and the #357 naked-short guard holds across
+   * ALL N steps; {@code targetRemaining} is captured ONCE. Per-step intent keys use a distinct
+   * {@code :reprice-N} suffix (deterministic loop counter, separate from the original {@code
+   * :exit:} and the #216 {@code :retry} keys) so no two steps reuse a {@code client_order_id}.
+   * v=DEFAULT_VERSION (in-flight workflows started before this patch) keep the #216 single-shot
+   * retry path so their recorded histories replay byte-identically — the only new command on v=0 is
+   * this appended getVersion marker. The reprice deadline terminates at or before the R-AB-1
+   * flatten-lead trigger so the bounded flatten is unambiguously the final owner (no overlapping
+   * double-place).
+   */
+  private static final String VERSION_EXIT_STEPPED_REPRICE = "exit-stepped-reprice";
+
+  /** Plan-2B R-AB-1 default: minutes before expiry close to arm the guaranteed flatten timer. */
+  private static final long FLATTEN_LEAD_MINUTES_DEFAULT = 30L;
+
+  /** Plan-2B R-AB-2 default: number of bounded stepped exit repricings. */
+  private static final long EXIT_REPRICE_STEPS_DEFAULT = 3L;
+
+  /** Plan-2B R-AB-2 default: per-step price concession the exit reprice walks toward the market. */
+  private static final BigDecimal EXIT_REPRICE_TICK_DEFAULT = new BigDecimal("0.05");
+
   // Plan-2A R-AA-6 (realized-P&L for flatten fills) needs no separate gate: the flatten fill is
   // routed through the shared emitExitFill -> PartialExitFilled only inside the v>=1 branch of
   // VERSION_FLATTEN_FILL_AWAIT, so legacy replays never reach it.
@@ -439,6 +495,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private String currentInFlightIntentKey;
   private boolean eodFired;
   private boolean expiryFired;
+
+  /**
+   * Plan-2B R-AB-1: latched true when the guaranteed expiry-lead flatten timer fires (armed under
+   * {@link #VERSION_EXPIRY_LEAD_FLATTEN} v&gt;=1 for EVERY lot, multi-day included). Drives the
+   * main-loop break + the run()-tail flatten with reason {@code expiry_lead}.
+   */
+  private boolean expiryLeadFired;
 
   /**
    * Plan-2A R-AA-1: set true when an in-loop flatten (risk_breach/force_close/chandelier) placed a
@@ -570,6 +633,33 @@ public class PositionWorkflowImpl implements PositionWorkflow {
           });
     }
 
+    // Plan-2B R-AB-1: arm a GUARANTEED bounded flatten timer at (expiry_close -
+    // flatten_lead_minutes)
+    // ET for EVERY lot (multi-day included), independent of eod_force_flatten and of the 0DTE-only
+    // expiry-close timer above. On fire -> 2A's bounded reason-scoped flatten with
+    // reason=expiry_lead.
+    // Version-gated and appended AFTER the legacy timer-arm block so v=0 histories (which never
+    // recorded the durationUntilExpiryFlattenEt Activity call or its timer) replay
+    // byte-identically;
+    // the only new command on v=0 is this getVersion marker (resolving to DEFAULT_VERSION).
+    int expiryLeadVersion =
+        Workflow.getVersion(VERSION_EXPIRY_LEAD_FLATTEN, Workflow.DEFAULT_VERSION, 1);
+    if (expiryLeadVersion >= 1 && expiryDate != null) {
+      String fc = in.getForceClose0dteEt();
+      LocalTime closeTime = (fc == null || fc.isBlank()) ? null : LocalTime.parse(fc);
+      long leadMinutes = resolveFlattenLeadMinutes(in);
+      Duration flattenLeadIn =
+          calendar.durationUntilExpiryFlattenEt(expiryDate, leadMinutes, closeTime);
+      if (!flattenLeadIn.isZero() && !flattenLeadIn.isNegative()) {
+        Promise<Void> flattenLeadTimer = Workflow.newTimer(flattenLeadIn);
+        flattenLeadTimer.thenApply(
+            v -> {
+              expiryLeadFired = true;
+              return null;
+            });
+      }
+    }
+
     // Issue #203: v>=1 awaits the first onFill before declaring PositionEntered. If no fill
     // arrives within the resolved first-fill TTL (or EOD/expiry pre-empt first), emit
     // PositionNeverFilled and terminate so reconciliation can prune the stale SUBMITTED journal
@@ -622,7 +712,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       this.lastFillEvent = null;
     }
 
-    while (remainingQty > 0 && !eodFired && !expiryFired) {
+    while (remainingQty > 0 && !eodFired && !expiryFired && !expiryLeadFired) {
       Workflow.await(
           () ->
               !pendingExits.isEmpty()
@@ -633,6 +723,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   || chandelierFireRequested
                   || eodFired
                   || expiryFired
+                  // Plan-2B R-AB-1: wake on the guaranteed expiry-lead flatten timer so the run()
+                  // tail flattens the lot. Predicate-only addition (expiryLeadFired is latched only
+                  // under v>=1, where the timer was armed) — replay-neutral for v=0 histories.
+                  || expiryLeadFired
                   || remainingQty == 0
                   // Plan-2A R-AA-1: an in-loop flatten (risk_breach/force_close/chandelier) whose
                   // bounded limit rested unfilled leaves the workflow alive; wake on a LATE fill of
@@ -640,7 +734,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   // a
                   // recorded command, so this addition is replay-neutral for v=0 histories.
                   || (flattenAwaitingLateFill && lastFillEvent != null));
-      if (eodFired || expiryFired || remainingQty == 0) {
+      if (eodFired || expiryFired || expiryLeadFired || remainingQty == 0) {
         break;
       }
       // Plan-2A R-AA-1: apply a LATE fill of a resting in-loop-flatten bounded limit, so a
@@ -725,8 +819,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
 
     // v>=1 guarded epilogue.
-    if (eodFired || expiryFired) {
-      String reason = eodFired ? "eod" : "expiry";
+    if (eodFired || expiryFired || expiryLeadFired) {
+      // Plan-2B R-AB-1: an expiry-lead timer fire flattens with reason=expiry_lead so the dedicated
+      // ExpiryLead* kinds (not the Eod* fallthrough) label the lifecycle event. eod/expiry keep
+      // their reasons; eod takes precedence if both an eod sweep and a lead timer fired in the same
+      // task (the lead window precedes EOD by design, so this only matters in degenerate configs).
+      String reason = eodFired ? "eod" : expiryFired ? "expiry" : "expiry_lead";
       // Re-place the bounded flatten until broker-confirmed flat. A place exception (visible
       // non-retryable ApplicationFailure) propagates out of flattenRemaining -> run() (an allowed
       // terminal). An unfilled bounded limit returns false; for the expiry session the next attempt
@@ -1168,7 +1266,22 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // v>=1 retries the timed-out STC exactly once with a fresh limit price and intent_key.
     int retryVersion =
         Workflow.getVersion(VERSION_EXIT_RETRY_ON_TIMEOUT, Workflow.DEFAULT_VERSION, 1);
-    int maxRetries = retryVersion >= 1 ? 1 : 0;
+    // Plan-2B R-AB-2: bounded STEPPED reprice gate (second gate layered over the #216 single-shot).
+    // v=DEFAULT_VERSION keeps maxRetries=1 (legacy single retry) AND the legacy fresh-limit source
+    // chain for byte-identical replay. v>=1 raises the cap to exit_reprice_steps and re-anchors
+    // each
+    // step on a fresh GetOptionQuoteActivity bid/mid bounded by exit_floor, using :reprice-N keys.
+    int steppedRepriceVersion =
+        Workflow.getVersion(VERSION_EXIT_STEPPED_REPRICE, Workflow.DEFAULT_VERSION, 1);
+    int maxRetries;
+    if (steppedRepriceVersion >= 1) {
+      // exit_reprice_steps is the count of re-places AFTER the original placement, so the retry cap
+      // equals the configured step count. The R-AB-1 flatten timer is the backstop once the walk
+      // exhausts; the deadline is naturally bounded by exitFillTtlSecs * (steps+1) << the lead.
+      maxRetries = (int) Math.max(1L, resolveExitRepriceSteps());
+    } else {
+      maxRetries = retryVersion >= 1 ? 1 : 0;
+    }
     // Issue #227: gate the fresh-limit source-order swap. v=DEFAULT_VERSION (in-flight workflows
     // that already entered the retry block under PR #226) keep the original lastTick → peak → ref
     // chain for replay safety; v>=1 (new executions) use the corrected lastTick → ref → peak chain.
@@ -1190,6 +1303,35 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       if (retryCount == 0) {
         intentKey = Workflow.getInfo().getWorkflowId() + ":exit:" + req.getSignalId();
         intent = exitIntent(req, qtyToClose, intentKey, req.getRefPremium());
+      } else if (steppedRepriceVersion >= 1) {
+        // Plan-2B R-AB-2: bounded STEPPED reprice. Per-step intent key uses a distinct :reprice-N
+        // suffix (deterministic loop counter, separate from the original :exit: and the legacy
+        // :retry keys) so no two steps reuse a client_order_id. The step's limit is anchored on a
+        // fresh GetOptionQuoteActivity bid/mid, walked toward the market by exit_reprice_tick per
+        // step, and BOUNDED by exit_floor (same fail-safe as 2A: null/unresolvable/above-bid →
+        // marketable). retryQty is the late-fill-reconciled remaining (never re-ceil'd) so the #357
+        // naked-short guard holds across ALL N steps.
+        intentKey =
+            Workflow.getInfo().getWorkflowId()
+                + ":exit:"
+                + req.getSignalId()
+                + ":reprice-"
+                + retryCount;
+        BigDecimal stepLimit = computeSteppedRepriceLimit(retryCount);
+        auditLog(
+            KIND_PARTIAL_EXIT_RETRY_REQUESTED,
+            subject(
+                "signal_id",
+                req.getSignalId(),
+                "retry_attempt",
+                retryCount,
+                "fresh_limit_price",
+                stepLimit,
+                "source_premium",
+                stepLimit == null ? "marketable_fallback" : "live_quote_stepped",
+                "intent_key",
+                intentKey));
+        intent = exitIntent(req, retryQty, intentKey, stepLimit);
       } else {
         // Issue #216 retry: fresh intent_key (the prior one was cancelled) and fresh limit price.
         // Source preference under VERSION_EXIT_RETRY_SOURCE_ORDER v>=1 (#227):
@@ -1307,6 +1449,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                     lastFillEvent != null
                         || eodFired
                         || expiryFired
+                        // Plan-2B R-AB-2: yield the stepped reprice to the R-AB-1 flatten timer so
+                        // the bounded flatten is the unambiguous final owner (deadline pinned at or
+                        // before the lead trigger; no overlapping double-place). Predicate-only
+                        // addition (expiryLeadFired latched only under v>=1) — replay-neutral for
+                        // v=0 histories.
+                        || expiryLeadFired
                         || !pendingRiskBreaches.isEmpty()
                         || !pendingForceCloses.isEmpty());
       }
@@ -1416,6 +1564,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     } else if ("expiry".equals(reason)) {
       kindReq = KIND_EXPIRY_FORCE_FLATTEN_REQUESTED;
       kindDone = KIND_EXPIRY_FORCE_FLATTENED;
+    } else if ("expiry_lead".equals(reason)) {
+      // Plan-2B R-AB-1: dedicated lead-flatten kinds — do NOT fall through to the Eod* kinds, which
+      // would mislabel the multi-day expiry-lead flatten as the blanket EOD sweep.
+      kindReq = KIND_EXPIRY_LEAD_FLATTEN_REQUESTED;
+      kindDone = KIND_EXPIRY_LEAD_FORCE_FLATTENED;
     } else {
       // chandelier_trail or other Phase 4+ reasons: re-use the EOD audit kinds so downstream
       // dashboards see a single force-flatten pattern (the audit subject carries `reason` for
@@ -1669,6 +1822,96 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   }
 
   /**
+   * Plan-2B R-AB-2: compute the bounded LIMIT for stepped exit reprice step {@code step} (1-based:
+   * step 1 is the first re-place after the original placement). Anchors on a FRESH {@link
+   * GetOptionQuoteActivity} bid/mid (re-fetched each step so the walk tracks the live market),
+   * walks toward the market by {@code step * exit_reprice_tick}, and is BOUNDED by {@code
+   * exit_floor} (the same fail-safe as 2A's {@link #computeBoundedFlattenLimit(String)} —
+   * null/unresolvable/above-bid → marketable). Returns {@code null} (= a marketable exit) on every
+   * fail-safe branch so the stepped reprice can never rest above an executable price:
+   *
+   * <ul>
+   *   <li>quote FAILED/UNAVAILABLE → marketable + {@link #KIND_FLATTEN_QUOTE_UNAVAILABLE};
+   *   <li>no usable anchor → marketable;
+   *   <li>floor null/unresolvable, or floor &gt; live bid → marketable + {@link
+   *       #KIND_FLATTEN_FLOOR_CONFIG_ERROR}.
+   * </ul>
+   *
+   * <p>Uses the NORMAL-session floor (never the expiry-day collapse) — a normal STC reprice is not
+   * an expiry-day event.
+   */
+  private BigDecimal computeSteppedRepriceLimit(int step) {
+    GetOptionQuoteRequest qreq = new GetOptionQuoteRequest();
+    qreq.setSchemaVersion(1L);
+    qreq.setTenantId(input.getTenantId());
+    qreq.setStrategyId(input.getStrategyId());
+    qreq.setContractSymbol(input.getContractSymbol());
+    OptionQuoteResult quote = optionQuote.getOptionQuote(qreq);
+
+    if (quote == null || quote.getStatus() != OptionQuoteResult.Status.OK) {
+      auditLog(
+          KIND_FLATTEN_QUOTE_UNAVAILABLE,
+          subject(
+              "contract_symbol",
+              input.getContractSymbol(),
+              "reason",
+              "exit_reprice",
+              "quote_status",
+              quote == null ? "NULL" : quote.getStatus().value(),
+              "note",
+              "marketable_fallback"));
+      return null;
+    }
+
+    BigDecimal liveBid = quote.getBid();
+    // Anchor chain: live bid → mid → lastTickPremium → peakPremium → ref (same as the flatten
+    // path).
+    BigDecimal anchor =
+        firstPositive(
+            liveBid, quote.getMid(), lastTickPremium, peakPremium, input.getEntryPremium());
+    if (anchor == null) {
+      return null; // No usable anchor → marketable.
+    }
+
+    BigDecimal floor = resolveExitFloor(anchor, false);
+    if (floor == null) {
+      auditLog(
+          KIND_FLATTEN_FLOOR_CONFIG_ERROR,
+          subject(
+              "contract_symbol",
+              input.getContractSymbol(),
+              "reason",
+              "exit_reprice",
+              "note",
+              "no_resolvable_floor_marketable_fallback"));
+      return null;
+    }
+    if (liveBid != null && liveBid.signum() > 0 && floor.compareTo(liveBid) > 0) {
+      auditLog(
+          KIND_FLATTEN_FLOOR_CONFIG_ERROR,
+          subject(
+              "contract_symbol",
+              input.getContractSymbol(),
+              "reason",
+              "exit_reprice",
+              "floor",
+              floor,
+              "live_bid",
+              liveBid,
+              "note",
+              "floor_above_live_bid_marketable_fallback"));
+      return null;
+    }
+
+    // Walk toward the market: limit = max(floor, anchor - step * exit_reprice_tick). The walk never
+    // crosses the configured fail-safe floor.
+    BigDecimal tick = resolveExitRepriceTick();
+    BigDecimal concession = tick.multiply(BigDecimal.valueOf(step));
+    BigDecimal limit = anchor.subtract(concession).max(floor);
+    return OptionTick.round(limit);
+  }
+
+  /**
    * Resolve the exit floor for a bounded flatten. Normal session: {@code max(exit_floor_abs, anchor
    * * exit_floor_pct)}. Expiry session: {@code expiry_day_floor} (a near-zero floor applied only
    * when a live bid exists — the caller has already routed bid&lt;=0 to fully marketable). Returns
@@ -1864,6 +2107,38 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
     Long configured = input.getExitFillTtlSecs();
     return configured != null ? configured : EXIT_FILL_TTL_SECS_DEFAULT;
+  }
+
+  /**
+   * Plan-2B R-AB-1: resolve the flatten-lead minutes for the guaranteed expiry-lead timer. Sourced
+   * from {@code input.flatten_lead_minutes}; null/absent falls back to {@link
+   * #FLATTEN_LEAD_MINUTES_DEFAULT}. Pure read (no Temporal command) — only reached under {@link
+   * #VERSION_EXPIRY_LEAD_FLATTEN} v&gt;=1.
+   */
+  private long resolveFlattenLeadMinutes(PositionWorkflowInput in) {
+    Long configured = in.getFlattenLeadMinutes();
+    return configured != null ? configured : FLATTEN_LEAD_MINUTES_DEFAULT;
+  }
+
+  /**
+   * Plan-2B R-AB-2: resolve the bounded stepped-reprice step count. Sourced from {@code
+   * input.exit_reprice_steps}; null/absent falls back to {@link #EXIT_REPRICE_STEPS_DEFAULT}. Pure
+   * read — only consulted under {@link #VERSION_EXIT_STEPPED_REPRICE} v&gt;=1.
+   */
+  private long resolveExitRepriceSteps() {
+    Long configured = input.getExitRepriceSteps();
+    return configured != null ? configured : EXIT_REPRICE_STEPS_DEFAULT;
+  }
+
+  /**
+   * Plan-2B R-AB-2: resolve the per-step price concession the bounded stepped reprice walks toward
+   * the market. Sourced from {@code input.exit_reprice_tick}; null/absent falls back to {@link
+   * #EXIT_REPRICE_TICK_DEFAULT}. Pure read — only consulted under {@link
+   * #VERSION_EXIT_STEPPED_REPRICE} v&gt;=1.
+   */
+  private BigDecimal resolveExitRepriceTick() {
+    BigDecimal configured = input.getExitRepriceTick();
+    return (configured != null && configured.signum() > 0) ? configured : EXIT_REPRICE_TICK_DEFAULT;
   }
 
   private static Map<String, Object> subject(Object... kv) {

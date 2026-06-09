@@ -93,3 +93,15 @@ class PositionWorkflowInput(BaseModel):
     """
     Plan-2A R-AA-5: carried over from StrategyConfig.expiry_day_floor. On the expiry session the bounded flatten's floor collapses to this near-zero value (applied only when a live bid exists; bid <= 0 → fully marketable). Optional/null preserves pre-change behavior. Spec-only carry in this chunk; flatten consumption lands in R-AA-3.
     """
+    flatten_lead_minutes: conint(ge=0, le=390) | None = None
+    """
+    Plan-2B R-AB-1: carried over from StrategyConfig.flatten_lead_minutes. PositionWorkflow arms a guaranteed bounded flatten timer for EVERY lot (multi-day included) at (expiry_close - flatten_lead_minutes) ET so a position with no STC is sold before expiry. Optional/null treated as the in-code 30-minute default. Consumption is gated behind Workflow.getVersion so in-flight pre-2B workflows replay deterministically (legacy histories never recorded the lead timer).
+    """
+    exit_reprice_steps: conint(ge=1, le=10) | None = None
+    """
+    Plan-2B R-AB-2: carried over from StrategyConfig.exit_reprice_steps. Bounds the stepped exit reprice in PositionWorkflow.processOne. Optional/null treated as the in-code default (~3). Consumption gated behind Workflow.getVersion so in-flight pre-2B workflows keep the legacy single-shot exit retry on replay.
+    """
+    exit_reprice_tick: confloat(le=5.0, gt=0.0) | None = None
+    """
+    Plan-2B R-AB-2: carried over from StrategyConfig.exit_reprice_tick. Per-step price concession the bounded stepped exit reprice walks toward the market. Optional/null treated as the in-code default (~0.05). Consumption gated behind Workflow.getVersion.
+    """

@@ -34,6 +34,31 @@ public interface MarketCalendarActivities {
   Duration durationUntilExpiryCloseEt(LocalDate expiry, LocalTime closeTime);
 
   /**
+   * Plan-2B R-AB-1: duration from "now" (Activity wall clock) to {@code (closeTime - leadMinutes)}
+   * ET on {@code expiry}, for ANY future-or-today expiry (NOT just 0DTE — this is the multi-day
+   * sell-guarantee surface that {@link #durationUntilExpiryCloseEt} cannot provide because it
+   * returns ZERO unless {@code expiry == today}).
+   *
+   * <p>ET-aware / weekend-aware: when the computed lead instant lands on a Saturday or Sunday, the
+   * trigger is rolled FORWARD to the same wall-clock time on the prior Friday so the bounded
+   * flatten still arms before the weekend (a flatten firing on a closed market is a safe no-op
+   * anyway — the bounded limit simply does not fill until the next session — so holiday-awareness
+   * is descoped per the plan; weekend roll-back is the minimum to avoid arming a timer for a
+   * non-trading day).
+   *
+   * <p>Returns a POSITIVE Duration for any future trigger; ZERO when the trigger instant is already
+   * past (the caller then treats the lot as already inside its flatten window and arms no timer —
+   * the EOD/expiry-close timers cover the same-session case). Determinism: the value flows only
+   * through the (replay-ignored) Activity input payload; the workflow gates the timer-arm command
+   * itself via {@code Workflow.getVersion}.
+   *
+   * @param expiry the option's OCC expiry date
+   * @param leadMinutes minutes before the close at which to arm the flatten (e.g. 30)
+   * @param closeTime per-strategy close time ET; null preserves the legacy 15:30 ET default
+   */
+  Duration durationUntilExpiryFlattenEt(LocalDate expiry, long leadMinutes, LocalTime closeTime);
+
+  /**
    * Whether the US equity options market is currently open. Phase 5 KISS: Monday-Friday 09:30-16:00
    * America/New_York. Holidays and half-days land with the full MarketCalendar in Phase 6.
    */

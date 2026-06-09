@@ -144,6 +144,40 @@ class BtoPricingTest {
     assertThat(out.limit()).isEqualByComparingTo(new BigDecimal("3.15"));
   }
 
+  /**
+   * Plan-2B R-AB-3: the copytrade-v1 conservative caps (abs=0.05, pct=0.05) now ship in the YAML so
+   * the entry crosses the spread within the willing-to-pay cap instead of exact-mirroring and
+   * non-filling. SLIP_MIN takes the lesser of (price + abs) and (price * (1 + pct)). At price=2.30:
+   * abs branch 2.35, pct branch 2.415 → 2.35 (abs wins). No market order; the cap is the bound.
+   */
+  @Test
+  void copytradeConservativeCaps_returnsSlipMin_withinWillingToPayCap_issueRAB3() {
+    CopytradeSignalPayload p = payloadWithPrice(new BigDecimal("2.30"));
+    StrategyConfig cfg = configWithSlippage(new BigDecimal("0.05"), new BigDecimal("0.05"));
+
+    PricedLimit out = BtoPricing.computeBtoLimit(p, cfg);
+
+    assertThat(out.strategy()).isEqualTo(Strategy.SLIP_MIN);
+    assertThat(out.limit()).isEqualByComparingTo(new BigDecimal("2.35"));
+    assertThat(out.limit().scale()).isLessThanOrEqualTo(2);
+  }
+
+  /**
+   * Plan-2B R-AB-3: MIRROR fidelity is preserved when both caps are unset (null) — a strategy that
+   * has NOT opted into slippage still mirrors the author price exactly. Guards against the config
+   * change in copytrade-v1.yaml accidentally being read as a global default.
+   */
+  @Test
+  void mirrorStillValidWhenSlippageNull_issueRAB3() {
+    CopytradeSignalPayload p = payloadWithPrice(new BigDecimal("2.30"));
+    StrategyConfig cfg = configWithSlippage(null, null);
+
+    PricedLimit out = BtoPricing.computeBtoLimit(p, cfg);
+
+    assertThat(out.strategy()).isEqualTo(Strategy.MIRROR);
+    assertThat(out.limit()).isEqualByComparingTo(new BigDecimal("2.30"));
+  }
+
   @Test
   void wireKeys_areStableContractRegardlessOfJavaEnumRenames() {
     // Pins the audit-subject wire-format contract: a Java rename (e.g. SLIP_MIN → SlipMin) must
