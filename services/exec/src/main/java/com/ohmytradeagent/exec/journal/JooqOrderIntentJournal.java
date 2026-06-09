@@ -247,42 +247,40 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
 
   @Override
   public boolean markExpired(String intentKey) {
-    OffsetDateTime now = OffsetDateTime.now();
-    int updated =
-        dsl.update(TABLE)
-            .set(field("state"), OrderState.EXPIRED.name())
-            .set(field("last_error"), "broker terminal: EXPIRED")
-            .set(field("last_state_at"), now)
-            .set(field("version"), field("version", Long.class).plus(1))
-            .where(field("intent_key", String.class).eq(intentKey))
-            .and(field("state", String.class).eq(OrderState.SUBMITTED.name()))
-            .execute();
-    return updated == 1;
+    return markTerminalIfSubmitted(intentKey, OrderState.EXPIRED, "broker terminal: EXPIRED");
   }
 
   @Override
   public boolean markBrokerRejected(String intentKey, String reason) {
-    OffsetDateTime now = OffsetDateTime.now();
-    int updated =
-        dsl.update(TABLE)
-            .set(field("state"), OrderState.ERRORED.name())
-            .set(field("last_error"), reason)
-            .set(field("last_state_at"), now)
-            .set(field("version"), field("version", Long.class).plus(1))
-            .where(field("intent_key", String.class).eq(intentKey))
-            .and(field("state", String.class).eq(OrderState.SUBMITTED.name()))
-            .execute();
-    return updated == 1;
+    return markTerminalIfSubmitted(intentKey, OrderState.ERRORED, reason);
   }
 
   @Override
   public boolean markCancelledIfSubmitted(String intentKey) {
+    // lastError=null: a broker-confirmed cancel carries no error (mirrors markCancelled).
+    return markTerminalIfSubmitted(intentKey, OrderState.CANCELLED, null);
+  }
+
+  /**
+   * Guarded terminal transition shared by the FillPoller terminal-non-fill paths: flips a row to
+   * {@code targetState} only while it is still {@code SUBMITTED}, bumps {@code version}, stamps
+   * {@code last_state_at}, and (when {@code lastError != null}) records {@code last_error}. Returns
+   * true iff exactly one row changed — so a row that already won the late-fill race to {@code
+   * FILLED} is a silent no-op.
+   */
+  private boolean markTerminalIfSubmitted(
+      String intentKey, OrderState targetState, String lastError) {
     OffsetDateTime now = OffsetDateTime.now();
-    int updated =
+    var update =
         dsl.update(TABLE)
-            .set(field("state"), OrderState.CANCELLED.name())
+            .set(field("state"), targetState.name())
             .set(field("last_state_at"), now)
-            .set(field("version"), field("version", Long.class).plus(1))
+            .set(field("version"), field("version", Long.class).plus(1));
+    if (lastError != null) {
+      update = update.set(field("last_error"), lastError);
+    }
+    int updated =
+        update
             .where(field("intent_key", String.class).eq(intentKey))
             .and(field("state", String.class).eq(OrderState.SUBMITTED.name()))
             .execute();
