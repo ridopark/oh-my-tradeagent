@@ -249,6 +249,11 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
     // eod_force_flatten passed through verbatim, never defaulted (copytrade false must propagate
     // so PositionWorkflowImpl does not re-arm the EOD timer).
     posInput.setEodForceFlatten(config != null ? config.getEodForceFlatten() : null);
+    // Plan-2A R-AA-5: fix the pre-existing force_close_0dte_et omission — an adopted 0DTE lot must
+    // get the same per-strategy expiry-close flatten time as a copytrade-spawned one, sourced from
+    // StrategyConfig exactly as CopytradeSignalWorkflowImpl does. Null/absent passes through; the
+    // child defaults to 15:30 ET.
+    posInput.setForceClose0dteEt(config != null ? config.getForceClose0dteEt() : null);
     if (config != null && config.getMinPartialQtyBehavior() != null) {
       posInput.setMinPartialQtyBehavior(
           PositionWorkflowInput.MinPartialQtyBehavior.fromValue(
@@ -257,6 +262,14 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
     long ttlSecs = selectPendingTtlSecs(config);
     posInput.setFirstFillTtlSecs(ttlSecs);
     posInput.setExitFillTtlSecs(ttlSecs);
+    // Plan-2A R-AA-5: carry the bounded-flatten exit floors onto the adopted child so an adopted
+    // (often expiry-day) lot arms the same bounded flatten machinery. All three pass through
+    // verbatim (null preserved → marketable fail-safe fallback in the child). Not consumed yet.
+    if (config != null) {
+      posInput.setExitFloorAbs(config.getExitFloorAbs());
+      posInput.setExitFloorPct(config.getExitFloorPct());
+      posInput.setExpiryDayFloor(config.getExpiryDayFloor());
+    }
     return posInput;
   }
 

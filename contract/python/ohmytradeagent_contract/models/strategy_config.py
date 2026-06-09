@@ -211,3 +211,15 @@ class StrategyConfig(BaseModel):
     """
     Issue #205 (originally #16): governs partial_exit when remainingQty <= 1 AND floor(remainingQty * fraction) == 0 — the integer broker quantum can no longer represent a partial honestly. 'skip' (default) logs PartialExitSkippedMinQty and places no order; the runner rides to trail/EOD/STC. 'full_close' closes the last contract on the partial signal. Null/absent treated as 'skip'. PositionWorkflowImpl gates the new branch behind Workflow.getVersion('min-partial-qty-skip', DEFAULT, 1) so in-flight pre-#205 workflows preserve their legacy ceil(remainingQty * fraction) behavior on replay.
     """
+    exit_floor_abs: Annotated[Decimal, Field(gt=0)] | None = None
+    """
+    Plan-2A R-AA-5: absolute price floor (dollars per contract premium) for a bounded, reason-scoped scheduled flatten (eod/expiry/chandelier). The bounded sell is placed marketable (at/through the live bid from GetOptionQuoteActivity) but never below this floor. fail-SAFE: null/absent/unresolvable — or a floor that sits above the live bid — falls back to a marketable exit (never 'no sell'), with a loud config-error audit. Combined with exit_floor_pct via max() so the more conservative of the two applies. Spec-only field in this chunk; PositionWorkflow flatten wiring lands in the next chunk (R-AA-3). Opt-in: null disables this floor term.
+    """
+    exit_floor_pct: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Plan-2A R-AA-5: fractional price floor (fraction of the anchor premium) for a bounded scheduled flatten. floor = anchor * exit_floor_pct. Combined with exit_floor_abs via max() so the more conservative of the two applies. fail-SAFE identically to exit_floor_abs (null/absent/unresolvable or above-live-bid → marketable fallback). Spec-only field in this chunk; flatten wiring lands in R-AA-3. Opt-in: null disables this floor term.
+    """
+    expiry_day_floor: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Plan-2A R-AA-5: on the EXPIRY session the normal exit_floor collapses to this near-zero floor so a decaying long option is sold for something rather than ridden to $0. Applied strictly as a price FLOOR and ONLY when a live bid exists; when bid <= 0 the flatten goes fully marketable (a contract with no live bid expires worthless regardless — out of scope of the sell guarantee). Conservative default ~0.01. Spec-only field in this chunk; flatten wiring lands in R-AA-3.
+    """

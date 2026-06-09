@@ -54,6 +54,25 @@ final class ExecActivitiesFactory {
    */
   private static final int MAX_ATTEMPTS = 5;
 
+  /**
+   * Plan-2A R-AA-6: explicit backoff so a transient broker/journal hiccup retries with spacing
+   * instead of Temporal's default tight schedule. Spacing out the (up to {@link #MAX_ATTEMPTS})
+   * attempts *reduces* the dup-422 trigger on the order path: a 422-on-retry from a duplicate
+   * client_order_id is far less likely when the first attempt has had a real moment to settle at
+   * the broker before the next fires (Plan-1 B1 already fixes the crash; this only narrows the
+   * window).
+   *
+   * <p>startToClose stays at {@link #DEFAULT_START_TO_CLOSE} (15s) for ALL THREE exec activities —
+   * this stub is shared by placeOrder + cancelOrder + reads, and the over-sell gate relies on the
+   * cancel/read paths staying snappy near expiry. We add backoff only (no startToClose change), so
+   * no stub split is needed and no version gate is required (plain options).
+   */
+  private static final Duration RETRY_INITIAL_INTERVAL = Duration.ofMillis(500);
+
+  private static final double RETRY_BACKOFF_COEFFICIENT = 2.0;
+
+  private static final Duration RETRY_MAXIMUM_INTERVAL = Duration.ofSeconds(5);
+
   private ExecActivitiesFactory() {}
 
   /**
@@ -68,7 +87,13 @@ final class ExecActivitiesFactory {
         ActivityOptions.newBuilder()
             .setTaskQueue(taskQueueFor(brokerTarget))
             .setStartToCloseTimeout(DEFAULT_START_TO_CLOSE)
-            .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(MAX_ATTEMPTS).build())
+            .setRetryOptions(
+                RetryOptions.newBuilder()
+                    .setMaximumAttempts(MAX_ATTEMPTS)
+                    .setInitialInterval(RETRY_INITIAL_INTERVAL)
+                    .setBackoffCoefficient(RETRY_BACKOFF_COEFFICIENT)
+                    .setMaximumInterval(RETRY_MAXIMUM_INTERVAL)
+                    .build())
             .build());
   }
 

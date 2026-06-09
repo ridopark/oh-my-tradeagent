@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/option-quote-result.json",
+  "title": "OptionQuoteResult",
+  "description": "Plan-2A R-AA-2: result of GetOptionQuoteActivity.getOptionQuote. A one-shot NBBO snapshot mapped from the market-data-svc internal Quote(bid,mid,ask,retrievedAt) record. status=FAILED is returned (not thrown) so the bounded-flatten path can fall back to a marketable exit and emit a loud availability audit instead of going into Temporal retry. When status=UNAVAILABLE the provider returned no snapshot (Optional.empty); bid/mid/ask are absent.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.OptionQuoteResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_symbol",
+    "retrieved_at",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version."
+    },
+    "contract_symbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OCC option symbol the snapshot is for (echoed from the request)."
+    },
+    "bid": {
+      "type": "number",
+      "description": "NBBO bid premium per contract, dollars. Absent when status != OK."
+    },
+    "mid": {
+      "type": "number",
+      "description": "Provider-computed mid premium per contract, dollars. Absent when status != OK."
+    },
+    "ask": {
+      "type": "number",
+      "description": "NBBO ask premium per contract, dollars. Absent when status != OK."
+    },
+    "retrieved_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp when the snapshot was taken (or attempted)."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["OK", "UNAVAILABLE", "FAILED"],
+      "description": "OK: bid/mid/ask present. UNAVAILABLE: provider returned no snapshot. FAILED: the snapshot call threw; returned (not thrown) so the workflow can fall back to a marketable exit and audit."
+    },
+    "error": {
+      "type": "string",
+      "description": "Error message when status=FAILED."
+    }
+  }
+}

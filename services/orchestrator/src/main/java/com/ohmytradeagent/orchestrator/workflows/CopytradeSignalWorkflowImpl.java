@@ -483,6 +483,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     long ttlSecsForChild = selectPendingTtlSecs(config);
     posInput.setFirstFillTtlSecs(ttlSecsForChild);
     posInput.setExitFillTtlSecs(ttlSecsForChild);
+    // Plan-2A R-AA-5: carry the bounded-flatten exit floors so PositionWorkflow's scheduled flatten
+    // (R-AA-3, next chunk) can anchor a bounded LIMIT instead of a market dump. All three pass
+    // through verbatim (null preserved); PositionWorkflowImpl treats null as the marketable
+    // fail-safe fallback. Not consumed in workflow logic yet — plumb + default only.
+    posInput.setExitFloorAbs(config.getExitFloorAbs());
+    posInput.setExitFloorPct(config.getExitFloorPct());
+    posInput.setExpiryDayFloor(config.getExpiryDayFloor());
 
     Async.function(child::run, posInput);
     // Wait until the child is durably scheduled before returning.
