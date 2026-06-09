@@ -12,6 +12,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.AdoptionResult;
+import com.ohmytradeagent.contract.AdoptionWorkflowInput;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.BrokerOpenOrder;
 import com.ohmytradeagent.contract.BrokerPosition;
@@ -19,6 +21,7 @@ import com.ohmytradeagent.contract.JournalEntry;
 import com.ohmytradeagent.contract.ReconciliationSummary;
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
@@ -34,6 +37,8 @@ import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,6 +50,16 @@ class ReconciliationWorkflowImplTest {
   private static final String CORE_QUEUE = "orchestrator-core";
   // Phase 2c.2: broker_target=alpaca-paper -> task queue broker-alpaca-paper via the factory.
   private static final String EXEC_QUEUE = "broker-alpaca-paper";
+
+  /**
+   * Plan-2A R-AA-4: records what the auto-adopted child AdoptionWorkflow received. The child runs
+   * in the same JVM under the test env, so the recording double publishes its input here keyed on
+   * the child workflow id. {@code FAIL_ON_ADOPT} makes the double throw so the recon-side
+   * child-start Promise swallow can be asserted.
+   */
+  static final Map<String, AdoptionWorkflowInput> ADOPT_STARTED = new ConcurrentHashMap<>();
+
+  static volatile boolean FAIL_ON_ADOPT = false;
 
   private TestWorkflowEnvironment env;
   private AuditActivities audit;
@@ -65,8 +80,17 @@ class ReconciliationWorkflowImplTest {
     env =
         TestWorkflowEnvironment.newInstance(
             TestEnvironmentOptions.newBuilder().setUseTimeskipping(false).build());
+    ADOPT_STARTED.clear();
+    FAIL_ON_ADOPT = false;
     Worker coreWorker = env.newWorker(CORE_QUEUE);
-    coreWorker.registerWorkflowImplementationTypes(ReconciliationWorkflowImpl.class);
+    // Plan-2A R-AA-4: the recon workflow + a recording AdoptionWorkflow double. The auto-adopt
+    // ABANDON child inherits the parent task queue (no explicit setTaskQueue in
+    // ChildWorkflowOptions
+    // → CORE_QUEUE), so the double must be registered here. The double records its input (and can
+    // be
+    // made to throw) without pulling in the real adoption/exec dependency chain.
+    coreWorker.registerWorkflowImplementationTypes(
+        ReconciliationWorkflowImpl.class, RecordingAdoptionWorkflowImpl.class);
     audit = Mockito.mock(AuditActivities.class);
     auditQuery = Mockito.mock(AuditQueryActivities.class);
     exec = Mockito.mock(ReconciliationExecActivity.class);
@@ -655,6 +679,197 @@ class ReconciliationWorkflowImplTest {
         .containsEntry("first_seen_at", tick3FirstSeen.toString());
   }
 
+  // ---------- Plan-2A R-AA-4: recon auto-adopts orphaned FILLED positions ----------
+
+  @Test
+  void positionOrphanFilled_autoAdopts_startsAbandonChildOnce_emitsAuditAndInitiatedMetric() {
+    // A broker-held position with a FILLED journal anchor + no running owner → recon must start
+    // AdoptionWorkflow as an ABANDON child exactly once, with id == WorkflowIds.adoption(...), emit
+    // a ReconAutoAdoptionInitiated audit, and bump the `initiated` counter.
+    String paddedOcc = "SPY   260519C00737000";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    // Neither the PositionWorkflow owner nor the adoption id is running.
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+
+    String adoptWfId = WorkflowIds.adoption("dev", "copytrade-v1", paddedOcc);
+    // The recon-side precheck probes the adoption id before the Async start (synchronous, so it has
+    // happened by the time run() returns).
+    Mockito.verify(positionLookup).isPositionWorkflowRunning(eq(adoptWfId));
+    // The ABANDON child runs asynchronously in the same test env; poll until it records its input.
+    waitUntilAdoptStarted(adoptWfId);
+    AdoptionWorkflowInput got = ADOPT_STARTED.get(adoptWfId);
+    assertThat(got.getTenantId()).isEqualTo("dev");
+    assertThat(got.getStrategyId()).isEqualTo("copytrade-v1");
+    assertThat(got.getOcc()).isEqualTo(paddedOcc);
+
+    AuditEvent initiated = captureKind("ReconAutoAdoptionInitiated");
+    assertThat(initiated.getSubject())
+        .containsEntry("option_symbol", paddedOcc)
+        .containsEntry("adoption_workflow_id", adoptWfId)
+        .containsEntry(
+            "expected_workflow_id", "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-99:0");
+
+    verify(metrics, times(1))
+        .recordAutoAdopt(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("initiated"));
+  }
+
+  @Test
+  void positionOrphanFilled_adoptionIdAlreadyRunning_precheckSkipsStart() {
+    // A prior cycle already issued the adoption start and that adoption id is still RUNNING (the
+    // in-flight window). The precheck must skip the duplicate start, emit no Initiated audit, and
+    // bump `already_owned` instead. The PositionOrphan(filled) page itself is unchanged.
+    String paddedOcc = "SPY   260519C00737000";
+    String adoptWfId = WorkflowIds.adoption("dev", "copytrade-v1", paddedOcc);
+    String posWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-99:0";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    // The owner is NOT running (so the orphan fires), but the adoption id IS running.
+    when(positionLookup.isPositionWorkflowRunning(eq(posWfId))).thenReturn(false);
+    when(positionLookup.isPositionWorkflowRunning(eq(adoptWfId))).thenReturn(true);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    // No duplicate child started.
+    assertThat(ADOPT_STARTED).doesNotContainKey(adoptWfId);
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "ReconAutoAdoptionInitiated".equals(e.getKind())));
+    verify(metrics, times(1))
+        .recordAutoAdopt(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("already_owned"));
+    verify(metrics, never())
+        .recordAutoAdopt(anyString(), anyString(), anyString(), eq("initiated"));
+  }
+
+  @Test
+  void positionOrphanFilled_ownerReappearsAfterCompleteWindow_precheckSkipsStart() {
+    // Post-complete window: the adopted PositionWorkflow owner is now RUNNING (a prior adopt
+    // completed and the owner survived). The owner-running check short-circuits the auto-adopt — no
+    // PositionOrphan even fires (the existing owner-running branch), so no auto-adopt at all.
+    String paddedOcc = "SPY   260519C00737000";
+    String posWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-99:0";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    when(positionLookup.isPositionWorkflowRunning(eq(posWfId))).thenReturn(true);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    assertThat(ADOPT_STARTED).isEmpty();
+    verify(metrics, never()).recordAutoAdopt(anyString(), anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void positionOrphanFilled_openSellAtBroker_overSellGateSkipsAutoAdopt() {
+    // Over-sell gate (b): an open/pending SELL for the OCC exists at the broker → recon must NOT
+    // auto-adopt (it would race the settling close). OCC normalized via compact() on both sides:
+    // broker reports the compact OCC, the position carries the padded form.
+    String paddedOcc = "SPY   260519C00737000";
+    String compactOcc = "SPY260519C00737000";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    // An OPEN SELL for the same OCC (compact form, as Alpaca would report it).
+    when(exec.brokerListOpenOrders())
+        .thenReturn(List.of(sellOrder("brk-sell", "cid-sell", compactOcc)));
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    // The PositionOrphan still pages (detection is unchanged), but auto-adopt is refused.
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    assertThat(ADOPT_STARTED).isEmpty();
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "ReconAutoAdoptionInitiated".equals(e.getKind())));
+    verify(metrics, times(1))
+        .recordAutoAdopt(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("refused_not_held"));
+    // The over-sell gate fires BEFORE the idempotency precheck, so no running-state probe for the
+    // adoption id is even issued.
+    Mockito.verify(positionLookup, never())
+        .isPositionWorkflowRunning(eq(WorkflowIds.adoption("dev", "copytrade-v1", paddedOcc)));
+  }
+
+  @Test
+  void positionOrphanMissing_noAnchor_isNotAutoAdopted_pageOnly() {
+    // journal_status='missing' (no FILLED anchor) → page only, never auto-adopted.
+    String paddedOcc = "SPY   260519C00737000";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    captureKind("PositionOrphan"); // page emitted
+    assertThat(ADOPT_STARTED).isEmpty();
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "ReconAutoAdoptionInitiated".equals(e.getKind())));
+    verify(metrics, never()).recordAutoAdopt(anyString(), anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void positionOrphanFilled_childStartFailurePromiseIsSwallowed_reconRunCompletes() {
+    // The residual TOCTOU child-already-started is a benign no-op: the failed child-start Promise
+    // must NOT propagate to recon run(). Force the child to throw on adopt; recon run() must still
+    // return its summary normally (not a WorkflowFailedException).
+    FAIL_ON_ADOPT = true;
+    String paddedOcc = "SPY   260519C00737000";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    // recon run() completed normally despite the child adoption failing.
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    assertThat(summary.getSchemaVersion()).isEqualTo(1L);
+  }
+
+  /**
+   * Plan-2A R-AA-4: recording AdoptionWorkflow double for the recon auto-adopt path. Publishes the
+   * input it received (keyed on its own workflow id) so the test can assert the ABANDON-child
+   * start. When {@code FAIL_ON_ADOPT} is set it throws, exercising the recon-side child-start
+   * Promise swallow.
+   */
+  public static class RecordingAdoptionWorkflowImpl implements AdoptionWorkflow {
+    @Override
+    public AdoptionResult adopt(AdoptionWorkflowInput in) {
+      ADOPT_STARTED.put(io.temporal.workflow.Workflow.getInfo().getWorkflowId(), in);
+      if (FAIL_ON_ADOPT) {
+        throw io.temporal.failure.ApplicationFailure.newNonRetryableFailure(
+            "boom", "TestAdoptFailure");
+      }
+      AdoptionResult r = new AdoptionResult();
+      r.setSchemaVersion(1L);
+      r.setOutcome(AdoptionResult.Outcome.ADOPTED);
+      return r;
+    }
+  }
+
   // ---------- helpers ----------
 
   private ReconciliationSummary runWorkflow() {
@@ -735,6 +950,40 @@ class ReconciliationWorkflowImplTest {
     o.setOptionSymbol(occ);
     o.setSide(BrokerOpenOrder.Side.BUY);
     o.setQty(1L);
+    o.setState("open");
+    return o;
+  }
+
+  /**
+   * Poll until the auto-adopted ABANDON child has executed and recorded its input, or fail after a
+   * bounded wait. The child runs asynchronously (recon does not block on it by design), so a short
+   * poll is needed; this is waiting on a real async side effect, not a Temporal timer (no
+   * time-skipping involved).
+   */
+  private static void waitUntilAdoptStarted(String adoptWfId) {
+    long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+    while (System.nanoTime() < deadline) {
+      if (ADOPT_STARTED.containsKey(adoptWfId)) {
+        return;
+      }
+      try {
+        Thread.sleep(20);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        break;
+      }
+    }
+    throw new AssertionError("auto-adopt child never started for id=" + adoptWfId);
+  }
+
+  private BrokerOpenOrder sellOrder(String brokerOrderId, String clientOrderId, String occ) {
+    BrokerOpenOrder o = new BrokerOpenOrder();
+    o.setSchemaVersion(1L);
+    o.setBrokerOrderId(brokerOrderId);
+    o.setClientOrderId(clientOrderId);
+    o.setOptionSymbol(occ);
+    o.setSide(BrokerOpenOrder.Side.SELL);
+    o.setQty(5L);
     o.setState("open");
     return o;
   }

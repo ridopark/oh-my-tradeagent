@@ -226,6 +226,13 @@ public final class AuditEventKinds {
           "PositionOrphanOngoing",
           "JournalOrphanOngoing",
           "ReconciliationMetricsRecordFailed",
+          // Plan-2A R-AA-4: emitted by ReconciliationWorkflowImpl when a recon cycle detects a
+          // PositionOrphan(journal_status='filled') and issues an ABANDON-child AdoptionWorkflow
+          // start to re-attach the orphaned-but-legit lot to a managing PositionWorkflow. Pure
+          // provenance / observability for the auto-adopt path — NOT a lifecycle event (the real
+          // ledger ENTRY is the adopted workflow's PositionEntered). Intentionally placed in
+          // ALL_KINDS only, not in ENTRY_KINDS or any *_TERMINAL_CLOSE_KINDS group.
+          "ReconAutoAdoptionInitiated",
           // Issue #239/#285: emitted by AdoptionWorkflow when an operator-triggered
           // adoption reconstructs + starts a PositionWorkflow owner for a confirmed orphan. Pure
           // provenance / observability — NOT a lifecycle event. The real ledger ENTRY is the

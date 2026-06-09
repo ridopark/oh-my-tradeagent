@@ -1,5 +1,6 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
+import com.ohmytradeagent.contract.AdoptionWorkflowInput;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.BrokerOpenOrder;
 import com.ohmytradeagent.contract.BrokerPosition;
@@ -12,8 +13,14 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
+import com.ohmytradeagent.orchestrator.domain.OccSymbol;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.api.enums.v1.ParentClosePolicy;
+import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
 import io.temporal.common.RetryOptions;
+import io.temporal.workflow.Async;
+import io.temporal.workflow.ChildWorkflowOptions;
+import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
 import java.time.Instant;
@@ -64,6 +71,14 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   private static final String KIND_POSITION_ORPHAN_ONGOING = "PositionOrphanOngoing";
   private static final String KIND_JOURNAL_ORPHAN_ONGOING = "JournalOrphanOngoing";
   private static final String KIND_METRICS_RECORD_FAILED = "ReconciliationMetricsRecordFailed";
+  // Plan-2A R-AA-4: a recon cycle issued an ABANDON-child AdoptionWorkflow start for an orphaned
+  // FILLED position.
+  private static final String KIND_RECON_AUTO_ADOPTION_INITIATED = "ReconAutoAdoptionInitiated";
+
+  // Plan-2A R-AA-4: recon.auto_adopt.{initiated,already_owned,refused_not_held} metric outcomes.
+  private static final String AUTO_ADOPT_INITIATED = "initiated";
+  private static final String AUTO_ADOPT_ALREADY_OWNED = "already_owned";
+  private static final String AUTO_ADOPT_REFUSED_NOT_HELD = "refused_not_held";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -280,6 +295,13 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         emitPositionOrphanWithDebounce(
             in, p, expectedWfId, recentFilled.getSignalId(), "filled", now, debounceSince);
         positionOrphans++;
+        // Plan-2A R-AA-4: a FILLED journal anchor exists (this branch) AND no running owner →
+        // auto-adopt the orphaned-but-legit lot by starting AdoptionWorkflow as an ABANDON child.
+        // The "missing"/no-anchor branch above intentionally falls through (page only) and never
+        // reaches here. No recon-side version gate: recon executions are short-lived per scheduled
+        // run (workflowId carries {{.ScheduledRunID}}), so there is no long-lived in-flight history
+        // to replay-protect — a getVersion marker here would be vacuous.
+        maybeAutoAdopt(in, brokerTarget, p, expectedWfId, brokerOpen);
       }
     }
 
@@ -414,6 +436,117 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // Else: already escalated this window — silent suppress.
       }
       // Else: still within the escalation window — silent suppress (debounced).
+    }
+  }
+
+  /**
+   * Plan-2A R-AA-4: auto-adopt an orphaned FILLED position. Caller has already established that (a)
+   * a FILLED journal anchor exists for the OCC and (b) no PositionWorkflow with {@code
+   * expectedWfId} is running — that is the very condition that fires the {@code
+   * journal_status='filled'} PositionOrphan. This method adds the over-sell gate + idempotency
+   * precheck, then starts {@code AdoptionWorkflow} as a non-blocking ABANDON child.
+   *
+   * <p>Mechanism (fixed by the plan, mirrors {@code AdoptionWorkflowImpl} ~152-161):
+   *
+   * <ul>
+   *   <li>{@code Workflow.newChildWorkflowStub} + {@code ChildWorkflowOptions} with the canonical
+   *       {@code WorkflowIds.adoption(tenant,strategy,occ)} id, {@code ParentClosePolicy.ABANDON}
+   *       (the child must outlive this short recon cycle), and {@code
+   *       WorkflowIdReusePolicy.ALLOW_DUPLICATE} (NOT REJECT_DUPLICATE — the adoption id keys on
+   *       (tenant,strategy,occ) only, so REJECT would permanently block re-adopting an OCC that
+   *       goes adopted → managed → re-orphaned; the precheck below covers churn).
+   *   <li>Launched via {@code Async.function(child::adopt, input)} so recon does not block.
+   *   <li>NOT {@code ExternalWorkflowStub.start()} (no such method) and NOT a client-side {@code
+   *       WorkflowExecutionAlreadyStarted} catch.
+   * </ul>
+   *
+   * <p>Idempotency = recon-side PRECHECK before the Async start: skip if {@code expectedWfId} (the
+   * PositionWorkflow owner) OR the adoption id is already running. This covers both the in-flight
+   * and post-complete windows. The residual sub-second TOCTOU child-already-started is a benign
+   * no-op — the failed child-start Promise is swallowed (NOT propagated to recon {@code run()}).
+   *
+   * <p>Over-sell gate: only auto-adopt when no open/pending SELL for the OCC exists at the broker.
+   * Matched on {@code side==SELL} with the OCC normalized via {@link OccSymbol#compact(String)} on
+   * BOTH sides (padded-vs-compact mismatch would defeat the gate, cf. the %20-padding bug in
+   * 16e4c6e). NOTE: {@code AlpacaPaperBroker} does not override {@code listOpenOrders()} today, so
+   * on Alpaca {@code brokerOpen} is empty and this gate is currently inert — R-AA-1 (workflow stays
+   * running until a broker-confirmed fill) is the real settling-close defense. Implemented
+   * correctly so it works once {@code listOpenOrders()} lands.
+   */
+  private void maybeAutoAdopt(
+      ReconciliationWorkflowInput in,
+      String brokerTarget,
+      BrokerPosition p,
+      String expectedWfId,
+      List<BrokerOpenOrder> brokerOpen) {
+    String adoptWfId =
+        WorkflowIds.adoption(in.getTenantId(), in.getStrategyId(), p.getOptionSymbol());
+
+    // Over-sell gate (b): refuse if any open/pending SELL for this OCC exists at the broker.
+    String compactOcc = OccSymbol.compact(p.getOptionSymbol());
+    for (BrokerOpenOrder o : brokerOpen) {
+      if (o.getSide() == BrokerOpenOrder.Side.SELL
+          && compactOcc != null
+          && compactOcc.equals(OccSymbol.compact(o.getOptionSymbol()))) {
+        recordAutoAdoptMetric(in, brokerTarget, AUTO_ADOPT_REFUSED_NOT_HELD);
+        return;
+      }
+    }
+
+    // Idempotency precheck (in-flight AND post-complete windows): the owner is already known
+    // not-running (caller condition), but re-check it AND the adoption id. A running adoption id
+    // means a prior cycle already issued the start — skip to avoid a duplicate.
+    if (positionLookup.isPositionWorkflowRunning(expectedWfId)
+        || positionLookup.isPositionWorkflowRunning(adoptWfId)) {
+      recordAutoAdoptMetric(in, brokerTarget, AUTO_ADOPT_ALREADY_OWNED);
+      return;
+    }
+
+    AdoptionWorkflowInput adoptInput = new AdoptionWorkflowInput();
+    adoptInput.setSchemaVersion(1L);
+    adoptInput.setTenantId(in.getTenantId());
+    adoptInput.setStrategyId(in.getStrategyId());
+    adoptInput.setOcc(p.getOptionSymbol());
+    adoptInput.setOperatorId("recon");
+
+    ChildWorkflowOptions opts =
+        ChildWorkflowOptions.newBuilder()
+            .setWorkflowId(adoptWfId)
+            .setParentClosePolicy(ParentClosePolicy.PARENT_CLOSE_POLICY_ABANDON)
+            .setWorkflowIdReusePolicy(
+                WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE)
+            .build();
+    AdoptionWorkflow child = Workflow.newChildWorkflowStub(AdoptionWorkflow.class, opts);
+
+    // Emit provenance + counter BEFORE the Async start (the start is the side effect this audits).
+    Map<String, Object> subj =
+        subject(
+            "option_symbol",
+            p.getOptionSymbol(),
+            "qty",
+            p.getQty(),
+            "adoption_workflow_id",
+            adoptWfId,
+            "expected_workflow_id",
+            expectedWfId);
+    auditLog(KIND_RECON_AUTO_ADOPTION_INITIATED, subj);
+    recordAutoAdoptMetric(in, brokerTarget, AUTO_ADOPT_INITIATED);
+
+    // Non-blocking start so recon doesn't wait on the adoption. The residual TOCTOU
+    // child-already-started is a benign no-op: swallow the failed child-start Promise so it never
+    // propagates to recon run(). This is the deterministic Promise.exceptionally handler — distinct
+    // from the forbidden client-side WorkflowExecutionAlreadyStarted catch.
+    Promise<?> started = Async.function(child::adopt, adoptInput);
+    started.exceptionally(t -> null);
+  }
+
+  private void recordAutoAdoptMetric(
+      ReconciliationWorkflowInput in, String brokerTarget, String outcome) {
+    try {
+      metrics.recordAutoAdopt(in.getTenantId(), in.getStrategyId(), brokerTarget, outcome);
+    } catch (RuntimeException e) {
+      // Metrics are non-fatal (mirrors the recordCycle convention) — a meter outage cannot break a
+      // recon cycle. Swallow; the audit row is the durable record of the decision.
     }
   }
 

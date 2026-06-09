@@ -38,4 +38,14 @@ public interface ReconciliationMetricsActivities {
       long lagMillis,
       long discrepancies,
       long intentsReconciled);
+
+  /**
+   * Plan-2A R-AA-4: records one recon auto-adoption decision as a counter increment. Emits {@code
+   * recon_auto_adopt_total} tagged with {@code tenant}, {@code strategy}, {@code broker_target},
+   * and {@code outcome} ∈ {@code {initiated, already_owned, refused_not_held}} — the {@code
+   * recon.auto_adopt.{initiated,already_owned,refused_not_held}} metric family. A benign {@code
+   * already_owned} / {@code refused_not_held} skip is NOT an alert (a just-closed or settling-close
+   * lot racing the adopt); only {@code initiated} reflects a real ABANDON-child start.
+   */
+  void recordAutoAdopt(String tenantId, String strategyId, String brokerTarget, String outcome);
 }
