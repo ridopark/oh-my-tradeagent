@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>oh-my-tradeagent · BTO / STC end-to-end flow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#070a0e; --panel:#0e151c; --panel-2:#0b1117; --line:#1c2630;
+    --ink:#cdd8e3; --mut:#6c7a89; --dim:#3d4956;
+    --buy:#36e0a0; --buy-d:#0f3b2c;
+    --sell:#ff5f6d; --sell-d:#3d1419;
+    --warn:#ffb454; --warn-d:#3a2a10;
+    --audit:#9d7bff; --recon:#46c4ff;
+    --glow:0 0 0 1px rgba(255,255,255,.04), 0 8px 30px rgba(0,0,0,.5);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font-family:"JetBrains Mono",ui-monospace,monospace}
+  body{
+    background-image:
+      radial-gradient(1200px 600px at 80% -10%, rgba(70,196,255,.06), transparent 60%),
+      radial-gradient(900px 500px at 0% 110%, rgba(54,224,160,.05), transparent 55%),
+      linear-gradient(transparent 0 31px, rgba(255,255,255,.018) 31px 32px),
+      linear-gradient(90deg, transparent 0 31px, rgba(255,255,255,.018) 31px 32px);
+    background-size:auto,auto,32px 32px,32px 32px;
+    line-height:1.5; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--recon)}
+  .wrap{max-width:1180px;margin:0 auto;padding:40px 26px 80px}
+
+  /* header */
+  header{position:relative;border:1px solid var(--line);border-radius:14px;padding:30px 30px 26px;background:
+    linear-gradient(180deg,rgba(255,255,255,.025),transparent 70%),var(--panel);box-shadow:var(--glow);overflow:hidden}
+  header::after{content:"";position:absolute;inset:0;background:
+    repeating-linear-gradient(115deg,transparent 0 22px,rgba(255,255,255,.012) 22px 23px);pointer-events:none}
+  .kicker{font-size:11px;letter-spacing:.4em;text-transform:uppercase;color:var(--mut)}
+  h1{font-family:"Syne",sans-serif;font-weight:800;font-size:clamp(30px,5vw,54px);line-height:1.02;margin:.25em 0 .15em;letter-spacing:-.01em}
+  h1 .buy{color:var(--buy)} h1 .sell{color:var(--sell)}
+  .sub{color:var(--mut);max-width:70ch;font-size:13.5px}
+  .meta{margin-top:18px;display:flex;flex-wrap:wrap;gap:8px}
+  .tag{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:4px 11px;color:var(--mut);background:var(--panel-2)}
+
+  /* controls */
+  .controls{position:sticky;top:0;z-index:30;margin:22px 0;padding:12px;border:1px solid var(--line);border-radius:12px;
+    background:rgba(8,12,16,.82);backdrop-filter:blur(10px);display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button{font-family:inherit;font-size:12.5px;font-weight:700;letter-spacing:.02em;cursor:pointer;color:var(--ink);
+    background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:9px 15px;transition:.15s;position:relative}
+  button:hover{border-color:var(--dim);transform:translateY(-1px)}
+  button .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;vertical-align:middle}
+  button.run-bto .dot{background:var(--buy);box-shadow:0 0 10px var(--buy)}
+  button.run-stc .dot{background:var(--sell);box-shadow:0 0 10px var(--sell)}
+  button.run-inc .dot{background:var(--warn);box-shadow:0 0 10px var(--warn)}
+  button.active{border-color:currentColor}
+  button.run-bto.active{color:var(--buy)} button.run-stc.active{color:var(--sell)} button.run-inc.active{color:var(--warn)}
+  .spd{margin-left:auto;color:var(--mut);font-size:11px;display:flex;gap:8px;align-items:center}
+  .spd button{padding:6px 10px}
+
+  /* layout */
+  .grid{display:grid;grid-template-columns:1fr 320px;gap:18px;align-items:start}
+  @media(max-width:900px){.grid{grid-template-columns:1fr}}
+  section.flow{border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:var(--glow);padding:22px;margin-bottom:18px;position:relative}
+  .flow h2{font-family:"Syne",sans-serif;font-size:20px;margin:0 0 2px;letter-spacing:.01em;display:flex;align-items:center;gap:10px}
+  .flow .lead{color:var(--mut);font-size:12.5px;margin:0 0 20px}
+  .rail{position:absolute;left:0;top:0;bottom:0;width:4px;border-radius:14px 0 0 14px}
+  .rail.buy{background:linear-gradient(var(--buy),transparent)} .rail.sell{background:linear-gradient(var(--sell),transparent)}
+
+  /* pipeline */
+  .pipe{position:relative;display:flex;flex-wrap:wrap;gap:10px 26px}
+  .stage{position:relative;flex:1 1 168px;min-width:158px;border:1px solid var(--line);border-radius:11px;background:var(--panel-2);
+    padding:12px 12px 11px;transition:.3s;opacity:.5}
+  .stage::after{content:"";position:absolute;right:-19px;top:50%;width:12px;height:12px;border-top:1.5px solid var(--dim);
+    border-right:1.5px solid var(--dim);transform:translateY(-50%) rotate(45deg);opacity:.5}
+  .stage:last-child::after,.stage.tail::after{display:none}
+  .stage .ac{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut)}
+  .stage .ti{font-size:13px;font-weight:700;margin:3px 0 4px;color:var(--ink)}
+  .stage .de{font-size:11px;color:var(--mut);line-height:1.45}
+  .stage.audit{border-style:dashed}
+  .stage .badge{display:inline-block;margin-top:7px;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;
+    padding:2px 7px;border-radius:5px;border:1px solid currentColor}
+  .stage.lit{opacity:1;transform:translateY(-2px)}
+  .pipe.buy .stage.lit{border-color:var(--buy);box-shadow:0 0 0 1px var(--buy),0 0 26px rgba(54,224,160,.18)}
+  .pipe.sell .stage.lit{border-color:var(--sell);box-shadow:0 0 0 1px var(--sell),0 0 26px rgba(255,95,109,.18)}
+  .stage.done{opacity:1}
+  .stage.good{border-color:var(--buy)!important;color:var(--buy)}
+  .stage.fail{border-color:var(--sell)!important;color:var(--sell);opacity:1}
+  .stage.warnnode{border-color:var(--warn)!important;color:var(--warn);opacity:1}
+  .stage .de,.stage .ac,.stage .ti{color:inherit}
+  .stage.good .de,.stage.fail .de,.stage.warnnode .de{opacity:.8}
+
+  /* fork row */
+  .fork{margin-top:16px;border-top:1px dashed var(--line);padding-top:14px;display:flex;flex-wrap:wrap;gap:10px}
+  .fork .stage{flex:1 1 230px;opacity:.85}
+
+  /* packet */
+  .packet{position:absolute;width:18px;height:18px;border-radius:50%;left:0;top:0;pointer-events:none;z-index:5;
+    transform:translate(-50%,-50%);opacity:0;transition:transform .55s cubic-bezier(.5,.05,.3,1),opacity .25s}
+  .packet b{position:absolute;inset:0;border-radius:50%}
+  .packet.buy b{background:var(--buy);box-shadow:0 0 16px 4px var(--buy)}
+  .packet.sell b{background:var(--sell);box-shadow:0 0 16px 4px var(--sell)}
+  .packet.warn b{background:var(--warn);box-shadow:0 0 16px 4px var(--warn)}
+  .packet b::before{content:"";position:absolute;inset:-6px;border-radius:50%;border:1px solid currentColor;opacity:.4;animation:ring 1.1s linear infinite}
+  @keyframes ring{from{transform:scale(.6);opacity:.6}to{transform:scale(1.7);opacity:0}}
+
+  /* side: audit log */
+  aside{position:sticky;top:86px}
+  .log{border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:var(--glow);overflow:hidden}
+  .log .hd{padding:13px 15px;border-bottom:1px solid var(--line);font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--mut);display:flex;justify-content:space-between;align-items:center}
+  .log .hd b{color:var(--audit);font-weight:700}
+  .log .body{height:430px;overflow:auto;padding:8px 0;font-size:11.5px}
+  .log .row{display:grid;grid-template-columns:50px 1fr;gap:8px;padding:5px 15px;border-left:2px solid transparent;animation:slide .3s ease}
+  .log .row .tm{color:var(--dim)}
+  .log .row .ev{color:var(--ink)}
+  .log .row.audit{border-left-color:var(--audit)} .log .row.audit .ev{color:#c7b6ff}
+  .log .row.good{border-left-color:var(--buy)} .log .row.good .ev{color:var(--buy)}
+  .log .row.fail{border-left-color:var(--sell)} .log .row.fail .ev{color:var(--sell)}
+  .log .row.warn{border-left-color:var(--warn)} .log .row.warn .ev{color:var(--warn)}
+  .log .row.recon{border-left-color:var(--recon)} .log .row.recon .ev{color:var(--recon)}
+  @keyframes slide{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:none}}
+  .log .empty{color:var(--dim);padding:20px 15px;font-size:11.5px}
+
+  .legend{margin-top:16px;border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:15px 16px}
+  .legend h3{font-family:"Syne",sans-serif;font-size:13px;margin:0 0 11px;color:var(--mut);letter-spacing:.1em;text-transform:uppercase}
+  .legend .it{display:flex;gap:9px;align-items:center;font-size:11.5px;color:var(--mut);margin:6px 0}
+  .legend .sw{width:13px;height:13px;border-radius:4px;flex:none}
+
+  /* recon strip */
+  .recon-strip{border:1px solid var(--line);border-left:3px solid var(--recon);border-radius:12px;background:linear-gradient(90deg,rgba(70,196,255,.05),transparent 40%),var(--panel);padding:16px 20px;margin-bottom:18px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+  .recon-strip .pulse{width:11px;height:11px;border-radius:50%;background:var(--recon);box-shadow:0 0 0 0 rgba(70,196,255,.6);animation:pp 2.4s infinite;flex:none}
+  @keyframes pp{0%{box-shadow:0 0 0 0 rgba(70,196,255,.5)}70%{box-shadow:0 0 0 12px rgba(70,196,255,0)}100%{box-shadow:0 0 0 0 rgba(70,196,255,0)}}
+  .recon-strip b{color:var(--recon)}
+  .recon-strip .txt{font-size:12px;color:var(--mut);flex:1;min-width:240px}
+
+  /* fix panel */
+  .fixes{border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:var(--glow);padding:24px;margin-top:6px}
+  .fixes h2{font-family:"Syne",sans-serif;font-size:20px;margin:0 0 4px}
+  .fixes p.lead{color:var(--mut);font-size:12.5px;margin:0 0 18px}
+  .ftable{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+  .fcard{border:1px solid var(--line);border-radius:11px;background:var(--panel-2);padding:14px;position:relative;overflow:hidden}
+  .fcard .id{font-family:"Syne",sans-serif;font-weight:800;font-size:13px;letter-spacing:.05em}
+  .fcard.b .id{color:var(--buy)} .fcard.r .id{color:var(--recon)}
+  .fcard .wt{font-size:11px;color:var(--sell);margin:6px 0 5px;letter-spacing:.02em}
+  .fcard .fx{font-size:11.5px;color:var(--mut);line-height:1.5}
+  .fcard .pill{position:absolute;top:12px;right:12px;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:2px 8px}
+
+  footer{margin-top:40px;color:var(--dim);font-size:11px;text-align:center;letter-spacing:.05em}
+  .glossary{margin-top:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:20px 24px}
+  .glossary h3{font-family:"Syne",sans-serif;margin:0 0 10px;font-size:14px;color:var(--mut);letter-spacing:.08em;text-transform:uppercase}
+  .glossary dl{display:grid;grid-template-columns:120px 1fr;gap:6px 16px;margin:0;font-size:12px}
+  .glossary dt{color:var(--ink);font-weight:700} .glossary dd{margin:0;color:var(--mut)}
+  @media(max-width:600px){.glossary dl{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="kicker">oh-my-tradeagent · copytrade-v1 · temporal-orchestrated</div>
+    <h1><span class="buy">BTO</span> &amp; <span class="sell">STC</span><br/>order flow, end&#8209;to&#8209;end</h1>
+    <p class="sub">How a Discord copytrade signal becomes a broker order and a managed position — every stage, every audit event, and the failure branches that the current fix plans address. Press a <b>RUN</b> button to animate a live signal through the pipeline.</p>
+    <div class="meta">
+      <span class="tag">Discord → Sidecar → Temporal → Exec/Alpaca</span>
+      <span class="tag">CopytradeSignalWorkflow</span>
+      <span class="tag">PositionWorkflow</span>
+      <span class="tag">Reconciliation (5&nbsp;min)</span>
+      <span class="tag">paper · alpaca-paper</span>
+    </div>
+  </header>
+
+  <div class="controls">
+    <button class="run-bto" data-run="bto"><span class="dot"></span>RUN · BTO entry</button>
+    <button class="run-stc" data-run="stc"><span class="dot"></span>RUN · STC exit</button>
+    <button class="run-inc" data-run="inc"><span class="dot"></span>RUN · QQQ-725 incident</button>
+    <span class="spd">speed
+      <button data-spd="1" class="active">1×</button>
+      <button data-spd="2">2×</button>
+      <button data-spd="0.5">0.5×</button>
+    </span>
+  </div>
+
+  <div class="grid">
+    <div>
+      <!-- BTO -->
+      <section class="flow" id="sec-bto">
+        <div class="rail buy"></div>
+        <h2><span class="buy">▲</span> BTO — buy&#8209;to&#8209;open (entry)</h2>
+        <p class="lead">A buy signal opens a new long option position. Limit order at the signal price + the willing&#8209;to&#8209;pay cap; filled within the pending TTL or it expires.</p>
+        <div class="pipe buy" id="pipe-bto"></div>
+        <div class="fork" id="fork-bto"></div>
+        <div class="packet buy" id="pk-bto"><b></b></div>
+      </section>
+
+      <!-- STC -->
+      <section class="flow" id="sec-stc">
+        <div class="rail sell"></div>
+        <h2><span class="sell">▼</span> STC — sell&#8209;to&#8209;close (exit)</h2>
+        <p class="lead">A sell signal routes to the live PositionWorkflow, which sells a fraction (or all) of the open lot. Must actually fill — an unfilled exit leaves a live position.</p>
+        <div class="pipe sell" id="pipe-stc"></div>
+        <div class="fork" id="fork-stc"></div>
+        <div class="packet sell" id="pk-stc"><b></b></div>
+      </section>
+
+      <!-- reconciliation -->
+      <div class="recon-strip">
+        <div class="pulse"></div>
+        <div class="txt"><b>Reconciliation</b> sweeps every 5&nbsp;min: broker positions vs running PositionWorkflows vs the order journal. Today it is <b>detect&#8209;only</b> — emits <b>PositionOrphan</b> / <b>JournalOrphan</b> and stops. <b>Plan&#8209;2&nbsp;R1</b> makes it auto&#8209;adopt; <b>R3</b> guarantees a bounded force&#8209;flatten before expiry.</div>
+      </div>
+
+      <!-- fixes -->
+      <div class="fixes">
+        <h2>Where it breaks — and the fix it maps to</h2>
+        <p class="lead">The animated red/amber branches above are real failure modes. Each maps to a planned fix (Plan&#8209;1: crash&nbsp;+&nbsp;visibility · Plan&#8209;2: automatic recovery&nbsp;+&nbsp;sell guarantee).</p>
+        <div class="ftable" id="fixes"></div>
+      </div>
+
+      <div class="glossary">
+        <h3>Glossary</h3>
+        <dl>
+          <dt>BTO</dt><dd>Buy&#8209;to&#8209;open — entry; opens a long option position.</dd>
+          <dt>STC</dt><dd>Sell&#8209;to&#8209;close — exit; sells a fraction/all of an open lot.</dd>
+          <dt>intent journal</dt><dd>Durable per&#8209;order row (RECORDED→SUBMITTED→FILLED/EXPIRED/…) — the exec idempotency ledger.</dd>
+          <dt>audit_log</dt><dd>Hash&#8209;chained event ledger in the orchestrator DB; drives Discord alerts.</dd>
+          <dt>PositionWorkflow</dt><dd>Long&#8209;lived Temporal workflow that manages one open lot until closed.</dd>
+          <dt>OrphanSTC</dt><dd>An STC with no live position to act on.</dd>
+          <dt>PositionOrphan</dt><dd>A broker&#8209;held position with no running PositionWorkflow.</dd>
+        </dl>
+      </div>
+    </div>
+
+    <!-- side -->
+    <aside>
+      <div class="log">
+        <div class="hd"><span>audit / event stream</span><b id="log-mode">idle</b></div>
+        <div class="body" id="log"><div class="empty">Press RUN to stream events…</div></div>
+      </div>
+      <div class="legend">
+        <h3>Legend</h3>
+        <div class="it"><span class="sw" style="background:var(--buy)"></span>BTO / buy path · success</div>
+        <div class="it"><span class="sw" style="background:var(--sell)"></span>STC / sell path · failure</div>
+        <div class="it"><span class="sw" style="background:var(--warn)"></span>caution / unfilled / drop</div>
+        <div class="it"><span class="sw" style="background:var(--audit)"></span>audit_log event</div>
+        <div class="it"><span class="sw" style="background:var(--recon)"></span>reconciliation</div>
+        <div class="it"><span class="sw" style="border:1px dashed var(--mut);background:transparent"></span>dashed = emits an audit row</div>
+      </div>
+    </aside>
+  </div>
+
+  <footer>generated for oh-my-tradeagent · flow reflects CopytradeSignalWorkflow / PositionWorkflow / Reconciliation as of the current branch · self-contained, no external runtime</footer>
+</div>
+
+<script>
+/* ---------- data: stages reflect the real workflow ---------- */
+const BTO = [
+  {ac:'Discord',          ti:'BTO signal',        de:'“BTO QQQ …C @ 3.55” from the followed author'},
+  {ac:'Sidecar',          ti:'Parse + dispatch',  de:'signal-source-discord → start CopytradeSignalWorkflow'},
+  {ac:'Orchestrator',     ti:'SignalReceived',    de:'workflow begins', audit:1},
+  {ac:'Risk',             ti:'Pre-trade check',   de:'buying power · PDT · option eligibility (fail-closed)'},
+  {ac:'Orchestrator',     ti:'SignalAccepted',    de:'gate passed · contracts sized', audit:1},
+  {ac:'Pricing',          ti:'BtoPricing limit',  de:'signal price + max_slippage cap (willing-to-pay)'},
+  {ac:'Exec → Alpaca',    ti:'placeOrder',        de:'limit · day TIF · journal RECORDED→SUBMITTED · broker_order_id'},
+  {ac:'Orchestrator',     ti:'OrderSubmitted',    de:'await fill ≤ pending TTL (90s)', audit:1},
+  {ac:'Fill detect',      ti:'Fill',              de:'WS trade_updates ▸ FillPoller fallback → FillDispatcher.onFill'},
+  {ac:'Orchestrator',     ti:'EntryFilled',       de:'broker-confirmed fill', audit:1},
+  {ac:'PositionWorkflow', ti:'PositionEntered',   de:'qty=5 · lot now managed', audit:1, end:'good'},
+];
+const BTO_FORK = [
+  {ac:'Branch · no fill', ti:'TTL 90s expires',   de:'limit @ signal price never filled (price ran) → cancelOrder', warn:1},
+  {ac:'Orchestrator',     ti:'EntryExpired',      de:'entry missed — no position opened (the QQQ-735 case)', warn:1, audit:1},
+];
+const STC = [
+  {ac:'Discord',          ti:'STC signal',        de:'“STC QQQ …C” (fraction or full)'},
+  {ac:'Sidecar',          ti:'Parse + dispatch',  de:'→ CopytradeSignalWorkflow'},
+  {ac:'Orchestrator',     ti:'SignalReceived',    de:'workflow begins', audit:1},
+  {ac:'Orchestrator',     ti:'handleStc lookup',  de:'find PositionWorkflow (Redis) + isRunning guard'},
+  {ac:'Orchestrator',     ti:'ExitRequested',     de:'signal partialExit → PositionWorkflow', audit:1},
+  {ac:'PositionWorkflow', ti:'processOne',        de:'qtyToClose = ceil(remaining × fraction)'},
+  {ac:'Exec → Alpaca',    ti:'placeOrder SELL',   de:'limit · exitIntent (refPremium / last mid)'},
+  {ac:'Orchestrator',     ti:'PartialExitRequested', de:'await fill ≤ exit TTL (90s)', audit:1},
+  {ac:'Fill detect',      ti:'Fill',              de:'WS ▸ poller → onFill'},
+  {ac:'PositionWorkflow', ti:'PartialExitFilled', de:'remainingQty −= filled', audit:1},
+  {ac:'PositionWorkflow', ti:'PositionClosed',    de:'remaining = 0 · lot closed', audit:1, end:'good'},
+];
+const STC_FORK = [
+  {ac:'Branch · no position', ti:'OrphanSTC',     de:'lookup miss / workflow not running → alert, STC dropped', warn:1, audit:1},
+  {ac:'Branch · no fill',     ti:'exit TTL → retry×1 → drop', de:'unfilled limit dropped → position stays open (#216/#357)', warn:1},
+  {ac:'Branch · deadline',    ti:'EOD / expiry flatten', de:'flattenRemaining — TODAY a MARKET order ⚠ (Plan-2 R3 → bounded limit)', warn:1},
+];
+/* the actual incident */
+const INC = [
+  {ac:'PositionWorkflow', ti:'processOne (exit)', de:'SELL 3 @ 0.52 · journal SUBMITTED · broker_order_id'},
+  {ac:'Exec → Alpaca',    ti:'placeOrder retried',de:'15s timeout → Temporal re-POSTs same client_order_id', warn:1},
+  {ac:'Alpaca',           ti:'422 "must be unique"',de:'duplicate WITHOUT existing_order_id', fail:1},
+  {ac:'Adapter',          ti:'mis-mapped',        de:'→ non-retryable InvalidRequestError (B1 fixes this)', fail:1},
+  {ac:'PositionWorkflow', ti:'CRASH (uncaught)',  de:'exit placeOrder not wrapped → workflow FAILED (B2)', fail:1},
+  {ac:'Reconciliation',   ti:'PositionOrphan',    de:'broker holds 5 · no workflow · detect-only · unpaged 3 days (B3)', fail:1, audit:1},
+  {ac:'Outcome',          ti:'rides to expiry',   de:'unmanaged → ~total loss (Plan-2 R1 auto-adopt + R3 force-flatten)', fail:1, end:'fail'},
+];
+const FIXES = [
+  {k:'b',id:'B1',w:'duplicate-422 crash',fx:'placeOrder treats “client_order_id must be unique” as an idempotent duplicate (by-cid lookup) — never a non-retryable crash.',p:'Plan-1'},
+  {k:'b',id:'B2',w:'silent workflow death',fx:'wrap the exit placeOrder (return on failure) → PositionWorkflow survives, emits PartialExitPlaceFailed.',p:'Plan-1'},
+  {k:'b',id:'B3',w:'orphan unpaged 3 days',fx:'PositionOrphan / PartialExitPlaceFailed page Discord; loud path for a filled orphan.',p:'Plan-1'},
+  {k:'b',id:'A',w:'stuck SUBMITTED row',fx:'FillPoller ingests broker expired/canceled → journal terminalized; no permanent JournalOrphan.',p:'Plan-1'},
+  {k:'r',id:'R1',w:'no auto-recovery',fx:'reconciliation auto-adopts an orphaned filled position within one 5-min cycle — no human.',p:'Plan-2'},
+  {k:'r',id:'R3',w:'no sell deadline / market dump',fx:'guaranteed bounded-limit force-flatten before expiry for every lot — never a market order.',p:'Plan-2'},
+  {k:'r',id:'R4',w:'structural non-fills',fx:'bounded repricing exits within the floor + entry max_slippage cap → orders actually fill.',p:'Plan-2'},
+  {k:'r',id:'R5',w:'other crash points',fx:'main-loop error boundary, flatten never silent-completes, bump the 15s activity timeout.',p:'Plan-2'},
+];
+
+/* ---------- render ---------- */
+const $=s=>document.querySelector(s);
+function chip(s){
+  const d=document.createElement('div');
+  d.className='stage'+(s.audit?' audit':'')+(s.warn?' warnnode':'')+(s.fail?' fail':'');
+  let badge=''; if(s.end==='good') badge='<span class="badge">position open</span>';
+  d.innerHTML=`<div class="ac">${s.ac}</div><div class="ti">${s.ti}</div><div class="de">${s.de}</div>${badge}`;
+  return d;
+}
+function fill(id,arr){const c=$(id);arr.forEach((s,i)=>{const e=chip(s);if(i===arr.length-1)e.classList.add('tail');c.appendChild(e);});return [...c.children];}
+const elBto=fill('#pipe-bto',BTO);
+const elBtoF=fill('#fork-bto',BTO_FORK);
+const elStc=fill('#pipe-stc',STC);
+const elStcF=fill('#fork-stc',STC_FORK);
+// fixes cards
+$('#fixes').innerHTML=FIXES.map(f=>`<div class="fcard ${f.k}"><span class="pill">${f.p}</span><div class="id">${f.id}</div><div class="wt">⚠ ${f.w}</div><div class="fx">${f.fx}</div></div>`).join('');
+
+/* ---------- animation engine ---------- */
+let SPEED=1, running=false, token=0;
+const log=$('#log');
+function clearLog(){log.innerHTML='';}
+function tstamp(n){const s=(n*0.8).toFixed(1);return s.padStart(4,'0')+'s';}
+function logRow(i,s,kind){
+  const r=document.createElement('div');
+  r.className='row '+(kind||(s.fail?'fail':s.warn?'warn':s.audit?'audit':''));
+  r.innerHTML=`<span class="tm">${tstamp(i)}</span><span class="ev">${s.audit?'◆ ':''}${s.ti}</span>`;
+  log.appendChild(r); log.scrollTop=log.scrollHeight;
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms/SPEED));
+function reset(){
+  [...elBto,...elBtoF,...elStc,...elStcF].forEach(e=>e.classList.remove('lit','done','good','fail','warnnode'));
+  // restore fork base styling
+  elBtoF.forEach((e,i)=>{if(BTO_FORK[i].warn)e.classList.add('warnnode');});
+  elStcF.forEach((e,i)=>{if(STC_FORK[i].warn)e.classList.add('warnnode');});
+  ['#pk-bto','#pk-stc'].forEach(p=>$(p).style.opacity=0);
+}
+function movePacket(pkSel,secSel,el){
+  const pk=$(pkSel), sec=$(secSel);
+  const r=el.getBoundingClientRect(), b=sec.getBoundingClientRect();
+  pk.style.opacity=1;
+  pk.style.transform=`translate(${r.left-b.left+r.width/2}px,${r.top-b.top+r.height/2}px) translate(-50%,-50%)`;
+}
+async function runSeq(arr,els,pkSel,secSel,mode,offset=0){
+  for(let i=0;i<arr.length;i++){
+    if(token!==mode.id)return;
+    const s=arr[i],el=els[i];
+    movePacket(pkSel,secSel,el);
+    await sleep(360);
+    if(token!==mode.id)return;
+    el.classList.add('lit');
+    if(s.end==='good')el.classList.add('good');
+    if(s.end==='fail')el.classList.add('fail');
+    logRow(offset+i,s);
+    await sleep(560);
+    el.classList.remove('lit');el.classList.add('done');
+  }
+}
+function setMode(name){$('#log-mode').textContent=name;}
+function setActive(btn){document.querySelectorAll('[data-run]').forEach(b=>b.classList.remove('active'));btn&&btn.classList.add('active');}
+
+async function run(kind,btn){
+  token++; const myId=token; const mode={id:myId};
+  running=true; reset(); clearLog(); setActive(btn);
+  if(kind==='bto'){
+    setMode('BTO entry'); $('#pk-stc').style.opacity=0;
+    await runSeq(BTO,elBto,'#pk-bto','#sec-bto',mode);
+    if(token!==myId)return;
+    logRow(BTO.length,{ti:'— position managed by PositionWorkflow —'},'good');
+  }
+  if(kind==='stc'){
+    setMode('STC exit'); $('#pk-bto').style.opacity=0;
+    await runSeq(STC,elStc,'#pk-stc','#sec-stc',mode);
+    if(token!==myId)return;
+    logRow(STC.length,{ti:'— lot fully sold —'},'good');
+  }
+  if(kind==='inc'){
+    setMode('QQQ-725 incident'); $('#pk-bto').style.opacity=0;
+    // run STC happy until processOne, then divert into incident
+    const head=STC.slice(0,6);
+    await runSeq(head,elStc.slice(0,6),'#pk-stc','#sec-stc',mode);
+    if(token!==myId)return;
+    // incident plays on the STC fork area: reuse fork chips? show in log + light the relevant fork
+    for(let i=0;i<INC.length;i++){
+      if(token!==myId)return;
+      // light a representative node
+      const target = i<=1 ? elStc[6] : (i<=3 ? elStc[6] : elStcF[i>=5?0:1]);
+      movePacket('#pk-stc','#sec-stc',target);
+      $('#pk-stc').className='packet '+(INC[i].fail?'warn':'sell'); // shift to warn hue
+      await sleep(360); if(token!==myId)return;
+      target.classList.add('lit', INC[i].fail?'fail':'warnnode');
+      logRow(6+i,INC[i],INC[i].fail?'fail':'warn');
+      await sleep(620);
+      target.classList.remove('lit');
+    }
+    if(token!==myId)return;
+    logRow(6+INC.length,{ti:'△ prevented by B1·B2·B3 + Plan-2 R1·R3'},'recon');
+    $('#pk-stc').className='packet sell';
+  }
+  running=false; setActive(null);
+}
+
+document.querySelectorAll('[data-run]').forEach(b=>b.addEventListener('click',()=>run(b.dataset.run,b)));
+document.querySelectorAll('[data-spd]').forEach(b=>b.addEventListener('click',()=>{
+  SPEED=parseFloat(b.dataset.spd);
+  document.querySelectorAll('[data-spd]').forEach(x=>x.classList.remove('active'));b.classList.add('active');
+}));
+// staggered reveal on load
+window.addEventListener('load',()=>{
+  [...elBto,...elStc].forEach((e,i)=>{e.style.transition='none';setTimeout(()=>{e.style.transition='';e.classList.add('done');setTimeout(()=>e.classList.remove('done'),400);},60+i*30);});
+});
+// reposition packets on resize is implicit (recomputed each move)
+</script>
+</body>
+</html>

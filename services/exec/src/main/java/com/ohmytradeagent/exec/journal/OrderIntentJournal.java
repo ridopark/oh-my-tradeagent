@@ -104,4 +104,30 @@ public interface OrderIntentJournal {
    */
   boolean markFilled(
       String intentKey, long filledQty, BigDecimal avgFillPrice, OffsetDateTime filledAt);
+
+  /**
+   * Terminalizes a row whose broker order expired unfilled. Guarded, boolean-returning (modeled on
+   * {@link #markFilled}, not the unconditional {@link #markCancelled}): transitions {@code
+   * SUBMITTED → EXPIRED} only, so a row that won the late-fill race (already FILLED) is left
+   * untouched. Returns true iff the row was updated. Used by the {@code FillPoller} to stop the
+   * permanent {@code JournalOrphan} an expired-unfilled exit otherwise leaves stuck SUBMITTED.
+   */
+  boolean markExpired(String intentKey);
+
+  /**
+   * Terminalizes a row the broker rejected after submission, recording {@code reason} in {@code
+   * last_error}. Guarded, boolean-returning: transitions {@code SUBMITTED → ERRORED} only (first
+   * writer of {@code ERRORED}; distinct from {@link #markPlaceFailed}, which keeps state). Returns
+   * true iff the row was updated.
+   */
+  boolean markBrokerRejected(String intentKey, String reason);
+
+  /**
+   * Guarded variant of {@link #markCancelled}: transitions {@code SUBMITTED → CANCELLED} only and
+   * returns true iff the row was updated. The poller routes the broker-CANCELLED case through this
+   * (not the unconditional {@link #markCancelled}) so a row that won the late-fill race (already
+   * FILLED) is not clobbered back to CANCELLED. The unconditional {@link #markCancelled} stays for
+   * its existing callers.
+   */
+  boolean markCancelledIfSubmitted(String intentKey);
 }

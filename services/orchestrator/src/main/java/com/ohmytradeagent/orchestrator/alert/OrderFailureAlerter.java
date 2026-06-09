@@ -89,12 +89,31 @@ public class OrderFailureAlerter {
   // outcome:rejected mirror so a rejected signal posts exactly one Discord message.
   // Issue #311: when the feed toggle is OFF, we union SignalRejected back in at construction so
   // the no-alert gap can't recur if an operator forgets to flip the feed on.
-  private static final String DEFAULT_FAILURE_KINDS = "OrphanSTC,EntryExpired";
+  // B3 (PLAN-exit-place-duplicate-422-crash): PositionOrphan / PositionOrphanOngoing (recon's
+  // live-orphan pages) and PartialExitPlaceFailed (an exit placement that failed) are shipped in
+  // the
+  // IMAGE default — NOT via 40-tenants-config / ALERT_DISCORD_FAILURE_KINDS env, which is unset on
+  // homelab and not applied by deploy.yml. Relying on config would silently reopen the 3-day
+  // orphan-blind-spot from the QQQ-725 incident. application.yml's alert.discord.failure-kinds
+  // default mirrors this string.
+  private static final String DEFAULT_FAILURE_KINDS =
+      "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
-  /** STC (exit) failure kinds; everything else in the allowlist is treated as a BTO (entry). */
-  private static final Set<String> STC_KINDS = Set.of("OrphanSTC");
+  // B3: recon orphan kinds that render the orphaned-position embed (different subject shape than a
+  // BTO/STC order failure — see buildOrphanEmbed).
+  private static final String POSITION_ORPHAN_KIND = "PositionOrphan";
+  private static final String POSITION_ORPHAN_ONGOING_KIND = "PositionOrphanOngoing";
+  private static final Set<String> ORPHAN_KINDS =
+      Set.of(POSITION_ORPHAN_KIND, POSITION_ORPHAN_ONGOING_KIND);
+
+  /**
+   * STC (exit) failure kinds; everything else in the allowlist is treated as a BTO (entry). B3 adds
+   * {@code PartialExitPlaceFailed} (an exit placeOrder that failed) so it labels as an exit, not a
+   * BTO.
+   */
+  private static final Set<String> STC_KINDS = Set.of("OrphanSTC", "PartialExitPlaceFailed");
 
   private final WebhookClient webhookClient;
   private final Set<String> failureKinds;
@@ -140,7 +159,9 @@ public class OrderFailureAlerter {
       if (event == null || event.getKind() == null || !failureKinds.contains(event.getKind())) {
         return;
       }
-      webhookClient.postEmbed(buildEmbed(event));
+      WebhookEmbed embed =
+          ORPHAN_KINDS.contains(event.getKind()) ? buildOrphanEmbed(event) : buildEmbed(event);
+      webhookClient.postEmbed(embed);
     } catch (RuntimeException e) {
       // Defensive: a notification must never break the audit write / trading path.
       log.warn("order-failure-alert build/dispatch failed kind={}", safeKind(event), e);
@@ -167,15 +188,62 @@ public class OrderFailureAlerter {
     fields.add(new WebhookEmbed.Field("reason", reason, false));
     fields.add(new WebhookEmbed.Field("signal_id", subjectStr(subject, "signal_id"), false));
 
-    String footer =
-        "workflow_id: "
-            + orNa(event.getWorkflowId())
-            + " | tenant/strategy: "
-            + orNa(event.getTenantId())
-            + "/"
-            + orNa(event.getStrategyId());
+    return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
 
-    return new WebhookEmbed(title, null, AlertColors.RED, footer, fields);
+  /**
+   * B3 (PLAN-exit-place-duplicate-422-crash): render the recon orphan subject — a DIFFERENT shape
+   * than the BTO/STC order subject {@link #buildEmbed} assumes. {@code
+   * ReconciliationWorkflowImpl.emitPositionOrphanWithDebounce} produces {@code option_symbol} /
+   * {@code qty} / {@code journal_status} / {@code expected_workflow_id} and the identifier {@code
+   * journal_entry_signal_id} (NOT {@code signal_id}). The title carries the operator-actionable
+   * summary "broker holds {qty} {symbol}, no managing workflow"; every key is read NULL-SAFE
+   * because a render that throws is swallowed by {@link #onAuditEvent}'s catch — which would
+   * SILENTLY LOSE the page that exists to surface a live orphaned position.
+   */
+  private WebhookEmbed buildOrphanEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    String symbolRaw = rawSubject(subject, "option_symbol");
+    String qty = subjectStr(subject, "qty");
+    String journalStatus = subjectStr(subject, "journal_status");
+    // The recon orphan identifier is journal_entry_signal_id; fall back to signal_id for safety.
+    String orphanSignalId = subjectStrFallback(subject, "journal_entry_signal_id", "signal_id");
+
+    String title =
+        ":warning: Orphaned position — broker holds "
+            + qty
+            + " "
+            + orNa(symbolRaw)
+            + ", no managing workflow";
+
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("kind", String.valueOf(event.getKind()), false));
+    fields.add(new WebhookEmbed.Field("symbol", YahooOptionLink.markdown(symbolRaw), false));
+    fields.add(new WebhookEmbed.Field("qty", qty, false));
+    fields.add(new WebhookEmbed.Field("journal_status", journalStatus, false));
+    fields.add(new WebhookEmbed.Field("signal_id", orphanSignalId, false));
+    fields.add(
+        new WebhookEmbed.Field(
+            "expected_workflow_id", subjectStr(subject, "expected_workflow_id"), false));
+
+    return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
+
+  /** Shared embed footer: low-signal trace (workflow_id, tenant/strategy) for both embed shapes. */
+  private static String buildFooter(AuditEvent event) {
+    return "workflow_id: "
+        + orNa(event.getWorkflowId())
+        + " | tenant/strategy: "
+        + orNa(event.getTenantId())
+        + "/"
+        + orNa(event.getStrategyId());
+  }
+
+  /** {@link #subjectStr} on {@code primary}, falling back to {@code fallback} when it is absent. */
+  private static String subjectStrFallback(
+      Map<String, Object> subject, String primary, String fallback) {
+    String value = subjectStr(subject, primary);
+    return "n/a".equals(value) ? subjectStr(subject, fallback) : value;
   }
 
   private static String reasonOf(String kind, Map<String, Object> subject) {

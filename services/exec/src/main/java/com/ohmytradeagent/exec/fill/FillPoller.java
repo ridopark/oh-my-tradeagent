@@ -111,8 +111,29 @@ public class FillPoller {
           e.toString());
       return;
     }
-    if (status != BrokerOrderStatus.FILLED) {
-      return;
+    // Terminal non-fills (Part A): ingest into the journal so an expired/canceled/rejected exit
+    // doesn't sit stuck SUBMITTED forever (→ permanent JournalOrphan). Each transition is guarded
+    // on state='SUBMITTED' inside the journal, so a row that already won the late-fill race to
+    // FILLED (via the WS path) is a silent no-op — never demoted off FILLED.
+    switch (status) {
+      case EXPIRED -> {
+        journal.markExpired(row.intentKey());
+        return;
+      }
+      case CANCELLED -> {
+        journal.markCancelledIfSubmitted(row.intentKey());
+        return;
+      }
+      case REJECTED -> {
+        journal.markBrokerRejected(row.intentKey(), "broker terminal: REJECTED");
+        return;
+      }
+      case OPEN, UNKNOWN -> {
+        return;
+      }
+      case FILLED -> {
+        // fall through to the fill-dispatch path below
+      }
     }
     BrokerFillDetail detail;
     try {

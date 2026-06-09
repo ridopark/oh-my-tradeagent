@@ -163,6 +163,15 @@ public final class AuditEventKinds {
           // PARTIAL_EXIT_FILL_KINDS (it must not inflate the realized-P&L ledger atop the real
           // PartialExitFilled) nor any terminal/fill group.
           "PartialExitRetrySkippedSatisfied",
+          // B2 (PLAN-exit-place-duplicate-422-crash): emitted by PositionWorkflowImpl when an exit
+          // placeOrder activity FAILS (e.g. a duplicate-client_order_id 422 misclassified as a
+          // non-retryable InvalidRequestError). Under VERSION_EXIT_PLACE_FAILURE_GUARD v>=1 the
+          // catch emits this kind, releases the in-flight latch, and returns WITHOUT decrementing
+          // remainingQty so the live lot stays managed instead of being orphaned by a crashed
+          // workflow (the QQQ-725 incident). NOT a lifecycle/fill event (nothing was sold) —
+          // intentionally placed in ALL_KINDS only for observability, not in any lifecycle group.
+          // Paged by OrderFailureAlerter (B3).
+          "PartialExitPlaceFailed",
           // Issue #205: emitted by PositionWorkflowImpl when a partial-exit signal lands on a
           // remainingQty<=1 runner with floor(qty * fraction)==0 and config selects SKIP. Also
           // classified in PARTIAL_EXIT_FILL_KINDS (it fulfills the partial-exit request by

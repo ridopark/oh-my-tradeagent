@@ -222,6 +222,21 @@ class ExecActivitiesImplPlaceOrderValidationTest {
         String intentKey, long filledQty, BigDecimal avgFillPrice, OffsetDateTime filledAt) {
       throw fail();
     }
+
+    @Override
+    public boolean markExpired(String intentKey) {
+      throw fail();
+    }
+
+    @Override
+    public boolean markBrokerRejected(String intentKey, String reason) {
+      throw fail();
+    }
+
+    @Override
+    public boolean markCancelledIfSubmitted(String intentKey) {
+      throw fail();
+    }
   }
 
   /** Broker spy that fails the test if any method is invoked — the guard must short-circuit. */

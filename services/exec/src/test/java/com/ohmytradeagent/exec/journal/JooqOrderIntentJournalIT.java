@@ -375,6 +375,103 @@ class JooqOrderIntentJournalIT {
     assertThat(journal.findByBrokerOrderId("anything")).isEmpty();
   }
 
+  @Test
+  void markExpired_fromSubmitted_flipsStateBumpsVersionSetsLastError() {
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "brk-A");
+    JournaledOrder before = journal.findByIntentKey("intent-A").orElseThrow();
+
+    boolean updated = journal.markExpired("intent-A");
+
+    assertThat(updated).isTrue();
+    JournaledOrder row = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(row.state()).isEqualTo(OrderState.EXPIRED);
+    assertThat(row.lastError()).isEqualTo("broker terminal: EXPIRED");
+    assertThat(row.lastStateAt()).isNotNull();
+    assertThat(row.version()).isEqualTo(before.version() + 1);
+  }
+
+  @Test
+  void markExpired_fromNonSubmitted_isNoOp() {
+    // A row already FILLED (won the late-fill race) must NOT be demoted to EXPIRED.
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "brk-A");
+    journal.markFilled(
+        "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+    JournaledOrder before = journal.findByIntentKey("intent-A").orElseThrow();
+
+    boolean updated = journal.markExpired("intent-A");
+
+    assertThat(updated).isFalse();
+    JournaledOrder after = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(after.state()).isEqualTo(OrderState.FILLED);
+    assertThat(after.version()).isEqualTo(before.version());
+  }
+
+  @Test
+  void markBrokerRejected_fromSubmitted_flipsToErroredSetsReason() {
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "brk-A");
+    JournaledOrder before = journal.findByIntentKey("intent-A").orElseThrow();
+
+    boolean updated = journal.markBrokerRejected("intent-A", "broker terminal: REJECTED");
+
+    assertThat(updated).isTrue();
+    JournaledOrder row = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(row.state()).isEqualTo(OrderState.ERRORED);
+    assertThat(row.lastError()).isEqualTo("broker terminal: REJECTED");
+    assertThat(row.lastStateAt()).isNotNull();
+    assertThat(row.version()).isEqualTo(before.version() + 1);
+  }
+
+  @Test
+  void markBrokerRejected_fromNonSubmitted_isNoOp() {
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "brk-A");
+    journal.markFilled(
+        "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+    JournaledOrder before = journal.findByIntentKey("intent-A").orElseThrow();
+
+    boolean updated = journal.markBrokerRejected("intent-A", "broker terminal: REJECTED");
+
+    assertThat(updated).isFalse();
+    JournaledOrder after = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(after.state()).isEqualTo(OrderState.FILLED);
+    assertThat(after.version()).isEqualTo(before.version());
+  }
+
+  @Test
+  void markCancelledIfSubmitted_fromSubmitted_flipsStateBumpsVersion() {
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "brk-A");
+    JournaledOrder before = journal.findByIntentKey("intent-A").orElseThrow();
+
+    boolean updated = journal.markCancelledIfSubmitted("intent-A");
+
+    assertThat(updated).isTrue();
+    JournaledOrder row = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(row.state()).isEqualTo(OrderState.CANCELLED);
+    assertThat(row.lastStateAt()).isNotNull();
+    assertThat(row.version()).isEqualTo(before.version() + 1);
+  }
+
+  @Test
+  void markCancelledIfSubmitted_fromNonSubmitted_isNoOp() {
+    // The guarded variant must not clobber a FILLED row that won the late-fill race (#357).
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "brk-A");
+    journal.markFilled(
+        "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+    JournaledOrder before = journal.findByIntentKey("intent-A").orElseThrow();
+
+    boolean updated = journal.markCancelledIfSubmitted("intent-A");
+
+    assertThat(updated).isFalse();
+    JournaledOrder after = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(after.state()).isEqualTo(OrderState.FILLED);
+    assertThat(after.version()).isEqualTo(before.version());
+  }
+
   private OrderIntent intent(String key) {
     OrderIntent i = new OrderIntent();
     i.setSchemaVersion(1L);

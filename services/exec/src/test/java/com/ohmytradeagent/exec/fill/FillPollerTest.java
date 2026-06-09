@@ -220,6 +220,91 @@ class FillPollerTest {
     assertThat(registry.counter("fill_listener.events_unknown_order").count()).isEqualTo(0.0);
   }
 
+  @Test
+  void runOnce_expiredRow_marksExpired_noFillDetail() {
+    JournaledOrder row = row("ck-exp", "brk-exp");
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(row));
+    when(broker.getOrderStatus("brk-exp")).thenReturn(BrokerOrderStatus.EXPIRED);
+
+    poller.runOnce();
+
+    verify(journal, times(1)).markExpired("ck-exp");
+    verify(broker, never()).getFillDetail(any());
+    verify(dispatcher, never()).dispatch(any());
+  }
+
+  @Test
+  void runOnce_expiredRow_alreadyFilled_isSilentNoOp() {
+    // The guarded markExpired returns false (the row won the late-fill race to FILLED via WS); the
+    // poller must not fall through to fill-dispatch or otherwise act.
+    JournaledOrder row = row("ck-exp", "brk-exp");
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(row));
+    when(broker.getOrderStatus("brk-exp")).thenReturn(BrokerOrderStatus.EXPIRED);
+    when(journal.markExpired("ck-exp")).thenReturn(false);
+
+    poller.runOnce();
+
+    verify(journal, times(1)).markExpired("ck-exp");
+    verify(broker, never()).getFillDetail(any());
+    verify(dispatcher, never()).dispatch(any());
+  }
+
+  @Test
+  void runOnce_cancelledRow_marksCancelledIfSubmitted() {
+    JournaledOrder row = row("ck-can", "brk-can");
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(row));
+    when(broker.getOrderStatus("brk-can")).thenReturn(BrokerOrderStatus.CANCELLED);
+
+    poller.runOnce();
+
+    verify(journal, times(1)).markCancelledIfSubmitted("ck-can");
+    verify(broker, never()).getFillDetail(any());
+    verify(dispatcher, never()).dispatch(any());
+  }
+
+  @Test
+  void runOnce_rejectedRow_marksBrokerRejected() {
+    JournaledOrder row = row("ck-rej", "brk-rej");
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(row));
+    when(broker.getOrderStatus("brk-rej")).thenReturn(BrokerOrderStatus.REJECTED);
+
+    poller.runOnce();
+
+    verify(journal, times(1)).markBrokerRejected(eq("ck-rej"), anyString());
+    verify(broker, never()).getFillDetail(any());
+    verify(dispatcher, never()).dispatch(any());
+  }
+
+  @Test
+  void runOnce_unknownStatus_noJournalWrite() {
+    JournaledOrder row = row("ck-unk", "brk-unk");
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(row));
+    when(broker.getOrderStatus("brk-unk")).thenReturn(BrokerOrderStatus.UNKNOWN);
+
+    poller.runOnce();
+
+    verify(journal, never()).markExpired(any());
+    verify(journal, never()).markCancelledIfSubmitted(any());
+    verify(journal, never()).markBrokerRejected(any(), any());
+    verify(broker, never()).getFillDetail(any());
+    verify(dispatcher, never()).dispatch(any());
+  }
+
+  @Test
+  void runOnce_openStatus_noJournalWrite() {
+    JournaledOrder row = row("ck-open", "brk-open");
+    when(journal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(row));
+    when(broker.getOrderStatus("brk-open")).thenReturn(BrokerOrderStatus.OPEN);
+
+    poller.runOnce();
+
+    verify(journal, never()).markExpired(any());
+    verify(journal, never()).markCancelledIfSubmitted(any());
+    verify(journal, never()).markBrokerRejected(any(), any());
+    verify(broker, never()).getFillDetail(any());
+    verify(dispatcher, never()).dispatch(any());
+  }
+
   private JournaledOrder row(String intentKey, String brokerOrderId) {
     return new JournaledOrder(
         intentKey,
