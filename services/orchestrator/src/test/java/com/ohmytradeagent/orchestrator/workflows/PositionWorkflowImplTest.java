@@ -18,6 +18,7 @@ import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
+import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
@@ -27,6 +28,7 @@ import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
+import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.api.common.v1.WorkflowExecution;
@@ -58,6 +60,7 @@ class PositionWorkflowImplTest {
   private ExecActivities exec;
   private MarketCalendarActivities calendar;
   private SubscribePremiumActivity marketData;
+  private GetOptionQuoteActivity optionQuote;
 
   @BeforeEach
   void setUp() {
@@ -69,20 +72,48 @@ class PositionWorkflowImplTest {
     calendar = Mockito.mock(MarketCalendarActivities.class);
     exec = Mockito.mock(ExecActivities.class);
     marketData = Mockito.mock(SubscribePremiumActivity.class);
+    optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
 
     // Default calendar: no EOD/expiry pressure
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
     when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
     // Default market-data: subscription succeeds.
     when(marketData.subscribePremium(any())).thenReturn(subscribedResult());
+    // Plan-2A R-AA-2/R-AA-3: default live-bid quote so bounded scheduled flatten anchors on a real
+    // bid. bid=2.50 mid=2.55 ask=2.60. Tests that need FAILED/UNAVAILABLE override per-test.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            quoteOk(new BigDecimal("2.50"), new BigDecimal("2.55"), new BigDecimal("2.60")));
 
     coreWorker.registerActivitiesImplementations(audit, calendar);
     Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
     brokerWorker.registerActivitiesImplementations(exec);
     Worker mdWorker = env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
-    mdWorker.registerActivitiesImplementations(marketData);
+    mdWorker.registerActivitiesImplementations(marketData, optionQuote);
 
     env.start();
+  }
+
+  private static OptionQuoteResult quoteOk(BigDecimal bid, BigDecimal mid, BigDecimal ask) {
+    OptionQuoteResult r = new OptionQuoteResult();
+    r.setSchemaVersion(1L);
+    r.setContractSymbol("NVDA  260516C00140000");
+    r.setBid(bid);
+    r.setMid(mid);
+    r.setAsk(ask);
+    r.setRetrievedAt(OffsetDateTime.now());
+    r.setStatus(OptionQuoteResult.Status.OK);
+    return r;
+  }
+
+  private static OptionQuoteResult quoteFailed(String error) {
+    OptionQuoteResult r = new OptionQuoteResult();
+    r.setSchemaVersion(1L);
+    r.setContractSymbol("NVDA  260516C00140000");
+    r.setRetrievedAt(OffsetDateTime.now());
+    r.setStatus(OptionQuoteResult.Status.FAILED);
+    r.setError(error);
+    return r;
   }
 
   private static SubscribePremiumResult subscribedResult() {
@@ -293,8 +324,10 @@ class PositionWorkflowImplTest {
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 4L);
 
-    // Let virtual time advance past EOD so the force-flatten fires.
+    // Let virtual time advance past EOD so the force-flatten fires, then deliver its fill.
     env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 4L, new BigDecimal("2.50")));
 
     // Workflow survives the force-flatten (does not crash/terminate/re-orphan).
     String result = WorkflowStub.fromTyped(stub).getResult(String.class);
@@ -367,8 +400,12 @@ class PositionWorkflowImplTest {
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
 
-    // Let virtual time advance past EOD
+    // Let virtual time advance past EOD; the bounded flatten places its limit then awaits a fill.
     env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    // Plan-2A R-AA-1: remainingQty is zeroed ONLY by the actual fill, so the workflow stays alive
+    // until this flatten fill arrives.
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
 
     String result = WorkflowStub.fromTyped(stub).getResult(String.class);
     assertThat(result).isEqualTo("pos-eod");
@@ -378,6 +415,13 @@ class PositionWorkflowImplTest {
 
     captureKind("EodForceFlattened");
     verify(exec, atLeastOnce()).placeOrder(any());
+    // Plan-2A R-AA-6: the flatten fill enters realized P&L via a PartialExitFilled carrying price.
+    AuditEvent flattenFill = captureKind("PartialExitFilled");
+    assertThat(((Number) flattenFill.getSubject().get("avg_fill_price")).doubleValue())
+        .isEqualTo(2.50);
+    assertThat(asLong(flattenFill.getSubject().get("qty_filled"))).isEqualTo(5L);
+    assertThat(flattenFill.getSubject()).containsEntry("option_symbol", "NVDA  260516C00140000");
+    assertThat(flattenFill.getSubject()).containsEntry("signal_id", "flatten-eod");
   }
 
   @Test
@@ -389,10 +433,15 @@ class PositionWorkflowImplTest {
     PositionWorkflow stub = newStub("pos-expiry");
     // input(3) leaves force_close_0dte_et null -> the workflow must call the activity with a null
     // closeTime, preserving the legacy 15:30 ET default path (Issue #15 null-passthrough).
-    WorkflowStub.fromTyped(stub).start(input(3));
+    // expiry_day_floor set so the bounded expiry flatten rests a real limit (not config-error).
+    PositionWorkflowInput in = input(3);
+    in.setExpiryDayFloor(new BigDecimal("0.05"));
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
 
     env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 3L, new BigDecimal("2.50")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
@@ -404,7 +453,7 @@ class PositionWorkflowImplTest {
   }
 
   @Test
-  void expiryTimer_configuredForceClose0dte_drivesFlattenAsMarketOrder() throws Exception {
+  void expiryTimer_configuredForceClose0dte_drivesBoundedLimitFlatten() throws Exception {
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
     when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ofMillis(200));
     when(exec.placeOrder(any())).thenReturn(submittedResult());
@@ -412,10 +461,13 @@ class PositionWorkflowImplTest {
     PositionWorkflow stub = newStub("pos-expiry-cfg");
     PositionWorkflowInput in = input(3);
     in.setForceClose0dteEt("14:45"); // Issue #15: per-strategy 0DTE force-flat time.
+    in.setExpiryDayFloor(new BigDecimal("0.05")); // R-AA-3: expiry floor collapse (bid>0).
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
 
     env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 3L, new BigDecimal("2.50")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
@@ -425,7 +477,10 @@ class PositionWorkflowImplTest {
     // The configured "14:45" must be parsed and passed to the calendar activity as LocalTime.
     verify(calendar).durationUntilExpiryCloseEt(any(), eq(LocalTime.of(14, 45)));
 
-    // The expiry flatten stays a MARKET order: the SELL OrderIntent has no limit price.
+    // Plan-2A R-AA-3: a live bid (2.50) + an expiry_day_floor (0.05) -> the expiry flatten is a
+    // BOUNDED marketable LIMIT (no longer a market dump): the SELL OrderIntent carries a limit
+    // price
+    // anchored at/through the bid and at/above the floor.
     ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
     verify(exec, atLeastOnce()).placeOrder(intent.capture());
     OrderIntent flatten =
@@ -433,7 +488,9 @@ class PositionWorkflowImplTest {
             .filter(i -> i.getSide() == OrderIntent.Side.SELL)
             .reduce((a, b) -> b)
             .orElseThrow();
-    assertThat(flatten.getLimitPrice()).isNull();
+    assertThat(flatten.getLimitPrice()).isNotNull();
+    assertThat(flatten.getLimitPrice()).isGreaterThanOrEqualTo(new BigDecimal("0.05"));
+    assertThat(flatten.getLimitPrice()).isLessThanOrEqualTo(new BigDecimal("2.50"));
   }
 
   @Test
@@ -455,11 +512,249 @@ class PositionWorkflowImplTest {
     // Trigger EOD before fill arrives.
     env.sleep(Duration.ofMinutes(1));
 
+    // EOD cancels the in-flight order, places the bounded flatten, then awaits its fill (R-AA-1).
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
+
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     verify(exec, atLeastOnce()).cancelOrder(anyString());
     captureKind("EodForceFlattenRequested");
     captureKind("EodForceFlattened");
+  }
+
+  // ---------- Plan-2A R-AA-1 / R-AA-3 / R-AA-6: bounded scheduled flatten ----------
+
+  /**
+   * Plan-2A R-AA-1 (the core silent-loss fix), epilogue path (~595, NOT processOne): an EOD bounded
+   * flatten that is PLACED but never FILLED must leave the workflow ALIVE and must NOT emit
+   * PositionClosed — remainingQty is zeroed only by an actual fill. Pre-fix the workflow zeroed at
+   * placement and emitted an unconditional PositionClosed, silently completing with a live lot.
+   */
+  @Test
+  void epilogue_eodBoundedLimitPlacedButUnfilled_staysAliveNoPositionClosed() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-eod-unfilled");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L); // short TTL so the unfilled-await elapses quickly under virtual time
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // EOD fires -> bounded flatten is placed -> fill never arrives -> TTL elapses -> cancel + stay
+    // alive. Advance well past the TTL.
+    env.sleep(Duration.ofMinutes(2));
+    waitForPlaceOrderCount(1);
+
+    // The workflow is still RUNNING (queryable) and has NOT emitted PositionClosed.
+    PositionState state = stub.positionState();
+    assertThat(state.remainingQty()).isEqualTo(5L);
+    assertThat(captureAll("PositionClosed")).isEmpty();
+    // A loud failure audit was emitted for the unfilled bounded flatten.
+    AuditEvent failed = captureKind("EodForceFlattenFailed");
+    assertThat(failed.getSubject())
+        .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
+  }
+
+  /**
+   * Plan-2A R-AA-1 broker-confirmed-zero invariant: a PARTIAL flatten fill must NOT close the
+   * position — PositionClosed is emitted only at broker-confirmed remaining==0. A first flatten
+   * fill of 2-of-5 leaves the workflow alive; a late fill of the residual 3 then closes it.
+   */
+  @Test
+  void epilogue_eodPartialFlattenFill_thenResidualFill_closesOnlyAtZero() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-eod-partial");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    // Partial flatten fill (2 of 5): the workflow must stay alive (remaining 3), no PositionClosed.
+    stub.onFill(fill("brk-flatten-1", 2L, new BigDecimal("2.50")));
+
+    // Give the workflow a moment to process the partial fill, then confirm it has not closed.
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() == 5L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+    assertThat(captureAll("PositionClosed")).isEmpty();
+
+    // Late fill of the residual 3 -> broker-confirmed zero -> PositionClosed.
+    stub.onFill(fill("brk-flatten-2", 3L, new BigDecimal("2.48")));
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-eod-partial");
+
+    AuditEvent closed = captureKind("PositionClosed");
+    assertThat(asLong(closed.getSubject().get("remaining_qty"))).isEqualTo(0L);
+    // R-AA-6: two PartialExitFilled rows (2 + 3) both carry price -> realized P&L counts the
+    // flatten.
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills).hasSize(2);
+    assertThat(fills.stream().mapToLong(e -> asLong(e.getSubject().get("qty_filled"))).sum())
+        .isEqualTo(5L);
+  }
+
+  /**
+   * Plan-2A R-AA-3: a CHANDELIER_TRAIL flatten is BOUNDED — it places a marketable LIMIT
+   * (limitPrice != null) anchored at/through the live bid and at/above the resolved exit floor.
+   * (eod/expiry bounded-limit pricing is covered by {@link
+   * #expiryTimer_configuredForceClose0dte_drivesBoundedLimitFlatten()}; the immediacy MARKET
+   * pricing by {@link #forceClose_healthyPosition_acceptsAndFlattens()} / {@link
+   * #riskBreach_healthyPosition_flattens()}.)
+   */
+  @Test
+  void chandelierFlatten_isBoundedLimit_notMarket() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-chandelier-bounded");
+    PositionWorkflowInput in = input(5);
+    in.setExitFloorAbs(new BigDecimal("0.50"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // peak=3.00 gb=0.10 -> threshold 2.70; tick 2.70 fires the trail.
+    stub.armChandelier(
+        armPayload(
+            "pos-chandelier-bounded", "src-1", new BigDecimal("3.00"), new BigDecimal("0.10")));
+    stub.chandelierTick(tick(new BigDecimal("2.70")));
+
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent flatten =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow();
+    assertThat(flatten.getLimitPrice()).isNotNull();
+    // Anchored on the live bid (2.50), at/above the floor (0.50).
+    assertThat(flatten.getLimitPrice()).isGreaterThanOrEqualTo(new BigDecimal("0.50"));
+    assertThat(flatten.getLimitPrice()).isLessThanOrEqualTo(new BigDecimal("2.50"));
+  }
+
+  /**
+   * Plan-2A R-AA-3 quote FAIL-SAFE: when GetOptionQuoteActivity returns status=FAILED on a
+   * scheduled flatten, the bounded path FAILS SAFE to a MARKETABLE exit (limitPrice == null) and
+   * emits a loud FlattenQuoteUnavailable audit — never a stale ref-premium limit, never "no sell".
+   */
+  @Test
+  void boundedFlatten_quoteFailed_marketableFallbackAndAvailabilityAudit() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteFailed("provider 503"));
+
+    PositionWorkflow stub = newStub("pos-eod-quote-failed");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFloorAbs(new BigDecimal("0.50"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent avail = captureKind("FlattenQuoteUnavailable");
+    assertThat(avail.getSubject())
+        .containsEntry("reason", "eod")
+        .containsEntry("note", "marketable_fallback");
+
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent flatten =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow();
+    assertThat(flatten.getLimitPrice()).isNull(); // marketable, not a stale ref-premium limit
+  }
+
+  /**
+   * Plan-2A R-AA-3 floor FAIL-SAFE: when the resolved exit floor sits ABOVE the live bid (a floor
+   * that high would forbid selling at any executable price), the bounded path FAILS SAFE to a
+   * MARKETABLE exit (limitPrice == null) and emits a loud FlattenFloorConfigError audit.
+   */
+  @Test
+  void boundedFlatten_floorAboveBid_marketableFallbackAndConfigErrorAudit() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // live bid 2.50, floor_abs 5.00 -> floor > bid.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            quoteOk(new BigDecimal("2.50"), new BigDecimal("2.55"), new BigDecimal("2.60")));
+
+    PositionWorkflow stub = newStub("pos-eod-floor-above-bid");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFloorAbs(new BigDecimal("5.00"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent cfg = captureKind("FlattenFloorConfigError");
+    assertThat(cfg.getSubject()).containsEntry("note", "floor_above_live_bid_marketable_fallback");
+
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent flatten =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow();
+    assertThat(flatten.getLimitPrice()).isNull();
+  }
+
+  /**
+   * Plan-2A R-AA-3 expiry-session collapse: on the expiry path with NO live bid (bid &lt;= 0) the
+   * flatten goes FULLY MARKETABLE (limitPrice == null) — a no-bid contract expires worthless and is
+   * out of scope of the bounded-limit guarantee (we do NOT rest a $0.01 limit that never fills).
+   */
+  @Test
+  void boundedFlatten_expirySessionNoLiveBid_fullyMarketable() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ofMillis(200));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // bid = 0 -> no live bid on the expiry session.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            quoteOk(new BigDecimal("0.00"), new BigDecimal("0.01"), new BigDecimal("0.02")));
+
+    PositionWorkflow stub = newStub("pos-expiry-no-bid");
+    PositionWorkflowInput in = input(3);
+    in.setExpiryDayFloor(new BigDecimal("0.05"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 3L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 3L, new BigDecimal("0.01")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    captureKind("ExpiryForceFlattened");
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent flatten =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow();
+    assertThat(flatten.getLimitPrice()).isNull();
   }
 
   // ---------- Issue #204: bounded exit-fill await in processOne() ----------
@@ -805,8 +1100,10 @@ class PositionWorkflowImplTest {
     // tick=2.70 -> tick <= threshold fires.
     stub.chandelierTick(tick(new BigDecimal("2.70")));
 
-    // Workflow auto-flattens on fire; wait for the flatten placeOrder.
+    // Workflow auto-flattens on fire; wait for the bounded flatten placeOrder then deliver its fill
+    // (Plan-2A R-AA-1: remainingQty zeroed only on the fill).
     waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent fired = captureKind("ChandelierTrailFired");
@@ -829,6 +1126,7 @@ class PositionWorkflowImplTest {
     stub.chandelierTick(tick(new BigDecimal("3.30")));
 
     waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent fired = captureKind("ChandelierTrailFired");
@@ -872,6 +1170,9 @@ class PositionWorkflowImplTest {
     assertThat(result.getStatus()).isEqualTo(ForceCloseResult.Status.ACCEPTED);
     assertThat(result.getExitSignalId()).startsWith("force:ops-1:");
 
+    // force_close keeps exit-NOW (MARKET) but is still fill-awaited under R-AA-1: deliver the fill.
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent req = captureKind("ForceCloseRequested");
@@ -882,6 +1183,15 @@ class PositionWorkflowImplTest {
     AuditEvent flatReq = captureKind("EodForceFlattenRequested");
     assertThat(flatReq.getSubject()).containsEntry("reason", "force_close");
     captureKind("EodForceFlattened");
+    // force_close keeps the MARKET (immediacy) flatten: the SELL OrderIntent has no limit price.
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent flatten =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow();
+    assertThat(flatten.getLimitPrice()).isNull();
   }
 
   @Test
@@ -931,6 +1241,9 @@ class PositionWorkflowImplTest {
 
     stub.riskBreach(riskBreachPayload("auto:daily_loss", "auto:daily_loss"));
 
+    // risk_breach keeps exit-NOW (MARKET) but is still fill-awaited under R-AA-1: deliver the fill.
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 4L, new BigDecimal("2.50")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent acted = captureKind("RiskBreachActed");
@@ -939,6 +1252,15 @@ class PositionWorkflowImplTest {
     AuditEvent flatReq = captureKind("EodForceFlattenRequested");
     assertThat(flatReq.getSubject()).containsEntry("reason", "risk_breach");
     captureKind("EodForceFlattened");
+    // risk_breach keeps the MARKET (immediacy) flatten: the SELL OrderIntent has no limit price.
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent flatten =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow();
+    assertThat(flatten.getLimitPrice()).isNull();
   }
 
   @Test
@@ -956,6 +1278,9 @@ class PositionWorkflowImplTest {
 
     stub.riskBreach(riskBreachPayload("manual:operator", "ops-3"));
 
+    // risk_breach cancels the in-flight order, places the MARKET flatten, then awaits its fill.
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     verify(exec, atLeastOnce()).cancelOrder(anyString());
@@ -1757,8 +2082,10 @@ class PositionWorkflowImplTest {
     // The retry's own TTL would fire at t=120+90=210s, but EOD at t=150s fires first. The retry
     // await's predicate wakes on eodFired=true; processOne returns with currentInFlightIntentKey
     // still set to the ":retry"-suffixed key, and run() invokes flattenRemaining("eod") which
-    // cancels that key.
+    // cancels that key, then places the bounded flatten and awaits its fill (R-AA-1).
     env.sleep(Duration.ofSeconds(60));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 

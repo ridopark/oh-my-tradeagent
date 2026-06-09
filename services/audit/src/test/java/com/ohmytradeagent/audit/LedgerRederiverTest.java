@@ -147,6 +147,33 @@ class LedgerRederiverTest {
   }
 
   @Test
+  void flattenOriginPartialExitFilledWithoutRequestIsTolerated() {
+    // Plan-2A R-AA-6: the scheduled-flatten fill now rides a PartialExitFilled (so it enters
+    // realized P&L) WITHOUT a preceding PartialExitRequested (the flatten path never emits a
+    // request). The verifier must tolerate this — a fill with no matching request must NOT raise
+    // MissingPartialExitFill (only the reverse, a request with no fill, is a divergence) and must
+    // NOT cause a double-terminal/orphan regression. Lifecycle: entry -> flatten fill -> terminal.
+    String corr = "signal-flatten";
+    List<AuditEvent> events =
+        new ArrayList<>(
+            List.of(
+                event(corr, "SignalReceived", t(0, 0)),
+                event(corr, "EntryFilled", t(0, 1)),
+                event(corr, "PositionEntered", t(0, 2)),
+                // Flatten fill: PartialExitFilled with NO preceding PartialExitRequested.
+                event(corr, "PartialExitFilled", t(0, 3)),
+                // Lifecycle markers emitted by the flatten path.
+                event(corr, "EodForceFlattened", t(0, 4)),
+                event(corr, "PositionClosed", t(0, 5))));
+
+    List<Divergence> findings = rederiver.rederive(events);
+
+    assertThat(findings)
+        .as("a flatten-origin PartialExitFilled without a PartialExitRequested is tolerated")
+        .isEmpty();
+  }
+
+  @Test
   void eventsWithoutCorrelationIdAreIgnoredForLifecycleCheck() {
     // KillSwitchTripped and similar workflow-scoped events have no correlation_id; they must
     // not raise spurious divergences.
