@@ -8,7 +8,7 @@ from typing import Annotated
 
 from enum import StrEnum
 
-from pydantic import Field, BaseModel, ConfigDict, conint, constr
+from pydantic import Field, BaseModel, ConfigDict, confloat, conint, constr
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -80,4 +80,16 @@ class PositionWorkflowInput(BaseModel):
     )
     """
     Issue #15: wall-clock time (HH:MM in US/Eastern) carried over from the spawning CopytradeSignalWorkflow's StrategyConfig.force_close_0dte_et. Governs the time at which PositionWorkflow's 0DTE expiry-close flatten timer fires (the flatten stays a MARKET order). Optional/null/absent treated as the legacy 15:30 ET default to preserve pre-change behavior for replays of positions spawned before this field existed; no Workflow.getVersion gate is required because the value flows only through MarketCalendarActivities.durationUntilExpiryCloseEt's (replay-ignored) activity input and the unchanged timer-arming command sequence.
+    """
+    exit_floor_abs: Annotated[Decimal, Field(gt=0)] | None = None
+    """
+    Plan-2A R-AA-5: carried over from the spawning workflow's StrategyConfig.exit_floor_abs so PositionWorkflow's bounded scheduled flatten (R-AA-3) has an absolute price floor. fail-SAFE: null/absent/unresolvable falls back to a marketable exit. Optional/null preserves pre-change behavior for replays of positions spawned before this field existed. Spec-only carry in this chunk; flatten consumption lands in R-AA-3.
+    """
+    exit_floor_pct: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Plan-2A R-AA-5: carried over from StrategyConfig.exit_floor_pct. Fractional price floor (fraction of the anchor premium) for the bounded scheduled flatten; combined with exit_floor_abs via max(). fail-SAFE identically. Optional/null preserves pre-change behavior. Spec-only carry in this chunk; flatten consumption lands in R-AA-3.
+    """
+    expiry_day_floor: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Plan-2A R-AA-5: carried over from StrategyConfig.expiry_day_floor. On the expiry session the bounded flatten's floor collapses to this near-zero value (applied only when a live bid exists; bid <= 0 → fully marketable). Optional/null preserves pre-change behavior. Spec-only carry in this chunk; flatten consumption lands in R-AA-3.
     """

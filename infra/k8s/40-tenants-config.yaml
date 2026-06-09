@@ -76,3 +76,8 @@ data:
     # deep-OTM/illiquid contract often has no live quote and the market order is rejected.
     # Keep in sync with tenants/dev/strategies/copytrade-v1.yaml.
     force_close_0dte_et: "14:45"
+    # Plan-2A R-AA-5: bounded scheduled-flatten floors (fail-SAFE → marketable; expiry
+    # collapses to expiry_day_floor). Keep in sync with the canonical strategy file.
+    exit_floor_abs: 0.05
+    exit_floor_pct: 0.5
+    expiry_day_floor: 0.01

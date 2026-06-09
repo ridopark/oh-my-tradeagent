@@ -1,5 +1,6 @@
 package com.ohmytradeagent.marketdata.config;
 
+import com.ohmytradeagent.contract.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.contract.activities.SubscribePremiumActivity;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
@@ -57,9 +58,12 @@ public class TemporalWorkerConfig {
   }
 
   @Bean
-  public Worker worker(WorkerFactory factory, SubscribePremiumActivity activity) {
+  public Worker worker(
+      WorkerFactory factory,
+      SubscribePremiumActivity subscribePremiumActivity,
+      GetOptionQuoteActivity getOptionQuoteActivity) {
     Worker worker = factory.newWorker(taskQueue);
-    worker.registerActivitiesImplementations(activity);
+    worker.registerActivitiesImplementations(subscribePremiumActivity, getOptionQuoteActivity);
     return worker;
   }
 }

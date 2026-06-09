@@ -5,6 +5,8 @@ import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
+import com.ohmytradeagent.contract.GetOptionQuoteRequest;
+import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
@@ -15,6 +17,7 @@ import com.ohmytradeagent.contract.SubscribePremiumRequest;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
+import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import com.ohmytradeagent.orchestrator.domain.OptionTick;
@@ -124,6 +127,23 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // lifecycle/fill event (nothing was sold; the lot survives for a later STC / EOD flatten /
   // re-drive); registered in AuditEventKinds.ALL_KINDS only. Paged by OrderFailureAlerter (B3).
   private static final String KIND_PARTIAL_EXIT_PLACE_FAILED = "PartialExitPlaceFailed";
+
+  // Plan-2A R-AA-3 audit kind: the bounded scheduled-flatten (eod/expiry/chandelier_trail) computed
+  // an exit_floor that is UNUSABLE for a bounded limit — exit_floor_abs/exit_floor_pct were
+  // null/absent/unresolvable, or the resolved floor sits ABOVE the live bid (a floor that high
+  // would
+  // forbid selling at any executable price). The flatten FAILS SAFE by falling back to a marketable
+  // exit (never "no sell") and emits this loud kind so a misconfigured floor is visible.
+  // Observability-only — registered in AuditEventKinds.ALL_KINDS only (NOT a lifecycle/fill kind).
+  private static final String KIND_FLATTEN_FLOOR_CONFIG_ERROR = "FlattenFloorConfigError";
+
+  // Plan-2A R-AA-3 audit kind: GetOptionQuoteActivity returned status=FAILED or UNAVAILABLE on a
+  // scheduled/expiry flatten path, so the bounded flatten has no live-bid anchor. The flatten FAILS
+  // SAFE by falling back to a marketable exit (NOT a stale ref-premium limit) and emits this loud
+  // kind so a market-data outage during a force-close is visible. Observability-only — registered
+  // in
+  // AuditEventKinds.ALL_KINDS only (NOT a lifecycle/fill kind).
+  private static final String KIND_FLATTEN_QUOTE_UNAVAILABLE = "FlattenQuoteUnavailable";
 
   private static final String VERSION_CHANDELIER = "chandelier-v1";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
@@ -268,6 +288,40 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_EXIT_PLACE_FAILURE_GUARD = "exit-place-failure-guard";
 
   /**
+   * Plan-2A R-AA-1 replay gate (the core silent-loss fix). Pre-this-patch {@link
+   * #flattenRemaining(String)} set {@code remainingQty=0} on {@code placeOrder} SUCCESS (no
+   * fill-await) and {@code run()} then emitted {@link #KIND_POSITION_CLOSED} unconditionally —
+   * benign only while the flatten was a MARKET order, but R-AA-3 turns it into a bounded LIMIT that
+   * can rest UNFILLED, re-opening the QQQ-725 silent-loss class. v&gt;=1 (new executions): after
+   * {@code placeOrder} the flatten {@code Workflow.await}s on {@code lastFillEvent} up to a TTL and
+   * zeroes {@code remainingQty} ONLY from the actual fill; the run()-tail epilogue becomes a
+   * GUARDED loop that emits {@code PositionClosed} ONLY when {@code remainingQty==0}
+   * (broker-confirmed) and stays ALIVE (re-arm / block) on a TTL timeout. v=DEFAULT_VERSION
+   * (in-flight workflows started before this patch) keep the legacy zero-at-placement +
+   * unconditional-close path so their recorded histories replay byte-identically — the only new
+   * command on v=0 is the appended {@code getVersion} marker (resolving to DEFAULT_VERSION for
+   * legacy histories). Redefined invariant: {@code KIND_POSITION_CLOSED ⟹ broker-confirmed
+   * remaining == 0}.
+   */
+  private static final String VERSION_FLATTEN_FILL_AWAIT = "flatten-fill-await";
+
+  /**
+   * Plan-2A R-AA-3 replay gate. Routes the scheduled flatten by CLASSIFICATION: any reason ∉
+   * {{@code risk_breach}, {@code force_close}} is BOUNDED (a marketable LIMIT anchored on the live
+   * bid from {@link GetOptionQuoteActivity}, bounded by {@code exit_floor_abs}/{@code
+   * exit_floor_pct}, with the expiry-session {@code expiry_day_floor} collapse); {@code
+   * risk_breach}/{@code force_close} keep exit-NOW (MARKET, {@code limitPrice=null}). Only
+   * consulted inside the v&gt;=1 branch of {@link #VERSION_FLATTEN_FILL_AWAIT}, so legacy replays
+   * never record this marker; fresh executions resolve it to v&gt;=1. Anchor chain: live bid → mid
+   * → {@code lastTickPremium} → {@code peakPremium} → ref → marketable.
+   */
+  private static final String VERSION_FLATTEN_BOUNDED_LIMIT = "flatten-bounded-limit";
+
+  // Plan-2A R-AA-6 (realized-P&L for flatten fills) needs no separate gate: the flatten fill is
+  // routed through the shared emitExitFill -> PartialExitFilled only inside the v>=1 branch of
+  // VERSION_FLATTEN_FILL_AWAIT, so legacy replays never reach it.
+
+  /**
    * Issue #203 / #212 fallback: bounded wait for the first onFill before the workflow gives up and
    * emits PositionNeverFilled. Matches {@code pending_ttl_paper_secs} in {@code copytrade-v1.yaml}
    * (90s paper default). Used (a) for v=DEFAULT_VERSION replays under {@link
@@ -329,6 +383,21 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               .setStartToCloseTimeout(Duration.ofSeconds(10))
               .build());
 
+  /**
+   * Plan-2A R-AA-2: one-shot live-bid quote anchor for the bounded scheduled flatten (R-AA-3).
+   * Routed to the {@code market-data} task queue (same as {@link #marketData}). Short
+   * start-to-close + the SDK default bounded retry so a market-data hiccup can't wedge a
+   * force-close — the activity returns {@code status=FAILED/UNAVAILABLE} (never throws) so the
+   * flatten falls back to a marketable exit + a loud {@link #KIND_FLATTEN_QUOTE_UNAVAILABLE} audit.
+   */
+  private final GetOptionQuoteActivity optionQuote =
+      Workflow.newActivityStub(
+          GetOptionQuoteActivity.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(MARKET_DATA_TASK_QUEUE)
+              .setStartToCloseTimeout(Duration.ofSeconds(5))
+              .build());
+
   private PositionWorkflowInput input;
   private long remainingQty;
 
@@ -370,6 +439,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private String currentInFlightIntentKey;
   private boolean eodFired;
   private boolean expiryFired;
+
+  /**
+   * Plan-2A R-AA-1: set true when an in-loop flatten (risk_breach/force_close/chandelier) placed a
+   * bounded limit that rested UNFILLED within its TTL. The main loop then stays alive and applies a
+   * LATE fill of that resting order when it arrives, instead of hanging the close open. Reset once
+   * the lot drains.
+   */
+  private boolean flattenAwaitingLateFill;
 
   // Phase 4: chandelier-trail state
   private boolean trailingArmed;
@@ -556,9 +633,28 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   || chandelierFireRequested
                   || eodFired
                   || expiryFired
-                  || remainingQty == 0);
+                  || remainingQty == 0
+                  // Plan-2A R-AA-1: an in-loop flatten (risk_breach/force_close/chandelier) whose
+                  // bounded limit rested unfilled leaves the workflow alive; wake on a LATE fill of
+                  // that resting order so it drains rather than hanging open. Predicate-only — not
+                  // a
+                  // recorded command, so this addition is replay-neutral for v=0 histories.
+                  || (flattenAwaitingLateFill && lastFillEvent != null));
       if (eodFired || expiryFired || remainingQty == 0) {
         break;
+      }
+      // Plan-2A R-AA-1: apply a LATE fill of a resting in-loop-flatten bounded limit, so a
+      // close-in-progress position drains on the broker fill instead of hanging. Guarded by the
+      // flatten-await flag (set only when an in-loop flatten returned unfilled) so it never races
+      // processOne's own fill handling.
+      if (flattenAwaitingLateFill && lastFillEvent != null) {
+        emitExitFill("flatten-" + (closeReason != null ? closeReason : "flatten"), lastFillEvent);
+        lastFillEvent = null;
+        if (remainingQty == 0) {
+          flattenAwaitingLateFill = false;
+          break;
+        }
+        continue;
       }
       // Phase 5: risk_breach + force_close take priority over the normal exit pipeline so
       // operator intent and kill-switch cascades are not blocked behind a queued STC.
@@ -592,8 +688,67 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       }
     }
 
+    // Plan-2A R-AA-1: the run()-tail / EOD-expiry epilogue is a GUARDED loop, not straight-line
+    // flatten-once -> unconditional PositionClosed. v=DEFAULT_VERSION (in-flight workflows started
+    // before this patch) keep the legacy flatten-once + unconditional-close path so their recorded
+    // histories replay byte-identically (the only new command on v=0 is the appended getVersion
+    // marker). v>=1: emit PositionClosed ONLY when remainingQty==0 (broker-confirmed); on a
+    // bounded-flatten TTL timeout, re-arm/re-place rather than return; the workflow stays ALIVE
+    // (blocked on a late fill) when the bounded limit rests unfilled — never silently completes
+    // with
+    // a live lot. The ONLY terminal conditions that let run() return are broker-confirmed remaining
+    // == 0 OR a visible non-retryable ApplicationFailure thrown out of placeOrder.
+    int flattenAwaitVersion =
+        Workflow.getVersion(VERSION_FLATTEN_FILL_AWAIT, Workflow.DEFAULT_VERSION, 1);
+    if (flattenAwaitVersion == Workflow.DEFAULT_VERSION) {
+      if (eodFired || expiryFired) {
+        flattenRemaining(eodFired ? "eod" : "expiry");
+      }
+
+      // Phase 4: if the position closed via a non-chandelier path while the trail was armed, audit
+      // that the trail was torn down by the exit.
+      if (trailingArmed) {
+        String reason = closeReason != null ? closeReason : "normal_stc";
+        if (!"chandelier_trail".equals(reason)) {
+          auditLog(KIND_CHANDELIER_UNARMED_BY_EXIT, subject("reason", reason));
+        }
+      }
+
+      auditLog(
+          KIND_POSITION_CLOSED,
+          subject(
+              "entry_signal_id", input.getEntrySignalId(),
+              "contract_symbol", input.getContractSymbol(),
+              "remaining_qty", remainingQty));
+
+      return Workflow.getInfo().getWorkflowId();
+    }
+
+    // v>=1 guarded epilogue.
     if (eodFired || expiryFired) {
-      flattenRemaining(eodFired ? "eod" : "expiry");
+      String reason = eodFired ? "eod" : "expiry";
+      // Re-place the bounded flatten until broker-confirmed flat. A place exception (visible
+      // non-retryable ApplicationFailure) propagates out of flattenRemaining -> run() (an allowed
+      // terminal). An unfilled bounded limit returns false; for the expiry session the next attempt
+      // collapses to a marketable sell (R-AA-3), so this loop drives toward a fill. If the limit
+      // still rests unfilled after a placement attempt, fall through to the alive-block below
+      // rather
+      // than spin: the workflow stays running (no silent complete) until a late fill drains the lot
+      // or an operator force-closes.
+      boolean flat = flattenRemaining(reason);
+      if (!flat) {
+        // Stay ALIVE: block until a late fill (delivered via onFill -> a subsequent flatten cycle)
+        // or some other path drains the lot. The bounded limit is resting at the broker; we never
+        // emit PositionClosed with remaining > 0. A re-arm cycle re-places on the next late fill.
+        while (remainingQty > 0) {
+          // Wait for a late fill of the resting bounded limit; apply it and re-evaluate.
+          Workflow.await(() -> lastFillEvent != null);
+          if (lastFillEvent != null) {
+            emitExitFill("flatten-" + reason, lastFillEvent);
+            lastFillEvent = null;
+          }
+        }
+      }
     }
 
     // Phase 4: if the position closed via a non-chandelier path while the trail was armed, audit
@@ -605,6 +760,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       }
     }
 
+    // R-AA-1 invariant: PositionClosed ⟹ broker-confirmed remaining == 0. The guarded paths above
+    // only fall through here once remainingQty == 0; the alive-block never exits with remaining >
+    // 0.
     auditLog(
         KIND_POSITION_CLOSED,
         subject(
@@ -1236,7 +1394,20 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
   }
 
-  private void flattenRemaining(String reason) {
+  /**
+   * Force-flatten the remaining quantity for {@code reason}. Returns {@code true} iff the position
+   * is now broker-confirmed flat ({@code remainingQty == 0}).
+   *
+   * <p>Plan-2A R-AA-1/R-AA-3: under {@link #VERSION_FLATTEN_FILL_AWAIT} v&gt;=1 the place is
+   * followed by a bounded {@code Workflow.await} on the fill and {@code remainingQty} is zeroed
+   * ONLY from the actual fill (never at placement). The pricing is reason-scoped (R-AA-3):
+   * scheduled reasons (eod/expiry/chandelier_trail) place a BOUNDED marketable LIMIT anchored on
+   * the live bid; risk_breach/force_close keep exit-NOW MARKET. The fill is routed through {@link
+   * #emitExitFill(String, FillSignalPayload)} so it enters realized P&amp;L (R-AA-6).
+   * v=DEFAULT_VERSION keeps the legacy zero-at-placement MARKET path so recorded histories replay
+   * byte-identically.
+   */
+  private boolean flattenRemaining(String reason) {
     String kindReq;
     String kindDone;
     if ("eod".equals(reason)) {
@@ -1282,48 +1453,255 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
 
     if (remainingQty == 0) {
-      return;
+      return true;
     }
 
     String flattenIntentKey = Workflow.getInfo().getWorkflowId() + ":exit:flatten-" + reason;
-    OrderIntent intent = flattenIntent(flattenIntentKey, reason);
-    try {
-      exec.placeOrder(intent);
-      long flattened = remainingQty;
-      remainingQty = 0;
-      auditLog(
-          kindDone,
-          subject(
-              "entry_signal_id",
-              input.getEntrySignalId(),
-              "contract_symbol",
-              input.getContractSymbol(),
-              "qty_flattened",
-              flattened,
-              "reason",
-              reason));
-    } catch (RuntimeException e) {
-      auditLog(
-          KIND_EOD_FORCE_FLATTEN_FAILED,
-          subject(
-              "entry_signal_id", input.getEntrySignalId(),
-              "contract_symbol", input.getContractSymbol(),
-              "error", e.getMessage(),
-              "reason", reason,
-              "note", "orphan_until_phase_5_reconcile"));
+
+    // Plan-2A R-AA-1 decision point. The getVersion marker is appended AFTER the shared prologue
+    // (kindReq audit + best-effort cancel) and BEFORE the place/zero, so legacy histories — which
+    // recorded kindReq/cancel/placeOrder/kindDone with no marker — replay through the v=DEFAULT
+    // branch byte-identically (the only new command on v=0 is this appended marker).
+    int flattenAwaitVersion =
+        Workflow.getVersion(VERSION_FLATTEN_FILL_AWAIT, Workflow.DEFAULT_VERSION, 1);
+    if (flattenAwaitVersion == Workflow.DEFAULT_VERSION) {
+      // LEGACY: place a MARKET flatten, zero remainingQty at placement SUCCESS, audit kindDone.
+      OrderIntent intent = flattenIntent(flattenIntentKey, reason);
+      try {
+        exec.placeOrder(intent);
+        long flattened = remainingQty;
+        remainingQty = 0;
+        auditLog(
+            kindDone,
+            subject(
+                "entry_signal_id",
+                input.getEntrySignalId(),
+                "contract_symbol",
+                input.getContractSymbol(),
+                "qty_flattened",
+                flattened,
+                "reason",
+                reason));
+      } catch (RuntimeException e) {
+        auditLog(
+            KIND_EOD_FORCE_FLATTEN_FAILED,
+            subject(
+                "entry_signal_id", input.getEntrySignalId(),
+                "contract_symbol", input.getContractSymbol(),
+                "error", e.getMessage(),
+                "reason", reason,
+                "note", "orphan_until_phase_5_reconcile"));
+      }
+      return remainingQty == 0;
     }
+
+    // v>=1 (R-AA-1 + R-AA-3 + R-AA-6).
+    boolean immediacy = "risk_breach".equals(reason) || "force_close".equals(reason);
+    BigDecimal flattenLimit = immediacy ? null : computeBoundedFlattenLimit(reason);
+    OrderIntent intent = flattenIntent(flattenIntentKey, reason, flattenLimit);
+
+    lastFillEvent = null;
+    // R-AA-1: a placeOrder exception (a visible non-retryable ApplicationFailure) propagates out of
+    // run() as a visible workflow failure — an ALLOWED terminal. We do NOT swallow it on v>=1: a
+    // silently-swallowed failure plus a re-arm loop would spin forever, and the safety contract is
+    // "broker-confirmed flat OR visible failure", never "silent complete".
+    exec.placeOrder(intent);
+
+    long ttl = resolveExitFillTtlSecs();
+    Workflow.await(Duration.ofSeconds(ttl), () -> lastFillEvent != null);
+
+    if (lastFillEvent != null) {
+      // R-AA-1: zero remainingQty ONLY from the actual fill. R-AA-6: route through the shared
+      // fill-applier so the flatten fill emits PartialExitFilled (enters realized P&L). A synthetic
+      // signal_id flatten-<reason> matches flattenIntent's signal_id.
+      long flattenedThisFill = lastFillEvent.getFilledQty();
+      emitExitFill("flatten-" + reason, lastFillEvent);
+      lastFillEvent = null;
+      flattenAwaitingLateFill = false;
+      if (remainingQty == 0) {
+        // Lifecycle marker (P&L-neutral): the realized-P&L credit rode the PartialExitFilled above.
+        auditLog(
+            kindDone,
+            subject(
+                "entry_signal_id",
+                input.getEntrySignalId(),
+                "contract_symbol",
+                input.getContractSymbol(),
+                "qty_flattened",
+                flattenedThisFill,
+                "reason",
+                reason));
+        return true;
+      }
+      // Partial fill: stay alive for the residual; do not emit the terminal lifecycle marker.
+      flattenAwaitingLateFill = true;
+      return false;
+    }
+
+    // TTL timeout — the bounded limit rests UNFILLED. Best-effort cancel, emit a loud failure
+    // audit,
+    // and stay ALIVE (never zero remainingQty, never emit PositionClosed). The caller re-arms / the
+    // main loop applies a late fill of the resting order.
+    try {
+      exec.cancelOrder(flattenIntentKey);
+    } catch (RuntimeException ignored) {
+      // Best-effort; reconciliation closes the loop on the real broker-side state.
+    }
+    auditLog(
+        KIND_EOD_FORCE_FLATTEN_FAILED,
+        subject(
+            "entry_signal_id",
+            input.getEntrySignalId(),
+            "contract_symbol",
+            input.getContractSymbol(),
+            "reason",
+            reason,
+            "remaining_qty",
+            remainingQty,
+            "note",
+            "bounded_flatten_unfilled_workflow_stays_alive"));
+    flattenAwaitingLateFill = true;
+    return false;
   }
 
   /**
-   * Apply a single exit fill: decrement {@code remainingQty} and emit the {@link
-   * #KIND_PARTIAL_EXIT_FILLED} audit (with the option_symbol correlation key under {@link
-   * #VERSION_EXIT_FILLED_OPTION_SYMBOL} v&gt;=1). Shared by the normal-path fill block and the
-   * VERSION_EXIT_RETRY_LATE_FILL_RECONCILE timeout-branch reconcile so the two audits are
-   * byte-identical. Does NOT touch the in-flight latches or {@code closeReason} — the caller owns
-   * lifecycle transitions. Idempotency (process each fill exactly once) is the caller's
-   * responsibility: the reconcile path nulls {@code lastFillEvent} immediately after this call so a
-   * late fill is never double-counted between the normal path and the reconcile.
+   * Plan-2A R-AA-3: compute the bounded marketable-LIMIT price for a scheduled flatten. Anchors on
+   * the live bid from {@link GetOptionQuoteActivity} (chain: live bid → mid → {@code
+   * lastTickPremium} → {@code peakPremium} → ref), bounded by {@code exit_floor_abs}/{@code
+   * exit_floor_pct}. Returns {@code null} (= a marketable exit, {@code limitPrice=null}) on every
+   * FAIL-SAFE branch:
+   *
+   * <ul>
+   *   <li>quote FAILED/UNAVAILABLE → marketable fallback + {@link #KIND_FLATTEN_QUOTE_UNAVAILABLE};
+   *   <li>no usable anchor at all → marketable;
+   *   <li>floor null/absent/unresolvable, or floor &gt; live bid → marketable + {@link
+   *       #KIND_FLATTEN_FLOOR_CONFIG_ERROR};
+   *   <li>EXPIRY session with {@code bid <= 0} → fully marketable (a no-bid contract expires
+   *       worthless; do NOT rest a $0.01 limit that never fills).
+   * </ul>
    */
+  private BigDecimal computeBoundedFlattenLimit(String reason) {
+    int boundedVersion =
+        Workflow.getVersion(VERSION_FLATTEN_BOUNDED_LIMIT, Workflow.DEFAULT_VERSION, 1);
+    if (boundedVersion == Workflow.DEFAULT_VERSION) {
+      // Defensive: only reachable on a fresh execution (the caller is already inside v>=1 of
+      // VERSION_FLATTEN_FILL_AWAIT); a marketable exit is the safe default.
+      return null;
+    }
+
+    boolean expirySession = "expiry".equals(reason);
+
+    GetOptionQuoteRequest qreq = new GetOptionQuoteRequest();
+    qreq.setSchemaVersion(1L);
+    qreq.setTenantId(input.getTenantId());
+    qreq.setStrategyId(input.getStrategyId());
+    qreq.setContractSymbol(input.getContractSymbol());
+    OptionQuoteResult quote = optionQuote.getOptionQuote(qreq);
+
+    if (quote == null || quote.getStatus() != OptionQuoteResult.Status.OK) {
+      // Quote FAILED/UNAVAILABLE on a scheduled path → marketable fallback (NOT a stale ref-premium
+      // limit). Loud audit so a market-data outage during a force-close is visible.
+      auditLog(
+          KIND_FLATTEN_QUOTE_UNAVAILABLE,
+          subject(
+              "contract_symbol",
+              input.getContractSymbol(),
+              "reason",
+              reason,
+              "quote_status",
+              quote == null ? "NULL" : quote.getStatus().value(),
+              "note",
+              "marketable_fallback"));
+      return null;
+    }
+
+    BigDecimal liveBid = quote.getBid();
+
+    // EXPIRY session: when bid <= 0 go fully marketable (no-bid contract expires worthless).
+    if (expirySession && (liveBid == null || liveBid.signum() <= 0)) {
+      return null;
+    }
+
+    // Anchor chain: live bid → mid → lastTickPremium → peakPremium → ref.
+    BigDecimal anchor = firstPositive(liveBid, quote.getMid(), lastTickPremium, peakPremium);
+    if (anchor == null) {
+      // No usable anchor → marketable.
+      return null;
+    }
+
+    // Resolve the floor. exit_floor = max(exit_floor_abs, anchor * exit_floor_pct). On the expiry
+    // session the floor collapses to expiry_day_floor (applied only because a live bid exists
+    // here).
+    BigDecimal floor = resolveExitFloor(anchor, expirySession);
+    if (floor == null) {
+      // Floor null/absent/unresolvable → marketable fallback + loud config-error audit.
+      auditLog(
+          KIND_FLATTEN_FLOOR_CONFIG_ERROR,
+          subject(
+              "contract_symbol",
+              input.getContractSymbol(),
+              "reason",
+              reason,
+              "note",
+              "no_resolvable_floor_marketable_fallback"));
+      return null;
+    }
+
+    // A floor ABOVE the live bid would forbid selling at any executable price → marketable
+    // fallback.
+    if (liveBid != null && liveBid.signum() > 0 && floor.compareTo(liveBid) > 0) {
+      auditLog(
+          KIND_FLATTEN_FLOOR_CONFIG_ERROR,
+          subject(
+              "contract_symbol", input.getContractSymbol(),
+              "reason", reason,
+              "floor", floor,
+              "live_bid", liveBid,
+              "note", "floor_above_live_bid_marketable_fallback"));
+      return null;
+    }
+
+    // Bounded marketable LIMIT: anchor at/through the live bid, but never below the floor. Round to
+    // a
+    // penny tick (same deterministic helper the entry/exit paths use).
+    BigDecimal limit = anchor.max(floor);
+    return OptionTick.round(limit);
+  }
+
+  /**
+   * Resolve the exit floor for a bounded flatten. Normal session: {@code max(exit_floor_abs, anchor
+   * * exit_floor_pct)}. Expiry session: {@code expiry_day_floor} (a near-zero floor applied only
+   * when a live bid exists — the caller has already routed bid&lt;=0 to fully marketable). Returns
+   * {@code null} when no floor field resolves (fail-safe: caller falls back to marketable).
+   */
+  private BigDecimal resolveExitFloor(BigDecimal anchor, boolean expirySession) {
+    if (expirySession) {
+      BigDecimal edf = input.getExpiryDayFloor();
+      return (edf != null && edf.signum() >= 0) ? edf : null;
+    }
+    BigDecimal abs = input.getExitFloorAbs();
+    BigDecimal pct = input.getExitFloorPct();
+    BigDecimal pctFloor =
+        (pct != null && pct.signum() > 0 && anchor != null) ? anchor.multiply(pct) : null;
+    if (abs != null && abs.signum() > 0 && pctFloor != null) {
+      return abs.max(pctFloor);
+    }
+    if (abs != null && abs.signum() > 0) {
+      return abs;
+    }
+    return pctFloor;
+  }
+
+  /** First strictly-positive BigDecimal in the list, or null if none. Deterministic. */
+  private static BigDecimal firstPositive(BigDecimal... candidates) {
+    for (BigDecimal c : candidates) {
+      if (c != null && c.signum() > 0) {
+        return c;
+      }
+    }
+    return null;
+  }
+
   /**
    * Clear the exit in-flight latch + the tracked broker-order/signal/intent keys. Called when an
    * exit resolves and no further retry order is pending (fill complete, retry skipped/satisfied, or
@@ -1336,13 +1714,37 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     currentInFlightIntentKey = null;
   }
 
+  /**
+   * Apply a single partial-exit fill: decrement {@code remainingQty} and emit the {@link
+   * #KIND_PARTIAL_EXIT_FILLED} audit. Thin wrapper over the shared {@link #emitExitFill(String,
+   * FillSignalPayload)} keyed on {@code req.getSignalId()}. Shared by the normal-path fill block
+   * and the VERSION_EXIT_RETRY_LATE_FILL_RECONCILE timeout-branch reconcile so the two audits are
+   * byte-identical. Does NOT touch the in-flight latches or {@code closeReason} — the caller owns
+   * lifecycle transitions.
+   */
   private void applyExitFill(PartialExitRequest req, FillSignalPayload fillEvent) {
+    emitExitFill(req.getSignalId(), fillEvent);
+  }
+
+  /**
+   * Plan-2A R-AA-6: the SHARED fill-applier used by BOTH the partial-exit path (via {@link
+   * #applyExitFill(PartialExitRequest, FillSignalPayload)}) and the scheduled-flatten path (with a
+   * synthetic {@code flatten-<reason>} signal_id). Decrements {@code remainingQty} by the actual
+   * fill and emits {@link #KIND_PARTIAL_EXIT_FILLED} carrying {@code qty_filled} + {@code
+   * avg_fill_price} (+ {@code option_symbol} under {@link #VERSION_EXIT_FILLED_OPTION_SYMBOL}
+   * v&gt;=1) so {@code DailyPnlActivitiesImpl} enters every exit — STC AND force-flatten — into
+   * realized P&L. Before this, force-flatten exits emitted only {@code qty_flattened} (no price)
+   * and contributed ZERO realized P&L, so the daily-loss kill-switch under-counted losses on the
+   * eod/expiry/chandelier paths. Single P&L source: {@code EodForceFlattened}/{@code
+   * ExpiryForceFlattened} stay P&L-neutral lifecycle markers.
+   */
+  private void emitExitFill(String signalId, FillSignalPayload fillEvent) {
     long filled = fillEvent.getFilledQty();
     remainingQty -= filled;
     Map<String, Object> exitSubject =
         subject(
             "signal_id",
-            req.getSignalId(),
+            signalId,
             "qty_filled",
             filled,
             "remaining_qty_after",
@@ -1351,9 +1753,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             fillEvent.getBrokerOrderId(),
             "avg_fill_price",
             fillEvent.getAvgFillPrice());
-    // Issue #276: emit the per-symbol correlation key so the DailyPnl FIFO grouping matches this
-    // exit against its OWN symbol's entry basis. Replay-gated so legacy PositionWorkflow histories
-    // reproduce the old subject (no option_symbol) deterministically.
+    // Issue #276 / Plan-2A R-AA-6: emit the per-symbol correlation key so the DailyPnl FIFO
+    // grouping
+    // matches this exit against its OWN symbol's entry basis. Replay-gated so legacy
+    // PositionWorkflow
+    // histories reproduce the old subject (no option_symbol) deterministically.
     if (Workflow.getVersion(VERSION_EXIT_FILLED_OPTION_SYMBOL, Workflow.DEFAULT_VERSION, 1) >= 1) {
       exitSubject.put("option_symbol", input.getContractSymbol());
     }
@@ -1384,7 +1788,18 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     return i;
   }
 
+  /** Legacy v=0 flatten intent: always a MARKET order ({@code limitPrice=null}). */
   private OrderIntent flattenIntent(String intentKey, String reason) {
+    return flattenIntent(intentKey, reason, null);
+  }
+
+  /**
+   * Plan-2A R-AA-3 flatten intent. {@code limitPrice == null} → MARKET (immediacy reasons, or a
+   * bounded path that FAILED SAFE to marketable); a non-null {@code limitPrice} → a bounded
+   * marketable LIMIT (rounded to a penny tick via the shared deterministic helper, in lock-step
+   * with the exit/entry paths).
+   */
+  private OrderIntent flattenIntent(String intentKey, String reason, BigDecimal limitPrice) {
     OrderIntent i = new OrderIntent();
     i.setSchemaVersion(1L);
     i.setTenantId(input.getTenantId());
@@ -1397,7 +1812,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     i.setOptionSymbol(input.getContractSymbol());
     i.setSide(OrderIntent.Side.SELL);
     i.setQty(remainingQty);
-    i.setLimitPrice(null);
+    i.setLimitPrice(limitPrice == null ? null : OptionTick.round(limitPrice));
     i.setRecordedAt(workflowNow());
     return i;
   }

@@ -1178,6 +1178,16 @@ class CopytradeSignalWorkflowImplTest {
     assertThat(child.getForceClose0dteEt()).isNull();
   }
 
+  // ---------- Plan-2A R-AA-5: bounded-flatten exit floors passthrough onto the child ----------
+
+  @Test
+  void startPositionWorkflow_carriesExitFloors_fromStrategyConfig() throws Exception {
+    PositionWorkflowInput child = runBtoCapturingChildInput("14:45");
+    assertThat(child.getExitFloorAbs()).isEqualByComparingTo("0.05");
+    assertThat(child.getExitFloorPct()).isEqualByComparingTo("0.5");
+    assertThat(child.getExpiryDayFloor()).isEqualByComparingTo("0.01");
+  }
+
   /**
    * Drives the BTO happy path through {@link CopytradeSignalWorkflowImpl#startPositionWorkflow} on
    * a dedicated env whose child PositionWorkflow is a {@link RecordingPositionWorkflowImpl}, then
@@ -1213,6 +1223,12 @@ class CopytradeSignalWorkflowImplTest {
 
       StrategyConfig cfg = config();
       cfg.setForceClose0dteEt(forceClose0dteEt);
+      // Plan-2A R-AA-5: set the bounded-flatten floors so the passthrough test can assert they
+      // reach the child PositionWorkflowInput. Harmless to the force_close_0dte_et tests, which
+      // don't read these fields.
+      cfg.setExitFloorAbs(new java.math.BigDecimal("0.05"));
+      cfg.setExitFloorPct(new java.math.BigDecimal("0.5"));
+      cfg.setExpiryDayFloor(new java.math.BigDecimal("0.01"));
       when(localStrategy.get("dev", "copytrade-v1")).thenReturn(cfg);
       when(localStrategy.capitalForStrategy("dev", "copytrade-v1"))
           .thenReturn(new BigDecimal("100000"));

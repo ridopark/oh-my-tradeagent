@@ -28,6 +28,9 @@ public class ReconciliationMetricsActivitiesImpl implements ReconciliationMetric
   static final String LAG_TIMER_NAME = "reconciliation_lag_seconds";
   static final String DISCREPANCIES_COUNTER_NAME = "journal_broker_discrepancies_total";
   static final String INTENTS_COUNTER_NAME = "journal_broker_intents_reconciled_total";
+  // Plan-2A R-AA-4: recon.auto_adopt.{initiated,already_owned,refused_not_held} — one counter,
+  // distinguished by the `outcome` tag (Prometheus convention; queryable per outcome).
+  static final String AUTO_ADOPT_COUNTER_NAME = "recon_auto_adopt_total";
 
   private static final Logger log =
       LoggerFactory.getLogger(ReconciliationMetricsActivitiesImpl.class);
@@ -36,6 +39,8 @@ public class ReconciliationMetricsActivitiesImpl implements ReconciliationMetric
   private final ConcurrentMap<String, Timer> lagTimers = new ConcurrentHashMap<>();
   private final ConcurrentMap<String, Counter> discrepancyCounters = new ConcurrentHashMap<>();
   private final ConcurrentMap<String, Counter> intentCounters = new ConcurrentHashMap<>();
+  // Keyed on (tenant|strategy|broker_target|outcome) so each outcome gets its own counter.
+  private final ConcurrentMap<String, Counter> autoAdoptCounters = new ConcurrentHashMap<>();
 
   public ReconciliationMetricsActivitiesImpl(MeterRegistry meterRegistry) {
     this.meterRegistry = meterRegistry;
@@ -98,6 +103,32 @@ public class ReconciliationMetricsActivitiesImpl implements ReconciliationMetric
         lagMillis,
         discrepancies,
         intentsReconciled);
+  }
+
+  @Override
+  public void recordAutoAdopt(
+      String tenantId, String strategyId, String brokerTarget, String outcome) {
+    String key = tagKey(tenantId, strategyId, brokerTarget) + "|" + outcome;
+    Counter c =
+        autoAdoptCounters.computeIfAbsent(
+            key,
+            k ->
+                Counter.builder(AUTO_ADOPT_COUNTER_NAME)
+                    .description(
+                        "Recon auto-adoption decisions for orphaned FILLED positions, by outcome "
+                            + "(initiated|already_owned|refused_not_held). Plan-2A R-AA-4.")
+                    .tag("tenant", tenantId)
+                    .tag("strategy", strategyId)
+                    .tag("broker_target", brokerTarget)
+                    .tag("outcome", outcome)
+                    .register(meterRegistry));
+    c.increment();
+    log.debug(
+        "recon auto-adopt metric tenant={} strategy={} broker_target={} outcome={}",
+        tenantId,
+        strategyId,
+        brokerTarget,
+        outcome);
   }
 
   private static String tagKey(String tenantId, String strategyId, String brokerTarget) {

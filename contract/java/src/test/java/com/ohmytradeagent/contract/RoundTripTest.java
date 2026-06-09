@@ -154,6 +154,44 @@ class RoundTripTest {
   }
 
   @Test
+  void getOptionQuoteRequest_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("get-option-quote-request.json"));
+
+    GetOptionQuoteRequest deserialized = mapper.readValue(json, GetOptionQuoteRequest.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getTenantId()).isEqualTo("dev");
+    assertThat(deserialized.getStrategyId()).isEqualTo("copytrade-v1");
+    assertThat(deserialized.getContractSymbol()).isEqualTo("NVDA  260516C00140000");
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
+
+  @Test
+  void optionQuoteResult_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("option-quote-result.json"));
+
+    OptionQuoteResult deserialized = mapper.readValue(json, OptionQuoteResult.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getContractSymbol()).isEqualTo("NVDA  260516C00140000");
+    assertThat(deserialized.getBid().doubleValue()).isEqualTo(2.90);
+    assertThat(deserialized.getMid().doubleValue()).isEqualTo(2.95);
+    assertThat(deserialized.getAsk().doubleValue()).isEqualTo(3.00);
+    assertThat(deserialized.getStatus()).isEqualTo(OptionQuoteResult.Status.OK);
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
+
+  @Test
   void watchlistMirrorPayload_roundTrips() throws Exception {
     String json = Files.readString(FIXTURES.resolve("watchlist-mirror-payload.json"));
 

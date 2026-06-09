@@ -70,3 +70,16 @@ eod_force_flatten: false
 # still exist, so the (intentionally) MARKET flatten order fills. By 15:30 ET the
 # deep-OTM/illiquid contract often has no live quote and the market order is rejected.
 force_close_0dte_et: "14:45"
+
+# Plan-2A R-AA-5: bounded scheduled-flatten floors. Scheduled exits (eod/expiry/
+# chandelier) place a bounded marketable LIMIT anchored on the live bid instead of a
+# market dump. The floor is fail-SAFE: a null/unresolvable floor — or one above the
+# live bid — collapses to a marketable exit (never "no sell"). Conservative values: a
+# small absolute floor and a 50% fractional floor; whichever is more conservative
+# (max) applies. On the EXPIRY session the floor collapses to expiry_day_floor (near
+# zero) so a decaying long is sold for something rather than ridden to $0; a contract
+# with no live bid still goes fully marketable. Not consumed by workflow logic yet
+# (R-AA-3, next chunk) — defaults hold from code if this ConfigMap is stale.
+exit_floor_abs: 0.05
+exit_floor_pct: 0.5
+expiry_day_floor: 0.01

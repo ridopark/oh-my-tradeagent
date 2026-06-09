@@ -116,6 +116,26 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Plan-2A R-AA-1: pins the flatten-fill-await gate literal. This getVersion change-point keys the
+   * legacy-vs-bounded flatten fork; a renamed string re-resolves to DEFAULT_VERSION for legacy
+   * histories, which would silently revert the silent-loss fix on in-flight workflows.
+   */
+  @Test
+  void versionFlattenFillAwaitConstantNameIsStable() throws Exception {
+    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_FLATTEN_FILL_AWAIT");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("flatten-fill-await");
+  }
+
+  /** Plan-2A R-AA-3: pins the bounded-limit gate literal. */
+  @Test
+  void versionFlattenBoundedLimitConstantNameIsStable() throws Exception {
+    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_FLATTEN_BOUNDED_LIMIT");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("flatten-bounded-limit");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#276 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The recorded {@code PartialExitFilled} subject has no
    * {@code option_symbol} key; the current impl's v=DEFAULT_VERSION branch must reproduce that

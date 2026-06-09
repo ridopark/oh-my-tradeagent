@@ -172,6 +172,18 @@ public final class AuditEventKinds {
           // intentionally placed in ALL_KINDS only for observability, not in any lifecycle group.
           // Paged by OrderFailureAlerter (B3).
           "PartialExitPlaceFailed",
+          // Plan-2A R-AA-3: emitted by PositionWorkflowImpl's bounded scheduled-flatten when the
+          // exit_floor is unusable (exit_floor_abs/exit_floor_pct null/absent/unresolvable, or the
+          // resolved floor sits ABOVE the live bid). The flatten FAILS SAFE to a marketable exit
+          // and
+          // emits this loud kind. Observability-only — registered in ALL_KINDS only, NOT a
+          // lifecycle/fill kind.
+          "FlattenFloorConfigError",
+          // Plan-2A R-AA-3: emitted by PositionWorkflowImpl's bounded scheduled-flatten when
+          // GetOptionQuoteActivity returns FAILED/UNAVAILABLE so the bounded limit has no live-bid
+          // anchor. The flatten FAILS SAFE to a marketable exit (not a stale ref-premium limit) and
+          // emits this loud kind. Observability-only — registered in ALL_KINDS only.
+          "FlattenQuoteUnavailable",
           // Issue #205: emitted by PositionWorkflowImpl when a partial-exit signal lands on a
           // remainingQty<=1 runner with floor(qty * fraction)==0 and config selects SKIP. Also
           // classified in PARTIAL_EXIT_FILL_KINDS (it fulfills the partial-exit request by
@@ -214,6 +226,13 @@ public final class AuditEventKinds {
           "PositionOrphanOngoing",
           "JournalOrphanOngoing",
           "ReconciliationMetricsRecordFailed",
+          // Plan-2A R-AA-4: emitted by ReconciliationWorkflowImpl when a recon cycle detects a
+          // PositionOrphan(journal_status='filled') and issues an ABANDON-child AdoptionWorkflow
+          // start to re-attach the orphaned-but-legit lot to a managing PositionWorkflow. Pure
+          // provenance / observability for the auto-adopt path — NOT a lifecycle event (the real
+          // ledger ENTRY is the adopted workflow's PositionEntered). Intentionally placed in
+          // ALL_KINDS only, not in ENTRY_KINDS or any *_TERMINAL_CLOSE_KINDS group.
+          "ReconAutoAdoptionInitiated",
           // Issue #239/#285: emitted by AdoptionWorkflow when an operator-triggered
           // adoption reconstructs + starts a PositionWorkflow owner for a confirmed orphan. Pure
           // provenance / observability — NOT a lifecycle event. The real ledger ENTRY is the

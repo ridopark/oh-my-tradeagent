@@ -176,6 +176,13 @@ class AdoptionWorkflowImplTest {
     c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
     c.setEodForceFlatten(eodForceFlatten);
     c.setPendingTtlPaperSecs(120L);
+    // Plan-2A R-AA-5: force_close_0dte_et (previously omitted from buildInput) + the
+    // bounded-flatten
+    // floors, so buildInput's regression test can assert they reach the adopted child input.
+    c.setForceClose0dteEt("14:45");
+    c.setExitFloorAbs(new BigDecimal("0.05"));
+    c.setExitFloorPct(new BigDecimal("0.5"));
+    c.setExpiryDayFloor(new BigDecimal("0.01"));
     return c;
   }
 
@@ -209,6 +216,12 @@ class AdoptionWorkflowImplTest {
     // eod_force_flatten propagated verbatim; TTLs sourced from config.
     assertThat(started.getEodForceFlatten()).isEqualTo(Boolean.FALSE);
     assertThat(started.getFirstFillTtlSecs()).isEqualTo(120L);
+    // Plan-2A R-AA-5: buildInput now sets force_close_0dte_et (previously omitted — regression
+    // guard) and carries the bounded-flatten floors onto the adopted child.
+    assertThat(started.getForceClose0dteEt()).isEqualTo("14:45");
+    assertThat(started.getExitFloorAbs()).isEqualByComparingTo("0.05");
+    assertThat(started.getExitFloorPct()).isEqualByComparingTo("0.5");
+    assertThat(started.getExpiryDayFloor()).isEqualByComparingTo("0.01");
     // Issue #288: the resolved broker target is threaded onto the adopted child input from
     // StrategyConfig.broker_target so PositionWorkflowImpl can stamp it on the exit OrderIntent
     // (its first exec.placeOrder is the STC — without it the lot would re-orphan).
