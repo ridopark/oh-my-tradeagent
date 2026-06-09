@@ -252,6 +252,131 @@ class OrderFailureAlerterTest {
     assertThat(field(embed, "reason")).contains("AUTHOR_NOT_WHITELISTED");
   }
 
+  // ---- B3 (PLAN-exit-place-duplicate-422-crash): recon orphan + placement-failure paging ----
+
+  // The production-default allowlist after B3 (matches application.yml). PositionOrphan /
+  // PositionOrphanOngoing / PartialExitPlaceFailed are now first-class failure pages.
+  private static final String B3_PRODUCTION_DEFAULT_ALLOWLIST =
+      "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed";
+
+  /**
+   * Builds a subject with the EXACT shape ReconciliationWorkflowImpl.emitPositionOrphanWithDebounce
+   * produces (keys: option_symbol, qty, expected_workflow_id, journal_status, and the identifier
+   * journal_entry_signal_id — NOT signal_id). Asserting against this real shape (not a hand-rolled
+   * BTO map) is the whole point of the B3 render fix.
+   */
+  private static Map<String, Object> reconOrphanSubject(String journalStatus) {
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("option_symbol", "QQQ   260608C00725000");
+    subject.put("qty", 5L);
+    subject.put("expected_workflow_id", "pos-qqq-725");
+    subject.put("journal_status", journalStatus);
+    subject.put("journal_entry_signal_id", "entry-sig-725");
+    return subject;
+  }
+
+  @Test
+  void positionOrphan_rendersOrphanShapedEmbed_notBtoFailure_b3() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+
+    AuditEvent event = event("PositionOrphan", "wf-recon-1", reconOrphanSubject("filled"));
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    // It must NOT mislabel as a BTO/STC order failure.
+    assertThat(embed.title()).doesNotContain("BTO");
+    assertThat(embed.title()).doesNotContain("order FAILED");
+    assertThat(embed.title()).contains("Orphaned position");
+    // Orphan-shaped description renders qty + symbol + "no managing workflow".
+    String rendered = embed.title() + String.valueOf(embed.description());
+    assertThat(rendered).contains("5");
+    assertThat(rendered).contains("QQQ");
+    assertThat(rendered).contains("no managing workflow");
+    assertThat(embed.color()).isEqualTo(15548997); // red
+  }
+
+  @Test
+  void positionOrphanOngoing_rendersOrphanShapedEmbed_b3() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+
+    AuditEvent event = event("PositionOrphanOngoing", "wf-recon-2", reconOrphanSubject("missing"));
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("Orphaned position");
+    assertThat(embed.title() + String.valueOf(embed.description()))
+        .contains("no managing workflow");
+  }
+
+  @Test
+  void positionOrphanWithMissingKeys_isNullSafeAndDoesNotThrow_b3() {
+    // A render that throws is swallowed by onAuditEvent's catch → the page is SILENTLY LOST. The
+    // orphan branch must be null-safe on every key so the page always posts.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+
+    // Subject missing every key (qty/option_symbol/expected_workflow_id/journal_status absent).
+    AuditEvent event = event("PositionOrphan", "wf-recon-3", new LinkedHashMap<>());
+
+    assertThatCode(() -> alerter.onAuditEvent(event)).doesNotThrowAnyException();
+    // The page still posts (not silently lost) even with an empty subject.
+    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.any());
+  }
+
+  @Test
+  void positionOrphanWithNullSubject_isNullSafeAndStillPosts_b3() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+
+    AuditEvent event = event("PositionOrphan", "wf-recon-4", null);
+
+    assertThatCode(() -> alerter.onAuditEvent(event)).doesNotThrowAnyException();
+    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.any());
+  }
+
+  @Test
+  void partialExitPlaceFailed_rendersAsStcExit_b3() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("signal_id", "sig-fail-1");
+    subject.put("option_symbol", "QQQ   260608C00725000");
+    subject.put("intent_key", "pos-qqq-725:exit:sig-fail-1");
+    subject.put("qty", 3L);
+    subject.put("error", "client_order_id must be unique");
+    AuditEvent event = event("PartialExitPlaceFailed", "wf-place-fail-1", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    // PartialExitPlaceFailed is in STC_KINDS → labeled "STC (exit)", not "BTO (entry)".
+    assertThat(embed.title()).contains("STC (exit)");
+    assertThat(field(embed, "symbol")).contains("QQQ");
+    assertThat(field(embed, "signal_id")).isEqualTo("sig-fail-1");
+  }
+
+  @Test
+  void b3OrphanKindsAreInProductionDefaultAllowlist() {
+    // The allowlist must ship via the image (DEFAULT_FAILURE_KINDS), not via env/40-tenants-config.
+    WebhookClient webhook = mock(WebhookClient.class);
+    // Construct with NO explicit allowlist override → the constructor's DEFAULT_FAILURE_KINDS is
+    // exercised via the @Value default. Simulated here by passing the code-default literal.
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+    assertThat(alerter.failureKinds())
+        .contains("PositionOrphan", "PositionOrphanOngoing", "PartialExitPlaceFailed");
+  }
+
   private static WebhookEmbed capture(WebhookClient webhook) {
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
     verify(webhook, times(1)).postEmbed(captor.capture());

@@ -569,6 +569,72 @@ class PositionWorkflowImplTest {
     assertThat(partialFills.get(0).getSubject()).containsEntry("signal_id", "sig-follow");
   }
 
+  // ---------- B2 (PLAN-exit-place-duplicate-422-crash): exit-place-failure guard ----------
+
+  /**
+   * B2 headline: a non-retryable exit {@code placeOrder} failure (e.g. the
+   * duplicate-client_order_id 422 misclassified as {@code InvalidRequestError}) MUST NOT fail the
+   * PositionWorkflow and orphan the live lot. Under {@code VERSION_EXIT_PLACE_FAILURE_GUARD}
+   * v&gt;=1 the catch emits {@code PartialExitPlaceFailed}, releases the in-flight latch, and
+   * {@code return;}s out of processOne WITHOUT decrementing remainingQty. The workflow stays alive
+   * + the lot stays managed (proven by a follow-up STC that drains and fills normally, completing
+   * the run at EOD). Stronger than "not FAILED": the signal-handler turn completes, the position
+   * stays queryable at the unchanged qty, and the workflow's @WorkflowMethod returns normally.
+   */
+  @Test
+  void exitPlaceFailure_keepsWorkflowAliveManagedAndAuditsPlaceFailed_b2() throws Exception {
+    // First placeOrder (the exit) throws a non-retryable ApplicationFailure; subsequent
+    // placeOrder calls (the follow-up STC) succeed — proving the lot is still managed.
+    when(exec.placeOrder(any()))
+        .thenThrow(
+            ApplicationFailure.newNonRetryableFailure(
+                "Alpaca rejected order (422, non-duplicate): client_order_id must be unique",
+                "InvalidRequestError"))
+        .thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-exit-place-fail");
+    WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
+
+    // First STC: placeOrder throws. The catch must audit + release the latch + return — NOT crash.
+    stub.partialExit(partialExitRequest("sig-fail", "pos-exit-place-fail", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // The signal-handler turn completed and the workflow is still alive + queryable: the position
+    // is still managed at the UNCHANGED qty (nothing was sold).
+    PositionState afterFailure = stub.positionState();
+    assertThat(afterFailure.remainingQty()).isEqualTo(5L);
+    assertThat(afterFailure.contractSymbol()).isEqualTo("NVDA  260516C00140000");
+
+    // Follow-up STC drains (proving the in-flight latch was released) and fills normally.
+    stub.partialExit(partialExitRequest("sig-ok", "pos-exit-place-fail", 1.0));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-ok", 5L, new BigDecimal("3.00")));
+
+    // The workflow completes its run normally (it never FAILED).
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-exit-place-fail");
+
+    // PartialExitPlaceFailed audit was emitted carrying the diagnostic subject.
+    AuditEvent placeFailed = captureKind("PartialExitPlaceFailed");
+    assertThat(placeFailed.getSubject())
+        .containsEntry("signal_id", "sig-fail")
+        .containsEntry("option_symbol", "NVDA  260516C00140000");
+    assertThat(asLong(placeFailed.getSubject().get("qty"))).isEqualTo(3L);
+    assertThat(placeFailed.getSubject())
+        .containsEntry("intent_key", "pos-exit-place-fail:exit:sig-fail");
+    // The error message is the Temporal ActivityFailure message (mirrors flattenRemaining's
+    // EodForceFlattenFailed convention of e.getMessage()); it identifies the failed activity.
+    assertThat(String.valueOf(placeFailed.getSubject().get("error"))).contains("PlaceOrder");
+
+    // remainingQty was NOT decremented by the failed placement: the failed STC sold nothing, the
+    // successful follow-up sold all 5.
+    List<AuditEvent> partialFills = captureAll("PartialExitFilled");
+    assertThat(partialFills).hasSize(1);
+    assertThat(partialFills.get(0).getSubject()).containsEntry("signal_id", "sig-ok");
+    assertThat(asLong(partialFills.get(0).getSubject().get("qty_filled"))).isEqualTo(5L);
+  }
+
   // ---------- Phase 4: CHANDELIER_TRAIL ----------
 
   @Test

@@ -79,7 +79,12 @@ alert:
     webhook-url: ${ALERT_DISCORD_WEBHOOK_URL:}
     # Comma-separated allowlist of audit kinds that trigger a failure alert (avoids channel spam).
     # SignalRejected intentionally absent (issue #308) — owned by the signal-feed outcome mirror.
-    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired}
+    # B3 (PLAN-exit-place-duplicate-422-crash): PositionOrphan / PositionOrphanOngoing (recon's
+    # live-orphan pages) and PartialExitPlaceFailed (a failed exit placement) are shipped in this
+    # IMAGE default — NOT via 40-tenants-config, which deploy.yml never applies — so the orphan-blind
+    # spot from the QQQ-725 incident cannot silently reopen. Mirrors DEFAULT_FAILURE_KINDS in
+    # OrderFailureAlerter.java.
+    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed}
     signal-feed:
       # Issue #308: mirror every BTO/STC/AVG signal (received + outcome) to the same webhook.
       # Off by default — opt in via ALERT_SIGNAL_FEED_ENABLED=true. Independent of failure alerts.

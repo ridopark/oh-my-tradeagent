@@ -113,6 +113,18 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String KIND_PARTIAL_EXIT_RETRY_SKIPPED_SATISFIED =
       "PartialExitRetrySkippedSatisfied";
 
+  // B2 (PLAN-exit-place-duplicate-422-crash) audit kind: an exit-order placeOrder activity FAILED
+  // (e.g. a duplicate-client_order_id 422 misclassified by the broker adapter as a non-retryable
+  // InvalidRequestError). Pre-this-patch the uncaught failure propagated out of processOne() and
+  // FAILED the whole PositionWorkflow with no audit, orphaning the still-live lot (the QQQ-725
+  // incident). Under VERSION_EXIT_PLACE_FAILURE_GUARD v>=1 the catch emits this kind (carrying
+  // intent_key, option_symbol, qty, signal_id, and the error message), releases the in-flight
+  // latch,
+  // and returns WITHOUT decrementing remainingQty — the position stays managed and alive. NOT a
+  // lifecycle/fill event (nothing was sold; the lot survives for a later STC / EOD flatten /
+  // re-drive); registered in AuditEventKinds.ALL_KINDS only. Paged by OrderFailureAlerter (B3).
+  private static final String KIND_PARTIAL_EXIT_PLACE_FAILED = "PartialExitPlaceFailed";
+
   private static final String VERSION_CHANDELIER = "chandelier-v1";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
   private static final String VERSION_FORCE_CLOSE = "force-close-v1";
@@ -233,6 +245,27 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    */
   private static final String VERSION_EXIT_RETRY_LATE_FILL_RECONCILE =
       "exit-retry-late-fill-reconcile";
+
+  /**
+   * B2 (PLAN-exit-place-duplicate-422-crash) replay gate. Pre-this-patch the exit {@code
+   * exec.placeOrder(intent)} inside {@link #processOne(PartialExitRequest)} was UNCAUGHT: a
+   * non-retryable {@code ApplicationFailure} (e.g. the duplicate-client_order_id 422 misclassified
+   * as {@code InvalidRequestError}) propagated out of processOne and FAILED the whole
+   * PositionWorkflow with no audit, orphaning a live lot (the QQQ-725 incident). v&gt;=1 (new
+   * executions) wrap the placeOrder call in try/catch: on a {@code RuntimeException} (covers
+   * Temporal {@code ActivityFailure}/{@code ApplicationFailure}) the catch emits {@link
+   * #KIND_PARTIAL_EXIT_PLACE_FAILED}, releases the in-flight latch via {@link
+   * #releaseExitInFlightLatches()}, and {@code return;}s out of processOne — it does NOT fall
+   * through to {@code placed.getBrokerOrderId()} (a never-assigned reference) and does NOT enter
+   * the fill-await (a never-placed order never fills → wedge). {@code remainingQty} is unchanged
+   * (nothing was sold) so the lot stays managed and the workflow stays alive for a later STC / EOD
+   * flatten. v=DEFAULT_VERSION (in-flight workflows started before this patch) keep the original
+   * uncaught call so their recorded histories replay byte-identically — the try/catch wrapper and
+   * the new audit command exist ONLY under v&gt;=1. Byte-identity is by construction: on v=0 the
+   * only new command is the appended {@code getVersion} marker (resolving to DEFAULT_VERSION for
+   * legacy histories). Distinct from the prior session keys so it rolls independently.
+   */
+  private static final String VERSION_EXIT_PLACE_FAILURE_GUARD = "exit-place-failure-guard";
 
   /**
    * Issue #203 / #212 fallback: bounded wait for the first onFill before the workflow gives up and
@@ -1055,7 +1088,44 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
       lastFillEvent = null;
       currentInFlightIntentKey = intentKey;
-      OrderIntentResult placed = exec.placeOrder(intent);
+      // B2 (PLAN-exit-place-duplicate-422-crash) replay gate. v=DEFAULT_VERSION keeps the original
+      // UNCAUGHT placeOrder call so in-flight histories replay byte-identically (the only new
+      // command on v=0 is this getVersion marker). v>=1 wraps the call so a non-retryable
+      // ApplicationFailure (e.g. the duplicate-cid 422 misclassified as InvalidRequestError) no
+      // longer FAILS the workflow and orphans the live lot.
+      int placeFailureGuardVersion =
+          Workflow.getVersion(VERSION_EXIT_PLACE_FAILURE_GUARD, Workflow.DEFAULT_VERSION, 1);
+      OrderIntentResult placed;
+      if (placeFailureGuardVersion == Workflow.DEFAULT_VERSION) {
+        placed = exec.placeOrder(intent);
+      } else {
+        try {
+          placed = exec.placeOrder(intent);
+        } catch (RuntimeException e) {
+          // The exit placement failed (covers Temporal ActivityFailure / ApplicationFailure,
+          // including a non-retryable InvalidRequestError). Pre-B2 this propagated out of
+          // processOne
+          // and FAILED the whole workflow, orphaning the live lot with no audit. Instead: audit the
+          // failure, release the in-flight latch, and return — WITHOUT decrementing remainingQty
+          // (nothing was sold) and WITHOUT entering the fill-await (a never-placed order never
+          // fills → wedge). The lot stays managed; a later STC / EOD flatten / re-drive can act.
+          auditLog(
+              KIND_PARTIAL_EXIT_PLACE_FAILED,
+              subject(
+                  "signal_id",
+                  req.getSignalId(),
+                  "intent_key",
+                  intentKey,
+                  "option_symbol",
+                  input.getContractSymbol(),
+                  "qty",
+                  intent.getQty(),
+                  "error",
+                  e.getMessage()));
+          releaseExitInFlightLatches();
+          return;
+        }
+      }
       currentInFlightBrokerOrderId = placed.getBrokerOrderId();
 
       boolean filledInTime;
