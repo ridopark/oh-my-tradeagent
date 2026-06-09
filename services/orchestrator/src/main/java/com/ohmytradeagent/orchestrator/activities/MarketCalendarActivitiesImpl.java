@@ -50,6 +50,34 @@ public class MarketCalendarActivitiesImpl implements MarketCalendarActivities {
   }
 
   @Override
+  public Duration durationUntilExpiryFlattenEt(
+      LocalDate expiry, long leadMinutes, LocalTime closeTime) {
+    // Plan-2B R-AB-1: arm a flatten lead timer for ANY future-or-today expiry (multi-day included),
+    // unlike durationUntilExpiryCloseEt which is 0DTE-only.
+    LocalTime effectiveClose = closeTime != null ? closeTime : EXPIRY_CLOSE_TIME;
+    long lead = Math.max(0L, leadMinutes);
+    ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
+
+    // Trigger = (expiry close - leadMinutes) ET, on the expiry date.
+    ZonedDateTime trigger =
+        ZonedDateTime.of(expiry, effectiveClose, ET).withSecond(0).withNano(0).minusMinutes(lead);
+
+    // Weekend roll-back: a Saturday/Sunday trigger is moved to the same wall-clock time on the
+    // prior Friday so the bounded flatten arms before the weekend rather than for a closed market.
+    DayOfWeek dow = trigger.getDayOfWeek();
+    if (dow == DayOfWeek.SATURDAY) {
+      trigger = trigger.minusDays(1);
+    } else if (dow == DayOfWeek.SUNDAY) {
+      trigger = trigger.minusDays(2);
+    }
+
+    if (!now.isBefore(trigger)) {
+      return Duration.ZERO;
+    }
+    return Duration.between(now, trigger);
+  }
+
+  @Override
   public boolean isMarketOpen() {
     ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
     DayOfWeek dow = now.getDayOfWeek();

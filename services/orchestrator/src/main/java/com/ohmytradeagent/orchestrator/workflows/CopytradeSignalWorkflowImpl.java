@@ -490,6 +490,15 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     posInput.setExitFloorAbs(config.getExitFloorAbs());
     posInput.setExitFloorPct(config.getExitFloorPct());
     posInput.setExpiryDayFloor(config.getExpiryDayFloor());
+    // Plan-2B R-AB-1/R-AB-2: carry the guaranteed-flatten lead + bounded stepped-reprice tunables
+    // so
+    // PositionWorkflow arms the multi-day expiry-lead timer (R-AB-1) and walks the bounded exit
+    // reprice (R-AB-2). All pass through verbatim (null preserved → in-code defaults in the child:
+    // flatten_lead_minutes 30, exit_reprice_steps 3, exit_reprice_tick 0.05). Consumption is
+    // version-gated in the child so in-flight pre-2B workflows replay deterministically.
+    posInput.setFlattenLeadMinutes(config.getFlattenLeadMinutes());
+    posInput.setExitRepriceSteps(config.getExitRepriceSteps());
+    posInput.setExitRepriceTick(config.getExitRepriceTick());
 
     Async.function(child::run, posInput);
     // Wait until the child is durably scheduled before returning.

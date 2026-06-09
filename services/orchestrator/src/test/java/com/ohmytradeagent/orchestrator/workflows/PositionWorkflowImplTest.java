@@ -77,6 +77,12 @@ class PositionWorkflowImplTest {
     // Default calendar: no EOD/expiry pressure
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
     when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
+    // Plan-2B R-AB-1: default ZERO so the guaranteed expiry-lead timer is NOT armed unless a test
+    // overrides it (mirrors the durationUntilExpiryCloseEt default; ZERO/negative → no timer
+    // armed).
+    when(calendar.durationUntilExpiryFlattenEt(
+            any(), org.mockito.ArgumentMatchers.anyLong(), any()))
+        .thenReturn(Duration.ZERO);
     // Default market-data: subscription succeeds.
     when(marketData.subscribePremium(any())).thenReturn(subscribedResult());
     // Plan-2A R-AA-2/R-AA-3: default live-bid quote so bounded scheduled flatten anchors on a real
@@ -780,7 +786,9 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-exit-timeout");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    PositionWorkflowInput in = input(5);
+    in.setExitRepriceSteps(1L); // R-AB-2: cap at 1 retry → 2 timeouts then drop (legacy shape).
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
 
     // First STC: send fraction=0.5 and never deliver the fill.
@@ -839,7 +847,9 @@ class PositionWorkflowImplTest {
                 "broker rejected cancel — already filled", "BrokerCancelRejected"));
 
     PositionWorkflow stub = newStub("pos-exit-timeout-cancelfail");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    PositionWorkflowInput in = input(3);
+    in.setExitRepriceSteps(1L); // R-AB-2: cap at 1 retry → 2 timeouts then drop (legacy shape).
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
 
     stub.partialExit(partialExitRequest("sig-stuck", "pos-exit-timeout-cancelfail", 0.5));
@@ -1678,6 +1688,9 @@ class PositionWorkflowImplTest {
     PositionWorkflow stub = newStub("pos-exit-fill-ttl-20");
     PositionWorkflowInput in = input(5);
     in.setExitFillTtlSecs(20L);
+    // Plan-2B R-AB-2: cap the stepped reprice at 1 so this #212 TTL test keeps its "one retry then
+    // drop" (2-timeout) shape under the redesigned loop.
+    in.setExitRepriceSteps(1L);
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
 
@@ -1732,7 +1745,14 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-retry-fills");
-    WorkflowStub.fromTyped(stub).start(input(4));
+    PositionWorkflowInput in = input(4);
+    in.setExitRepriceSteps(1L); // R-AB-2: 1 reprice step → mirrors the legacy single-retry shape.
+    // exit_floor configured so the reprice produces a bounded LIMIT from the live quote
+    // (source_premium=live_quote_stepped); without a floor the reprice would fail-safe to
+    // marketable.
+    in.setExitFloorAbs(new BigDecimal("0.05"));
+    in.setExitFloorPct(new BigDecimal("0.5"));
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 4L);
 
     // First STC: ask for fraction=0.5 (qtyToClose=2) and never deliver the original fill.
@@ -1758,23 +1778,23 @@ class PositionWorkflowImplTest {
     assertThat(timeouts).hasSize(1);
     assertThat(timeouts.get(0).getSubject()).containsEntry("signal_id", "sig-retry");
 
-    // Exactly one retry-requested audit carrying the original signal_id, retry_attempt=1, and
-    // the source_premium provenance (no chandelier tick yet → ref_premium fallback).
+    // Exactly one reprice-requested audit carrying the original signal_id, retry_attempt=1, and the
+    // R-AB-2 stepped source_premium provenance (the limit is anchored on a fresh live quote).
     List<AuditEvent> retries = captureAll("PartialExitRetryRequested");
     assertThat(retries).hasSize(1);
     assertThat(retries.get(0).getSubject())
         .containsEntry("signal_id", "sig-retry")
-        .containsEntry("source_premium", "ref_premium");
+        .containsEntry("source_premium", "live_quote_stepped");
     assertThat(asLong(retries.get(0).getSubject().get("retry_attempt"))).isEqualTo(1L);
-    // intent_key has the :retry suffix so it's distinct from the original.
-    assertThat((String) retries.get(0).getSubject().get("intent_key")).endsWith(":retry");
+    // intent_key has the :reprice-1 suffix so it's distinct from the original.
+    assertThat((String) retries.get(0).getSubject().get("intent_key")).endsWith(":reprice-1");
 
-    // The retry order placed by placeOrder() carries the :retry intent_key.
+    // The reprice order placed by placeOrder() carries the :reprice-1 intent_key.
     ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
     verify(exec, atLeast(2)).placeOrder(intentCaptor.capture());
     List<OrderIntent> capturedIntents = intentCaptor.getAllValues();
     assertThat(capturedIntents.stream().map(OrderIntent::getIntentKey))
-        .anyMatch(k -> k != null && k.endsWith(":retry"));
+        .anyMatch(k -> k != null && k.endsWith(":reprice-1"));
 
     // Two PartialExitFilled audits: the retry-fill for sig-retry, then the closing sig-close-final.
     List<AuditEvent> partialFills = captureAll("PartialExitFilled");
@@ -1796,7 +1816,9 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-retry-caps");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    PositionWorkflowInput in = input(5);
+    in.setExitRepriceSteps(1L); // R-AB-2: cap the stepped reprice at 1 → 2 timeouts then drop.
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
 
     // First STC: never deliver the original fill.
@@ -1837,150 +1859,151 @@ class PositionWorkflowImplTest {
   }
 
   /**
-   * Issue #216: when the chandelier trail is armed and has received at least one tick before the
-   * exit-fill timeout fires, the retry's fresh limit price is sourced from {@code lastTickPremium}
-   * (most recent mid) rather than the original {@code req.getRefPremium()}. Drives the {@code
-   * source_premium=last_tick_premium} provenance in the {@code PartialExitRetryRequested} audit
-   * subject.
+   * Plan-2B R-AB-2: under the stepped-reprice redesign, the reprice limit is anchored on a FRESH
+   * GetOptionQuoteActivity bid/mid (live_quote_stepped) rather than the legacy lastTick/ref/peak
+   * source chain (which is now reachable only on v=0 replays — covered by the LegacyReplayTest).
+   * The step limit walks toward the market by exit_reprice_tick and is bounded by exit_floor. With
+   * the default quote (bid=2.50), tick=0.05, step=1, and a configured floor, the reprice limit is
+   * 2.45. Formerly {@code processOne_exitFillTimeoutRetry_chandelierTickDrivesFreshLimitSource}
+   * (#216).
    */
   @Test
-  void processOne_exitFillTimeoutRetry_chandelierTickDrivesFreshLimitSource() throws Exception {
+  void processOne_steppedReprice_limitAnchoredOnFreshLiveQuote() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
-    PositionWorkflow stub = newStub("pos-retry-tick");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    PositionWorkflowInput in = input(3);
+    in.setExitRepriceSteps(1L);
+    in.setExitRepriceTick(new BigDecimal("0.05"));
+    in.setExitFloorAbs(new BigDecimal("0.05"));
+    in.setExitFloorPct(new BigDecimal("0.5"));
+
+    PositionWorkflow stub = newStub("pos-reprice-quote");
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
 
-    // Arm the chandelier (peak=2.85, giveback=0.15 → threshold=2.4225) and seed a tick well above
-    // threshold so the trail does NOT fire — only the lastTickPremium gets latched on state.
+    // Arm the chandelier + seed a tick — proving the stepped limit is NOT sourced from these
+    // (legacy) signals but from the fresh live quote.
     stub.armChandelier(
         armPayload(
-            "pos-retry-tick", "src-arm-216", new BigDecimal("2.85"), new BigDecimal("0.15")));
+            "pos-reprice-quote", "src-arm-rab2", new BigDecimal("2.85"), new BigDecimal("0.15")));
     stub.chandelierTick(tick(new BigDecimal("2.70")));
 
-    // STC arrives; the original limit order never fills.
-    stub.partialExit(partialExitRequest("sig-tick-retry", "pos-retry-tick", 0.5));
+    stub.partialExit(partialExitRequest("sig-reprice-quote", "pos-reprice-quote", 0.5));
     waitForPlaceOrderCount(1);
     env.sleep(Duration.ofSeconds(120));
     waitForPlaceOrderCount(2);
-    stub.onFill(fill("brk-retry-tick", 2L, new BigDecimal("2.65")));
+    stub.onFill(fill("brk-reprice-quote", 2L, new BigDecimal("2.45")));
 
     // Drain the remaining runner.
-    stub.partialExit(partialExitRequest("sig-tick-close", "pos-retry-tick", 1.0));
+    stub.partialExit(partialExitRequest("sig-reprice-quote-close", "pos-reprice-quote", 1.0));
     waitForPlaceOrderCount(3);
-    stub.onFill(fill("brk-tick-close", 1L, new BigDecimal("2.60")));
+    stub.onFill(fill("brk-reprice-quote-close", 1L, new BigDecimal("2.40")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent retry = captureKind("PartialExitRetryRequested");
     assertThat(retry.getSubject())
-        .containsEntry("signal_id", "sig-tick-retry")
-        .containsEntry("source_premium", "last_tick_premium");
-    // fresh_limit_price reflects the latched tick premium (2.70), not the original ref (2.85).
+        .containsEntry("signal_id", "sig-reprice-quote")
+        .containsEntry("source_premium", "live_quote_stepped");
+    // fresh_limit_price = max(floor=1.25, bid 2.50 - 1*0.05) = 2.45 (from the live quote, NOT the
+    // armed peak 2.85 or the latched tick 2.70).
     assertThat(((Number) retry.getSubject().get("fresh_limit_price")).doubleValue())
-        .isEqualTo(2.70);
+        .isEqualTo(2.45);
   }
 
   /**
-   * Issue #227: when the chandelier is armed (peak populated) but no tick has arrived (so {@code
-   * lastTickPremium} stays null) AND the request carries a non-null {@code refPremium}, the retry's
-   * fresh limit price MUST be sourced from {@code req.getRefPremium()} — NOT from {@code
-   * peakPremium}. Rationale: {@code peakPremium} is a high-water-mark biased high for SELL exits;
-   * the author-posted {@code refPremium} is the closest fresh-quote proxy when no tick has fired.
-   * The new order is {@code lastTickPremium → refPremium → peakPremium}; this test exercises the
-   * middle branch (ref wins over peak).
+   * Plan-2B R-AB-2: when the live quote is UNAVAILABLE on a reprice step, the bounded reprice fails
+   * SAFE to a marketable exit (null limit, source_premium=marketable_fallback) and emits the
+   * FlattenQuoteUnavailable observability audit — never resting above an executable price. Formerly
+   * {@code processOne_exitFillTimeoutRetry_refPremiumPreferredOverPeak} (#227).
    */
   @Test
-  void processOne_exitFillTimeoutRetry_refPremiumPreferredOverPeak() throws Exception {
+  void processOne_steppedReprice_quoteUnavailable_failsSafeToMarketable() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteFailed("md outage"));
 
-    PositionWorkflow stub = newStub("pos-retry-ref-over-peak");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    PositionWorkflowInput in = input(3);
+    in.setExitRepriceSteps(1L);
+    in.setExitFloorAbs(new BigDecimal("0.05"));
+    in.setExitFloorPct(new BigDecimal("0.5"));
+
+    PositionWorkflow stub = newStub("pos-reprice-no-quote");
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
 
-    // Arm the chandelier so peakPremium=2.85 is latched, but do NOT fire a tick — lastTickPremium
-    // stays null. Under the new order, refPremium (3.10) MUST win over peakPremium (2.85).
-    stub.armChandelier(
-        armPayload(
-            "pos-retry-ref-over-peak",
-            "src-arm-227",
-            new BigDecimal("2.85"),
-            new BigDecimal("0.15")));
-
-    // STC with an explicit refPremium=3.10 (distinct from the armed peak=2.85 so the audit
-    // assertion is unambiguous).
-    PartialExitRequest req =
-        partialExitRequest("sig-ref-over-peak", "pos-retry-ref-over-peak", 0.5);
-    req.setRefPremium(new BigDecimal("3.10"));
-    stub.partialExit(req);
+    stub.partialExit(partialExitRequest("sig-reprice-no-quote", "pos-reprice-no-quote", 0.5));
     waitForPlaceOrderCount(1);
     env.sleep(Duration.ofSeconds(120));
     waitForPlaceOrderCount(2);
-    stub.onFill(fill("brk-retry-ref-over-peak", 2L, new BigDecimal("3.05")));
+    stub.onFill(fill("brk-reprice-no-quote", 2L, new BigDecimal("2.40")));
 
-    // Drain the remaining runner.
-    stub.partialExit(partialExitRequest("sig-ref-over-peak-close", "pos-retry-ref-over-peak", 1.0));
+    stub.partialExit(partialExitRequest("sig-no-quote-close", "pos-reprice-no-quote", 1.0));
     waitForPlaceOrderCount(3);
-    stub.onFill(fill("brk-ref-over-peak-close", 1L, new BigDecimal("3.00")));
+    stub.onFill(fill("brk-no-quote-close", 1L, new BigDecimal("2.35")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent retry = captureKind("PartialExitRetryRequested");
     assertThat(retry.getSubject())
-        .containsEntry("signal_id", "sig-ref-over-peak")
-        .containsEntry("source_premium", "ref_premium");
-    // fresh_limit_price reflects refPremium (3.10), NOT the armed peakPremium (2.85).
-    assertThat(((Number) retry.getSubject().get("fresh_limit_price")).doubleValue())
-        .isEqualTo(3.10);
+        .containsEntry("signal_id", "sig-reprice-no-quote")
+        .containsEntry("source_premium", "marketable_fallback");
+    // No fresh limit price (marketable exit).
+    assertThat(retry.getSubject().get("fresh_limit_price")).isNull();
+    // Loud observability audit for the market-data outage during the reprice.
+    assertThat(captureAll("FlattenQuoteUnavailable")).isNotEmpty();
+
+    // The reprice intent placed a MARKET order (null limit) when the quote was unavailable.
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeast(2)).placeOrder(intent.capture());
+    OrderIntent reprice =
+        intent.getAllValues().stream()
+            .filter(i -> i.getIntentKey() != null && i.getIntentKey().endsWith(":reprice-1"))
+            .reduce((a, b) -> b)
+            .orElseThrow(() -> new AssertionError("no :reprice-1 intent placed"));
+    assertThat(reprice.getLimitPrice()).isNull();
   }
 
   /**
-   * Issue #227: when both {@code lastTickPremium} AND {@code req.getRefPremium()} are null/zero,
-   * {@code peakPremium} is the last-resort source. Drives the {@code source_premium=peak_premium}
-   * audit and confirms peak only wins when both higher-priority sources are absent.
+   * Plan-2B R-AB-2: a step's bounded reprice never crosses the exit_floor — when the configured
+   * floor sits ABOVE the quote-anchored walk price, the step fails SAFE to marketable (the floor is
+   * above the live bid so a limit at the floor would never fill). Formerly {@code
+   * processOne_exitFillTimeoutRetry_peakPremiumOnlyWhenLastTickAndRefAbsent} (#227).
    */
   @Test
-  void processOne_exitFillTimeoutRetry_peakPremiumOnlyWhenLastTickAndRefAbsent() throws Exception {
+  void processOne_steppedReprice_floorAboveBid_failsSafeToMarketable() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
-    PositionWorkflow stub = newStub("pos-retry-peak-fallback");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    // exit_floor_abs=5.00 sits ABOVE the live bid 2.50 → floor-above-bid fail-safe → marketable.
+    PositionWorkflowInput in = input(3);
+    in.setExitRepriceSteps(1L);
+    in.setExitFloorAbs(new BigDecimal("5.00"));
+
+    PositionWorkflow stub = newStub("pos-reprice-floor-above");
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
 
-    // Arm the chandelier with peak=2.85; no tick → lastTickPremium null.
-    stub.armChandelier(
-        armPayload(
-            "pos-retry-peak-fallback",
-            "src-arm-227-peak",
-            new BigDecimal("2.85"),
-            new BigDecimal("0.15")));
-
-    // STC with refPremium explicitly null so peak is the only available source.
-    PartialExitRequest req =
-        partialExitRequest("sig-peak-fallback", "pos-retry-peak-fallback", 0.5);
-    req.setRefPremium(null);
-    stub.partialExit(req);
+    stub.partialExit(partialExitRequest("sig-floor-above", "pos-reprice-floor-above", 0.5));
     waitForPlaceOrderCount(1);
     env.sleep(Duration.ofSeconds(120));
     waitForPlaceOrderCount(2);
-    stub.onFill(fill("brk-retry-peak-fallback", 2L, new BigDecimal("2.80")));
+    stub.onFill(fill("brk-floor-above", 2L, new BigDecimal("2.40")));
 
-    // Drain the remaining runner.
-    stub.partialExit(partialExitRequest("sig-peak-fallback-close", "pos-retry-peak-fallback", 1.0));
+    stub.partialExit(partialExitRequest("sig-floor-above-close", "pos-reprice-floor-above", 1.0));
     waitForPlaceOrderCount(3);
-    stub.onFill(fill("brk-peak-fallback-close", 1L, new BigDecimal("2.75")));
+    stub.onFill(fill("brk-floor-above-close", 1L, new BigDecimal("2.35")));
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
     AuditEvent retry = captureKind("PartialExitRetryRequested");
     assertThat(retry.getSubject())
-        .containsEntry("signal_id", "sig-peak-fallback")
-        .containsEntry("source_premium", "peak_premium");
-    assertThat(((Number) retry.getSubject().get("fresh_limit_price")).doubleValue())
-        .isEqualTo(2.85);
+        .containsEntry("signal_id", "sig-floor-above")
+        .containsEntry("source_premium", "marketable_fallback");
+    assertThat(retry.getSubject().get("fresh_limit_price")).isNull();
+    // Loud floor-config-error audit (floor above live bid).
+    assertThat(captureAll("FlattenFloorConfigError")).isNotEmpty();
   }
 
   /**
@@ -2009,6 +2032,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(4);
     // Keep TTLs short so the test runs quickly under virtual time.
     in.setExitFillTtlSecs(2L);
+    in.setExitRepriceSteps(1L); // R-AB-2: cap at 1 reprice → 2 timeouts then drop (legacy shape).
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 4L);
 
@@ -2067,6 +2091,7 @@ class PositionWorkflowImplTest {
     PositionWorkflow stub = newStub("pos-eod-during-retry");
     PositionWorkflowInput in = input(5);
     in.setEodForceFlatten(Boolean.TRUE); // opt into the blanket EOD flatten to drive this path
+    in.setExitRepriceSteps(1L); // R-AB-2: single reprice step → the in-flight key is :reprice-1.
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
 
@@ -2106,14 +2131,14 @@ class PositionWorkflowImplTest {
     ArgumentCaptor<String> cancelKeyCaptor = ArgumentCaptor.forClass(String.class);
     verify(exec, atLeast(2)).cancelOrder(cancelKeyCaptor.capture());
     List<String> cancelledKeys = cancelKeyCaptor.getAllValues();
-    // Original timeout cancel hits the :exit:<sig> key (no :retry suffix).
+    // Original timeout cancel hits the :exit:<sig> key (no :reprice suffix).
     assertThat(cancelledKeys)
         .as("processOne's original-timeout cancel must hit the original intent_key")
         .anyMatch(k -> k.endsWith(":exit:sig-eod-retry"));
-    // EOD-during-retry cancel from flattenRemaining hits the :retry-suffixed key.
+    // EOD-during-reprice cancel from flattenRemaining hits the :reprice-1-suffixed live key.
     assertThat(cancelledKeys)
-        .as("flattenRemaining must cancel the live retry intent_key, not the original")
-        .anyMatch(k -> k.endsWith(":exit:sig-eod-retry:retry"));
+        .as("flattenRemaining must cancel the live reprice intent_key, not the original")
+        .anyMatch(k -> k.endsWith(":exit:sig-eod-retry:reprice-1"));
   }
 
   /**
@@ -2208,7 +2233,9 @@ class PositionWorkflowImplTest {
               return cancelledResult();
             });
 
-    WorkflowStub.fromTyped(stub).start(input(6));
+    PositionWorkflowInput in = input(6);
+    in.setExitRepriceSteps(1L); // R-AB-2: single reprice step → key is :reprice-1.
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 6L);
 
     // STC fraction=0.5 on remaining=6 → qtyToClose=3, targetRemaining=3.
@@ -2229,14 +2256,14 @@ class PositionWorkflowImplTest {
 
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
-    // The :retry OrderIntent qty must be EXACTLY 2 (remainder), not 3 (ceil of fraction).
+    // The :reprice-1 OrderIntent qty must be EXACTLY 2 (remainder), not 3 (ceil of fraction).
     ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
     verify(exec, atLeast(2)).placeOrder(intentCaptor.capture());
     OrderIntent retryIntent =
         intentCaptor.getAllValues().stream()
-            .filter(i -> i.getIntentKey() != null && i.getIntentKey().endsWith(":retry"))
+            .filter(i -> i.getIntentKey() != null && i.getIntentKey().endsWith(":reprice-1"))
             .reduce((a, b) -> b)
-            .orElseThrow(() -> new AssertionError("no :retry intent placed"));
+            .orElseThrow(() -> new AssertionError("no :reprice-1 intent placed"));
     assertThat(retryIntent.getQty())
         .as("retry qty must clamp to remaining - target (2), not ceil(remaining*fraction) (3)")
         .isEqualTo(2L);
@@ -2263,6 +2290,233 @@ class PositionWorkflowImplTest {
             captureAll("PartialExitFilled").stream()
                 .filter(e -> "brk-late-partial".equals(e.getSubject().get("broker_order_id"))))
         .hasSize(1);
+  }
+
+  // ---------- Plan-2B R-AB-1: guaranteed multi-day expiry-lead flatten timer ----------
+
+  /**
+   * R-AB-1 Done-when: a MULTI-DAY lot (expiry not today) arms a flatten timer (the calendar's
+   * {@code durationUntilExpiryFlattenEt} returns &gt; 0 for a future expiry) and, when it fires,
+   * the lot is sold via the 2A bounded reason-scoped flatten with reason=expiry_lead — routed to
+   * the DEDICATED ExpiryLead* kinds (NOT the Eod* fallthrough). The expiry-close (0DTE) timer stays
+   * ZERO so this exercises the lead timer in isolation.
+   */
+  @Test
+  void multiDayLot_armsExpiryLeadTimer_flattensViaBoundedLimit_routesToDedicatedKinds()
+      throws Exception {
+    // durationUntilExpiryCloseEt stays ZERO (multi-day → no 0DTE timer). The lead timer fires
+    // shortly.
+    when(calendar.durationUntilExpiryFlattenEt(
+            any(), org.mockito.ArgumentMatchers.anyLong(), any()))
+        .thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    // exit_floor configured so the bounded flatten anchors a LIMIT (floor=max(0.05, 2.50*0.5)=1.25
+    // < live bid 2.50, so a non-marketable bounded limit is produced).
+    PositionWorkflowInput in = input(4);
+    in.setExitFloorAbs(new BigDecimal("0.05"));
+    in.setExitFloorPct(new BigDecimal("0.5"));
+
+    PositionWorkflow stub = newStub("pos-expiry-lead");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 4L);
+
+    // Advance virtual time past the lead trigger so the guaranteed flatten fires.
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-lead", 4L, new BigDecimal("2.45")));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-expiry-lead");
+
+    // Dedicated lead kinds emitted; NOT the Eod* fallthrough.
+    AuditEvent leadReq = captureKind("ExpiryLeadFlattenRequested");
+    assertThat(leadReq.getSubject()).containsEntry("reason", "expiry_lead");
+    AuditEvent leadDone = captureKind("ExpiryLeadForceFlattened");
+    assertThat(leadDone.getSubject()).containsEntry("reason", "expiry_lead");
+    assertThat(captureAll("EodForceFlattenRequested")).isEmpty();
+    assertThat(captureAll("EodForceFlattened")).isEmpty();
+
+    // Sold via a BOUNDED LIMIT (not a market order): the SELL flatten intent carries a non-null
+    // limit anchored on the live bid (default quote bid=2.50).
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent flatten =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow(() -> new AssertionError("no SELL flatten intent placed"));
+    assertThat(flatten.getLimitPrice()).as("bounded LIMIT, not market").isNotNull();
+
+    // P&L rode the shared PartialExitFilled, and the lot is broker-confirmed flat.
+    assertThat(captureAll("PartialExitFilled")).isNotEmpty();
+    AuditEvent closed = captureKind("PositionClosed");
+    assertThat(asLong(closed.getSubject().get("remaining_qty"))).isEqualTo(0L);
+  }
+
+  /**
+   * R-AB-1: a lead-timer fire on a CLOSED market is a safe no-op — the bounded limit simply rests
+   * unfilled until the next session, and the workflow stays ALIVE (never emits PositionClosed with
+   * a live lot). Models this by firing the lead timer but delivering NO fill within the TTL: the
+   * bounded flatten times out, the workflow blocks on a late fill rather than completing.
+   */
+  @Test
+  void expiryLeadTimer_firesOnClosedMarket_isSafeNoOp_workflowStaysAlive() throws Exception {
+    when(calendar.durationUntilExpiryFlattenEt(
+            any(), org.mockito.ArgumentMatchers.anyLong(), any()))
+        .thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-lead-closed-market");
+    WorkflowStub.fromTyped(stub).start(input(4));
+    confirmEntry(stub, 4L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    // No fill arrives within the TTL → bounded flatten rests unfilled; advance past it.
+    env.sleep(Duration.ofSeconds(120));
+
+    // The flatten requested but did NOT confirm flat (no fill) → a failure audit, and the workflow
+    // stays ALIVE (never emits PositionClosed with a live lot). Deliver a late fill so the test can
+    // drain the workflow cleanly and prove the no-op was recoverable, not a silent loss.
+    assertThat(captureAll("ExpiryLeadFlattenRequested")).isNotEmpty();
+    assertThat(captureAll("PositionClosed")).isEmpty();
+
+    stub.onFill(fill("brk-late-lead", 4L, new BigDecimal("2.40")));
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-lead-closed-market");
+    AuditEvent closed = captureKind("PositionClosed");
+    assertThat(asLong(closed.getSubject().get("remaining_qty"))).isEqualTo(0L);
+  }
+
+  // ---------- Plan-2B R-AB-2: bounded stepped repricing on the normal exit ----------
+
+  /**
+   * R-AB-2 Done-when: the normal exit walks a BOUNDED STEPPED reprice over N steps within the
+   * exit_floor — each step re-anchored on a fresh GetOptionQuoteActivity bid/mid, each with a
+   * distinct :reprice-N intent_key (NO client_order_id reuse across steps). The original placement
+   * never fills; the final reprice step fills. No market order is ever placed.
+   */
+  @Test
+  void exit_steppedReprice_walksWithinFloor_noClientOrderIdReuse_thenFills() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+    // exit_reprice_steps=2, tick=0.05; default quote bid=2.50.
+    PositionWorkflowInput in = input(4);
+    in.setExitRepriceSteps(2L);
+    in.setExitRepriceTick(new BigDecimal("0.05"));
+    in.setExitFloorAbs(new BigDecimal("0.05"));
+    in.setExitFloorPct(new BigDecimal("0.5"));
+
+    PositionWorkflow stub = newStub("pos-stepped-reprice");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 4L);
+
+    stub.partialExit(partialExitRequest("sig-step", "pos-stepped-reprice", 1.0));
+    waitForPlaceOrderCount(1); // original placement
+
+    env.sleep(Duration.ofSeconds(120)); // original times out → reprice-1
+    waitForPlaceOrderCount(2);
+
+    env.sleep(Duration.ofSeconds(120)); // reprice-1 times out → reprice-2
+    waitForPlaceOrderCount(3);
+
+    // Deliver the fill on the final reprice step.
+    stub.onFill(fill("brk-step", 4L, new BigDecimal("2.45")));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-stepped-reprice");
+
+    // Capture all SELL intents; the reprice steps carry distinct :reprice-N keys (no reuse).
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeast(3)).placeOrder(intent.capture());
+    List<String> sellKeys =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .map(OrderIntent::getIntentKey)
+            .toList();
+    // Distinct keys → no client_order_id reuse across steps.
+    assertThat(sellKeys).doesNotHaveDuplicates();
+    assertThat(sellKeys).anyMatch(k -> k != null && k.endsWith(":reprice-1"));
+    assertThat(sellKeys).anyMatch(k -> k != null && k.endsWith(":reprice-2"));
+
+    // Every reprice step's limit is BOUNDED (non-null, never a market order) and at-or-above the
+    // floor. floor = max(0.05, anchor*0.5); anchor=2.50 → floor=1.25. Walk steps stay >= 1.25.
+    List<OrderIntent> repriceIntents =
+        intent.getAllValues().stream()
+            .filter(
+                i ->
+                    i.getSide() == OrderIntent.Side.SELL
+                        && i.getIntentKey() != null
+                        && i.getIntentKey().contains(":reprice-"))
+            .toList();
+    assertThat(repriceIntents).hasSizeGreaterThanOrEqualTo(2);
+    for (OrderIntent ri : repriceIntents) {
+      assertThat(ri.getLimitPrice()).as("bounded limit, never market").isNotNull();
+      assertThat(ri.getLimitPrice()).isGreaterThanOrEqualTo(new BigDecimal("1.25"));
+    }
+  }
+
+  /**
+   * R-AB-2 #357 naked-short guard across N steps: when NO fill arrives, every reprice step re-sends
+   * the SAME reconciled remaining qty (the captured qtyToClose) — it is never re-ceil'd or inflated
+   * across steps, so a multi-step walk can never over-sell. The late-fill-during-cancel reconcile
+   * itself is covered for the single-retry mechanism by {@link
+   * #processOne_exitFillTimeoutRetry_partialLateFill_clampsRetryToRemainder()}; here we assert the
+   * cross-step qty stability that the redesigned loop must preserve.
+   */
+  @Test
+  void exit_steppedReprice_qtyStableAcrossSteps_noOverSell() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflowInput in = input(5);
+    in.setExitRepriceSteps(2L);
+    in.setExitRepriceTick(new BigDecimal("0.05"));
+    in.setExitFloorAbs(new BigDecimal("0.05"));
+    in.setExitFloorPct(new BigDecimal("0.5"));
+
+    PositionWorkflow stub = newStub("pos-step-qty");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // fraction=0.6 → qtyToClose=3. No fill ever arrives; walk both steps then drop.
+    stub.partialExit(partialExitRequest("sig-step-qty", "pos-step-qty", 0.6));
+    waitForPlaceOrderCount(1);
+    env.sleep(Duration.ofSeconds(120)); // original times out → reprice-1
+    waitForPlaceOrderCount(2);
+    env.sleep(Duration.ofSeconds(120)); // reprice-1 times out → reprice-2
+    waitForPlaceOrderCount(3);
+    env.sleep(Duration.ofSeconds(120)); // reprice-2 times out → drop (cap reached)
+
+    // Drain the runner (still 5, nothing sold) so the workflow terminates.
+    stub.partialExit(partialExitRequest("sig-step-drain", "pos-step-qty", 1.0));
+    waitForPlaceOrderCount(4);
+    stub.onFill(fill("brk-step-drain", 5L, new BigDecimal("2.50")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // Every reprice step re-sent qty=3 (the captured qtyToClose), never an inflated value.
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeast(3)).placeOrder(intent.capture());
+    List<OrderIntent> repriceIntents =
+        intent.getAllValues().stream()
+            .filter(
+                i ->
+                    i.getIntentKey() != null
+                        && i.getIntentKey().contains(":reprice-")
+                        && "sig-step-qty".equals(i.getSignalId()))
+            .toList();
+    assertThat(repriceIntents).hasSizeGreaterThanOrEqualTo(2);
+    for (OrderIntent ri : repriceIntents) {
+      assertThat(ri.getQty()).as("no over-sell across steps").isEqualTo(3L);
+    }
+    // No PartialExitFilled for the dropped STC (nothing sold across all steps).
+    assertThat(
+            captureAll("PartialExitFilled").stream()
+                .filter(e -> "sig-step-qty".equals(e.getSubject().get("signal_id"))))
+        .isEmpty();
   }
 
   // ---------- helpers ----------

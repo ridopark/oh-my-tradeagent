@@ -81,3 +81,15 @@ data:
     exit_floor_abs: 0.05
     exit_floor_pct: 0.5
     expiry_day_floor: 0.01
+    # Plan-2B R-AB-1: guaranteed bounded flatten timer for EVERY lot (multi-day included)
+    # at (expiry_close - flatten_lead_minutes) ET; fires reason=expiry_lead through the 2A
+    # bounded flatten. Keep in sync with tenants/dev/strategies/copytrade-v1.yaml.
+    flatten_lead_minutes: 30
+    # Plan-2B R-AB-2: bounded stepped repricing on the normal exit (3 steps of 0.05,
+    # bounded by exit_floor; the flatten_lead timer is the backstop).
+    exit_reprice_steps: 3
+    exit_reprice_tick: 0.05
+    # Plan-2B R-AB-3: entry fill-rate within the willing-to-pay cap (lesser of +$0.05 or
+    # +5%). No market orders. Keep in sync with the canonical strategy file.
+    max_slippage_abs: 0.05
+    max_slippage_pct: 0.05

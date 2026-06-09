@@ -76,6 +76,10 @@ public final class AuditEventKinds {
           "PositionClosed",
           "EodForceFlattened",
           "ExpiryForceFlattened",
+          // Plan-2B R-AB-1: the multi-day expiry-lead bounded flatten terminal marker. Same
+          // hard-terminal-close family as Eod/Expiry force-flatten — it closes a lifecycle that
+          // had a real entry.
+          "ExpiryLeadForceFlattened",
           "SignalAbortedByRiskBreach");
 
   /**
@@ -196,6 +200,16 @@ public final class AuditEventKinds {
           "EodForceFlattenFailed",
           "ExpiryForceFlattenRequested",
           "ExpiryForceFlattened",
+          // Plan-2B R-AB-1: dedicated expiry-LEAD flatten kinds. PositionWorkflow arms a guaranteed
+          // bounded flatten timer for EVERY lot (multi-day included) at (expiry_close -
+          // flatten_lead_minutes) ET; on fire it runs 2A's bounded reason-scoped flatten with
+          // reason=expiry_lead. These dedicated kinds keep the lead-flatten lifecycle event from
+          // being mislabeled as the EOD sweep (the legacy reason-else fallthrough used the Eod*
+          // kinds). ExpiryLeadForceFlattened is the broker-confirmed terminal marker (P&L rides the
+          // accompanying PartialExitFilled); ExpiryLeadFlattenRequested is the cause-of-flatten
+          // marker. ExpiryLeadForceFlattened is a hard-terminal-close kind below.
+          "ExpiryLeadFlattenRequested",
+          "ExpiryLeadForceFlattened",
           "PositionClosed",
           "ChandelierArmed",
           "ChandelierTrailFired",

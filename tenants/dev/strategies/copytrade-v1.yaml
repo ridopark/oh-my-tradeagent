@@ -83,3 +83,25 @@ force_close_0dte_et: "14:45"
 exit_floor_abs: 0.05
 exit_floor_pct: 0.5
 expiry_day_floor: 0.01
+
+# Plan-2B R-AB-1: arm a GUARANTEED bounded flatten timer for EVERY lot (multi-day
+# included) at (expiry_close - flatten_lead_minutes) ET so a position with no STC is
+# sold via a bounded marketable LIMIT before expiry rather than ridden to $0 (the
+# QQQ-725 ride-to-expiry class). Independent of eod_force_flatten. Fires with
+# reason=expiry_lead through the 2A bounded reason-scoped flatten path. Conservative
+# 30 minutes.
+flatten_lead_minutes: 30
+# Plan-2B R-AB-2: bounded stepped repricing on the normal exit. Walk the exit limit
+# toward the market over exit_reprice_steps re-places (each re-anchored on a fresh
+# live bid/mid, bounded by exit_floor), then stop — the flatten_lead timer above is
+# the backstop. Conservative: 3 steps of 0.05 each.
+exit_reprice_steps: 3
+exit_reprice_tick: 0.05
+
+# Plan-2B R-AB-3: entry fill-rate within the willing-to-pay cap. With both unset the
+# BTO limit is an exact mirror of the author-posted price, which systematically
+# non-fills on fast options. Conservative caps: pay up to the lesser of +$0.05
+# absolute or +5% so the entry crosses the spread without chasing. No market orders;
+# the cap is the bound (buy-side cap is authoritative).
+max_slippage_abs: 0.05
+max_slippage_pct: 0.05

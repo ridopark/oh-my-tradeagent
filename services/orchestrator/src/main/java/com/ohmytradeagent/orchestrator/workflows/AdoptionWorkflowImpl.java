@@ -269,6 +269,13 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
       posInput.setExitFloorAbs(config.getExitFloorAbs());
       posInput.setExitFloorPct(config.getExitFloorPct());
       posInput.setExpiryDayFloor(config.getExpiryDayFloor());
+      // Plan-2B R-AB-1/R-AB-2: an adopted (often expiry-day / multi-day-orphan) lot must arm the
+      // same guaranteed expiry-lead flatten timer (R-AB-1) and bounded stepped reprice (R-AB-2) as
+      // a copytrade-spawned one, sourced from StrategyConfig exactly as CopytradeSignalWorkflowImpl
+      // does. All pass through verbatim (null → in-code defaults in the child).
+      posInput.setFlattenLeadMinutes(config.getFlattenLeadMinutes());
+      posInput.setExitRepriceSteps(config.getExitRepriceSteps());
+      posInput.setExitRepriceTick(config.getExitRepriceTick());
     }
     return posInput;
   }
