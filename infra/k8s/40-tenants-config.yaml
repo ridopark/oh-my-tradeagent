@@ -41,7 +41,7 @@ data:
     max_positions: 5
     capital_weight: 0.2
     min_contracts: 1
-    max_contracts: 5
+    max_contracts: 50
     skip_avg: true
     default_stc_fraction: 0.5
     partial_fractions:
