@@ -42,6 +42,8 @@ data:
     capital_weight: 0.2
     min_contracts: 1
     max_contracts: 50
+    # Issue #336 portfolio dollar-exposure cap (keep in sync): 25% of cost-basis capital base.
+    notional_cap_pct_of_capital_base: 0.25
     skip_avg: true
     default_stc_fraction: 0.5
     partial_fractions:
