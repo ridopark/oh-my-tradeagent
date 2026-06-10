@@ -26,7 +26,7 @@ max_positions: 5
 # Phase 2a sizing
 capital_weight: 0.2
 min_contracts: 1
-max_contracts: 5
+max_contracts: 50
 
 # Phase 2a default per Open Question #10
 skip_avg: true
