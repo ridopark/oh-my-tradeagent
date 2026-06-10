@@ -157,7 +157,7 @@ services:
       - "9091:9090"
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.116.0
+    image: otel/opentelemetry-collector-contrib:0.117.0
     restart: unless-stopped
     command: ["--config=/etc/otel-collector.yaml"]
     volumes:
