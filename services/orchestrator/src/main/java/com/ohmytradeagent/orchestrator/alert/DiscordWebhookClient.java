@@ -57,9 +57,16 @@ public class DiscordWebhookClient implements WebhookClient {
     this.requestTimeout = requestTimeout;
   }
 
+  /**
+   * Fixed mention-suppression literal appended to every webhook body: with {@code parse:[]} Discord
+   * renders {@code @everyone}/{@code @here}/{@code <@…>}/{@code <@&…>} as text but never notifies.
+   * No user input — these are operator alert feeds and none should ever ping.
+   */
+  private static final String NO_MENTIONS = ",\"allowed_mentions\":{\"parse\":[]}";
+
   @Override
   public void post(String content) {
-    send("{\"content\":" + jsonString(content) + "}", content);
+    send("{\"content\":" + jsonString(content) + NO_MENTIONS + "}", content);
   }
 
   @Override
@@ -103,7 +110,7 @@ public class DiscordWebhookClient implements WebhookClient {
     if (embed.footer() != null && !embed.footer().isBlank()) {
       sb.append(",\"footer\":{\"text\":").append(jsonString(embed.footer())).append("}");
     }
-    sb.append("}]}");
+    sb.append("}]").append(NO_MENTIONS).append("}");
     return sb.toString();
   }
 

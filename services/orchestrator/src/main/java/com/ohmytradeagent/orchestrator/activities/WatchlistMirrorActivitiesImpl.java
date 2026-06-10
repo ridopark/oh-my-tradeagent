@@ -40,10 +40,6 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
   private static final DateTimeFormatter EMBED_DATE =
       DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.ENGLISH);
 
-  private static final String CALL_HEADER = "CALL ▲ above";
-  private static final String PUT_HEADER = "PUT ▼ below";
-  private static final String NONE = "—";
-
   private final WebhookClient webhookClient;
 
   public WatchlistMirrorActivitiesImpl(WebhookClient webhookClient) {
@@ -63,75 +59,54 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
 
   /**
    * Builds the rich embed: green accent, date-stamped title, an {@code "via <author>"} footer, and
-   * a fenced monospace table as the description so columns stay aligned in Discord.
+   * a per-play description (no code fence) so it uses the embed's full width.
    */
   private static WebhookEmbed buildEmbed(WatchlistMirrorPayload payload, List<TickerWatch> rows) {
     String title = "📋 Watchlist — " + EMBED_DATE.format(payload.getEtDate());
-    String description = renderTable(rows);
+    String description = renderPlays(rows);
     String footer = "via " + payload.getAuthor();
     return new WebhookEmbed(title, description, DISCORD_GREEN, footer);
   }
 
   /**
-   * Renders the per-ticker rows as a left-padded monospace table inside a fenced code block. Column
-   * widths are computed from content. Strikes print without a trailing {@code .0}; triggers are
-   * formatted to 2 decimals. An absent leg renders as an em-dash.
+   * Renders one line per leg (no code fence — the embed uses its full width): per ticker the call
+   * line (if present) then the put line (if present), tickers in original order. A one-sided ticker
+   * emits only that line — no placeholder. The play (ticker+strike) is bolded; the trigger is
+   * plain.
+   *
+   * <pre>
+   *   📈 **SPY 756C** — breaks above 755.30
+   *   📉 **SPY 745P** — breaks below 748.00
+   * </pre>
    */
-  static String renderTable(List<TickerWatch> rows) {
-    String[] tickerCol = new String[rows.size()];
-    String[] callCol = new String[rows.size()];
-    for (int i = 0; i < rows.size(); i++) {
-      TickerWatch w = rows.get(i);
-      tickerCol[i] = w.ticker();
-      callCol[i] = formatLeg(w.call());
-    }
-
-    int tickerWidth = maxWidth("TICKER", tickerCol);
-    int callWidth = maxWidth(CALL_HEADER, callCol);
-
+  static String renderPlays(List<TickerWatch> rows) {
     StringBuilder sb = new StringBuilder();
-    sb.append(pad("TICKER", tickerWidth))
-        .append("  ")
-        .append(pad(CALL_HEADER, callWidth))
-        .append("  ")
-        .append(PUT_HEADER);
-    for (int i = 0; i < rows.size(); i++) {
-      sb.append('\n')
-          .append(pad(tickerCol[i], tickerWidth))
-          .append("  ")
-          .append(pad(callCol[i], callWidth))
-          .append("  ")
-          .append(formatLeg(rows.get(i).put()));
+    for (TickerWatch w : rows) {
+      if (w.call() != null) {
+        appendLine(sb, "📈", w.ticker(), w.call(), "breaks above");
+      }
+      if (w.put() != null) {
+        appendLine(sb, "📉", w.ticker(), w.put(), "breaks below");
+      }
     }
-
-    // Overhead = open-fence + "\n" + "\n" + close-fence.
-    String table = truncate(sb.toString(), EMBED_DESC_MAX, FENCE.length() * 2 + 2);
-    return FENCE + "\n" + table + "\n" + FENCE;
+    return truncate(sb.toString(), EMBED_DESC_MAX, 0);
   }
 
-  private static String formatLeg(Leg leg) {
-    if (leg == null) {
-      return NONE;
+  private static void appendLine(
+      StringBuilder sb, String emoji, String ticker, Leg leg, String direction) {
+    if (sb.length() > 0) {
+      sb.append('\n');
     }
-    return leg.strike()
-        + Character.toUpperCase(leg.right())
-        + "  "
-        + leg.trigger().setScale(2, RoundingMode.HALF_UP).toPlainString();
-  }
-
-  private static int maxWidth(String header, String[] values) {
-    int width = header.length();
-    for (String v : values) {
-      width = Math.max(width, v.length());
-    }
-    return width;
-  }
-
-  private static String pad(String value, int width) {
-    if (value.length() >= width) {
-      return value;
-    }
-    return value + " ".repeat(width - value.length());
+    sb.append(emoji)
+        .append(" **")
+        .append(ticker)
+        .append(' ')
+        .append(leg.strike())
+        .append(Character.toUpperCase(leg.right()))
+        .append("** — ")
+        .append(direction)
+        .append(' ')
+        .append(leg.trigger().setScale(2, RoundingMode.HALF_UP).toPlainString());
   }
 
   /**

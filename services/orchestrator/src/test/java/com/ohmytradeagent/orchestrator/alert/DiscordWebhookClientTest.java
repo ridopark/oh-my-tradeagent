@@ -133,6 +133,66 @@ class DiscordWebhookClientTest {
     assertThat(body).doesNotContain("\"description\"");
   }
 
+  @Test
+  void postContentBodyCarriesContentAndSuppressesMentions() throws Exception {
+    HttpClient http = okHttp();
+    DiscordWebhookClient client =
+        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+
+    client.post("hello world");
+
+    String body = sentBody(http);
+    assertThat(body).contains("\"content\":\"hello world\"");
+    assertThat(body).contains("\"allowed_mentions\":{\"parse\":[]}");
+  }
+
+  @Test
+  void postEmbedBodyCarriesEmbedsAndSuppressesMentions() throws Exception {
+    HttpClient http = okHttp();
+    DiscordWebhookClient client =
+        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+
+    client.postEmbed(new WebhookEmbed("Title", "desc", 5763719, "via Author"));
+
+    String body = sentBody(http);
+    assertThat(body).contains("\"embeds\":[{");
+    assertThat(body).contains("\"allowed_mentions\":{\"parse\":[]}");
+  }
+
+  @Test
+  void contentWithEveryoneMentionStillPostsButSuppressed() throws Exception {
+    HttpClient http = okHttp();
+    DiscordWebhookClient client =
+        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+
+    client.post("alert @everyone now");
+
+    String body = sentBody(http);
+    // The literal @everyone is still posted (rendered as text) but cannot ping.
+    assertThat(body).contains("@everyone");
+    assertThat(body).contains("\"allowed_mentions\":{\"parse\":[]}");
+  }
+
+  /** A mock HttpClient that returns a 204 for any send. */
+  private static HttpClient okHttp() throws Exception {
+    HttpClient http = Mockito.mock(HttpClient.class);
+    @SuppressWarnings("unchecked")
+    HttpResponse<Void> resp = Mockito.mock(HttpResponse.class);
+    Mockito.when(resp.statusCode()).thenReturn(204);
+    Mockito.when(
+            http.send(
+                Mockito.any(HttpRequest.class), Mockito.<HttpResponse.BodyHandler<Void>>any()))
+        .thenReturn(resp);
+    return http;
+  }
+
+  /** Captures and drains the single request body sent through the mock client. */
+  private static String sentBody(HttpClient http) throws Exception {
+    ArgumentCaptor<HttpRequest> captor = ArgumentCaptor.forClass(HttpRequest.class);
+    Mockito.verify(http).send(captor.capture(), Mockito.<HttpResponse.BodyHandler<Void>>any());
+    return bodyOf(captor.getValue());
+  }
+
   /** Drains the request's BodyPublisher into a UTF-8 string. */
   private static String bodyOf(HttpRequest request) {
     Flow.Publisher<ByteBuffer> publisher = request.bodyPublisher().orElseThrow();
