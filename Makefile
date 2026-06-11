@@ -3,7 +3,7 @@
 # Python). Anything added here should be a thin developer-experience
 # wrapper, not a parallel build system.
 
-.PHONY: hooks help dashboard-dev dashboard-seed
+.PHONY: hooks help dashboard-dev dashboard-seed local-up local-down
 
 help:
 	@echo "Available targets:"
@@ -15,6 +15,24 @@ help:
 	@echo "                 BFF + Next.js, with passwordless Dev login). Ctrl-C to stop."
 	@echo "  dashboard-seed Insert sample trades/orders into the local Postgres so the"
 	@echo "                 dashboard shows data (run while the infra is up). Idempotent."
+	@echo "  local-up       Build + start the full local pipeline in Docker (infra +"
+	@echo "                 sidecar + orchestrator/exec/market-data). restart policies"
+	@echo "                 keep everything running across host restarts."
+	@echo "  local-down     Stop the local pipeline containers (volumes are kept)."
+
+# Full local pipeline in Docker: infra + signal sidecar + the three Java
+# services (orchestrator/exec/market-data), built from the same shared
+# Dockerfile CI uses. Requires infra/.env.local (cp infra/.env.local.example).
+# Every service has restart: unless-stopped, so after the first `make local-up`
+# the whole stack comes back on its own when Docker Desktop / the host restarts.
+LOCAL_COMPOSE := docker compose --env-file infra/.env.local -f infra/docker-compose.yml --profile sidecar --profile services
+
+local-up:
+	@test -f infra/.env.local || { echo "infra/.env.local missing — cp infra/.env.local.example infra/.env.local and fill it in"; exit 1; }
+	$(LOCAL_COMPOSE) up -d --build
+
+local-down:
+	$(LOCAL_COMPOSE) down
 
 # Thin wrapper: full local tenant-dashboard stack from source. See the script header
 # and dashboard/README.md §'Local development' for what it does and its caveats.
