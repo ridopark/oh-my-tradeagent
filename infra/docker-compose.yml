@@ -166,6 +166,109 @@ services:
       - "4317:4317"
       - "4318:4318"
 
+  # --- Local Java services (full pipeline) -----------------------------------
+  # Built from the same shared Dockerfile CI/homelab uses, so local containers
+  # match deployed behavior. Profile-gated so a plain `up -d` doesn't force a
+  # Maven build; start once with
+  #   docker compose --env-file infra/.env.local -f infra/docker-compose.yml --profile services up -d --build
+  # (or `make local-up` from the repo root). restart: unless-stopped means
+  # Docker Desktop brings them back after a host/WSL restart. Secrets and
+  # feature flags (APCA_*, ALERT_*, BROKER_IMPL, ...) come from the
+  # --env-file; in-network endpoints (postgres/temporal/redis) are hardcoded
+  # here and intentionally ignore the localhost values in .env.local.
+
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: infra/docker/java-service.Dockerfile
+      args:
+        SERVICE_MODULE: orchestrator
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+      temporal-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_TARGET: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      ORCHESTRATOR_DB_URL: jdbc:postgresql://postgres:5432/orchestrator
+      ORCHESTRATOR_DB_USER: temporal
+      ORCHESTRATOR_DB_PASS: temporal
+      ORCHESTRATOR_FLYWAY_USER: temporal
+      ORCHESTRATOR_FLYWAY_PASS: temporal
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      ORCHESTRATOR_TENANTS_DIR: /etc/copytrade/tenants
+      # Config-diff baseline for TenantConfigChanged old_values only; /tmp keeps
+      # the tenants mount read-only and losing it on recreate is harmless.
+      ORCHESTRATOR_SNAPSHOT_DIR: /tmp/tenants-snapshot
+      ORCHESTRATOR_CAPITAL_PER_STRATEGY: ${ORCHESTRATOR_CAPITAL_PER_STRATEGY:-100000}
+      ALERT_DISCORD_WEBHOOK_URL: ${ALERT_DISCORD_WEBHOOK_URL:-}
+      ALERT_SIGNAL_FEED_ENABLED: ${ALERT_SIGNAL_FEED_ENABLED:-false}
+    volumes:
+      - ../tenants:/etc/copytrade/tenants:ro
+    ports:
+      - "8084:8080"
+    profiles: ["services"]
+
+  exec:
+    build:
+      context: ..
+      dockerfile: infra/docker/java-service.Dockerfile
+      args:
+        SERVICE_MODULE: exec
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+      temporal-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_TARGET: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: broker-alpaca-paper
+      EXEC_DB_URL: jdbc:postgresql://postgres:5432/exec_alpaca_paper
+      EXEC_DB_USER: temporal
+      EXEC_DB_PASS: temporal
+      BROKER_IMPL: ${BROKER_IMPL:-alpaca-paper}
+      EXEC_FILL_LISTENER_ENABLED: ${EXEC_FILL_LISTENER_ENABLED:-true}
+      EXEC_FILL_LISTENER_POLL_ENABLED: ${EXEC_FILL_LISTENER_POLL_ENABLED:-true}
+      APCA_API_KEY_ID: ${APCA_API_KEY_ID:-}
+      APCA_API_SECRET_KEY: ${APCA_API_SECRET_KEY:-}
+      APCA_API_BASE_URL: ${APCA_API_BASE_URL:-https://paper-api.alpaca.markets}
+      ALERT_DISCORD_WEBHOOK_URL: ${ALERT_DISCORD_WEBHOOK_URL:-}
+    ports:
+      - "8085:8080"
+    profiles: ["services"]
+
+  market-data:
+    build:
+      context: ..
+      dockerfile: infra/docker/java-service.Dockerfile
+      args:
+        SERVICE_MODULE: market-data
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_started
+      temporal-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_TARGET: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      MARKET_DATA_PROVIDER: alpaca
+      APCA_API_KEY_ID: ${APCA_API_KEY_ID:-}
+      APCA_API_SECRET_KEY: ${APCA_API_SECRET_KEY:-}
+      APCA_API_BASE_URL: ${APCA_API_BASE_URL:-https://paper-api.alpaca.markets}
+    ports:
+      - "8086:8080"
+    profiles: ["services"]
+
   # Discord watcher. State (cookies + heartbeat) lives on a named volume so
   # restart preserves session. Replica >= 1 is safe (durable dedupe via Temporal).
   # To run two replicas: `docker compose -f infra/docker-compose.yml up -d --scale signal-source-discord=2`.
