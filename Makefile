@@ -25,12 +25,14 @@ help:
 # Dockerfile CI uses. Requires infra/.env.local (cp infra/.env.local.example).
 # Every service has restart: unless-stopped, so after the first `make local-up`
 # the whole stack comes back on its own when Docker Desktop / the host restarts.
+LOCAL_COMPOSE := docker compose --env-file infra/.env.local -f infra/docker-compose.yml --profile sidecar --profile services
+
 local-up:
 	@test -f infra/.env.local || { echo "infra/.env.local missing — cp infra/.env.local.example infra/.env.local and fill it in"; exit 1; }
-	docker compose --env-file infra/.env.local -f infra/docker-compose.yml --profile sidecar --profile services up -d --build
+	$(LOCAL_COMPOSE) up -d --build
 
 local-down:
-	docker compose --env-file infra/.env.local -f infra/docker-compose.yml --profile sidecar --profile services down
+	$(LOCAL_COMPOSE) down
 
 # Thin wrapper: full local tenant-dashboard stack from source. See the script header
 # and dashboard/README.md §'Local development' for what it does and its caveats.

@@ -7,6 +7,7 @@
 /target/
 **/build/
 **/dist/
+**/.next/
 **/.gradle/
 *.log
 

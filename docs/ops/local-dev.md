@@ -53,7 +53,10 @@ Run the whole flow — Discord signal → orchestrator → exec on your **local*
    > The watcher **seeds** existing channel messages as "already seen" on startup so historical
    > signals never re-fire — to test, post a **new** message *after* it has started.
 
-3. **Run the Java services** (each via `mvn spring-boot:run` **from its module dir** — the
+3. **Run the Java services.** Preferred: `make local-up` runs all three in Docker (built
+   from the same Dockerfile CI uses, `restart: unless-stopped` so the stack survives host
+   restarts). The `mvn` path below remains useful for debugging a single service in
+   isolation (each via `mvn spring-boot:run` **from its module dir** — the
    `spring-boot` plugin prefix only resolves against the module, not the root reactor — sourcing the
    same env so they use the local Alpaca account + output webhook). DB hosts + Temporal default to
    `localhost`; the boot-required bits (`EXEC_DB_URL`, `ORCHESTRATOR_DB_USER/PASS` superuser override,
