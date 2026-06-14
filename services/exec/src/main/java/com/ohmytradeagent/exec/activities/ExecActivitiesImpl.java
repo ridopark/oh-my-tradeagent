@@ -14,6 +14,7 @@ import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
 import io.temporal.failure.ApplicationFailure;
 import java.time.OffsetDateTime;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
 /**
@@ -70,50 +71,74 @@ public class ExecActivitiesImpl implements ExecActivities {
     // and
     // the WS-echoed id all match. The intent_key stays unchanged (journal PK / :exit: STC routing).
     String clientOrderId = ClientOrderId.forIntent(intent.getIntentKey());
-    PlaceOrderResponse br;
+    // P1 multi-tenant-credentials: carry tenant_id to the broker boundary (and surface it on the
+    // MDC for observability) so later phases can resolve per-tenant credentials and assert the
+    // account. The value is threaded only — the Alpaca request body is unchanged this phase.
+    MDC.put("tenant_id", intent.getTenantId());
     try {
-      br =
-          broker.placeOrder(
-              new PlaceOrderRequest(
-                  clientOrderId,
-                  intent.getOptionSymbol(),
-                  intent.getSide().value(),
-                  intent.getQty(),
-                  intent.getLimitPrice()));
-    } catch (RuntimeException e) {
-      // Issue #295: surface the broker rejection at the DB layer. Without this the row stays
-      // RECORDED with last_error=NULL and a broker-side outage (e.g. the 128-char 422) is
-      // invisible.
-      // State is left RECORDED so a later retry can still place. The persist is best-effort: a
-      // failure here (e.g. DB down) must NOT mask the original broker exception, whose
-      // retryable/non-retryable classification Temporal relies on (a swallowed InvalidRequestError
-      // replaced by a generic DB RuntimeException would retry forever — the #264 retry-storm
-      // class).
+      PlaceOrderResponse br;
       try {
-        journal.markPlaceFailed(intent.getIntentKey(), e.getMessage());
-      } catch (RuntimeException persistFailure) {
-        e.addSuppressed(persistFailure);
+        br =
+            broker.placeOrder(
+                new PlaceOrderRequest(
+                    intent.getTenantId(),
+                    clientOrderId,
+                    intent.getOptionSymbol(),
+                    intent.getSide().value(),
+                    intent.getQty(),
+                    intent.getLimitPrice()));
+      } catch (RuntimeException e) {
+        // Issue #295: surface the broker rejection at the DB layer. Without this the row stays
+        // RECORDED with last_error=NULL and a broker-side outage (e.g. the 128-char 422) is
+        // invisible.
+        // State is left RECORDED so a later retry can still place. The persist is best-effort: a
+        // failure here (e.g. DB down) must NOT mask the original broker exception, whose
+        // retryable/non-retryable classification Temporal relies on (a swallowed
+        // InvalidRequestError
+        // replaced by a generic DB RuntimeException would retry forever — the #264 retry-storm
+        // class).
+        try {
+          journal.markPlaceFailed(intent.getIntentKey(), e.getMessage());
+        } catch (RuntimeException persistFailure) {
+          e.addSuppressed(persistFailure);
+        }
+        // Issue #297: best-effort Discord alert on the broker rejection that caused the #295
+        // outage.
+        // The alerter never throws and is invoked AFTER the journal write and BEFORE the original
+        // broker exception is rethrown unchanged — it must not alter the exception's
+        // retryable/non-retryable classification that Temporal relies on (the #264 retry-storm
+        // class).
+        rejectionAlerter.onBrokerRejection(intent, clientOrderId, e.getMessage());
+        throw e;
       }
-      // Issue #297: best-effort Discord alert on the broker rejection that caused the #295 outage.
-      // The alerter never throws and is invoked AFTER the journal write and BEFORE the original
-      // broker exception is rethrown unchanged — it must not alter the exception's
-      // retryable/non-retryable classification that Temporal relies on (the #264 retry-storm
-      // class).
-      rejectionAlerter.onBrokerRejection(intent, clientOrderId, e.getMessage());
-      throw e;
-    }
 
-    if (br.alreadyClosed()) {
-      // PLAN-over-exit-422: the SELL/STC was a broker-confirmed over-exit — Alpaca rejected it with
-      // a "position intent mismatch" 422 AND /v2/positions confirmed the OCC was already flat. This
-      // is BENIGN (nothing to sell), NOT a failure: terminalize the journal RECORDED → CANCELLED so
-      // it does not orphan, and DO NOT call rejectionAlerter (that is the exception-path pager only
-      // —
-      // we are on the success branch). The returned OrderIntentResult carries state=CANCELLED /
-      // brokerOrderId=null (via result(row)); the orchestrator zeroes remainingQty and emits the
-      // visible, non-paging PartialExitAlreadyFlat audit.
-      journal.markClosedAlreadyFlat(
-          intent.getIntentKey(), "benign over-exit: broker-confirmed flat");
+      if (br.alreadyClosed()) {
+        // PLAN-over-exit-422: the SELL/STC was a broker-confirmed over-exit — Alpaca rejected it
+        // with
+        // a "position intent mismatch" 422 AND /v2/positions confirmed the OCC was already flat.
+        // This
+        // is BENIGN (nothing to sell), NOT a failure: terminalize the journal RECORDED → CANCELLED
+        // so
+        // it does not orphan, and DO NOT call rejectionAlerter (that is the exception-path pager
+        // only
+        // —
+        // we are on the success branch). The returned OrderIntentResult carries state=CANCELLED /
+        // brokerOrderId=null (via result(row)); the orchestrator zeroes remainingQty and emits the
+        // visible, non-paging PartialExitAlreadyFlat audit.
+        journal.markClosedAlreadyFlat(
+            intent.getIntentKey(), "benign over-exit: broker-confirmed flat");
+        return journal
+            .findByIntentKey(intent.getIntentKey())
+            .map(ExecActivitiesImpl::result)
+            .orElseThrow(
+                () ->
+                    ApplicationFailure.newNonRetryableFailure(
+                        "Journal row missing post-mark: " + intent.getIntentKey(),
+                        "JournalConsistencyError"));
+      }
+
+      journal.markSubmittedIfRecorded(intent.getIntentKey(), br.brokerOrderId());
+
       return journal
           .findByIntentKey(intent.getIntentKey())
           .map(ExecActivitiesImpl::result)
@@ -122,18 +147,9 @@ public class ExecActivitiesImpl implements ExecActivities {
                   ApplicationFailure.newNonRetryableFailure(
                       "Journal row missing post-mark: " + intent.getIntentKey(),
                       "JournalConsistencyError"));
+    } finally {
+      MDC.remove("tenant_id");
     }
-
-    journal.markSubmittedIfRecorded(intent.getIntentKey(), br.brokerOrderId());
-
-    return journal
-        .findByIntentKey(intent.getIntentKey())
-        .map(ExecActivitiesImpl::result)
-        .orElseThrow(
-            () ->
-                ApplicationFailure.newNonRetryableFailure(
-                    "Journal row missing post-mark: " + intent.getIntentKey(),
-                    "JournalConsistencyError"));
   }
 
   @Override

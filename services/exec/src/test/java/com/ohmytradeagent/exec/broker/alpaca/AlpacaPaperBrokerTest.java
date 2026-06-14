@@ -372,7 +372,7 @@ class AlpacaPaperBrokerTest {
                 "{\"id\":\"alp-12345\",\"client_order_id\":\"intent-A\",\"status\":\"accepted\"}"));
 
     PlaceOrderRequest req =
-        new PlaceOrderRequest("intent-A", "NVDA  260516C00140000", "BUY", 1L, null);
+        new PlaceOrderRequest("t-dev", "intent-A", "NVDA  260516C00140000", "BUY", 1L, null);
     broker.placeOrder(req);
 
     RecordedRequest recorded = server.takeRequest();
@@ -501,7 +501,7 @@ class AlpacaPaperBrokerTest {
 
     PlaceOrderRequest req =
         new PlaceOrderRequest(
-            "intent-422", "NVDA  260516C00140000", "BUY", 1L, new BigDecimal("2.30"));
+            "t-dev", "intent-422", "NVDA  260516C00140000", "BUY", 1L, new BigDecimal("2.30"));
 
     assertThatThrownBy(() -> broker.placeOrder(req))
         .isInstanceOf(ApplicationFailure.class)
@@ -1108,13 +1108,13 @@ class AlpacaPaperBrokerTest {
 
   private static PlaceOrderRequest request(String clientOrderId) {
     return new PlaceOrderRequest(
-        clientOrderId, "NVDA  260516C00140000", "BUY", 1L, new BigDecimal("2.30"));
+        "t-dev", clientOrderId, "NVDA  260516C00140000", "BUY", 1L, new BigDecimal("2.30"));
   }
 
   private static PlaceOrderRequest sellRequest(String clientOrderId) {
     // Same OCC (unpadded on the wire → NVDA260516C00140000) as request(), but a SELL/STC so the
     // over-exit cross-check is in scope.
     return new PlaceOrderRequest(
-        clientOrderId, "NVDA  260516C00140000", "SELL", 6L, new BigDecimal("2.30"));
+        "t-dev", clientOrderId, "NVDA  260516C00140000", "SELL", 6L, new BigDecimal("2.30"));
   }
 }
