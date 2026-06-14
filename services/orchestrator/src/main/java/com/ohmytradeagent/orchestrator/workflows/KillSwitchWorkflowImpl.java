@@ -13,6 +13,7 @@ import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.Workflow;
@@ -43,6 +44,15 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   private static final String KIND_KILL_SWITCH_TRIPPED = "KillSwitchTripped";
   private static final String KIND_KILL_SWITCH_RESET_APPROVED = "KillSwitchResetApproved";
   private static final String KIND_KILL_SWITCH_HEARTBEAT_ERROR = "KillSwitchHeartbeatError";
+
+  /**
+   * B2 (P0c-b1) change-id for the live kill-switch heartbeat floor. Gates the fail-closed trip on a
+   * {@code -live} strategy that reaches the heartbeat with no valid {@code daily_loss_threshold}.
+   * For every pre-B2 in-flight history {@link Workflow#getVersion} returns {@link
+   * Workflow#DEFAULT_VERSION} (no marker recorded), so the heartbeat command stream is
+   * byte-identical to the legacy path and replay stays deterministic.
+   */
+  private static final String VERSION_KILLSWITCH_LIVE_FLOOR = "killswitch-live-floor";
 
   /** Heartbeat cadence — 60s per PLAN.md kill-switch flow. */
   static final Duration HEARTBEAT_INTERVAL = Duration.ofSeconds(60);
@@ -198,8 +208,19 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
 
     StrategyConfig cfg = strategy.get(input.getTenantId(), input.getStrategyId());
     BigDecimal threshold = cfg.getDailyLossThreshold();
+    int v = Workflow.getVersion(VERSION_KILLSWITCH_LIVE_FLOOR, Workflow.DEFAULT_VERSION, 1);
+    boolean isLive = StrategyConfigInvariants.isLive(cfg);
     if (threshold == null || threshold.signum() <= 0) {
-      // No threshold configured — auto-trip disabled.
+      if (v == Workflow.DEFAULT_VERSION || !isLive) {
+        // Legacy in-flight replays + all paper/non-live: original opt-out behavior, unchanged.
+        return;
+      }
+      // v>=1 && live && no valid loss gate: an upstream control was bypassed on a real-money
+      // strategy — fail closed. Trip with a DISTINCT reason so reporting never conflates this with
+      // a
+      // real daily-loss trip. doTrip already emits the KIND_KILL_SWITCH_TRIPPED audit + cascade
+      // flatten.
+      doTrip("auto:missing_loss_threshold", "auto:missing_loss_threshold", null);
       return;
     }
     BigDecimal pnlValue =

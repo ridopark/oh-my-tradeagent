@@ -28,11 +28,10 @@ public final class StrategyConfigInvariants {
    * @param label the {@code "tenantId/strategyId"} string used in messages
    */
   public static void validateLiveRequiredGates(StrategyConfig cfg, String label) {
-    StrategyConfig.BrokerTarget target = cfg.getBrokerTarget();
-    String brokerTarget = target == null ? null : target.value();
-    if (brokerTarget == null || !brokerTarget.endsWith("-live")) {
+    if (!isLive(cfg)) {
       return;
     }
+    String brokerTarget = cfg.getBrokerTarget().value();
 
     BigDecimal dailyLoss = cfg.getDailyLossThreshold();
     if (dailyLoss == null || dailyLoss.signum() <= 0) {
@@ -64,5 +63,17 @@ public final class StrategyConfigInvariants {
               + " (operator decision)",
           label);
     }
+  }
+
+  /**
+   * The single canonical "is this a live (real-money) strategy?" predicate: a non-null {@code
+   * broker_target} whose value ends with {@code -live}. The kill-switch heartbeat floor and this
+   * boot validator both gate on it — keep exactly one definition so a real-money strategy can never
+   * be misclassified as paper (which would silently skip the loss-gate enforcement). Pure (no I/O,
+   * no Temporal API), so it is safe to call from replay-sensitive workflow code.
+   */
+  public static boolean isLive(StrategyConfig cfg) {
+    StrategyConfig.BrokerTarget target = cfg.getBrokerTarget();
+    return target != null && target.value() != null && target.value().endsWith("-live");
   }
 }
