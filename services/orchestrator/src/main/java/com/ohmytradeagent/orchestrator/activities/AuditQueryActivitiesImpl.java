@@ -229,4 +229,71 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
       return null;
     }
   }
+
+  /**
+   * P3-a (multi-tenant-broker-credentials): SAFETY GATE — fails CLOSED. This is the deliberate
+   * exception to this class's documented fail-soft (return 0) posture: a verify failure must refuse
+   * a live order, never let an unapproved one through. Do not "fix" this back to fail-soft.
+   *
+   * <p>Queries the most-recent {@code LivePromotionApproved} row for {@code (tenant_id,
+   * strategy_id)} whose subject {@code broker_target} matches, selecting its {@code occurred_at}
+   * (which equals {@code approved_at} for these rows — {@code LivePromotionActivitiesImpl} sets
+   * both to the same {@code now} at record time). Classification:
+   *
+   * <ul>
+   *   <li>{@code dsl == null} (test env without Postgres) → {@link
+   *       LivePromotionStatus#VERIFY_ERROR}
+   *   <li>no matching row → {@link LivePromotionStatus#ABSENT}
+   *   <li>{@code occurred_at < notStaleSince} → {@link LivePromotionStatus#STALE}
+   *   <li>otherwise → {@link LivePromotionStatus#VALID}
+   *   <li>any {@link RuntimeException} → {@link LivePromotionStatus#VERIFY_ERROR} (caught, NOT
+   *       rethrown — so the workflow's verify activity does not retry-storm; the refusal is
+   *       terminal for the signal)
+   * </ul>
+   */
+  @Override
+  public LivePromotionStatus checkLivePromotion(
+      String tenantId, String strategyId, String brokerTarget, OffsetDateTime notStaleSince) {
+    if (dsl == null) {
+      log.warn(
+          "checkLivePromotion has no DSLContext tenant={} strategy={} broker_target={};"
+              + " failing CLOSED to VERIFY_ERROR",
+          tenantId,
+          strategyId,
+          brokerTarget);
+      return LivePromotionStatus.VERIFY_ERROR;
+    }
+    try {
+      Record r =
+          dsl.fetchOne(
+              "SELECT occurred_at FROM audit_log "
+                  + "WHERE tenant_id = ? AND strategy_id = ? AND kind = 'LivePromotionApproved' "
+                  + "AND subject ->> 'broker_target' = ? "
+                  + "ORDER BY occurred_at DESC LIMIT 1",
+              tenantId,
+              strategyId,
+              brokerTarget);
+      if (r == null) {
+        return LivePromotionStatus.ABSENT;
+      }
+      Timestamp ts = r.get(0, Timestamp.class);
+      if (ts == null) {
+        return LivePromotionStatus.ABSENT;
+      }
+      OffsetDateTime occurredAt = OffsetDateTime.ofInstant(ts.toInstant(), ZoneOffset.UTC);
+      if (occurredAt.isBefore(notStaleSince)) {
+        return LivePromotionStatus.STALE;
+      }
+      return LivePromotionStatus.VALID;
+    } catch (RuntimeException e) {
+      log.warn(
+          "checkLivePromotion failed tenant={} strategy={} broker_target={};"
+              + " failing CLOSED to VERIFY_ERROR",
+          tenantId,
+          strategyId,
+          brokerTarget,
+          e);
+      return LivePromotionStatus.VERIFY_ERROR;
+    }
+  }
 }

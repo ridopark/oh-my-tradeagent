@@ -26,8 +26,10 @@ import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
+import com.ohmytradeagent.orchestrator.activities.LivePromotionStatus;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
@@ -64,6 +66,7 @@ class CopytradeSignalWorkflowImplTest {
 
   private TestWorkflowEnvironment env;
   private AuditActivities audit;
+  private AuditQueryActivities auditQuery;
   private StrategyActivities strategy;
   private RiskActivities risk;
   private ContractActivities contract;
@@ -84,6 +87,7 @@ class CopytradeSignalWorkflowImplTest {
         CopytradeSignalWorkflowImpl.class, PositionWorkflowImpl.class);
 
     audit = Mockito.mock(AuditActivities.class);
+    auditQuery = Mockito.mock(AuditQueryActivities.class);
     strategy = Mockito.mock(StrategyActivities.class);
     risk = Mockito.mock(RiskActivities.class);
     contract = Mockito.mock(ContractActivities.class);
@@ -101,10 +105,16 @@ class CopytradeSignalWorkflowImplTest {
     when(marketData.subscribePremium(any())).thenReturn(ok);
 
     coreWorker.registerActivitiesImplementations(
-        audit, strategy, risk, contract, positionLookup, calendar);
+        audit, auditQuery, strategy, risk, contract, positionLookup, calendar);
     // ExecActivities lives on the exec-svc task queue; register a separate worker.
     Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
     brokerWorker.registerActivitiesImplementations(exec);
+    // P3-a: live-promotion VALID-path tests use broker_target=alpaca-live, which routes
+    // ExecActivities to broker-alpaca-live. Register the same exec mock there so the dispatched
+    // placeOrder is answered (refusal tests never reach placeOrder, so this is only load-bearing
+    // for liveBtoWithValidPromotion_dispatchesOrder).
+    Worker brokerLiveWorker = env.newWorker("broker-alpaca-live");
+    brokerLiveWorker.registerActivitiesImplementations(exec);
     Worker mdWorker = env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
     mdWorker.registerActivitiesImplementations(marketData);
 
@@ -205,6 +215,186 @@ class CopytradeSignalWorkflowImplTest {
         .containsEntry("broker_order_id", "stub-intent-K")
         .containsEntry("option_symbol", "NVDA  260516C00140000")
         .containsEntry("limit_price_strategy", "slip_min");
+  }
+
+  // ---------- P3-a: live-promotion dispatch gate ----------
+
+  @Test
+  void liveBtoWithNoValidPromotion_refusesOrder_emitsLivePromotionMissingAudit() {
+    // ABSENT: a LIVE BTO with no valid LivePromotionApproved row must be refused — no placeOrder,
+    // no PositionWorkflow — and emit a LivePromotionMissing audit with reason=absent.
+    StrategyConfig cfg = liveConfig();
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(auditQuery.checkLivePromotion(anyString(), anyString(), anyString(), any()))
+        .thenReturn(LivePromotionStatus.ABSENT);
+
+    String result = runWorkflow(btoPayload());
+    assertThat(result).isEqualTo("111:0");
+
+    verify(exec, never()).placeOrder(any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+
+    AuditEvent missing = capture("LivePromotionMissing");
+    assertThat(missing.getSubject())
+        .containsEntry("signal_id", "111:0")
+        .containsEntry("tenant_id", "dev")
+        .containsEntry("strategy_id", "copytrade-v1")
+        .containsEntry("broker_target", "alpaca-live")
+        .containsEntry("reason", "absent")
+        .containsEntry("outcome", "REJECTED");
+  }
+
+  @Test
+  void liveBtoWithValidPromotion_dispatchesOrder() {
+    // VALID: a LIVE BTO with a fresh approval dispatches the order through the normal path.
+    StrategyConfig cfg = liveConfig();
+    cfg.setPendingTtlPaperSecs(1L); // short TTL so the test exits quickly after dispatch
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(auditQuery.checkLivePromotion(anyString(), anyString(), anyString(), any()))
+        .thenReturn(LivePromotionStatus.VALID);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-intent-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-intent-K"));
+
+    runWorkflow(btoPayload());
+
+    verify(exec, times(1)).placeOrder(any());
+    capture("OrderSubmitted");
+    // No refusal emitted on the VALID path.
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    assertThat(
+            all.getAllValues().stream().anyMatch(e -> "LivePromotionMissing".equals(e.getKind())))
+        .isFalse();
+  }
+
+  @Test
+  void liveBtoWithStalePromotion_refusesOrder() {
+    // STALE: refused with reason=stale. Also verify the deterministic staleness window — the
+    // notStaleSince arg passed to the verify activity is workflowStart − 30 days.
+    StrategyConfig cfg = liveConfig();
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(auditQuery.checkLivePromotion(anyString(), anyString(), anyString(), any()))
+        .thenReturn(LivePromotionStatus.STALE);
+
+    // Capture the workflow's start time so we can pin the 30d window deterministically.
+    long startMillis = env.currentTimeMillis();
+    runWorkflow(btoPayload());
+
+    verify(exec, never()).placeOrder(any());
+    AuditEvent missing = capture("LivePromotionMissing");
+    assertThat(missing.getSubject()).containsEntry("reason", "stale");
+
+    ArgumentCaptor<OffsetDateTime> sinceCaptor = ArgumentCaptor.forClass(OffsetDateTime.class);
+    verify(auditQuery)
+        .checkLivePromotion(
+            eq("dev"), eq("copytrade-v1"), eq("alpaca-live"), sinceCaptor.capture());
+    OffsetDateTime expected =
+        OffsetDateTime.ofInstant(
+            java.time.Instant.ofEpochMilli(startMillis - java.time.Duration.ofDays(30).toMillis()),
+            ZoneOffset.UTC);
+    // The workflow's first command runs at-or-after env start; the window is currentTimeMillis−30d.
+    // Assert the captured value is exactly 30 days before the verify-call instant, allowing for the
+    // tiny advance between env start and the verify command.
+    assertThat(sinceCaptor.getValue()).isAfterOrEqualTo(expected);
+    assertThat(sinceCaptor.getValue())
+        .isBeforeOrEqualTo(expected.plus(java.time.Duration.ofMinutes(5)));
+  }
+
+  @Test
+  void liveBtoWithVerifyError_refusesOrder() {
+    // VERIFY_ERROR: the verify failed closed — refused with reason=verify_error.
+    StrategyConfig cfg = liveConfig();
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(auditQuery.checkLivePromotion(anyString(), anyString(), anyString(), any()))
+        .thenReturn(LivePromotionStatus.VERIFY_ERROR);
+
+    runWorkflow(btoPayload());
+
+    verify(exec, never()).placeOrder(any());
+    AuditEvent missing = capture("LivePromotionMissing");
+    assertThat(missing.getSubject()).containsEntry("reason", "verify_error");
+  }
+
+  @Test
+  void paperBtoSkipsLivePromotionGate() {
+    // Paper (alpaca-paper): the live-promotion gate must NOT run — checkLivePromotion is never
+    // invoked — and the order dispatches unchanged.
+    StrategyConfig cfg = config(); // alpaca-paper
+    cfg.setPendingTtlPaperSecs(1L);
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-intent-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-intent-K"));
+
+    runWorkflow(btoPayload());
+
+    verify(auditQuery, never()).checkLivePromotion(anyString(), anyString(), anyString(), any());
+    verify(exec, times(1)).placeOrder(any());
   }
 
   @Test
@@ -1106,6 +1296,20 @@ class CopytradeSignalWorkflowImplTest {
     c.setCapitalWeight(new BigDecimal("0.2"));
     c.setMinContracts(1L);
     c.setMaxContracts(5L);
+    return c;
+  }
+
+  /**
+   * P3-a: a LIVE strategy config (broker_target=alpaca-live). Routes exec Activities to the
+   * broker-alpaca-paper worker registered in {@link #setUp()} is NOT used here — the live-promotion
+   * gate short-circuits BEFORE placeOrder on a refusal, and the VALID path's exec mock answers
+   * regardless of queue routing in these tests (placeOrder is stubbed on the single broker worker).
+   * The ALPACA_LIVE value ("alpaca-live") ends with "-live" so StrategyConfigInvariants.isLive is
+   * true.
+   */
+  private StrategyConfig liveConfig() {
+    StrategyConfig c = config();
+    c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_LIVE);
     return c;
   }
 

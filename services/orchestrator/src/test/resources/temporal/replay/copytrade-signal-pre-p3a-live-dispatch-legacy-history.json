@@ -1,0 +1,1268 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-06-14T23:39:03.086Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "CopytradeSignalWorkflow"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJzaWduYWxfaWQiOiJsZWdhY3ktMTExOjAiLCJtZXNzYWdlX2lkIjoibGVnYWN5LTExMSIsImF1dGhvciI6ImFjbWVfdHJhZGVyIiwicG9zdGVkX2F0IjoiMjAyNi0wNS0xM1QxNzoyMjozMVoiLCJhY3Rpb24iOiJCVE8iLCJ0aWNrZXIiOiJOVkRBIiwiZXhwaXJ5IjoiMjAyNi0wNS0xNiIsInN0cmlrZSI6MTQwLCJyaWdodCI6IkMiLCJwcmljZSI6Mi4zMCwicmF3X2xpbmUiOiJCVE8gTlZEQSA1LzE2IDE0MEMgQCAyLjMwIn0\u003d"
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "315360000s",
+        "workflowRunTimeout": "315360000s",
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "09760009-9cf4-4fb1-8397-b9de9287cf8c",
+        "identity": "1404317@Rido-GamePC",
+        "firstExecutionRunId": "09760009-9cf4-4fb1-8397-b9de9287cf8c",
+        "attempt": 1,
+        "header": {}
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-06-14T23:39:03.086Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-06-14T23:39:03.094Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-06-14T23:39:03.211Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {
+          "langUsedFlags": [
+            1
+          ]
+        },
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-06-14T23:39:03.211Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "b5139ab2-e3b1-3802-b77c-6cbf22bf594e",
+        "activityType": {
+          "name": "Log"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJldmVudF9pZCI6IjYwZGEwY2MwLTEyMGYtMzdjNS1iZDJkLTA3ZDRlZjY3ZDBlYSIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNi0xNFQyMzozOTowMy4wOTRaIiwia2luZCI6IlNpZ25hbFJlY2VpdmVkIiwic3ViamVjdCI6eyJzaWduYWxfaWQiOiJsZWdhY3ktMTExOjAifSwiYWN0b3IiOiJ3b3JrZmxvdzpMZWdhY3lFbXVsYXRvciIsIndvcmtmbG93X2lkIjoibGVnYWN5LXByZS1wM2EtbGl2ZS1lbXVsYXRvciIsImNvcnJlbGF0aW9uX2lkIjoibGVnYWN5LTExMTowIn0\u003d"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "3",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-06-14T23:39:03.212Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "5",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-06-14T23:39:03.225Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {},
+        "scheduledEventId": "5",
+        "startedEventId": "6",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-06-14T23:39:03.225Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-06-14T23:39:03.225Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "8",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-06-14T23:39:03.228Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "8",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2026-06-14T23:39:03.228Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "4b4a6714-3263-38b9-ba30-b62c35cac65c",
+        "activityType": {
+          "name": "Get"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "ImRldiI\u003d"
+            },
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "ImNvcHl0cmFkZS12MSI\u003d"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "9",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "12",
+      "eventTime": "2026-06-14T23:39:03.228Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "11",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "13",
+      "eventTime": "2026-06-14T23:39:03.243Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJicm9rZXJfdGFyZ2V0IjoiYWxwYWNhLWxpdmUiLCJhdXRob3Jfd2hpdGVsaXN0IjpbImFjbWVfdHJhZGVyIl0sIm1heF9zaWduYWxfYWdlX2J0b19zZWNzIjozNjAwLCJtYXhfc2lnbmFsX2FnZV9zdGNfc2VjcyI6MzYwMCwibWF4X3Bvc2l0aW9ucyI6NSwiY2FwaXRhbF93ZWlnaHQiOjAuMiwibWluX2NvbnRyYWN0cyI6MSwibWF4X2NvbnRyYWN0cyI6NSwicGVuZGluZ190dGxfcGFwZXJfc2VjcyI6MSwicHJlX3RyYWRlX2NoZWNrX2VuYWJsZWQiOmZhbHNlfQ\u003d\u003d"
+            }
+          ]
+        },
+        "scheduledEventId": "11",
+        "startedEventId": "12",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "14",
+      "eventTime": "2026-06-14T23:39:03.243Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "15",
+      "eventTime": "2026-06-14T23:39:03.243Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "14",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "16",
+      "eventTime": "2026-06-14T23:39:03.254Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "14",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "17",
+      "eventTime": "2026-06-14T23:39:03.254Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "c6e8de72-f481-335d-9d31-93b2e36411f4",
+        "activityType": {
+          "name": "CheckEntry"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJzaWduYWxfaWQiOiJsZWdhY3ktMTExOjAiLCJtZXNzYWdlX2lkIjoibGVnYWN5LTExMSIsImF1dGhvciI6ImFjbWVfdHJhZGVyIiwicG9zdGVkX2F0IjoiMjAyNi0wNS0xM1QxNzoyMjozMVoiLCJhY3Rpb24iOiJCVE8iLCJ0aWNrZXIiOiJOVkRBIiwiZXhwaXJ5IjoiMjAyNi0wNS0xNiIsInN0cmlrZSI6MTQwLCJyaWdodCI6IkMiLCJwcmljZSI6Mi4zMCwicmF3X2xpbmUiOiJCVE8gTlZEQSA1LzE2IDE0MEMgQCAyLjMwIn0\u003d"
+            },
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJicm9rZXJfdGFyZ2V0IjoiYWxwYWNhLWxpdmUiLCJhdXRob3Jfd2hpdGVsaXN0IjpbImFjbWVfdHJhZGVyIl0sIm1heF9zaWduYWxfYWdlX2J0b19zZWNzIjozNjAwLCJtYXhfc2lnbmFsX2FnZV9zdGNfc2VjcyI6MzYwMCwibWF4X3Bvc2l0aW9ucyI6NSwiY2FwaXRhbF93ZWlnaHQiOjAuMiwibWluX2NvbnRyYWN0cyI6MSwibWF4X2NvbnRyYWN0cyI6NSwicGVuZGluZ190dGxfcGFwZXJfc2VjcyI6MSwicHJlX3RyYWRlX2NoZWNrX2VuYWJsZWQiOmZhbHNlfQ\u003d\u003d"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "15",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "18",
+      "eventTime": "2026-06-14T23:39:03.255Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "17",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "19",
+      "eventTime": "2026-06-14T23:39:03.260Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJhbGxvd2VkIjp0cnVlLCJyZWFzb24iOm51bGwsImRldGFpbCI6bnVsbH0\u003d"
+            }
+          ]
+        },
+        "scheduledEventId": "17",
+        "startedEventId": "18",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "20",
+      "eventTime": "2026-06-14T23:39:03.260Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "21",
+      "eventTime": "2026-06-14T23:39:03.260Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "20",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "22",
+      "eventTime": "2026-06-14T23:39:03.268Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "20",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "23",
+      "eventTime": "2026-06-14T23:39:03.268Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "8e1efe64-a944-3246-b3cd-6884f8ea1524",
+        "activityType": {
+          "name": "Resolve"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJ0ZW5hbnRJZCI6ImRldiIsInRpY2tlciI6Ik5WREEiLCJleHBpcnkiOiIyMDI2LTA1LTE2Iiwic3RyaWtlIjoxNDAsInJpZ2h0IjoiQyJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "21",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "24",
+      "eventTime": "2026-06-14T23:39:03.268Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "23",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "25",
+      "eventTime": "2026-06-14T23:39:03.272Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJvcHRpb25TeW1ib2wiOiJOVkRBICAyNjA1MTZDMDAxNDAwMDAiLCJ0aWNrZXIiOiJOVkRBIiwiZXhwaXJ5IjoiMjAyNi0wNS0xNiIsInN0cmlrZSI6MTQwLCJyaWdodCI6IkMiLCJzb3VyY2UiOiJHRU5FUkFURUQifQ\u003d\u003d"
+            }
+          ]
+        },
+        "scheduledEventId": "23",
+        "startedEventId": "24",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "26",
+      "eventTime": "2026-06-14T23:39:03.272Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "27",
+      "eventTime": "2026-06-14T23:39:03.273Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "26",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "28",
+      "eventTime": "2026-06-14T23:39:03.276Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "26",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "29",
+      "eventTime": "2026-06-14T23:39:03.276Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "0bc7818e-3bb4-3ddd-8341-b2b1cd526171",
+        "activityType": {
+          "name": "CapitalForStrategy"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "ImRldiI\u003d"
+            },
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "ImNvcHl0cmFkZS12MSI\u003d"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "27",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "30",
+      "eventTime": "2026-06-14T23:39:03.277Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "29",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "31",
+      "eventTime": "2026-06-14T23:39:03.278Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "MTAwMDAw"
+            }
+          ]
+        },
+        "scheduledEventId": "29",
+        "startedEventId": "30",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "32",
+      "eventTime": "2026-06-14T23:39:03.278Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "33",
+      "eventTime": "2026-06-14T23:39:03.278Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "32",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "34",
+      "eventTime": "2026-06-14T23:39:03.281Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "32",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "35",
+      "eventTime": "2026-06-14T23:39:03.281Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "6a58c2ed-f536-307f-984d-d32f7d820492",
+        "activityType": {
+          "name": "Log"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJldmVudF9pZCI6IjM3OWUwYmM1LTQzMWMtMzNmMi1hYzNmLTc2NmU4MTM3N2UyZCIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNi0xNFQyMzozOTowMy4yNzhaIiwia2luZCI6IlNpZ25hbEFjY2VwdGVkIiwic3ViamVjdCI6eyJzaWduYWxfaWQiOiJsZWdhY3ktMTExOjAifSwiYWN0b3IiOiJ3b3JrZmxvdzpMZWdhY3lFbXVsYXRvciIsIndvcmtmbG93X2lkIjoibGVnYWN5LXByZS1wM2EtbGl2ZS1lbXVsYXRvciIsImNvcnJlbGF0aW9uX2lkIjoibGVnYWN5LTExMTowIn0\u003d"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "33",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "36",
+      "eventTime": "2026-06-14T23:39:03.281Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "35",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "37",
+      "eventTime": "2026-06-14T23:39:03.282Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {},
+        "scheduledEventId": "35",
+        "startedEventId": "36",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "38",
+      "eventTime": "2026-06-14T23:39:03.282Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "39",
+      "eventTime": "2026-06-14T23:39:03.282Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "38",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "40",
+      "eventTime": "2026-06-14T23:39:03.288Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "38",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "41",
+      "eventTime": "2026-06-14T23:39:03.288Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "82fe60a3-a553-3a85-8b5d-775cd68d9493",
+        "activityType": {
+          "name": "PlaceOrder"
+        },
+        "taskQueue": {
+          "name": "broker-alpaca-live"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJpbnRlbnRfa2V5IjoibGVnYWN5LXByZS1wM2EtbGl2ZS1lbXVsYXRvcjplbnRyeSIsInNpZ25hbF9pZCI6ImxlZ2FjeS0xMTE6MCIsImJyb2tlcl90YXJnZXQiOiJhbHBhY2EtbGl2ZSIsIm9wdGlvbl9zeW1ib2wiOiJOVkRBICAyNjA1MTZDMDAxNDAwMDAiLCJzaWRlIjoiQlVZIiwicXR5IjoxLCJsaW1pdF9wcmljZSI6Mi4zMCwicmVjb3JkZWRfYXQiOiIyMDI2LTA2LTE0VDIzOjM5OjAzLjI4MloifQ\u003d\u003d"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "39",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "42",
+      "eventTime": "2026-06-14T23:39:03.289Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "41",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "43",
+      "eventTime": "2026-06-14T23:39:03.293Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwiaW50ZW50X2tleSI6ImludGVudC1LIiwiYnJva2VyX29yZGVyX2lkIjoiYnJrLTEiLCJzdGF0ZSI6IlNVQk1JVFRFRCIsImxhc3Rfc3RhdGVfYXQiOiIyMDI2LTA2LTE0VDE4OjM5OjAyLjg5MzE2ODI4NS0wNTowMCJ9"
+            }
+          ]
+        },
+        "scheduledEventId": "41",
+        "startedEventId": "42",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "44",
+      "eventTime": "2026-06-14T23:39:03.293Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "45",
+      "eventTime": "2026-06-14T23:39:03.293Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "44",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "46",
+      "eventTime": "2026-06-14T23:39:03.296Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "44",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "47",
+      "eventTime": "2026-06-14T23:39:03.296Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "e661d8cb-ef82-3b69-9e39-234c57b8af05",
+        "activityType": {
+          "name": "Log"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJldmVudF9pZCI6IjE3ZDUyY2ZiLTZiMDYtM2Y0ZS1iYzczLWY2YWU3ZGRiYzZiMyIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNi0xNFQyMzozOTowMy4yOTNaIiwia2luZCI6Ik9yZGVyU3VibWl0dGVkIiwic3ViamVjdCI6eyJzaWduYWxfaWQiOiJsZWdhY3ktMTExOjAifSwiYWN0b3IiOiJ3b3JrZmxvdzpMZWdhY3lFbXVsYXRvciIsIndvcmtmbG93X2lkIjoibGVnYWN5LXByZS1wM2EtbGl2ZS1lbXVsYXRvciIsImNvcnJlbGF0aW9uX2lkIjoibGVnYWN5LTExMTowIn0\u003d"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "45",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "48",
+      "eventTime": "2026-06-14T23:39:03.296Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "47",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "49",
+      "eventTime": "2026-06-14T23:39:03.297Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {},
+        "scheduledEventId": "47",
+        "startedEventId": "48",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "50",
+      "eventTime": "2026-06-14T23:39:03.297Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "51",
+      "eventTime": "2026-06-14T23:39:03.297Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "50",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "52",
+      "eventTime": "2026-06-14T23:39:03.303Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "50",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "53",
+      "eventTime": "2026-06-14T23:39:03.303Z",
+      "eventType": "EVENT_TYPE_TIMER_STARTED",
+      "timerStartedEventAttributes": {
+        "timerId": "61071c3f-4831-3aa1-b023-01fa1053d7b2",
+        "startToFireTimeout": "1s",
+        "workflowTaskCompletedEventId": "51"
+      }
+    },
+    {
+      "eventId": "54",
+      "eventTime": "2026-06-14T23:39:04.304Z",
+      "eventType": "EVENT_TYPE_TIMER_FIRED",
+      "timerFiredEventAttributes": {
+        "timerId": "61071c3f-4831-3aa1-b023-01fa1053d7b2",
+        "startedEventId": "53"
+      }
+    },
+    {
+      "eventId": "55",
+      "eventTime": "2026-06-14T23:39:04.304Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "56",
+      "eventTime": "2026-06-14T23:39:04.304Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "55",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "57",
+      "eventTime": "2026-06-14T23:39:04.306Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "55",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "58",
+      "eventTime": "2026-06-14T23:39:04.306Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "97b73e49-25b0-3017-ade5-86e412d702bd",
+        "activityType": {
+          "name": "Log"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJldmVudF9pZCI6ImMyOGRmZGYwLTdmOTctMzM3Yy1hYmE4LWRhZjI1YWYzYTliYiIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNi0xNFQyMzozOTowNC4zMDRaIiwia2luZCI6Ik9yZGVyQ2FuY2VsUmVxdWVzdGVkIiwic3ViamVjdCI6eyJzaWduYWxfaWQiOiJsZWdhY3ktMTExOjAifSwiYWN0b3IiOiJ3b3JrZmxvdzpMZWdhY3lFbXVsYXRvciIsIndvcmtmbG93X2lkIjoibGVnYWN5LXByZS1wM2EtbGl2ZS1lbXVsYXRvciIsImNvcnJlbGF0aW9uX2lkIjoibGVnYWN5LTExMTowIn0\u003d"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "56",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "59",
+      "eventTime": "2026-06-14T23:39:04.307Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "58",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "60",
+      "eventTime": "2026-06-14T23:39:04.308Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {},
+        "scheduledEventId": "58",
+        "startedEventId": "59",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "61",
+      "eventTime": "2026-06-14T23:39:04.308Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "62",
+      "eventTime": "2026-06-14T23:39:04.309Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "61",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "63",
+      "eventTime": "2026-06-14T23:39:04.310Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "61",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "64",
+      "eventTime": "2026-06-14T23:39:04.310Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "486803f7-c1e0-3025-a44d-727d63c5b880",
+        "activityType": {
+          "name": "CancelOrder"
+        },
+        "taskQueue": {
+          "name": "broker-alpaca-live"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "ImxlZ2FjeS1wcmUtcDNhLWxpdmUtZW11bGF0b3I6ZW50cnki"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "62",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "65",
+      "eventTime": "2026-06-14T23:39:04.311Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "64",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "66",
+      "eventTime": "2026-06-14T23:39:04.312Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwiaW50ZW50X2tleSI6ImludGVudC1LIiwiYnJva2VyX29yZGVyX2lkIjoiYnJrLTEiLCJzdGF0ZSI6IkNBTkNFTExFRCIsImxhc3Rfc3RhdGVfYXQiOiIyMDI2LTA2LTE0VDE4OjM5OjAyLjg5MzcwMDc2NC0wNTowMCJ9"
+            }
+          ]
+        },
+        "scheduledEventId": "64",
+        "startedEventId": "65",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "67",
+      "eventTime": "2026-06-14T23:39:04.312Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "68",
+      "eventTime": "2026-06-14T23:39:04.312Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "67",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "69",
+      "eventTime": "2026-06-14T23:39:04.314Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "67",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "70",
+      "eventTime": "2026-06-14T23:39:04.314Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "1e906d52-54e2-3323-9623-2d9f5563bb4f",
+        "activityType": {
+          "name": "Log"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJldmVudF9pZCI6IjI0Zjg1NTMyLTg3NDktMzZiOC1hOWE5LWY0Yzc1ZDgxNDY5ZiIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNi0xNFQyMzozOTowNC4zMTJaIiwia2luZCI6Ik9yZGVyQ2FuY2VsbGVkIiwic3ViamVjdCI6eyJzaWduYWxfaWQiOiJsZWdhY3ktMTExOjAifSwiYWN0b3IiOiJ3b3JrZmxvdzpMZWdhY3lFbXVsYXRvciIsIndvcmtmbG93X2lkIjoibGVnYWN5LXByZS1wM2EtbGl2ZS1lbXVsYXRvciIsImNvcnJlbGF0aW9uX2lkIjoibGVnYWN5LTExMTowIn0\u003d"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "68",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "71",
+      "eventTime": "2026-06-14T23:39:04.314Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "70",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "72",
+      "eventTime": "2026-06-14T23:39:04.315Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {},
+        "scheduledEventId": "70",
+        "startedEventId": "71",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "73",
+      "eventTime": "2026-06-14T23:39:04.315Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "74",
+      "eventTime": "2026-06-14T23:39:04.315Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "73",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "75",
+      "eventTime": "2026-06-14T23:39:04.317Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "73",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "76",
+      "eventTime": "2026-06-14T23:39:04.317Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "a97d1096-6f3f-3474-a654-e9dec7713ec6",
+        "activityType": {
+          "name": "Log"
+        },
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "eyJzY2hlbWFfdmVyc2lvbiI6MSwidGVuYW50X2lkIjoiZGV2Iiwic3RyYXRlZ3lfaWQiOiJjb3B5dHJhZGUtdjEiLCJldmVudF9pZCI6ImY5ZGJjOTRkLTI5NmQtMzRjMi05MThmLTk5MmI5NzIwZjk4YiIsIm9jY3VycmVkX2F0IjoiMjAyNi0wNi0xNFQyMzozOTowNC4zMTVaIiwia2luZCI6IkVudHJ5RXhwaXJlZCIsInN1YmplY3QiOnsic2lnbmFsX2lkIjoibGVnYWN5LTExMTowIn0sImFjdG9yIjoid29ya2Zsb3c6TGVnYWN5RW11bGF0b3IiLCJ3b3JrZmxvd19pZCI6ImxlZ2FjeS1wcmUtcDNhLWxpdmUtZW11bGF0b3IiLCJjb3JyZWxhdGlvbl9pZCI6ImxlZ2FjeS0xMTE6MCJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "10s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "74",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s"
+        }
+      }
+    },
+    {
+      "eventId": "77",
+      "eventTime": "2026-06-14T23:39:04.317Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "76",
+        "identity": "1404317@Rido-GamePC",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "78",
+      "eventTime": "2026-06-14T23:39:04.318Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {},
+        "scheduledEventId": "76",
+        "startedEventId": "77",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "79",
+      "eventTime": "2026-06-14T23:39:04.318Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "orchestrator-core"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "80",
+      "eventTime": "2026-06-14T23:39:04.318Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "79",
+        "identity": "1404317@Rido-GamePC"
+      }
+    },
+    {
+      "eventId": "81",
+      "eventTime": "2026-06-14T23:39:04.325Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "79",
+        "identity": "1404317@Rido-GamePC",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "82",
+      "eventTime": "2026-06-14T23:39:04.325Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED",
+      "workflowExecutionCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg\u003d\u003d"
+              },
+              "data": "ImxlZ2FjeS0xMTE6MCI\u003d"
+            }
+          ]
+        },
+        "workflowTaskCompletedEventId": "80"
+      }
+    }
+  ]
+}
