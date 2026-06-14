@@ -5,8 +5,8 @@ package com.ohmytradeagent.tdbff.orders;
 // NEW all-states history select: WHERE tenant_id=? AND strategy_id IN (...) ORDER BY recorded_at
 // DESC LIMIT ?.
 import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter;
+import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
-import com.ohmytradeagent.tdbff.platform.YamlStrategyRegistry;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -15,6 +15,8 @@ import java.util.Map;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -25,16 +27,18 @@ import org.springframework.stereotype.Component;
 @Component
 public class OrdersReader {
 
+  private static final Logger log = LoggerFactory.getLogger(OrdersReader.class);
+
   static final int DEFAULT_LIMIT = 100;
   static final int MAX_LIMIT = 500;
 
   private final TenantStrategyResolver strategyResolver;
-  private final YamlStrategyRegistry strategyRegistry;
+  private final DbStrategyConfigReader strategyRegistry;
   private final BrokerDataSourceRouter router;
 
   public OrdersReader(
       TenantStrategyResolver strategyResolver,
-      YamlStrategyRegistry strategyRegistry,
+      DbStrategyConfigReader strategyRegistry,
       BrokerDataSourceRouter router) {
     this.strategyResolver = strategyResolver;
     this.strategyRegistry = strategyRegistry;
@@ -53,8 +57,17 @@ public class OrdersReader {
     Map<String, List<String>> strategiesByBroker = new LinkedHashMap<>();
     for (String strategyId : strategyResolver.strategyIdsForTenant(tenantId)) {
       String brokerTarget = strategyRegistry.brokerTarget(tenantId, strategyId);
-      // An unconfigured broker_target is surfaced as a 404 by dslFor below; skip the bucketing only
-      // for configured targets so a typo doesn't silently drop the strategy.
+      // brokerTarget reads fail-soft (null = unconfigured / missing config row). A null target must
+      // NOT flow to router.dslFor below — that would throw BrokerNotConfiguredException and 404 the
+      // whole tenant's order history. Omit the unconfigured strategy instead. A null is anomalous
+      // (the orchestrator forbids a null broker_target), so WARN rather than vanish it silently.
+      if (brokerTarget == null) {
+        log.warn(
+            "omitting strategy {}/{} from order history: no broker_target in strategy_config",
+            tenantId,
+            strategyId);
+        continue;
+      }
       strategiesByBroker.computeIfAbsent(brokerTarget, k -> new ArrayList<>()).add(strategyId);
     }
 

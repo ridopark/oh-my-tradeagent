@@ -1,7 +1,6 @@
 package com.ohmytradeagent.tdbff.web;
 
 import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter.BrokerNotConfiguredException;
-import com.ohmytradeagent.tdbff.platform.YamlStrategyRegistry.StrategyNotFoundException;
 import java.time.format.DateTimeParseException;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -51,17 +50,6 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
   private static ResponseEntity<Map<String, Object>> badRequestResponse(String detail) {
     return ResponseEntity.status(HttpStatus.BAD_REQUEST)
         .body(Map.of("error", "bad_request", "detail", detail));
-  }
-
-  // A tenant/strategy whose YAML is absent from the mounted config is operator misconfiguration,
-  // not
-  // a server fault. Map it to 404 (instead of letting the catch-all return 500). The exception
-  // message carries the absolute file path — log it server-side at WARN, never in the HTTP body.
-  @ExceptionHandler(StrategyNotFoundException.class)
-  public ResponseEntity<Map<String, Object>> strategyNotFound(StrategyNotFoundException e) {
-    log.warn("strategy config not found: {}", e.getMessage());
-    return ResponseEntity.status(HttpStatus.NOT_FOUND)
-        .body(Map.of("error", "strategy_not_configured"));
   }
 
   // Catch-all for anything not mapped above (and not a framework exception — those keep their

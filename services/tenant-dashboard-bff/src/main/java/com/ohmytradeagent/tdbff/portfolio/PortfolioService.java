@@ -1,7 +1,7 @@
 package com.ohmytradeagent.tdbff.portfolio;
 
+import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
-import com.ohmytradeagent.tdbff.platform.YamlStrategyRegistry;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import java.math.BigDecimal;
@@ -43,7 +43,7 @@ public class PortfolioService {
   private final RealizedPnlCalculator realizedPnl;
   private final AccountEquityClient accountEquity;
   private final TenantStrategyResolver strategyResolver;
-  private final YamlStrategyRegistry strategyRegistry;
+  private final DbStrategyConfigReader strategyRegistry;
   // Dev-only gate: when true, account_equity rows also carry the informational brokerage
   // account_number for dashboard verification. Default false so it is NEVER exposed in prod.
   private final boolean exposeBrokerAccountNumber;
@@ -53,7 +53,7 @@ public class PortfolioService {
       RealizedPnlCalculator realizedPnl,
       AccountEquityClient accountEquity,
       TenantStrategyResolver strategyResolver,
-      YamlStrategyRegistry strategyRegistry,
+      DbStrategyConfigReader strategyRegistry,
       @Value("${bff.expose-broker-account-number:false}") boolean exposeBrokerAccountNumber) {
     this.positionsReader = positionsReader;
     this.realizedPnl = realizedPnl;
