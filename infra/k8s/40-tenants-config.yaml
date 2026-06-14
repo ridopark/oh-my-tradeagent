@@ -26,7 +26,12 @@ data:
     schema_version: 1
     tenant_id: dev
     strategy_id: copytrade-v1
-    broker_target: alpaca-live
+    # DEFAULT is alpaca-paper. Running real money is a deliberate PER-CLUSTER override applied
+    # out-of-band (e.g. homelab runs alpaca-live via a manual `kubectl -n copytrade patch/apply`);
+    # it is intentionally NOT the repo default, so a fresh apply / local / CI never trades live.
+    # ⚠ Re-applying this ConfigMap to a live cluster reverts it to paper — patch broker_target back
+    # to alpaca-live there afterward. The drift check will (advisedly) flag this paper↔live gap.
+    broker_target: alpaca-paper
     author_whitelist:
       - TradingTheTrend
       - Edtrader
