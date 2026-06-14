@@ -29,7 +29,8 @@ public class AlpacaConfig {
   RestClient alpacaRestClient(
       AlpacaProperties props,
       RestClient.Builder builder,
-      @Value("${broker.impl:}") String brokerImpl) {
+      @Value("${broker.impl:}") String brokerImpl,
+      @Value("${exec.fill-listener.ws-url:}") String fillWsUrl) {
     if (props.apiKeyId() == null || props.apiKeyId().isBlank()) {
       throw new IllegalStateException(
           "broker.impl=alpaca-* requires APCA_API_KEY_ID; got blank/null. "
@@ -58,6 +59,20 @@ public class AlpacaConfig {
               + "alpaca.base-url="
               + props.baseUrl()
               + ". Point it at the paper host.");
+    }
+    // The fill-listener WS URL is a SEPARATE knob from the REST base-url (the base-url checks above
+    // only cover the order path). A -live impl whose WS URL still points at the paper trade-updates
+    // stream would authenticate live keys against the paper endpoint (rejected) and silently lose
+    // real-time fills. Enforce the live direction only; a paper/stub build may keep the default
+    // paper ws-url, so don't break it.
+    if (brokerImpl.endsWith("-live") && fillWsUrl != null && fillWsUrl.contains("paper")) {
+      throw new IllegalStateException(
+          "broker.impl="
+              + brokerImpl
+              + " (live) must not target the paper fill-listener stream; "
+              + "exec.fill-listener.ws-url="
+              + fillWsUrl
+              + ". Point it at the live trade-updates stream.");
     }
     return builder
         .baseUrl(props.baseUrl())

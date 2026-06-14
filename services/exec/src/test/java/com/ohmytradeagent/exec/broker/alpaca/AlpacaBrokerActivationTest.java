@@ -154,6 +154,64 @@ class AlpacaBrokerActivationTest {
             });
   }
 
+  private static final String LIVE_WS = "wss://api.alpaca.markets/stream";
+  private static final String PAPER_WS = "wss://paper-api.alpaca.markets/stream";
+
+  @Test
+  void liveImplWithPaperWsUrlFailsFast() {
+    runner
+        .withPropertyValues(
+            "broker.impl=alpaca-live",
+            "alpaca.api-key-id=dummy-key",
+            "alpaca.api-secret-key=dummy-secret",
+            "alpaca.base-url=" + LIVE_HOST,
+            "exec.fill-listener.ws-url=" + PAPER_WS)
+        .withUserConfiguration(BrokerBeans.class)
+        .run(
+            ctx -> {
+              assertThat(ctx).hasFailed();
+              assertThat(ctx)
+                  .getFailure()
+                  .rootCause()
+                  .isInstanceOf(IllegalStateException.class)
+                  .hasMessageContaining("fill-listener");
+            });
+  }
+
+  @Test
+  void liveImplWithLiveWsUrlActivates() {
+    runner
+        .withPropertyValues(
+            "broker.impl=alpaca-live",
+            "alpaca.api-key-id=dummy-key",
+            "alpaca.api-secret-key=dummy-secret",
+            "alpaca.base-url=" + LIVE_HOST,
+            "exec.fill-listener.ws-url=" + LIVE_WS)
+        .withUserConfiguration(BrokerBeans.class)
+        .run(
+            ctx -> {
+              assertThat(ctx).hasNotFailed();
+              assertThat(ctx).hasBean("alpacaRestClient");
+            });
+  }
+
+  @Test
+  void paperImplWithPaperWsUrlActivates() {
+    runner
+        .withPropertyValues(
+            "broker.impl=alpaca-paper",
+            "alpaca.api-key-id=dummy-key",
+            "alpaca.api-secret-key=dummy-secret",
+            "alpaca.base-url=" + PAPER_HOST,
+            "exec.fill-listener.ws-url=" + PAPER_WS)
+        .withUserConfiguration(BrokerBeans.class)
+        .run(
+            ctx -> {
+              assertThat(ctx).hasNotFailed();
+              assertThat(ctx).hasBean("alpacaRestClient");
+            });
+  }
+
   /**
    * The conditionally-registered Alpaca beans + StubBroker. Kept separate from {@link TestConfig}
    * so the always-on collaborator beans (RestClient.Builder, MeterRegistry, ObjectMapper) are
