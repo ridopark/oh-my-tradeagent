@@ -50,7 +50,7 @@ class AlpacaBrokerActivationTest {
   }
 
   @Test
-  void aliveImplActivatesAlpacaAdapterAgainstLiveHost() {
+  void liveImplActivatesAlpacaAdapterAgainstLiveHost() {
     runner
         .withPropertyValues(
             "broker.impl=alpaca-live",
