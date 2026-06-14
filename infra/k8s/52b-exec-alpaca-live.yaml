@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: exec-alpaca-live
+  namespace: copytrade
+spec:
+  selector:
+    app: exec-alpaca-live
+  ports:
+    # Spring Boot actuator on the main HTTP port. Use for health / info /
+    # prometheus scrape and ad-hoc `kubectl exec ... wget /actuator/...` triage.
+    # No business-logic controllers on this port — exec-svc is a Temporal
+    # worker, so requests to `/` get a Spring 404.
+    - port: 8080
+      targetPort: http
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exec-alpaca-live
+  namespace: copytrade
+  labels:
+    app: exec-alpaca-live
+spec:
+  # MUST stay at 1. The fill-listener (AlpacaTradeUpdatesStream + FillPoller in
+  # the exec-svc fill package) is not leader-elected; multi-pod deployments
+  # would multiply broker calls and Temporal signals by N. See
+  # docs/ops/fill-listener.md for the constraint + the multi-pod leader-election
+  # follow-up.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: exec-alpaca-live
+  template:
+    metadata:
+      labels:
+        app: exec-alpaca-live
+    spec:
+      containers:
+        - name: exec-alpaca-live
+          # Same provider-agnostic exec-svc image as exec-alpaca-paper; the live
+          # Alpaca adapter is selected at boot via BROKER_IMPL=alpaca-live (the
+          # AlpacaConfig/AlpacaPaperBroker/AlpacaTradeUpdatesStream conditions
+          # activate on any alpaca-* target). TEMPORAL_TASK_QUEUE and EXEC_DB_URL
+          # point at the dedicated live queue + DB so live order intents/journal
+          # never share idempotency keys with the paper book.
+          # NOTE: this Deployment is NOT applied by deploy.yml (exec-alpaca-live
+          # is not in the SERVICES matrix); the operator applies it by hand at
+          # cutover. See _workspace/PLAN-alpaca-live-adapter.md Phase 3.
+          image: ghcr.io/ridopark/oh-my-tradeagent-exec:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            # Alpaca LIVE credentials: APCA_API_KEY_ID + APCA_API_SECRET_KEY +
+            # APCA_API_BASE_URL (https://api.alpaca.markets). Operator-provisioned
+            # separately (kubectl create secret generic alpaca-credentials-live ...);
+            # kept distinct from alpaca-credentials so live keys never reach a paper
+            # pod. AlpacaConfig fails fast if this base-url points at a paper host.
+            - secretRef:
+                name: alpaca-credentials-live
+          env:
+            # Phase 5b.E: shared Temporal at temporal/temporal-frontend, Temporal-level ns `copytrade`.
+            - name: TEMPORAL_TARGET
+              value: temporal-frontend.temporal.svc.cluster.local:7233
+            - name: TEMPORAL_NAMESPACE
+              value: copytrade
+            - name: TEMPORAL_TASK_QUEUE
+              value: broker-alpaca-live
+            - name: EXEC_DB_URL
+              value: jdbc:postgresql://postgres:5432/exec_alpaca_live
+            - name: EXEC_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: EXEC_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: BROKER_IMPL
+              value: alpaca-live
+            # Production fill detection: WS trade-updates + 30s polling fallback.
+            # docs/ops/fill-listener.md for the cooperation model + single-pod constraint.
+            # Both default OFF in application.yml; this manifest opts in.
+            - name: EXEC_FILL_LISTENER_ENABLED
+              value: "true"
+            - name: EXEC_FILL_LISTENER_POLL_ENABLED
+              value: "true"
+            # Issue #297 / #295: non-blocking Discord alert on a broker rejection in placeOrder.
+            # The webhook URL is an operator-provisioned secret. `optional: true` so the pod still
+            # boots when the secret is absent — the alerter is then a no-op (logs the would-be
+            # alert) and the broker/order path is entirely unaffected. Provisioning the
+            # `discord-alert-credentials` Secret with key ALERT_DISCORD_WEBHOOK_URL is an operator
+            # follow-up.
+            - name: ALERT_DISCORD_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: discord-alert-credentials
+                  key: ALERT_DISCORD_WEBHOOK_URL
+                  optional: true
+          # exec-svc is a Temporal worker but keeps the default servlet web stack so
+          # actuator (health / info / prometheus) is reachable on 8080. No
+          # business-logic controllers; the worker poll loop is still the implicit
+          # liveness signal — no httpGet probes wired today.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi

@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Locale;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -35,6 +35,11 @@ import org.springframework.web.client.RestClient;
 /**
  * Alpaca paper-trading {@link OptionsBroker}. Selected by {@code broker.impl=alpaca-paper}; sends
  * orders to {@code paper-api.alpaca.markets} via the shared {@link RestClient}.
+ *
+ * <p>The adapter is endpoint-agnostic — the base URL and API keys come entirely from {@link
+ * AlpacaProperties} — so the same class serves both {@code alpaca-paper} and {@code alpaca-live};
+ * the historical "Paper" in the name is endpoint-agnostic and a rename is deferred to a separate
+ * mechanical PR.
  *
  * <p>Idempotency is delegated to Alpaca via the caller-supplied {@code client_order_id} (issue
  * #295: a bounded, ≤128-char value derived from the intent_key — Alpaca caps client_order_id at
@@ -66,7 +71,7 @@ import org.springframework.web.client.RestClient;
  * path can re-introduce {@code order_class=mleg} on a sibling request DTO.
  */
 @Component
-@ConditionalOnProperty(name = "broker.impl", havingValue = "alpaca-paper")
+@ConditionalOnExpression("'${broker.impl:}'.startsWith('alpaca-')")
 public class AlpacaPaperBroker implements OptionsBroker {
 
   private static final Logger log = LoggerFactory.getLogger(AlpacaPaperBroker.class);
