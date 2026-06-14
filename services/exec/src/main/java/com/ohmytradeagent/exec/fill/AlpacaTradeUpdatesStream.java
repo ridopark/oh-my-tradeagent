@@ -42,10 +42,10 @@ import org.springframework.stereotype.Component;
 // Gate on BOTH flags so an operator who flips fill-listener on with broker.impl=stub gets a clean
 // "bean disabled, condition not met" startup message instead of a cryptic
 // NoSuchBeanDefinitionException
-// on AlpacaProperties (which AlpacaConfig only registers when broker.impl=alpaca-paper).
+// on AlpacaProperties (which AlpacaConfig only registers for an alpaca-* broker.impl).
 @Component
 @ConditionalOnExpression(
-    "'${broker.impl:}' == 'alpaca-paper' and ${exec.fill-listener.enabled:false}")
+    "'${broker.impl:}'.startsWith('alpaca-') and ${exec.fill-listener.enabled:false}")
 @EnableConfigurationProperties(FillListenerProperties.class)
 public class AlpacaTradeUpdatesStream {
 
