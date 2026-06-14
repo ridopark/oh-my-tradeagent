@@ -237,6 +237,11 @@ class ExecActivitiesImplPlaceOrderValidationTest {
     public boolean markCancelledIfSubmitted(String intentKey) {
       throw fail();
     }
+
+    @Override
+    public boolean markClosedAlreadyFlat(String intentKey, String reason) {
+      throw fail();
+    }
   }
 
   /** Broker spy that fails the test if any method is invoked — the guard must short-circuit. */

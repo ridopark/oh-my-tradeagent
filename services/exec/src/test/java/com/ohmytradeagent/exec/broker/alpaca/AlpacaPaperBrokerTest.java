@@ -248,6 +248,104 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void placeOrder_sellOverExit422_brokerConfirmsFlat_returnsAlreadyClosed() throws Exception {
+    // PLAN-over-exit-422: an STC that lands AFTER the lot is already flat draws Alpaca's
+    // "position intent mismatch, inferred: sell_to_open" 422. The adapter must NOT crash; it
+    // cross-checks /v2/positions, finds the OCC absent, and returns the benign already-closed
+    // response so the activity terminalizes the journal without paging.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"message\":\"position intent mismatch, inferred: sell_to_open, "
+                    + "specified: sell_to_close\"}"));
+    // /v2/positions: the OCC is absent (only an unrelated holding) → broker confirms flat.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"symbol\":\"SPY260519C00737000\",\"asset_class\":\"us_option\","
+                    + "\"qty\":\"5\",\"side\":\"long\",\"avg_entry_price\":\"0.84\"}]"));
+
+    PlaceOrderResponse r = broker.placeOrder(sellRequest("intent-A"));
+
+    assertThat(r.alreadyClosed()).isTrue();
+    assertThat(r.alreadyExisted()).isFalse();
+    assertThat(r.brokerOrderId()).isNull();
+
+    assertThat(server.takeRequest().getPath()).isEqualTo("/v2/orders");
+    assertThat(server.takeRequest().getPath()).isEqualTo("/v2/positions");
+  }
+
+  @Test
+  void placeOrder_sellOverExit422_brokerStillHoldsQty_throwsMapErrorNotBenign() {
+    // The 422 carried the over-exit signature, but /v2/positions STILL reports qty>0 for this OCC —
+    // so the rejection was NOT a true over-exit (e.g. a transient insufficient-qty from an
+    // in-flight
+    // sibling). The change must be a no-op: fall through to the existing mapError failure path so a
+    // genuinely-still-open lot is never silently abandoned.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"position intent mismatch, inferred: sell_to_open\"}"));
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"symbol\":\"NVDA260516C00140000\",\"asset_class\":\"us_option\","
+                    + "\"qty\":\"3\",\"side\":\"long\",\"avg_entry_price\":\"2.10\"}]"));
+
+    assertThatThrownBy(() -> broker.placeOrder(sellRequest("intent-A")))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("InvalidRequestError");
+              assertThat(f.isNonRetryable()).isTrue();
+            });
+  }
+
+  @Test
+  void placeOrder_sellOverExit422_positionsCallThrows_fallsThroughToFailure() {
+    // Fail-safe: a /v2/positions call that throws means we cannot CONFIRM flat. We must fall
+    // through
+    // to the failure path (keep the lot managed), never benignly abandon it.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"position intent mismatch, inferred: sell_to_open\"}"));
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(500)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"positions unavailable\"}"));
+
+    assertThatThrownBy(() -> broker.placeOrder(sellRequest("intent-A")))
+        .isInstanceOf(ApplicationFailure.class);
+  }
+
+  @Test
+  void placeOrder_buyWithOverExitBody_throwsMapError_noPositionsCrossCheck() {
+    // BUY/BTO is unaffected by an over-exit: the SELL-only guard must not fire, so the same 422
+    // body
+    // maps straight through mapError with NO /v2/positions call (only one request is enqueued).
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"position intent mismatch, inferred: sell_to_open\"}"));
+
+    assertThatThrownBy(() -> broker.placeOrder(request("intent-A")))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> assertThat(f.getType()).isEqualTo("InvalidRequestError"));
+  }
+
+  @Test
   void getOrderStatus_unauthorized_throwsAuthErrorNonRetryable() {
     server.enqueue(
         new MockResponse()
@@ -1011,5 +1109,12 @@ class AlpacaPaperBrokerTest {
   private static PlaceOrderRequest request(String clientOrderId) {
     return new PlaceOrderRequest(
         clientOrderId, "NVDA  260516C00140000", "BUY", 1L, new BigDecimal("2.30"));
+  }
+
+  private static PlaceOrderRequest sellRequest(String clientOrderId) {
+    // Same OCC (unpadded on the wire → NVDA260516C00140000) as request(), but a SELL/STC so the
+    // over-exit cross-check is in scope.
+    return new PlaceOrderRequest(
+        clientOrderId, "NVDA  260516C00140000", "SELL", 6L, new BigDecimal("2.30"));
   }
 }

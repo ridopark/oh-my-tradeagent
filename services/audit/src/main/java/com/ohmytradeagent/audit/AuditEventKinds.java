@@ -176,6 +176,17 @@ public final class AuditEventKinds {
           // intentionally placed in ALL_KINDS only for observability, not in any lifecycle group.
           // Paged by OrderFailureAlerter (B3).
           "PartialExitPlaceFailed",
+          // PLAN-over-exit-422: emitted by PositionWorkflowImpl when an exit/flatten placeOrder
+          // Activity returns a BENIGN broker-confirmed already-closed outcome (an over-exit 422
+          // whose OCC /v2/positions confirmed flat). Distinct from PartialExitPlaceFailed (a
+          // genuine
+          // failure that pages): this is P&L-neutral observability — the lot was closed by an
+          // already-booked sibling exit. Carries remaining_qty_before (a >0 value is the divergence
+          // tripwire). Intentionally registered in ALL_KINDS ONLY — NOT in PARTIAL_EXIT_FILL_KINDS
+          // /
+          // TERMINAL_CLOSE_KINDS / PARTIAL_EXIT_REQUEST_KINDS (must not inflate P&L/lifecycle), and
+          // NOT in OrderFailureAlerter's DEFAULT_FAILURE_KINDS, so it does not page.
+          "PartialExitAlreadyFlat",
           // Plan-2A R-AA-3: emitted by PositionWorkflowImpl's bounded scheduled-flatten when the
           // exit_floor is unusable (exit_floor_abs/exit_floor_pct null/absent/unresolvable, or the
           // resolved floor sits ABOVE the live bid). The flatten FAILS SAFE to a marketable exit

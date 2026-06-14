@@ -123,6 +123,20 @@ public interface OrderIntentJournal {
   boolean markBrokerRejected(String intentKey, String reason);
 
   /**
+   * Over-exit-422 benign terminalization (PLAN-over-exit-422): an STC/SELL the broker rejected with
+   * a "position intent mismatch" 422 that {@code /v2/positions} CONFIRMED was already flat.
+   * Guarded, boolean-returning: transitions {@code RECORDED → CANCELLED} only (the over-exit was
+   * rejected before the row ever reached SUBMITTED), records {@code reason} in {@code last_error},
+   * bumps {@code version}. Idempotent under at-least-once retry — a repeat call after the first
+   * terminalization no longer matches {@code state='RECORDED'} and is a silent no-op. Reuses {@code
+   * CANCELLED} (already in the state CHECK constraint) as the cross-Activity signal; disambiguation
+   * from a real cancel lives in {@code last_error} + the {@code PartialExitAlreadyFlat} audit
+   * event, not the state enum. Distinct from the unconditional {@link #markCancelled}. Returns true
+   * iff the row was updated.
+   */
+  boolean markClosedAlreadyFlat(String intentKey, String reason);
+
+  /**
    * Guarded variant of {@link #markCancelled}: transitions {@code SUBMITTED → CANCELLED} only and
    * returns true iff the row was updated. The poller routes the broker-CANCELLED case through this
    * (not the unconditional {@link #markCancelled}) so a row that won the late-fill race (already
