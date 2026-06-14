@@ -8,16 +8,8 @@ import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
-import java.util.TreeSet;
-import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -61,7 +53,6 @@ public class TenantConfigChangedEmitter implements ApplicationRunner {
 
   private static final Logger log = LoggerFactory.getLogger(TenantConfigChangedEmitter.class);
 
-  static final String KIND = "TenantConfigChanged";
   static final String ACTOR = "orchestrator-svc:configmap-reload";
   static final String SOURCE = "configmap-reload";
 
@@ -166,78 +157,23 @@ public class TenantConfigChangedEmitter implements ApplicationRunner {
     }
 
     Map<String, Object> prior = priorOpt.get();
-    List<String> changedKeys = diffKeys(prior, current);
-    if (changedKeys.isEmpty()) {
+    if (TenantConfigChangedEvents.diffKeys(prior, current).isEmpty()) {
       // No-op reload (acceptance criterion 2): identical config → no event, snapshot is already
       // current. We do NOT rewrite the file in this branch — it would only add filesystem churn.
       return;
     }
 
-    Map<String, Object> oldValues = redactedView(prior, changedKeys);
-    Map<String, Object> newValues = redactedView(current, changedKeys);
-
-    OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-
-    Map<String, Object> subject = new LinkedHashMap<>();
-    subject.put("tenant_id", tenantId);
-    subject.put("strategy_id", strategyId);
-    subject.put("changed_keys", changedKeys);
-    subject.put("old_values", oldValues);
-    subject.put("new_values", newValues);
-    subject.put("source", SOURCE);
-    subject.put("loaded_at", now);
-
-    AuditEvent event = new AuditEvent();
-    event.setSchemaVersion(1L);
-    event.setTenantId(tenantId);
-    event.setStrategyId(strategyId);
-    event.setEventId(UUID.randomUUID().toString());
-    event.setOccurredAt(now);
-    event.setKind(KIND);
-    event.setActor(ACTOR);
-    event.setCorrelationId(tenantId + "/" + strategyId);
-    event.setSubject(subject);
+    // Delegate event construction to the shared factory so this boot-time emitter and the P0c-a
+    // runtime StrategyConfigWriter emit a byte-identical TenantConfigChanged shape.
+    // configmap-reload
+    // carries no version columns (null oldVersion/newVersion → keys omitted).
+    AuditEvent event =
+        TenantConfigChangedEvents.build(
+            tenantId, strategyId, ACTOR, SOURCE, null, null, prior, current, redactedKeys);
 
     audit.log(event);
 
     writeSnapshotQuietly(tenantId, strategyId, current);
-  }
-
-  /**
-   * Returns the sorted list of keys whose values differ between {@code prior} and {@code current},
-   * over the union of both keysets. {@code null}-vs-missing is treated as a no-change (a key
-   * present-with-null on one side and absent on the other is not interesting to operators).
-   */
-  static List<String> diffKeys(Map<String, Object> prior, Map<String, Object> current) {
-    Set<String> union = new TreeSet<>(prior.keySet());
-    union.addAll(current.keySet());
-    List<String> out = new ArrayList<>();
-    for (String key : union) {
-      Object p = prior.get(key);
-      Object c = current.get(key);
-      if (!Objects.equals(p, c)) {
-        out.add(key);
-      }
-    }
-    return out;
-  }
-
-  /**
-   * Build the {@code old_values} or {@code new_values} map: for each changed key that is NOT in the
-   * redact set, include the key + value; for each redacted key, omit the entry entirely (the key
-   * still appears in {@code changed_keys} so the operator knows it changed).
-   */
-  private Map<String, Object> redactedView(Map<String, Object> source, List<String> changedKeys) {
-    Map<String, Object> out = new LinkedHashMap<>();
-    for (String key : changedKeys) {
-      if (redactedKeys.contains(key)) {
-        continue;
-      }
-      if (source.containsKey(key)) {
-        out.put(key, source.get(key));
-      }
-    }
-    return out;
   }
 
   private void writeSnapshotQuietly(
