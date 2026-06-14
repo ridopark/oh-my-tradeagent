@@ -14,6 +14,7 @@ import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
 import io.temporal.failure.ApplicationFailure;
 import java.time.OffsetDateTime;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
 /**
@@ -70,11 +71,18 @@ public class ExecActivitiesImpl implements ExecActivities {
     // and
     // the WS-echoed id all match. The intent_key stays unchanged (journal PK / :exit: STC routing).
     String clientOrderId = ClientOrderId.forIntent(intent.getIntentKey());
+    // P1 multi-tenant-credentials: carry tenant_id to the broker boundary, and surface it on the
+    // MDC
+    // for the duration of the broker call so later phases can resolve per-tenant credentials and
+    // assert the account. The value is threaded only — the Alpaca request body is unchanged this
+    // phase. MDC is scoped to the placement via try-with-resources (auto-removed on close) so it
+    // cannot leak onto the pooled Temporal worker thread.
     PlaceOrderResponse br;
-    try {
+    try (MDC.MDCCloseable ignored = MDC.putCloseable("tenant_id", intent.getTenantId())) {
       br =
           broker.placeOrder(
               new PlaceOrderRequest(
+                  intent.getTenantId(),
                   clientOrderId,
                   intent.getOptionSymbol(),
                   intent.getSide().value(),

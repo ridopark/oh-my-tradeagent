@@ -87,6 +87,33 @@ class ExecActivitiesImplClientOrderIdTest {
   }
 
   @Test
+  void placeOrder_carriesIntentTenantId_toBrokerRequest_andMdc() {
+    // P1 multi-tenant-credentials: the tenant_id from the OrderIntent must reach the broker
+    // boundary (carried on PlaceOrderRequest) and be surfaced on the MDC during the placement, so
+    // later phases can resolve per-tenant credentials. This phase threads identity only.
+    OrderIntent intent = exitIntent(); // tenantId = "dev"
+    JournaledOrder recorded = recordedRow(EXIT_INTENT_KEY);
+    when(journal.findByIntentKey(EXIT_INTENT_KEY)).thenReturn(Optional.of(recorded));
+
+    String[] mdcDuringPlacement = new String[1];
+    when(broker.placeOrder(any()))
+        .thenAnswer(
+            inv -> {
+              mdcDuringPlacement[0] = org.slf4j.MDC.get("tenant_id");
+              return PlaceOrderResponse.placed("brk-1");
+            });
+
+    exec.placeOrder(intent);
+
+    ArgumentCaptor<PlaceOrderRequest> req = ArgumentCaptor.forClass(PlaceOrderRequest.class);
+    verify(broker).placeOrder(req.capture());
+    assertThat(req.getValue().tenantId()).isEqualTo("dev");
+    assertThat(mdcDuringPlacement[0]).isEqualTo("dev");
+    // The MDC key must not leak past the activity onto the pooled worker thread.
+    assertThat(org.slf4j.MDC.get("tenant_id")).isNull();
+  }
+
+  @Test
   void placeOrder_brokerRejects_persistsLastError_thenRethrows() {
     OrderIntent intent = exitIntent();
     JournaledOrder recorded = recordedRow(EXIT_INTENT_KEY);
