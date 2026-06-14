@@ -15,6 +15,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Profile;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 /**
@@ -31,12 +33,16 @@ import org.springframework.stereotype.Component;
  *
  * <p>{@code @Profile("!test")} mirrors {@link CrossTenantBrokerTargetBootstrapper}: this runner
  * touches the DB and walks the tenants tree, neither of which the unit-test profile provides.
- * Unlike that bootstrapper it does NOT need {@code Ordered.HIGHEST_PRECEDENCE} — seeding the config
- * store is independent of the cross-tenant broker_target invariant and the kill-switch /
- * reconciliation schedule startup, so it runs at the default order.
+ *
+ * <p>P0c-b2: ordered {@code Ordered.HIGHEST_PRECEDENCE} so the DB store is back-filled BEFORE the
+ * {@link LiveRequiredGateBootstrapper} / {@link CrossTenantBrokerTargetBootstrapper} validators run
+ * (they read config via the active registry, which in db-mode is the just-seeded store). It keeps
+ * self-constructing its own {@link YamlStrategyRegistry} to seed — seeding via the active bean
+ * would be a DB-from-DB no-op in db-mode.
  */
 @Component
 @Profile("!test")
+@Order(Ordered.HIGHEST_PRECEDENCE)
 public class StrategyConfigSeedReconciler implements ApplicationRunner {
 
   private static final Logger log = LoggerFactory.getLogger(StrategyConfigSeedReconciler.class);
