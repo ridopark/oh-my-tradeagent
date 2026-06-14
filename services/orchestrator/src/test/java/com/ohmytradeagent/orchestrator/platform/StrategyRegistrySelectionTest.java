@@ -23,8 +23,7 @@ class StrategyRegistrySelectionTest {
   private final ApplicationContextRunner runner =
       new ApplicationContextRunner()
           .withConfiguration(AutoConfigurations.of(PropertyPlaceholderAutoConfiguration.class))
-          .withUserConfiguration(Deps.class)
-          .withUserConfiguration(DbStrategyRegistry.class, YamlStrategyRegistry.class);
+          .withUserConfiguration(Deps.class, DbStrategyRegistry.class, YamlStrategyRegistry.class);
 
   @Test
   void dbFlagSelectsDbRegistryAndYamlIsAbsent() {
