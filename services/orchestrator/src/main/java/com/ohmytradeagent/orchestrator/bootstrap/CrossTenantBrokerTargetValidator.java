@@ -1,9 +1,7 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.ohmytradeagent.contract.StrategyConfig;
-import java.io.IOException;
+import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -25,10 +23,14 @@ import java.util.Map;
  * <p>Wired on the {@link TenantStrategyScanner}-fed boot path (see {@link
  * CrossTenantBrokerTargetBootstrapper}) so a violating tenants tree fails fast before any workflow
  * starts. Strategies with an absent {@code broker_target} are skipped — they cannot collide.
+ *
+ * <p>P0c-b2: broker_target is resolved through the active {@link StrategyRegistry} rather than read
+ * directly off disk. The scan enumerates which {@code (tenant, strategy)} pairs to classify; a
+ * scanned strategy whose config cannot load throws BEFORE it can be classified live/paper, and that
+ * throw MUST propagate (boot fails closed) — never degrade to a skip that could corrupt the
+ * ownership map.
  */
 public final class CrossTenantBrokerTargetValidator {
-
-  private static final ObjectMapper YAML = new ObjectMapper(new YAMLFactory());
 
   private CrossTenantBrokerTargetValidator() {}
 
@@ -36,21 +38,26 @@ public final class CrossTenantBrokerTargetValidator {
    * Throws {@link IllegalStateException} if two distinct tenants map to the same {@code
    * broker_target}. No-op when the tenants dir does not exist.
    */
-  public static void validate(Path tenantsDir) {
-    ownerByBrokerTarget(tenantsDir);
+  public static void validate(Path tenantsDir, StrategyRegistry registry) {
+    ownerByBrokerTarget(tenantsDir, registry);
   }
 
   /**
    * Builds the {@code broker_target -> owning tenant} map, throwing if any {@code broker_target} is
-   * claimed by two distinct tenants. Returns an empty map when the tenants dir is missing.
+   * claimed by two distinct tenants. Returns an empty map when the tenants dir is missing. A
+   * scanned strategy whose config cannot load via {@code registry.get} throws (fail closed) before
+   * it can be classified.
    */
-  public static Map<String, String> ownerByBrokerTarget(Path tenantsDir) {
+  public static Map<String, String> ownerByBrokerTarget(
+      Path tenantsDir, StrategyRegistry registry) {
     Map<String, String> ownerByTarget = new LinkedHashMap<>();
     if (!Files.exists(tenantsDir)) {
       return ownerByTarget;
     }
     for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
-      String brokerTarget = readBrokerTarget(tenantsDir, ts.tenantId(), ts.strategyId());
+      StrategyConfig cfg = registry.get(ts.tenantId(), ts.strategyId());
+      StrategyConfig.BrokerTarget target = cfg.getBrokerTarget();
+      String brokerTarget = target == null ? null : target.value();
       if (brokerTarget == null || brokerTarget.isBlank()) {
         continue;
       }
@@ -69,17 +76,5 @@ public final class CrossTenantBrokerTargetValidator {
       }
     }
     return ownerByTarget;
-  }
-
-  private static String readBrokerTarget(Path tenantsDir, String tenantId, String strategyId) {
-    Path file = tenantsDir.resolve(tenantId).resolve("strategies").resolve(strategyId + ".yaml");
-    try {
-      StrategyConfig cfg = YAML.readValue(file.toFile(), StrategyConfig.class);
-      StrategyConfig.BrokerTarget target = cfg.getBrokerTarget();
-      return target == null ? null : target.value();
-    } catch (IOException e) {
-      throw new IllegalStateException(
-          "Failed to read broker_target from " + file.toAbsolutePath(), e);
-    }
   }
 }

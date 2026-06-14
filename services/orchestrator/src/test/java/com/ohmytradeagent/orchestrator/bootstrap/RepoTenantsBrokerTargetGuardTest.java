@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.ohmytradeagent.orchestrator.platform.YamlStrategyRegistry;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
@@ -22,7 +23,10 @@ class RepoTenantsBrokerTargetGuardTest {
     // unit tests in CrossTenantBrokerTargetValidatorTest cover the validator logic directly.
     assumeTrue(tenantsDir != null, "repo tenants/ dir not found from test working directory");
 
-    assertThatCode(() -> CrossTenantBrokerTargetValidator.validate(tenantsDir))
+    assertThatCode(
+            () ->
+                CrossTenantBrokerTargetValidator.validate(
+                    tenantsDir, new YamlStrategyRegistry(tenantsDir.toString())))
         .doesNotThrowAnyException();
   }
 
