@@ -1,0 +1,18 @@
+-- P0c-a (multi-tenant-broker-credentials epic): the runtime config write path
+-- (StrategyConfigWriter) performs an in-place compare-and-set UPDATE on strategy_config
+-- (config blob, schema_version, version, updated_at, updated_by). V5 deliberately withheld
+-- UPDATE/DELETE from orchestrator_runtime because P0a had no mutation path; P0c-a adds the
+-- write path, so grant UPDATE here (mirrors V5's explicit per-table grant style — not GRANT ALL,
+-- principle of least privilege).
+--
+-- DELETE is STILL withheld: P0c-a never deletes a strategy_config row (deactivation is a future
+-- concern and would itself need a dual-control gate, like the DANGEROUS field class). Granting
+-- only UPDATE keeps the destructive operation off the runtime role.
+--
+-- Safety note: a runtime UPDATE may only reduce-or-hold risk. The enforcement is in application
+-- code (StrategyConfigWriter's IDENTITY / DANGEROUS / EXPOSURE field-class checks), NOT in this
+-- grant — daily_loss_threshold + notional_cap_pct_of_capital_base are re-read by
+-- KillSwitchWorkflowImpl.heartbeat() every tick, so the writer hard-blocks any change to them to
+-- avoid disarming the live loss circuit-breaker. This grant only opens the column-level door; the
+-- writer is the lock.
+GRANT UPDATE ON strategy_config TO orchestrator_runtime;
