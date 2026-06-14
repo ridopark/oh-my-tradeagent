@@ -13,6 +13,7 @@ import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.Workflow;
@@ -208,7 +209,7 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     StrategyConfig cfg = strategy.get(input.getTenantId(), input.getStrategyId());
     BigDecimal threshold = cfg.getDailyLossThreshold();
     int v = Workflow.getVersion(VERSION_KILLSWITCH_LIVE_FLOOR, Workflow.DEFAULT_VERSION, 1);
-    boolean isLive = isLiveTarget(cfg.getBrokerTarget());
+    boolean isLive = StrategyConfigInvariants.isLive(cfg);
     if (threshold == null || threshold.signum() <= 0) {
       if (v == Workflow.DEFAULT_VERSION || !isLive) {
         // Legacy in-flight replays + all paper/non-live: original opt-out behavior, unchanged.
@@ -217,7 +218,7 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
       // v>=1 && live && no valid loss gate: an upstream control was bypassed on a real-money
       // strategy — fail closed. Trip with a DISTINCT reason so reporting never conflates this with
       // a
-      // real daily-loss trip. doTrip already emits KIND_KILL_SWITCH_TRIPPED audit + the cascade
+      // real daily-loss trip. doTrip already emits the KIND_KILL_SWITCH_TRIPPED audit + cascade
       // flatten.
       doTrip("auto:missing_loss_threshold", "auto:missing_loss_threshold", null);
       return;
@@ -405,15 +406,5 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   private static OffsetDateTime workflowNow() {
     return OffsetDateTime.ofInstant(
         Instant.ofEpochMilli(Workflow.currentTimeMillis()), ZoneOffset.UTC);
-  }
-
-  /**
-   * One notion of "live" — mirrors {@link
-   * com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants}'s {@code -live} predicate
-   * exactly: a non-null {@code broker_target} whose value ends with {@code "-live"}. A null
-   * broker_target is NOT live (paper / unconfigured strategies keep the original opt-out behavior).
-   */
-  private static boolean isLiveTarget(StrategyConfig.BrokerTarget t) {
-    return t != null && t.value() != null && t.value().endsWith("-live");
   }
 }
