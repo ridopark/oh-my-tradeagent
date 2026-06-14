@@ -381,6 +381,12 @@ public class AlpacaPaperBroker implements OptionsBroker {
    * genuine funding error). This sentinel ONLY GATES the broker-truth cross-check in {@code
    * placeOrder}; the "flat" decision is made by {@code /v2/positions}, never inferred from this
    * string.
+   *
+   * <p>TODO: Alpaca's numeric reject code for this case was not captured at the incident; match on
+   * it (as {@code isCancelOnFilled} does for {@code 42210000}) once sampled, so the signature
+   * survives a message-text edit. Until then the substring is a provisional signature — safe
+   * because a missed match merely falls through to the existing failure path, never to a wrongful
+   * benign.
    */
   private boolean isPositionAlreadyFlatSentinel(HttpStatusCodeException e) {
     if (e.getStatusCode().value() != 422) {

@@ -247,12 +247,13 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
 
   @Override
   public boolean markExpired(String intentKey) {
-    return markTerminalIfSubmitted(intentKey, OrderState.EXPIRED, "broker terminal: EXPIRED");
+    return markTerminalIfInState(
+        intentKey, OrderState.SUBMITTED, OrderState.EXPIRED, "broker terminal: EXPIRED");
   }
 
   @Override
   public boolean markBrokerRejected(String intentKey, String reason) {
-    return markTerminalIfSubmitted(intentKey, OrderState.ERRORED, reason);
+    return markTerminalIfInState(intentKey, OrderState.SUBMITTED, OrderState.ERRORED, reason);
   }
 
   @Override
@@ -263,34 +264,25 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
     // an at-least-once retry of the placeOrder Activity lands as a silent no-op (updated==0) once
     // the
     // first call terminalized the row. last_error carries the benign reason for disambiguation.
-    OffsetDateTime now = OffsetDateTime.now();
-    int updated =
-        dsl.update(TABLE)
-            .set(field("state"), OrderState.CANCELLED.name())
-            .set(field("last_error"), reason)
-            .set(field("last_state_at"), now)
-            .set(field("version"), field("version", Long.class).plus(1))
-            .where(field("intent_key", String.class).eq(intentKey))
-            .and(field("state", String.class).eq(OrderState.RECORDED.name()))
-            .execute();
-    return updated == 1;
+    return markTerminalIfInState(intentKey, OrderState.RECORDED, OrderState.CANCELLED, reason);
   }
 
   @Override
   public boolean markCancelledIfSubmitted(String intentKey) {
     // lastError=null: a broker-confirmed cancel carries no error (mirrors markCancelled).
-    return markTerminalIfSubmitted(intentKey, OrderState.CANCELLED, null);
+    return markTerminalIfInState(intentKey, OrderState.SUBMITTED, OrderState.CANCELLED, null);
   }
 
   /**
-   * Guarded terminal transition shared by the FillPoller terminal-non-fill paths: flips a row to
-   * {@code targetState} only while it is still {@code SUBMITTED}, bumps {@code version}, stamps
-   * {@code last_state_at}, and (when {@code lastError != null}) records {@code last_error}. Returns
-   * true iff exactly one row changed — so a row that already won the late-fill race to {@code
-   * FILLED} is a silent no-op.
+   * Guarded terminal transition: flips a row to {@code targetState} only while it is still in
+   * {@code fromState}, bumps {@code version}, stamps {@code last_state_at}, and (when {@code
+   * lastError != null}) records {@code last_error}. Returns true iff exactly one row changed — so a
+   * row that already lost the guard race (e.g. a late fill to {@code FILLED}, or a retry that
+   * already terminalized) is a silent no-op. The FillPoller terminal-non-fill paths guard on {@code
+   * SUBMITTED}; the over-exit benign path guards on {@code RECORDED}.
    */
-  private boolean markTerminalIfSubmitted(
-      String intentKey, OrderState targetState, String lastError) {
+  private boolean markTerminalIfInState(
+      String intentKey, OrderState fromState, OrderState targetState, String lastError) {
     OffsetDateTime now = OffsetDateTime.now();
     var update =
         dsl.update(TABLE)
@@ -303,7 +295,7 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
     int updated =
         update
             .where(field("intent_key", String.class).eq(intentKey))
-            .and(field("state", String.class).eq(OrderState.SUBMITTED.name()))
+            .and(field("state", String.class).eq(fromState.name()))
             .execute();
     return updated == 1;
   }
