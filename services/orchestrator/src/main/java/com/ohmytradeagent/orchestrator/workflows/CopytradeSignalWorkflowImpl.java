@@ -52,6 +52,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
@@ -158,10 +159,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // only at v>=1, and the paper path (!isLive) schedules ZERO verify activities at any version.
   private static final String VERSION_LIVE_PROMOTION_GATE = "live-promotion-gate-v1";
 
-  // P3-a: the live-promotion staleness window. A LivePromotionApproved older than this is refused
-  // as
-  // STALE. Hardcoded constant by design — making it config-tunable is P3-b, NOT this phase.
-  private static final java.time.Duration LIVE_PROMOTION_TTL = java.time.Duration.ofDays(30);
+  // P3-a: the live-promotion staleness window. A LivePromotionApproved older than this window is
+  // refused as STALE. Hardcoded by design — making it config-tunable is P3-b, NOT this phase.
+  private static final Duration LIVE_PROMOTION_TTL = Duration.ofDays(30);
 
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
@@ -361,7 +361,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
                 "tenant_id", payload.getTenantId(),
                 "strategy_id", payload.getStrategyId(),
                 "broker_target", config.getBrokerTarget().value(),
-                "reason", status.name().toLowerCase(java.util.Locale.ROOT),
+                "reason", status.name().toLowerCase(Locale.ROOT),
                 "outcome", "REJECTED"));
         // Fail-closed: NO placeOrder, NO PositionWorkflow.
         return payload.getSignalId();
