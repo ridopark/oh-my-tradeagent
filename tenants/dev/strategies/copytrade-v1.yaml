@@ -1,7 +1,7 @@
 schema_version: 1
 tenant_id: dev
 strategy_id: copytrade-v1
-broker_target: alpaca-paper  # Phase 2c.2: routes to broker-alpaca-paper task queue
+broker_target: alpaca-live  # routes to broker-alpaca-live task queue — REAL MONEY (live account 847309116)
 
 # Phase 2a risk gates
 author_whitelist:
