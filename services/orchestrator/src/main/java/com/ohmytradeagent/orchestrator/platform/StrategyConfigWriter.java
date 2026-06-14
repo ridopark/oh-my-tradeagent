@@ -7,7 +7,6 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigChangedEvents;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigSnapshot;
 import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
-import java.math.BigDecimal;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -209,7 +208,9 @@ public class StrategyConfigWriter {
               + ") — refusing to persist a newer-than-build row");
     }
 
-    // (ii) required-field validity (the schema `required` set) + cross-field min<=max.
+    // (ii) required-field validity + cross-field min<=max. This list mirrors the JSON-Schema
+    // `required` set in strategy-config.json by hand (the generated DTO emits no bean-validation
+    // constraints); keep them in sync. The round-trip guard (iv) is the fail-close backstop.
     requireNonNull(cfg.getTenantId(), "tenant_id", label);
     requireNonNull(cfg.getStrategyId(), "strategy_id", label);
     requireNonNull(cfg.getBrokerTarget(), "broker_target", label);
@@ -280,15 +281,15 @@ public class StrategyConfigWriter {
         next.getNotionalCapPctOfCapitalBase());
 
     // EXPOSURE: must not increase (equal or lower OK).
-    requireNotIncreasedLong("max_contracts", stored.getMaxContracts(), next.getMaxContracts());
-    requireNotIncreasedLong("min_contracts", stored.getMinContracts(), next.getMinContracts());
-    requireNotIncreasedLong("max_positions", stored.getMaxPositions(), next.getMaxPositions());
-    requireNotIncreasedBig("capital_weight", stored.getCapitalWeight(), next.getCapitalWeight());
-    requireNotIncreasedBig(
+    requireNotIncreased("max_contracts", stored.getMaxContracts(), next.getMaxContracts());
+    requireNotIncreased("min_contracts", stored.getMinContracts(), next.getMinContracts());
+    requireNotIncreased("max_positions", stored.getMaxPositions(), next.getMaxPositions());
+    requireNotIncreased("capital_weight", stored.getCapitalWeight(), next.getCapitalWeight());
+    requireNotIncreased(
         "max_notional_per_signal",
         stored.getMaxNotionalPerSignal(),
         next.getMaxNotionalPerSignal());
-    requireNotIncreasedBig(
+    requireNotIncreased(
         "max_daily_notional_deployed",
         stored.getMaxDailyNotionalDeployed(),
         next.getMaxDailyNotionalDeployed());
@@ -320,37 +321,16 @@ public class StrategyConfigWriter {
     }
   }
 
-  private static void requireNotIncreasedLong(String field, Long stored, Long next) {
-    // null handling mirrors requireNotIncreasedBig: no prior cap → not an increase; removing a cap
-    // (next == null while stored != null) is conservatively rejected; otherwise compare values.
+  /**
+   * EXPOSURE-field rule (works for any {@link Comparable} cap type — Long or BigDecimal): no prior
+   * cap (stored == null) → never an increase; removing a cap (next == null while stored != null) is
+   * conservatively rejected (dropping a cap is not a tightening); otherwise reject when next &gt;
+   * stored. Only equal-or-lower exposure is permitted at runtime.
+   */
+  private static <T extends Comparable<T>> void requireNotIncreased(
+      String field, T stored, T next) {
     if (stored == null) {
       return;
-    }
-    if (next == null) {
-      throw new DangerousFieldChangeRejected(
-          "EXPOSURE field "
-              + field
-              + " may not be removed (stored="
-              + stored
-              + ", new=null) — dropping a cap is not a tightening");
-    }
-    if (next.compareTo(stored) > 0) {
-      throw new DangerousFieldChangeRejected(
-          "EXPOSURE field "
-              + field
-              + " may not increase (stored="
-              + stored
-              + ", new="
-              + next
-              + ") — only equal-or-lower exposure is permitted at runtime");
-    }
-  }
-
-  private static void requireNotIncreasedBig(String field, BigDecimal stored, BigDecimal next) {
-    // null handling: a non-null cap being removed (next == null) is NOT a tightening — be
-    // conservative and reject it. null→null is no change. null→value tightens (adds a cap) → OK.
-    if (stored == null) {
-      return; // no prior cap; any value (or null) is not an increase of an existing cap
     }
     if (next == null) {
       throw new DangerousFieldChangeRejected(
