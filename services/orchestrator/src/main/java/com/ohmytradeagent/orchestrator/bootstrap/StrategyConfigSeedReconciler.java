@@ -51,11 +51,14 @@ public class StrategyConfigSeedReconciler implements ApplicationRunner {
   @Autowired
   public StrategyConfigSeedReconciler(
       @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir,
-      YamlStrategyRegistry yamlRegistry,
       DSLContext dsl,
       ObjectMapper objectMapper) {
     this.tenantsDir = Path.of(tenantsDir);
-    this.yamlRegistry = yamlRegistry;
+    // Build the YAML reader locally rather than injecting it: after the registry-bean mutual
+    // exclusion (strategy.config.source=db), no YamlStrategyRegistry bean exists in db-mode, but
+    // the
+    // seeder must still read the tenants tree to back-fill the DB store in BOTH modes.
+    this.yamlRegistry = new YamlStrategyRegistry(tenantsDir);
     this.dsl = dsl;
     this.objectMapper = objectMapper;
   }
