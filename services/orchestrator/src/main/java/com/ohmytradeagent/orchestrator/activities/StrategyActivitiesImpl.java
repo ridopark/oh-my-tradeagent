@@ -86,10 +86,17 @@ public class StrategyActivitiesImpl implements StrategyActivities {
     if (e instanceof StrategyNotFoundException) {
       return "not_found";
     }
-    if (e instanceof IllegalStateException
-        && e.getMessage() != null
-        && e.getMessage().contains("schema_version")) {
-      return "schema_version";
+    if (e instanceof IllegalStateException) {
+      // DbStrategyRegistry throws IllegalStateException for two distinct conditions: a
+      // newer-than-build schema_version (no cause) and an unparseable config blob (a
+      // JsonProcessingException cause). Keep them as separate reasons — a corrupt blob and a
+      // newer-schema row are different operational responses, and neither is a DB-I/O failure.
+      if (e.getCause() instanceof com.fasterxml.jackson.core.JsonProcessingException) {
+        return "config_parse";
+      }
+      if (e.getMessage() != null && e.getMessage().contains("schema_version")) {
+        return "schema_version";
+      }
     }
     return "db_error";
   }
@@ -101,7 +108,7 @@ public class StrategyActivitiesImpl implements StrategyActivities {
             Counter.builder(READ_FAILURES_COUNTER)
                 .description(
                     "Live strategy-config read failures (fail-closed: the read still rethrows). "
-                        + "reason ∈ {not_found, schema_version, db_error}.")
+                        + "reason ∈ {not_found, schema_version, config_parse, db_error}.")
                 .tag("tenant", tenantId)
                 .tag("strategy", strategyId)
                 .tag("reason", reason)
@@ -135,6 +142,11 @@ public class StrategyActivitiesImpl implements StrategyActivities {
    * Best-effort — never throws (a resolve failure must not break the success return path).
    */
   private void onReadSuccess(String tenantId, String strategyId) {
+    // Fast path for the signal-frequency common case: nothing is alerted, so there is nothing to
+    // re-arm — skip the prefix-string / list / iterator allocation entirely.
+    if (alertedKeys.isEmpty()) {
+      return;
+    }
     try {
       String prefix = tenantId + "|" + strategyId + "|";
       List<String> resolved = new ArrayList<>();

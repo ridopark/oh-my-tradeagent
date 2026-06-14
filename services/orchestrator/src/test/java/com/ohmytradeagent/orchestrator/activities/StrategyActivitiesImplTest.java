@@ -95,12 +95,25 @@ class StrategyActivitiesImplTest {
   }
 
   @Test
-  void getDbErrorTagged() {
+  void getConfigParseFailureTagged() {
+    // DbStrategyRegistry wraps a JsonProcessingException cause when the stored blob won't parse.
     when(registry.get(TENANT, STRATEGY))
-        .thenThrow(new IllegalStateException("Failed to deserialize strategy_config.config"));
+        .thenThrow(
+            new IllegalStateException(
+                "Failed to deserialize strategy_config.config",
+                new com.fasterxml.jackson.core.JsonParseException(null, "bad json")));
 
     assertThatThrownBy(() -> activities.get(TENANT, STRATEGY))
         .isInstanceOf(IllegalStateException.class);
+    assertThat(counter("config_parse")).isEqualTo(1.0);
+  }
+
+  @Test
+  void getDbErrorTagged() {
+    // A genuine DB-I/O failure (no schema_version, no parse cause) buckets as db_error.
+    when(registry.get(TENANT, STRATEGY)).thenThrow(new RuntimeException("connection refused"));
+
+    assertThatThrownBy(() -> activities.get(TENANT, STRATEGY)).isInstanceOf(RuntimeException.class);
     assertThat(counter("db_error")).isEqualTo(1.0);
   }
 
