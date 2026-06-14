@@ -5,8 +5,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter;
+import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
-import com.ohmytradeagent.tdbff.platform.YamlStrategyRegistry;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.List;
@@ -42,7 +42,7 @@ class OrdersReaderIT {
   private static DSLContext dsl;
 
   private final TenantStrategyResolver strategyResolver = mock(TenantStrategyResolver.class);
-  private final YamlStrategyRegistry strategyRegistry = mock(YamlStrategyRegistry.class);
+  private final DbStrategyConfigReader strategyRegistry = mock(DbStrategyConfigReader.class);
   private final BrokerDataSourceRouter router = mock(BrokerDataSourceRouter.class);
   private OrdersReader reader;
 
@@ -104,6 +104,21 @@ class OrdersReaderIT {
     assertThat(items).hasSize(2);
     // newest first — exercises byRecordedAtDesc on the OffsetDateTime-typed recorded_at column.
     assertThat(items).extracting(m -> m.get("intent_key")).containsExactly("ok-new", "ok-old");
+  }
+
+  @Test
+  void unconfiguredBrokerTargetIsOmitted_notA404() {
+    // Tenant `dev` owns s1 (alpaca-paper, configured) and s2 whose broker_target read fail-softs to
+    // null. A null target must NOT reach router.dslFor (that would 404 the whole history); the s2
+    // rows are simply omitted. router has no stub for any other broker — a leak would throw here.
+    when(strategyResolver.strategyIdsForTenant("dev")).thenReturn(List.of("s1", "s2"));
+    when(strategyRegistry.brokerTarget("dev", "s2")).thenReturn(null);
+    insert("ok", "dev", "s1", "2026-05-14T14:00:00Z");
+    insert("dropped", "dev", "s2", "2026-05-14T15:00:00Z");
+
+    List<Map<String, Object>> items = reader.orders("dev", 100);
+
+    assertThat(items).extracting(m -> m.get("intent_key")).containsExactly("ok");
   }
 
   private void insert(String intentKey, String tenant, String strategy, String recordedAtIso) {

@@ -6,8 +6,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
-import com.ohmytradeagent.tdbff.platform.YamlStrategyRegistry;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import java.math.BigDecimal;
@@ -22,7 +22,7 @@ class PortfolioServiceTest {
   private final RealizedPnlCalculator realizedPnl = mock(RealizedPnlCalculator.class);
   private final AccountEquityClient accountEquity = mock(AccountEquityClient.class);
   private final TenantStrategyResolver strategyResolver = mock(TenantStrategyResolver.class);
-  private final YamlStrategyRegistry strategyRegistry = mock(YamlStrategyRegistry.class);
+  private final DbStrategyConfigReader strategyRegistry = mock(DbStrategyConfigReader.class);
 
   private final PortfolioService service =
       new PortfolioService(

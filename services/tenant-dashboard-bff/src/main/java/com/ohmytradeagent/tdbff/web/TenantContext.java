@@ -5,7 +5,7 @@ package com.ohmytradeagent.tdbff.web;
 // absent (single-tenant operator convenience). A TENANT-FACING read must NEVER silently fall back
 // to `dev` — an absent X-Tenant-Id is a 401, not "show me dev's positions". Strategy ids are NOT a
 // header here either: they are resolved server-side from the mounted tenants tree
-// (TenantStrategyResolver) so a caller can never widen its own scope.
+// (TenantStrategyResolver, querying strategy_config) so a caller can never widen its own scope.
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
@@ -15,9 +15,8 @@ public class TenantContext {
 
   static final String HEADER_TENANT = "X-Tenant-Id";
 
-  // tenant_id flows into a filesystem path (YamlStrategyRegistry resolves tenants/<id>/...), so
-  // constrain it to a safe charset here — independent of any caller's ordering — to make path
-  // traversal (e.g. "../../etc") structurally impossible rather than only implicitly blocked.
+  // tenant_id is a SQL bind parameter scoping every read; constrain it to a safe charset here —
+  // independent of any caller's ordering — as defense-in-depth against a malformed identity.
   private static final Pattern TENANT_ID = Pattern.compile("[A-Za-z0-9_-]+");
 
   /**
