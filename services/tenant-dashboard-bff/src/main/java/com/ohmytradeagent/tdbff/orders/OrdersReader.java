@@ -15,6 +15,8 @@ import java.util.Map;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -24,6 +26,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class OrdersReader {
+
+  private static final Logger log = LoggerFactory.getLogger(OrdersReader.class);
 
   static final int DEFAULT_LIMIT = 100;
   static final int MAX_LIMIT = 500;
@@ -55,8 +59,13 @@ public class OrdersReader {
       String brokerTarget = strategyRegistry.brokerTarget(tenantId, strategyId);
       // brokerTarget reads fail-soft (null = unconfigured / missing config row). A null target must
       // NOT flow to router.dslFor below — that would throw BrokerNotConfiguredException and 404 the
-      // whole tenant's order history. Omit the unconfigured strategy instead.
+      // whole tenant's order history. Omit the unconfigured strategy instead. A null is anomalous
+      // (the orchestrator forbids a null broker_target), so WARN rather than vanish it silently.
       if (brokerTarget == null) {
+        log.warn(
+            "omitting strategy {}/{} from order history: no broker_target in strategy_config",
+            tenantId,
+            strategyId);
         continue;
       }
       strategiesByBroker.computeIfAbsent(brokerTarget, k -> new ArrayList<>()).add(strategyId);
