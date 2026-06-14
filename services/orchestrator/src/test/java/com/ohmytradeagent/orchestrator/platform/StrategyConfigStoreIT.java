@@ -134,9 +134,8 @@ class StrategyConfigStoreIT {
             + "strategy_id: strat-a\n"
             + "broker_target: paper\n");
 
-    YamlStrategyRegistry yaml = new YamlStrategyRegistry(tenantsDir.toString());
     StrategyConfigSeedReconciler reconciler =
-        new StrategyConfigSeedReconciler(tenantsDir.toString(), yaml, dsl, objectMapper);
+        new StrategyConfigSeedReconciler(tenantsDir.toString(), dsl, objectMapper);
     ApplicationArguments noArgs = new org.springframework.boot.DefaultApplicationArguments();
 
     // First run → seeds exactly one row.
@@ -181,9 +180,8 @@ class StrategyConfigStoreIT {
         "operator:manual");
     String preexistingConfig = configText("acme", "strat-a");
 
-    YamlStrategyRegistry yaml = new YamlStrategyRegistry(tenantsDir.toString());
     StrategyConfigSeedReconciler reconciler =
-        new StrategyConfigSeedReconciler(tenantsDir.toString(), yaml, dsl, objectMapper);
+        new StrategyConfigSeedReconciler(tenantsDir.toString(), dsl, objectMapper);
     reconciler.run(new org.springframework.boot.DefaultApplicationArguments());
 
     assertThat(rowCount()).isEqualTo(1);
@@ -191,6 +189,40 @@ class StrategyConfigStoreIT {
         .as("pre-existing row content must be preserved (no overwrite)")
         .isEqualTo(preexistingConfig);
     assertThat(versionOf("acme", "strat-a")).as("pre-existing version preserved").isEqualTo(7L);
+  }
+
+  /**
+   * Boot premise for P0b: seed the DB from the tenants tree, then read the same (tenant, strategy)
+   * back via {@link DbStrategyRegistry} and assert it equals the {@link YamlStrategyRegistry} read.
+   * If DB == YAML at boot, the validators may safely keep reading YAML in P0b while live signal
+   * reads cut over to the DB.
+   */
+  @Test
+  void seedThenDbReadEqualsYaml(@org.junit.jupiter.api.io.TempDir Path tenantsDir)
+      throws Exception {
+    Path strategiesDir = tenantsDir.resolve("acme").resolve("strategies");
+    Files.createDirectories(strategiesDir);
+    Files.writeString(
+        strategiesDir.resolve("strat-a.yaml"),
+        "schema_version: 1\n"
+            + "tenant_id: acme\n"
+            + "strategy_id: strat-a\n"
+            + "broker_target: paper\n"
+            + "max_positions: 5\n"
+            + "min_contracts: 1\n"
+            + "max_contracts: 5\n");
+
+    StrategyConfigSeedReconciler reconciler =
+        new StrategyConfigSeedReconciler(tenantsDir.toString(), dsl, objectMapper);
+    reconciler.run(new org.springframework.boot.DefaultApplicationArguments());
+
+    StrategyConfig fromDb = new DbStrategyRegistry(dsl, objectMapper).get("acme", "strat-a");
+    StrategyConfig fromYaml =
+        new YamlStrategyRegistry(tenantsDir.toString()).get("acme", "strat-a");
+
+    assertThat(fromDb)
+        .as("DB read must equal YAML read after seed (boot premise)")
+        .isEqualTo(fromYaml);
   }
 
   // --- helpers ---

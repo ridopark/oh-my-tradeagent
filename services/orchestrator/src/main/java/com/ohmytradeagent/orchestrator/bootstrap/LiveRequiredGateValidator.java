@@ -4,11 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.ohmytradeagent.contract.StrategyConfig;
 import java.io.IOException;
-import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Phase P2 live-safety: config-load invariant requiring every {@code -live} strategy to declare its
@@ -32,8 +29,6 @@ import org.slf4j.LoggerFactory;
  */
 public final class LiveRequiredGateValidator {
 
-  private static final Logger log = LoggerFactory.getLogger(LiveRequiredGateValidator.class);
-
   private static final ObjectMapper YAML = new ObjectMapper(new YAMLFactory());
 
   private LiveRequiredGateValidator() {}
@@ -48,44 +43,8 @@ public final class LiveRequiredGateValidator {
     }
     for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       StrategyConfig cfg = readConfig(tenantsDir, ts.tenantId(), ts.strategyId());
-      StrategyConfig.BrokerTarget target = cfg.getBrokerTarget();
-      String brokerTarget = target == null ? null : target.value();
-      if (brokerTarget == null || !brokerTarget.endsWith("-live")) {
-        continue;
-      }
-
       String label = ts.tenantId() + "/" + ts.strategyId();
-
-      BigDecimal dailyLoss = cfg.getDailyLossThreshold();
-      if (dailyLoss == null || dailyLoss.signum() <= 0) {
-        throw new IllegalStateException(
-            "live strategy "
-                + label
-                + " (broker_target="
-                + brokerTarget
-                + ") is missing a required loss gate: daily_loss_threshold must be set and > 0"
-                + " (got "
-                + dailyLoss
-                + "). A real-money strategy must declare a kill-switch loss threshold.");
-      }
-
-      if (cfg.getNotionalCapPctOfCapitalBase() == null) {
-        throw new IllegalStateException(
-            "live strategy "
-                + label
-                + " (broker_target="
-                + brokerTarget
-                + ") is missing a required loss gate: notional_cap_pct_of_capital_base must be set."
-                + " A real-money strategy must declare a portfolio notional cap.");
-      }
-
-      Boolean preTrade = cfg.getPreTradeCheckEnabled();
-      if (preTrade == null || !preTrade) {
-        log.warn(
-            "live strategy {} has pre_trade_check disabled — PDT/buying-power gate is OFF"
-                + " (operator decision)",
-            label);
-      }
+      StrategyConfigInvariants.validateLiveRequiredGates(cfg, label);
     }
   }
 
