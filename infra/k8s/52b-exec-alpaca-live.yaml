@@ -90,6 +90,14 @@ spec:
               value: "true"
             - name: EXEC_FILL_LISTENER_POLL_ENABLED
               value: "true"
+            # The fill-listener WS URL is a SEPARATE knob from the REST base-url
+            # (which comes from the alpaca-credentials-live Secret). It defaults to
+            # the PAPER stream in application.yml, so a live deployment MUST override
+            # it to the live trade-updates stream or the WS authenticates live keys
+            # against the paper endpoint (rejected) and fills fall back to the 30s
+            # REST poller only. The AlpacaConfig base-url guard does NOT cover this.
+            - name: EXEC_FILL_LISTENER_WS_URL
+              value: wss://api.alpaca.markets/stream
             # Issue #297 / #295: non-blocking Discord alert on a broker rejection in placeOrder.
             # The webhook URL is an operator-provisioned secret. `optional: true` so the pod still
             # boots when the secret is absent — the alerter is then a no-op (logs the would-be

@@ -1,7 +1,7 @@
 schema_version: 1
 tenant_id: dev
 strategy_id: copytrade-v1
-broker_target: alpaca-paper  # Phase 2c.2: routes to broker-alpaca-paper task queue
+broker_target: alpaca-paper  # DEFAULT; real money (alpaca-live) is a per-cluster operator override applied out-of-band, never the repo default. See 40-tenants-config.yaml.
 
 # Phase 2a risk gates
 author_whitelist:
