@@ -90,7 +90,8 @@ public class StrategyConfigSeedReconciler implements ApplicationRunner {
    */
   private boolean seedIfAbsent(String tenantId, String strategyId) {
     StrategyConfig config = yamlRegistry.get(tenantId, strategyId);
-    long schemaVersion = config.getSchemaVersion() == null ? 1L : config.getSchemaVersion();
+    int schemaVersion =
+        config.getSchemaVersion() == null ? 1 : config.getSchemaVersion().intValue();
     String configJson;
     try {
       configJson = objectMapper.writeValueAsString(config);
@@ -100,15 +101,16 @@ public class StrategyConfigSeedReconciler implements ApplicationRunner {
           e);
     }
 
+    // version is omitted — V5 declares it NOT NULL DEFAULT 1 (single source of truth for the seed).
     int inserted =
         dsl.execute(
             "INSERT INTO strategy_config "
-                + "(tenant_id, strategy_id, schema_version, config, version, updated_by) "
-                + "VALUES (?, ?, ?, ?::jsonb, 1, ?) "
+                + "(tenant_id, strategy_id, schema_version, config, updated_by) "
+                + "VALUES (?, ?, ?, ?::jsonb, ?) "
                 + "ON CONFLICT (tenant_id, strategy_id) DO NOTHING",
             tenantId,
             strategyId,
-            (int) schemaVersion,
+            schemaVersion,
             configJson,
             SEED_ACTOR);
 
