@@ -273,6 +273,71 @@ class KillSwitchWorkflowImplTest {
     verify(audit, atLeastOnce()).log(any());
   }
 
+  // ---------- B2 (P0c-b1): live kill-switch heartbeat floor ----------
+
+  @Test
+  void heartbeat_liveWithNullThreshold_tripsWithDistinctReason() {
+    // Market open + a LIVE strategy whose daily_loss_threshold is null (an upstream control was
+    // bypassed). The heartbeat must fail closed: trip with the distinct anomaly reason.
+    when(calendar.isMarketOpen()).thenReturn(true);
+    when(strategy.get(anyString(), anyString())).thenReturn(liveNullThresholdConfig());
+
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-live/killswitch-livenull");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Skip the first heartbeat tick (60s interval).
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:missing_loss_threshold");
+    assertThat(s.getActor()).isEqualTo("auto:missing_loss_threshold");
+
+    AuditEvent tripped = captureKind("KillSwitchTripped");
+    assertThat(tripped.getSubject()).containsEntry("reason", "auto:missing_loss_threshold");
+    // Anomaly trip carries no quantified value (null pnl was never computed).
+    assertThat(tripped.getSubject()).doesNotContainKey("value");
+
+    // pnl is never computed on the anomaly path — the trip short-circuits before the pnl Activity.
+    verify(pnl, never()).computeRealizedPnl(anyString(), anyString(), any());
+  }
+
+  @Test
+  void heartbeat_paperWithNullThreshold_doesNotTrip() {
+    // PAPER strategy with a null threshold preserves the original opt-out: no auto-trip.
+    when(calendar.isMarketOpen()).thenReturn(true);
+    when(strategy.get(anyString(), anyString())).thenReturn(paperNullThresholdConfig());
+
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-papernull");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isFalse();
+    verify(cascade, never())
+        .cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void heartbeat_liveWithValidThreshold_unchanged() {
+    // LIVE strategy + valid threshold + non-breaching pnl: the normal path is unchanged — no trip.
+    when(calendar.isMarketOpen()).thenReturn(true);
+    StrategyConfig live = liveNullThresholdConfig();
+    live.setDailyLossThreshold(new BigDecimal("2500.00"));
+    when(strategy.get(anyString(), anyString())).thenReturn(live);
+    when(pnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-100"));
+
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-live/killswitch-livevalid");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isFalse();
+  }
+
   @Test
   void recordLivePromotionValidator_blankTenantId_rejected() {
     KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-lp-tenant");
@@ -393,6 +458,25 @@ class KillSwitchWorkflowImplTest {
     c.setCapitalWeight(new BigDecimal("0.2"));
     c.setDailyLossThreshold(new BigDecimal("2500.00"));
     c.setResetCooldownSecs(60L);
+    return c;
+  }
+
+  /**
+   * B2 (P0c-b1): a LIVE strategy (broker_target ends with {@code -live}) whose {@code
+   * daily_loss_threshold} is null — the anomaly the heartbeat floor fails closed on.
+   */
+  private static StrategyConfig liveNullThresholdConfig() {
+    StrategyConfig c = strategyConfig();
+    c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_LIVE);
+    c.setDailyLossThreshold(null);
+    return c;
+  }
+
+  /** B2: a PAPER strategy with a null {@code daily_loss_threshold} — the preserved opt-out path. */
+  private static StrategyConfig paperNullThresholdConfig() {
+    StrategyConfig c = strategyConfig();
+    c.setBrokerTarget(StrategyConfig.BrokerTarget.PAPER);
+    c.setDailyLossThreshold(null);
     return c;
   }
 
