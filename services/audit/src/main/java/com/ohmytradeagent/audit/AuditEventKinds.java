@@ -91,7 +91,17 @@ public final class AuditEventKinds {
    * signal — same family of "never opened" terminations, one layer deeper in the workflow stack.
    */
   public static final Set<String> SOFT_TERMINAL_CLOSE_KINDS =
-      Set.of("EntryExpired", "OrderCancelled", "SignalRejected", "PositionNeverFilled");
+      Set.of(
+          "EntryExpired",
+          "OrderCancelled",
+          "SignalRejected",
+          "PositionNeverFilled",
+          // P3-a (multi-tenant-broker-credentials): emitted by CopytradeSignalWorkflowImpl when a
+          // LIVE BTO is refused at the live-promotion gate (no VALID LivePromotionApproved row, or
+          // a STALE/ABSENT/VERIFY_ERROR verify result). Fires BEFORE any broker activity — same
+          // "never opened / refused before any broker activity" disposition as SignalRejected — so
+          // it is a soft-terminal close, not an orphaned open lifecycle.
+          "LivePromotionMissing");
 
   /**
    * Every kind that terminates a lifecycle. An open lifecycle (one with an {@link #ENTRY_KINDS}
@@ -268,6 +278,9 @@ public final class AuditEventKinds {
           "PositionAdopted",
           // LivePromotionActivitiesImpl
           "LivePromotionApproved",
+          // CopytradeSignalWorkflowImpl (P3-a): the live-promotion-gate refusal disposition. Also
+          // in SOFT_TERMINAL_CLOSE_KINDS (refused before any broker activity, like SignalRejected).
+          "LivePromotionMissing",
           // TenantConfigChangedEmitter (no KIND_ constant; literal string in the emitter)
           "TenantConfigChanged");
 }

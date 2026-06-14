@@ -99,4 +99,28 @@ public interface AuditQueryActivities {
    */
   OffsetDateTime firstSeenJournalOrphan(
       String tenantId, String strategyId, String intentKey, OffsetDateTime since);
+
+  /**
+   * P3-a (multi-tenant-broker-credentials): SAFETY-GATE verify for the live-promotion dispatch gate
+   * in {@code CopytradeSignalWorkflowImpl#handleBto}. Looks up the most-recent {@code
+   * LivePromotionApproved} audit row for {@code (tenant_id, strategy_id)} whose subject {@code
+   * broker_target} matches, and classifies it relative to a staleness floor.
+   *
+   * <p><b>This method is the deliberate fail-CLOSED exception to this interface's documented
+   * fail-soft posture.</b> Where the orphan-debounce reads return the no-prior value (0 / null) on
+   * a DB outage, this one returns {@link LivePromotionStatus#VERIFY_ERROR} — which the workflow
+   * treats as a REFUSAL — so a verify failure can never let an unapproved live order through.
+   *
+   * @param tenantId audit tenant scope
+   * @param strategyId audit strategy scope
+   * @param brokerTarget the live broker_target the BTO would route to (e.g. {@code alpaca-live});
+   *     matched against the approval row's {@code subject->>'broker_target'}
+   * @param notStaleSince the staleness floor — an approval whose {@code occurred_at} is strictly
+   *     before this is {@link LivePromotionStatus#STALE}
+   * @return {@link LivePromotionStatus#VALID} only when a fresh matching approval exists; {@link
+   *     LivePromotionStatus#ABSENT} / {@link LivePromotionStatus#STALE} / {@link
+   *     LivePromotionStatus#VERIFY_ERROR} otherwise — all of which refuse the live order
+   */
+  LivePromotionStatus checkLivePromotion(
+      String tenantId, String strategyId, String brokerTarget, OffsetDateTime notStaleSince);
 }

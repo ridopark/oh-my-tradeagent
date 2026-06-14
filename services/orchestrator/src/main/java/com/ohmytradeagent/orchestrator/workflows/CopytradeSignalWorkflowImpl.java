@@ -19,11 +19,14 @@ import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AccountSnapshotMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
+import com.ohmytradeagent.orchestrator.activities.LivePromotionStatus;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
 import com.ohmytradeagent.orchestrator.domain.BtoPricing;
 import com.ohmytradeagent.orchestrator.domain.BtoPricing.PricedLimit;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveInput;
@@ -71,6 +74,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private static final String KIND_CHANDELIER_ARM_REQUESTED = "ChandelierArmRequested";
   // Phase 5: kill-switch cascade short-circuit audit.
   private static final String KIND_SIGNAL_ABORTED_BY_RISK_BREACH = "SignalAbortedByRiskBreach";
+  // P3-a (multi-tenant-broker-credentials): emitted when a LIVE BTO is refused at the
+  // live-promotion gate (no VALID LivePromotionApproved row for the broker_target). Registered in
+  // AuditEventKinds.ALL_KINDS + SOFT_TERMINAL_CLOSE_KINDS (refused before any broker activity).
+  private static final String KIND_LIVE_PROMOTION_MISSING = "LivePromotionMissing";
 
   private static final String REASON_TTL_EXPIRED = "ttl_expired";
   // Issue: orphan-STC alerting. handleStc's stale Redis lookup can return a DEAD (terminal)
@@ -144,6 +151,18 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // PositionWorkflow emits OrphanSTC instead of crashing the CopytradeSignalWorkflow.
   private static final String VERSION_STC_RUNNING_GUARD = "stc-running-guard-v1";
 
+  // P3-a (multi-tenant-broker-credentials): gate the LIVE-only live-promotion dispatch check added
+  // in handleBto (after the SignalAccepted audit, before newIntent/placeOrder). v=DEFAULT_VERSION
+  // (legacy in-flight histories) is byte-identical to the pre-P3a path — the new branch is
+  // reachable
+  // only at v>=1, and the paper path (!isLive) schedules ZERO verify activities at any version.
+  private static final String VERSION_LIVE_PROMOTION_GATE = "live-promotion-gate-v1";
+
+  // P3-a: the live-promotion staleness window. A LivePromotionApproved older than this is refused
+  // as
+  // STALE. Hardcoded constant by design — making it config-tunable is P3-b, NOT this phase.
+  private static final java.time.Duration LIVE_PROMOTION_TTL = java.time.Duration.ofDays(30);
+
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
 
@@ -164,6 +183,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   private final AuditActivities audit =
       Workflow.newActivityStub(AuditActivities.class, DEFAULT_OPTIONS);
+  // P3-a: the live-promotion safety-gate verify. On the orchestrator-core queue (DEFAULT_OPTIONS),
+  // same as the other read-side stubs.
+  private final AuditQueryActivities auditQuery =
+      Workflow.newActivityStub(AuditQueryActivities.class, DEFAULT_OPTIONS);
   private final StrategyActivities strategy =
       Workflow.newActivityStub(StrategyActivities.class, DEFAULT_OPTIONS);
   private final RiskActivities risk =
@@ -306,6 +329,44 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "option_symbol", resolved.optionSymbol(),
             "contracts", contracts,
             "ref_premium", payload.getPrice()));
+
+    // P3-a (multi-tenant-broker-credentials): the LIVE-only live-promotion dispatch gate. A real-
+    // money BTO may only place an order when a fresh (not-stale) LivePromotionApproved row exists
+    // for (tenant_id, strategy_id, broker_target). The verify fails CLOSED — ABSENT/STALE/VERIFY_
+    // ERROR all refuse the order (no placeOrder, no PositionWorkflow), emit LivePromotionMissing,
+    // and return the signal_id (the same fail-closed return shape as the reject path).
+    //
+    // Replay: getVersion is read UNCONDITIONALLY (before the isLive test). The new branch is
+    // reachable only at gateV>=1; for DEFAULT_VERSION (legacy in-flight histories) the path is
+    // byte-identical (only the marker is added). The paper path (!isLive) schedules ZERO verify
+    // activities and emits NO new command at any version. Staleness uses Workflow.currentTimeMillis
+    // (NOT OffsetDateTime.now) so the window is deterministic across replays.
+    int gateV = Workflow.getVersion(VERSION_LIVE_PROMOTION_GATE, Workflow.DEFAULT_VERSION, 1);
+    if (gateV >= 1 && StrategyConfigInvariants.isLive(config)) {
+      long sinceMillis = Workflow.currentTimeMillis() - LIVE_PROMOTION_TTL.toMillis();
+      OffsetDateTime notStaleSince =
+          OffsetDateTime.ofInstant(Instant.ofEpochMilli(sinceMillis), ZoneOffset.UTC);
+      LivePromotionStatus status =
+          auditQuery.checkLivePromotion(
+              payload.getTenantId(),
+              payload.getStrategyId(),
+              config.getBrokerTarget().value(),
+              notStaleSince);
+      if (status != LivePromotionStatus.VALID) {
+        logAudit(
+            payload,
+            KIND_LIVE_PROMOTION_MISSING,
+            subject(
+                "signal_id", payload.getSignalId(),
+                "tenant_id", payload.getTenantId(),
+                "strategy_id", payload.getStrategyId(),
+                "broker_target", config.getBrokerTarget().value(),
+                "reason", status.name().toLowerCase(java.util.Locale.ROOT),
+                "outcome", "REJECTED"));
+        // Fail-closed: NO placeOrder, NO PositionWorkflow.
+        return payload.getSignalId();
+      }
+    }
 
     String intentKey = Workflow.getInfo().getWorkflowId() + ":entry";
     OrderIntent intent = newIntent(payload, config, resolved, contracts, intentKey, priced.limit());

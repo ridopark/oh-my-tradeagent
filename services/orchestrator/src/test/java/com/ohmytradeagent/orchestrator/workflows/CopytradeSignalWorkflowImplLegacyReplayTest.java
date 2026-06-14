@@ -117,10 +117,22 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
           "src/test/resources/temporal/replay/"
               + "copytrade-signal-pre-165-ttl-expiry-legacy-history.json");
 
+  // P3-a: legacy (no live-promotion-gate-v1 marker) LIVE-BTO dispatch fixture. A faithful pre-P3a
+  // live BTO that placed an order WITHOUT the gate. Replaying it under the current impl must take
+  // the v=DEFAULT_VERSION branch (gate skipped) — proving in-flight pre-P3a live executions stay
+  // deterministic.
+  private static final String LIVE_PROMOTION_FIXTURE_RESOURCE =
+      "temporal/replay/copytrade-signal-pre-p3a-live-dispatch-legacy-history.json";
+  private static final Path LIVE_PROMOTION_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "copytrade-signal-pre-p3a-live-dispatch-legacy-history.json");
+
   private static final String CORE_QUEUE = "orchestrator-core";
   private static final String LEGACY_EMULATOR_WORKFLOW_ID = "legacy-pre-111-emulator";
   private static final String BREACH_ABORT_EMULATOR_WORKFLOW_ID = "legacy-pre-274-breach-emulator";
   private static final String TTL_EXPIRY_EMULATOR_WORKFLOW_ID = "legacy-pre-165-ttl-emulator";
+  private static final String LIVE_PROMOTION_EMULATOR_WORKFLOW_ID = "legacy-pre-p3a-live-emulator";
 
   /**
    * Pins the version-marker constant name so a rename in {@link CopytradeSignalWorkflowImpl} fails
@@ -146,6 +158,22 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
     Field marker = CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_STC_RUNNING_GUARD");
     marker.setAccessible(true);
     assertThat((String) marker.get(null)).isEqualTo("stc-running-guard-v1");
+  }
+
+  /**
+   * P3-a: pins the live-promotion-gate version marker. The LIVE-only dispatch gate in {@code
+   * handleBto} is fenced behind {@code Workflow.getVersion(VERSION_LIVE_PROMOTION_GATE, DEFAULT,
+   * 1)} so pre-P3a in-flight live-BTO histories (recorded with NO {@code live-promotion-gate-v1}
+   * marker) replay through the v=DEFAULT_VERSION branch and skip the gate — byte-identical to their
+   * recorded command stream. Renaming the literal would silently re-version live executions; this
+   * test fails loudly on that. Mirrors {@link #versionStcRunningGuardConstantNameIsStable}.
+   */
+  @Test
+  void versionLivePromotionGateConstantNameIsStable() throws Exception {
+    Field marker =
+        CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_LIVE_PROMOTION_GATE");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("live-promotion-gate-v1");
   }
 
   /**
@@ -217,6 +245,37 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
 
     WorkflowReplayer.replayWorkflowExecutionFromResource(
         TTL_EXPIRY_FIXTURE_RESOURCE, CopytradeSignalWorkflowImpl.class);
+  }
+
+  /**
+   * P3-a: replays a pre-P3a LIVE-BTO dispatch history against the current impl. The recorded
+   * history (broker_target=alpaca-live) carries NO {@code live-promotion-gate-v1} marker, so {@code
+   * getVersion(VERSION_LIVE_PROMOTION_GATE, DEFAULT, 1)} returns {@code DEFAULT_VERSION} during
+   * replay and the current impl SKIPS the live-promotion gate entirely — no {@code
+   * checkLivePromotion} verify activity is scheduled and no {@code LivePromotionMissing} audit is
+   * emitted. The recorded command stream (the legacy entry → placeOrder → OrderSubmitted → TTL
+   * cancel → expire sequence) must replay byte-clean. Pins the in-flight pre-P3a live-dispatch
+   * replay determinism the phase calls out.
+   *
+   * <p>Fixture provenance: the {@link LegacyLiveBtoEmulatorWorkflowImpl} mirrors the pre-P3a
+   * fully-legacy ({@code v=DEFAULT_VERSION} for ALL the pre-existing gates) live-BTO TTL-expiry
+   * command order — it records NO version markers at all. The current impl, replaying a marker-less
+   * history, takes the v=DEFAULT_VERSION branch at every {@code getVersion} call (incl. the new
+   * live-promotion gate), so the gate is skipped and the legacy path reproduces exactly.
+   */
+  @Test
+  void legacyPreP3aLiveDispatchHistoryReplaysAgainstCurrentImplWithoutNonDeterminism()
+      throws Exception {
+    assertThat(getClass().getClassLoader().getResource(LIVE_PROMOTION_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. Regenerate with"
+                + " `mvn -pl services/orchestrator test -Dgenerate.legacy.fixture=true"
+                + " -Dtest=CopytradeSignalWorkflowImplLegacyReplayTest#regenerateLiveDispatchFixture`",
+            LIVE_PROMOTION_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    WorkflowReplayer.replayWorkflowExecutionFromResource(
+        LIVE_PROMOTION_FIXTURE_RESOURCE, CopytradeSignalWorkflowImpl.class);
   }
 
   // ---------------------------------------------------------------------------
@@ -421,6 +480,69 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
     Files.writeString(TTL_EXPIRY_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
   }
 
+  /**
+   * P3-a: one-shot generator for the pre-P3a LIVE-BTO dispatch fixture. Disabled by default; run
+   * via {@code -Dgenerate.legacy.fixture=true}. The {@link LegacyLiveBtoEmulatorWorkflowImpl}
+   * mirrors the pre-P3a fully-legacy LIVE-BTO TTL-expiry command order on a CANCELLED cancel result
+   * — identical activity sequence to the {@link LegacyTtlExpiryEmulatorWorkflowImpl} but with an
+   * {@code alpaca-live} broker_target (so exec routes to {@code broker-alpaca-live}). Records NO
+   * version markers — crucially NO {@code live-promotion-gate-v1} — so the current impl, replaying
+   * the marker-less history, takes the v=DEFAULT_VERSION branch at the live-promotion gate and
+   * skips it.
+   */
+  @Test
+  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
+  void regenerateLiveDispatchFixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(LegacyLiveBtoEmulatorWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      StrategyActivities strategy = Mockito.mock(StrategyActivities.class);
+      LegacyRiskActivities legacyRisk = Mockito.mock(LegacyRiskActivities.class);
+      LegacyExecActivities legacyExec = Mockito.mock(LegacyExecActivities.class);
+      LegacyContractActivities legacyContract = Mockito.mock(LegacyContractActivities.class);
+
+      StrategyConfig cfg = legacyLiveStrategyConfig();
+      cfg.setPendingTtlPaperSecs(1L); // short TTL so the await expires quickly under test time-skip
+      when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+      when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+      when(legacyRisk.checkEntry(any(), any())).thenReturn(RiskDecision.approved());
+      when(legacyContract.resolve(any())).thenReturn(LEGACY_OCC);
+      when(legacyExec.placeOrder(any())).thenReturn(submitted("intent-K", "brk-1"));
+      when(legacyExec.cancelOrder(any())).thenReturn(cancelled("intent-K", "brk-1"));
+
+      worker.registerActivitiesImplementations(audit, strategy, legacyRisk, legacyContract);
+      // Live exec activities route to broker-alpaca-live (ExecActivitiesFactory.forTarget) —
+      // register them on that queue, otherwise placeOrder blocks forever.
+      Worker brokerWorker = env.newWorker("broker-alpaca-live");
+      brokerWorker.registerActivitiesImplementations(legacyExec);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      CopytradeSignalWorkflow wf =
+          client.newWorkflowStub(
+              CopytradeSignalWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(LIVE_PROMOTION_EMULATOR_WORKFLOW_ID)
+                  .build());
+      // No onFill / no breach: the TTL await expires (test env skips time) and the legacy
+      // cancel-then-expire sequence is recorded.
+      wf.process(btoPayload());
+
+      json = client.fetchHistory(LIVE_PROMOTION_EMULATOR_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
+    Files.createDirectories(LIVE_PROMOTION_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(LIVE_PROMOTION_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
@@ -462,6 +584,19 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
     // pre-#111 history has it null/false — and even if set, the legacy emulator doesn't call
     // assertPreTradeCheckRoutable or dispatchPreTradeCheck, mirroring pre-#111 handleBto.
     c.setPreTradeCheckEnabled(false);
+    return c;
+  }
+
+  /**
+   * P3-a: a LIVE variant of {@link #legacyStrategyConfig()} (broker_target=alpaca-live, value
+   * "alpaca-live" ends with "-live" so {@code StrategyConfigInvariants.isLive} is true). Used by
+   * the pre-P3a live-dispatch fixture generator so the recorded history routes exec to
+   * broker-alpaca- live and exercises the isLive==true path — but with NO live-promotion-gate-v1
+   * marker, so the current impl skips the gate on replay.
+   */
+  private static StrategyConfig legacyLiveStrategyConfig() {
+    StrategyConfig c = legacyStrategyConfig();
+    c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_LIVE);
     return c;
   }
 
@@ -681,6 +816,78 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
 
       // Legacy v=DEFAULT_VERSION TTL-expiry on CANCELLED: cancel-request, cancel, cancelled,
       // expired.
+      audit.log(auditEvent(payload, "OrderCancelRequested"));
+      OrderIntentResult cancelResult = exec.cancelOrder(intentKey);
+      if (cancelResult.getState() == OrderIntentResult.State.CANCELLED) {
+        audit.log(auditEvent(payload, "OrderCancelled"));
+      } else {
+        audit.log(auditEvent(payload, "OrderCancelFailed"));
+      }
+      audit.log(auditEvent(payload, "EntryExpired"));
+      return payload.getSignalId();
+    }
+
+    @Override
+    public void onFill(FillSignalPayload event) {}
+
+    @Override
+    public void riskBreach(RiskBreachPayload payload) {}
+  }
+
+  /**
+   * P3-a: emulator mirroring the pre-P3a fully-legacy LIVE-BTO TTL-expiry command order. Identical
+   * activity sequence to {@link LegacyTtlExpiryEmulatorWorkflowImpl}, but the exec stub is pinned
+   * to {@code broker-alpaca-live} (matching {@code ExecActivitiesFactory.forTarget("alpaca-live")})
+   * so the recorded history is a faithful live dispatch. Records NO version markers — crucially NO
+   * {@code live-promotion-gate-v1} — so replaying it under {@link CopytradeSignalWorkflowImpl}
+   * returns {@code DEFAULT_VERSION} at the live-promotion gate and skips it. Implements {@link
+   * CopytradeSignalWorkflow} so the recorded {@code workflowType.name} matches what {@link
+   * WorkflowReplayer} registers.
+   *
+   * <p>Activity sequence: {@code Log(SignalReceived)} -> {@code strategy.get} -> 2-arg {@code
+   * CheckEntry} (approved) -> {@code contract.resolve} -> {@code capitalForStrategy} -> {@code
+   * Log(SignalAccepted)} -> {@code placeOrder} -> {@code Log(OrderSubmitted)} -> [TTL await
+   * expires] -> {@code Log(OrderCancelRequested)} -> {@code cancelOrder} (CANCELLED) -> {@code
+   * Log(OrderCancelled)} -> {@code Log(EntryExpired)} -> return. The new gate sits between
+   * SignalAccepted and placeOrder; its absence from this sequence is the property under test.
+   */
+  public static class LegacyLiveBtoEmulatorWorkflowImpl implements CopytradeSignalWorkflow {
+    private static final ActivityOptions OPTS =
+        ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
+    private static final ActivityOptions EXEC_OPTS =
+        ActivityOptions.newBuilder()
+            .setTaskQueue("broker-alpaca-live")
+            .setStartToCloseTimeout(Duration.ofSeconds(10))
+            .build();
+    private final AuditActivities audit = Workflow.newActivityStub(AuditActivities.class, OPTS);
+    private final StrategyActivities strategy =
+        Workflow.newActivityStub(StrategyActivities.class, OPTS);
+    private final LegacyRiskActivities risk =
+        Workflow.newActivityStub(LegacyRiskActivities.class, OPTS);
+    private final LegacyContractActivities contract =
+        Workflow.newActivityStub(LegacyContractActivities.class, OPTS);
+    private final LegacyExecActivities exec =
+        Workflow.newActivityStub(LegacyExecActivities.class, EXEC_OPTS);
+
+    @Override
+    public String process(CopytradeSignalPayload payload) {
+      audit.log(auditEvent(payload, "SignalReceived"));
+      StrategyConfig cfg = strategy.get(payload.getTenantId(), payload.getStrategyId());
+      RiskDecision decision = risk.checkEntry(payload, cfg);
+      if (!decision.allowed()) {
+        audit.log(auditEvent(payload, "SignalRejected"));
+        return payload.getSignalId();
+      }
+      contract.resolve(ContractResolveInput.from(payload));
+      strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
+      audit.log(auditEvent(payload, "SignalAccepted"));
+      String intentKey = Workflow.getInfo().getWorkflowId() + ":entry";
+      exec.placeOrder(intent(payload, cfg, intentKey));
+      audit.log(auditEvent(payload, "OrderSubmitted"));
+
+      long ttlSecs = cfg.getPendingTtlPaperSecs() != null ? cfg.getPendingTtlPaperSecs() : 90L;
+      Workflow.await(Duration.ofSeconds(ttlSecs), () -> false); // never fills -> TTL expiry path.
+
       audit.log(auditEvent(payload, "OrderCancelRequested"));
       OrderIntentResult cancelResult = exec.cancelOrder(intentKey);
       if (cancelResult.getState() == OrderIntentResult.State.CANCELLED) {
