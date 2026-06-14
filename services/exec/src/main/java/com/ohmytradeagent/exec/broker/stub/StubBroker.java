@@ -40,7 +40,9 @@ public class StubBroker implements OptionsBroker {
     String brokerOrderId = "stub-" + request.clientOrderId();
     BrokerOrderStatus prior =
         statusByBrokerOrderId.putIfAbsent(brokerOrderId, BrokerOrderStatus.OPEN);
-    return new PlaceOrderResponse(brokerOrderId, prior != null);
+    return prior != null
+        ? PlaceOrderResponse.alreadyExisted(brokerOrderId)
+        : PlaceOrderResponse.placed(brokerOrderId);
   }
 
   @Override

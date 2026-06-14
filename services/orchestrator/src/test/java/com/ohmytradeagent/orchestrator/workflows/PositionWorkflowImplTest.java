@@ -940,6 +940,101 @@ class PositionWorkflowImplTest {
     assertThat(asLong(partialFills.get(0).getSubject().get("qty_filled"))).isEqualTo(5L);
   }
 
+  /**
+   * PLAN-over-exit-422: a partial-exit whose placeOrder returns a BENIGN broker-confirmed
+   * already-flat outcome (state=CANCELLED) must be treated as already-closed — NOT a
+   * PartialExitPlaceFailed page. The workflow emits the visible non-paging PartialExitAlreadyFlat
+   * audit carrying remaining_qty_before, zeroes remainingQty from broker truth, and completes the
+   * run normally (PositionClosed). Because the lot still showed qty (nothing was sold by this STC),
+   * remaining_qty_before>0 — the divergence tripwire (WARN + metric) gated on the SAME branch.
+   */
+  @Test
+  void partialExitBenignAlreadyFlat_emitsAlreadyFlat_zeroesQty_noPlaceFailed() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(alreadyClosedResult());
+
+    PositionWorkflow stub = newStub("pos-over-exit-flat");
+    WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
+
+    stub.partialExit(partialExitRequest("sig-flat", "pos-over-exit-flat", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // The run completes normally (it never FAILED, never wedged in the fill-await of a never-placed
+    // order).
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-over-exit-flat");
+
+    // The benign already-flat audit was emitted with remaining_qty_before = the (unsold) lot qty.
+    AuditEvent alreadyFlat = captureKind("PartialExitAlreadyFlat");
+    assertThat(alreadyFlat.getSubject())
+        .containsEntry("signal_id", "sig-flat")
+        .containsEntry("option_symbol", "NVDA  260516C00140000")
+        .containsEntry("intent_key", "pos-over-exit-flat:exit:sig-flat");
+    // remaining_qty_before>0 → the divergence WARN+metric branch fired (same gate as this value).
+    assertThat(asLong(alreadyFlat.getSubject().get("remaining_qty_before"))).isEqualTo(5L);
+
+    // NOT a failure: no PartialExitPlaceFailed page, and no PartialExitFilled (nothing was sold).
+    assertThat(captureAll("PartialExitPlaceFailed")).isEmpty();
+    assertThat(captureAll("PartialExitFilled")).isEmpty();
+  }
+
+  /**
+   * PLAN-over-exit-422 regression: a genuine non-duplicate 422 (an over-exit signature that the
+   * broker adapter did NOT confirm flat, so it surfaces as a non-retryable placeOrder FAILURE) must
+   * STILL route to PartialExitPlaceFailed — the benign path only fires on a state=CANCELLED RETURN,
+   * never on a thrown failure.
+   */
+  @Test
+  void partialExitGenuine422Failure_stillEmitsPlaceFailed_notAlreadyFlat() throws Exception {
+    when(exec.placeOrder(any()))
+        .thenThrow(
+            ApplicationFailure.newNonRetryableFailure(
+                "Alpaca rejected order (422, non-duplicate): bad request", "InvalidRequestError"));
+
+    PositionWorkflow stub = newStub("pos-genuine-422");
+    WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
+
+    stub.partialExit(partialExitRequest("sig-422", "pos-genuine-422", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Position stays managed at the unchanged qty (the failure path does not zero remainingQty).
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+
+    captureKind("PartialExitPlaceFailed");
+    assertThat(captureAll("PartialExitAlreadyFlat")).isEmpty();
+  }
+
+  /**
+   * PLAN-over-exit-422: a scheduled flatten (EOD here) whose placeOrder returns a BENIGN
+   * broker-confirmed already-flat outcome (state=CANCELLED) sets remainingQty=0 and EXITS the
+   * alive-loop — a flatten on an already-flat lot is satisfied, not a failure. The run completes
+   * normally and emits PartialExitAlreadyFlat (NOT EodForceFlattenFailed).
+   */
+  @Test
+  void flattenBenignAlreadyFlat_zeroesQty_exitsAliveLoop_noFailure() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofSeconds(30));
+    when(exec.placeOrder(any())).thenReturn(alreadyClosedResult());
+
+    PositionWorkflow stub = newStub("pos-flatten-flat");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    // The run completes normally — the flatten exited the alive-loop on broker-confirmed flat
+    // without ever awaiting a fill of a never-placed order.
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-flatten-flat");
+
+    AuditEvent alreadyFlat = captureKind("PartialExitAlreadyFlat");
+    assertThat(asLong(alreadyFlat.getSubject().get("remaining_qty_before"))).isEqualTo(5L);
+    assertThat(captureAll("EodForceFlattenFailed")).isEmpty();
+  }
+
   // ---------- Phase 4: CHANDELIER_TRAIL ----------
 
   @Test
@@ -2589,6 +2684,22 @@ class PositionWorkflowImplTest {
   private OrderIntentResult cancelledResult() {
     OrderIntentResult r = submittedResult();
     r.setState(OrderIntentResult.State.CANCELLED);
+    return r;
+  }
+
+  /**
+   * PLAN-over-exit-422: a placeOrder return for a BENIGN broker-confirmed already-flat over-exit —
+   * state=CANCELLED with a NULL brokerOrderId (no order was created), mirroring what the exec
+   * Activity surfaces after {@code markClosedAlreadyFlat}.
+   */
+  private OrderIntentResult alreadyClosedResult() {
+    OrderIntentResult r = new OrderIntentResult();
+    r.setSchemaVersion(1L);
+    r.setIntentKey("exit-key");
+    r.setBrokerOrderId(null);
+    r.setState(OrderIntentResult.State.CANCELLED);
+    r.setLastError("benign over-exit: broker-confirmed flat");
+    r.setLastStateAt(OffsetDateTime.now());
     return r;
   }
 

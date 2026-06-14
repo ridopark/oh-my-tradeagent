@@ -103,6 +103,27 @@ public class ExecActivitiesImpl implements ExecActivities {
       throw e;
     }
 
+    if (br.alreadyClosed()) {
+      // PLAN-over-exit-422: the SELL/STC was a broker-confirmed over-exit — Alpaca rejected it with
+      // a "position intent mismatch" 422 AND /v2/positions confirmed the OCC was already flat. This
+      // is BENIGN (nothing to sell), NOT a failure: terminalize the journal RECORDED → CANCELLED so
+      // it does not orphan, and DO NOT call rejectionAlerter (that is the exception-path pager only
+      // —
+      // we are on the success branch). The returned OrderIntentResult carries state=CANCELLED /
+      // brokerOrderId=null (via result(row)); the orchestrator zeroes remainingQty and emits the
+      // visible, non-paging PartialExitAlreadyFlat audit.
+      journal.markClosedAlreadyFlat(
+          intent.getIntentKey(), "benign over-exit: broker-confirmed flat");
+      return journal
+          .findByIntentKey(intent.getIntentKey())
+          .map(ExecActivitiesImpl::result)
+          .orElseThrow(
+              () ->
+                  ApplicationFailure.newNonRetryableFailure(
+                      "Journal row missing post-mark: " + intent.getIntentKey(),
+                      "JournalConsistencyError"));
+    }
+
     journal.markSubmittedIfRecorded(intent.getIntentKey(), br.brokerOrderId());
 
     return journal

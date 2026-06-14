@@ -256,6 +256,27 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public boolean markClosedAlreadyFlat(String intentKey, String reason) {
+    // PLAN-over-exit-422: RECORDED → CANCELLED for a broker-confirmed over-exit (the lot was
+    // already
+    // flat, so the STC was rejected before ever reaching SUBMITTED). Guarded on state='RECORDED' so
+    // an at-least-once retry of the placeOrder Activity lands as a silent no-op (updated==0) once
+    // the
+    // first call terminalized the row. last_error carries the benign reason for disambiguation.
+    OffsetDateTime now = OffsetDateTime.now();
+    int updated =
+        dsl.update(TABLE)
+            .set(field("state"), OrderState.CANCELLED.name())
+            .set(field("last_error"), reason)
+            .set(field("last_state_at"), now)
+            .set(field("version"), field("version", Long.class).plus(1))
+            .where(field("intent_key", String.class).eq(intentKey))
+            .and(field("state", String.class).eq(OrderState.RECORDED.name()))
+            .execute();
+    return updated == 1;
+  }
+
+  @Override
   public boolean markCancelledIfSubmitted(String intentKey) {
     // lastError=null: a broker-confirmed cancel carries no error (mirrors markCancelled).
     return markTerminalIfSubmitted(intentKey, OrderState.CANCELLED, null);

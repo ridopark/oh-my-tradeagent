@@ -138,6 +138,25 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // re-drive); registered in AuditEventKinds.ALL_KINDS only. Paged by OrderFailureAlerter (B3).
   private static final String KIND_PARTIAL_EXIT_PLACE_FAILED = "PartialExitPlaceFailed";
 
+  // PLAN-over-exit-422 audit kind: an exit/flatten placeOrder Activity returned a BENIGN
+  // already-closed outcome — the SELL/STC drew Alpaca's "position intent mismatch, inferred:
+  // sell_to_open" 422 AND the broker's /v2/positions CONFIRMED the OCC was already flat (nothing to
+  // sell). The exec Activity terminalized the journal (RECORDED -> CANCELLED) and surfaced
+  // state=CANCELLED; the workflow zeroes remainingQty from broker truth, releases the in-flight
+  // latch, and returns — NO PartialExitPlaceFailed page, NO crash, NO orphan. Carries
+  // remaining_qty_before so a divergence (contracts zeroed without a booked PartialExitFilled) is
+  // visible: when remaining_qty_before>0 the workflow ALSO logs a WARN and increments a metric. NOT
+  // a lifecycle/fill event (P&L-neutral — the lot was closed by an already-booked sibling exit);
+  // registered in AuditEventKinds.ALL_KINDS only and NOT in OrderFailureAlerter's failure kinds, so
+  // it does not page. Distinct from PartialExitPlaceFailed (a genuine failure that DOES page).
+  private static final String KIND_PARTIAL_EXIT_ALREADY_FLAT = "PartialExitAlreadyFlat";
+
+  // PLAN-over-exit-422 metric: counts benign broker-confirmed over-exits whose remaining_qty_before
+  // was >0 (contracts zeroed without a booked fill — a divergence worth alerting on, distinct from
+  // the expected remaining_qty_before==0 trim-after-flat case).
+  private static final String METRIC_OVER_EXIT_FLAT_DIVERGENCE =
+      "position_workflow.over_exit_already_flat.qty_divergence";
+
   // Plan-2A R-AA-3 audit kind: the bounded scheduled-flatten (eod/expiry/chandelier_trail) computed
   // an exit_floor that is UNUSABLE for a bounded limit — exit_floor_abs/exit_floor_pct were
   // null/absent/unresolvable, or the resolved floor sits ABOVE the live bid (a floor that high
@@ -1426,6 +1445,27 @@ public class PositionWorkflowImpl implements PositionWorkflow {
           return;
         }
       }
+      // PLAN-over-exit-422: a BENIGN broker-confirmed already-closed outcome (the SELL/STC drew an
+      // over-exit 422 AND /v2/positions confirmed the lot was flat) surfaces as state=CANCELLED
+      // with
+      // a null brokerOrderId. Treat it as already-closed: drain any in-flight fill, emit the
+      // visible
+      // non-paging PartialExitAlreadyFlat audit (with the divergence WARN+metric when qty was
+      // non-zero), zero remainingQty from broker truth, set the normal close-reason, release the
+      // in-flight latch, and return — never a PartialExitPlaceFailed page, never a wedge in the
+      // fill-await (a never-placed order never fills). Gated under the same B2 version marker so
+      // v=0
+      // histories replay byte-identically: the branch only fires when placeOrder RETURNS CANCELLED,
+      // which a pre-patch exec could never produce, so it is dead on legacy replay; resolving it
+      // here (v>=1 only) keeps the command stream identical for v=0.
+      if (placeFailureGuardVersion >= 1 && placed.getState() == OrderIntentResult.State.CANCELLED) {
+        handleBenignAlreadyFlatExit(req.getSignalId(), intentKey);
+        releaseExitInFlightLatches();
+        if (closeReason == null) {
+          closeReason = "normal_stc";
+        }
+        return;
+      }
       currentInFlightBrokerOrderId = placed.getBrokerOrderId();
 
       boolean filledInTime;
@@ -1621,7 +1661,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // LEGACY: place a MARKET flatten, zero remainingQty at placement SUCCESS, audit kindDone.
       OrderIntent intent = flattenIntent(flattenIntentKey, reason);
       try {
-        exec.placeOrder(intent);
+        OrderIntentResult flattenPlaced = exec.placeOrder(intent);
+        // PLAN-over-exit-422: a benign broker-confirmed already-flat outcome (state=CANCELLED) is
+        // NOT a failure — a flatten on a lot that is already flat is satisfied. Zero remainingQty,
+        // emit PartialExitAlreadyFlat, and exit the alive-loop. Replay-neutral: a pre-patch exec
+        // could never return CANCELLED, so this branch is dead on legacy histories (no new
+        // command).
+        if (flattenPlaced.getState() == OrderIntentResult.State.CANCELLED) {
+          handleBenignAlreadyFlatExit("flatten-" + reason, flattenIntentKey);
+          return remainingQty == 0;
+        }
         long flattened = remainingQty;
         remainingQty = 0;
         auditLog(
@@ -1658,7 +1707,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // run() as a visible workflow failure — an ALLOWED terminal. We do NOT swallow it on v>=1: a
     // silently-swallowed failure plus a re-arm loop would spin forever, and the safety contract is
     // "broker-confirmed flat OR visible failure", never "silent complete".
-    exec.placeOrder(intent);
+    OrderIntentResult flattenPlaced = exec.placeOrder(intent);
+    // PLAN-over-exit-422: a benign broker-confirmed already-flat flatten (state=CANCELLED) zeroes
+    // remainingQty from broker truth and exits the alive-loop — broker-confirmed flat IS the
+    // satisfying terminal, so it is neither a "silent complete" nor a failure. Skip the fill-await
+    // (a never-placed order never fills → wedge).
+    if (flattenPlaced.getState() == OrderIntentResult.State.CANCELLED) {
+      handleBenignAlreadyFlatExit("flatten-" + reason, flattenIntentKey);
+      flattenAwaitingLateFill = false;
+      return remainingQty == 0;
+    }
 
     long ttl = resolveExitFillTtlSecs();
     Workflow.await(Duration.ofSeconds(ttl), () -> lastFillEvent != null);
@@ -2005,6 +2063,51 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       exitSubject.put("option_symbol", input.getContractSymbol());
     }
     auditLog(KIND_PARTIAL_EXIT_FILLED, exitSubject);
+  }
+
+  /**
+   * PLAN-over-exit-422: shared handler for a BENIGN broker-confirmed already-closed exit (the
+   * placeOrder Activity returned state=CANCELLED). DRAINS any in-flight {@code lastFillEvent} FIRST
+   * (so a real fill that landed between placement and this point is booked into realized P&L before
+   * we zero from broker truth), captures {@code remaining_qty_before}, emits the visible non-paging
+   * {@link #KIND_PARTIAL_EXIT_ALREADY_FLAT} audit, and zeroes {@code remainingQty}. When {@code
+   * remaining_qty_before>0} (contracts zeroed without a booked PartialExitFilled — a real
+   * divergence) it ALSO logs a WARN and increments {@link #METRIC_OVER_EXIT_FLAT_DIVERGENCE}. Does
+   * NOT touch the in-flight latches or {@code closeReason} / the alive-loop — the caller owns those
+   * lifecycle transitions (they differ between the partial-exit and flatten sites).
+   */
+  private void handleBenignAlreadyFlatExit(String signalId, String intentKey) {
+    if (lastFillEvent != null) {
+      // Drain a real in-flight fill before zeroing — emitExitFill decrements remainingQty by the
+      // booked fill and emits PartialExitFilled (enters realized P&L).
+      emitExitFill(signalId, lastFillEvent);
+      lastFillEvent = null;
+    }
+    long remainingQtyBefore = remainingQty;
+    auditLog(
+        KIND_PARTIAL_EXIT_ALREADY_FLAT,
+        subject(
+            "signal_id",
+            signalId,
+            "intent_key",
+            intentKey,
+            "option_symbol",
+            input.getContractSymbol(),
+            "remaining_qty_before",
+            remainingQtyBefore));
+    if (remainingQtyBefore > 0) {
+      Workflow.getMetricsScope().counter(METRIC_OVER_EXIT_FLAT_DIVERGENCE).inc(1);
+      Workflow.getLogger(PositionWorkflowImpl.class)
+          .warn(
+              "over-exit already-flat divergence: broker confirmed flat but remaining_qty_before={} "
+                  + "was non-zero (contracts zeroed without a booked PartialExitFilled) signal_id={} "
+                  + "intent_key={} option_symbol={}",
+              remainingQtyBefore,
+              signalId,
+              intentKey,
+              input.getContractSymbol());
+    }
+    remainingQty = 0;
   }
 
   private OrderIntent exitIntent(

@@ -129,6 +129,47 @@ class JooqOrderIntentJournalIT {
   }
 
   @Test
+  void markClosedAlreadyFlat_onRecordedRow_flipsToCancelledSetsLastErrorReturnsTrue() {
+    // PLAN-over-exit-422: a broker-confirmed over-exit terminalizes RECORDED -> CANCELLED with the
+    // benign reason in last_error.
+    journal.upsertIntent(intent("intent-A"));
+
+    boolean updated = journal.markClosedAlreadyFlat("intent-A", "benign over-exit: flat");
+
+    assertThat(updated).isTrue();
+    JournaledOrder row = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(row.state()).isEqualTo(OrderState.CANCELLED);
+    assertThat(row.lastError()).isEqualTo("benign over-exit: flat");
+  }
+
+  @Test
+  void markClosedAlreadyFlat_twice_secondReturnsFalse_idempotent() {
+    journal.upsertIntent(intent("intent-A"));
+    journal.markClosedAlreadyFlat("intent-A", "benign over-exit: flat");
+
+    boolean second = journal.markClosedAlreadyFlat("intent-A", "benign over-exit: flat again");
+
+    assertThat(second).isFalse();
+    // The first reason stands; the no-op retry did not overwrite it.
+    assertThat(journal.findByIntentKey("intent-A").orElseThrow().lastError())
+        .isEqualTo("benign over-exit: flat");
+  }
+
+  @Test
+  void markClosedAlreadyFlat_onSubmittedRow_noOp() {
+    // Guard is state='RECORDED' only — a row that already reached SUBMITTED is not a benign
+    // over-exit and must be left untouched.
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "stub-intent-A");
+
+    boolean updated = journal.markClosedAlreadyFlat("intent-A", "benign over-exit: flat");
+
+    assertThat(updated).isFalse();
+    assertThat(journal.findByIntentKey("intent-A").orElseThrow().state())
+        .isEqualTo(OrderState.SUBMITTED);
+  }
+
+  @Test
   void markFilled_flipsState() {
     // Issue #165: markFilled transitions SUBMITTED → FILLED and records the
     // broker-confirmed fill detail discovered during a cancel-on-filled race.

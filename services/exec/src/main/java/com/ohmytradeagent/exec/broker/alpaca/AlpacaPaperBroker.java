@@ -173,11 +173,11 @@ public class AlpacaPaperBroker implements OptionsBroker {
         throw ApplicationFailure.newNonRetryableFailure(
             "Alpaca placeOrder returned null/empty body", "BrokerProtocolError");
       }
-      return new PlaceOrderResponse(resp.id(), false);
+      return PlaceOrderResponse.placed(resp.id());
     } catch (HttpStatusCodeException e) {
       String existingId = duplicateExistingOrderId(e);
       if (existingId != null) {
-        return new PlaceOrderResponse(existingId, true);
+        return PlaceOrderResponse.alreadyExisted(existingId);
       }
       // A retried placement (at-least-once Activity semantics) can re-POST the same
       // client_order_id; Alpaca answers 422 "client_order_id must be unique" WITHOUT an
@@ -195,8 +195,51 @@ public class AlpacaPaperBroker implements OptionsBroker {
         duplicateCidRethrowCounter.increment();
         throw e;
       }
+      // Over-exit-422 (PLAN-over-exit-422): an STC/SELL that lands AFTER the lot is already flat
+      // draws Alpaca's "position intent mismatch, inferred: sell_to_open" 422. CONFIRM, don't
+      // infer:
+      // we never derive "flat" from the rejection string (a transient insufficient-qty from an
+      // in-flight sibling order, a missed fill, or an external close could carry the same wording
+      // while the broker STILL holds the lot — silently abandoning a live position is the QQQ-725
+      // ride-to-expiry class on real money). Instead we cross-check /v2/positions and treat the 422
+      // as benign already-closed ONLY when the broker itself reports the OCC absent or zero-qty.
+      // Any uncertainty (positions call throws, OR the broker still reports qty>0) FAILS SAFE to
+      // the
+      // existing mapError failure path so the still-managed lot is never dropped. SELL-only
+      // (BUY/BTO
+      // is unaffected by an over-exit).
+      if (!isBuy(request.side()) && isPositionAlreadyFlatSentinel(e)) {
+        List<BrokerPosition> open;
+        try {
+          open = listOpenPositions();
+        } catch (RuntimeException positionsErr) {
+          // Fail-safe: cannot confirm flat → fall through to the failure path (keep the lot
+          // managed).
+          throw mapError(e);
+        }
+        if (isOccFlat(open, alpacaSymbol)) {
+          return PlaceOrderResponse.closedAlreadyFlat();
+        }
+        // Broker still reports qty>0 for this OCC → the 422 was NOT a true over-exit. Fall through.
+      }
       throw mapError(e);
     }
+  }
+
+  /**
+   * Over-exit cross-check: returns true iff {@code /v2/positions} confirms the OCC is flat — i.e.
+   * no LONG option position with qty&gt;0 matches {@code alpacaSymbol} (Alpaca's unpadded OCC form,
+   * the same form {@link #listOpenPositions()} forwards). A present, non-zero-qty position returns
+   * false so the caller falls through to the failure path rather than benignly abandoning a live
+   * lot.
+   */
+  private boolean isOccFlat(List<BrokerPosition> open, String alpacaSymbol) {
+    for (BrokerPosition pos : open) {
+      if (alpacaSymbol.equals(pos.getOptionSymbol()) && pos.getQty() != null && pos.getQty() > 0) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -245,7 +288,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
       return null;
     }
     duplicateCidResolvedCounter.increment();
-    return new PlaceOrderResponse(looked.id(), true);
+    return PlaceOrderResponse.alreadyExisted(looked.id());
   }
 
   /**
@@ -326,6 +369,30 @@ public class AlpacaPaperBroker implements OptionsBroker {
           "BrokerProtocolError");
     }
     return new BrokerFillDetail(resp.filledQty(), resp.filledAvgPrice(), resp.filledAt());
+  }
+
+  /**
+   * Over-exit sentinel: returns true if the 422 body indicates Alpaca rejected the order because
+   * the specified {@code sell_to_close} could not be reconciled with an open long position — the
+   * "position intent mismatch, inferred: sell_to_open" rejection an STC that lands AFTER the lot is
+   * already flat draws. Matches the over-exit signature ONLY: {@code position intent mismatch} OR
+   * {@code inferred: sell_to_open}. Deliberately does NOT match bare {@code insufficient qty} /
+   * {@code short} (those collide with {@code insufficient_buying_power} and would mis-flag a
+   * genuine funding error). This sentinel ONLY GATES the broker-truth cross-check in {@code
+   * placeOrder}; the "flat" decision is made by {@code /v2/positions}, never inferred from this
+   * string.
+   */
+  private boolean isPositionAlreadyFlatSentinel(HttpStatusCodeException e) {
+    if (e.getStatusCode().value() != 422) {
+      return false;
+    }
+    String body = e.getResponseBodyAsString();
+    if (body == null) {
+      return false;
+    }
+    String haystack = body.toLowerCase(Locale.ROOT);
+    return haystack.contains("position intent mismatch")
+        || haystack.contains("inferred: sell_to_open");
   }
 
   /**

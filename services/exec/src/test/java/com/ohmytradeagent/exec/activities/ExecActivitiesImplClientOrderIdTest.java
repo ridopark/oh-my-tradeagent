@@ -70,7 +70,7 @@ class ExecActivitiesImplClientOrderIdTest {
     OrderIntent intent = exitIntent();
     JournaledOrder recorded = recordedRow(EXIT_INTENT_KEY);
     when(journal.findByIntentKey(EXIT_INTENT_KEY)).thenReturn(Optional.of(recorded));
-    when(broker.placeOrder(any())).thenReturn(new PlaceOrderResponse("brk-1", false));
+    when(broker.placeOrder(any())).thenReturn(PlaceOrderResponse.placed("brk-1"));
 
     exec.placeOrder(intent);
 
@@ -155,6 +155,53 @@ class ExecActivitiesImplClientOrderIdTest {
     assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
 
     verify(journal).markPlaceFailed(eq(EXIT_INTENT_KEY), anyString());
+  }
+
+  @Test
+  void placeOrder_brokerAlreadyClosed_terminalizesJournal_noAlert_returnsCancelled() {
+    // PLAN-over-exit-422: the broker confirmed the over-exit was benign (lot already flat). The
+    // activity must terminalize the journal via markClosedAlreadyFlat, NOT mark it SUBMITTED, NOT
+    // page the rejection alerter (that is exception-path only), and return state=CANCELLED with a
+    // null brokerOrderId.
+    OrderIntent intent = exitIntent();
+    when(journal.findByIntentKey(EXIT_INTENT_KEY))
+        .thenReturn(Optional.of(cancelledAlreadyFlatRow(EXIT_INTENT_KEY)));
+    when(broker.placeOrder(any())).thenReturn(PlaceOrderResponse.closedAlreadyFlat());
+
+    var result = exec.placeOrder(intent);
+
+    assertThat(result.getState().value()).isEqualTo("CANCELLED");
+    assertThat(result.getBrokerOrderId()).isNull();
+    verify(journal).markClosedAlreadyFlat(eq(EXIT_INTENT_KEY), anyString());
+    verify(journal, never()).markSubmittedIfRecorded(anyString(), anyString());
+    verify(journal, never()).markPlaceFailed(anyString(), anyString());
+    // Benign success path: the exception-only rejection alerter must NOT fire.
+    verify(webhook, never()).postEmbed(any());
+  }
+
+  private static JournaledOrder cancelledAlreadyFlatRow(String intentKey) {
+    return new JournaledOrder(
+        intentKey,
+        "sig-stc",
+        "dev",
+        "copytrade-v1",
+        "alpaca-paper",
+        ClientOrderId.forIntent(intentKey),
+        "TSLA  260529C00435000",
+        "SELL",
+        25L,
+        new BigDecimal("1.10"),
+        OrderState.CANCELLED,
+        null,
+        OffsetDateTime.parse("2026-05-29T15:31:44Z"),
+        null,
+        OffsetDateTime.parse("2026-05-29T15:31:44Z"),
+        null,
+        "benign over-exit: broker-confirmed flat",
+        null,
+        null,
+        null,
+        1L);
   }
 
   private static final String ENTRY_INTENT_KEY =
