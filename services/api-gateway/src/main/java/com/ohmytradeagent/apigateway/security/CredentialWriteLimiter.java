@@ -69,19 +69,28 @@ public class CredentialWriteLimiter {
    */
   public boolean tryAcquire(String tenant) {
     long now = clock.millis();
-    TenantState s = states.compute(tenant, (k, existing) -> evictIfStale(existing, now));
-    synchronized (s) {
-      if (now < s.lockedUntilMillis) {
-        return false;
-      }
-      long minute = now / 60_000L;
-      if (s.windowMinute != minute) {
-        s.windowMinute = minute;
-        s.windowCount = 0;
-      }
-      s.windowCount++;
-      return s.windowCount <= ratePerMinute;
-    }
+    // All evict + read-modify-write happens inside compute(), which ConcurrentHashMap serializes
+    // per key — so there is no separate lock and no compute-then-lock race. The decision is carried
+    // out via a 1-element holder since compute() must return the (non-null) state.
+    boolean[] allowed = {false};
+    states.compute(
+        tenant,
+        (k, existing) -> {
+          TenantState s = evictIfStale(existing, now);
+          if (now < s.lockedUntilMillis) {
+            allowed[0] = false;
+            return s;
+          }
+          long minute = now / 60_000L;
+          if (s.windowMinute != minute) {
+            s.windowMinute = minute;
+            s.windowCount = 0;
+          }
+          s.windowCount++;
+          allowed[0] = s.windowCount <= ratePerMinute;
+          return s;
+        });
+    return allowed[0];
   }
 
   /**
@@ -92,33 +101,37 @@ public class CredentialWriteLimiter {
    */
   public void recordOutcome(String tenant, BrokerCredentialAuditRequest.Outcome outcome) {
     long now = clock.millis();
-    TenantState s = states.compute(tenant, (k, existing) -> evictIfStale(existing, now));
-    synchronized (s) {
-      switch (outcome) {
-        case SAVED -> {
-          s.failureCount = 0;
-          s.firstFailureMillis = 0L;
-        }
-        case REJECTED_VALIDATION -> {
-          // Slide the failure window: a rejection outside the window starts a fresh streak.
-          if (s.firstFailureMillis == 0L || now - s.firstFailureMillis > lockoutWindowMillis) {
-            s.firstFailureMillis = now;
-            s.failureCount = 1;
-          } else {
-            s.failureCount++;
+    // Evict + mutate inside compute() (per-key serialized by ConcurrentHashMap) — no separate lock.
+    states.compute(
+        tenant,
+        (k, existing) -> {
+          TenantState s = evictIfStale(existing, now);
+          switch (outcome) {
+            case SAVED -> {
+              s.failureCount = 0;
+              s.firstFailureMillis = 0L;
+            }
+            case REJECTED_VALIDATION -> {
+              // Slide the failure window: a rejection outside the window starts a fresh streak.
+              if (s.firstFailureMillis == 0L || now - s.firstFailureMillis > lockoutWindowMillis) {
+                s.firstFailureMillis = now;
+                s.failureCount = 1;
+              } else {
+                s.failureCount++;
+              }
+              if (s.failureCount >= lockoutThreshold) {
+                s.lockedUntilMillis = now + lockoutDurationMillis;
+                s.failureCount = 0;
+                s.firstFailureMillis = 0L;
+              }
+            }
+            default -> {
+              // REJECTED_PERSIST_ERROR / REJECTED_ACCOUNT_MISMATCH / REJECTED_KEK_UNAVAILABLE: a
+              // server-side fault must never lock a tenant out; leave the failure streak untouched.
+            }
           }
-          if (s.failureCount >= lockoutThreshold) {
-            s.lockedUntilMillis = now + lockoutDurationMillis;
-            s.failureCount = 0;
-            s.firstFailureMillis = 0L;
-          }
-        }
-        default -> {
-          // REJECTED_PERSIST_ERROR / REJECTED_ACCOUNT_MISMATCH / REJECTED_KEK_UNAVAILABLE: a
-          // server-side fault must never lock a tenant out; leave the failure streak untouched.
-        }
-      }
-    }
+          return s;
+        });
   }
 
   /**
@@ -141,7 +154,10 @@ public class CredentialWriteLimiter {
     return new TenantState();
   }
 
-  /** Mutable per-tenant state; all mutation is guarded by synchronizing on the instance. */
+  /**
+   * Mutable per-tenant state; mutated only inside {@code states.compute(...)}, which {@link
+   * ConcurrentHashMap} serializes per key — so no additional synchronization is needed.
+   */
   private static final class TenantState {
     private long windowMinute = -1L;
     private int windowCount;
