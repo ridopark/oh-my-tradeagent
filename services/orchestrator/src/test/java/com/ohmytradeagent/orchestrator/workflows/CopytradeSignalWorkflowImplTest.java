@@ -341,6 +341,41 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
+  void liveBtoWithConfigChangedPromotion_refusesOrder() {
+    // P3-b CONFIG_CHANGED: a risk-relevant TenantConfigChanged landed after the approval, so the
+    // verify returns CONFIG_CHANGED. The live BTO is refused — no placeOrder, no PositionWorkflow —
+    // and a LivePromotionMissing audit with reason=config_changed is emitted. The workflow still
+    // returns the signalId (a clean refusal, not a failure).
+    StrategyConfig cfg = liveConfig();
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(auditQuery.checkLivePromotion(anyString(), anyString(), anyString(), any()))
+        .thenReturn(LivePromotionStatus.CONFIG_CHANGED);
+
+    String result = runWorkflow(btoPayload());
+    assertThat(result).isEqualTo("111:0");
+
+    verify(exec, never()).placeOrder(any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+
+    AuditEvent missing = capture("LivePromotionMissing");
+    assertThat(missing.getSubject()).containsEntry("reason", "config_changed");
+  }
+
+  @Test
   void liveBtoWithVerifyError_refusesOrder() {
     // VERIFY_ERROR: the verify failed closed — refused with reason=verify_error.
     StrategyConfig cfg = liveConfig();
