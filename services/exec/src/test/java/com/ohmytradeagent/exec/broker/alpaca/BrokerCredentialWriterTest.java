@@ -103,7 +103,7 @@ class BrokerCredentialWriterTest {
     // The keys authenticate the SAME account the operator declared → save proceeds, write issued.
     enqueueAccount("847309116");
 
-    long version =
+    BrokerCredentialWriter.SaveResult result =
         writer(recordingDsl(1), "alpaca-x")
             .save(
                 "alice",
@@ -116,7 +116,10 @@ class BrokerCredentialWriterTest {
                 0L,
                 "tester");
 
-    assertThat(version).isEqualTo(1L);
+    assertThat(result.version()).isEqualTo(1L);
+    // The non-secret SAVED metadata the audit needs: the active KEK version + verified account.
+    assertThat(result.kekVersion()).isEqualTo(KEK_VERSION);
+    assertThat(result.brokerAccountId()).isEqualTo("847309116");
     // Exactly one SQL write was issued, and it is the upsert into broker_credentials.
     assertThat(executedSql).hasSize(1);
     assertThat(executedSql.get(0).toLowerCase()).contains("broker_credentials");

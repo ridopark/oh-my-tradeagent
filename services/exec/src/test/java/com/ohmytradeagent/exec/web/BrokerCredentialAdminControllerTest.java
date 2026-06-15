@@ -85,7 +85,7 @@ class BrokerCredentialAdminControllerTest {
             eq("acct-1"),
             eq(0L),
             eq("acme")))
-        .thenReturn(7L);
+        .thenReturn(new BrokerCredentialWriter.SaveResult(7L, 1, "acct-1"));
 
     mvc.perform(
             post("/internal/broker-credentials")
@@ -93,7 +93,9 @@ class BrokerCredentialAdminControllerTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(BODY))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$.version").value(7));
+        .andExpect(jsonPath("$.version").value(7))
+        .andExpect(jsonPath("$.kek_version").value(1))
+        .andExpect(jsonPath("$.broker_account_id").value("acct-1"));
 
     verify(writer)
         .save(

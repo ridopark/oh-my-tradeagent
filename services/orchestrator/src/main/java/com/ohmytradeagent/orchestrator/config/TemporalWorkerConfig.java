@@ -16,6 +16,7 @@ import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.activities.WatchlistMirrorActivities;
 import com.ohmytradeagent.orchestrator.workflows.AccountSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
@@ -103,7 +104,13 @@ public class TemporalWorkerConfig {
         // Net-new single-step workflow: mirrors the verbatim daily watchlist to the trade-alert
         // Discord webhook. The signal-source-discord sidecar starts it by the type name
         // "WatchlistMirrorWorkflow" on this same orchestrator-core queue.
-        WatchlistMirrorWorkflowImpl.class);
+        WatchlistMirrorWorkflowImpl.class,
+        // UI-P2-a credential-audit carrier: short-lived workflow that hosts the
+        // (already-registered)
+        // metadata-only BrokerCredentialAuditActivities.record and completes. Started by the
+        // api-gateway /broker-credentials forward; the activity impl is registered below (do NOT
+        // re-register it).
+        BrokerCredentialAuditWorkflowImpl.class);
     worker.registerActivitiesImplementations(
         audit,
         auditQuery,

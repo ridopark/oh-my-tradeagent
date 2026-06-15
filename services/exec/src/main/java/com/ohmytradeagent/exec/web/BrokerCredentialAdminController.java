@@ -66,7 +66,7 @@ public class BrokerCredentialAdminController {
 
     String actor = callerTenantId;
     try {
-      long version =
+      BrokerCredentialWriter.SaveResult result =
           writer.save(
               body.tenantId(),
               body.provider(),
@@ -82,8 +82,10 @@ public class BrokerCredentialAdminController {
           "broker credential write accepted tenant={} provider={} version={}",
           body.tenantId(),
           body.provider(),
-          version);
-      return ResponseEntity.ok(new BrokerCredentialWriteResponse(version));
+          result.version());
+      return ResponseEntity.ok(
+          new BrokerCredentialWriteResponse(
+              result.version(), result.kekVersion(), result.brokerAccountId()));
     } catch (OptimisticLockException e) {
       // Stale version → 409. The writer message may name tenant/provider/version (no key); we do
       // NOT propagate it to the body to keep the response free of any detail.

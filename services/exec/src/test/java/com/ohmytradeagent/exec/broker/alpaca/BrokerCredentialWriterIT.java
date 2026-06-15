@@ -147,23 +147,30 @@ class BrokerCredentialWriterIT {
   void firstWriteInsertsVersionOne() {
     enqueueAccount("847309116");
 
-    long version =
+    BrokerCredentialWriter.SaveResult result =
         writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
 
-    assertThat(version).isEqualTo(1L);
+    assertThat(result.version()).isEqualTo(1L);
     assertThat(versionOf("alice")).isEqualTo(1L);
+    // The widened SaveResult carries the active KEK version and the stubbed /v2/account number.
+    assertThat(result.kekVersion()).isEqualTo(crypto().activeVersion());
+    assertThat(result.brokerAccountId()).isEqualTo("847309116");
   }
 
   @Test
   void secondSaveBumpsVersionAndReEncrypts() {
     enqueueAccount("847309116");
     long v1 =
-        writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+        writer()
+            .save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester")
+            .version();
     byte[] ct1 = ciphertextOf("alice");
 
     enqueueAccount("847309116");
     long v2 =
-        writer().save("alice", PROVIDER, "k2", "s2", baseUrl, "wss://x", "847309116", v1, "tester");
+        writer()
+            .save("alice", PROVIDER, "k2", "s2", baseUrl, "wss://x", "847309116", v1, "tester")
+            .version();
     byte[] ct2 = ciphertextOf("alice");
 
     assertThat(v1).isEqualTo(1L);

@@ -77,9 +77,18 @@ public class BrokerCredentialWriter {
   }
 
   /**
+   * Result of a successful credential write. All three fields are NON-SECRET metadata the UI-P2-a
+   * audit needs to record a complete {@code SAVED} event: the CAS-bumped row {@code version}, the
+   * {@code kekVersion} the row's DEK was wrapped under, and the verified {@code brokerAccountId}
+   * (the {@code /v2/account} number, or the declared account, or {@code null}/blank when the probe
+   * was disabled by a blank declared account). NONE of these is key material.
+   */
+  public record SaveResult(long version, int kekVersion, String brokerAccountId) {}
+
+  /**
    * Validates the supplied broker keys against {@code /v2/account} and, on success, persists them
    * envelope-encrypted into {@code broker_credentials} via a CAS UPSERT, returning the row's new
-   * {@code version}.
+   * {@code version} plus the non-secret {@code kekVersion} and verified {@code brokerAccountId}.
    *
    * @param tenantId tenant the keys belong to
    * @param provider broker provider (e.g. {@code "alpaca"})
@@ -91,12 +100,13 @@ public class BrokerCredentialWriter {
    *     MUST authenticate this account (blank disables the probe, paper/back-compat)
    * @param expectedVersion the stored row version the caller read (0 for a first write)
    * @param actor audit subject recorded in {@code updated_by}
-   * @return the new row {@code version} (1 on first write, prior+1 on update)
+   * @return the {@link SaveResult} (new row {@code version}, active {@code kekVersion}, verified
+   *     {@code brokerAccountId})
    * @throws IllegalStateException on a {@code -live} pod (refuse-by-construction), missing creds, a
    *     paper/live host mismatch, or an account mismatch — in every case NO row is written
    * @throws OptimisticLockException if {@code expectedVersion} does not match the stored version
    */
-  public long save(
+  public SaveResult save(
       String tenantId,
       String provider,
       String apiKeyId,
@@ -118,8 +128,11 @@ public class BrokerCredentialWriter {
     }
 
     // MUST-FIX-6: validate-on-entry BEFORE any DB write. A throw here means the keys are bad
-    // (missing / paper-live mismatch / wrong account) → reject, persist nothing.
-    validateOnEntry(tenantId, apiKeyId, apiSecretKey, baseUrl, wsUrl, declaredAccountId);
+    // (missing / paper-live mismatch / wrong account) → reject, persist nothing. On success it
+    // returns the verified /v2/account number (null when the probe is disabled by a blank declared
+    // account) — a NON-SECRET identifier the SAVED audit reports.
+    String verifiedAccount =
+        validateOnEntry(tenantId, apiKeyId, apiSecretKey, baseUrl, wsUrl, declaredAccountId);
 
     // Always re-encrypt fresh: new DEK + nonces, AAD bound to the row identity (shared formatter so
     // the read path decrypts byte-identically). The writer is the only writer and replaces all
@@ -145,7 +158,13 @@ public class BrokerCredentialWriter {
         provider,
         newVersion,
         actor);
-    return newVersion;
+    // brokerAccountId: the probe-verified account when the probe ran, else the operator-declared
+    // account (so a blank-probe paper write still reports what it claimed). Both are non-secret.
+    String brokerAccountId =
+        verifiedAccount != null
+            ? verifiedAccount
+            : (declaredAccountId == null ? "" : declaredAccountId);
+    return new SaveResult(newVersion, (int) crypto.activeVersion(), brokerAccountId);
   }
 
   /**
@@ -155,7 +174,7 @@ public class BrokerCredentialWriter {
    * AlpacaConfig#buildRestClient}, {@link AlpacaPaperBroker}, and {@link
    * BrokerAccountIdentityVerifier} so write-time validation matches read-time enforcement exactly.
    */
-  private void validateOnEntry(
+  private String validateOnEntry(
       String tenantId,
       String apiKeyId,
       String apiSecretKey,
@@ -170,7 +189,9 @@ public class BrokerCredentialWriter {
     OptionsBroker probe = new AlpacaPaperBroker(restClient, objectMapper, meterRegistry);
 
     try {
-      BrokerAccountIdentityVerifier.verify(
+      // Returns the verified /v2/account number, or null when the probe is disabled (blank declared
+      // account). A NON-SECRET identifier only.
+      return BrokerAccountIdentityVerifier.verify(
           probe, declaredAccountId, "credential save tenant=" + tenantId);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
