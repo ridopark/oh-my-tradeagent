@@ -29,7 +29,11 @@ public record BrokerCredentialForwardRequest(
     @JsonProperty("ws_url") String wsUrl,
     @JsonProperty("declared_account_id") String declaredAccountId,
     @JsonProperty("expected_version") long expectedVersion,
-    @JsonProperty("correlation_id") String correlationId) {
+    // WRITE_ONLY: accepted on the inbound dashboard POST, but NOT serialized when this record is
+    // forwarded to exec — correlation_id is an api-gateway-only concern, so the same record can be
+    // sent straight through without a second exec-shaped copy.
+    @JsonProperty(value = "correlation_id", access = JsonProperty.Access.WRITE_ONLY)
+        String correlationId) {
 
   @Override
   public String toString() {

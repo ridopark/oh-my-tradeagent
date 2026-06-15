@@ -1,6 +1,5 @@
 package com.ohmytradeagent.apigateway.web;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.ohmytradeagent.contract.BrokerCredentialAuditRequest;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflow;
@@ -72,7 +71,12 @@ public class BrokerCredentialController {
   private final int ratePerMinute;
 
   // Per-tenant fixed-window counter: maps tenant -> current minute-window state. ConcurrentHashMap
-  // keeps it lock-light; the window resets when the wall-clock minute bucket advances.
+  // keeps it lock-light; the window resets when the wall-clock minute bucket advances. The stale
+  // Window is replaced in place each minute (no per-minute accumulation), but a tenant key is never
+  // evicted — bounded by the validated ([A-Za-z0-9_-]+) distinct-tenant set, negligible in
+  // practice.
+  // The UI-P2-c limiter replaces this stopgap wholesale (size-capped/TTL-evicting), so no eviction
+  // is added here.
   private final ConcurrentHashMap<String, Window> windows = new ConcurrentHashMap<>();
 
   public BrokerCredentialController(
@@ -154,34 +158,22 @@ public class BrokerCredentialController {
   }
 
   /**
-   * Forwards the credential to exec WITHOUT the {@code correlation_id} field (an api-gateway-only
-   * concern). Status is captured via {@code exchange} so a non-2xx response does not throw before
-   * we can map it to the matching audit outcome. A transport-level failure (exec unreachable) maps
-   * to the same coarse persist-error outcome as a 5xx.
+   * Forwards the credential to exec. The inbound {@link BrokerCredentialForwardRequest} is sent
+   * straight through: its {@code correlation_id} is {@code WRITE_ONLY} so Jackson omits it on the
+   * wire (an api-gateway-only concern), and its {@code toString} is redacted so Spring's outbound
+   * message-converter TRACE log can never render the api-key/secret (MF-7) — a raw {@code Map}
+   * whose {@code toString} echoes the secret would leak it. Status is captured via {@code exchange}
+   * so a non-2xx response does not throw before we can map it to the matching audit outcome. A
+   * transport-level failure (exec unreachable) maps to the same coarse persist-error outcome as a
+   * 5xx.
    */
   private ExecOutcome forwardToExec(String tenant, BrokerCredentialForwardRequest body) {
-    // Forward as a typed, REDACTED-toString record (NOT a raw Map): Spring's outbound message
-    // converter TRACE-logs the body via toString, so a Map (whose toString echoes the secret) would
-    // leak it (MF-7). Jackson still serializes the snake_case fields for the wire. correlation_id
-    // is
-    // deliberately omitted — it is an api-gateway-only concern.
-    ExecCredentialBody execBody =
-        new ExecCredentialBody(
-            body.tenantId(),
-            body.provider(),
-            body.apiKeyId(),
-            body.apiSecretKey(),
-            body.baseUrl(),
-            body.wsUrl(),
-            body.declaredAccountId(),
-            body.expectedVersion());
-
     try {
       return execRestClient
           .post()
           .uri("/internal/broker-credentials")
           .header("X-Tenant-Id", tenant)
-          .body(execBody)
+          .body(body)
           .exchange(
               (request, response) -> {
                 HttpStatusCode status = response.getStatusCode();
@@ -297,37 +289,4 @@ public class BrokerCredentialController {
       BrokerCredentialAuditRequest.Outcome outcome,
       HttpStatusCode callerStatus,
       BrokerCredentialForwardResponse body) {}
-
-  /**
-   * The exec-shaped forward body (snake_case, NO correlation_id). {@code toString} is REDACTED so
-   * Spring's outbound message-converter TRACE log can never render the api-key/secret (MF-7);
-   * Jackson serializes the {@code @JsonProperty} fields for the wire regardless.
-   */
-  private record ExecCredentialBody(
-      @JsonProperty("tenant_id") String tenantId,
-      @JsonProperty("provider") String provider,
-      @JsonProperty("api_key_id") String apiKeyId,
-      @JsonProperty("api_secret_key") String apiSecretKey,
-      @JsonProperty("base_url") String baseUrl,
-      @JsonProperty("ws_url") String wsUrl,
-      @JsonProperty("declared_account_id") String declaredAccountId,
-      @JsonProperty("expected_version") long expectedVersion) {
-
-    @Override
-    public String toString() {
-      return "ExecCredentialBody[tenantId="
-          + tenantId
-          + ", provider="
-          + provider
-          + ", apiKeyId=***, apiSecretKey=***, baseUrl="
-          + baseUrl
-          + ", wsUrl="
-          + wsUrl
-          + ", declaredAccountId="
-          + declaredAccountId
-          + ", expectedVersion="
-          + expectedVersion
-          + "]";
-    }
-  }
 }
