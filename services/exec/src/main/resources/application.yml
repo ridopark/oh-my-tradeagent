@@ -49,6 +49,14 @@ alpaca:
 # multi-pod deployments would multiply dispatch cost by N until leader
 # election lands.
 exec:
+  # P6-c dark credential-write endpoint auth. Only CONSUMED when broker.creds.source=db (the
+  # ExecAdminTokenFilter + BrokerCredentialAdminController beans are gated on it AND an alpaca-*
+  # impl), so on a homelab pod (broker.creds.source defaults to env) this key is inert and the
+  # endpoint does not exist. The insecure default is for local dev only; under the `prod` profile a
+  # pod that boots with this default crashloops (fail-fast in ExecAdminTokenFilter), mirroring the
+  # BFF shared token.
+  admin:
+    service-token: ${EXEC_ADMIN_SHARED_TOKEN:dev-admin-token}
   fill-listener:
     enabled: ${EXEC_FILL_LISTENER_ENABLED:false}
     ws-url: ${EXEC_FILL_LISTENER_WS_URL:wss://paper-api.alpaca.markets/stream}
