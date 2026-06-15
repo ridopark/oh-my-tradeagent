@@ -3,6 +3,7 @@ package com.ohmytradeagent.apigateway.web;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ohmytradeagent.apigateway.config.ExecClientConfig;
+import com.ohmytradeagent.apigateway.security.CredentialWriteLimiter;
 import com.ohmytradeagent.apigateway.security.ServiceTokenFilter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -26,9 +27,21 @@ class BrokerCredentialDarkProofTest {
 
   private final ApplicationContextRunner runner =
       new ApplicationContextRunner()
+          // Spring Boot registers ApplicationConversionService on the real context; this slice
+          // harness does not, so the limiter's @Value ISO-8601 Duration defaults (PT10M/PT15M)
+          // would fail String→Duration conversion. Register it to mirror the production context.
+          .withInitializer(
+              ctx ->
+                  ctx.getBeanFactory()
+                      .setConversionService(
+                          org.springframework.boot.convert.ApplicationConversionService
+                              .getSharedInstance()))
           .withConfiguration(AutoConfigurations.of(RestClientAutoConfiguration.class))
           .withUserConfiguration(
-              ExecClientConfig.class, ServiceTokenFilter.class, BrokerCredentialController.class)
+              ExecClientConfig.class,
+              ServiceTokenFilter.class,
+              CredentialWriteLimiter.class,
+              BrokerCredentialController.class)
           .withUserConfiguration(TestSupportConfig.class)
           .withPropertyValues("exec.base-url=http://exec:8080");
 
@@ -38,6 +51,7 @@ class BrokerCredentialDarkProofTest {
         ctx -> {
           assertThat(ctx).doesNotHaveBean(BrokerCredentialController.class);
           assertThat(ctx).doesNotHaveBean(ServiceTokenFilter.class);
+          assertThat(ctx).doesNotHaveBean(CredentialWriteLimiter.class);
           assertThat(ctx).doesNotHaveBean("execRestClient");
           assertThat(ctx).doesNotHaveBean("brokerCredentialClock");
         });
@@ -51,6 +65,7 @@ class BrokerCredentialDarkProofTest {
             ctx -> {
               assertThat(ctx).hasSingleBean(BrokerCredentialController.class);
               assertThat(ctx).hasSingleBean(ServiceTokenFilter.class);
+              assertThat(ctx).hasSingleBean(CredentialWriteLimiter.class);
               assertThat(ctx).hasBean("execRestClient");
               assertThat(ctx).hasBean("brokerCredentialClock");
             });

@@ -1,5 +1,6 @@
 package com.ohmytradeagent.apigateway.web;
 
+import com.ohmytradeagent.apigateway.security.CredentialWriteLimiter;
 import com.ohmytradeagent.contract.BrokerCredentialAuditRequest;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflow;
@@ -14,11 +15,8 @@ import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -50,9 +48,11 @@ import org.springframework.web.server.ResponseStatusException;
  * payload (the audit request carries only non-secret metadata). The secret rides ONLY the
  * api-gateway→exec HTTP body.
  *
- * <p><b>Rate-limit (UI-P2-a).</b> An in-process per-tenant fixed-window counter caps writes (the
- * exec {@code /v2/account} probe is reachable through this path; bounding attempts prevents it
- * being used as a key-testing oracle or a cost/DoS lever). Over cap → 429, no forward, no audit.
+ * <p><b>Rate-limit + lockout (UI-P2-c).</b> Delegated to {@link CredentialWriteLimiter} (keyed by
+ * tenant only): a per-tenant minute-window cap (the exec {@code /v2/account} probe is reachable
+ * through this path; bounding attempts prevents it being used as a key-testing oracle or a cost/DoS
+ * lever) PLUS a lockout armed by repeated validation rejections. Refused → 429, no forward, no
+ * audit.
  */
 @RestController
 @RequestMapping("/broker-credentials")
@@ -67,30 +67,21 @@ public class BrokerCredentialController {
   private final WorkflowClient workflowClient;
   private final TenantContext ctx;
   private final Clock clock;
+  private final CredentialWriteLimiter limiter;
   private final Counter auditStartFailures;
-  private final int ratePerMinute;
-
-  // Per-tenant fixed-window counter: maps tenant -> current minute-window state. ConcurrentHashMap
-  // keeps it lock-light; the window resets when the wall-clock minute bucket advances. The stale
-  // Window is replaced in place each minute (no per-minute accumulation), but a tenant key is never
-  // evicted — bounded by the validated ([A-Za-z0-9_-]+) distinct-tenant set, negligible in
-  // practice.
-  // The UI-P2-c limiter replaces this stopgap wholesale (size-capped/TTL-evicting), so no eviction
-  // is added here.
-  private final ConcurrentHashMap<String, Window> windows = new ConcurrentHashMap<>();
 
   public BrokerCredentialController(
       RestClient execRestClient,
       WorkflowClient workflowClient,
       TenantContext ctx,
       Clock clock,
-      MeterRegistry meterRegistry,
-      @Value("${broker.credentials.write.rate-per-minute:10}") int ratePerMinute) {
+      CredentialWriteLimiter limiter,
+      MeterRegistry meterRegistry) {
     this.execRestClient = execRestClient;
     this.workflowClient = workflowClient;
     this.ctx = ctx;
     this.clock = clock;
-    this.ratePerMinute = ratePerMinute;
+    this.limiter = limiter;
     this.auditStartFailures =
         Counter.builder("broker_credential_audit_start_failures")
             .description("count of credential-write audit-workflow starts that failed to dispatch")
@@ -109,13 +100,18 @@ public class BrokerCredentialController {
       throw new ResponseStatusException(HttpStatus.FORBIDDEN);
     }
 
-    // (c) rate-limit cap — over cap → 429, no forward, no audit.
-    if (!allow(tenant)) {
+    // (c) rate-limit / lockout — refused → 429, no forward, no audit.
+    if (!limiter.tryAcquire(tenant)) {
       throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS);
     }
 
     // (d) forward to exec, capturing the status without letting a non-2xx throw before mapping.
     ExecOutcome exec = forwardToExec(tenant, body);
+
+    // Feed the outcome back to the limiter (validation rejects may arm a lockout; a SAVED resets
+    // the streak) BEFORE the audit workflow, so the lockout decision is recorded even if the audit
+    // start fails. Keyed by tenant only — no key material crosses into the limiter (MF-7).
+    limiter.recordOutcome(tenant, exec.outcome());
 
     // (e) map exec status → caller response + audit outcome.
     BrokerCredentialAuditRequest.ChangeType changeType =
@@ -261,35 +257,6 @@ public class BrokerCredentialController {
           tenant,
           correlationId,
           e.getClass().getName());
-    }
-  }
-
-  /**
-   * Per-tenant fixed-window rate limiter. Returns true if the write is within the per-minute cap.
-   * The window key is the current epoch-minute; when it advances the count resets. {@code compute}
-   * serializes the read-bump per tenant.
-   */
-  private boolean allow(String tenant) {
-    long minute = clock.millis() / 60_000L;
-    Window w =
-        windows.compute(
-            tenant,
-            (k, existing) -> {
-              if (existing == null || existing.minute != minute) {
-                return new Window(minute);
-              }
-              return existing;
-            });
-    return w.count.incrementAndGet() <= ratePerMinute;
-  }
-
-  /** Mutable per-tenant window: the epoch-minute bucket and the count of writes within it. */
-  private static final class Window {
-    private final long minute;
-    private final AtomicInteger count = new AtomicInteger(0);
-
-    private Window(long minute) {
-      this.minute = minute;
     }
   }
 

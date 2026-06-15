@@ -9,6 +9,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.ohmytradeagent.apigateway.security.CredentialWriteLimiter;
 import com.ohmytradeagent.contract.BrokerCredentialAuditRequest;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflow;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -16,6 +17,7 @@ import io.temporal.client.WorkflowClient;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import okhttp3.mockwebserver.MockResponse;
@@ -78,7 +80,7 @@ class BrokerCredentialControllerTest {
 
     controller =
         new BrokerCredentialController(
-            execRestClient, workflowClient, ctx, fixed, meterRegistry, 10);
+            execRestClient, workflowClient, ctx, fixed, limiter(fixed, 10), meterRegistry);
 
     rootLogger = (Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
     logCapture = new ListAppender<>();
@@ -91,6 +93,12 @@ class BrokerCredentialControllerTest {
   void tearDown() throws IOException {
     rootLogger.detachAppender(logCapture);
     exec.shutdown();
+  }
+
+  private static CredentialWriteLimiter limiter(Clock clock, int ratePerMinute) {
+    // Generous lockout settings so only the rate cap is exercised unless a test drives 422s.
+    return new CredentialWriteLimiter(
+        clock, ratePerMinute, 5, Duration.ofMinutes(10), Duration.ofMinutes(15));
   }
 
   private static HttpServletRequest reqWithTenant(String tenant) {
@@ -242,14 +250,15 @@ class BrokerCredentialControllerTest {
     String deadBaseUrl = dead.url("/").toString().replaceAll("/$", "");
     dead.shutdown();
     RestClient deadClient = RestClient.builder().baseUrl(deadBaseUrl).build();
+    Clock deadClock = Clock.fixed(Instant.parse("2026-06-15T12:00:00Z"), ZoneOffset.UTC);
     BrokerCredentialController unreachable =
         new BrokerCredentialController(
             deadClient,
             workflowClient,
             new TenantContext("dev", "copytrade-v1"),
-            Clock.fixed(Instant.parse("2026-06-15T12:00:00Z"), ZoneOffset.UTC),
-            meterRegistry,
-            10);
+            deadClock,
+            limiter(deadClock, 10),
+            meterRegistry);
 
     try (MockedStatic<WorkflowClient> mocked = Mockito.mockStatic(WorkflowClient.class)) {
       var resp = unreachable.write(reqWithTenant(TENANT), body(TENANT, 0L));
@@ -293,7 +302,8 @@ class BrokerCredentialControllerTest {
     RestClient rc =
         RestClient.builder().baseUrl(exec.url("/").toString().replaceAll("/$", "")).build();
     BrokerCredentialController capped =
-        new BrokerCredentialController(rc, workflowClient, ctx, fixed, meterRegistry, 2);
+        new BrokerCredentialController(
+            rc, workflowClient, ctx, fixed, limiter(fixed, 2), meterRegistry);
 
     enqueueExec(200, "{\"version\":1,\"kek_version\":1,\"broker_account_id\":\"x\"}");
     enqueueExec(200, "{\"version\":2,\"kek_version\":1,\"broker_account_id\":\"x\"}");
@@ -308,6 +318,40 @@ class BrokerCredentialControllerTest {
       // The 429 did NOT forward to exec.
       assertThat(exec.getRequestCount()).isEqualTo(forwardsBefore);
     }
+  }
+
+  @Test
+  void lockedTenant_after422Streak_is429_withoutForwarding() {
+    // Lockout threshold = 3 for this controller; 3 validation rejections arm the lockout, and the
+    // 4th write is refused (429) BEFORE any forward to exec.
+    TenantContext ctx = new TenantContext("dev", "copytrade-v1");
+    Clock fixed = Clock.fixed(Instant.parse("2026-06-15T12:00:00Z"), ZoneOffset.UTC);
+    RestClient rc =
+        RestClient.builder().baseUrl(exec.url("/").toString().replaceAll("/$", "")).build();
+    CredentialWriteLimiter lockingLimiter =
+        new CredentialWriteLimiter(fixed, 1000, 3, Duration.ofMinutes(10), Duration.ofMinutes(15));
+    BrokerCredentialController locking =
+        new BrokerCredentialController(
+            rc, workflowClient, ctx, fixed, lockingLimiter, meterRegistry);
+
+    // Three 422s from exec → three REJECTED_VALIDATION outcomes → lockout armed.
+    enqueueExec(422, "{\"error\":\"credential_rejected\"}");
+    enqueueExec(422, "{\"error\":\"credential_rejected\"}");
+    enqueueExec(422, "{\"error\":\"credential_rejected\"}");
+
+    try (MockedStatic<WorkflowClient> ignored = Mockito.mockStatic(WorkflowClient.class)) {
+      locking.write(reqWithTenant(TENANT), body(TENANT, 0L));
+      locking.write(reqWithTenant(TENANT), body(TENANT, 0L));
+      locking.write(reqWithTenant(TENANT), body(TENANT, 0L));
+      long forwardsBefore = exec.getRequestCount();
+
+      assertThatResponseStatus(
+          () -> locking.write(reqWithTenant(TENANT), body(TENANT, 0L)),
+          HttpStatus.TOO_MANY_REQUESTS);
+      // The locked-out write never reached exec.
+      assertThat(exec.getRequestCount()).isEqualTo(forwardsBefore);
+    }
+    assertNoSecretInLogs();
   }
 
   @Test
