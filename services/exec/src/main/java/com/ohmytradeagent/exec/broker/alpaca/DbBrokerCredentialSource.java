@@ -1,5 +1,6 @@
 package com.ohmytradeagent.exec.broker.alpaca;
 
+import static com.ohmytradeagent.exec.broker.BrokerCredentialSource.unavailable;
 import static org.jooq.impl.DSL.field;
 import static org.jooq.impl.DSL.table;
 
@@ -7,7 +8,6 @@ import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
 import com.ohmytradeagent.exec.broker.BrokerCredentials;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCrypto;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCryptoException;
-import io.temporal.failure.ApplicationFailure;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import java.util.Base64;
 import java.util.Map;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.Record;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
@@ -54,6 +55,21 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
 
   private static final String TABLE = "broker_credentials";
 
+  // Column references declared once and reused by both the projection and the row read, so the two
+  // can't drift in name or type.
+  private static final Field<byte[]> CIPHERTEXT = field("ciphertext", byte[].class);
+  private static final Field<byte[]> IV = field("iv", byte[].class);
+  private static final Field<byte[]> WRAPPED_DEK = field("wrapped_dek", byte[].class);
+  private static final Field<byte[]> DEK_IV = field("dek_iv", byte[].class);
+  private static final Field<Integer> KEK_VERSION = field("kek_version", Integer.class);
+  private static final Field<String> BASE_URL = field("base_url", String.class);
+  private static final Field<String> WS_URL = field("ws_url", String.class);
+  private static final Field<String> EXPECTED_ACCOUNT_ID =
+      field("expected_account_id", String.class);
+  private static final Field<Long> VERSION = field("version", Long.class);
+  private static final Field<String> TENANT_ID = field("tenant_id", String.class);
+  private static final Field<String> PROVIDER = field("provider", String.class);
+
   private final DSLContext dsl;
   private final BrokerCredentialCrypto crypto;
   private final boolean live;
@@ -87,37 +103,32 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
     // One consistent snapshot: a single-row SELECT, all envelope fields read together.
     Record row =
         dsl.select(
-                field("ciphertext", byte[].class),
-                field("iv", byte[].class),
-                field("wrapped_dek", byte[].class),
-                field("dek_iv", byte[].class),
-                field("kek_version", Integer.class),
-                field("base_url", String.class),
-                field("ws_url", String.class),
-                field("expected_account_id", String.class))
+                CIPHERTEXT,
+                IV,
+                WRAPPED_DEK,
+                DEK_IV,
+                KEK_VERSION,
+                BASE_URL,
+                WS_URL,
+                EXPECTED_ACCOUNT_ID)
             .from(table(TABLE))
-            .where(field("tenant_id").eq(tenantId))
-            .and(field("provider").eq(provider))
+            .where(TENANT_ID.eq(tenantId))
+            .and(PROVIDER.eq(provider))
             .fetchOne();
     if (row == null) {
       // A missing row is a deployment/config error, not transient — fail closed, non-retryable.
       throw unavailable("no credential row for tenant=" + tenantId + " provider=" + provider);
     }
 
-    String baseUrl = row.get(field("base_url", String.class));
-    String wsUrl = row.get(field("ws_url", String.class));
-    String expectedAccountId = row.get(field("expected_account_id", String.class));
-    int rowKekVersion = row.get(field("kek_version", Integer.class));
+    String baseUrl = row.get(BASE_URL);
+    String wsUrl = row.get(WS_URL);
+    String expected = row.get(EXPECTED_ACCOUNT_ID) == null ? "" : row.get(EXPECTED_ACCOUNT_ID);
+    int rowKekVersion = row.get(KEK_VERSION);
 
-    String expectedForAad = expectedAccountId == null ? "" : expectedAccountId;
-    byte[] aad = aad(tenantId, provider, expectedForAad, rowKekVersion);
+    byte[] aad = aad(tenantId, provider, expected, rowKekVersion);
     BrokerCredentialCrypto.Envelope env =
         new BrokerCredentialCrypto.Envelope(
-            row.get(field("ciphertext", byte[].class)),
-            row.get(field("iv", byte[].class)),
-            row.get(field("wrapped_dek", byte[].class)),
-            row.get(field("dek_iv", byte[].class)),
-            rowKekVersion);
+            row.get(CIPHERTEXT), row.get(IV), row.get(WRAPPED_DEK), row.get(DEK_IV), rowKekVersion);
 
     byte[][] fields;
     try {
@@ -134,11 +145,7 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
     String apiKeyId = new String(fields[0], StandardCharsets.UTF_8);
     String apiSecretKey = new String(fields[1], StandardCharsets.UTF_8);
     return new BrokerCredentials(
-        apiKeyId,
-        apiSecretKey,
-        baseUrl,
-        wsUrl == null ? "" : wsUrl,
-        expectedAccountId == null ? "" : expectedAccountId);
+        apiKeyId, apiSecretKey, baseUrl, wsUrl == null ? "" : wsUrl, expected);
   }
 
   /**
@@ -151,11 +158,11 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
   @Override
   public String fingerprint(String tenantId, String provider) {
     Long version =
-        dsl.select(field("version", Long.class))
+        dsl.select(VERSION)
             .from(table(TABLE))
-            .where(field("tenant_id").eq(tenantId))
-            .and(field("provider").eq(provider))
-            .fetchOne(field("version", Long.class));
+            .where(TENANT_ID.eq(tenantId))
+            .and(PROVIDER.eq(provider))
+            .fetchOne(VERSION);
     return version == null ? "absent" : Long.toString(version);
   }
 
@@ -190,9 +197,5 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
       // Never include the (decoded or raw) bytes — just the path and the failure kind.
       throw new IllegalStateException("broker KEK file is not valid base64 at " + kekPath);
     }
-  }
-
-  private static ApplicationFailure unavailable(String message) {
-    return ApplicationFailure.newNonRetryableFailure(message, "BrokerCredentialsUnavailable");
   }
 }

@@ -1,5 +1,6 @@
 package com.ohmytradeagent.exec.broker.crypto;
 
+import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
@@ -181,10 +182,8 @@ public final class BrokerCredentialCrypto {
             "packed broker credential blob has trailing bytes");
       }
       return new byte[][] {a, b};
-    } catch (RuntimeException e) {
-      if (e instanceof BrokerCredentialCryptoException bcce) {
-        throw bcce;
-      }
+    } catch (BufferUnderflowException | NegativeArraySizeException | IndexOutOfBoundsException e) {
+      // A truncated blob or a bogus length prefix — fail closed without echoing any bytes.
       throw new BrokerCredentialCryptoException("malformed packed broker credential blob");
     }
   }

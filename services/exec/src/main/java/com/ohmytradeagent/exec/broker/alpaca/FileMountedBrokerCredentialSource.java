@@ -1,9 +1,10 @@
 package com.ohmytradeagent.exec.broker.alpaca;
 
+import static com.ohmytradeagent.exec.broker.BrokerCredentialSource.unavailable;
+
 import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
 import com.ohmytradeagent.exec.broker.BrokerCredentials;
-import io.temporal.failure.ApplicationFailure;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -237,9 +238,5 @@ public class FileMountedBrokerCredentialSource implements BrokerCredentialSource
     if (value.contains("/") || value.contains("..") || value.indexOf('\0') >= 0) {
       throw unavailable("unsafe " + label + " for credential resolution: '" + value + "'");
     }
-  }
-
-  private static ApplicationFailure unavailable(String message) {
-    return ApplicationFailure.newNonRetryableFailure(message, "BrokerCredentialsUnavailable");
   }
 }
