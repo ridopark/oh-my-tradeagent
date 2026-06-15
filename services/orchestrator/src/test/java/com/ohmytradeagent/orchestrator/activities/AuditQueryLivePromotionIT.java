@@ -4,12 +4,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Map;
+import java.util.Set;
 import org.flywaydb.core.Flyway;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -48,6 +51,7 @@ class AuditQueryLivePromotionIT {
   private static Connection adminConn;
   private static Connection runtimeConn;
   private static LivePromotionActivitiesImpl livePromotion;
+  private static AuditActivitiesImpl audit;
   private static AuditQueryActivitiesImpl auditQuery;
 
   @BeforeAll
@@ -73,7 +77,7 @@ class AuditQueryLivePromotionIT {
     ObjectMapper om = new ObjectMapper().registerModule(new JavaTimeModule());
     DSLContext dsl = DSL.using(runtimeConn, SQLDialect.POSTGRES);
     AuditLogChainWriter writer = new AuditLogChainWriter(om);
-    AuditActivitiesImpl audit = new AuditActivitiesImpl(dsl, om, writer, true, event -> {});
+    audit = new AuditActivitiesImpl(dsl, om, writer, true, event -> {});
     livePromotion = new LivePromotionActivitiesImpl(audit);
     auditQuery = new AuditQueryActivitiesImpl(dsl);
   }
@@ -100,6 +104,43 @@ class AuditQueryLivePromotionIT {
     req.setStrategyId(strategy);
     req.setBrokerTarget(brokerTarget);
     livePromotion.approve(req);
+  }
+
+  /**
+   * Seeds one {@code TenantConfigChanged} audit row whose {@code changed_keys} contains exactly
+   * {@code changedKey}, emitted through the SAME {@link AuditActivitiesImpl#log} path the
+   * TenantConfigChangedEmitter uses (so the JSONB subject shape — including the {@code
+   * changed_keys} array — is authoritative). Returns the event_id so the caller can force {@code
+   * occurred_at} via the admin-conn UPDATE idiom. The prior/current maps differ only on {@code
+   * changedKey} so {@code TenantConfigChangedEvents.diffKeys} yields {@code [changedKey]}.
+   */
+  private String seedConfigChanged(String tenant, String strategy, String changedKey) {
+    Map<String, Object> prior = Map.of(changedKey, "old");
+    Map<String, Object> current = Map.of(changedKey, "new");
+    AuditEvent event =
+        TenantConfigChangedEvents.build(
+            tenant,
+            strategy,
+            "operator:test",
+            "configmap-reload",
+            null,
+            null,
+            prior,
+            current,
+            Set.of());
+    audit.log(event);
+    return event.getEventId();
+  }
+
+  private void forceOccurredAt(String eventId, String interval) throws Exception {
+    try (Statement st = adminConn.createStatement()) {
+      st.executeUpdate(
+          "UPDATE audit_log SET occurred_at = now() + interval '"
+              + interval
+              + "' WHERE event_id = '"
+              + eventId
+              + "'");
+    }
   }
 
   @Test
@@ -150,5 +191,87 @@ class AuditQueryLivePromotionIT {
     OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
     assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
         .isEqualTo(LivePromotionStatus.ABSENT);
+  }
+
+  // --- P3-b: config-change invalidation -------------------------------------------------------
+
+  @Test
+  void riskConfigChangedAfterApproval_returnsConfigChanged() throws Exception {
+    // Fresh approval, then a risk-relevant TenantConfigChanged (notional_cap_pct_of_capital_base)
+    // whose occurred_at is AFTER the approval → the risk envelope the approvers signed off on no
+    // longer holds → CONFIG_CHANGED.
+    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    String cfgEventId =
+        seedConfigChanged("dev", "copytrade-v1", "notional_cap_pct_of_capital_base");
+    forceOccurredAt(cfgEventId, "1 hour");
+
+    OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
+    assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
+        .isEqualTo(LivePromotionStatus.CONFIG_CHANGED);
+  }
+
+  @Test
+  void nonRiskConfigChangedAfterApproval_returnsValid() throws Exception {
+    // A config change touching only a NON-risk field (max_slippage_pct is not in the void set) must
+    // not invalidate the approval → VALID.
+    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    String cfgEventId = seedConfigChanged("dev", "copytrade-v1", "max_slippage_pct");
+    forceOccurredAt(cfgEventId, "1 hour");
+
+    OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
+    assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
+        .isEqualTo(LivePromotionStatus.VALID);
+  }
+
+  @Test
+  void riskConfigChangedBeforeApproval_returnsValid() throws Exception {
+    // A risk change that occurred BEFORE the approval is already subsumed by the sign-off (strict
+    // >)
+    // → VALID. Approval is at ~now; force the config change one hour into the PAST.
+    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    String cfgEventId =
+        seedConfigChanged("dev", "copytrade-v1", "notional_cap_pct_of_capital_base");
+    forceOccurredAt(cfgEventId, "-1 hour");
+
+    OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
+    assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
+        .isEqualTo(LivePromotionStatus.VALID);
+  }
+
+  @Test
+  void configChangedOtherTenantOrStrategy_returnsValid() throws Exception {
+    // A risk change scoped to a DIFFERENT (tenant, strategy) must not invalidate this approval.
+    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    String cfgEventId =
+        seedConfigChanged("other", "other-strategy", "notional_cap_pct_of_capital_base");
+    forceOccurredAt(cfgEventId, "1 hour");
+
+    OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
+    assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
+        .isEqualTo(LivePromotionStatus.VALID);
+  }
+
+  @Test
+  void configChangeQueryDbError_returnsVerifyError() throws Exception {
+    // Set up a fresh, valid, non-stale approval so the verify reaches the P3-b 2nd query, then
+    // close
+    // the runtime connection so that 2nd query throws — fail-CLOSED to VERIFY_ERROR, never VALID.
+    seedApproval("dev", "copytrade-v1", "alpaca-live");
+
+    // Use a dedicated runtime connection + DSLContext we can close mid-test without poisoning the
+    // shared one used by the other tests in this class.
+    java.sql.Connection brokenConn =
+        DriverManager.getConnection(
+            postgres.getJdbcUrl(), "orchestrator_runtime", RUNTIME_PASSWORD);
+    brokenConn.setAutoCommit(true);
+    DSLContext brokenDsl = DSL.using(brokenConn, SQLDialect.POSTGRES);
+    AuditQueryActivitiesImpl brokenAuditQuery = new AuditQueryActivitiesImpl(brokenDsl);
+    brokenConn.close();
+
+    OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
+    assertThat(
+            brokenAuditQuery.checkLivePromotion(
+                "dev", "copytrade-v1", "alpaca-live", notStaleSince))
+        .isEqualTo(LivePromotionStatus.VERIFY_ERROR);
   }
 }

@@ -26,6 +26,69 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
 
   private static final Logger log = LoggerFactory.getLogger(AuditQueryActivitiesImpl.class);
 
+  /**
+   * P3-b: the risk-relevant {@code StrategyConfig} JSON field keys whose post-approval change voids
+   * a {@code LivePromotionApproved} sign-off. The CORE set is exactly the P0c-a DANGEROUS +
+   * EXPOSURE classes from {@code StrategyConfigWriter.checkFieldClasses} (the single source of
+   * truth for what counts as a risk-envelope edit):
+   *
+   * <ul>
+   *   <li>DANGEROUS (must-equal-stored): {@code broker_target}, {@code daily_loss_threshold},
+   *       {@code notional_cap_pct_of_capital_base}.
+   *   <li>EXPOSURE (tighten-only): {@code max_contracts}, {@code min_contracts}, {@code
+   *       max_positions}, {@code capital_weight}, {@code max_notional_per_signal}, {@code
+   *       max_daily_notional_deployed}.
+   * </ul>
+   *
+   * <p>risk-manager-suggested additions, verified against {@code
+   * contract/schemas/strategy-config.json} — INCLUDED because each exists as a real schema
+   * property: {@code notional_cap_pct_of_equity} (the deprecated cap alias, schema line ~191),
+   * {@code same_underlying_count}, {@code sector_concentration_cap}, {@code daily_trade_count},
+   * {@code drawdown_velocity_threshold}. None were excluded-because-absent — all five risk-manager
+   * fields are present in the schema. (A non-existent key here would be a silent no-op; a real risk
+   * field missing would be a detection hole, so each was confirmed against the exact snake_case
+   * schema key.)
+   */
+  private static final java.util.Set<String> RISK_RELEVANT_CONFIG_KEYS =
+      java.util.Set.of(
+          // CORE — DANGEROUS (StrategyConfigWriter.checkFieldClasses)
+          "broker_target",
+          "daily_loss_threshold",
+          "notional_cap_pct_of_capital_base",
+          // CORE — EXPOSURE (StrategyConfigWriter.checkFieldClasses)
+          "max_contracts",
+          "min_contracts",
+          "max_positions",
+          "capital_weight",
+          "max_notional_per_signal",
+          "max_daily_notional_deployed",
+          // risk-manager additions (all verified present in strategy-config.json)
+          "notional_cap_pct_of_equity",
+          "same_underlying_count",
+          "sector_concentration_cap",
+          "daily_trade_count",
+          "drawdown_velocity_threshold");
+
+  /**
+   * Renders {@link #RISK_RELEVANT_CONFIG_KEYS} as a Postgres {@code text[]} array literal for
+   * inlining into a plain-SQL {@code jsonb_exists_any(target, text[])} call. The keys are
+   * compile-time code constants (never user input), so inlining is injection-safe; building from
+   * the constant keeps it the single source of truth.
+   */
+  private static String riskKeysSqlArrayLiteral() {
+    StringBuilder sb = new StringBuilder("ARRAY[");
+    boolean first = true;
+    for (String key : RISK_RELEVANT_CONFIG_KEYS) {
+      if (!first) {
+        sb.append(',');
+      }
+      first = false;
+      sb.append('\'').append(key).append('\'');
+    }
+    sb.append("]::text[]");
+    return sb.toString();
+  }
+
   private final DSLContext dsl;
 
   @Autowired
@@ -245,11 +308,24 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
    *       LivePromotionStatus#VERIFY_ERROR}
    *   <li>no matching row → {@link LivePromotionStatus#ABSENT}
    *   <li>{@code occurred_at < notStaleSince} → {@link LivePromotionStatus#STALE}
+   *   <li>a risk-relevant {@code TenantConfigChanged} with {@code occurred_at} strictly after the
+   *       matched approval → {@link LivePromotionStatus#CONFIG_CHANGED} (P3-b)
    *   <li>otherwise → {@link LivePromotionStatus#VALID}
    *   <li>any {@link RuntimeException} → {@link LivePromotionStatus#VERIFY_ERROR} (caught, NOT
    *       rethrown — so the workflow's verify activity does not retry-storm; the refusal is
    *       terminal for the signal)
    * </ul>
+   *
+   * <p>P3-b config-change invalidation: after confirming a fresh (not-stale) approval, this also
+   * checks whether any {@code TenantConfigChanged} touching a {@link #RISK_RELEVANT_CONFIG_KEYS}
+   * key landed AFTER that approval — if so the risk envelope the approvers signed off on no longer
+   * holds and the gate returns {@link LivePromotionStatus#CONFIG_CHANGED}. It inherits this
+   * method's fail-CLOSED posture: the 2nd query runs inside the same try/catch, so any DB error
+   * there → {@link LivePromotionStatus#VERIFY_ERROR}, never VALID. P3-b protects the
+   * configmap-reload path (edit YAML → restart), which the P0c-a {@code StrategyConfigWriter} API
+   * guard does not cover; it complements that guard. NOTE: {@code TenantConfigChangedEmitter} emits
+   * no event on first-ever boot for a (tenant,strategy), so a risk edit folded into a first boot
+   * has no audit row to detect — P3-b detects post-approval changes that emitted an event.
    */
   @Override
   public LivePromotionStatus checkLivePromotion(
@@ -280,9 +356,27 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
       if (ts == null) {
         return LivePromotionStatus.ABSENT;
       }
-      OffsetDateTime occurredAt = OffsetDateTime.ofInstant(ts.toInstant(), ZoneOffset.UTC);
-      if (occurredAt.isBefore(notStaleSince)) {
+      OffsetDateTime approvedAt = OffsetDateTime.ofInstant(ts.toInstant(), ZoneOffset.UTC);
+      if (approvedAt.isBefore(notStaleSince)) {
         return LivePromotionStatus.STALE;
+      }
+      // P3-b: a risk-relevant TenantConfigChanged strictly AFTER the matched approval voids it.
+      // Use the FUNCTION jsonb_exists_any(target, text[]) — NOT the `?|` operator — because jOOQ
+      // plain SQL treats every `?` as a JDBC bind, so `?|` would misparse. jsonb_exists_any is the
+      // exact functional equivalent and contains no `?`. occurred_at > ? is strictly-after.
+      Record cfg =
+          dsl.fetchOne(
+              "SELECT 1 FROM audit_log WHERE tenant_id = ? AND strategy_id = ? "
+                  + "AND kind = 'TenantConfigChanged' AND occurred_at > ? "
+                  + "AND jsonb_exists_any(subject -> 'changed_keys', "
+                  + riskKeysSqlArrayLiteral()
+                  + ") "
+                  + "LIMIT 1",
+              tenantId,
+              strategyId,
+              Timestamp.from(approvedAt.toInstant()));
+      if (cfg != null) {
+        return LivePromotionStatus.CONFIG_CHANGED;
       }
       return LivePromotionStatus.VALID;
     } catch (RuntimeException e) {

@@ -280,6 +280,23 @@ approvers must:
    # do not flip broker_target.
    ```
 
+**P3-b — a risk-envelope edit AFTER sign-off VOIDS the approval.** Once `LivePromotionApproved`
+is recorded, any change to a risk-relevant config field (the P0c-a DANGEROUS/EXPOSURE set —
+`broker_target`, `daily_loss_threshold`, the notional caps, the contract/position/capital caps,
+the portfolio gates) that lands after the approval's `occurred_at` re-opens the gate: the live
+dispatch verify returns `config_changed` and refuses live orders until a fresh
+`POST /promotion/approve` (again two distinct approvers) is recorded. This protects the
+configmap-reload path (edit YAML → restart), which the runtime config-write API guard does not
+cover. The specific changed field(s) are visible in the `TenantConfigChanged` audit rows for that
+(tenant, strategy) after the approval:
+
+```sh
+curl -s 'http://copytrade.homelab.local/audit?tenant=<t>&strategy=<s>&kind=TenantConfigChanged&limit=5' \
+  | jq '.events[] | {occurred_at, changed_keys: .subject.changed_keys}'
+# Any row whose occurred_at is after the LivePromotionApproved occurred_at AND whose
+# changed_keys touches a risk field is what trips config_changed — re-approve to clear it.
+```
+
 Once `LivePromotionApproved` is in the audit log with two distinct IDs, the operator
 flips `broker_target` to `<provider>-live` per the promotion procedure (mirror image of
 Path 2 above). The rollback runbook stays on file as the standing recovery procedure.
