@@ -31,14 +31,25 @@ api-gateway:
   # or the ServiceTokenFilter fails fast at boot.
   service-token: ${API_GATEWAY_SHARED_TOKEN:dev-shared-token}
 
-# UI-P2-a credential-write forward. DARK by default: with write.enabled unset/false NONE of the
-# new beans (controller, exec RestClient, ServiceTokenFilter, Clock) exist and the route 404s.
-# The opt-in is a manual, per-cluster operator action — NO repo manifest sets this true.
+# UI-P2-a/c credential-write forward. DARK by default: with write.enabled unset/false NONE of the
+# new beans (controller, exec RestClient, ServiceTokenFilter, Clock, CredentialWriteLimiter) exist
+# and the route 404s. The opt-in is a manual, per-cluster operator action — NO repo manifest sets
+# this true.
 broker:
   credentials:
     write:
       enabled: ${BROKER_CREDENTIALS_WRITE_ENABLED:false}
+      # UI-P2-c CredentialWriteLimiter (per-tenant, in-process; api-gateway is single-replica).
+      # rate-per-minute: per-tenant minute-window write cap (over cap → 429, no forward).
       rate-per-minute: ${BROKER_CREDENTIALS_WRITE_RATE_PER_MINUTE:10}
+      # lockout-threshold: consecutive REJECTED_VALIDATION (422) results within lockout-window that
+      # arm a lockout. ONLY validation rejects count — a SAVED resets the streak; a persist error
+      # never counts.
+      lockout-threshold: ${BROKER_CREDENTIALS_WRITE_LOCKOUT_THRESHOLD:5}
+      # lockout-window: rolling window the threshold rejections must fall within (ISO-8601 Duration).
+      lockout-window: ${BROKER_CREDENTIALS_WRITE_LOCKOUT_WINDOW:PT10M}
+      # lockout-duration: how long a tenant is refused (429 before forwarding) once locked out.
+      lockout-duration: ${BROKER_CREDENTIALS_WRITE_LOCKOUT_DURATION:PT15M}
 
 # Exec internal base URL the credential forward targets (in-cluster service name).
 exec:

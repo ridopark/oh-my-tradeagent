@@ -9,9 +9,11 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.ohmytradeagent.apigateway.security.CredentialWriteLimiter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.client.WorkflowClient;
 import java.time.Clock;
+import java.time.Duration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -41,14 +43,16 @@ class BrokerCredentialMalformedBodyTest {
   @BeforeEach
   void setUp() {
     // The controller deps are inert here: a malformed body never reaches the handler method.
+    Clock clock = Clock.systemUTC();
     BrokerCredentialController controller =
         new BrokerCredentialController(
             mock(RestClient.class),
             mock(WorkflowClient.class),
             new TenantContext("dev", "copytrade-v1"),
-            Clock.systemUTC(),
-            new SimpleMeterRegistry(),
-            10);
+            clock,
+            new CredentialWriteLimiter(
+                clock, 10, 5, Duration.ofMinutes(10), Duration.ofMinutes(15)),
+            new SimpleMeterRegistry());
     mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())

@@ -109,3 +109,39 @@ spec:
             limits:
               cpu: 1000m
               memory: 768Mi
+---
+# UI-P2-c: restrict who may reach exec's HTTP port (8080). exec serves the dark P6-c
+# `POST /internal/broker-credentials` endpoint (and the actuator) on the default Spring Boot port
+# 8080 — exec sets no `server.port`, so it matches the Service `port: 8080` above. The api-gateway
+# RestClient forwards tenant credentials to `http://exec:8080/internal/broker-credentials`, so this
+# policy admits ingress ONLY from the api-gateway pod, blocking any other namespace pod from
+# probing the credential endpoint (which fronts the broker /v2/account key-test path).
+#
+# Ingress-ONLY by design: exec's Temporal worker talks to Temporal as an EGRESS connection
+# (exec→temporal-frontend:7233), which an Ingress policy does not restrict — so this does NOT
+# break the worker poll loop, fill listener, or any outbound broker call.
+#
+# Enforced ONLY on a cluster running a NetworkPolicy-capable CNI. Stock k3s ships kube-router,
+# which DOES enforce policies here (proven by the tenant-dashboard-bff policy in
+# 58-tenant-dashboard-bff.yaml). kube-router also permits health-probe traffic from the hosting
+# node, so the kubelet liveness/readiness checks on 8080 keep working without an explicit rule.
+# Per the deploy model this file is applied as a whole (deploy.yml globs *-exec-alpaca-paper.yaml);
+# on a cluster where it is not auto-applied it must be applied manually (`kubectl apply -f`).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exec-alpaca-paper-allow-api-gateway-internal
+  namespace: copytrade
+spec:
+  podSelector:
+    matchLabels:
+      app: exec-alpaca-paper
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
