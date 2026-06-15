@@ -1,6 +1,7 @@
 package com.ohmytradeagent.exec.broker.alpaca;
 
 import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
+import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -54,16 +55,19 @@ public class AlpacaAccountIdentityProbe implements ApplicationRunner {
   private final String brokerImpl;
   private final String expectedAccount;
   private final String bootstrapTenant;
+  private final String credsSource;
 
   public AlpacaAccountIdentityProbe(
       BrokerClientRegistry registry,
       @Value("${broker.impl:}") String brokerImpl,
       @Value("${EXPECTED_ALPACA_ACCOUNT_ID:}") String expectedAccount,
-      @Value("${EXEC_BOOTSTRAP_TENANT_ID:dev}") String bootstrapTenant) {
+      @Value("${EXEC_BOOTSTRAP_TENANT_ID:dev}") String bootstrapTenant,
+      @Value("${broker.creds.source:env}") String credsSource) {
     this.registry = registry;
     this.brokerImpl = brokerImpl;
     this.expectedAccount = expectedAccount;
     this.bootstrapTenant = bootstrapTenant;
+    this.credsSource = credsSource;
   }
 
   @Override
@@ -82,7 +86,24 @@ public class AlpacaAccountIdentityProbe implements ApplicationRunner {
     // Warm the registry for the bootstrap tenant. The build runs the mode-coherence check + the P2
     // account-identity assertion (with bounded transient-read retry); a mismatch/unreachable throws
     // out of here and aborts boot (fail closed). A blank expected is a no-op assertion (paper).
-    registry.brokerFor(bootstrapTenant, PROVIDER);
+    try {
+      registry.brokerFor(bootstrapTenant, PROVIDER);
+    } catch (io.temporal.failure.ApplicationFailure e) {
+      // Soft boot ONLY under broker.creds.source=db when the credential is simply not yet written.
+      // db credential rows are written POST-boot via the admin endpoint (the write endpoint only
+      // exists on a running pod), so crashlooping here on a missing bootstrap row is a deadlock.
+      // Resolution is lazy per-request, so continuing boot is safe. Every other failure (mismatch,
+      // unreachable, env/file missing-creds, any non-ApplicationFailure) still aborts boot.
+      if ("db".equals(credsSource) && BrokerCredentialSource.UNAVAILABLE_TYPE.equals(e.getType())) {
+        log.warn(
+            "bootstrap broker credential not yet written under broker.creds.source=db (tenant={});"
+                + " db creds are written post-boot via the admin endpoint and resolved lazily"
+                + " per-request — continuing boot without warm-up",
+            bootstrapTenant);
+        return;
+      }
+      throw e;
+    }
     if (!expectedBlank) {
       log.info(
           "broker account identity verified at boot via registry warm-up (tenant={})",
