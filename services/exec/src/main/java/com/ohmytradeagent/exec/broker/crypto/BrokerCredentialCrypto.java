@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.broker.crypto;
 
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 import java.util.LinkedHashMap;
@@ -99,6 +100,16 @@ public final class BrokerCredentialCrypto {
   }
 
   /**
+   * The KEK version {@link #encrypt} stamps on its {@link Envelope}. The write path binds this same
+   * value into the AAD so write-AAD kek_version == the stored {@code kek_version} column == the
+   * read-AAD kek_version for ANY active version (the AAD is the single source of truth — never a
+   * separately-configured writer field, which could drift on a KEK rotation).
+   */
+  public int activeVersion() {
+    return activeVersion;
+  }
+
+  /**
    * Envelope-encrypts {@code plaintext} under a fresh DEK, binding {@code aad} into both layers.
    */
   public Envelope encrypt(byte[] plaintext, byte[] aad) {
@@ -157,6 +168,18 @@ public final class BrokerCredentialCrypto {
       cipher.updateAAD(aad);
     }
     return cipher.doFinal(input);
+  }
+
+  /**
+   * The row-binding AAD shared by the read path ({@code DbBrokerCredentialSource}) and the write
+   * path ({@code BrokerCredentialWriter}). Binding the ciphertext to {@code tenant || provider ||
+   * expectedAccount || kekVersion} (MUST-FIX-3) means a cross-row/cross-tenant blob swap fails GCM
+   * verification on decrypt. Read and write MUST produce byte-identical AAD, so the formatter lives
+   * here once rather than duplicated per side.
+   */
+  public static byte[] aad(String tenant, String provider, String expectedAccount, int kekVersion) {
+    return (tenant + "|" + provider + "|" + expectedAccount + "|" + kekVersion)
+        .getBytes(StandardCharsets.UTF_8);
   }
 
   /**
