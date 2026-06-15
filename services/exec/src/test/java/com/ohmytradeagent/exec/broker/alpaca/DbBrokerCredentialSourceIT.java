@@ -8,12 +8,8 @@ import static org.jooq.impl.DSL.table;
 import com.ohmytradeagent.exec.broker.BrokerCredentials;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCrypto;
 import io.temporal.failure.ApplicationFailure;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.sql.DriverManager;
-import java.util.Base64;
 import java.util.Map;
 import org.flywaydb.core.Flyway;
 import org.jooq.DSLContext;
@@ -24,7 +20,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
-import org.junit.jupiter.api.io.TempDir;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -52,9 +47,6 @@ class DbBrokerCredentialSourceIT {
   private static DSLContext dsl;
   private static byte[] kekBytes;
 
-  @TempDir static Path kekDir;
-  private static Path kekPath;
-
   @BeforeAll
   static void initDb() throws Exception {
     Flyway.configure()
@@ -69,8 +61,6 @@ class DbBrokerCredentialSourceIT {
 
     kekBytes = new byte[32];
     java.util.Arrays.fill(kekBytes, (byte) 0x42);
-    kekPath = kekDir.resolve("kek.b64");
-    Files.writeString(kekPath, Base64.getEncoder().encodeToString(kekBytes));
   }
 
   @AfterAll
@@ -84,7 +74,7 @@ class DbBrokerCredentialSourceIT {
   }
 
   private DbBrokerCredentialSource source(String brokerImpl) {
-    return new DbBrokerCredentialSource(dsl, kekPath.toString(), KEK_VERSION, brokerImpl);
+    return new DbBrokerCredentialSource(dsl, crypto(), brokerImpl);
   }
 
   private static byte[] aad(
@@ -269,26 +259,6 @@ class DbBrokerCredentialSourceIT {
   @Test
   void fingerprintAbsentForMissingRow() {
     assertThat(source(PAPER).fingerprint("nobody", PROVIDER)).isEqualTo("absent");
-  }
-
-  @Test
-  void missingKekFileFailsClosedAtConstruction() {
-    // MUST-FIX-4: a misconfigured pod with no KEK file must crash loudly at construction, not
-    // limp along serving nothing per-call.
-    assertThatThrownBy(
-            () ->
-                new DbBrokerCredentialSource(
-                    dsl, kekDir.resolve("does-not-exist").toString(), KEK_VERSION, PAPER))
-        .isInstanceOf(IllegalStateException.class);
-  }
-
-  @Test
-  void blankKekFileFailsClosedAtConstruction() throws IOException {
-    Path blank = kekDir.resolve("blank.b64");
-    Files.writeString(blank, "   ");
-    assertThatThrownBy(
-            () -> new DbBrokerCredentialSource(dsl, blank.toString(), KEK_VERSION, PAPER))
-        .isInstanceOf(IllegalStateException.class);
   }
 
   @Test

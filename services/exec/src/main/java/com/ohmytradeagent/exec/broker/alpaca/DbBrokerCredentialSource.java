@@ -8,12 +8,7 @@ import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
 import com.ohmytradeagent.exec.broker.BrokerCredentials;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCrypto;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCryptoException;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Base64;
-import java.util.Map;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record;
@@ -75,17 +70,12 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
   private final boolean live;
 
   public DbBrokerCredentialSource(
-      DSLContext dsl,
-      @Value("${broker.creds.db.kek-path:/etc/broker-kek/kek}") String kekPath,
-      @Value("${broker.creds.db.kek-version:1}") int kekVersion,
-      @Value("${broker.impl:}") String brokerImpl) {
+      DSLContext dsl, BrokerCredentialCrypto crypto, @Value("${broker.impl:}") String brokerImpl) {
     this.dsl = dsl;
     this.live = brokerImpl != null && brokerImpl.endsWith("-live");
-    // MUST-FIX-4: load + validate the KEK at construction so a misconfigured pod fails loudly at
-    // boot instead of limping along and failing every resolve. KISS single active version for
-    // P6-a, but the crypto util keys the map by version so the row's kek_version column is honored.
-    byte[] kek = loadKek(kekPath);
-    this.crypto = new BrokerCredentialCrypto(Map.of(kekVersion, kek), kekVersion);
+    // The crypto bean (KEK loaded + validated once at boot by BrokerCredentialCryptoConfig —
+    // MUST-FIX-4) is shared with the P6-b write path so read + write use the IDENTICAL envelope.
+    this.crypto = crypto;
   }
 
   @Override
@@ -125,7 +115,7 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
     String expected = row.get(EXPECTED_ACCOUNT_ID) == null ? "" : row.get(EXPECTED_ACCOUNT_ID);
     int rowKekVersion = row.get(KEK_VERSION);
 
-    byte[] aad = aad(tenantId, provider, expected, rowKekVersion);
+    byte[] aad = BrokerCredentialCrypto.aad(tenantId, provider, expected, rowKekVersion);
     BrokerCredentialCrypto.Envelope env =
         new BrokerCredentialCrypto.Envelope(
             row.get(CIPHERTEXT), row.get(IV), row.get(WRAPPED_DEK), row.get(DEK_IV), rowKekVersion);
@@ -164,38 +154,5 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
             .and(PROVIDER.eq(provider))
             .fetchOne(VERSION);
     return version == null ? "absent" : Long.toString(version);
-  }
-
-  private static byte[] aad(
-      String tenant, String provider, String expectedAccount, int kekVersion) {
-    return (tenant + "|" + provider + "|" + expectedAccount + "|" + kekVersion)
-        .getBytes(StandardCharsets.UTF_8);
-  }
-
-  /**
-   * Reads the base64-encoded 32-byte KEK from {@code kekPath} and validates it. A missing/blank
-   * file or malformed base64 throws {@link IllegalStateException} at construction (MUST-FIX-4) so
-   * the pod crashloops; the bytes never appear in the message.
-   */
-  private static byte[] loadKek(String kekPath) {
-    Path path = Path.of(kekPath);
-    if (!Files.isRegularFile(path)) {
-      throw new IllegalStateException("broker KEK file not found at " + kekPath);
-    }
-    String b64;
-    try {
-      b64 = Files.readString(path, StandardCharsets.UTF_8).strip();
-    } catch (IOException e) {
-      throw new IllegalStateException("failed reading broker KEK file at " + kekPath, e);
-    }
-    if (b64.isEmpty()) {
-      throw new IllegalStateException("broker KEK file is blank at " + kekPath);
-    }
-    try {
-      return Base64.getDecoder().decode(b64);
-    } catch (IllegalArgumentException e) {
-      // Never include the (decoded or raw) bytes — just the path and the failure kind.
-      throw new IllegalStateException("broker KEK file is not valid base64 at " + kekPath);
-    }
   }
 }
