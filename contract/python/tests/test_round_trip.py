@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from ohmytradeagent_contract.models.account_snapshot_request import AccountSnapshotRequest
 from ohmytradeagent_contract.models.arm_chandelier_payload import ArmChandelierPayload
 from ohmytradeagent_contract.models.audit_event import AuditEvent
 from ohmytradeagent_contract.models.copytrade_signal_payload import (
@@ -181,6 +182,19 @@ def test_subscribe_premium_result_round_trips() -> None:
     # error is an optional field — drop None values to compare against the fixture.
     serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
     assert serialized == original
+
+
+def test_account_snapshot_request_tenant_id_optional_round_trip() -> None:
+    """P4-c-b: AccountSnapshotRequest.tenant_id is optional; present round-trips, absent is fine."""
+    base = {"schema_version": 1, "broker_target": "alpaca-paper"}
+    absent = AccountSnapshotRequest.model_validate(base)
+    assert absent.tenant_id is None
+    with_tenant = AccountSnapshotRequest.model_validate({**base, "tenant_id": "staging_paper"})
+    assert with_tenant.tenant_id == "staging_paper"
+    reloaded = AccountSnapshotRequest.model_validate_json(
+        with_tenant.model_dump_json(by_alias=True, exclude_none=True)
+    )
+    assert reloaded.tenant_id == "staging_paper"
 
 
 def test_pre_trade_check_request_round_trips() -> None:

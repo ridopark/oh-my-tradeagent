@@ -1003,10 +1003,11 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   }
 
   /**
-   * Builds the {@link AccountSnapshotRequest} the workflow dispatches to exec-svc. Equity is
-   * account-level (tenant/strategy-independent), so the request is keyed solely on {@code
-   * broker_target}; {@code correlation_id} is the deterministic {@code signal_id} so audit traces
-   * stitch end-to-end.
+   * Builds the {@link AccountSnapshotRequest} the workflow dispatches to exec-svc. P4-c-b: carries
+   * the payload's {@code tenant_id} so exec resolves THIS tenant's broker and the cap-basis cash
+   * reads the tenant's own brokerage account (under env-fallback creds this is the same single
+   * account, so it is behavior-preserving until per-tenant file creds are active). {@code
+   * correlation_id} is the deterministic {@code signal_id} so audit traces stitch end-to-end.
    */
   private static AccountSnapshotRequest buildAccountSnapshotRequest(
       CopytradeSignalPayload payload, StrategyConfig config) {
@@ -1014,6 +1015,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     r.setSchemaVersion(1L);
     r.setBrokerTarget(
         AccountSnapshotRequest.BrokerTarget.fromValue(config.getBrokerTarget().value()));
+    r.setTenantId(payload.getTenantId());
     r.setCorrelationId(payload.getSignalId());
     return r;
   }

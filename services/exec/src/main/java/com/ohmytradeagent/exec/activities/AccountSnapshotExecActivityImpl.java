@@ -14,13 +14,13 @@ import org.springframework.stereotype.Component;
  * under Temporal Activity retry semantics. The orchestrator's notional-cap gate fails closed on any
  * exception or zero equity, so a broker outage rejects entries rather than allowing them.
  *
- * <p>Equity is account-level (one credential set per exec deployment), so the request carries no
- * tenant/strategy — it is identified solely by the {@code broker_target} that routed the dispatch
- * to this worker's {@code broker-<target>} task queue.
- *
- * <p>P4-a: resolve the broker via {@link BrokerClientRegistry} keyed on {@code (ACCOUNT_LEVEL,
- * provider)}. The request has no tenant, and under the env-fallback source the resolver ignores the
- * tenant key anyway, so behavior is preserved.
+ * <p>P4-c-b: resolve the broker via {@link BrokerClientRegistry} keyed on the request's {@code
+ * tenant_id} so each tenant's cap-basis cash reads its OWN brokerage account. When {@code
+ * tenant_id} is null/blank — the account-level dashboard equity caller, or a legacy request — fall
+ * back to {@link BrokerClientRegistry#ACCOUNT_LEVEL}. Under the env-fallback credential source the
+ * resolver ignores the tenant key, so both paths resolve the same single account and behavior is
+ * preserved until per-tenant file creds are active. This is a READ; the registry's P2
+ * account-identity assertion runs at build time on whichever key resolves.
  */
 @Component
 public class AccountSnapshotExecActivityImpl implements AccountSnapshotActivity {
@@ -33,10 +33,15 @@ public class AccountSnapshotExecActivityImpl implements AccountSnapshotActivity 
 
   @Override
   public AccountSnapshotResult accountSnapshot(AccountSnapshotRequest request) {
+    // Per-tenant resolution: a present tenant_id reads that tenant's own account; a null/blank
+    // tenant_id (dashboard account-level caller / legacy request) falls back to ACCOUNT_LEVEL.
+    // Under env creds both resolve the same single account, so this is behavior-preserving.
+    String tenantId = request.getTenantId();
+    String resolveKey =
+        (tenantId == null || tenantId.isBlank()) ? BrokerClientRegistry.ACCOUNT_LEVEL : tenantId;
     OptionsBroker broker =
         brokerRegistry.brokerFor(
-            BrokerClientRegistry.ACCOUNT_LEVEL,
-            BrokerClientRegistry.providerOf(request.getBrokerTarget().value()));
+            resolveKey, BrokerClientRegistry.providerOf(request.getBrokerTarget().value()));
     AccountSnapshotResult result = new AccountSnapshotResult();
     result.setSchemaVersion(1L);
     // Issue #323: read equity AND cash from a SINGLE broker account fetch (getAccount) rather than
