@@ -24,8 +24,11 @@ export default async function SettingsPage({
 }: {
   searchParams: { saved?: string; error?: string };
 }) {
-  const session = await auth();
-  const status = await getBrokerCredentialStatus();
+  // Independent reads — run them together rather than serializing the BFF fetch behind auth().
+  const [session, status] = await Promise.all([
+    auth(),
+    getBrokerCredentialStatus(),
+  ]);
 
   // Hidden anti-replay/trace token minted per render — emitted into the form and round-tripped as the
   // request's correlation_id. Never derived from or containing any secret.

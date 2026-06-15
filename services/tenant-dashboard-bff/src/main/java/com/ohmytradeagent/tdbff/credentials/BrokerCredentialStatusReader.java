@@ -21,6 +21,9 @@ public class BrokerCredentialStatusReader {
 
   private final DSLContext dsl;
 
+  // Single-broker MVP: bind directly to the alpaca-paper exec DB. OrdersReader routes through
+  // BrokerDataSourceRouter to union a tenant's multiple broker DBs; when a second broker DB lands,
+  // this reader must do the same or it will silently only see alpaca-paper credentials.
   public BrokerCredentialStatusReader(@Qualifier("execAlpacaPaperDsl") DSLContext dsl) {
     this.dsl = dsl;
   }
