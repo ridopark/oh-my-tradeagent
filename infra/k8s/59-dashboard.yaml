@@ -121,11 +121,17 @@ spec:
             # entered in the form flows server-side ONLY — never returned to the browser.
             - name: API_GATEWAY_BASE_URL
               value: http://api-gateway:8082
+            # optional: true keeps the dashboard pod booting while the credential-write feature is
+            # dark (the key only matters when BROKER_CREDENTIALS_WRITE_ENABLED=true and a tenant
+            # submits via /settings). Without this, a missing key is a CreateContainerConfigError that
+            # blocks the whole dashboard rollout. The operator adds the real key (matching
+            # api-gateway's token) at activation — see docs/ops/broker-credential-opt-in.md.
             - name: API_GATEWAY_SHARED_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: API_GATEWAY_SHARED_TOKEN
+                  optional: true
             # Dark-by-default: status panel only until flipped to "true" (and the api-gateway route's
             # own flag is on). Re-applying this manifest reverts to dark.
             - name: BROKER_CREDENTIALS_WRITE_ENABLED
