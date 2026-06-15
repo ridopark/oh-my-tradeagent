@@ -31,8 +31,9 @@ import org.springframework.stereotype.Component;
  * <ul>
  *   <li><b>IDENTITY</b> ({@code tenant_id}, {@code strategy_id}, {@code schema_version}) — must
  *       equal stored.
- *   <li><b>DANGEROUS / hard-block</b> ({@code broker_target}, {@code daily_loss_threshold}, {@code
- *       notional_cap_pct_of_capital_base}) — must equal stored; deferred to P3.
+ *   <li><b>DANGEROUS / hard-block</b> ({@code broker_target}, {@code broker_account_id}, {@code
+ *       daily_loss_threshold}, {@code notional_cap_pct_of_capital_base}) — must equal stored;
+ *       deferred to P3. ({@code broker_account_id} routes real orders to a brokerage account.)
  *   <li><b>EXPOSURE / tighten-only</b> ({@code max_contracts}, {@code min_contracts}, {@code
  *       max_positions}, {@code capital_weight}, {@code max_notional_per_signal}, {@code
  *       max_daily_notional_deployed}) — must not increase vs stored.
@@ -273,6 +274,11 @@ public class StrategyConfigWriter {
     // notional_cap_pct_of_capital_base are the kill-switch disarm vectors — null AND widened are
     // both rejected here because anything other than an exact match changes them.
     requireDangerousUnchanged("broker_target", stored.getBrokerTarget(), next.getBrokerTarget());
+    // P4-c: broker_account_id routes real orders to a specific brokerage account; a runtime change
+    // would re-route live orders to a different account. Same DANGEROUS class as broker_target.
+    // Objects.equals tolerates null==null (absent on both sides → allowed), rejects null→value.
+    requireDangerousUnchanged(
+        "broker_account_id", stored.getBrokerAccountId(), next.getBrokerAccountId());
     requireDangerousUnchanged(
         "daily_loss_threshold", stored.getDailyLossThreshold(), next.getDailyLossThreshold());
     requireDangerousUnchanged(

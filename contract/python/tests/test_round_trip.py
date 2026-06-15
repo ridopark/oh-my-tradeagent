@@ -269,6 +269,19 @@ def test_strategy_config_force_close_fields_round_trip() -> None:
     assert absent.force_close_eod_et is None
 
 
+def test_strategy_config_broker_account_id_round_trip() -> None:
+    """P4-c-a: optional broker_account_id parses, round-trips, and absent is fine."""
+    data = {**_STRATEGY_CONFIG_BASE, "broker_account_id": "847309116"}
+    model = StrategyConfig.model_validate(data)
+    assert model.broker_account_id == "847309116"
+    reloaded = StrategyConfig.model_validate_json(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert reloaded.broker_account_id == "847309116"
+
+    # Absent case (the existing copytrade-v1 fixture) must still validate cleanly.
+    absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
+    assert absent.broker_account_id is None
+
+
 def test_strategy_config_force_close_bad_format_rejected() -> None:
     """Issue #15: HH:MM regex rejects malformed times (no second-component, no 25:00)."""
     for bad in ("15:0", "25:00", "15:60", "1500", "noon"):
