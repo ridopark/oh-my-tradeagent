@@ -32,10 +32,10 @@ import org.springframework.stereotype.Component;
  *
  * <p><b>Fail-closed.</b> A missing directory, a missing/blank required field, or — on a {@code
  * -live} pod — a blank {@code expected-account-id} all THROW out of {@link #resolve}, which
- * propagates out of the registry's {@code computeIfAbsent} so no client is cached and no order is
- * placed against an unverified account. The source NEVER falls back to the env cred set (that would
- * defeat tenant isolation and risk a cross-account order) and NEVER logs or includes secret
- * material in an exception message.
+ * propagates out of the registry's cache build so no client is cached and no order is placed
+ * against an unverified account. The source NEVER falls back to the env cred set (that would defeat
+ * tenant isolation and risk a cross-account order) and NEVER logs or includes secret material in an
+ * exception message.
  *
  * <p><b>Live requires a declared account.</b> Under per-tenant creds a blank {@code
  * expected-account-id} would silently disable the P2 account-identity assertion ({@link
@@ -80,18 +80,24 @@ public class FileMountedBrokerCredentialSource implements BrokerCredentialSource
   @Override
   public BrokerCredentials resolve(String tenantId, String provider) {
     String tenant = resolveTenant(tenantId);
-    Path dir = root.resolve(scopedDirName(tenant, provider));
+    Path dir = scopedDir(tenant, provider);
     if (!Files.isDirectory(dir)) {
       // Missing mount / typo'd tenant: a deployment error, not transient — retrying a missing k8s
       // secret accomplishes nothing. The path (a mount path, never contents) is the only detail.
       throw unavailable(
           "no credential directory for tenant=" + tenant + " provider=" + provider + " at " + dir);
     }
-    String apiKeyId = readRequired(dir, FIELD_API_KEY_ID, tenant, provider);
-    String apiSecretKey = readRequired(dir, FIELD_API_SECRET_KEY, tenant, provider);
-    String baseUrl = readRequired(dir, FIELD_BASE_URL, tenant, provider);
-    String wsUrl = readOptional(dir, FIELD_WS_URL);
-    String expectedAccountId = readOptional(dir, FIELD_EXPECTED_ACCOUNT_ID);
+    // Pin a SINGLE mount generation: a k8s projected Secret swaps the ..data symlink atomically on
+    // rotation, so resolving it to its realpath ONCE and reading all fields from that snapshot
+    // makes
+    // a mid-read swap impossible to observe as a torn old/new key+secret pair. A plain directory
+    // (dev / tests, no ..data) reads straight from the dir.
+    Path snap = currentGeneration(dir);
+    String apiKeyId = readRequired(snap, dir, FIELD_API_KEY_ID, tenant, provider);
+    String apiSecretKey = readRequired(snap, dir, FIELD_API_SECRET_KEY, tenant, provider);
+    String baseUrl = readRequired(snap, dir, FIELD_BASE_URL, tenant, provider);
+    String wsUrl = readOptional(snap, FIELD_WS_URL);
+    String expectedAccountId = readOptional(snap, FIELD_EXPECTED_ACCOUNT_ID);
 
     // MUST-FIX-1 (cross-account foot-gun seal): on a -live pod a blank expected-account-id would
     // silently disable the P2 account-identity assertion (verify() no-ops on blank). A live tenant
@@ -112,6 +118,49 @@ public class FileMountedBrokerCredentialSource implements BrokerCredentialSource
   }
 
   /**
+   * Change-token for the key's mounted credentials: the last-modified time of the current mount
+   * generation (the {@code ..data} snapshot, or the directory itself for a plain dir). A k8s Secret
+   * update swaps {@code ..data} atomically, bumping this; the registry rebuilds the client on the
+   * change. A missing directory returns a distinct {@code "absent"} sentinel so the registry
+   * rebuilds and {@link #resolve} then throws the fail-closed no-directory error. Never reads
+   * secret bytes.
+   */
+  @Override
+  public String fingerprint(String tenantId, String provider) {
+    Path dir = scopedDir(resolveTenant(tenantId), provider);
+    if (!Files.isDirectory(dir)) {
+      return "absent";
+    }
+    Path snap = currentGeneration(dir);
+    try {
+      return Long.toString(Files.getLastModifiedTime(snap).toMillis());
+    } catch (IOException e) {
+      throw new IllegalStateException("failed reading credential mount mtime at " + snap, e);
+    }
+  }
+
+  private Path scopedDir(String tenant, String provider) {
+    return root.resolve(scopedDirName(tenant, provider));
+  }
+
+  /**
+   * Resolves the key's current mount generation: a k8s projected Secret exposes a {@code ..data}
+   * symlink pointing at the live timestamped data dir, so {@code toRealPath} pins one generation
+   * for a consistent multi-field read. A plain directory (no {@code ..data}) is its own generation.
+   */
+  private Path currentGeneration(Path dir) {
+    Path data = dir.resolve("..data");
+    if (!Files.exists(data)) {
+      return dir;
+    }
+    try {
+      return data.toRealPath();
+    } catch (IOException e) {
+      throw new IllegalStateException("failed resolving credential mount generation at " + data, e);
+    }
+  }
+
+  /**
    * Maps the {@link BrokerClientRegistry#ACCOUNT_LEVEL} sentinel to the configured account-level
    * tenant; passes any real tenant through unchanged. An {@code ACCOUNT_LEVEL} request with no
    * configured {@code broker.creds.account-level-tenant} fails closed rather than guessing a
@@ -129,8 +178,9 @@ public class FileMountedBrokerCredentialSource implements BrokerCredentialSource
     return accountLevelTenant;
   }
 
-  private String readRequired(Path dir, String field, String tenant, String provider) {
-    String value = readFile(dir.resolve(field));
+  private String readRequired(
+      Path readBase, Path reportDir, String field, String tenant, String provider) {
+    String value = readFile(readBase.resolve(field));
     if (value == null || value.isEmpty()) {
       throw unavailable(
           "missing/blank required cred field '"
@@ -140,13 +190,13 @@ public class FileMountedBrokerCredentialSource implements BrokerCredentialSource
               + " provider="
               + provider
               + " at "
-              + dir);
+              + reportDir);
     }
     return value;
   }
 
-  private String readOptional(Path dir, String field) {
-    String value = readFile(dir.resolve(field));
+  private String readOptional(Path readBase, String field) {
+    String value = readFile(readBase.resolve(field));
     return value == null ? "" : value;
   }
 

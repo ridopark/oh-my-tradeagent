@@ -6,10 +6,11 @@ package com.ohmytradeagent.exec.broker;
  * Activities, account/pre-trade/recon Activities, the fill poller) resolves its handle through here
  * instead of injecting a single shared {@link OptionsBroker} bean.
  *
- * <p>Implementations cache the built client per key ({@code computeIfAbsent}) so a client is built
- * once per account, never per call. Building runs the P2 account-identity assertion +
- * mode-coherence check fail-closed BEFORE the entry is published — a build failure leaves no cached
- * entry and throws, so no order is placed against an unverified account.
+ * <p>Implementations cache the built client per key (an atomic per-key build) so a client is built
+ * once per account, never per call, and rebuilt only when the resolved credentials change. Building
+ * runs the P2 account-identity assertion + mode-coherence check fail-closed BEFORE the entry is
+ * published — a build failure leaves no cached entry and throws, so no order is placed against an
+ * unverified account.
  */
 public interface BrokerClientRegistry {
 
