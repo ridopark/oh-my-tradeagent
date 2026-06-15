@@ -172,6 +172,52 @@ class FileMountedBrokerCredentialSourceTest {
   }
 
   @Test
+  void fingerprintChangesWhenMountMtimeChanges() throws IOException {
+    writeFull("alice", "alice-key", "alice-secret", "111");
+    var src = source("", PAPER);
+    String fp1 = src.fingerprint("alice", "alpaca");
+
+    // Model a k8s Secret rotation: the projected mount's dir mtime bumps on the atomic ..data swap.
+    Files.setLastModifiedTime(
+        root.resolve("alice-alpaca"), java.nio.file.attribute.FileTime.fromMillis(0));
+    String fp2 = src.fingerprint("alice", "alpaca");
+
+    assertThat(fp2).isNotEqualTo(fp1);
+  }
+
+  @Test
+  void fingerprintIsAbsentSentinelForMissingDirectory() {
+    assertThat(source("", PAPER).fingerprint("nope", "alpaca")).isEqualTo("absent");
+  }
+
+  @Test
+  void readsThroughDataSnapshotWhenPresent() throws IOException {
+    // k8s projects a Secret as <dir>/..data/<field> (with <dir>/<field> symlinks into it). When a
+    // ..data generation dir is present, resolve must read all fields from that single pinned
+    // generation — here the ONLY copies live under ..data, so a successful read proves the routing.
+    Path data = Files.createDirectories(root.resolve("alice-alpaca").resolve("..data"));
+    Files.writeString(data.resolve("api-key-id"), "alice-key");
+    Files.writeString(data.resolve("api-secret-key"), "alice-secret");
+    Files.writeString(data.resolve("base-url"), PAPER_HOST);
+    Files.writeString(data.resolve("expected-account-id"), "111");
+
+    BrokerCredentials c = source("", PAPER).resolve("alice", "alpaca");
+    assertThat(c.apiKeyId()).isEqualTo("alice-key");
+    assertThat(c.expectedAccountId()).isEqualTo("111");
+  }
+
+  @Test
+  void envFallbackSourceFingerprintIsConstant() {
+    // The live-safety proof: the env source inherits the interface default (a constant), so the
+    // registry never rebuilds it — byte-identical order path. Asserts no override leaked in.
+    var env =
+        new EnvFallbackBrokerCredentialSource(new AlpacaProperties(PAPER_HOST, "k", "s"), "", "");
+    assertThat(env.fingerprint("alice", "alpaca"))
+        .isEqualTo(env.fingerprint("bob", "alpaca"))
+        .isEqualTo("static");
+  }
+
+  @Test
   void toStringRedactsCredentialFields() {
     BrokerCredentials c =
         new BrokerCredentials("the-key-id", "the-secret", PAPER_HOST, "wss://x", "123");
