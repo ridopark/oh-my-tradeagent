@@ -84,7 +84,8 @@ public class ExecActivitiesImpl implements ExecActivities {
     OptionsBroker broker =
         brokerRegistry.brokerFor(
             intent.getTenantId(),
-            BrokerClientRegistry.providerOf(intent.getBrokerTarget().value()));
+            BrokerClientRegistry.providerOf(intent.getBrokerTarget().value()),
+            intent.getBrokerAccountId());
     // P1 multi-tenant-credentials: carry tenant_id to the broker boundary, and surface it on the
     // MDC
     // for the duration of the broker call so later phases can resolve per-tenant credentials and

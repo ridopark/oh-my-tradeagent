@@ -24,6 +24,7 @@ from ohmytradeagent_contract.models.copytrade_signal_payload import (
     Right,
 )
 from ohmytradeagent_contract.models.fill_signal_payload import FillSignalPayload
+from ohmytradeagent_contract.models.order_intent import OrderIntent
 from ohmytradeagent_contract.models.partial_exit_request import PartialExitRequest
 from ohmytradeagent_contract.models.position_workflow_input import PositionWorkflowInput
 from ohmytradeagent_contract.models.pre_trade_check_request import (
@@ -182,6 +183,19 @@ def test_subscribe_premium_result_round_trips() -> None:
     # error is an optional field — drop None values to compare against the fixture.
     serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
     assert serialized == original
+
+
+def test_order_intent_broker_account_id_optional_round_trip() -> None:
+    """P4-c-b-2: OrderIntent.broker_account_id is optional; present round-trips, absent is fine."""
+    base = _load("order-intent-bto.json")
+    absent = OrderIntent.model_validate(base)
+    assert absent.broker_account_id is None
+    with_account = OrderIntent.model_validate({**base, "broker_account_id": "PA3FKGPFYPLH"})
+    assert with_account.broker_account_id == "PA3FKGPFYPLH"
+    reloaded = OrderIntent.model_validate_json(
+        with_account.model_dump_json(by_alias=True, exclude_none=True)
+    )
+    assert reloaded.broker_account_id == "PA3FKGPFYPLH"
 
 
 def test_account_snapshot_request_tenant_id_optional_round_trip() -> None:

@@ -23,11 +23,27 @@ public interface BrokerClientRegistry {
   String ACCOUNT_LEVEL = "__account_level__";
 
   /**
-   * Returns the broker for {@code (tenantId, provider)}, building + caching it on first use. Throws
-   * (non-retryably for an unknown provider, fail-closed for a mode/account mismatch) rather than
-   * returning an unverified client.
+   * Returns the broker for {@code (tenantId, provider)}, building + caching it on first use, with
+   * NO config-declared-account cross-check. Used by the account-level reads (snapshot / pre-trade /
+   * reconciliation), the fill poller, and the boot warm-up — none of which carry a config-declared
+   * account. Delegates to the 3-arg form with a {@code null} declared account.
    */
-  OptionsBroker brokerFor(String tenantId, String provider);
+  default OptionsBroker brokerFor(String tenantId, String provider) {
+    return brokerFor(tenantId, provider, null);
+  }
+
+  /**
+   * Returns the broker for {@code (tenantId, provider)}, cross-checking that {@code
+   * declaredAccountId} — the account the dispatching config declares (an OrderIntent's {@code
+   * broker_account_id}) — matches the account the resolved credentials authenticate. The order path
+   * passes the intent's declared account so a typo'd/inconsistent operator setup fails closed
+   * (P4-c-b-2) instead of routing the order to the wrong account. A blank {@code declaredAccountId}
+   * (today's tenants) or a blank authenticated account (paper / env back-compat) disables the
+   * cross-check — mirroring the P2 blank-expected semantics — so the live path is byte-identical.
+   * Throws non-retryably for an unknown provider or an account mismatch rather than returning an
+   * unverified client.
+   */
+  OptionsBroker brokerFor(String tenantId, String provider, String declaredAccountId);
 
   /**
    * Extracts the provider from a {@code broker_target} value: the substring before the first {@code

@@ -8,6 +8,8 @@ import com.ohmytradeagent.exec.broker.OptionsBroker;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.failure.ApplicationFailure;
 import java.util.concurrent.ConcurrentHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.stereotype.Component;
@@ -35,6 +37,8 @@ import org.springframework.web.client.RestClient;
 @ConditionalOnExpression("'${broker.impl:}'.startsWith('alpaca-')")
 public class AlpacaBrokerClientRegistry implements BrokerClientRegistry {
 
+  private static final Logger log = LoggerFactory.getLogger(AlpacaBrokerClientRegistry.class);
+
   /** Provider this registry serves. A non-{@code alpaca} key is a routing bug → non-retryable. */
   private static final String PROVIDER = "alpaca";
 
@@ -60,7 +64,7 @@ public class AlpacaBrokerClientRegistry implements BrokerClientRegistry {
   }
 
   @Override
-  public OptionsBroker brokerFor(String tenantId, String provider) {
+  public OptionsBroker brokerFor(String tenantId, String provider, String declaredAccountId) {
     if (!PROVIDER.equals(provider)) {
       // A non-alpaca provider reaching the alpaca worker is a routing/config bug, not a transient
       // condition — fail non-retryably (mirrors the exec InvalidBrokerTargetError precedent).
@@ -77,10 +81,10 @@ public class AlpacaBrokerClientRegistry implements BrokerClientRegistry {
     // change (constant for the env source → never rebuilds → live path byte-identical). Computed
     // once outside compute so the per-key locked region is just a compare + (rarely) a build.
     String current = source.fingerprint(tenantId, provider);
-    // compute() serializes the compare-or-rebuild per key (no torn (fingerprint, broker) value, no
-    // concurrent double-build). NOTE: unlike computeIfAbsent, compute KEEPS the previous mapping if
-    // the remapping throws — so a failed rebuild must EXPLICITLY evict (return null) rather than
-    // throw, else a stale client would survive a rotation. We stash the failure and rethrow after,
+    // compute() serializes the compare-or-rebuild per key (no torn cache value, no concurrent
+    // double-build). NOTE: unlike computeIfAbsent, compute KEEPS the previous mapping if the
+    // remapping throws — so a failed rebuild must EXPLICITLY evict (return null) rather than throw,
+    // else a stale client would survive a rotation. We stash the failure and rethrow after,
     // preserving the fail-closed contract (no entry cached, next call re-attempts).
     RuntimeException[] failure = {null};
     CachedBroker result =
@@ -96,7 +100,7 @@ public class AlpacaBrokerClientRegistry implements BrokerClientRegistry {
                 // VERIFIED broker; a throw here means the rotated creds failed (wrong account / bad
                 // /
                 // unreachable) → evict so no stale or unverified client is ever published.
-                return new CachedBroker(current, build(k));
+                return build(k, current);
               } catch (RuntimeException e) {
                 failure[0] = e;
                 return null;
@@ -105,7 +109,44 @@ public class AlpacaBrokerClientRegistry implements BrokerClientRegistry {
     if (result == null) {
       throw failure[0];
     }
+    // P4-c-b-2 account cross-check, PER CALL (not per build): the config-declared account
+    // (intent.broker_account_id) must match the account the resolved creds authenticate (already ==
+    // the live /v2/account via the P2 assertion). Done here, after compute, so a read-caller that
+    // warmed the cache cannot skip it. Either side blank disables the check (P2-consistent).
+    assertDeclaredMatchesExpected(declaredAccountId, result.expectedAccountId(), key);
     return result.broker();
+  }
+
+  /**
+   * Fails closed when the config-declared account and the creds-authenticated account both name a
+   * (different) account. Either blank is a no-op: a blank declared (today's tenants) or a blank
+   * authenticated account (paper / env back-compat) disables the cross-check, keeping the live path
+   * byte-identical. A non-blank declared against a blank expected is logged (the operator declared
+   * an account the creds don't assert) but not failed here — that hard-fail belongs at the live
+   * credential source / a boot gate, not mid-order.
+   */
+  private void assertDeclaredMatchesExpected(String declared, String expected, BrokerKey key) {
+    if (declared == null || declared.isBlank()) {
+      return;
+    }
+    if (expected == null || expected.isBlank()) {
+      log.warn(
+          "broker account cross-check skipped for {}: config declares broker_account_id but the"
+              + " resolved credentials assert no account (expected-account-id blank)",
+          key);
+      return;
+    }
+    if (!declared.equals(expected)) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "broker account cross-check FAILED for "
+              + key
+              + ": the dispatching config declares broker_account_id='"
+              + declared
+              + "' but the resolved credentials authenticate account='"
+              + expected
+              + "' — refusing to route the order to the wrong account",
+          "AccountMismatchError");
+    }
   }
 
   /**
@@ -114,7 +155,7 @@ public class AlpacaBrokerClientRegistry implements BrokerClientRegistry {
    * entry cached) and {@code brokerFor} rethrows — fail-closed, no order against an unverified
    * account.
    */
-  private OptionsBroker build(BrokerKey key) {
+  private CachedBroker build(BrokerKey key, String fingerprint) {
     BrokerCredentials creds = source.resolve(key.tenantId(), key.provider());
 
     // Cred presence + mode coherence (extracted verbatim from the pre-P4-a AlpacaConfig). The pod
@@ -141,7 +182,7 @@ public class AlpacaBrokerClientRegistry implements BrokerClientRegistry {
           "interrupted verifying broker account identity for " + key, e);
     }
 
-    return broker;
+    return new CachedBroker(fingerprint, broker, creds.expectedAccountId());
   }
 
   /** Cache key. tenantId is part of the key so P4-b's per-tenant creds get distinct clients. */
@@ -149,8 +190,10 @@ public class AlpacaBrokerClientRegistry implements BrokerClientRegistry {
 
   /**
    * Cache value: the built+verified broker tagged with the credential {@code fingerprint} it was
-   * built from. A later resolution rebuilds when the source's current fingerprint no longer matches
-   * (an operator credential rotation), so the client self-heals without a pod restart.
+   * built from AND the {@code expectedAccountId} the creds authenticate (== the live /v2/account
+   * via the P2 assertion). A later resolution rebuilds when the source's current fingerprint no
+   * longer matches (an operator credential rotation); the cached {@code expectedAccountId} feeds
+   * the P4-c-b-2 per-call account cross-check without re-resolving creds on the hot path.
    */
-  record CachedBroker(String fingerprint, OptionsBroker broker) {}
+  record CachedBroker(String fingerprint, OptionsBroker broker, String expectedAccountId) {}
 }

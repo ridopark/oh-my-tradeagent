@@ -50,6 +50,10 @@ class OrderIntent(BaseModel):
     """
     Routes the activity to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; using them for active routing produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.
     """
+    broker_account_id: constr(min_length=1) | None = None
+    """
+    P4-c-b-2: OPTIONAL. The brokerage account the dispatching strategy config declares (StrategyConfig.broker_account_id). exec cross-checks it against the account the resolved per-tenant credentials AUTHENTICATE — a mismatch (both non-blank) fails closed (AccountMismatchError) so a typo'd/inconsistent operator setup can't route an order to the wrong account. A blank value (today's tenants) disables the cross-check. NOT persisted to order_intent_journal — it is a pre-broker in-memory routing guard, not part of the order record.
+    """
     option_symbol: constr(min_length=1)
     """
     Full OCC option symbol (e.g. 'AAPL250117C00150000'), resolved by ContractActivities.resolve from CopytradeSignalPayload.(ticker, expiry, strike, right). Distinct from the raw underlying ticker carried on the upstream signal payload.

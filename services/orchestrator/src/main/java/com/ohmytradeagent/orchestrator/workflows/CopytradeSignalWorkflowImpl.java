@@ -1073,6 +1073,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     i.setIntentKey(intentKey);
     i.setSignalId(payload.getSignalId());
     i.setBrokerTarget(OrderIntent.BrokerTarget.fromValue(config.getBrokerTarget().value()));
+    // P4-c-b-2: carry the config-declared account so exec cross-checks it against the account the
+    // per-tenant creds authenticate (fail-closed on a mismatch). Null for today's tenants (no
+    // broker_account_id) → the cross-check is skipped → behavior-preserving.
+    i.setBrokerAccountId(config.getBrokerAccountId());
     i.setOptionSymbol(resolved.optionSymbol());
     i.setSide(OrderIntent.Side.BUY);
     i.setQty(contracts);
