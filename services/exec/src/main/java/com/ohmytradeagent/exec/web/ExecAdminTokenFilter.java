@@ -44,7 +44,9 @@ public class ExecAdminTokenFilter extends OncePerRequestFilter {
   // started without EXEC_ADMIN_SHARED_TOKEN silently trusts a value anyone can read from this repo.
   private static final String INSECURE_DEFAULT_TOKEN = "dev-admin-token";
 
-  private final String sharedToken;
+  // The expected token is fixed at construction, so encode it once rather than per request. The
+  // constant-time compare (MessageDigest.isEqual) is preserved — only the right operand is hoisted.
+  private final byte[] sharedTokenBytes;
 
   public ExecAdminTokenFilter(
       @Value("${exec.admin.service-token}") String sharedToken, Environment environment) {
@@ -54,7 +56,7 @@ public class ExecAdminTokenFilter extends OncePerRequestFilter {
           "exec.admin.service-token is the well-known default under the prod profile — set"
               + " EXEC_ADMIN_SHARED_TOKEN to a real secret");
     }
-    this.sharedToken = sharedToken;
+    this.sharedTokenBytes = sharedToken.getBytes(StandardCharsets.UTF_8);
   }
 
   @Override
@@ -82,6 +84,6 @@ public class ExecAdminTokenFilter extends OncePerRequestFilter {
   private boolean tokenMatches(String header) {
     String presented = header.substring(BEARER_PREFIX.length());
     return java.security.MessageDigest.isEqual(
-        presented.getBytes(StandardCharsets.UTF_8), sharedToken.getBytes(StandardCharsets.UTF_8));
+        presented.getBytes(StandardCharsets.UTF_8), sharedTokenBytes);
   }
 }

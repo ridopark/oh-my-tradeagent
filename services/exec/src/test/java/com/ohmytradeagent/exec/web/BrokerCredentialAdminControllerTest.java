@@ -124,17 +124,7 @@ class BrokerCredentialAdminControllerTest {
 
   @Test
   void optimisticLock_is409_andResponseHasNoSecret() throws Exception {
-    when(writer.save(
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyLong(),
-            anyString()))
-        .thenThrow(new OptimisticLockException("stale expectedVersion=0 for tenant=acme"));
+    stubSaveThrows(new OptimisticLockException("stale expectedVersion=0 for tenant=acme"));
 
     String response =
         mvc.perform(
@@ -153,19 +143,9 @@ class BrokerCredentialAdminControllerTest {
 
   @Test
   void writerRejection_is422_andResponseHasNoSecret() throws Exception {
-    when(writer.save(
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyLong(),
-            anyString()))
-        .thenThrow(
-            new IllegalStateException(
-                "keys authenticate account acct-999 not declared acct-1 " + API_KEY));
+    stubSaveThrows(
+        new IllegalStateException(
+            "keys authenticate account acct-999 not declared acct-1 " + API_KEY));
 
     String response =
         mvc.perform(
@@ -184,17 +164,7 @@ class BrokerCredentialAdminControllerTest {
 
   @Test
   void catchAll_is500_andResponseHasNoSecret() throws Exception {
-    when(writer.save(
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyLong(),
-            anyString()))
-        .thenThrow(new RuntimeException("kaboom " + API_SECRET));
+    stubSaveThrows(new RuntimeException("kaboom " + API_SECRET));
 
     String response =
         mvc.perform(
@@ -233,6 +203,20 @@ class BrokerCredentialAdminControllerTest {
             anyLong(),
             anyString());
     assertNoSecretInLogs();
+  }
+
+  private void stubSaveThrows(Throwable t) {
+    when(writer.save(
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyLong(),
+            anyString()))
+        .thenThrow(t);
   }
 
   private void assertResponseHasNoSecret(String response) {
