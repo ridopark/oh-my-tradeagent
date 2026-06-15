@@ -3,6 +3,8 @@ package com.ohmytradeagent.orchestrator.activities;
 import java.sql.Timestamp;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.slf4j.Logger;
@@ -49,8 +51,8 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
    * field missing would be a detection hole, so each was confirmed against the exact snake_case
    * schema key.)
    */
-  private static final java.util.Set<String> RISK_RELEVANT_CONFIG_KEYS =
-      java.util.Set.of(
+  private static final Set<String> RISK_RELEVANT_CONFIG_KEYS =
+      Set.of(
           // CORE — DANGEROUS (StrategyConfigWriter.checkFieldClasses)
           "broker_target",
           "daily_loss_threshold",
@@ -70,24 +72,15 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
           "drawdown_velocity_threshold");
 
   /**
-   * Renders {@link #RISK_RELEVANT_CONFIG_KEYS} as a Postgres {@code text[]} array literal for
+   * {@link #RISK_RELEVANT_CONFIG_KEYS} rendered ONCE as a Postgres {@code text[]} array literal for
    * inlining into a plain-SQL {@code jsonb_exists_any(target, text[])} call. The keys are
    * compile-time code constants (never user input), so inlining is injection-safe; building from
-   * the constant keeps it the single source of truth.
+   * the constant keeps it the single source of truth. Element order is irrelevant (set membership).
    */
-  private static String riskKeysSqlArrayLiteral() {
-    StringBuilder sb = new StringBuilder("ARRAY[");
-    boolean first = true;
-    for (String key : RISK_RELEVANT_CONFIG_KEYS) {
-      if (!first) {
-        sb.append(',');
-      }
-      first = false;
-      sb.append('\'').append(key).append('\'');
-    }
-    sb.append("]::text[]");
-    return sb.toString();
-  }
+  private static final String RISK_KEYS_SQL_ARRAY_LITERAL =
+      RISK_RELEVANT_CONFIG_KEYS.stream()
+          .map(k -> "'" + k + "'")
+          .collect(Collectors.joining(",", "ARRAY[", "]::text[]"));
 
   private final DSLContext dsl;
 
@@ -369,7 +362,7 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
               "SELECT 1 FROM audit_log WHERE tenant_id = ? AND strategy_id = ? "
                   + "AND kind = 'TenantConfigChanged' AND occurred_at > ? "
                   + "AND jsonb_exists_any(subject -> 'changed_keys', "
-                  + riskKeysSqlArrayLiteral()
+                  + RISK_KEYS_SQL_ARRAY_LITERAL
                   + ") "
                   + "LIMIT 1",
               tenantId,
