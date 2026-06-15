@@ -66,11 +66,14 @@ class BrokerCredentialStatusControllerWebMvcTest {
             .andReturn();
 
     String json = result.getResponse().getContentAsString();
+    // Match quoted JSON keys, not bare substrings — a bare "iv" would false-pass/fail on any value
+    // containing those two chars (a timestamp, an account id, etc.).
     for (String secret :
-        List.of("ciphertext", "wrapped_dek", "iv", "dek_iv", "api_secret", "api_key")) {
+        List.of(
+            "ciphertext", "wrapped_dek", "iv", "dek_iv", "kek_version", "api_secret", "api_key")) {
       Assertions.assertThat(json)
           .as("serialized status response must not leak secret column %s", secret)
-          .doesNotContain(secret);
+          .doesNotContain("\"" + secret + "\"");
     }
   }
 

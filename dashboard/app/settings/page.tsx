@@ -46,6 +46,9 @@ export default async function SettingsPage({
       banner = { tone: "err", msg: "Version changed — reload and retry." };
     } else if (errorStatus === "404") {
       banner = { tone: "err", msg: "Credential entry is not available." };
+    } else if (errorStatus === "0") {
+      // Transport error / timeout reaching the gateway — the write did not happen.
+      banner = { tone: "err", msg: "Gateway unreachable — credential not saved." };
     } else if (errorStatus === "403" || errorStatus === "400" || errorStatus === "422") {
       banner = { tone: "err", msg: "Request rejected." };
     } else {
@@ -165,8 +168,11 @@ export default async function SettingsPage({
                   defaultValue="alpaca-paper"
                   className="rounded border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100"
                 >
+                  {/* alpaca-paper only for now: DB creds refuse *-live by construction, and the
+                      status reader is single-broker (can't see a live-broker DB → wrong
+                      expected_version). alpaca-live returns with dual-control + a multi-broker
+                      reader. */}
                   <option value="alpaca-paper">alpaca-paper</option>
-                  <option value="alpaca-live">alpaca-live</option>
                 </select>
               </label>
 
