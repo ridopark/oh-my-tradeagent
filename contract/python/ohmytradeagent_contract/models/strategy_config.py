@@ -49,6 +49,10 @@ class StrategyConfig(BaseModel):
     """
     Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; configuring an active strategy with them produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.
     """
+    broker_account_id: constr(min_length=1) | None = None
+    """
+    P4-c: the brokerage account this strategy's tenant trades against on broker_target. OPTIONAL — absent preserves the #323 one-tenant-per-broker_target invariant. When set, two distinct tenants may share a broker_target IFF each declares a distinct broker_account_id (gated behind multitenant.broker-accounts.enabled, default off, until the per-tenant runtime account reads land in P4-c-b). P4-c-b will cross-check this declared account against the exec creds' expected-account-id (the account the keys actually authenticate). Identifiers are provider-specific free strings (Alpaca numeric e.g. 847309116; other brokers differ), so only non-blank is enforced. A DANGEROUS field in StrategyConfigWriter: it routes real orders, so a runtime change is hard-blocked (must equal stored).
+    """
     author_whitelist: list[constr(min_length=1)] = Field(..., min_length=1)
     """
     Discord author IDs whose signals are admitted. Risk gate AUTHOR_NOT_WHITELISTED on miss.

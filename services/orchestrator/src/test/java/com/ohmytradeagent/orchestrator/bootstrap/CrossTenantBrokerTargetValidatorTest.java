@@ -49,6 +49,31 @@ class CrossTenantBrokerTargetValidatorTest {
             .formatted(tenant, strategy, brokerTarget));
   }
 
+  private void writeStrategy(
+      Path tenantsDir, String tenant, String strategy, String brokerTarget, String brokerAccountId)
+      throws Exception {
+    Path file = tenantsDir.resolve(tenant).resolve("strategies").resolve(strategy + ".yaml");
+    Files.createDirectories(file.getParent());
+    Files.writeString(
+        file,
+        """
+        schema_version: 1
+        tenant_id: %s
+        strategy_id: %s
+        broker_target: %s
+        broker_account_id: %s
+        author_whitelist:
+          - acme_trader
+        max_signal_age_bto_secs: 30
+        max_signal_age_stc_secs: 60
+        max_positions: 5
+        capital_weight: 0.2
+        min_contracts: 1
+        max_contracts: 5
+        """
+            .formatted(tenant, strategy, brokerTarget, brokerAccountId));
+  }
+
   private static StrategyRegistry yamlRegistry(Path tenantsDir) {
     return new YamlStrategyRegistry(tenantsDir.toString());
   }
@@ -116,6 +141,102 @@ class CrossTenantBrokerTargetValidatorTest {
             CrossTenantBrokerTargetValidator.ownerByBrokerTarget(
                 tenantsDir, yamlRegistry(tenantsDir)))
         .containsEntry("alpaca-paper", "acme");
+  }
+
+  // ---- P4-c-a shared-broker-accounts mode (gated, dark by default) ----
+
+  @Test
+  void strictModeUnaffectedByBrokerAccountId(@TempDir Path tenantsDir) throws Exception {
+    // Behavior-preserving proof: in strict mode (default) the broker_account_id is ignored — a
+    // single tenant with an account set passes identically to one without.
+    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live", "847309116");
+
+    assertThat(
+            CrossTenantBrokerTargetValidator.ownerByBrokerTarget(
+                tenantsDir, yamlRegistry(tenantsDir)))
+        .containsEntry("alpaca-live", "acme");
+  }
+
+  @Test
+  void sharedModeAllowsSingleTenantWithoutAccount(@TempDir Path tenantsDir) throws Exception {
+    // Even with the flag ON, a single-tenant broker_target needs no account (the live path today).
+    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live");
+
+    assertThatCode(
+            () ->
+                CrossTenantBrokerTargetValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), true))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void sharedModeAllowsDistinctTenantsWithDistinctAccounts(@TempDir Path tenantsDir)
+      throws Exception {
+    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper", "111");
+    writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-paper", "222");
+
+    assertThatCode(
+            () ->
+                CrossTenantBrokerTargetValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), true))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void sharedModeRejectsDistinctTenantsWithSameAccount(@TempDir Path tenantsDir) throws Exception {
+    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper", "111");
+    writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-paper", "111");
+
+    assertThatThrownBy(
+            () ->
+                CrossTenantBrokerTargetValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), true))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("alpaca-paper")
+        .hasMessageContaining("111");
+  }
+
+  @Test
+  void sharedModeRejectsDistinctTenantsWhenOneAccountAbsent(@TempDir Path tenantsDir)
+      throws Exception {
+    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper", "111");
+    writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-paper"); // no account
+
+    assertThatThrownBy(
+            () ->
+                CrossTenantBrokerTargetValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), true))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("alpaca-paper")
+        .hasMessageContaining("globex");
+  }
+
+  @Test
+  void sharedModeRejectsOneTenantWithInconsistentAccountAcrossStrategies(@TempDir Path tenantsDir)
+      throws Exception {
+    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper", "111");
+    writeStrategy(tenantsDir, "acme", "copytrade-v2", "alpaca-paper", "222");
+
+    assertThatThrownBy(
+            () ->
+                CrossTenantBrokerTargetValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), true))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("acme")
+        .hasMessageContaining("Intra-tenant");
+  }
+
+  @Test
+  void sharedModeAllowsOneTenantWithConsistentAccountAcrossStrategies(@TempDir Path tenantsDir)
+      throws Exception {
+    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper", "111");
+    writeStrategy(tenantsDir, "acme", "copytrade-v2", "alpaca-paper", "111");
+
+    assertThatCode(
+            () ->
+                CrossTenantBrokerTargetValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), true))
+        .doesNotThrowAnyException();
   }
 
   // ---- db-mode (registry-driven) fail-closed behavior ----

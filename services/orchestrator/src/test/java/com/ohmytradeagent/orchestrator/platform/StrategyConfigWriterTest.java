@@ -127,6 +127,19 @@ class StrategyConfigWriterTest {
   }
 
   @Test
+  void rejectsBrokerAccountIdChange_theAccountRoutingVector() {
+    // P4-c: broker_account_id routes real orders to a brokerage account; a runtime change would
+    // re-route live orders. DANGEROUS (must equal stored): setting it from null is rejected.
+    StrategyConfig stored = liveSafeStored();
+    StrategyConfig next = copy(stored);
+    next.setBrokerAccountId("847309116");
+    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
+        .isInstanceOf(DangerousFieldChangeRejected.class)
+        .hasMessageContaining("broker_account_id");
+    verify(audit, never()).log(any());
+  }
+
+  @Test
   void rejectsDailyLossThresholdWidened_theDisarmVector() {
     StrategyConfig stored = liveSafeStored(); // daily_loss_threshold = 500
     StrategyConfig next = copy(stored);

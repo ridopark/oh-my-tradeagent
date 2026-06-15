@@ -33,16 +33,27 @@ public class CrossTenantBrokerTargetBootstrapper implements ApplicationRunner {
 
   private final Path tenantsDir;
   private final StrategyRegistry registry;
+  private final boolean sharedBrokerAccounts;
 
   public CrossTenantBrokerTargetBootstrapper(
-      @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir, StrategyRegistry registry) {
+      @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir,
+      @Value("${multitenant.broker-accounts.enabled:false}") boolean sharedBrokerAccounts,
+      StrategyRegistry registry) {
     this.tenantsDir = Path.of(tenantsDir);
+    this.sharedBrokerAccounts = sharedBrokerAccounts;
     this.registry = registry;
   }
 
   @Override
   public void run(ApplicationArguments args) {
-    CrossTenantBrokerTargetValidator.validate(tenantsDir, registry);
-    log.info("cross-tenant broker_target invariant validated for tenants dir {}", tenantsDir);
+    // sharedBrokerAccounts (multitenant.broker-accounts.enabled) is DARK by default: the strict
+    // #323
+    // one-tenant-per-broker_target rule holds until P4-c-b makes the runtime account reads
+    // per-tenant.
+    CrossTenantBrokerTargetValidator.validate(tenantsDir, registry, sharedBrokerAccounts);
+    log.info(
+        "cross-tenant broker_target invariant validated for tenants dir {} (sharedBrokerAccounts={})",
+        tenantsDir,
+        sharedBrokerAccounts);
   }
 }
