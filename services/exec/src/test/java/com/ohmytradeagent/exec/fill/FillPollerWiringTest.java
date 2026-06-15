@@ -3,7 +3,7 @@ package com.ohmytradeagent.exec.fill;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
-import com.ohmytradeagent.exec.broker.OptionsBroker;
+import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -59,8 +59,8 @@ class FillPollerWiringTest {
     }
 
     @Bean
-    OptionsBroker pollerWiringBroker() {
-      return mock(OptionsBroker.class);
+    BrokerClientRegistry pollerWiringBrokerRegistry() {
+      return mock(BrokerClientRegistry.class);
     }
 
     @Bean

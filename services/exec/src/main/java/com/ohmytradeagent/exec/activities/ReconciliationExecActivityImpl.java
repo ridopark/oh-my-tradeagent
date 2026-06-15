@@ -4,27 +4,45 @@ import com.ohmytradeagent.contract.BrokerOpenOrder;
 import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.JournalEntry;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
+import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
- * Phase 5 reconciliation Activity impl for the Tradier paper broker. Adapts the per-service journal
- * + broker port into the cross-service contract types ({@link JournalEntry}, {@link
- * BrokerOpenOrder}). Stateless; safe under Temporal Activity retry semantics.
+ * Phase 5 reconciliation Activity impl. Adapts the per-service journal + broker port into the
+ * cross-service contract types ({@link JournalEntry}, {@link BrokerOpenOrder}). Stateless; safe
+ * under Temporal Activity retry semantics.
+ *
+ * <p>P4-a: resolve the broker via {@link BrokerClientRegistry}. The recon contract methods carry no
+ * {@code broker_target}, so the provider is derived from this single-mode pod's {@code broker.impl}
+ * (e.g. {@code alpaca-paper} → {@code alpaca}); the tenant is the request's {@code tenantId} when
+ * present, else {@code ACCOUNT_LEVEL}. The env-fallback source ignores the tenant, so behavior is
+ * preserved.
  */
 @Component
 public class ReconciliationExecActivityImpl implements ReconciliationExecActivity {
 
   private final OrderIntentJournal journal;
-  private final OptionsBroker broker;
+  private final BrokerClientRegistry brokerRegistry;
+  private final String provider;
 
-  public ReconciliationExecActivityImpl(OrderIntentJournal journal, OptionsBroker broker) {
+  public ReconciliationExecActivityImpl(
+      OrderIntentJournal journal,
+      BrokerClientRegistry brokerRegistry,
+      @Value("${broker.impl:}") String brokerImpl) {
     this.journal = journal;
-    this.broker = broker;
+    this.brokerRegistry = brokerRegistry;
+    this.provider = BrokerClientRegistry.providerOf(brokerImpl);
+  }
+
+  private OptionsBroker broker(String tenantId) {
+    return brokerRegistry.brokerFor(
+        tenantId != null ? tenantId : AccountSnapshotExecActivityImpl.ACCOUNT_LEVEL, provider);
   }
 
   @Override
@@ -36,7 +54,7 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
 
   @Override
   public List<BrokerOpenOrder> brokerListOpenOrders() {
-    return broker.listOpenOrders();
+    return broker(AccountSnapshotExecActivityImpl.ACCOUNT_LEVEL).listOpenOrders();
   }
 
   @Override
@@ -44,7 +62,7 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
     // tenantId / strategyId are forward-compat hooks — Alpaca paper is single-account so the
     // broker's listOpenPositions cannot filter by them today. Future multi-account brokers will
     // honour them inside the broker impl.
-    return broker.listOpenPositions();
+    return broker(tenantId).listOpenPositions();
   }
 
   @Override
@@ -57,15 +75,15 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
   }
 
   /**
-   * Issue #239: broker truth for the adoption phantom guard. {@code tenantId}/{@code strategyId}
-   * are intentionally unused — the injected broker client is already tenant/strategy-scoped at
-   * construction (per the broker task queue), so they only document the call site.
+   * Issue #239: broker truth for the adoption phantom guard. {@code strategyId} is intentionally
+   * unused — the resolved broker client is already tenant/strategy-scoped at construction (per the
+   * broker task queue), so it only documents the call site.
    */
   @Override
   public BrokerPosition brokerGetPositionByOcc(String tenantId, String strategyId, String occ) {
     // Issue #239: broker truth for the adoption phantom guard. Filters the broker position list to
     // the requested OCC; returns null when the broker does not hold it.
-    return broker.listOpenPositions().stream()
+    return broker(tenantId).listOpenPositions().stream()
         .filter(p -> occ.equals(p.getOptionSymbol()))
         .findFirst()
         .orElse(null);

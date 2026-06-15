@@ -24,10 +24,8 @@ import java.util.List;
 import java.util.Locale;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
-import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
@@ -69,9 +67,11 @@ import org.springframework.web.client.RestClient;
  * rejected it with {@code "mleg orders must have at least 2 legs and at most 4 legs"} — {@code
  * mleg} is reserved for genuine multi-leg strategies. When multi-leg support is added later, that
  * path can re-introduce {@code order_class=mleg} on a sibling request DTO.
+ *
+ * <p>P4-a: no longer a Spring {@code @Component} — the {@link
+ * com.ohmytradeagent.exec.broker.BrokerClientRegistry} constructs one instance PER {@code (tenant,
+ * account)} key from registry-resolved credentials. The class + ctor are unchanged.
  */
-@Component
-@ConditionalOnExpression("'${broker.impl:}'.startsWith('alpaca-')")
 public class AlpacaPaperBroker implements OptionsBroker {
 
   private static final Logger log = LoggerFactory.getLogger(AlpacaPaperBroker.class);

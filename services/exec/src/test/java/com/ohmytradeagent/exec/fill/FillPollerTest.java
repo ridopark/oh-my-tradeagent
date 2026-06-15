@@ -61,7 +61,14 @@ class FillPollerTest {
     registry = new SimpleMeterRegistry();
     metrics = new FillListenerMetrics(registry);
     props = new FillPollerProperties(true, 30_000L, 60_000L, 50);
-    poller = new FillPoller(journal, broker, dispatcher, metrics, props, FIXED_CLOCK);
+    poller =
+        new FillPoller(
+            journal,
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker),
+            dispatcher,
+            metrics,
+            props,
+            FIXED_CLOCK);
   }
 
   @Test
@@ -133,7 +140,14 @@ class FillPollerTest {
   @Test
   void runOnce_respectsBatchSize() {
     FillPollerProperties tinyBatch = new FillPollerProperties(true, 30_000L, 60_000L, 3);
-    poller = new FillPoller(journal, broker, dispatcher, metrics, tinyBatch, FIXED_CLOCK);
+    poller =
+        new FillPoller(
+            journal,
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker),
+            dispatcher,
+            metrics,
+            tinyBatch,
+            FIXED_CLOCK);
     when(journal.findSubmittedOlderThan(any(), eq(3))).thenReturn(List.of());
 
     poller.runOnce();
@@ -186,7 +200,13 @@ class FillPollerTest {
     FillDispatcherImpl realDispatcher =
         new FillDispatcherImpl(realJournal, workflowClient, metrics);
     FillPoller backstopPoller =
-        new FillPoller(realJournal, broker, realDispatcher, metrics, props, FIXED_CLOCK);
+        new FillPoller(
+            realJournal,
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker),
+            realDispatcher,
+            metrics,
+            props,
+            FIXED_CLOCK);
 
     JournaledOrder submittedRow = row("ck-missed", "brk-missed");
     when(realJournal.findSubmittedOlderThan(any(), eq(50))).thenReturn(List.of(submittedRow));

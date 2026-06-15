@@ -73,7 +73,11 @@ class ReconciliationExecActivityImplIT {
     dsl.deleteFrom(table("order_intent_journal")).execute();
     journal = new JooqOrderIntentJournal(dsl);
     broker = new StubBroker();
-    exec = new ReconciliationExecActivityImpl(journal, broker);
+    exec =
+        new ReconciliationExecActivityImpl(
+            journal,
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker),
+            "alpaca-paper");
   }
 
   @Test
