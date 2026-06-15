@@ -92,16 +92,11 @@ public class AlpacaBrokerClientRegistry implements BrokerClientRegistry {
     // P2 account-identity assertion (bounded transient-read retry, mismatch never retried). A throw
     // propagates out of computeIfAbsent → NO entry cached → fail-closed. A blank expectedAccountId
     // is
-    // a no-op (paper / back-compat).
+    // a no-op (paper / back-compat). The only checked throw is InterruptedException (retry sleep).
     try {
       BrokerAccountIdentityVerifier.verify(
           broker, creds.expectedAccountId(), "registry key " + key);
-    } catch (RuntimeException e) {
-      throw e;
-    } catch (Exception e) {
-      // verify() only declares Exception for the InterruptedException of the retry sleep; surface
-      // it
-      // as a runtime failure so computeIfAbsent does not cache and the call fails closed.
+    } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new IllegalStateException(
           "interrupted verifying broker account identity for " + key, e);

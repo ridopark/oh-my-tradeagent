@@ -40,7 +40,7 @@ public final class BrokerAccountIdentityVerifier {
    * broker.impl or the registry key) for triage messages.
    */
   public static void verify(OptionsBroker broker, String expected, String context)
-      throws Exception {
+      throws InterruptedException {
     if (expected == null || expected.isBlank()) {
       // assertion disabled (paper / back-compat).
       return;
@@ -55,7 +55,7 @@ public final class BrokerAccountIdentityVerifier {
   }
 
   private static String fetchAccountNumberWithRetry(OptionsBroker broker, String context)
-      throws Exception {
+      throws InterruptedException {
     Exception last = null;
     for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {

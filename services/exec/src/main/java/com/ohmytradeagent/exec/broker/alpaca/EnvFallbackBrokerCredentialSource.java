@@ -38,10 +38,10 @@ public class EnvFallbackBrokerCredentialSource implements BrokerCredentialSource
   @Override
   public BrokerCredentials resolve(String tenantId, String provider) {
     // tenantId is intentionally ignored: the env-fallback maps every tenant to the single env cred
-    // set so the registry-resolved broker is byte-identical to the pre-P4-a single broker.
-    // Field-for-
-    // field from AlpacaProperties (apiKeyId / apiSecretKey / baseUrl) plus the WS URL + expected
-    // account id. P4-b replaces this with the per-tenant source.
+    // set so the registry-resolved broker is byte-identical to the pre-P4-a single broker. The
+    // values come field-for-field from AlpacaProperties (apiKeyId / apiSecretKey / baseUrl) plus
+    // the
+    // WS URL + expected account id. P4-b replaces this with the per-tenant source.
     return new BrokerCredentials(
         props.apiKeyId(), props.apiSecretKey(), props.baseUrl(), wsUrl, expectedAccountId);
   }

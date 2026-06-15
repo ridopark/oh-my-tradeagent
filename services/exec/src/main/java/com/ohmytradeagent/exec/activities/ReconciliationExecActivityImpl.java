@@ -42,7 +42,7 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
 
   private OptionsBroker broker(String tenantId) {
     return brokerRegistry.brokerFor(
-        tenantId != null ? tenantId : AccountSnapshotExecActivityImpl.ACCOUNT_LEVEL, provider);
+        tenantId != null ? tenantId : BrokerClientRegistry.ACCOUNT_LEVEL, provider);
   }
 
   @Override
@@ -54,7 +54,7 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
 
   @Override
   public List<BrokerOpenOrder> brokerListOpenOrders() {
-    return broker(AccountSnapshotExecActivityImpl.ACCOUNT_LEVEL).listOpenOrders();
+    return broker(BrokerClientRegistry.ACCOUNT_LEVEL).listOpenOrders();
   }
 
   @Override

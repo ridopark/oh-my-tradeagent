@@ -25,13 +25,6 @@ import org.springframework.stereotype.Component;
 @Component
 public class AccountSnapshotExecActivityImpl implements AccountSnapshotActivity {
 
-  /**
-   * Constant tenant key for account-level resolution. The {@code AccountSnapshotRequest} carries no
-   * tenant (account is one credential set per deployment) and the env-fallback resolver ignores the
-   * tenant, so a stable constant keeps a single cached client per provider.
-   */
-  static final String ACCOUNT_LEVEL = "__account_level__";
-
   private final BrokerClientRegistry brokerRegistry;
 
   public AccountSnapshotExecActivityImpl(BrokerClientRegistry brokerRegistry) {
@@ -42,7 +35,8 @@ public class AccountSnapshotExecActivityImpl implements AccountSnapshotActivity 
   public AccountSnapshotResult accountSnapshot(AccountSnapshotRequest request) {
     OptionsBroker broker =
         brokerRegistry.brokerFor(
-            ACCOUNT_LEVEL, BrokerClientRegistry.providerOf(request.getBrokerTarget().value()));
+            BrokerClientRegistry.ACCOUNT_LEVEL,
+            BrokerClientRegistry.providerOf(request.getBrokerTarget().value()));
     AccountSnapshotResult result = new AccountSnapshotResult();
     result.setSchemaVersion(1L);
     // Issue #323: read equity AND cash from a SINGLE broker account fetch (getAccount) rather than
