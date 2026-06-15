@@ -18,6 +18,11 @@ from pydantic import ValidationError
 from ohmytradeagent_contract.models.account_snapshot_request import AccountSnapshotRequest
 from ohmytradeagent_contract.models.arm_chandelier_payload import ArmChandelierPayload
 from ohmytradeagent_contract.models.audit_event import AuditEvent
+from ohmytradeagent_contract.models.broker_credential_audit_request import (
+    BrokerCredentialAuditRequest,
+    ChangeType,
+    Outcome,
+)
 from ohmytradeagent_contract.models.copytrade_signal_payload import (
     Action,
     CopytradeSignalPayload,
@@ -96,6 +101,26 @@ def test_audit_event_round_trips() -> None:
     assert model.kind == "SignalReceived"
     assert model.subject["signal_id"] == "1234567890123456789:0"
 
+    serialized = json.loads(model.model_dump_json(by_alias=True))
+    assert serialized == original
+
+
+def test_broker_credential_audit_request_round_trips() -> None:
+    original = _load("broker-credential-audit-request.json")
+
+    model = BrokerCredentialAuditRequest.model_validate(original)
+
+    assert model.schema_version == 1
+    assert model.tenant_id == "dev"
+    assert model.provider == "alpaca"
+    assert model.change_type == ChangeType.rotate
+    assert model.outcome == Outcome.saved
+    assert model.broker_account_id == "PA3FKGPFYPLH"
+    assert model.credential_version == 2
+    assert model.kek_version == 1
+    assert model.correlation_id == "req-7f3b1d40"
+
+    # All optional fields populated in the fixture — no exclude_none needed.
     serialized = json.loads(model.model_dump_json(by_alias=True))
     assert serialized == original
 

@@ -127,6 +127,7 @@ public final class AuditEventKinds {
    *   <li>{@code orchestrator/workflows/KillSwitchWorkflowImpl.java}
    *   <li>{@code orchestrator/workflows/ReconciliationWorkflowImpl.java}
    *   <li>{@code orchestrator/activities/LivePromotionActivitiesImpl.java}
+   *   <li>{@code orchestrator/activities/BrokerCredentialAuditActivitiesImpl.java}
    * </ul>
    *
    * <p>Plus the {@code TenantConfigChanged} kind emitted by {@code TenantConfigChangedEmitter}. The
@@ -281,6 +282,13 @@ public final class AuditEventKinds {
           // CopytradeSignalWorkflowImpl (P3-a): the live-promotion-gate refusal disposition. Also
           // in SOFT_TERMINAL_CLOSE_KINDS (refused before any broker activity, like SignalRejected).
           "LivePromotionMissing",
+          // BrokerCredentialAuditActivitiesImpl (P6-d, multi-tenant-broker-credentials): emitted
+          // (DARK — no caller yet) when a tenant broker credential is written/rotated.
+          // Metadata-only
+          // subject; carries ZERO key material. NOT a position-lifecycle event — a neutral event on
+          // a dedicated per-tenant credential hash chain (strategy_id sentinel '_broker'), so it is
+          // intentionally in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "BrokerCredentialWritten",
           // TenantConfigChangedEmitter (no KIND_ constant; literal string in the emitter)
           "TenantConfigChanged");
 }
