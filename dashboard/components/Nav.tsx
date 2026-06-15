@@ -7,6 +7,7 @@ const LINKS = [
   { href: "/positions", label: "Positions" },
   { href: "/trades", label: "Trades" },
   { href: "/orders", label: "Order History" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export function Nav({ tenantId }: { tenantId?: string }) {

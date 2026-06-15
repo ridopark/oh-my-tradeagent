@@ -105,9 +105,23 @@ export interface Portfolio {
   unrealized_pnl_note: string;
 }
 
+// UI-P2-b: non-secret broker-credential status surfaced by the BFF. Contains NO secret material —
+// broker_account_id is a non-secret brokerage account identifier; the api_key_id / api_secret_key
+// are NEVER returned by the status endpoint.
+export interface BrokerCredentialStatus {
+  provider: string;
+  configured: boolean;
+  version: number;
+  broker_account_id: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
 export const getPositions = () => bffGet<Envelope<Position>>("/api/positions");
 export const getTrades = (limit = 100) =>
   bffGet<Envelope<Trade>>(`/api/trades?limit=${limit}`);
 export const getOrders = (limit = 100) =>
   bffGet<Envelope<Order>>(`/api/orders?limit=${limit}`);
 export const getPortfolio = () => bffGet<Portfolio>("/api/portfolio");
+export const getBrokerCredentialStatus = () =>
+  bffGet<Envelope<BrokerCredentialStatus>>("/api/broker-credentials/status");
