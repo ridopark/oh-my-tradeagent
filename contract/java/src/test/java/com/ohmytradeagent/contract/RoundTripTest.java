@@ -232,6 +232,31 @@ class RoundTripTest {
   }
 
   @Test
+  void brokerCredentialAuditRequest_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("broker-credential-audit-request.json"));
+
+    BrokerCredentialAuditRequest deserialized =
+        mapper.readValue(json, BrokerCredentialAuditRequest.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getTenantId()).isEqualTo("dev");
+    assertThat(deserialized.getProvider()).isEqualTo("alpaca");
+    assertThat(deserialized.getChangeType())
+        .isEqualTo(BrokerCredentialAuditRequest.ChangeType.ROTATE);
+    assertThat(deserialized.getOutcome()).isEqualTo(BrokerCredentialAuditRequest.Outcome.SAVED);
+    assertThat(deserialized.getBrokerAccountId()).isEqualTo("PA3FKGPFYPLH");
+    assertThat(deserialized.getCredentialVersion()).isEqualTo(2L);
+    assertThat(deserialized.getKekVersion()).isEqualTo(1L);
+    assertThat(deserialized.getCorrelationId()).isEqualTo("req-7f3b1d40");
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
+
+  @Test
   void preTradeCheckResult_roundTrips() throws Exception {
     String json = Files.readString(FIXTURES.resolve("pre-trade-check-result.json"));
 

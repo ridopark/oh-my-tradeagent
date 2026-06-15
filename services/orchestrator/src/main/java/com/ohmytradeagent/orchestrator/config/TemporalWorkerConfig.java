@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.config;
 import com.ohmytradeagent.orchestrator.activities.AccountSnapshotMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
+import com.ohmytradeagent.orchestrator.activities.BrokerCredentialAuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
@@ -70,6 +71,7 @@ public class TemporalWorkerConfig {
       WorkerFactory factory,
       AuditActivities audit,
       AuditQueryActivities auditQuery,
+      BrokerCredentialAuditActivities brokerCredentialAudit,
       StrategyActivities strategy,
       RiskActivities risk,
       ContractActivities contract,
@@ -105,6 +107,10 @@ public class TemporalWorkerConfig {
     worker.registerActivitiesImplementations(
         audit,
         auditQuery,
+        // P6-d (multi-tenant-broker-credentials): DARK metadata-only credential-write audit
+        // capability. Registered so its wiring + determinism are proven; nothing calls it in P6-d
+        // (carrier + api-gateway caller defer to UI-P2).
+        brokerCredentialAudit,
         strategy,
         risk,
         contract,
