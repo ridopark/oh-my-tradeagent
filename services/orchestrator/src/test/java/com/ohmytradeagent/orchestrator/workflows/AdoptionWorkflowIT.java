@@ -141,7 +141,8 @@ class AdoptionWorkflowIT {
     // P4-a: exec resolves the broker via a BrokerClientRegistry. The stub registry returns the
     // StubBroker for every key; "alpaca-paper" is the pod's broker.impl (provider="alpaca").
     brokerWorker.registerActivitiesImplementations(
-        new ReconciliationExecActivityImpl(journal, (tenantId, provider) -> broker, "alpaca-paper"));
+        new ReconciliationExecActivityImpl(
+            journal, (tenantId, provider) -> broker, "alpaca-paper"));
     env.start();
   }
 
