@@ -26,6 +26,25 @@ temporal:
 api-gateway:
   default-tenant: ${API_GATEWAY_DEFAULT_TENANT:dev}
   default-strategy: ${API_GATEWAY_DEFAULT_STRATEGY:copytrade-v1}
+  # UI-P2-a inbound service token for the /broker-credentials route (the dashboard-server hop).
+  # Local-dev default; a pod under the `prod` profile MUST override via API_GATEWAY_SHARED_TOKEN
+  # or the ServiceTokenFilter fails fast at boot.
+  service-token: ${API_GATEWAY_SHARED_TOKEN:dev-shared-token}
+
+# UI-P2-a credential-write forward. DARK by default: with write.enabled unset/false NONE of the
+# new beans (controller, exec RestClient, ServiceTokenFilter, Clock) exist and the route 404s.
+# The opt-in is a manual, per-cluster operator action — NO repo manifest sets this true.
+broker:
+  credentials:
+    write:
+      enabled: ${BROKER_CREDENTIALS_WRITE_ENABLED:false}
+      rate-per-minute: ${BROKER_CREDENTIALS_WRITE_RATE_PER_MINUTE:10}
+
+# Exec internal base URL the credential forward targets (in-cluster service name).
+exec:
+  base-url: ${EXEC_BASE_URL:http://exec:8080}
+  admin:
+    service-token: ${EXEC_ADMIN_SHARED_TOKEN:}
 
 management:
   endpoints:

@@ -23,6 +23,20 @@ public final class WorkflowIds {
   }
 
   /**
+   * Workflow ID for the short-lived {@code BrokerCredentialAuditWorkflow} that records a metadata-
+   * only audit of a tenant broker-credential write/rotation (UI-P2-a).
+   *
+   * <p>Deliberately does NOT route through {@link #tenantStrategy}: a credential is {@code (tenant,
+   * provider)}-scoped and strategy-agnostic, so there is no {@code s-} segment. The {@code _broker}
+   * chain identity matches what P6-d's audit committed to. The {@code correlationId} embedded in
+   * the id is the dedup key — a retried api-gateway call collides on {@code REJECT_DUPLICATE}
+   * rather than double-auditing the same write.
+   */
+  public static String brokerCredentialAudit(String tenantId, String correlationId) {
+    return "t-" + tenantId + "/_broker/cred-audit/" + correlationId;
+  }
+
+  /**
    * Workflow ID prefix for a {@code PositionWorkflow}; {@code entrySignalId} disambiguates re-BTOs.
    */
   public static String position(

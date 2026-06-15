@@ -31,6 +31,24 @@ public class TenantContext {
     return headerOr(req, HEADER_TENANT, defaultTenant);
   }
 
+  /**
+   * STRICT tenant resolution for the UI-P2-a credential-write route — NO dev fallback. The
+   * dashboard server asserts a verified {@code X-Tenant-Id}; an absent/blank/malformed value is a
+   * misconfiguration or an attempt to skip the assertion, so it throws {@link
+   * MissingHeaderException} (mapped to HTTP 400 by {@link GlobalExceptionHandler}) rather than
+   * silently defaulting to {@code dev}. The format guard ({@code [A-Za-z0-9_-]+}) keeps a hostile
+   * tenant value out of the workflow id / Visibility query. The lenient {@link
+   * #tenantId(HttpServletRequest)} is untouched (other routes still default for single-tenant dev
+   * convenience).
+   */
+  public String requiredTenantId(HttpServletRequest req) {
+    String v = req.getHeader(HEADER_TENANT);
+    if (v == null || v.isBlank() || !v.matches("[A-Za-z0-9_-]+")) {
+      throw new MissingHeaderException(HEADER_TENANT);
+    }
+    return v;
+  }
+
   public String strategyId(HttpServletRequest req) {
     return headerOr(req, HEADER_STRATEGY, defaultStrategy);
   }

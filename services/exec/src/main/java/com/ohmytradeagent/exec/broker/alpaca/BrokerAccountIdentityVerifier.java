@@ -34,16 +34,20 @@ public final class BrokerAccountIdentityVerifier {
   private BrokerAccountIdentityVerifier() {}
 
   /**
-   * Reads the broker account number (bounded retry) and asserts it matches {@code expected}. No-op
-   * when {@code expected} is blank. Throws {@link IllegalStateException} on mismatch (permanent) or
-   * after exhausting the transient-read retry budget. {@code context} names the call site (e.g. the
-   * broker.impl or the registry key) for triage messages.
+   * Reads the broker account number (bounded retry) and asserts it matches {@code expected},
+   * returning the verified account number. No-op when {@code expected} is blank — returns {@code
+   * null} (no probe ran, no account to report). Throws {@link IllegalStateException} on mismatch
+   * (permanent) or after exhausting the transient-read retry budget. {@code context} names the call
+   * site (e.g. the broker.impl or the registry key) for triage messages.
+   *
+   * @return the verified {@code /v2/account} number when {@code expected} is non-blank, else {@code
+   *     null} (probe disabled). Never a key/secret — an account identifier only.
    */
-  public static void verify(OptionsBroker broker, String expected, String context)
+  public static String verify(OptionsBroker broker, String expected, String context)
       throws InterruptedException {
     if (expected == null || expected.isBlank()) {
-      // assertion disabled (paper / back-compat).
-      return;
+      // assertion disabled (paper / back-compat) — no probe, so no account number to report.
+      return null;
     }
     String accountNumber = fetchAccountNumberWithRetry(broker, context);
     // Mismatch is PERMANENT: this throws and propagates immediately (never retried above).
@@ -52,6 +56,7 @@ public final class BrokerAccountIdentityVerifier {
         "broker account identity verified: account={} matches expected ({})",
         accountNumber,
         context);
+    return accountNumber;
   }
 
   private static String fetchAccountNumberWithRetry(OptionsBroker broker, String context)
