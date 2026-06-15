@@ -16,7 +16,7 @@ public final class FixedBrokerClientRegistry implements BrokerClientRegistry {
   }
 
   @Override
-  public OptionsBroker brokerFor(String tenantId, String provider) {
+  public OptionsBroker brokerFor(String tenantId, String provider, String declaredAccountId) {
     return broker;
   }
 }

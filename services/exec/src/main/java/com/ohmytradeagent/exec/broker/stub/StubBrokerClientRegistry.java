@@ -22,7 +22,8 @@ public class StubBrokerClientRegistry implements BrokerClientRegistry {
   }
 
   @Override
-  public OptionsBroker brokerFor(String tenantId, String provider) {
+  public OptionsBroker brokerFor(String tenantId, String provider, String declaredAccountId) {
+    // The stub has no real brokerage account; the declared-account cross-check is a no-op.
     return stubBroker;
   }
 }

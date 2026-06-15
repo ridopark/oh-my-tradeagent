@@ -164,6 +164,89 @@ class AlpacaBrokerClientRegistryTest {
     assertThat(server.getRequestCount()).isZero();
   }
 
+  // ---- P4-c-b-2: config-declared-account cross-check ----
+
+  private void enqueueAccount(String accountNumber) {
+    server.enqueue(
+        new MockResponse()
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"account_number\":\"" + accountNumber + "\",\"equity\":\"1\",\"cash\":\"1\"}"));
+  }
+
+  @Test
+  void crossCheck_matchingDeclaredAccount_placesOk() {
+    enqueueAccount("847309116");
+    CountingSource source = new CountingSource(credsPaper("847309116"));
+    AlpacaBrokerClientRegistry reg = registry(source, "alpaca-x");
+
+    // declared == creds-authenticated account → no throw, broker returned.
+    assertThat(reg.brokerFor("dev", "alpaca", "847309116")).isNotNull();
+  }
+
+  @Test
+  void crossCheck_mismatchedDeclaredAccount_failsClosedNonRetryable() {
+    // creds authenticate (and /v2/account confirms) 847309116, but the intent declares a DIFFERENT
+    // account → the order must not route to the wrong account.
+    enqueueAccount("847309116");
+    CountingSource source = new CountingSource(credsPaper("847309116"));
+    AlpacaBrokerClientRegistry reg = registry(source, "alpaca-x");
+
+    assertThatThrownBy(() -> reg.brokerFor("dev", "alpaca", "999999999"))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("AccountMismatchError");
+              assertThat(f.isNonRetryable()).isTrue();
+            })
+        .hasMessageContaining("847309116")
+        .hasMessageContaining("999999999");
+  }
+
+  @Test
+  void crossCheck_blankDeclared_skips() {
+    enqueueAccount("847309116");
+    CountingSource source = new CountingSource(credsPaper("847309116"));
+    AlpacaBrokerClientRegistry reg = registry(source, "alpaca-x");
+
+    // Today's tenants declare no broker_account_id → null/blank declared → cross-check skipped.
+    assertThat(reg.brokerFor("dev", "alpaca", null)).isNotNull();
+    assertThat(reg.brokerFor("dev", "alpaca", "  ")).isNotNull();
+  }
+
+  @Test
+  void crossCheck_blankExpected_skipsEvenWhenDeclaredSet() {
+    // Live env-paper shape: creds carry a blank expected-account-id (P2 disabled), so even a
+    // non-blank declared account does NOT fail — behavior-preserving. No /v2/account read happens.
+    CountingSource source = new CountingSource(credsPaper(""));
+    AlpacaBrokerClientRegistry reg = registry(source, "alpaca-x");
+
+    assertThat(reg.brokerFor("dev", "alpaca", "847309116")).isNotNull();
+    assertThat(server.getRequestCount()).isZero();
+  }
+
+  @Test
+  void crossCheck_runsPerCall_notPerBuild_cannotBeSkippedByAReadCaller() {
+    // The load-bearing property: a read-caller (2-arg, no declared account) warms the cache FIRST;
+    // a later order (3-arg) with a mismatched declared account must STILL fail closed — the check
+    // runs on every call against the cached expectedAccountId, not only at build time.
+    enqueueAccount("847309116");
+    CountingSource source = new CountingSource(credsPaper("847309116"));
+    AlpacaBrokerClientRegistry reg = registry(source, "alpaca-x");
+
+    // Read-path warm-up (e.g. AccountSnapshot via the 2-arg) builds + caches with no cross-check.
+    assertThat(reg.brokerFor("dev", "alpaca")).isNotNull();
+
+    // Order path on the SAME cached entry with a mismatched declared account → fail closed.
+    assertThatThrownBy(() -> reg.brokerFor("dev", "alpaca", "999999999"))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> assertThat(f.getType()).isEqualTo("AccountMismatchError"));
+    // Only the build read /v2/account once; the mismatched call hit the cache (no rebuild).
+    assertThat(server.getRequestCount()).isEqualTo(1);
+    assertThat(source.calls.get()).isEqualTo(1);
+  }
+
   @Test
   void unknownProviderIsNonRetryable() {
     CountingSource source = new CountingSource(credsPaper(""));

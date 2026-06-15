@@ -142,7 +142,7 @@ class AdoptionWorkflowIT {
     // StubBroker for every key; "alpaca-paper" is the pod's broker.impl (provider="alpaca").
     brokerWorker.registerActivitiesImplementations(
         new ReconciliationExecActivityImpl(
-            journal, (tenantId, provider) -> broker, "alpaca-paper"));
+            journal, (tenantId, provider, declaredAccountId) -> broker, "alpaca-paper"));
     env.start();
   }
 
