@@ -1,16 +1,23 @@
 package com.ohmytradeagent.exec.broker.alpaca;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestClient;
 
 /**
  * Spring wiring for the Alpaca adapter. Activated for any {@code alpaca-*} broker.impl (both {@code
  * alpaca-paper} and {@code alpaca-live}), so containers that boot with {@code BROKER_IMPL=stub}
- * (CI, idempotency ITs) never construct a RestClient or check Alpaca credentials.
+ * (CI, idempotency ITs) never bind Alpaca config.
+ *
+ * <p>P4-a: the single shared {@code alpacaRestClient} {@code @Bean} is gone — the {@link
+ * com.ohmytradeagent.exec.broker.BrokerClientRegistry} now builds a {@link RestClient} PER {@code
+ * (tenant, account)} key via {@link #buildRestClient}. This class is retained only as the
+ * {@code @EnableConfigurationProperties(AlpacaProperties.class)} holder and the home of the shared
+ * RestClient header-wiring factory (single source of truth so the registry's per-key build matches
+ * the historical wiring byte-for-byte). The cred-presence + mode-coherence fail-fast guards moved
+ * to {@link AlpacaModeCoherence}; the boot account probe moved to a registry warm-up ({@link
+ * AlpacaAccountIdentityProbe}).
  */
 @Configuration
 @ConditionalOnExpression("'${broker.impl:}'.startsWith('alpaca-')")
@@ -18,66 +25,18 @@ import org.springframework.web.client.RestClient;
 public class AlpacaConfig {
 
   /**
-   * Builds the shared {@link RestClient} pre-wired with Alpaca's base URL and auth headers. Fails
-   * fast on missing creds: a misconfigured deployment must not silently boot and then 401 on every
-   * order — that wastes Temporal Activity retries and pollutes the audit log. Also fails fast when
-   * the impl and base URL disagree (a {@code -live} impl pointed at the paper host, or vice versa),
-   * so a real-money build can never silently route to paper and a paper build can never route to
-   * live.
+   * Builds a {@link RestClient} pre-wired with Alpaca's base URL and auth headers, exactly as the
+   * pre-P4-a {@code alpacaRestClient} bean did (same {@code APCA-API-KEY-ID} / {@code
+   * APCA-API-SECRET-KEY} / {@code Accept} headers) so the registry's per-key client is
+   * byte-identical on the wire. Cred presence + mode coherence are enforced by the caller via
+   * {@link AlpacaModeCoherence} before this is invoked.
    */
-  @Bean
-  RestClient alpacaRestClient(
-      AlpacaProperties props,
-      RestClient.Builder builder,
-      @Value("${broker.impl:}") String brokerImpl,
-      @Value("${exec.fill-listener.ws-url:}") String fillWsUrl) {
-    if (props.apiKeyId() == null || props.apiKeyId().isBlank()) {
-      throw new IllegalStateException(
-          "broker.impl=alpaca-* requires APCA_API_KEY_ID; got blank/null. "
-              + "Set the alpaca-credentials Secret in your deployment.");
-    }
-    if (props.apiSecretKey() == null || props.apiSecretKey().isBlank()) {
-      throw new IllegalStateException(
-          "broker.impl=alpaca-* requires APCA_API_SECRET_KEY; got blank/null. "
-              + "Set the alpaca-credentials Secret in your deployment.");
-    }
-    boolean baseUrlIsPaper = props.baseUrl() != null && props.baseUrl().contains("paper");
-    if (brokerImpl.endsWith("-live") && baseUrlIsPaper) {
-      throw new IllegalStateException(
-          "broker.impl="
-              + brokerImpl
-              + " (live) must not target a paper endpoint; "
-              + "alpaca.base-url="
-              + props.baseUrl()
-              + ". Point it at the live host.");
-    }
-    if (brokerImpl.endsWith("-paper") && !baseUrlIsPaper) {
-      throw new IllegalStateException(
-          "broker.impl="
-              + brokerImpl
-              + " (paper) must target a paper endpoint; "
-              + "alpaca.base-url="
-              + props.baseUrl()
-              + ". Point it at the paper host.");
-    }
-    // The fill-listener WS URL is a SEPARATE knob from the REST base-url (the base-url checks above
-    // only cover the order path). A -live impl whose WS URL still points at the paper trade-updates
-    // stream would authenticate live keys against the paper endpoint (rejected) and silently lose
-    // real-time fills. Enforce the live direction only; a paper/stub build may keep the default
-    // paper ws-url, so don't break it.
-    if (brokerImpl.endsWith("-live") && fillWsUrl != null && fillWsUrl.contains("paper")) {
-      throw new IllegalStateException(
-          "broker.impl="
-              + brokerImpl
-              + " (live) must not target the paper fill-listener stream; "
-              + "exec.fill-listener.ws-url="
-              + fillWsUrl
-              + ". Point it at the live trade-updates stream.");
-    }
+  public static RestClient buildRestClient(
+      RestClient.Builder builder, String baseUrl, String apiKeyId, String apiSecretKey) {
     return builder
-        .baseUrl(props.baseUrl())
-        .defaultHeader("APCA-API-KEY-ID", props.apiKeyId())
-        .defaultHeader("APCA-API-SECRET-KEY", props.apiSecretKey())
+        .baseUrl(baseUrl)
+        .defaultHeader("APCA-API-KEY-ID", apiKeyId)
+        .defaultHeader("APCA-API-SECRET-KEY", apiSecretKey)
         .defaultHeader("Accept", "application/json")
         .build();
   }

@@ -61,7 +61,7 @@ class ExecActivitiesImplClientOrderIdTest {
     exec =
         new ExecActivitiesImpl(
             journal,
-            broker,
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker),
             new BrokerRejectionAlerter(webhook, /* enabled= */ true, Runnable::run));
   }
 

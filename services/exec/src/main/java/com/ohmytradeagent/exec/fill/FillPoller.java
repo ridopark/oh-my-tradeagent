@@ -1,5 +1,6 @@
 package com.ohmytradeagent.exec.fill;
 
+import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
@@ -36,7 +37,7 @@ public class FillPoller {
   private static final Logger log = LoggerFactory.getLogger(FillPoller.class);
 
   private final OrderIntentJournal journal;
-  private final OptionsBroker broker;
+  private final BrokerClientRegistry brokerRegistry;
   private final FillDispatcher dispatcher;
   private final FillListenerMetrics metrics;
   private final FillPollerProperties props;
@@ -45,22 +46,22 @@ public class FillPoller {
   @Autowired
   public FillPoller(
       OrderIntentJournal journal,
-      OptionsBroker broker,
+      BrokerClientRegistry brokerRegistry,
       FillDispatcher dispatcher,
       FillListenerMetrics metrics,
       FillPollerProperties props) {
-    this(journal, broker, dispatcher, metrics, props, Clock.systemUTC());
+    this(journal, brokerRegistry, dispatcher, metrics, props, Clock.systemUTC());
   }
 
   FillPoller(
       OrderIntentJournal journal,
-      OptionsBroker broker,
+      BrokerClientRegistry brokerRegistry,
       FillDispatcher dispatcher,
       FillListenerMetrics metrics,
       FillPollerProperties props,
       Clock clock) {
     this.journal = journal;
-    this.broker = broker;
+    this.brokerRegistry = brokerRegistry;
     this.dispatcher = dispatcher;
     this.metrics = metrics;
     this.props = props;
@@ -101,6 +102,12 @@ public class FillPoller {
     // markSubmittedIfRecorded atomically sets state=SUBMITTED + broker_order_id, so a row matching
     // state='SUBMITTED' always carries a non-null broker_order_id. Defensive checks here would mask
     // an invariant break.
+    // P4-a: resolve the broker per journaled row's (tenantId, brokerTarget) (cached, cheap) and
+    // reuse
+    // the same handle for getOrderStatus + getFillDetail on this row.
+    OptionsBroker broker =
+        brokerRegistry.brokerFor(
+            row.tenantId(), BrokerClientRegistry.providerOf(row.brokerTarget()));
     BrokerOrderStatus status;
     try {
       status = broker.getOrderStatus(row.brokerOrderId());

@@ -3,6 +3,7 @@ package com.ohmytradeagent.exec.activities;
 import com.ohmytradeagent.contract.AccountSnapshotRequest;
 import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
+import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import org.springframework.stereotype.Component;
 
@@ -16,18 +17,26 @@ import org.springframework.stereotype.Component;
  * <p>Equity is account-level (one credential set per exec deployment), so the request carries no
  * tenant/strategy — it is identified solely by the {@code broker_target} that routed the dispatch
  * to this worker's {@code broker-<target>} task queue.
+ *
+ * <p>P4-a: resolve the broker via {@link BrokerClientRegistry} keyed on {@code (ACCOUNT_LEVEL,
+ * provider)}. The request has no tenant, and under the env-fallback source the resolver ignores the
+ * tenant key anyway, so behavior is preserved.
  */
 @Component
 public class AccountSnapshotExecActivityImpl implements AccountSnapshotActivity {
 
-  private final OptionsBroker broker;
+  private final BrokerClientRegistry brokerRegistry;
 
-  public AccountSnapshotExecActivityImpl(OptionsBroker broker) {
-    this.broker = broker;
+  public AccountSnapshotExecActivityImpl(BrokerClientRegistry brokerRegistry) {
+    this.brokerRegistry = brokerRegistry;
   }
 
   @Override
   public AccountSnapshotResult accountSnapshot(AccountSnapshotRequest request) {
+    OptionsBroker broker =
+        brokerRegistry.brokerFor(
+            BrokerClientRegistry.ACCOUNT_LEVEL,
+            BrokerClientRegistry.providerOf(request.getBrokerTarget().value()));
     AccountSnapshotResult result = new AccountSnapshotResult();
     result.setSchemaVersion(1L);
     // Issue #323: read equity AND cash from a SINGLE broker account fetch (getAccount) rather than

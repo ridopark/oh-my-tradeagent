@@ -80,7 +80,7 @@ class ExecActivitiesImplIT {
     exec =
         new ExecActivitiesImpl(
             journal,
-            broker,
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker),
             new com.ohmytradeagent.exec.alert.BrokerRejectionAlerter(content -> {}, false));
   }
 

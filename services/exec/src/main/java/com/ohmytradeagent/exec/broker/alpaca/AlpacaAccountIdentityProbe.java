@@ -1,6 +1,6 @@
 package com.ohmytradeagent.exec.broker.alpaca;
 
-import com.ohmytradeagent.exec.broker.OptionsBroker;
+import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -10,11 +10,21 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.stereotype.Component;
 
 /**
- * Phase P2 live-safety: at boot of an Alpaca worker, prove the API keys authenticate the
- * operator-declared brokerage account before the worker starts trading. Wrong-account keys on the
- * real-money path are catastrophic, so this fails closed: an {@link ApplicationRunner} that throws
- * aborts Spring startup → k8s crashloops the pod (the correct signal that the deployment is
- * misconfigured / the account is unreachable).
+ * Phase P2 live-safety, P4-a registry warm-up: at boot of an Alpaca worker, prove the API keys
+ * authenticate the operator-declared brokerage account before the worker starts trading.
+ * Wrong-account keys on the real-money path are catastrophic, so this fails closed: an {@link
+ * ApplicationRunner} that throws aborts Spring startup → k8s crashloops the pod (the correct signal
+ * that the deployment is misconfigured / the account is unreachable).
+ *
+ * <p>P4-a: the account-identity read + assertion + bounded transient-retry now live in the {@link
+ * BrokerClientRegistry} build ({@link BrokerAccountIdentityVerifier}). This runner simply WARMS the
+ * registry for the configured bootstrap tenant — {@code registry.brokerFor(tenant, "alpaca")} — so
+ * the build runs at boot and a mismatch/unreachable throws here, aborting startup exactly as
+ * before. Account identity is therefore NOT lazy-only.
+ *
+ * <p>Under the env-fallback credential source the assertion is tenant-independent (same creds →
+ * same account), so the crashloop-on-misconfig guarantee holds regardless of the warm-up tenant
+ * key. P4-b (per-tenant creds) will warm each live tenant explicitly.
  *
  * <p>Two distinct failure modes, kept distinguishable for triage:
  *
@@ -28,7 +38,8 @@ import org.springframework.stereotype.Component;
  *
  * <p>Activated only for {@code alpaca-*} impls (mirrors {@link AlpacaConfig}). A {@code -live} impl
  * with a blank {@code EXPECTED_ALPACA_ACCOUNT_ID} is rejected at boot (a live worker must declare
- * its account); a {@code -paper} impl with it blank is a no-op (back-compat).
+ * its account); a {@code -paper} impl with it blank warms the registry with the account assertion
+ * disabled (back-compat).
  */
 @Component
 @ConditionalOnExpression("'${broker.impl:}'.startsWith('alpaca-')")
@@ -36,22 +47,23 @@ public class AlpacaAccountIdentityProbe implements ApplicationRunner {
 
   private static final Logger log = LoggerFactory.getLogger(AlpacaAccountIdentityProbe.class);
 
-  /** Bounded retry budget for the TRANSIENT account-read; a mismatch is never retried. */
-  private static final int MAX_ATTEMPTS = 3;
+  /** Provider this warm-up bootstraps; the exec pod is single-provider in P4-a. */
+  private static final String PROVIDER = "alpaca";
 
-  private static final long BACKOFF_MS = 500L;
-
-  private final OptionsBroker broker;
+  private final BrokerClientRegistry registry;
   private final String brokerImpl;
   private final String expectedAccount;
+  private final String bootstrapTenant;
 
   public AlpacaAccountIdentityProbe(
-      OptionsBroker broker,
+      BrokerClientRegistry registry,
       @Value("${broker.impl:}") String brokerImpl,
-      @Value("${EXPECTED_ALPACA_ACCOUNT_ID:}") String expectedAccount) {
-    this.broker = broker;
+      @Value("${EXPECTED_ALPACA_ACCOUNT_ID:}") String expectedAccount,
+      @Value("${EXEC_BOOTSTRAP_TENANT_ID:dev}") String bootstrapTenant) {
+    this.registry = registry;
     this.brokerImpl = brokerImpl;
     this.expectedAccount = expectedAccount;
+    this.bootstrapTenant = bootstrapTenant;
   }
 
   @Override
@@ -67,48 +79,14 @@ public class AlpacaAccountIdentityProbe implements ApplicationRunner {
               + " worker without a declared account");
     }
 
-    if (expectedBlank) {
-      // Paper (or any non-live impl) with no declared account: assertion disabled, back-compat.
-      return;
+    // Warm the registry for the bootstrap tenant. The build runs the mode-coherence check + the P2
+    // account-identity assertion (with bounded transient-read retry); a mismatch/unreachable throws
+    // out of here and aborts boot (fail closed). A blank expected is a no-op assertion (paper).
+    registry.brokerFor(bootstrapTenant, PROVIDER);
+    if (!expectedBlank) {
+      log.info(
+          "broker account identity verified at boot via registry warm-up (tenant={})",
+          bootstrapTenant);
     }
-
-    String accountNumber = fetchAccountNumberWithRetry();
-    // Mismatch is PERMANENT: this throws and propagates immediately (never retried above).
-    AccountIdentityAssertion.assertMatches(accountNumber, expectedAccount);
-    log.info(
-        "broker account identity verified: account={} matches EXPECTED_ALPACA_ACCOUNT_ID",
-        accountNumber);
-  }
-
-  /**
-   * Reads {@code /v2/account} {@code account_number} with bounded retry on TRANSIENT failure. Only
-   * the read is retried — the caller asserts identity on the returned value, and a mismatch (a
-   * permanent condition) is not a read failure so it never reaches this method's retry loop. If
-   * every attempt throws, the last exception is rethrown so boot fails closed.
-   */
-  private String fetchAccountNumberWithRetry() throws Exception {
-    Exception last = null;
-    for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        return broker.getAccount().accountNumber();
-      } catch (Exception e) {
-        last = e;
-        log.warn(
-            "broker account read attempt {}/{} failed (transient): {}",
-            attempt,
-            MAX_ATTEMPTS,
-            e.toString());
-        if (attempt < MAX_ATTEMPTS) {
-          Thread.sleep(BACKOFF_MS);
-        }
-      }
-    }
-    throw new IllegalStateException(
-        "cannot reach broker account endpoint to verify identity after "
-            + MAX_ATTEMPTS
-            + " attempts (broker.impl="
-            + brokerImpl
-            + ") — refusing to boot",
-        last);
   }
 }

@@ -3,8 +3,10 @@ package com.ohmytradeagent.exec.broker.alpaca;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.ohmytradeagent.exec.broker.OptionsBroker;
+import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
+import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
 import com.ohmytradeagent.exec.broker.stub.StubBroker;
+import com.ohmytradeagent.exec.broker.stub.StubBrokerClientRegistry;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
@@ -16,10 +18,16 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestClient;
 
 /**
- * Wiring contract for the Alpaca adapter's broker.impl gating. Exercises every broker.impl
- * permutation (alpaca-live, alpaca-paper, stub, absent) plus the two fail-fast guards (missing
- * creds and live/paper endpoint coherence) in one ApplicationContextRunner sweep. Mirrors the house
- * bean-wiring style of {@code FillPollerWiringTest}.
+ * Wiring contract for the P4-a broker registry's broker.impl gating. Exercises every broker.impl
+ * permutation (alpaca-live, alpaca-paper, stub, absent) and asserts that EXACTLY ONE {@link
+ * BrokerClientRegistry} bean is selected per profile: the {@link AlpacaBrokerClientRegistry} +
+ * {@link EnvFallbackBrokerCredentialSource} for {@code alpaca-*}, the {@link
+ * StubBrokerClientRegistry} for {@code stub}/absent (no alpaca credential source, no RestClient
+ * built).
+ *
+ * <p>The cred-presence + live/paper coherence FAIL-FAST guards moved into the registry build
+ * ({@link AlpacaModeCoherence}); they are unit-pinned in {@link AlpacaModeCoherenceTest}. The boot
+ * account probe (now a registry warm-up) is pinned in {@link AlpacaAccountIdentityProbeTest}.
  */
 class AlpacaBrokerActivationTest {
 
@@ -50,7 +58,7 @@ class AlpacaBrokerActivationTest {
   }
 
   @Test
-  void liveImplActivatesAlpacaAdapterAgainstLiveHost() {
+  void liveImplSelectsAlpacaRegistryAndEnvFallbackSource() {
     runner
         .withPropertyValues(
             "broker.impl=alpaca-live",
@@ -61,14 +69,18 @@ class AlpacaBrokerActivationTest {
         .run(
             ctx -> {
               assertThat(ctx).hasNotFailed();
-              assertThat(ctx).hasBean("alpacaRestClient");
-              assertThat(ctx.getBeanNamesForType(OptionsBroker.class)).hasSize(1);
-              assertThat(ctx.getBean(OptionsBroker.class)).isInstanceOf(AlpacaPaperBroker.class);
+              assertThat(ctx.getBeanNamesForType(BrokerClientRegistry.class)).hasSize(1);
+              assertThat(ctx.getBean(BrokerClientRegistry.class))
+                  .isInstanceOf(AlpacaBrokerClientRegistry.class);
+              assertThat(ctx.getBeanNamesForType(BrokerCredentialSource.class)).hasSize(1);
+              assertThat(ctx.getBean(BrokerCredentialSource.class))
+                  .isInstanceOf(EnvFallbackBrokerCredentialSource.class);
+              assertThat(ctx).doesNotHaveBean(StubBrokerClientRegistry.class);
             });
   }
 
   @Test
-  void paperImplStillActivatesAlpacaAdapterAgainstPaperHost() {
+  void paperImplSelectsAlpacaRegistry() {
     runner
         .withPropertyValues(
             "broker.impl=alpaca-paper",
@@ -79,149 +91,57 @@ class AlpacaBrokerActivationTest {
         .run(
             ctx -> {
               assertThat(ctx).hasNotFailed();
-              assertThat(ctx).hasBean("alpacaRestClient");
-              assertThat(ctx.getBeanNamesForType(OptionsBroker.class)).hasSize(1);
-              assertThat(ctx.getBean(OptionsBroker.class)).isInstanceOf(AlpacaPaperBroker.class);
+              assertThat(ctx.getBeanNamesForType(BrokerClientRegistry.class)).hasSize(1);
+              assertThat(ctx.getBean(BrokerClientRegistry.class))
+                  .isInstanceOf(AlpacaBrokerClientRegistry.class);
             });
   }
 
   @Test
-  void stubImplSelectsStubBrokerAndNoAlpacaWiring() {
+  void stubImplSelectsStubRegistryAndNoAlpacaWiring() {
     runner
         .withPropertyValues("broker.impl=stub")
         .withUserConfiguration(BrokerBeans.class)
         .run(
             ctx -> {
               assertThat(ctx).hasNotFailed();
-              assertThat(ctx.getBeanNamesForType(OptionsBroker.class)).hasSize(1);
-              assertThat(ctx.getBean(OptionsBroker.class)).isInstanceOf(StubBroker.class);
-              assertThat(ctx).doesNotHaveBean("alpacaRestClient");
+              assertThat(ctx.getBeanNamesForType(BrokerClientRegistry.class)).hasSize(1);
+              assertThat(ctx.getBean(BrokerClientRegistry.class))
+                  .isInstanceOf(StubBrokerClientRegistry.class);
+              assertThat(ctx).doesNotHaveBean(AlpacaBrokerClientRegistry.class);
+              assertThat(ctx).doesNotHaveBean(BrokerCredentialSource.class);
               assertThat(ctx).doesNotHaveBean(AlpacaConfig.class);
             });
   }
 
   @Test
-  void absentImplDefaultsToStubBroker() {
+  void absentImplDefaultsToStubRegistry() {
     runner
         .withUserConfiguration(BrokerBeans.class)
         .run(
             ctx -> {
               assertThat(ctx).hasNotFailed();
-              assertThat(ctx.getBeanNamesForType(OptionsBroker.class)).hasSize(1);
-              assertThat(ctx.getBean(OptionsBroker.class)).isInstanceOf(StubBroker.class);
-              assertThat(ctx).doesNotHaveBean("alpacaRestClient");
+              assertThat(ctx.getBeanNamesForType(BrokerClientRegistry.class)).hasSize(1);
+              assertThat(ctx.getBean(BrokerClientRegistry.class))
+                  .isInstanceOf(StubBrokerClientRegistry.class);
+              assertThat(ctx).doesNotHaveBean(AlpacaBrokerClientRegistry.class);
+              assertThat(ctx).doesNotHaveBean(BrokerCredentialSource.class);
               assertThat(ctx).doesNotHaveBean(AlpacaConfig.class);
-            });
-  }
-
-  @Test
-  void liveImplWithBlankApiKeyFailsFast() {
-    runner
-        .withPropertyValues(
-            "broker.impl=alpaca-live",
-            "alpaca.api-key-id=",
-            "alpaca.api-secret-key=dummy-secret",
-            "alpaca.base-url=" + LIVE_HOST)
-        .withUserConfiguration(BrokerBeans.class)
-        .run(
-            ctx -> {
-              assertThat(ctx).hasFailed();
-              assertThat(ctx)
-                  .getFailure()
-                  .rootCause()
-                  .isInstanceOf(IllegalStateException.class)
-                  .hasMessageContaining("APCA_API_KEY_ID");
-            });
-  }
-
-  @Test
-  void liveImplPointedAtPaperHostFailsFast() {
-    runner
-        .withPropertyValues(
-            "broker.impl=alpaca-live",
-            "alpaca.api-key-id=dummy-key",
-            "alpaca.api-secret-key=dummy-secret",
-            "alpaca.base-url=" + PAPER_HOST)
-        .withUserConfiguration(BrokerBeans.class)
-        .run(
-            ctx -> {
-              assertThat(ctx).hasFailed();
-              assertThat(ctx)
-                  .getFailure()
-                  .rootCause()
-                  .isInstanceOf(IllegalStateException.class)
-                  .hasMessageContaining("alpaca-live");
-            });
-  }
-
-  private static final String LIVE_WS = "wss://api.alpaca.markets/stream";
-  private static final String PAPER_WS = "wss://paper-api.alpaca.markets/stream";
-
-  @Test
-  void liveImplWithPaperWsUrlFailsFast() {
-    runner
-        .withPropertyValues(
-            "broker.impl=alpaca-live",
-            "alpaca.api-key-id=dummy-key",
-            "alpaca.api-secret-key=dummy-secret",
-            "alpaca.base-url=" + LIVE_HOST,
-            "exec.fill-listener.ws-url=" + PAPER_WS)
-        .withUserConfiguration(BrokerBeans.class)
-        .run(
-            ctx -> {
-              assertThat(ctx).hasFailed();
-              assertThat(ctx)
-                  .getFailure()
-                  .rootCause()
-                  .isInstanceOf(IllegalStateException.class)
-                  .hasMessageContaining("fill-listener");
-            });
-  }
-
-  @Test
-  void liveImplWithLiveWsUrlActivates() {
-    runner
-        .withPropertyValues(
-            "broker.impl=alpaca-live",
-            "alpaca.api-key-id=dummy-key",
-            "alpaca.api-secret-key=dummy-secret",
-            "alpaca.base-url=" + LIVE_HOST,
-            "exec.fill-listener.ws-url=" + LIVE_WS)
-        .withUserConfiguration(BrokerBeans.class)
-        .run(
-            ctx -> {
-              assertThat(ctx).hasNotFailed();
-              assertThat(ctx).hasBean("alpacaRestClient");
-            });
-  }
-
-  @Test
-  void paperImplWithPaperWsUrlActivates() {
-    runner
-        .withPropertyValues(
-            "broker.impl=alpaca-paper",
-            "alpaca.api-key-id=dummy-key",
-            "alpaca.api-secret-key=dummy-secret",
-            "alpaca.base-url=" + PAPER_HOST,
-            "exec.fill-listener.ws-url=" + PAPER_WS)
-        .withUserConfiguration(BrokerBeans.class)
-        .run(
-            ctx -> {
-              assertThat(ctx).hasNotFailed();
-              assertThat(ctx).hasBean("alpacaRestClient");
             });
   }
 
   /**
-   * The conditionally-registered Alpaca beans + StubBroker. Kept separate from {@link TestConfig}
-   * so the always-on collaborator beans (RestClient.Builder, MeterRegistry, ObjectMapper) are
-   * present regardless of which broker.impl branch the @Conditional selects.
+   * The conditionally-registered Alpaca + stub beans. Kept separate from {@link TestConfig} so the
+   * always-on collaborator beans (RestClient.Builder, MeterRegistry, ObjectMapper) are present
+   * regardless of which broker.impl branch the @Conditional selects.
    */
   @Configuration
   @org.springframework.context.annotation.Import({
     AlpacaConfig.class,
-    AlpacaPaperBroker.class,
-    StubBroker.class
+    EnvFallbackBrokerCredentialSource.class,
+    AlpacaBrokerClientRegistry.class,
+    StubBroker.class,
+    StubBrokerClientRegistry.class
   })
   static class BrokerBeans {}
 }

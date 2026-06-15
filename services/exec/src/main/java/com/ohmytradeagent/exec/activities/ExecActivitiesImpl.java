@@ -3,6 +3,7 @@ package com.ohmytradeagent.exec.activities;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.exec.alert.BrokerRejectionAlerter;
+import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.ClientOrderId;
@@ -38,13 +39,15 @@ import org.springframework.stereotype.Component;
 public class ExecActivitiesImpl implements ExecActivities {
 
   private final OrderIntentJournal journal;
-  private final OptionsBroker broker;
+  private final BrokerClientRegistry brokerRegistry;
   private final BrokerRejectionAlerter rejectionAlerter;
 
   public ExecActivitiesImpl(
-      OrderIntentJournal journal, OptionsBroker broker, BrokerRejectionAlerter rejectionAlerter) {
+      OrderIntentJournal journal,
+      BrokerClientRegistry brokerRegistry,
+      BrokerRejectionAlerter rejectionAlerter) {
     this.journal = journal;
-    this.broker = broker;
+    this.brokerRegistry = brokerRegistry;
     this.rejectionAlerter = rejectionAlerter;
   }
 
@@ -71,6 +74,17 @@ public class ExecActivitiesImpl implements ExecActivities {
     // and
     // the WS-echoed id all match. The intent_key stays unchanged (journal PK / :exit: STC routing).
     String clientOrderId = ClientOrderId.forIntent(intent.getIntentKey());
+    // P4-a: resolve the broker for THIS intent's (tenant, provider) once via the registry instead
+    // of
+    // a single injected OptionsBroker. Under the env-fallback credential source every key resolves
+    // to
+    // the same env cred set, so the resolved client is byte-identical to the pre-P4-a single
+    // broker;
+    // P4-b makes it per-tenant. brokerTarget is guaranteed non-null by validateIntent above.
+    OptionsBroker broker =
+        brokerRegistry.brokerFor(
+            intent.getTenantId(),
+            BrokerClientRegistry.providerOf(intent.getBrokerTarget().value()));
     // P1 multi-tenant-credentials: carry tenant_id to the broker boundary, and surface it on the
     // MDC
     // for the duration of the broker call so later phases can resolve per-tenant credentials and
@@ -164,6 +178,11 @@ public class ExecActivitiesImpl implements ExecActivities {
       return journal.findByIntentKey(intentKey).map(ExecActivitiesImpl::result).orElseThrow();
     }
 
+    // P4-a: resolve the broker ONCE from the journaled row's (tenantId, brokerTarget) and reuse the
+    // same handle for both the cancel and the cancel-on-filled getFillDetail follow-up.
+    OptionsBroker broker =
+        brokerRegistry.brokerFor(
+            row.tenantId(), BrokerClientRegistry.providerOf(row.brokerTarget()));
     journal.markCancelAttempted(intentKey);
     CancelResponse cancel = broker.cancelOrder(row.brokerOrderId());
     switch (cancel.outcome()) {

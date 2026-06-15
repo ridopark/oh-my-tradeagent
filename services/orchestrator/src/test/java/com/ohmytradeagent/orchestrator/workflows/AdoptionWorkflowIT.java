@@ -138,8 +138,11 @@ class AdoptionWorkflowIT {
     // REAL exec broker-truth on a DISTINCT queue — only reachable by routing through the exec
     // task queue (the whole point of #285). Backed by a REAL journal + StubBroker.
     Worker brokerWorker = env.newWorker(EXEC_QUEUE);
+    // P4-a: exec resolves the broker via a BrokerClientRegistry. The stub registry returns the
+    // StubBroker for every key; "alpaca-paper" is the pod's broker.impl (provider="alpaca").
     brokerWorker.registerActivitiesImplementations(
-        new ReconciliationExecActivityImpl(journal, broker));
+        new ReconciliationExecActivityImpl(
+            journal, (tenantId, provider) -> broker, "alpaca-paper"));
     env.start();
   }
 

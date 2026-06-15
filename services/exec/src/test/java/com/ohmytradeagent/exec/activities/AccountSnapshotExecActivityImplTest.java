@@ -24,7 +24,9 @@ class AccountSnapshotExecActivityImplTest {
     OptionsBroker broker = mock(OptionsBroker.class);
     when(broker.getAccount())
         .thenReturn(new OptionsBroker.AccountSummary(new BigDecimal("123456.78"), null, null));
-    AccountSnapshotExecActivityImpl impl = new AccountSnapshotExecActivityImpl(broker);
+    AccountSnapshotExecActivityImpl impl =
+        new AccountSnapshotExecActivityImpl(
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker));
 
     AccountSnapshotRequest req = new AccountSnapshotRequest();
     req.setSchemaVersion(1L);
@@ -48,7 +50,9 @@ class AccountSnapshotExecActivityImplTest {
         .thenReturn(
             new OptionsBroker.AccountSummary(
                 new BigDecimal("123456.78"), new BigDecimal("42000.00"), "PA3ER05HLHMB"));
-    AccountSnapshotExecActivityImpl impl = new AccountSnapshotExecActivityImpl(broker);
+    AccountSnapshotExecActivityImpl impl =
+        new AccountSnapshotExecActivityImpl(
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker));
 
     AccountSnapshotRequest req = new AccountSnapshotRequest();
     req.setSchemaVersion(1L);
@@ -71,7 +75,9 @@ class AccountSnapshotExecActivityImplTest {
         .thenReturn(
             new OptionsBroker.AccountSummary(
                 new BigDecimal("123456.78"), new BigDecimal("42000.00"), null));
-    AccountSnapshotExecActivityImpl impl = new AccountSnapshotExecActivityImpl(broker);
+    AccountSnapshotExecActivityImpl impl =
+        new AccountSnapshotExecActivityImpl(
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker));
 
     AccountSnapshotRequest req = new AccountSnapshotRequest();
     req.setSchemaVersion(1L);
