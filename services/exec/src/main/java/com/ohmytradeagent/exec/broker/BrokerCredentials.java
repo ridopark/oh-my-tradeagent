@@ -20,4 +20,21 @@ package com.ohmytradeagent.exec.broker;
  * </ul>
  */
 public record BrokerCredentials(
-    String apiKeyId, String apiSecretKey, String baseUrl, String wsUrl, String expectedAccountId) {}
+    String apiKeyId, String apiSecretKey, String baseUrl, String wsUrl, String expectedAccountId) {
+
+  /**
+   * Redacts the two credential fields ({@code apiKeyId} / {@code apiSecretKey}) so an accidental
+   * log line, stack trace, or alert that interpolates this record never leaks key material. The
+   * non-secret endpoint/account fields stay visible for triage.
+   */
+  @Override
+  public String toString() {
+    return "BrokerCredentials[apiKeyId=***, apiSecretKey=***, baseUrl="
+        + baseUrl
+        + ", wsUrl="
+        + wsUrl
+        + ", expectedAccountId="
+        + expectedAccountId
+        + "]";
+  }
+}

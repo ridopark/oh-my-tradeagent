@@ -98,6 +98,62 @@ class AlpacaBrokerActivationTest {
   }
 
   @Test
+  void fileCredsSourceSelectsFileMountedSource() {
+    // broker.creds.source=file → exactly one BrokerCredentialSource, the per-tenant file source.
+    runner
+        .withPropertyValues(
+            "broker.impl=alpaca-paper",
+            "broker.creds.source=file",
+            "alpaca.api-key-id=dummy-key",
+            "alpaca.api-secret-key=dummy-secret",
+            "alpaca.base-url=" + PAPER_HOST)
+        .withUserConfiguration(BrokerBeans.class)
+        .run(
+            ctx -> {
+              assertThat(ctx).hasNotFailed();
+              assertThat(ctx.getBeanNamesForType(BrokerCredentialSource.class)).hasSize(1);
+              assertThat(ctx.getBean(BrokerCredentialSource.class))
+                  .isInstanceOf(FileMountedBrokerCredentialSource.class);
+              assertThat(ctx).doesNotHaveBean(EnvFallbackBrokerCredentialSource.class);
+            });
+  }
+
+  @Test
+  void explicitEnvCredsSourceSelectsEnvFallbackSource() {
+    runner
+        .withPropertyValues(
+            "broker.impl=alpaca-paper",
+            "broker.creds.source=env",
+            "alpaca.api-key-id=dummy-key",
+            "alpaca.api-secret-key=dummy-secret",
+            "alpaca.base-url=" + PAPER_HOST)
+        .withUserConfiguration(BrokerBeans.class)
+        .run(
+            ctx -> {
+              assertThat(ctx).hasNotFailed();
+              assertThat(ctx.getBeanNamesForType(BrokerCredentialSource.class)).hasSize(1);
+              assertThat(ctx.getBean(BrokerCredentialSource.class))
+                  .isInstanceOf(EnvFallbackBrokerCredentialSource.class);
+              assertThat(ctx).doesNotHaveBean(FileMountedBrokerCredentialSource.class);
+            });
+  }
+
+  @Test
+  void unrecognizedCredsSourceYieldsNoSourceAndFailsContext() {
+    // MUST-FIX-2: a typo'd selector must fail-closed-LOUD (zero sources → the registry's required
+    // BrokerCredentialSource ctor arg is unsatisfied → context fails), never silently default env.
+    runner
+        .withPropertyValues(
+            "broker.impl=alpaca-paper",
+            "broker.creds.source=garbage",
+            "alpaca.api-key-id=dummy-key",
+            "alpaca.api-secret-key=dummy-secret",
+            "alpaca.base-url=" + PAPER_HOST)
+        .withUserConfiguration(BrokerBeans.class)
+        .run(ctx -> assertThat(ctx).hasFailed());
+  }
+
+  @Test
   void stubImplSelectsStubRegistryAndNoAlpacaWiring() {
     runner
         .withPropertyValues("broker.impl=stub")
@@ -139,6 +195,7 @@ class AlpacaBrokerActivationTest {
   @org.springframework.context.annotation.Import({
     AlpacaConfig.class,
     EnvFallbackBrokerCredentialSource.class,
+    FileMountedBrokerCredentialSource.class,
     AlpacaBrokerClientRegistry.class,
     StubBroker.class,
     StubBrokerClientRegistry.class

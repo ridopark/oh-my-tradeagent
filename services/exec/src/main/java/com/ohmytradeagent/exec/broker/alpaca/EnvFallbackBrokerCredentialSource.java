@@ -4,6 +4,7 @@ import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
 import com.ohmytradeagent.exec.broker.BrokerCredentials;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -16,10 +17,14 @@ import org.springframework.stereotype.Component;
  * single broker; P4-b adds the per-tenant impl.
  *
  * <p>Activated for any {@code alpaca-*} broker.impl (mirrors {@link AlpacaConfig}), so a {@code
- * BROKER_IMPL=stub} container never constructs this bean.
+ * BROKER_IMPL=stub} container never constructs this bean. {@code broker.creds.source} selects
+ * between this {@code env} default ({@code matchIfMissing}) and the per-tenant {@link
+ * FileMountedBrokerCredentialSource} ({@code file}); the two are mutually exclusive, so an
+ * unrecognized selector value yields NO source bean (fail-closed crash, never a silent default).
  */
 @Component
 @ConditionalOnExpression("'${broker.impl:}'.startsWith('alpaca-')")
+@ConditionalOnProperty(name = "broker.creds.source", havingValue = "env", matchIfMissing = true)
 public class EnvFallbackBrokerCredentialSource implements BrokerCredentialSource {
 
   private final AlpacaProperties props;
