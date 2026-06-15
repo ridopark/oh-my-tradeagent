@@ -1,6 +1,7 @@
 package com.ohmytradeagent.exec.broker.alpaca;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCrypto;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -116,6 +117,14 @@ public class BrokerCredentialWriter {
       String declaredAccountId,
       long expectedVersion,
       String actor) {
+    // Canonicalize to the read-path provider authority: a caller passing a broker_target
+    // ("alpaca-paper") is normalized to its provider ("alpaca") so the stored row AND its AAD
+    // always
+    // match what resolve(tenant, BrokerClientRegistry.providerOf(broker_target)) looks up.
+    // Idempotent
+    // on an already-canonical provider ("alpaca" -> "alpaca").
+    provider = BrokerClientRegistry.providerOf(provider);
+
     // MUST-FIX-1: a -live pod refuses to persist DB creds outright in P6-b. Checked first so no
     // network probe or DB write can happen on a live pod.
     if (live) {

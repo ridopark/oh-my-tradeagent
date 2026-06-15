@@ -165,14 +165,17 @@ export default async function SettingsPage({
                 Provider
                 <select
                   name="provider"
-                  defaultValue="alpaca-paper"
+                  defaultValue="alpaca"
                   className="rounded border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100"
                 >
-                  {/* alpaca-paper only for now: DB creds refuse *-live by construction, and the
-                      status reader is single-broker (can't see a live-broker DB → wrong
-                      expected_version). alpaca-live returns with dual-control + a multi-broker
-                      reader. */}
-                  <option value="alpaca-paper">alpaca-paper</option>
+                  {/* The credential is keyed by (tenant, provider); provider is the CANONICAL
+                      brokerage = "alpaca" (== exec BrokerClientRegistry.providerOf(broker_target)),
+                      NOT a broker_target like "alpaca-paper". Sending the broker_target would store
+                      an unresolvable row (the resolve path looks up providerOf -> "alpaca") and
+                      break the expected_version match against the BFF status (which returns
+                      "alpaca"). Paper vs live is the tenant's broker_target / pod, not part of the
+                      credential. */}
+                  <option value="alpaca">Alpaca</option>
                 </select>
               </label>
 
