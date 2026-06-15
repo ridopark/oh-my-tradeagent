@@ -1,5 +1,7 @@
 package com.ohmytradeagent.exec.broker;
 
+import io.temporal.failure.ApplicationFailure;
+
 /**
  * Resolves the {@link BrokerCredentials} for a {@code (tenantId, provider)} key. The seam that P4-b
  * swaps from the single env cred set to per-tenant scoped secrets.
@@ -9,6 +11,24 @@ package com.ohmytradeagent.exec.broker;
  * broker is byte-identical to the pre-P4-a single broker.
  */
 public interface BrokerCredentialSource {
+
+  /**
+   * The Temporal failure type every source raises when it cannot produce credentials. It is part of
+   * the cross-service fail-closed contract (the registry/workflow keys redrive vs. abort off it,
+   * and tests assert it), so it lives once on the seam rather than as a literal duplicated per
+   * source.
+   */
+  String UNAVAILABLE_TYPE = "BrokerCredentialsUnavailable";
+
+  /**
+   * Builds the canonical non-retryable {@link #UNAVAILABLE_TYPE} failure. A
+   * missing/blank/undecryptable credential is a deployment or config error, never transient — fail
+   * closed, do not redrive. The message must never contain secret bytes (callers pass only
+   * identifiers/paths).
+   */
+  static ApplicationFailure unavailable(String message) {
+    return ApplicationFailure.newNonRetryableFailure(message, UNAVAILABLE_TYPE);
+  }
 
   /**
    * Resolve credentials for the given tenant + provider (e.g. {@code "alpaca"}). Implementations
