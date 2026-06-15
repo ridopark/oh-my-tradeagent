@@ -116,6 +116,20 @@ spec:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: BFF_SHARED_TOKEN
+            # UI-P2-b: api-gateway broker-credential WRITE endpoint. In-cluster ClusterIP DNS + the
+            # shared service token (must equal api-gateway's API_GATEWAY_SHARED_TOKEN). The secret
+            # entered in the form flows server-side ONLY — never returned to the browser.
+            - name: API_GATEWAY_BASE_URL
+              value: http://api-gateway:8082
+            - name: API_GATEWAY_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: API_GATEWAY_SHARED_TOKEN
+            # Dark-by-default: status panel only until flipped to "true" (and the api-gateway route's
+            # own flag is on). Re-applying this manifest reverts to dark.
+            - name: BROKER_CREDENTIALS_WRITE_ENABLED
+              value: "false"
           readinessProbe:
             httpGet:
               path: /signin
