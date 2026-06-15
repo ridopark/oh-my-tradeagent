@@ -109,6 +109,30 @@ spec:
             limits:
               cpu: 1000m
               memory: 768Mi
+          volumeMounts:
+            # P6-a envelope KEK for DB-sourced broker credentials. exec reads the
+            # base64-encoded 32-byte KEK from broker.creds.db.kek-path (default
+            # /etc/broker-kek/kek). DARK by default: the crypto bean that reads this
+            # file only exists when broker.creds.source=db, so with the default source
+            # this mount is inert and the pod is byte-identical. `optional: true` on the
+            # volume keeps the pod booting while the Secret is absent.
+            - name: broker-kek
+              mountPath: /etc/broker-kek
+              readOnly: true
+      volumes:
+        # Operator-provisioned, exec-only KEK. Create out-of-band (never committed):
+        #   kubectl -n copytrade create secret generic broker-kek \
+        #     --from-literal=kek="$(head -c 32 /dev/urandom | base64)"
+        # The mounted file /etc/broker-kek/kek then holds that base64 string, which
+        # loadKek() base64-decodes to the 32-byte key. See
+        # docs/ops/broker-credential-opt-in.md.
+        - name: broker-kek
+          secret:
+            secretName: broker-kek
+            optional: true
+            items:
+              - key: kek
+                path: kek
 ---
 # UI-P2-c: restrict who may reach exec's HTTP port (8080). exec serves the dark P6-c
 # `POST /internal/broker-credentials` endpoint (and the actuator) on the default Spring Boot port
