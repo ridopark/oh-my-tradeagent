@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 
-from pydantic import BaseModel, ConfigDict, conint
+from pydantic import BaseModel, ConfigDict, conint, constr
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -12,7 +12,7 @@ from ohmytradeagent_contract.types.broker_target import BrokerTarget
 
 class AccountSnapshotRequest(BaseModel):
     """
-    Issue #317 account-equity gate input. risk-svc dispatches this to exec-svc's account_snapshot Activity to read the brokerage account's net-liquidation equity for the notional_cap_pct_of_equity gate. Equity is account-level: it is identified solely by broker_target (one credential set / one account per <provider>-<env> exec deployment), so this request carries NO tenant_id/strategy_id — every (tenant, strategy) routing to a given broker_target shares one account and observes the same equity.
+    Issue #317 account-equity gate input. risk-svc dispatches this to exec-svc's account_snapshot Activity to read the brokerage account's cash/equity for the notional_cap_pct_of_capital_base gate. P4-c-b: tenant_id is OPTIONAL — when present, exec resolves the requesting tenant's broker so each tenant's cap-basis cash reads its OWN account (the multi-tenant-per-broker_target end-state); when absent (the account-level dashboard equity caller, and any legacy request), exec falls back to the account-level credential set. Under the env-fallback credential source (one account per <provider>-<env> exec deployment) both paths resolve the same single account, so the value is behavior-preserving until per-tenant file creds are active.
     """
 
     model_config = ConfigDict(
@@ -25,6 +25,10 @@ class AccountSnapshotRequest(BaseModel):
     broker_target: BrokerTarget
     """
     Routes the account-snapshot Activity to the broker-<value> task queue, mirroring PreTradeCheckRequest.broker_target and OrderIntent.broker_target.
+    """
+    tenant_id: constr(min_length=1) | None = None
+    """
+    P4-c-b: OPTIONAL. When present, exec resolves the broker for this tenant so the cap-basis cash reads the tenant's OWN brokerage account (per-tenant-credential end-state). When absent (the dashboard account-level equity caller, or a legacy request), exec falls back to the account-level credential set. Behavior-preserving under the env-fallback source (which ignores tenant → the same single account).
     """
     correlation_id: str | None = None
     """
