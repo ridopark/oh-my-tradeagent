@@ -217,6 +217,51 @@ class BrokerCredentialControllerTest {
   }
 
   @Test
+  void successStatusButEmptyBody_mapsToPersistError_502_noSavedAudit() {
+    // A 2xx with no body is not a verifiable save: we must not audit SAVED-without-version nor
+    // return a version. Audit outcome and caller response stay consistent as a persist error.
+    enqueueExec(200, "");
+    try (MockedStatic<WorkflowClient> mocked = Mockito.mockStatic(WorkflowClient.class)) {
+      var resp = controller.write(reqWithTenant(TENANT), body(TENANT, 0L));
+      assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY);
+      assertThat(resp.getBody()).doesNotContainKey("version");
+      BrokerCredentialAuditRequest audit = captureAuditRequest(mocked);
+      assertThat(audit.getOutcome())
+          .isEqualTo(BrokerCredentialAuditRequest.Outcome.REJECTED_PERSIST_ERROR);
+      assertThat(audit.getCredentialVersion()).isNull();
+    }
+    assertNoSecretInLogs();
+  }
+
+  @Test
+  void execUnreachable_transportFailure_mapsToPersistError_502_noSecretLogged() throws IOException {
+    // A dead exec (connection refused) exercises the catch(RuntimeException) transport branch.
+    // Use a throwaway server so the shared `exec` stays alive for tearDown's shutdown.
+    MockWebServer dead = new MockWebServer();
+    dead.start();
+    String deadBaseUrl = dead.url("/").toString().replaceAll("/$", "");
+    dead.shutdown();
+    RestClient deadClient = RestClient.builder().baseUrl(deadBaseUrl).build();
+    BrokerCredentialController unreachable =
+        new BrokerCredentialController(
+            deadClient,
+            workflowClient,
+            new TenantContext("dev", "copytrade-v1"),
+            Clock.fixed(Instant.parse("2026-06-15T12:00:00Z"), ZoneOffset.UTC),
+            meterRegistry,
+            10);
+
+    try (MockedStatic<WorkflowClient> mocked = Mockito.mockStatic(WorkflowClient.class)) {
+      var resp = unreachable.write(reqWithTenant(TENANT), body(TENANT, 0L));
+      assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY);
+      BrokerCredentialAuditRequest audit = captureAuditRequest(mocked);
+      assertThat(audit.getOutcome())
+          .isEqualTo(BrokerCredentialAuditRequest.Outcome.REJECTED_PERSIST_ERROR);
+    }
+    assertNoSecretInLogs();
+  }
+
+  @Test
   void tenantMismatch_is403_noForward_noAudit() {
     try (MockedStatic<WorkflowClient> mocked = Mockito.mockStatic(WorkflowClient.class)) {
       assertThatResponseStatus(

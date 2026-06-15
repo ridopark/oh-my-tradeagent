@@ -8,6 +8,8 @@ import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.web.client.RestClient;
 
 /**
@@ -30,8 +32,19 @@ public class ExecClientConfig {
   @Bean
   public RestClient execRestClient(
       RestClient.Builder builder,
+      Environment environment,
       @Value("${exec.base-url}") String execBaseUrl,
       @Value("${exec.admin.service-token:${EXEC_ADMIN_SHARED_TOKEN:}}") String execAdminToken) {
+    // Prod fail-fast on the secret-bearing hop: a pod that enables the write flag but forgets the
+    // exec admin secret must refuse to boot rather than silently forward credentials under an empty
+    // bearer (exec would reject it, but as a confusing 502 — fail clearly at startup instead).
+    // Mirrors ServiceTokenFilter's inbound posture.
+    if ((execAdminToken == null || execAdminToken.isBlank())
+        && environment.acceptsProfiles(Profiles.of("prod"))) {
+      throw new IllegalStateException(
+          "exec.admin.service-token is blank under the prod profile — set EXEC_ADMIN_SHARED_TOKEN"
+              + " to a real secret");
+    }
     ClientHttpRequestFactorySettings settings =
         ClientHttpRequestFactorySettings.defaults()
             .withConnectTimeout(Duration.ofSeconds(3))

@@ -141,6 +141,7 @@ public class BrokerCredentialController {
     if (exec.outcome() == BrokerCredentialAuditRequest.Outcome.SAVED && exec.body() != null) {
       auditRequest.setBrokerAccountId(exec.body().brokerAccountId());
       auditRequest.setCredentialVersion(exec.body().version());
+      // Intentional int→Long: exec's wire field is int; the contract's kek_version is Long.
       auditRequest.setKekVersion((long) exec.body().kekVersion());
     }
 
@@ -180,6 +181,14 @@ public class BrokerCredentialController {
                 if (status.is2xxSuccessful()) {
                   BrokerCredentialForwardResponse parsed =
                       response.bodyTo(BrokerCredentialForwardResponse.class);
+                  // A 2xx with no body is not a verifiable save — without the version we can
+                  // neither
+                  // populate a coherent SAVED audit nor return a version to the caller. Treat it as
+                  // a
+                  // persist error so the audit outcome and the caller response stay consistent.
+                  if (parsed == null) {
+                    return mapErrorStatus(502);
+                  }
                   return new ExecOutcome(
                       BrokerCredentialAuditRequest.Outcome.SAVED, HttpStatus.OK, parsed);
                 }
