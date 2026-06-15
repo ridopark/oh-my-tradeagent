@@ -2,6 +2,7 @@ import Link from "next/link";
 import { signOut } from "@/auth";
 
 const LINKS = [
+  { href: "/status", label: "Status" },
   { href: "/portfolio", label: "Portfolio" },
   { href: "/positions", label: "Positions" },
   { href: "/trades", label: "Trades" },
