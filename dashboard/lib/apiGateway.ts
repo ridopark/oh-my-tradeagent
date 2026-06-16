@@ -41,6 +41,52 @@ export interface PostBrokerCredentialResult {
   status: number;
 }
 
+// UI-P4: snake_case body matching the api-gateway strategy-config WRITE contract, minus tenant_id
+// (which is set FROM THE SESSION, never from caller input). `config` is the FULL edited strategy
+// config object (the stored config with edited scalar fields overlaid). No secret material —
+// strategy config holds no broker keys.
+export interface StrategyConfigInput {
+  strategy_id: string;
+  config: Record<string, unknown>;
+  expected_version: number;
+  correlation_id: string;
+}
+
+export async function postStrategyConfig(
+  input: StrategyConfigInput,
+): Promise<PostBrokerCredentialResult> {
+  const session = await auth();
+  const tenantId = session?.tenantId;
+  if (!tenantId) {
+    throw new Error("no tenant in session");
+  }
+  try {
+    const res = await fetch(`${API_GATEWAY_BASE_URL}/strategy-config`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${API_GATEWAY_TOKEN}`,
+        "X-Tenant-Id": tenantId,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        // tenant_id is bound to the verified session — NEVER trusted from input.
+        tenant_id: tenantId,
+        strategy_id: input.strategy_id,
+        config: input.config,
+        expected_version: input.expected_version,
+        correlation_id: input.correlation_id,
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(API_GATEWAY_TIMEOUT_MS),
+    });
+    // Coarse result only — match the credential client (no body read).
+    return { ok: res.ok, status: res.status };
+  } catch {
+    // Transport/abort error — the write did not happen. Coarse failure, no thrown detail.
+    return { ok: false, status: 0 };
+  }
+}
+
 export async function postBrokerCredential(
   input: BrokerCredentialInput,
 ): Promise<PostBrokerCredentialResult> {
