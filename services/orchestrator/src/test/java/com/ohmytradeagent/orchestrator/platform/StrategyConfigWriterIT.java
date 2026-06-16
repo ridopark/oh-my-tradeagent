@@ -204,6 +204,28 @@ class StrategyConfigWriterIT {
     assertThat(configJson("dev", "copytrade-v1").toString()).isEqualTo(before);
   }
 
+  /**
+   * A SCALE-ONLY difference in a DANGEROUS BigDecimal field (daily_loss_threshold 500 → 500.00) is
+   * NOT a value change → ACCEPTED. BigDecimal.equals is scale-sensitive, but a JSON round-trip (the
+   * UI-P4 edit path re-posts the full config) drops/adds trailing zeros, so a scale-sensitive
+   * compare would falsely 403 every save. compareTo == 0 is the correct "unchanged value" test.
+   */
+  @Test
+  void acceptsDailyLossThresholdScaleOnlyChange_theJsonRoundTripCase() throws Exception {
+    StrategyConfig stored = liveSafeConfig("dev", "copytrade-v1"); // daily_loss_threshold = 500
+    seedRow("dev", "copytrade-v1", stored, 1L);
+
+    StrategyConfig next = copy(stored);
+    next.setDailyLossThreshold(new BigDecimal("500.00")); // same value, scale 2 (vs stored scale 0)
+    next.setMaxPositions(3L); // a real tighten alongside, like a UI edit that re-posts everything
+
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    long newVersion = writer.update("dev", "copytrade-v1", next, 1L, "alice");
+
+    assertThat(newVersion).isEqualTo(2L); // accepted, NOT REJECTED_DANGEROUS on the scale diff
+    assertThat(configJson("dev", "copytrade-v1").get("max_positions").asLong()).isEqualTo(3L);
+  }
+
   /** An EXPOSURE increase (max_contracts up) persists nothing. */
   @Test
   void rejectsExposureIncrease_persistsNothing() throws Exception {

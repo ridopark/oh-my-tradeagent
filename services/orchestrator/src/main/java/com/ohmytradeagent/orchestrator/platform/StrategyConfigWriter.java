@@ -7,6 +7,7 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigChangedEvents;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigSnapshot;
 import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
+import java.math.BigDecimal;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -315,7 +316,16 @@ public class StrategyConfigWriter {
   }
 
   private static void requireDangerousUnchanged(String field, Object stored, Object next) {
-    if (!Objects.equals(stored, next)) {
+    // VALUE-equality for numeric fields (daily_loss_threshold, notional_cap_pct_of_capital_base):
+    // BigDecimal.equals is scale-sensitive, so a JSON round-trip that drops a trailing zero
+    // (2500.00 → 2500) would falsely read as a "change" and reject an otherwise-unchanged write.
+    // compareTo == 0 is the correct "unchanged value" test; a real value change still fails it. All
+    // other DANGEROUS fields (broker_target, broker_account_id) are strings/null — Objects.equals.
+    boolean unchanged =
+        (stored instanceof BigDecimal a && next instanceof BigDecimal b)
+            ? a.compareTo(b) == 0
+            : Objects.equals(stored, next);
+    if (!unchanged) {
       throw new DangerousFieldChangeRejected(
           "DANGEROUS field "
               + field
