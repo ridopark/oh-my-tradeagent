@@ -45,6 +45,33 @@ wired together with a passwordless **Dev login** — open <http://localhost:3000
 > account-snapshot workflow to time out (no orchestrator worker) before rendering. Re-seed anytime
 > with `make dashboard-seed` (idempotent).
 
+### Editing strategy config locally (the /config page)
+
+`make dashboard-dev` is **read-only** — the `/config` page renders but **Save** has no write backend.
+To exercise the full edit-and-save flow locally (the local equivalent of the homelab config-edit
+flow), use:
+
+```bash
+make config-edit-dev
+```
+
+This is a **superset** of `dashboard-dev`: on top of the compose infra it also brings up **redis**
+(the orchestrator requires it), the **orchestrator** (`mvn spring-boot:run`, which Flyway-creates +
+seeds the `strategy_config` table from the `tenants/` tree and hosts the
+`StrategyConfigUpdateWorkflow` worker on the `orchestrator-core` queue), the **api-gateway** :8082
+(the write forward, with `STRATEGY_CONFIG_WRITE_ENABLED=true`), the **BFF** :8083 (reads
+`strategy_config`), and the **Next.js** dev server :3000. Open <http://localhost:3000>, click
+**"Dev login (local only)"**, go to **/config**, edit a field, and **Save**. Ctrl-C stops the three
+JVMs + the web server (compose infra is left up). See `scripts/dev/config-edit-dev.sh` for the exact
+wiring.
+
+> The write path enforces the same guardrail as production: the orchestrator's
+> `StrategyConfigWriter` **hard-blocks** any risk-increasing / live-routing change (e.g. flipping
+> `broker_target`) → **403**, regardless of the write flag. A safe (tighten-only or no-op) change →
+> **200** with a bumped `new_version`. The api-gateway and orchestrator MUST share
+> `TEMPORAL_NAMESPACE=default` and the `orchestrator-core` task queue (the script sets both) — else
+> the workflow start has no live worker and times out → 503.
+
 ### Dev login — how it's gated
 
 The Dev login provider is **double-gated** so it can never reach production (`auth.config.ts`):

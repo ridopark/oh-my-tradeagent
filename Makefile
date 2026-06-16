@@ -3,7 +3,7 @@
 # Python). Anything added here should be a thin developer-experience
 # wrapper, not a parallel build system.
 
-.PHONY: hooks help dashboard-dev dashboard-seed local-up local-down
+.PHONY: hooks help dashboard-dev config-edit-dev dashboard-seed local-up local-down
 
 help:
 	@echo "Available targets:"
@@ -13,6 +13,8 @@ help:
 	@echo "                 #213). Idempotent. Run once after clone."
 	@echo "  dashboard-dev  Run the tenant dashboard locally end-to-end (compose infra +"
 	@echo "                 BFF + Next.js, with passwordless Dev login). Ctrl-C to stop."
+	@echo "  config-edit-dev  Run the full config-edit stack (compose infra + orchestrator +"
+	@echo "                 BFF + api-gateway + Next.js) so /config can save locally. Ctrl-C to stop."
 	@echo "  dashboard-seed Insert sample trades/orders into the local Postgres so the"
 	@echo "                 dashboard shows data (run while the infra is up). Idempotent."
 	@echo "  local-up       Build + start the full local pipeline in Docker (infra +"
@@ -38,6 +40,13 @@ local-down:
 # and dashboard/README.md §'Local development' for what it does and its caveats.
 dashboard-dev:
 	@./scripts/dev/dashboard-dev.sh
+
+# Thin wrapper: full local config-edit stack from source (superset of dashboard-dev —
+# adds redis + the orchestrator worker + the api-gateway write forward) so the dashboard
+# /config page can SAVE strategy config locally. See the script header and
+# dashboard/README.md §'Local development' for the wiring and caveats.
+config-edit-dev:
+	@./scripts/dev/config-edit-dev.sh
 
 # Seed sample audit_log + order_intent_journal rows into the local Postgres.
 dashboard-seed:
