@@ -3,7 +3,7 @@
 # Python). Anything added here should be a thin developer-experience
 # wrapper, not a parallel build system.
 
-.PHONY: hooks help dashboard-dev config-edit-dev dashboard-seed local-up local-down
+.PHONY: hooks help dashboard-dev config-edit-dev config-edit-docker dashboard-seed local-up local-down
 
 help:
 	@echo "Available targets:"
@@ -15,6 +15,8 @@ help:
 	@echo "                 BFF + Next.js, with passwordless Dev login). Ctrl-C to stop."
 	@echo "  config-edit-dev  Run the full config-edit stack (compose infra + orchestrator +"
 	@echo "                 BFF + api-gateway + Next.js) so /config can save locally. Ctrl-C to stop."
+	@echo "  config-edit-docker  Same stack as config-edit-dev but FULLY in Docker (no host"
+	@echo "                 JDK/Node). Runs detached; tear down with the printed command."
 	@echo "  dashboard-seed Insert sample trades/orders into the local Postgres so the"
 	@echo "                 dashboard shows data (run while the infra is up). Idempotent."
 	@echo "  local-up       Build + start the full local pipeline in Docker (infra +"
@@ -47,6 +49,21 @@ dashboard-dev:
 # dashboard/README.md §'Local development' for the wiring and caveats.
 config-edit-dev:
 	@./scripts/dev/config-edit-dev.sh
+
+# Fully-containerized sibling of config-edit-dev: the same end-to-end stack, but every
+# process (the three JVMs + the Next.js dev server) runs IN Docker — no host JDK/Node.
+# Profile-gated (config-edit) so it never affects a plain `docker compose up`. The
+# orchestrator is named explicitly so it starts regardless of its `services` profile;
+# orchestrator + api-gateway share TEMPORAL_NAMESPACE=default + the orchestrator-core
+# queue (else POST /strategy-config has no live worker). Detached; see the teardown line.
+config-edit-docker:
+	docker compose -f infra/docker-compose.yml --profile config-edit up -d --build \
+	  postgres temporal redis temporal-bootstrap orchestrator \
+	  tenant-dashboard-bff api-gateway dashboard-dev
+	@echo
+	@echo "==> config-edit (Docker) coming up. The dashboard compiles on first request (npm install + next dev)."
+	@echo "    Open    http://localhost:3000  -> 'Dev login (local only)' -> /config"
+	@echo "    Tear down: docker compose -f infra/docker-compose.yml --profile config-edit down"
 
 # Seed sample audit_log + order_intent_journal rows into the local Postgres.
 dashboard-seed:
