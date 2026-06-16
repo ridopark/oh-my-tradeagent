@@ -195,9 +195,9 @@ jobs:
             esac
           done <<< "$files"
 
-          list=""
-          for k in "${!want[@]}"; do list="$list $k"; done
-          matrix=$(jq -nc --arg s "$list" '{service: ($s | split(" ") | map(select(length>0)))}')
+          # One service key per line into jq; select drops the lone blank line that
+          # printf emits when `want` is empty, yielding {"service":[]}.
+          matrix=$(printf '%s\n' "${!want[@]}" | jq -Rnc '[inputs | select(. != "")] | {service: .}')
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "Changed files:"; printf '%s\n' "$files"
           echo "Diff-based deploy matrix: $matrix"
