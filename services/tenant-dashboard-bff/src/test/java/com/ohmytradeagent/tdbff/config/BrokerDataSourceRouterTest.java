@@ -10,13 +10,16 @@ import org.junit.jupiter.api.Test;
 
 class BrokerDataSourceRouterTest {
 
-  private final DSLContext execDsl = mock(DSLContext.class);
-  private final BrokerDataSourceRouter router = new BrokerDataSourceRouter(execDsl);
+  private final DSLContext paperDsl = mock(DSLContext.class);
+  private final DSLContext liveDsl = mock(DSLContext.class);
+  private final BrokerDataSourceRouter router = new BrokerDataSourceRouter(paperDsl, liveDsl);
 
   @Test
   void configuredTarget_returnsItsDsl() {
-    assertThat(router.dslFor("alpaca-paper")).isSameAs(execDsl);
+    assertThat(router.dslFor("alpaca-paper")).isSameAs(paperDsl);
     assertThat(router.isConfigured("alpaca-paper")).isTrue();
+    assertThat(router.dslFor("alpaca-live")).isSameAs(liveDsl);
+    assertThat(router.isConfigured("alpaca-live")).isTrue();
   }
 
   @Test
