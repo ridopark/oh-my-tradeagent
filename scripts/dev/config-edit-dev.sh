@@ -58,7 +58,11 @@ cleanup() {
   [ -n "$gw_pid" ]   && kill "$gw_pid"   2>/dev/null || true
   [ -n "$bff_pid" ]  && kill "$bff_pid"  2>/dev/null || true
   [ -n "$orch_pid" ] && kill "$orch_pid" 2>/dev/null || true
+  # Fallbacks for the forked children the captured PIDs don't track: mvn spring-boot:run forks a
+  # child JVM, and `npm run dev` forks `next-server` — killing the wrappers ($*_pid) above does not
+  # reliably reap either. (dashboard-dev.sh has the spring-boot:run fallback for the same reason.)
   pkill -f 'spring-boot:run' 2>/dev/null || true
+  pkill -f 'next-server' 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
