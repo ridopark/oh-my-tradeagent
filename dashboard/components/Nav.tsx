@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { signOut } from "@/auth";
+import { auth, signOut } from "@/auth";
+import { TenantSwitcher } from "@/components/TenantSwitcher";
 
 const LINKS = [
   { href: "/status", label: "Status" },
@@ -10,7 +11,9 @@ const LINKS = [
   { href: "/settings", label: "Settings" },
 ];
 
-export function Nav({ tenantId }: { tenantId?: string }) {
+export async function Nav({ tenantId }: { tenantId?: string }) {
+  const session = await auth();
+  const tenantIds = session?.tenantIds ?? [];
   return (
     <header className="border-b border-slate-800 bg-slate-900">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
@@ -29,7 +32,11 @@ export function Nav({ tenantId }: { tenantId?: string }) {
           </nav>
         </div>
         <div className="flex items-center gap-3 text-sm text-slate-400">
-          {tenantId && <span>tenant: {tenantId}</span>}
+          {tenantIds.length > 1 ? (
+            <TenantSwitcher current={tenantId} options={tenantIds} />
+          ) : (
+            tenantId && <span>tenant: {tenantId}</span>
+          )}
           <form
             action={async () => {
               "use server";
