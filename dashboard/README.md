@@ -72,6 +72,49 @@ wiring.
 > `TEMPORAL_NAMESPACE=default` and the `orchestrator-core` task queue (the script sets both) — else
 > the workflow start has no live worker and times out → 503.
 
+### Editing strategy config locally — fully in Docker (no host JDK/Node)
+
+`make config-edit-dev` runs the JVMs and Next.js as **host processes** (needs a local JDK + Node).
+For a machine with neither — or to match the deployed runtime exactly — use the fully-containerized
+sibling:
+
+```bash
+make config-edit-docker
+```
+
+This is the same end-to-end stack, but **every** process runs in Docker. It is the `config-edit`
+compose profile (`infra/docker-compose.yml`): three added services —
+
+- **tenant-dashboard-bff** :8083 — built from the shared `java-service.Dockerfile`
+  (`SERVICE_MODULE=tenant-dashboard-bff`); reads `strategy_config`.
+- **api-gateway** :8082 — `SERVICE_MODULE=api-gateway`; the write forward
+  (`STRATEGY_CONFIG_WRITE_ENABLED=true`).
+- **dashboard-dev** :3000 — the Next.js **dev** server, run as a plain `node:22-alpine` container
+  with `npm install && npm run dev` (**not** the prod `Dockerfile`).
+
+plus the reused compose `orchestrator` (Flyway-seeds `strategy_config` from the mounted `tenants/`
+tree, hosts the `StrategyConfigUpdateWorkflow` worker) and the `postgres`/`temporal`/`redis` infra.
+It runs **detached**; open <http://localhost:3000> → **"Dev login (local only)"** → **/config**.
+Tear down with:
+
+```bash
+docker compose -f infra/docker-compose.yml --profile config-edit down
+```
+
+Two non-obvious details:
+
+- **Dev login needs `NODE_ENV=development`.** The prod image runs `next start` with
+  `NODE_ENV=production`, where the passwordless Dev login is gated **off** (see the next subsection).
+  Running the dev container with `npm run dev` sets `NODE_ENV=development`, so the Dev login button
+  appears — that's why `dashboard-dev` uses `node:22-alpine` + `npm run dev` rather than the prod
+  `Dockerfile`.
+- **`node_modules` is a named volume.** `../dashboard` is bind-mounted into the container, but
+  `/app/node_modules` is a separate **named** volume so the container installs its own
+  Linux/arch-correct deps instead of inheriting the host's (possibly macOS/Windows) `node_modules`.
+
+The same guardrail and namespace/queue requirements as `config-edit-dev` apply (the api-gateway and
+orchestrator both run with `TEMPORAL_NAMESPACE=default` + `orchestrator-core` here too).
+
 ### Dev login — how it's gated
 
 The Dev login provider is **double-gated** so it can never reach production (`auth.config.ts`):

@@ -212,7 +212,9 @@ services:
       - ../tenants:/etc/copytrade/tenants:ro
     ports:
       - "8084:8080"
-    profiles: ["services"]
+    # Also in `config-edit`: that profile's api-gateway depends_on orchestrator (shared
+    # ns=default + orchestrator-core), and the orchestrator Flyway-seeds strategy_config.
+    profiles: ["services", "config-edit"]
 
   exec:
     build:
@@ -269,6 +271,125 @@ services:
       - "8086:8080"
     profiles: ["services"]
 
+  # --- Fully-containerized config-edit stack (profile: config-edit) ----------
+  # The all-in-Docker sibling of `make config-edit-dev` (scripts/dev/config-edit-dev.sh,
+  # which runs the JVMs + Next.js as HOST processes). Mirrors that script's env exactly.
+  # Profile-gated so a plain `up -d` and the existing flows are unaffected. Bring up with
+  #   make config-edit-docker
+  # (or `docker compose -f infra/docker-compose.yml --profile config-edit up -d --build ...`).
+  #
+  # CRITICAL wiring (same as the host flow): the orchestrator + api-gateway share
+  # TEMPORAL_NAMESPACE=default and the orchestrator-core task queue, else POST /strategy-config
+  # has no live worker -> 30s timeout -> 503. The compose `orchestrator` (profile: services) is
+  # reused as-is; `make config-edit-docker` names it explicitly on the `up` line so it starts
+  # regardless of profile (it already uses default + seeds strategy_config from the mounted
+  # tenants tree).
+
+  # BFF :8083 — READS strategy_config (GET /api/strategy-config). Two read-only datasources
+  # (orchestrator + exec_alpaca_paper) plus the Flyway-owned `dashboard` DB. Locally everything
+  # connects as `temporal` (superuser) for boot simplicity; DASHBOARD_READONLY_PASSWORD seeds the
+  # dashboard_readonly role the Next.js app reads with.
+  tenant-dashboard-bff:
+    build:
+      context: ..
+      dockerfile: infra/docker/java-service.Dockerfile
+      args:
+        SERVICE_MODULE: tenant-dashboard-bff
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    environment:
+      TENANT_DASHBOARD_BFF_PORT: "8083"
+      TEMPORAL_TARGET: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      BFF_SHARED_TOKEN: dev-shared-token
+      BFF_TENANTS_DIR: /etc/copytrade/tenants
+      BFF_ORCHESTRATOR_DB_URL: jdbc:postgresql://postgres:5432/orchestrator
+      BFF_ORCHESTRATOR_DB_USER: temporal
+      BFF_ORCHESTRATOR_DB_PASS: temporal
+      BFF_EXEC_ALPACA_PAPER_DB_URL: jdbc:postgresql://postgres:5432/exec_alpaca_paper
+      BFF_EXEC_ALPACA_PAPER_DB_USER: temporal
+      BFF_EXEC_ALPACA_PAPER_DB_PASS: temporal
+      # Flyway owns the `dashboard` DB (creates the dashboard_readonly role with this password).
+      DASHBOARD_DB_URL: jdbc:postgresql://postgres:5432/dashboard
+      DASHBOARD_DB_USER: temporal
+      DASHBOARD_DB_PASS: temporal
+      DASHBOARD_READONLY_PASSWORD: dashboard_readonly_dev
+    volumes:
+      - ../tenants:/etc/copytrade/tenants:ro
+    ports:
+      - "8083:8083"
+    profiles: ["config-edit"]
+
+  # api-gateway :8082 — WRITE forward: POST /strategy-config starts StrategyConfigUpdateWorkflow on
+  # the orchestrator-core queue. STRATEGY_CONFIG_WRITE_ENABLED=true un-darks the controller (else
+  # 404). Shares ns=default + orchestrator-core with the orchestrator (see CRITICAL note above).
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: infra/docker/java-service.Dockerfile
+      args:
+        SERVICE_MODULE: api-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+      orchestrator:
+        condition: service_started
+    environment:
+      API_GATEWAY_PORT: "8082"
+      TEMPORAL_TARGET: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      API_GATEWAY_DB_URL: jdbc:postgresql://postgres:5432/orchestrator
+      API_GATEWAY_DB_USER: temporal
+      API_GATEWAY_DB_PASS: temporal
+      API_GATEWAY_SHARED_TOKEN: dev-shared-token
+      STRATEGY_CONFIG_WRITE_ENABLED: "true"
+    ports:
+      - "8082:8082"
+    profiles: ["config-edit"]
+
+  # dashboard-dev :3000 — Next.js DEV server (NOT the prod Dockerfile). The prod image runs
+  # `next start` with NODE_ENV=production, where the passwordless Dev login is gated OFF
+  # (auth.config.ts: devLoginEnabled = AUTH_DEV_LOGIN==="true" && NODE_ENV==="development").
+  # `npm run dev` sets NODE_ENV=development, so the Dev login button appears. node_modules is a
+  # NAMED volume so the container installs its OWN deps (Linux/arch-correct) instead of being
+  # shadowed by the host's bind-mounted ../dashboard/node_modules.
+  dashboard-dev:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    depends_on:
+      tenant-dashboard-bff:
+        condition: service_started
+      api-gateway:
+        condition: service_started
+    environment:
+      NODE_ENV: development
+      AUTH_DEV_LOGIN: "true"
+      AUTH_DEV_TENANT: dev
+      AUTH_SECRET: dev-secret-not-for-prod
+      AUTH_URL: http://localhost:3000
+      BFF_INTERNAL_URL: http://tenant-dashboard-bff:8083
+      BFF_SHARED_TOKEN: dev-shared-token
+      DASHBOARD_DB_HOST: postgres
+      DASHBOARD_DB_USER: dashboard_readonly
+      DASHBOARD_READONLY_PASSWORD: dashboard_readonly_dev
+      API_GATEWAY_BASE_URL: http://api-gateway:8082
+      API_GATEWAY_SHARED_TOKEN: dev-shared-token
+      STRATEGY_CONFIG_WRITE_ENABLED: "true"
+    volumes:
+      - ../dashboard:/app
+      - dashboard-node-modules:/app/node_modules
+    ports:
+      - "3000:3000"
+    profiles: ["config-edit"]
+
   # Discord watcher. State (cookies + heartbeat) lives on a named volume so
   # restart preserves session. Replica >= 1 is safe (durable dedupe via Temporal).
   # To run two replicas: `docker compose -f infra/docker-compose.yml up -d --scale signal-source-discord=2`.
@@ -318,3 +439,7 @@ services:
 volumes:
   postgres-data:
   sidecar-state:
+  # config-edit profile: the Next.js dev container's own node_modules, so the
+  # container-installed (Linux/arch-correct) deps are not shadowed by the host's
+  # bind-mounted ../dashboard/node_modules.
+  dashboard-node-modules:
