@@ -9,6 +9,7 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowException;
 import io.temporal.client.WorkflowOptions;
 import jakarta.servlet.http.HttpServletRequest;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -54,6 +55,13 @@ public class StrategyConfigController {
   private static final Logger log = LoggerFactory.getLogger(StrategyConfigController.class);
   private static final String TASK_QUEUE = "orchestrator-core";
   private static final String ACTOR = "api-gateway:/strategy-config";
+  // Server-side run-timeout so the typed blocking stub.update(...) below cannot pin the Spring MVC
+  // request thread indefinitely when the orchestrator-core queue has no live poller (worker down /
+  // rolling) or the workflow wedges. On timeout the workflow fails → WorkflowException (caught
+  // below) → 503 (write disposition unknown — never reported as success). The activity's own 30s
+  // start-to-close only bounds it AFTER dispatch to a live worker; this bounds the unscheduled
+  // case.
+  private static final Duration WORKFLOW_RUN_TIMEOUT = Duration.ofSeconds(30);
 
   private final WorkflowClient workflowClient;
   private final TenantContext ctx;
@@ -99,6 +107,7 @@ public class StrategyConfigController {
                 WorkflowIds.strategyConfigUpdate(tenant, body.strategyId(), correlationId))
             .setWorkflowIdReusePolicy(
                 WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
+            .setWorkflowRunTimeout(WORKFLOW_RUN_TIMEOUT)
             .build();
     StrategyConfigUpdateWorkflow stub =
         workflowClient.newWorkflowStub(StrategyConfigUpdateWorkflow.class, opts);
