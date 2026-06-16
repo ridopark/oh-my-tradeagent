@@ -239,6 +239,42 @@ class BrokerCredentialWriterIT {
   }
 
   @Test
+  void brokerTargetProviderIsCanonicalizedToProvider() {
+    // A caller passing a broker_target-style provider ("alpaca-paper") must persist under the
+    // read-path provider authority ("alpaca"). Otherwise the stored row + its AAD key on
+    // "alpaca-paper" while resolve(tenant, providerOf("alpaca-paper")=="alpaca") looks up "alpaca"
+    // → unresolvable (and AAD/GCM-fail even if found).
+    enqueueAccount("847309116");
+    writer()
+        .save("alice", "alpaca-paper", "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+
+    // The row is keyed by the canonical provider "alpaca" at version 1 ...
+    Long canonicalVersion =
+        dsl.select(field("version", Long.class))
+            .from(table("broker_credentials"))
+            .where(field("tenant_id").eq("alice"))
+            .and(field("provider").eq("alpaca"))
+            .fetchOne(field("version", Long.class));
+    assertThat(canonicalVersion).isEqualTo(1L);
+
+    // ... and NOT under the broker_target value "alpaca-paper".
+    Integer brokerTargetRows =
+        dsl.selectCount()
+            .from(table("broker_credentials"))
+            .where(field("tenant_id").eq("alice"))
+            .and(field("provider").eq("alpaca-paper"))
+            .fetchOne(0, Integer.class);
+    assertThat(brokerTargetRows).isZero();
+
+    // Bonus: it resolves (and decrypts) under the canonical provider "alpaca", proving the
+    // write-AAD
+    // bound the canonical provider so it matches the read-AAD.
+    BrokerCredentials c = source().resolve("alice", "alpaca");
+    assertThat(c.apiKeyId()).isEqualTo("k1");
+    assertThat(c.apiSecretKey()).isEqualTo("s1");
+  }
+
+  @Test
   void roundTripAtNonDefaultActiveKekVersion() {
     // Regression for the AAD-kek_version divergence bug: the writer must derive the AAD's
     // kek_version from the crypto bean's ACTIVE version (not a hardcoded field), so the stored
