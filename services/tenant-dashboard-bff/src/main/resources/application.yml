@@ -46,6 +46,12 @@ bff:
       password: ${BFF_EXEC_ALPACA_PAPER_DB_PASS:temporal}
       maximum-pool-size: 4
       read-only: true
+    exec-alpaca-live:
+      jdbc-url: ${BFF_EXEC_ALPACA_LIVE_DB_URL:jdbc:postgresql://localhost:5432/exec_alpaca_live}
+      username: ${BFF_EXEC_ALPACA_LIVE_DB_USER:temporal}
+      password: ${BFF_EXEC_ALPACA_LIVE_DB_PASS:temporal}
+      maximum-pool-size: 4
+      read-only: true
 
 server:
   port: ${TENANT_DASHBOARD_BFF_PORT:8083}

@@ -7,18 +7,21 @@ import org.springframework.stereotype.Component;
 
 /**
  * Maps a strategy's {@code broker_target} to the exec datasource that holds its {@code
- * order_intent_journal}. MVP is a single-entry map ({@code alpaca-paper -> execAlpacaPaperDsl});
- * generalizing to N brokers (one datasource bean per {@code exec_<provider>_<env>} DB) is a noted
- * follow-up, NOT built here. An unknown/unconfigured target is a 404 rather than a silent empty
- * result, so a misrouted tenant is visible instead of looking like "no orders".
+ * order_intent_journal} — one datasource bean per {@code exec_<provider>_<env>} DB ({@code
+ * alpaca-paper -> execAlpacaPaperDsl}, {@code alpaca-live -> execAlpacaLiveDsl}). An
+ * unknown/unconfigured target is a 404 rather than a silent empty result, so a misrouted tenant is
+ * visible instead of looking like "no orders".
  */
 @Component
 public class BrokerDataSourceRouter {
 
   private final Map<String, DSLContext> byBrokerTarget;
 
-  public BrokerDataSourceRouter(@Qualifier("execAlpacaPaperDsl") DSLContext execAlpacaPaperDsl) {
-    this.byBrokerTarget = Map.of("alpaca-paper", execAlpacaPaperDsl);
+  public BrokerDataSourceRouter(
+      @Qualifier("execAlpacaPaperDsl") DSLContext execAlpacaPaperDsl,
+      @Qualifier("execAlpacaLiveDsl") DSLContext execAlpacaLiveDsl) {
+    this.byBrokerTarget =
+        Map.of("alpaca-paper", execAlpacaPaperDsl, "alpaca-live", execAlpacaLiveDsl);
   }
 
   /** The exec DSLContext for {@code brokerTarget}, or a 404-mapped throw if not configured. */

@@ -164,6 +164,22 @@ spec:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: BFF_EXEC_ALPACA_PAPER_DB_PASS
+            # Live exec order-journal (read-only). bff_readonly is a cluster-global role, so the
+            # same credentials connect to every exec_<broker> DB — only the URL differs. Without
+            # this, a live tenant's Orders page 404s (broker_not_configured) and the dashboard
+            # crashes. The live DB needs `GRANT SELECT ON order_intent_journal TO bff_readonly`.
+            - name: BFF_EXEC_ALPACA_LIVE_DB_URL
+              value: jdbc:postgresql://postgres:5432/exec_alpaca_live
+            - name: BFF_EXEC_ALPACA_LIVE_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_EXEC_ALPACA_PAPER_DB_USER
+            - name: BFF_EXEC_ALPACA_LIVE_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_EXEC_ALPACA_PAPER_DB_PASS
             # Surfaces the broker account_number on the Portfolio page (an "Account" column).
             # Marked dev-only because a broker_target's Alpaca account is SHARED across all tenants
             # on that target — exposing it leaks one account's id to every tenant. Safe HERE only
