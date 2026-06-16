@@ -58,7 +58,9 @@ for _ in $(seq 1 90); do
 done
 
 cd dashboard
-[ -d node_modules ] || { echo "==> npm install"; npm install; }
+# Check the `next` binary, not just the dir: an empty/partial node_modules passes `[ -d ]` but has
+# no `next` → `next: not found`.
+[ -x node_modules/.bin/next ] || { echo "==> npm install (dashboard deps)"; npm install; }
 
 echo "==> dashboard (Next.js) :3000 — open http://localhost:3000 and click 'Dev login (local only)'"
 AUTH_DEV_LOGIN=true \

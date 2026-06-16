@@ -141,7 +141,9 @@ done
 
 # ---- dashboard :3000 — Next.js UI (dashboard-dev env + the write-path wiring) -----------------
 cd dashboard
-[ -d node_modules ] || { echo "==> npm ci"; npm ci; }
+# Check the `next` binary, not just the dir: an empty/partial node_modules (e.g. a leftover dir
+# from an interrupted install) passes `[ -d node_modules ]` but has no `next` → `next: not found`.
+[ -x node_modules/.bin/next ] || { echo "==> npm ci (dashboard deps)"; npm ci; }
 
 echo "==> dashboard (Next.js) :3000 — open http://localhost:3000, 'Dev login (local only)', then /config"
 AUTH_DEV_LOGIN=true \
