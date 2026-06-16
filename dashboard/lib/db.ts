@@ -27,34 +27,20 @@ if (process.env.NODE_ENV !== "production") {
   global.__dashboardPool = pool;
 }
 
-export interface DashboardUser {
-  provider: string;
-  subject: string;
-  email: string | null;
-  tenantId: string;
-}
-
 /**
- * Look up the tenant bound to a verified social identity. Keyed on (provider, subject) — the stable
- * OAuth `sub`, never email. Returns null when no row exists; the caller (Auth.js signIn callback)
- * denies login on null so no session is ever minted for an unprovisioned identity.
+ * All tenants a verified social identity is provisioned for, keyed on (provider, subject) — the
+ * stable OAuth `sub`, never email. An identity may now hold several tenants (the operator switches
+ * the active one in the dashboard); the set is returned sorted for a stable default. Empty when no
+ * row exists; the caller (Auth.js signIn callback) denies login on empty so no session is ever
+ * minted for an unprovisioned identity.
  */
-export async function findTenantForIdentity(
+export async function findTenantsForIdentity(
   provider: string,
   subject: string,
-): Promise<DashboardUser | null> {
+): Promise<string[]> {
   const { rows } = await pool.query(
-    "SELECT provider, subject, email, tenant_id FROM dashboard_user WHERE provider = $1 AND subject = $2",
+    "SELECT tenant_id FROM dashboard_user WHERE provider = $1 AND subject = $2 ORDER BY tenant_id ASC",
     [provider, subject],
   );
-  if (rows.length === 0) {
-    return null;
-  }
-  const r = rows[0];
-  return {
-    provider: r.provider,
-    subject: r.subject,
-    email: r.email,
-    tenantId: r.tenant_id,
-  };
+  return rows.map((r) => r.tenant_id as string);
 }
