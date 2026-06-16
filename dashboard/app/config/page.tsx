@@ -45,6 +45,13 @@ function inputName(strategyId: string, field: string): string {
   return `${strategyId}::${field}`;
 }
 
+// Single source of truth for "is this field writable from the UI" (ignoring the WRITE_ENABLED
+// gate): a scalar that is neither IDENTITY nor DANGEROUS. Used by BOTH the render (to decide
+// editable inputs) and the save action (to decide which fields to overlay) so the two never drift.
+function isEditableField(klass: FieldClass, kind: ScalarKind | null): boolean {
+  return kind !== null && klass !== "IDENTITY" && klass !== "DANGEROUS";
+}
+
 const CLASS_BADGE: Record<
   Exclude<FieldClass, "SAFE">,
   { label: string; className: string }
@@ -62,6 +69,68 @@ const CLASS_BADGE: Record<
     className: "border-sky-500/40 bg-sky-500/10 text-sky-300",
   },
 };
+
+// Renders one field's value cell. Editable scalars become inputs (boolean → select, number →
+// number input, string → text input); everything else is read-only (a scalar span, or pretty-
+// printed JSON for arrays/objects/null).
+function FieldValue({
+  name,
+  value,
+  kind,
+  editable,
+}: {
+  name: string;
+  value: unknown;
+  kind: ScalarKind | null;
+  editable: boolean;
+}) {
+  const inputClass =
+    "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
+
+  if (editable && kind === "boolean") {
+    return (
+      <select
+        id={name}
+        name={name}
+        defaultValue={String(value as boolean)}
+        className={inputClass}
+      >
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    );
+  }
+  if (editable && (kind === "number" || kind === "string")) {
+    return (
+      <input
+        id={name}
+        name={name}
+        type={kind === "number" ? "number" : "text"}
+        step={kind === "number" ? "any" : undefined}
+        defaultValue={String(value)}
+        spellCheck={false}
+        className={inputClass}
+      />
+    );
+  }
+  if (kind !== null) {
+    // Read-only scalar (IDENTITY/DANGEROUS, or write disabled).
+    return (
+      <span className="block font-mono text-slate-300 sm:text-right">
+        {String(value)}
+      </span>
+    );
+  }
+  // Complex value (array/object/null) — read-only pretty JSON.
+  return (
+    <div className="flex flex-col gap-0.5">
+      <pre className="overflow-x-auto rounded bg-slate-950 px-2 py-1 text-xs text-slate-300">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+      <span className="text-xs text-slate-500">edit via config files for now</span>
+    </div>
+  );
+}
 
 export default async function ConfigPage({
   searchParams,
@@ -123,9 +192,9 @@ export default async function ConfigPage({
     const nextConfig: Record<string, unknown> = { ...item.config };
     for (const [field, value] of Object.entries(item.config)) {
       const klass = classOf(field, current.field_classes);
-      if (klass === "IDENTITY" || klass === "DANGEROUS") continue;
       const kind = scalarKind(value);
-      if (!kind) continue; // complex value — not editable here.
+      // IDENTITY/DANGEROUS or complex values are never editable — pass through untouched.
+      if (!isEditableField(klass, kind)) continue;
       const raw = formData.get(inputName(strategyId, field));
       if (raw === null) continue;
       if (kind === "number") {
@@ -208,15 +277,10 @@ export default async function ConfigPage({
                         const kind = scalarKind(value);
                         const badge =
                           klass === "SAFE" ? null : CLASS_BADGE[klass];
-                        // Editable only when: write enabled, scalar, and not IDENTITY/DANGEROUS.
+                        // Editable only when: write enabled AND the field is UI-writable.
                         const editable =
-                          WRITE_ENABLED &&
-                          kind !== null &&
-                          klass !== "IDENTITY" &&
-                          klass !== "DANGEROUS";
+                          WRITE_ENABLED && isEditableField(klass, kind);
                         const name = inputName(item.strategy_id, field);
-                        const inputClass =
-                          "rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
 
                         return (
                           <li
@@ -245,50 +309,12 @@ export default async function ConfigPage({
                             </div>
 
                             <div className="sm:w-1/2 sm:max-w-md">
-                              {editable && kind === "boolean" ? (
-                                <select
-                                  id={name}
-                                  name={name}
-                                  defaultValue={String(value as boolean)}
-                                  className={`${inputClass} w-full`}
-                                >
-                                  <option value="true">true</option>
-                                  <option value="false">false</option>
-                                </select>
-                              ) : editable && kind === "number" ? (
-                                <input
-                                  id={name}
-                                  name={name}
-                                  type="number"
-                                  step="any"
-                                  defaultValue={String(value as number)}
-                                  className={`${inputClass} w-full`}
-                                />
-                              ) : editable && kind === "string" ? (
-                                <input
-                                  id={name}
-                                  name={name}
-                                  type="text"
-                                  defaultValue={value as string}
-                                  spellCheck={false}
-                                  className={`${inputClass} w-full`}
-                                />
-                              ) : kind !== null ? (
-                                // Read-only scalar (IDENTITY/DANGEROUS, or write disabled).
-                                <span className="block font-mono text-slate-300 sm:text-right">
-                                  {String(value)}
-                                </span>
-                              ) : (
-                                // Complex value (array/object/null) — read-only pretty JSON.
-                                <div className="flex flex-col gap-0.5">
-                                  <pre className="overflow-x-auto rounded bg-slate-950 px-2 py-1 text-xs text-slate-300">
-                                    {JSON.stringify(value, null, 2)}
-                                  </pre>
-                                  <span className="text-xs text-slate-500">
-                                    edit via config files for now
-                                  </span>
-                                </div>
-                              )}
+                              <FieldValue
+                                name={name}
+                                value={value}
+                                kind={kind}
+                                editable={editable}
+                              />
                             </div>
                           </li>
                         );
