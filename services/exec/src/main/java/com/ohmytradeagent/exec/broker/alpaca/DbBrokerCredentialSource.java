@@ -4,6 +4,7 @@ import static com.ohmytradeagent.exec.broker.BrokerCredentialSource.unavailable;
 import static org.jooq.impl.DSL.field;
 import static org.jooq.impl.DSL.table;
 
+import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
 import com.ohmytradeagent.exec.broker.BrokerCredentials;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCrypto;
@@ -68,14 +69,24 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
   private final DSLContext dsl;
   private final BrokerCredentialCrypto crypto;
   private final boolean live;
+  private final String accountLevelTenant;
 
   public DbBrokerCredentialSource(
-      DSLContext dsl, BrokerCredentialCrypto crypto, @Value("${broker.impl:}") String brokerImpl) {
+      DSLContext dsl,
+      BrokerCredentialCrypto crypto,
+      @Value("${broker.impl:}") String brokerImpl,
+      @Value("${broker.creds.account-level-tenant:${EXEC_BOOTSTRAP_TENANT_ID:}}")
+          String accountLevelTenant) {
     this.dsl = dsl;
     this.live = brokerImpl != null && brokerImpl.endsWith("-live");
     // The crypto bean (KEK loaded + validated once at boot by BrokerCredentialCryptoConfig —
     // MUST-FIX-4) is shared with the P6-b write path so read + write use the IDENTICAL envelope.
     this.crypto = crypto;
+    // Account-level ops (AccountSnapshot, reconciliation) resolve with the ACCOUNT_LEVEL sentinel,
+    // which is not a real tenant; map it to the configured tenant whose row holds the account-level
+    // credential — mirrors FileMountedBrokerCredentialSource so file→db migration is
+    // behavior-equal.
+    this.accountLevelTenant = accountLevelTenant;
   }
 
   @Override
@@ -90,6 +101,12 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
               + ")");
     }
 
+    // ACCOUNT_LEVEL → the configured account-level tenant (whose row holds the credential); a real
+    // tenant passes through unchanged. The mapped tenant is then used for the lookup AND the AAD,
+    // so
+    // the envelope binds to the same tenant the write path used.
+    String tenant = resolveTenant(tenantId);
+
     // One consistent snapshot: a single-row SELECT, all envelope fields read together.
     Record row =
         dsl.select(
@@ -102,12 +119,12 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
                 WS_URL,
                 EXPECTED_ACCOUNT_ID)
             .from(table(TABLE))
-            .where(TENANT_ID.eq(tenantId))
+            .where(TENANT_ID.eq(tenant))
             .and(PROVIDER.eq(provider))
             .fetchOne();
     if (row == null) {
       // A missing row is a deployment/config error, not transient — fail closed, non-retryable.
-      throw unavailable("no credential row for tenant=" + tenantId + " provider=" + provider);
+      throw unavailable("no credential row for tenant=" + tenant + " provider=" + provider);
     }
 
     String baseUrl = row.get(BASE_URL);
@@ -115,7 +132,7 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
     String expected = row.get(EXPECTED_ACCOUNT_ID) == null ? "" : row.get(EXPECTED_ACCOUNT_ID);
     int rowKekVersion = row.get(KEK_VERSION);
 
-    byte[] aad = BrokerCredentialCrypto.aad(tenantId, provider, expected, rowKekVersion);
+    byte[] aad = BrokerCredentialCrypto.aad(tenant, provider, expected, rowKekVersion);
     BrokerCredentialCrypto.Envelope env =
         new BrokerCredentialCrypto.Envelope(
             row.get(CIPHERTEXT), row.get(IV), row.get(WRAPPED_DEK), row.get(DEK_IV), rowKekVersion);
@@ -129,7 +146,7 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
       // carries only a constant non-secret reason, but we re-wrap to a non-retryable Temporal
       // failure WITHOUT the cause so no provider/buffer detail can ride along. Never the secret.
       throw unavailable(
-          "broker credential decryption failed for tenant=" + tenantId + " provider=" + provider);
+          "broker credential decryption failed for tenant=" + tenant + " provider=" + provider);
     }
 
     String apiKeyId = new String(fields[0], StandardCharsets.UTF_8);
@@ -150,9 +167,28 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
     Long version =
         dsl.select(VERSION)
             .from(table(TABLE))
-            .where(TENANT_ID.eq(tenantId))
+            .where(TENANT_ID.eq(resolveTenant(tenantId)))
             .and(PROVIDER.eq(provider))
             .fetchOne(VERSION);
     return version == null ? "absent" : Long.toString(version);
+  }
+
+  /**
+   * Maps the {@link BrokerClientRegistry#ACCOUNT_LEVEL} sentinel to the configured account-level
+   * tenant; passes any real tenant through unchanged. An {@code ACCOUNT_LEVEL} request with no
+   * configured {@code broker.creds.account-level-tenant} fails closed rather than guessing a
+   * tenant. Mirrors {@link FileMountedBrokerCredentialSource#resolveTenant} so the two sources
+   * agree.
+   */
+  private String resolveTenant(String tenantId) {
+    if (!BrokerClientRegistry.ACCOUNT_LEVEL.equals(tenantId)) {
+      return tenantId;
+    }
+    if (accountLevelTenant == null || accountLevelTenant.isBlank()) {
+      throw unavailable(
+          "account-level credential resolution requested but broker.creds.account-level-tenant is"
+              + " unset — refusing to guess a tenant");
+    }
+    return accountLevelTenant;
   }
 }
