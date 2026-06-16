@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/strategy-config-update-result.json",
+  "title": "StrategyConfigUpdateResult",
+  "description": "UI-P3-b (strategy-config-write): terminal outcome of StrategyConfigUpdateWorkflow. The activity CATCHES each StrategyConfigWriter exception and coarsens it into the `outcome` enum (mirroring the UI-P2 no-internals rule — writer exception messages never surface to the client). api-gateway maps outcome to an HTTP status (UPDATED 200, REJECTED_STALE_VERSION 409, REJECTED_DANGEROUS 403, REJECTED_INVALID 400, NOT_FOUND 404). Only genuinely transient/unknown faults (an IllegalStateException from a corrupt stored row) are NOT coarsened — they propagate as a retryable activity failure, surfacing to the caller as a 503 (write disposition unknown, NEVER reported as success).",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.StrategyConfigUpdateResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "outcome"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "UPDATED",
+        "REJECTED_STALE_VERSION",
+        "REJECTED_DANGEROUS",
+        "REJECTED_INVALID",
+        "NOT_FOUND",
+        "REJECTED_PERSIST_ERROR"
+      ],
+      "description": "Controlled disposition of the write. UPDATED: the CAS committed (new_version set). REJECTED_STALE_VERSION: expected_version was stale (OptimisticLockException). REJECTED_DANGEROUS: the write would increase/remove risk or drift an identity/live-routing field (DangerousFieldChangeRejected) — NEVER coarsened into UPDATED. REJECTED_INVALID: the proposed config is malformed / fails live gates (InvalidConfigException). NOT_FOUND: no stored row for (tenant, strategy). REJECTED_PERSIST_ERROR: reserved coarse persist-error bucket for the caller; the activity itself does NOT emit it (a corrupt-row IllegalStateException propagates as a retryable failure instead)."
+    },
+    "new_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Set ONLY on UPDATED: the persisted version after the compare-and-set bump. Null/omitted on every rejected outcome."
+    }
+  }
+}
