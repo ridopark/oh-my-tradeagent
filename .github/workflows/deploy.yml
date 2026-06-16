@@ -9,11 +9,20 @@ name: Deploy to homelab
 #
 # Two trigger paths:
 #   - workflow_run: auto-chained off a successful "Build and push images"
-#     run on main. Every merge to main surfaces a deploy waiting on
-#     reviewer approval — no need to remember to redeploy after merge.
+#     run on main. DIFF-SCOPED: rolls ONLY the services whose files changed
+#     in the triggering commit (PRs squash-merge to main, so the head commit
+#     is the whole change). This stops a deploy from re-applying an UNRELATED
+#     service's manifest and clobbering a live-only `kubectl` override — e.g.
+#     the orchestrator's homelab `prod_real` tenant mount or
+#     exec-alpaca-paper's `BROKER_CREDS_SOURCE=db` (the deploy-all clobber bit
+#     on 2026-06-15: a BFF-only PR rolled orchestrator + exec and reverted
+#     both). A change to shared Java code (`contract/**`, root `pom.xml`,
+#     the java-service Dockerfile) still rolls all Java services, because they
+#     are all rebuilt — that residual clobber is inherent to a real shared
+#     change and must be re-patched by hand.
 #   - workflow_dispatch: manual redeploy from the Actions tab. Pick one
-#     service or `all`. Use for rolling restart on config change, or to
-#     replay after a failed previous deploy.
+#     service or `all`. `all` is an explicit operator reconcile. Use for
+#     rolling restart on config change, or to replay after a failed deploy.
 #
 # Both paths require:
 #   - Self-hosted runner with label `homelab` (shared with k8s-drift).
@@ -123,21 +132,78 @@ jobs:
       - name: Build deploy matrix
         id: matrix
         # All inputs handed through `env:` so the script is pure shell — no
-        # mixing of GitHub-expression and shell-expression contexts. On
-        # workflow_run, DISPATCH_SERVICE is empty string; the `:-all` default
-        # makes that case explicit instead of relying on short-circuit luck.
+        # mixing of GitHub-expression and shell-expression contexts.
+        #   - workflow_dispatch: the chosen service, or `all` (operator reconcile).
+        #   - workflow_run (auto): DIFF-SCOPED — map the triggering commit's changed
+        #     files to affected services so we never roll an unrelated service. gh is
+        #     preinstalled on ubuntu runners; contents:read covers the commits API.
         env:
           EVENT_NAME: ${{ github.event_name }}
           DISPATCH_SERVICE: ${{ github.event.inputs.service }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          SERVICE="${DISPATCH_SERVICE:-all}"
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$SERVICE" != "all" ]; then
-            matrix=$(jq -nc --arg s "$SERVICE" '{service: [$s]}')
-          else
-            matrix=$(jq -nc --arg s "$SERVICES" '{service: ($s | split(" "))}')
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            SERVICE="${DISPATCH_SERVICE:-all}"
+            if [ "$SERVICE" != "all" ]; then
+              matrix=$(jq -nc --arg s "$SERVICE" '{service: [$s]}')
+            else
+              matrix=$(jq -nc --arg s "$SERVICES" '{service: ($s | split(" "))}')
+            fi
+            echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+            echo "Dispatch deploy matrix: $matrix"
+            exit 0
           fi
+
+          # --- workflow_run: diff-based matrix ---
+          files=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" --jq '.files[].filename' || true)
+          if [ -z "$files" ]; then
+            echo "::warning::Could not determine changed files for ${HEAD_SHA}; deploying nothing. Run deploy.yml manually (workflow_dispatch) if a rollout is needed."
+            echo 'matrix={"service":[]}' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          declare -A want
+          add_all_java() { for s in orchestrator exec-alpaca-paper market-data api-gateway tenant-dashboard-bff; do want["$s"]=1; done; }
+          add_all() { for s in $SERVICES; do want["$s"]=1; done; }
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              services/orchestrator/*)                 want[orchestrator]=1 ;;
+              services/exec/*)                          want[exec-alpaca-paper]=1 ;;
+              services/market-data/*)                   want[market-data]=1 ;;
+              services/api-gateway/*)                   want[api-gateway]=1 ;;
+              services/signal-source-discord/*)         want[signal-source-discord]=1 ;;
+              services/tenant-dashboard-bff/*)          want[tenant-dashboard-bff]=1 ;;
+              services/audit/*)                         : ;;   # no rolled Deployment
+              dashboard/*)                              want[dashboard]=1 ;;
+              # Shared Java inputs rebuild every Java image -> roll them all.
+              contract/*|pom.xml|infra/docker/java-service.Dockerfile) add_all_java ;;
+              # Other build-context-wide inputs -> roll everything.
+              infra/docker/*|.dockerignore)             add_all ;;
+              # A bundled manifest edit rolls its own service (NN-<service>.yaml).
+              infra/k8s/51-orchestrator.yaml)           want[orchestrator]=1 ;;
+              infra/k8s/52-exec-alpaca-paper.yaml)      want[exec-alpaca-paper]=1 ;;
+              infra/k8s/53-market-data.yaml)            want[market-data]=1 ;;
+              infra/k8s/54-api-gateway.yaml)            want[api-gateway]=1 ;;
+              infra/k8s/55-signal-source-discord.yaml)  want[signal-source-discord]=1 ;;
+              infra/k8s/58-tenant-dashboard-bff.yaml)   want[tenant-dashboard-bff]=1 ;;
+              infra/k8s/59-dashboard.yaml)              want[dashboard]=1 ;;
+              *) : ;;   # docs, .github, tenants/, other infra/k8s -> no rollout
+            esac
+          done <<< "$files"
+
+          # One service key per line into jq; select drops the lone blank line that
+          # printf emits when `want` is empty, yielding {"service":[]}.
+          matrix=$(printf '%s\n' "${!want[@]}" | jq -Rnc '[inputs | select(. != "")] | {service: .}')
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "Computed deploy matrix: $matrix"
+          echo "Changed files:"; printf '%s\n' "$files"
+          echo "Diff-based deploy matrix: $matrix"
+          if [ "$matrix" = '{"service":[]}' ]; then
+            echo "::notice::No deployable service changed in ${HEAD_SHA}; skipping rollout."
+          fi
 
   deploy:
     name: Roll ${{ matrix.service }}
