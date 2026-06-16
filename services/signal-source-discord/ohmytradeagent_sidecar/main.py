@@ -33,6 +33,25 @@ def _required(name: str) -> str:
     return val
 
 
+def _parse_additional_targets(raw: str) -> list[tuple[str, str]]:
+    """Parse ``SIGNAL_EMIT_ADDITIONAL_TARGETS`` (``tenant:strategy,tenant:strategy``) into a list of
+    extra fan-out targets. Empty → no extras (single-tenant, unchanged). One browser/Discord session
+    can thus feed several tenants on the same channel (e.g. a live tenant + a paper shadow)."""
+    targets: list[tuple[str, str]] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        tenant, _, strategy = item.partition(":")
+        tenant, strategy = tenant.strip(), strategy.strip()
+        if not tenant or not strategy:
+            raise SystemExit(
+                f"SIGNAL_EMIT_ADDITIONAL_TARGETS entry '{item}' must be 'tenant:strategy'"
+            )
+        targets.append((tenant, strategy))
+    return targets
+
+
 def _log_if_failed(log: logging.Logger, name: str):
     """Done-callback that logs a non-cancellation task failure. Used to isolate
     the best-effort watchlist watcher so its crash never propagates."""
@@ -54,6 +73,9 @@ async def _amain() -> None:
     channel_url = _required("DISCORD_CHANNEL_URL")
     tenant_id = _required("TENANT_ID")
     strategy_id = _required("STRATEGY_ID")
+    additional_targets = _parse_additional_targets(
+        os.getenv("SIGNAL_EMIT_ADDITIONAL_TARGETS", "")
+    )
     temporal_target = os.getenv("TEMPORAL_TARGET", "localhost:7233")
     temporal_namespace = os.getenv("TEMPORAL_NAMESPACE", "default")
     task_queue = os.getenv("TEMPORAL_TASK_QUEUE", "orchestrator-core")
@@ -90,9 +112,10 @@ async def _amain() -> None:
         )
 
     log.info(
-        "starting sidecar (tenant=%s strategy=%s target=%s task_queue=%s)",
+        "starting sidecar (tenant=%s strategy=%s additional_targets=%s target=%s task_queue=%s)",
         tenant_id,
         strategy_id,
+        additional_targets,
         temporal_target,
         task_queue,
     )
@@ -105,6 +128,7 @@ async def _amain() -> None:
         emitter=emitter,
         tenant_id=tenant_id,
         strategy_id=strategy_id,
+        additional_targets=additional_targets,
         log=log,
         poll_interval_secs=poll_interval,
     )

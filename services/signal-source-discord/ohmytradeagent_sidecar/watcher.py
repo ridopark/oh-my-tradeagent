@@ -82,6 +82,7 @@ class Watcher:
         strategy_id: str,
         log: logging.Logger,
         poll_interval_secs: float,
+        additional_targets: list[tuple[str, str]] | None = None,
         lru_capacity: int = DEFAULT_LRU_CAPACITY,
     ) -> None:
         self._channel_url = channel_url
@@ -89,6 +90,14 @@ class Watcher:
         self._emitter = emitter
         self._tenant_id = tenant_id
         self._strategy_id = strategy_id
+        # Fan-out targets: the primary (tenant_id, strategy_id) plus any additional ones, so ONE
+        # browser/Discord session feeds several tenants watching the same channel (e.g. a live tenant
+        # and a paper shadow). Each parsed signal is emitted once per target; the per-target workflow
+        # id (t-<tenant>/s-<strategy>/sig/<id>) keeps them distinct and independently deduped.
+        self._targets: list[tuple[str, str]] = [
+            (tenant_id, strategy_id),
+            *(additional_targets or []),
+        ]
         self._log = log
         self._poll_interval = poll_interval_secs
         self._heartbeat_path = state_dir / "heartbeat"
@@ -134,14 +143,35 @@ class Watcher:
                 self._log.debug("no signal in message %s", m.message_id)
                 continue
             for i, sig in enumerate(parsed):
-                payload = self._build_payload(
+                await self._emit_signal(
                     message_id=m.message_id,
                     line_index=i,
                     author=m.author,
                     posted_at_iso=m.timestamp_iso,
                     sig=sig,
                 )
-                await self._emit_one(payload)
+
+    async def _emit_signal(
+        self,
+        *,
+        message_id: str,
+        line_index: int,
+        author: str,
+        posted_at_iso: str | None,
+        sig: ParsedSignal,
+    ) -> None:
+        """Fan one parsed signal out to every configured (tenant, strategy) target."""
+        for tenant_id, strategy_id in self._targets:
+            payload = self._build_payload(
+                message_id=message_id,
+                line_index=line_index,
+                author=author,
+                posted_at_iso=posted_at_iso,
+                sig=sig,
+                tenant_id=tenant_id,
+                strategy_id=strategy_id,
+            )
+            await self._emit_one(payload)
 
     def _build_payload(
         self,
@@ -151,6 +181,8 @@ class Watcher:
         author: str,
         posted_at_iso: str | None,
         sig: ParsedSignal,
+        tenant_id: str | None = None,
+        strategy_id: str | None = None,
     ) -> CopytradeSignalPayload:
         posted_at = (
             datetime.fromisoformat(posted_at_iso)
@@ -159,8 +191,8 @@ class Watcher:
         )
         return CopytradeSignalPayload(
             schema_version=1,
-            tenant_id=self._tenant_id,
-            strategy_id=self._strategy_id,
+            tenant_id=tenant_id or self._tenant_id,
+            strategy_id=strategy_id or self._strategy_id,
             signal_id=f"{message_id}:{line_index}",
             message_id=message_id,
             author=author,

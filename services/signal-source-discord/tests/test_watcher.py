@@ -125,3 +125,55 @@ async def test_emit_one_logs_emitted_and_deduped_paths(
     messages = "\n".join(r.message for r in caplog.records)
     assert "emitted BTO NVDA" in messages
     assert "deduped msg-1:0" in messages
+
+
+async def test_emit_signal_fans_out_to_all_targets(tmp_path: pathlib.Path) -> None:
+    emitter = InMemoryEmitter()
+    w = Watcher(
+        channel_url="https://discord/channel/x",
+        state_dir=tmp_path,
+        emitter=emitter,
+        tenant_id="prod_real",
+        strategy_id="copytrade-v1",
+        additional_targets=[("staging_paper", "copytrade-v1")],
+        log=logging.getLogger("test"),
+        poll_interval_secs=1.0,
+    )
+    parsed = ParsedSignal(
+        action="BTO",
+        ticker="NVDA",
+        expiry=date(2026, 5, 16),
+        strike=140.0,
+        right="C",
+        price=2.30,
+        tail="",
+        raw_line="BTO NVDA 5/16 140C @ 2.30",
+    )
+
+    await w._emit_signal(  # type: ignore[attr-defined]
+        message_id="msg-1",
+        line_index=0,
+        author="ridopark",
+        posted_at_iso="2026-05-16T13:35:00Z",
+        sig=parsed,
+    )
+
+    # One parsed signal -> one workflow per target, same signal_id, distinct tenants.
+    assert sorted(p.tenant_id for p in emitter.emitted) == ["prod_real", "staging_paper"]
+    assert all(p.signal_id == "msg-1:0" for p in emitter.emitted)
+    assert all(p.ticker == "NVDA" and p.action.value == "BTO" for p in emitter.emitted)
+
+
+def test_parse_additional_targets() -> None:
+    from ohmytradeagent_sidecar.main import _parse_additional_targets
+
+    assert _parse_additional_targets("") == []
+    assert _parse_additional_targets("  ") == []
+    assert _parse_additional_targets("staging_paper:copytrade-v1") == [
+        ("staging_paper", "copytrade-v1")
+    ]
+    assert _parse_additional_targets("a:x, b:y") == [("a", "x"), ("b", "y")]
+    with pytest.raises(SystemExit):
+        _parse_additional_targets("noseparator")
+    with pytest.raises(SystemExit):
+        _parse_additional_targets("tenant:")
