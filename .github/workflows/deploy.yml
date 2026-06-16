@@ -247,6 +247,21 @@ jobs:
         # second matching manifest is a config error worth surfacing here.
         run: |
           set -euo pipefail
+          # Services carrying LIVE-ONLY overrides applied out-of-band via `kubectl patch`
+          # (NOT reflected in the repo manifest) — applying NN-<svc>.yaml would REVERT them
+          # and break the live pipeline. Skip apply for these; the rollout restart below still
+          # re-pulls :latest while preserving the live spec. Apply genuine manifest changes for
+          # them BY HAND. (Footgun confirmed 2026-06-15 and 2026-06-16 — see ops notes.)
+          #   - orchestrator: tenants volume items → prod_real/ + staging_paper/ (repo = dev/)
+          #   - exec-alpaca-paper: BROKER_CREDS_SOURCE=db + EXEC_BOOTSTRAP_TENANT_ID=staging_paper
+          #     (absent in repo → apply strips them → staging_paper's encrypted-DB creds break)
+          RESTART_ONLY="orchestrator exec-alpaca-paper"
+          for s in $RESTART_ONLY; do
+            if [ "$s" = "${{ matrix.service }}" ]; then
+              echo "::notice::${{ matrix.service }} has live-only overrides — skipping apply (rollout restart below still re-pulls :latest)."
+              exit 0
+            fi
+          done
           shopt -s nullglob
           matches=(infra/k8s/*-${{ matrix.service }}.yaml)
           if [ "${#matches[@]}" -ne 1 ]; then
