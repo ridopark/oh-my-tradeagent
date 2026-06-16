@@ -34,8 +34,12 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
         // single dashboard_user INSERT (the chicken-and-egg otherwise: login is denied until the row
         // exists, and the OAuth `sub` is only knowable once the user attempts a login). The `sub` is
         // a pseudonymous id and email is informational — operator-only, in-cluster logs.
-        console.warn(
-          `[dashboard] denied login for unprovisioned identity: provider=${account.provider} subject=${account.providerAccountId} email=${profile?.email ?? "?"}`,
+        //
+        // Write STRAIGHT to the stderr stream, not console.warn: the Next.js standalone server
+        // patches `console.*` and swallows app-level console output in production, so the warning
+        // never reaches `kubectl logs`. process.stderr.write bypasses that patch (fd 2 is captured).
+        process.stderr.write(
+          `DENIED_LOGIN unprovisioned identity: provider=${account.provider} subject=${account.providerAccountId} email=${profile?.email ?? "?"}\n`,
         );
         return false;
       }
