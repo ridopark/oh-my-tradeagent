@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.jooq.impl.DSL.field;
 import static org.jooq.impl.DSL.table;
 
+import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.BrokerCredentials;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCrypto;
 import io.temporal.failure.ApplicationFailure;
@@ -73,8 +74,14 @@ class DbBrokerCredentialSourceIT {
     dsl.deleteFrom(table("broker_credentials")).execute();
   }
 
+  private static final String ACCT_TENANT = "acct-level-tenant";
+
   private DbBrokerCredentialSource source(String brokerImpl) {
-    return new DbBrokerCredentialSource(dsl, crypto(), brokerImpl);
+    return source(brokerImpl, ACCT_TENANT);
+  }
+
+  private DbBrokerCredentialSource source(String brokerImpl, String accountLevelTenant) {
+    return new DbBrokerCredentialSource(dsl, crypto(), brokerImpl, accountLevelTenant);
   }
 
   private static byte[] aad(
@@ -149,6 +156,29 @@ class DbBrokerCredentialSourceIT {
 
     assertThat(source(PAPER).resolve("alice", PROVIDER).apiKeyId()).isEqualTo("alice-key");
     assertThat(source(PAPER).resolve("bob", PROVIDER).apiKeyId()).isEqualTo("bob-key");
+  }
+
+  @Test
+  void accountLevelSentinelResolvesViaConfiguredTenant() {
+    // Account-level ops (AccountSnapshot / reconciliation) resolve with the ACCOUNT_LEVEL sentinel;
+    // it must map to the configured account-level tenant's row (the row was written + AAD-bound to
+    // that real tenant), not be looked up literally.
+    seed(crypto(), ACCT_TENANT, "acct-key", "acct-secret", PAPER_HOST, "wss://z", "999", 1);
+
+    BrokerCredentials c = source(PAPER).resolve(BrokerClientRegistry.ACCOUNT_LEVEL, PROVIDER);
+
+    assertThat(c.apiKeyId()).isEqualTo("acct-key");
+    assertThat(c.expectedAccountId()).isEqualTo("999");
+    assertThat(source(PAPER).fingerprint(BrokerClientRegistry.ACCOUNT_LEVEL, PROVIDER))
+        .isEqualTo("1");
+  }
+
+  @Test
+  void accountLevelSentinelWithBlankConfiguredTenantFailsClosed() {
+    assertThatThrownBy(
+            () -> source(PAPER, "").resolve(BrokerClientRegistry.ACCOUNT_LEVEL, PROVIDER))
+        .isInstanceOf(ApplicationFailure.class)
+        .hasMessageContaining("broker.creds.account-level-tenant is");
   }
 
   @Test
