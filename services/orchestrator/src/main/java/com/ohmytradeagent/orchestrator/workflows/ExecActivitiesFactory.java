@@ -127,13 +127,7 @@ final class ExecActivitiesFactory {
         ActivityOptions.newBuilder()
             .setTaskQueue(taskQueue)
             .setStartToCloseTimeout(DEFAULT_START_TO_CLOSE)
-            .setRetryOptions(
-                RetryOptions.newBuilder()
-                    .setMaximumAttempts(MAX_ATTEMPTS)
-                    .setInitialInterval(RETRY_INITIAL_INTERVAL)
-                    .setBackoffCoefficient(RETRY_BACKOFF_COEFFICIENT)
-                    .setMaximumInterval(RETRY_MAXIMUM_INTERVAL)
-                    .build())
+            .setRetryOptions(backoff(MAX_ATTEMPTS).build())
             .build();
     return Workflow.newActivityStub(
         ExecActivities.class,
@@ -153,14 +147,20 @@ final class ExecActivitiesFactory {
         .setTaskQueue(taskQueue)
         .setStartToCloseTimeout(DEFAULT_START_TO_CLOSE)
         .setScheduleToCloseTimeout(PLACE_ORDER_SCHEDULE_TO_CLOSE)
-        .setRetryOptions(
-            RetryOptions.newBuilder()
-                .setMaximumAttempts(PLACE_ORDER_MAX_ATTEMPTS)
-                .setInitialInterval(RETRY_INITIAL_INTERVAL)
-                .setBackoffCoefficient(RETRY_BACKOFF_COEFFICIENT)
-                .setMaximumInterval(RETRY_MAXIMUM_INTERVAL)
-                .build())
+        .setRetryOptions(backoff(PLACE_ORDER_MAX_ATTEMPTS).build())
         .build();
+  }
+
+  /**
+   * The shared 500ms→×2→5s backoff curve, parameterized only by max-attempts — the one dimension
+   * that differs between the snappy default and the widened order-submission budget.
+   */
+  private static RetryOptions.Builder backoff(int maxAttempts) {
+    return RetryOptions.newBuilder()
+        .setMaximumAttempts(maxAttempts)
+        .setInitialInterval(RETRY_INITIAL_INTERVAL)
+        .setBackoffCoefficient(RETRY_BACKOFF_COEFFICIENT)
+        .setMaximumInterval(RETRY_MAXIMUM_INTERVAL);
   }
 
   /** Visible for tests + ReconciliationWorkflow re-use. */
