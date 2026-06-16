@@ -3,7 +3,9 @@ package com.ohmytradeagent.orchestrator.workflows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.temporal.activity.ActivityOptions;
 import io.temporal.failure.ApplicationFailure;
+import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -97,5 +99,33 @@ class ExecActivitiesFactoryTest {
     assertThatThrownBy(() -> ExecActivitiesFactory.taskQueueFor("alpaca-prod"))
         .isInstanceOf(ApplicationFailure.class)
         .hasMessageContaining("InvalidBrokerTargetError");
+  }
+
+  /**
+   * Regression guard: order-submission ({@code PlaceOrder}) retry budget must stay wide enough to
+   * ride out a transient broker 5xx blip (~1–2 min) so a live entry/exit is not dropped. A
+   * regression that shrinks attempts back to the shared default (5) or drops the schedule-to-close
+   * ceiling would silently re-open the gap, so we assert the >=6-attempt / >=180s floor explicitly.
+   */
+  @Test
+  void placeOrderOptions_carryWidenedFiveHundredSurvivalBudget() {
+    ActivityOptions opts = ExecActivitiesFactory.placeOrderOptions("broker-alpaca-paper");
+
+    assertThat(opts.getRetryOptions().getMaximumAttempts()).isGreaterThanOrEqualTo(6);
+    assertThat(opts.getScheduleToCloseTimeout()).isGreaterThanOrEqualTo(Duration.ofSeconds(180));
+    // start-to-close stays at the shared 15s (we only widened attempts + schedule-to-close).
+    assertThat(opts.getStartToCloseTimeout()).isEqualTo(Duration.ofSeconds(15));
+    assertThat(opts.getTaskQueue()).isEqualTo("broker-alpaca-paper");
+  }
+
+  /**
+   * The per-method override key MUST match the Temporal activity-type name Temporal derives for
+   * {@link com.ohmytradeagent.orchestrator.activities.ExecActivities#placeOrder} (capitalized
+   * method name, no {@code @ActivityMethod} override). A drift here makes the widened budget
+   * silently ignored, so pin it.
+   */
+  @Test
+  void placeOrderActivityName_isPlaceOrder() {
+    assertThat(ExecActivitiesFactory.PLACE_ORDER_ACTIVITY_NAME).isEqualTo("PlaceOrder");
   }
 }

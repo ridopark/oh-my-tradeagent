@@ -6,6 +6,7 @@ import io.temporal.common.RetryOptions;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,13 +66,50 @@ final class ExecActivitiesFactory {
    * <p>startToClose stays at {@link #DEFAULT_START_TO_CLOSE} (15s) for ALL THREE exec activities —
    * this stub is shared by placeOrder + cancelOrder + reads, and the over-sell gate relies on the
    * cancel/read paths staying snappy near expiry. We add backoff only (no startToClose change), so
-   * no stub split is needed and no version gate is required (plain options).
+   * no version gate is required (plain options).
    */
   private static final Duration RETRY_INITIAL_INTERVAL = Duration.ofMillis(500);
 
   private static final double RETRY_BACKOFF_COEFFICIENT = 2.0;
 
   private static final Duration RETRY_MAXIMUM_INTERVAL = Duration.ofSeconds(5);
+
+  /**
+   * Temporal activity-type name for {@link ExecActivities#placeOrder} — the default is the
+   * capitalized method name (no {@code @ActivityMethod(name=...)} override on the interface).
+   * Pinned as a constant so the per-method options map below is not a stringly-typed footgun: a
+   * typo here would silently fall back to {@link #DEFAULT_START_TO_CLOSE}/{@link #MAX_ATTEMPTS} and
+   * re-open the exact 5xx gap this widening closes. Asserted in {@code ExecActivitiesFactoryTest}.
+   */
+  static final String PLACE_ORDER_ACTIVITY_NAME = "PlaceOrder";
+
+  /**
+   * Order-submission retry budget (widened beyond the shared default for {@code PlaceOrder} ONLY).
+   *
+   * <p>WHY: a transient broker 5xx (Alpaca {@code code 50010000}) on an entry/exit submission must
+   * survive a ~1–2 min blip rather than dropping a live order. The shared default ({@link
+   * #MAX_ATTEMPTS}=5 attempts with the 500ms→×2→5s backoff above) exhausts in well under a minute,
+   * so a 500 lasting ~1 min failed the workflow — the real incident was a {@code SPY
+   * 260622C00755000} BTO that took an HTTP 500 and died after the bounded retries. 6 attempts under
+   * a 180s schedule-to-close ceiling rides through a 1–2 min blip.
+   *
+   * <p>SAFE TO RETRY: every order this workflow places is a LIMIT order (the intent carries a
+   * {@code limit_price}), so retrying through a blip can never overpay — the worst case is no fill,
+   * never a worse fill. Non-retryable 4xx (401/403 auth, insufficient-funds, invalid-contract,
+   * non-duplicate 422) are still classified {@code nonRetryable} in {@code
+   * AlpacaPaperBroker.mapError} and fail fast — this widening only gives the genuinely-transient
+   * 5xx path more headroom.
+   *
+   * <p>BOUNDED: 6 attempts / 180s is still a hard ceiling, so a genuine broker outage fails-closed
+   * (and alerts) rather than retrying forever.
+   *
+   * <p>SCOPE: applied via a per-activity options override so cancelOrder + getOrderStatus keep the
+   * snappy shared default the over-sell gate depends on near expiry — only the order-submission
+   * path widens. startToClose is unchanged (15s).
+   */
+  private static final int PLACE_ORDER_MAX_ATTEMPTS = 6;
+
+  private static final Duration PLACE_ORDER_SCHEDULE_TO_CLOSE = Duration.ofSeconds(180);
 
   private ExecActivitiesFactory() {}
 
@@ -82,10 +120,12 @@ final class ExecActivitiesFactory {
    *     when {@code brokerTarget} is null/blank or fails the whitelist.
    */
   static ExecActivities forTarget(String brokerTarget) {
-    return Workflow.newActivityStub(
-        ExecActivities.class,
+    String taskQueue = taskQueueFor(brokerTarget);
+    // Shared default: cancelOrder + getOrderStatus (snappy; over-sell gate depends on these near
+    // expiry). placeOrder overrides with the widened 5xx-survival budget below.
+    ActivityOptions defaults =
         ActivityOptions.newBuilder()
-            .setTaskQueue(taskQueueFor(brokerTarget))
+            .setTaskQueue(taskQueue)
             .setStartToCloseTimeout(DEFAULT_START_TO_CLOSE)
             .setRetryOptions(
                 RetryOptions.newBuilder()
@@ -94,7 +134,33 @@ final class ExecActivitiesFactory {
                     .setBackoffCoefficient(RETRY_BACKOFF_COEFFICIENT)
                     .setMaximumInterval(RETRY_MAXIMUM_INTERVAL)
                     .build())
-            .build());
+            .build();
+    return Workflow.newActivityStub(
+        ExecActivities.class,
+        defaults,
+        Map.of(PLACE_ORDER_ACTIVITY_NAME, placeOrderOptions(taskQueue)));
+  }
+
+  /**
+   * Order-submission ({@code PlaceOrder}) activity options: the widened 5xx-survival budget ({@link
+   * #PLACE_ORDER_MAX_ATTEMPTS} attempts under a {@link #PLACE_ORDER_SCHEDULE_TO_CLOSE} ceiling),
+   * same 15s start-to-close and same backoff as the shared default. Package-visible so the
+   * regression guard in {@code ExecActivitiesFactoryTest} can assert the budget never silently
+   * shrinks back below the 6-attempt / 180s floor.
+   */
+  static ActivityOptions placeOrderOptions(String taskQueue) {
+    return ActivityOptions.newBuilder()
+        .setTaskQueue(taskQueue)
+        .setStartToCloseTimeout(DEFAULT_START_TO_CLOSE)
+        .setScheduleToCloseTimeout(PLACE_ORDER_SCHEDULE_TO_CLOSE)
+        .setRetryOptions(
+            RetryOptions.newBuilder()
+                .setMaximumAttempts(PLACE_ORDER_MAX_ATTEMPTS)
+                .setInitialInterval(RETRY_INITIAL_INTERVAL)
+                .setBackoffCoefficient(RETRY_BACKOFF_COEFFICIENT)
+                .setMaximumInterval(RETRY_MAXIMUM_INTERVAL)
+                .build())
+        .build();
   }
 
   /** Visible for tests + ReconciliationWorkflow re-use. */
