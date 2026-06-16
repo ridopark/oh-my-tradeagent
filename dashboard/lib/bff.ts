@@ -117,6 +117,24 @@ export interface BrokerCredentialStatus {
   updated_by: string | null;
 }
 
+// UI-P3-a: a tenant's editable strategy config(s) + version (for the future write path's optimistic
+// CAS) + field-class metadata. No secret material (broker keys live in a separate table). The
+// `config` is the raw strategy-config object; `field_classes` lists the non-SAFE fields so the UI
+// can render IDENTITY/DANGEROUS read-only and EXPOSURE tighten-only — any field not listed is SAFE.
+export interface StrategyConfigItem {
+  strategy_id: string;
+  version: number;
+  config: Record<string, unknown>;
+}
+export interface StrategyConfigResponse {
+  tenant_id: string;
+  count: number;
+  field_classes: { IDENTITY: string[]; DANGEROUS: string[]; EXPOSURE: string[] };
+  items: StrategyConfigItem[];
+}
+export const getStrategyConfig = () =>
+  bffGet<StrategyConfigResponse>("/api/strategy-config");
+
 export const getPositions = () => bffGet<Envelope<Position>>("/api/positions");
 export const getTrades = (limit = 100) =>
   bffGet<Envelope<Trade>>(`/api/trades?limit=${limit}`);
