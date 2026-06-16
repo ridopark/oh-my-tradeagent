@@ -51,6 +51,15 @@ broker:
       # lockout-duration: how long a tenant is refused (429 before forwarding) once locked out.
       lockout-duration: ${BROKER_CREDENTIALS_WRITE_LOCKOUT_DURATION:PT15M}
 
+# UI-P3-b strategy-config WRITE forward. DARK by default: with write.enabled unset/false the
+# StrategyConfigController bean does not exist and the /strategy-config route 404s. The opt-in is a
+# manual, per-cluster operator action — NO repo manifest sets this true. The orchestrator's
+# StrategyConfigWriter hard-blocks any risk-increasing / live-routing change regardless of this flag.
+strategy:
+  config:
+    write:
+      enabled: ${STRATEGY_CONFIG_WRITE_ENABLED:false}
+
 # Exec internal base URL the credential forward targets (in-cluster service name).
 exec:
   base-url: ${EXEC_BASE_URL:http://exec:8080}

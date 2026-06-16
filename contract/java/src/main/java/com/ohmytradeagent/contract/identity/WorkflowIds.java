@@ -37,6 +37,20 @@ public final class WorkflowIds {
   }
 
   /**
+   * Workflow ID for the short-lived {@code StrategyConfigUpdateWorkflow} that performs the UI-P3-b
+   * dark-gated, reduce-or-hold-risk runtime config write for {@code (tenant, strategy)}.
+   *
+   * <p>Routes through {@link #tenantStrategy} (the write IS strategy-scoped, unlike the {@code
+   * (tenant, provider)} credential audit) and appends the {@code correlationId} so a retried
+   * api-gateway call collides on {@code REJECT_DUPLICATE} rather than double-writing the same
+   * config (the underlying CAS is not idempotent-append).
+   */
+  public static String strategyConfigUpdate(
+      String tenantId, String strategyId, String correlationId) {
+    return tenantStrategy(tenantId, strategyId) + "/cfg-write/" + correlationId;
+  }
+
+  /**
    * Workflow ID prefix for a {@code PositionWorkflow}; {@code entrySignalId} disambiguates re-BTOs.
    */
   public static String position(

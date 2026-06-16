@@ -13,6 +13,7 @@ import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.activities.StrategyConfigUpdateActivities;
 import com.ohmytradeagent.orchestrator.activities.WatchlistMirrorActivities;
 import com.ohmytradeagent.orchestrator.workflows.AccountSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
@@ -21,6 +22,7 @@ import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.StrategyConfigUpdateWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistMirrorWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
@@ -73,6 +75,7 @@ public class TemporalWorkerConfig {
       AuditActivities audit,
       AuditQueryActivities auditQuery,
       BrokerCredentialAuditActivities brokerCredentialAudit,
+      StrategyConfigUpdateActivities strategyConfigUpdate,
       StrategyActivities strategy,
       RiskActivities risk,
       ContractActivities contract,
@@ -110,7 +113,12 @@ public class TemporalWorkerConfig {
         // metadata-only BrokerCredentialAuditActivities.record and completes. Started by the
         // api-gateway /broker-credentials forward; the activity impl is registered below (do NOT
         // re-register it).
-        BrokerCredentialAuditWorkflowImpl.class);
+        BrokerCredentialAuditWorkflowImpl.class,
+        // UI-P3-b config-write carrier: short-lived workflow that dispatches the
+        // StrategyConfigUpdateActivities.update Activity (in-process StrategyConfigWriter) on this
+        // orchestrator-core queue and returns the coarse outcome. Started by the api-gateway
+        // /strategy-config forward (dark-gated); the activity impl is registered below.
+        StrategyConfigUpdateWorkflowImpl.class);
     worker.registerActivitiesImplementations(
         audit,
         auditQuery,
@@ -118,6 +126,11 @@ public class TemporalWorkerConfig {
         // capability. Registered so its wiring + determinism are proven; nothing calls it in P6-d
         // (carrier + api-gateway caller defer to UI-P2).
         brokerCredentialAudit,
+        // UI-P3-b: DARK reduce-or-hold-risk runtime config-write capability. Drives the in-process
+        // StrategyConfigWriter and coarsens its exceptions into the result outcome enum. Nothing
+        // calls it unless the api-gateway /strategy-config route is enabled (flag-gated, off by
+        // default).
+        strategyConfigUpdate,
         strategy,
         risk,
         contract,

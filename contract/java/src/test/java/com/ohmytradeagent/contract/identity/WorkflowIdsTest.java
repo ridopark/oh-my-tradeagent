@@ -20,4 +20,17 @@ class WorkflowIdsTest {
     assertThat(WorkflowIds.brokerCredentialAudit("acme", "corr-123"))
         .isEqualTo("t-acme/_broker/cred-audit/corr-123");
   }
+
+  /**
+   * UI-P3-b: the config-write workflow id IS strategy-scoped (it routes through {@link
+   * WorkflowIds#tenantStrategy}, so it carries the {@code s-} segment, unlike the credential audit)
+   * and embeds the {@code correlation_id} so a retried api-gateway call dedups on {@code
+   * REJECT_DUPLICATE}. api-gateway's caller and the orchestrator's {@code
+   * StrategyConfigUpdateWorkflow} must agree on this literal.
+   */
+  @Test
+  void strategyConfigUpdateIsTheTenantStrategyShapeWithCorrelationId() {
+    assertThat(WorkflowIds.strategyConfigUpdate("acme", "copytrade-v1", "corr-123"))
+        .isEqualTo("t-acme/s-copytrade-v1/cfg-write/corr-123");
+  }
 }
