@@ -253,8 +253,12 @@ export default async function ConfigPage({
           <p className="text-sm text-slate-400">No strategy config available.</p>
         ) : (
           <div className="flex flex-col gap-8">
-            {cfg.items.map((item) => {
-              const fields = Object.entries(item.config);
+            {[...cfg.items]
+              .sort((a, b) => a.strategy_id.localeCompare(b.strategy_id))
+              .map((item) => {
+              const fields = Object.entries(item.config).sort(([a], [b]) =>
+                a.localeCompare(b),
+              );
               return (
                 <section key={item.strategy_id}>
                   <h2 className="mb-2 flex items-center gap-2 text-lg font-medium text-slate-100">
