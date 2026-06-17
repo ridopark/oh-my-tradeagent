@@ -8,6 +8,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.ohmytradeagent.contract.WatchlistMirrorPayload;
+import com.ohmytradeagent.orchestrator.alert.TenantWebhookResolver;
 import com.ohmytradeagent.orchestrator.alert.WebhookClient;
 import com.ohmytradeagent.orchestrator.alert.WebhookEmbed;
 import java.time.LocalDate;
@@ -19,6 +20,9 @@ import org.mockito.ArgumentCaptor;
  * WebhookClient} the trade-alert feed uses. The webhook client is mocked — no live secret required.
  */
 class WatchlistMirrorActivitiesImplTest {
+
+  private static final TenantWebhookResolver BLANK_RESOLVER =
+      new TenantWebhookResolver("", "", null, java.time.Duration.ofSeconds(30));
 
   private static WatchlistMirrorPayload payload(String raw) {
     WatchlistMirrorPayload p = new WatchlistMirrorPayload();
@@ -35,7 +39,8 @@ class WatchlistMirrorActivitiesImplTest {
   @Test
   void postsExactlyOnceWithHeaderAndFencedRawText() {
     WebhookClient webhook = mock(WebhookClient.class);
-    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+    WatchlistMirrorActivitiesImpl activity =
+        new WatchlistMirrorActivitiesImpl(webhook, BLANK_RESOLVER);
 
     activity.postWatchlistAlert(payload("AAPL calls\nTSLA puts"));
 
@@ -47,7 +52,8 @@ class WatchlistMirrorActivitiesImplTest {
   @Test
   void oversizedRawTextIsTruncatedWithinDiscordLimitAndKeepsBalancedFence() {
     WebhookClient webhook = mock(WebhookClient.class);
-    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+    WatchlistMirrorActivitiesImpl activity =
+        new WatchlistMirrorActivitiesImpl(webhook, BLANK_RESOLVER);
 
     String huge = "x".repeat(5000);
     activity.postWatchlistAlert(payload(huge));
@@ -63,7 +69,8 @@ class WatchlistMirrorActivitiesImplTest {
   @Test
   void literalTripleBacktickInRawTextIsNeutralizedSoFenceStaysIntact() {
     WebhookClient webhook = mock(WebhookClient.class);
-    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+    WatchlistMirrorActivitiesImpl activity =
+        new WatchlistMirrorActivitiesImpl(webhook, BLANK_RESOLVER);
 
     activity.postWatchlistAlert(payload("before ``` after"));
 
@@ -87,14 +94,16 @@ class WatchlistMirrorActivitiesImplTest {
   @Test
   void cleanParseablePayloadPostsPerPlayEmbed() {
     WebhookClient webhook = mock(WebhookClient.class);
-    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+    WatchlistMirrorActivitiesImpl activity =
+        new WatchlistMirrorActivitiesImpl(webhook, BLANK_RESOLVER);
 
     activity.postWatchlistAlert(payload(REAL_SAMPLE));
 
     WebhookEmbed embed = captureEmbed(webhook);
     // Raw fallback path must NOT fire when the parse is clean.
     verify(webhook, never())
-        .post(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+        .postToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
 
     assertThat(embed.title()).contains("Jun 3, 2026");
     assertThat(embed.color()).isEqualTo(5763719);
@@ -125,34 +134,39 @@ class WatchlistMirrorActivitiesImplTest {
   @Test
   void trailingGreetingStillRendersEmbedNotRawFallback() {
     WebhookClient webhook = mock(WebhookClient.class);
-    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+    WatchlistMirrorActivitiesImpl activity =
+        new WatchlistMirrorActivitiesImpl(webhook, BLANK_RESOLVER);
 
     // Part A: a trailing "Good luck @everyone" is ignorable chatter → still a clean embed.
     activity.postWatchlistAlert(payload(REAL_SAMPLE + "\n\nGood luck @everyone"));
 
     WebhookEmbed embed = captureEmbed(webhook);
     verify(webhook, never())
-        .post(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+        .postToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
     assertThat(embed.description()).contains("📈 **SPY 756C** — breaks above 755.30");
   }
 
   @Test
   void unparseableRawTextFallsBackToRawPost() {
     WebhookClient webhook = mock(WebhookClient.class);
-    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+    WatchlistMirrorActivitiesImpl activity =
+        new WatchlistMirrorActivitiesImpl(webhook, BLANK_RESOLVER);
 
     activity.postWatchlistAlert(payload("lol no setups today"));
 
     String content = capture(webhook);
     verify(webhook, never())
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
     assertThat(content).contains("```\nlol no setups today\n```");
   }
 
   @Test
   void doesNotThrowOnParseablePayload() {
     WebhookClient webhook = mock(WebhookClient.class);
-    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+    WatchlistMirrorActivitiesImpl activity =
+        new WatchlistMirrorActivitiesImpl(webhook, BLANK_RESOLVER);
 
     assertThatCode(() -> activity.postWatchlistAlert(payload("SPY 762c > 761.00")))
         .doesNotThrowAnyException();
@@ -161,20 +175,22 @@ class WatchlistMirrorActivitiesImplTest {
   @Test
   void doesNotThrow() {
     WebhookClient webhook = mock(WebhookClient.class);
-    WatchlistMirrorActivitiesImpl activity = new WatchlistMirrorActivitiesImpl(webhook);
+    WatchlistMirrorActivitiesImpl activity =
+        new WatchlistMirrorActivitiesImpl(webhook, BLANK_RESOLVER);
 
     assertThatCode(() -> activity.postWatchlistAlert(payload("ok"))).doesNotThrowAnyException();
   }
 
   private static String capture(WebhookClient webhook) {
     ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-    verify(webhook, times(1)).post(org.mockito.ArgumentMatchers.anyString(), captor.capture());
+    verify(webhook, times(1)).postToUrl(org.mockito.ArgumentMatchers.anyString(), captor.capture());
     return captor.getValue();
   }
 
   private static WebhookEmbed captureEmbed(WebhookClient webhook) {
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.anyString(), captor.capture());
+    verify(webhook, times(1))
+        .postEmbedToUrl(org.mockito.ArgumentMatchers.anyString(), captor.capture());
     return captor.getValue();
   }
 

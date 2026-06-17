@@ -10,6 +10,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.ohmytradeagent.contract.AuditEvent;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,10 +27,13 @@ import org.mockito.ArgumentCaptor;
  */
 class SignalFeedAlerterTest {
 
+  private static final TenantWebhookResolver RESOLVER =
+      new TenantWebhookResolver("", "", null, Duration.ofSeconds(30));
+
   @Test
   void receivedBtoDispatchesReceivedMessageWithSignalDetail() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "111:0");
@@ -61,7 +65,7 @@ class SignalFeedAlerterTest {
   @Test
   void receivedStcDispatchesReceivedMessage() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "222:1");
@@ -81,7 +85,7 @@ class SignalFeedAlerterTest {
   @Test
   void receivedAvgDispatchesReceivedMessage() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "333:0");
@@ -98,7 +102,7 @@ class SignalFeedAlerterTest {
   @Test
   void acceptedOutcomeDispatchesAcceptedMessageWithContractsAndRefPremium() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "111:0");
@@ -120,7 +124,7 @@ class SignalFeedAlerterTest {
   @Test
   void rejectedOutcomeDispatchesRejectedMessageWithReason() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "111:0");
@@ -141,7 +145,7 @@ class SignalFeedAlerterTest {
   @Test
   void rejectedConstructsContractFromPartsWhenNoResolvedSymbol() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "111:0");
@@ -164,7 +168,7 @@ class SignalFeedAlerterTest {
   @Test
   void avgSkippedOutcomeDispatchesSkippedMessageWithNote() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "333:0");
@@ -189,38 +193,38 @@ class SignalFeedAlerterTest {
   @Test
   void rejectedSignalPostsExactlyOneMessageFromFeedAlerter() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     AuditEvent event = event("SignalRejected", "wf-rej-2", Map.of("signal_id", "111:0"));
     alerter.onAuditEvent(event);
 
-    verify(webhook, times(1)).postEmbed(anyString(), any());
+    verify(webhook, times(1)).postEmbedToUrl(anyString(), any());
   }
 
   @Test
   void nonSignalFeedKindDoesNotDispatch() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     alerter.onAuditEvent(event("OrderSubmitted", "wf-1", Map.of("signal_id", "111:0")));
     alerter.onAuditEvent(event("EntryFilled", "wf-1", Map.of("signal_id", "111:0")));
     alerter.onAuditEvent(event("OrphanSTC", "wf-1", Map.of("signal_id", "111:0")));
     alerter.onAuditEvent(event("EntryExpired", "wf-1", Map.of("signal_id", "111:0")));
 
-    verify(webhook, never()).postEmbed(anyString(), any());
+    verify(webhook, never()).postEmbedToUrl(anyString(), any());
   }
 
   @Test
   void disabledTogglMakesAlerterANoOp() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ false);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ false);
 
     alerter.onAuditEvent(event("SignalReceived", "wf-1", Map.of("signal_id", "111:0")));
     alerter.onAuditEvent(event("SignalRejected", "wf-1", Map.of("signal_id", "111:0")));
     alerter.onAuditEvent(event("SignalAccepted", "wf-1", Map.of("signal_id", "111:0")));
     alerter.onAuditEvent(event("AvgSkipped", "wf-1", Map.of("signal_id", "111:0")));
 
-    verify(webhook, never()).postEmbed(anyString(), any());
+    verify(webhook, never()).postEmbedToUrl(anyString(), any());
     assertThat(alerter.enabled()).isFalse();
   }
 
@@ -229,8 +233,8 @@ class SignalFeedAlerterTest {
     WebhookClient webhook = mock(WebhookClient.class);
     org.mockito.Mockito.doThrow(new RuntimeException("webhook boom"))
         .when(webhook)
-        .postEmbed(anyString(), any());
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+        .postEmbedToUrl(anyString(), any());
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     AuditEvent event = event("SignalReceived", "wf-1", Map.of("signal_id", "111:0"));
 
@@ -240,7 +244,7 @@ class SignalFeedAlerterTest {
   @Test
   void nullSubjectAndNullKindAreSafe() {
     WebhookClient webhook = mock(WebhookClient.class);
-    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
+    SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, RESOLVER, /* enabled= */ true);
 
     AuditEvent nullKind = event(null, "wf-1", Map.of());
     AuditEvent nullSubject = event("SignalReceived", "wf-1", null);
@@ -249,12 +253,12 @@ class SignalFeedAlerterTest {
     assertThatCode(() -> alerter.onAuditEvent(nullSubject)).doesNotThrowAnyException();
 
     // null-kind must not dispatch; null-subject (feed kind) still dispatches with n/a fields.
-    verify(webhook, times(1)).postEmbed(anyString(), any());
+    verify(webhook, times(1)).postEmbedToUrl(anyString(), any());
   }
 
   private static WebhookEmbed capture(WebhookClient webhook) {
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook, times(1)).postEmbed(anyString(), captor.capture());
+    verify(webhook, times(1)).postEmbedToUrl(anyString(), captor.capture());
     return captor.getValue();
   }
 

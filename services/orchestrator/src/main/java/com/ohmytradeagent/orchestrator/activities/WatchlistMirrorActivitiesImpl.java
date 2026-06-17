@@ -4,6 +4,7 @@ import com.ohmytradeagent.contract.WatchlistMirrorPayload;
 import com.ohmytradeagent.orchestrator.activities.WatchlistParser.Leg;
 import com.ohmytradeagent.orchestrator.activities.WatchlistParser.ParseResult;
 import com.ohmytradeagent.orchestrator.activities.WatchlistParser.TickerWatch;
+import com.ohmytradeagent.orchestrator.alert.TenantWebhookResolver;
 import com.ohmytradeagent.orchestrator.alert.WebhookClient;
 import com.ohmytradeagent.orchestrator.alert.WebhookEmbed;
 import java.math.RoundingMode;
@@ -41,19 +42,23 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
       DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.ENGLISH);
 
   private final WebhookClient webhookClient;
+  private final TenantWebhookResolver webhookResolver;
 
-  public WatchlistMirrorActivitiesImpl(WebhookClient webhookClient) {
+  public WatchlistMirrorActivitiesImpl(
+      WebhookClient webhookClient, TenantWebhookResolver webhookResolver) {
     this.webhookClient = webhookClient;
+    this.webhookResolver = webhookResolver;
   }
 
   @Override
   public void postWatchlistAlert(WatchlistMirrorPayload payload) {
     ParseResult parsed = WatchlistParser.parse(payload.getRawText());
+    String url = webhookResolver.resolve(payload.getTenantId(), payload.getStrategyId());
     if (parsed.clean() && !parsed.rows().isEmpty()) {
-      webhookClient.postEmbed(payload.getTenantId(), buildEmbed(payload, parsed.rows()));
+      webhookClient.postEmbedToUrl(url, buildEmbed(payload, parsed.rows()));
     } else {
       // Malformed/empty watchlist is never dropped — fall back to verbatim raw text.
-      webhookClient.post(payload.getTenantId(), format(payload));
+      webhookClient.postToUrl(url, format(payload));
     }
   }
 

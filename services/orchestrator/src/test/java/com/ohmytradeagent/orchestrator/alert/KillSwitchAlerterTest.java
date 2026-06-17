@@ -8,6 +8,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.ohmytradeagent.contract.AuditEvent;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -21,10 +22,17 @@ import org.mockito.ArgumentCaptor;
  */
 class KillSwitchAlerterTest {
 
+  /**
+   * A blank-resolving resolver (no DB, no env, no global) so the URL is "" — embed content is the
+   * unit under test here; routing is covered by AlerterWebhookRoutingTest.
+   */
+  private static final TenantWebhookResolver RESOLVER =
+      new TenantWebhookResolver("", "", null, Duration.ofSeconds(30));
+
   @Test
   void killSwitchTrippedDispatchesRedEmbedWithTenantStrategyReasonActorValueTradingDay() {
     WebhookClient webhook = mock(WebhookClient.class);
-    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("reason", "auto:daily_loss");
@@ -55,7 +63,7 @@ class KillSwitchAlerterTest {
     // The B2 anomaly trip — a live strategy that reached the heartbeat with no valid loss gate.
     // No quantified `value` (null), so the value field is omitted; the reason distinguishes it.
     WebhookClient webhook = mock(WebhookClient.class);
-    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("reason", "auto:missing_loss_threshold");
@@ -75,19 +83,20 @@ class KillSwitchAlerterTest {
   @Test
   void nonKillSwitchKindDoesNotDispatch() {
     WebhookClient webhook = mock(WebhookClient.class);
-    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
 
     alerter.onAuditEvent(event("KillSwitchResetApproved", "wf-1", Map.of("approver_id_1", "a")));
     alerter.onAuditEvent(event("SignalRejected", "wf-2", Map.of("signal_id", "1:0")));
 
     verify(webhook, never())
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
   void nullKindAndNullSubjectAreSafe() {
     WebhookClient webhook = mock(WebhookClient.class);
-    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
 
     AuditEvent nullKind = event(null, "wf-3", Map.of());
     AuditEvent nullSubject = event("KillSwitchTripped", "wf-3", null);
@@ -97,7 +106,8 @@ class KillSwitchAlerterTest {
 
     // null-kind must not dispatch; null-subject (KillSwitchTripped) still pages with n/a fields.
     verify(webhook, times(1))
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
@@ -105,8 +115,9 @@ class KillSwitchAlerterTest {
     WebhookClient webhook = mock(WebhookClient.class);
     org.mockito.Mockito.doThrow(new RuntimeException("webhook boom"))
         .when(webhook)
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
-    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook);
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
 
     AuditEvent event = event("KillSwitchTripped", "wf-4", Map.of("reason", "auto:daily_loss"));
 
@@ -118,7 +129,7 @@ class KillSwitchAlerterTest {
     // The real Discord transport with a blank URL must be a no-op (no HTTP, no throw) so CI / tests
     // without a configured webhook never fail. KillSwitchAlerter delegates to it directly.
     DiscordWebhookClient blankUrlClient = new DiscordWebhookClient("", "");
-    KillSwitchAlerter alerter = new KillSwitchAlerter(blankUrlClient);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(blankUrlClient, RESOLVER);
 
     AuditEvent event = event("KillSwitchTripped", "wf-5", Map.of("reason", "auto:daily_loss"));
 
@@ -127,7 +138,8 @@ class KillSwitchAlerterTest {
 
   private static WebhookEmbed capture(WebhookClient webhook) {
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.anyString(), captor.capture());
+    verify(webhook, times(1))
+        .postEmbedToUrl(org.mockito.ArgumentMatchers.anyString(), captor.capture());
     return captor.getValue();
   }
 

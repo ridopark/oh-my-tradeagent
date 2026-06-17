@@ -149,9 +149,18 @@ class OrderFailureAlerterAfterCommitTest {
     }
 
     @Bean
-    OrderFailureAlerter orderFailureAlerter(OrderingWebhookClient webhookClient) {
+    TenantWebhookResolver webhookResolver() {
+      return new TenantWebhookResolver("", "", null, java.time.Duration.ofSeconds(30));
+    }
+
+    @Bean
+    OrderFailureAlerter orderFailureAlerter(
+        OrderingWebhookClient webhookClient, TenantWebhookResolver webhookResolver) {
       return new OrderFailureAlerter(
-          webhookClient, "SignalRejected,OrphanSTC,EntryExpired", /* signalFeedEnabled= */ true);
+          webhookClient,
+          webhookResolver,
+          "SignalRejected,OrphanSTC,EntryExpired",
+          /* signalFeedEnabled= */ true);
     }
 
     @Bean
@@ -185,9 +194,18 @@ class OrderFailureAlerterAfterCommitTest {
     }
 
     @Bean
-    OrderFailureAlerter orderFailureAlerter(WebhookClient webhookClient) {
+    TenantWebhookResolver webhookResolver() {
+      return new TenantWebhookResolver("", "", null, java.time.Duration.ofSeconds(30));
+    }
+
+    @Bean
+    OrderFailureAlerter orderFailureAlerter(
+        WebhookClient webhookClient, TenantWebhookResolver webhookResolver) {
       return new OrderFailureAlerter(
-          webhookClient, "SignalRejected,OrphanSTC,EntryExpired", /* signalFeedEnabled= */ true);
+          webhookClient,
+          webhookResolver,
+          "SignalRejected,OrphanSTC,EntryExpired",
+          /* signalFeedEnabled= */ true);
     }
 
     @Bean

@@ -9,6 +9,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.orchestrator.alert.TenantWebhookResolver;
 import com.ohmytradeagent.orchestrator.alert.WebhookClient;
 import com.ohmytradeagent.orchestrator.alert.WebhookEmbed;
 import com.ohmytradeagent.orchestrator.platform.CapitalAllocator;
@@ -46,8 +47,11 @@ class StrategyActivitiesImplTest {
     capitalAllocator = mock(CapitalAllocator.class);
     meterRegistry = new SimpleMeterRegistry();
     webhookClient = mock(WebhookClient.class);
+    TenantWebhookResolver webhookResolver =
+        new TenantWebhookResolver("", "", null, java.time.Duration.ofSeconds(30));
     activities =
-        new StrategyActivitiesImpl(registry, capitalAllocator, meterRegistry, webhookClient);
+        new StrategyActivitiesImpl(
+            registry, capitalAllocator, meterRegistry, webhookClient, webhookResolver);
   }
 
   private double counter(String reason) {
@@ -82,7 +86,7 @@ class StrategyActivitiesImplTest {
     // Two failures → counter == 2, but the red alert fires exactly once (dedup, no per-retry spam).
     assertThat(counter("not_found")).isEqualTo(2.0);
     verify(webhookClient, times(1))
-        .postEmbed(
+        .postEmbedToUrl(
             org.mockito.ArgumentMatchers.anyString(),
             org.mockito.ArgumentMatchers.any(WebhookEmbed.class));
   }
@@ -139,7 +143,7 @@ class StrategyActivitiesImplTest {
 
     // 2 failure alerts + 1 resolve alert = 3 embeds total.
     verify(webhookClient, times(3))
-        .postEmbed(
+        .postEmbedToUrl(
             org.mockito.ArgumentMatchers.anyString(),
             org.mockito.ArgumentMatchers.any(WebhookEmbed.class));
     assertThat(counter("not_found")).isEqualTo(2.0);
@@ -154,7 +158,7 @@ class StrategyActivitiesImplTest {
 
     assertThat(counter("not_found")).isEqualTo(0.0);
     verify(webhookClient, never())
-        .postEmbed(
+        .postEmbedToUrl(
             org.mockito.ArgumentMatchers.anyString(),
             org.mockito.ArgumentMatchers.any(WebhookEmbed.class));
   }
