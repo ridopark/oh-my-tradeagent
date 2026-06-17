@@ -255,7 +255,9 @@ jobs:
           #   - orchestrator: tenants volume items → prod_real/ + staging_paper/ (repo = dev/)
           #   - exec-alpaca-paper: BROKER_CREDS_SOURCE=db + EXEC_BOOTSTRAP_TENANT_ID=staging_paper
           #     (absent in repo → apply strips them → staging_paper's encrypted-DB creds break)
-          RESTART_ONLY="orchestrator exec-alpaca-paper"
+          #   - dashboard + api-gateway: STRATEGY_CONFIG_WRITE_ENABLED=true (repo keeps the
+          #     config-write path DARK by default → absent in repo → apply re-darks the config page)
+          RESTART_ONLY="orchestrator exec-alpaca-paper dashboard api-gateway"
           for s in $RESTART_ONLY; do
             if [ "$s" = "${{ matrix.service }}" ]; then
               echo "::notice::${{ matrix.service }} has live-only overrides — skipping apply (rollout restart below still re-pulls :latest)."
