@@ -8,6 +8,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.ohmytradeagent.contract.AuditEvent;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -22,10 +23,13 @@ import org.mockito.ArgumentCaptor;
  */
 class LivePromotionMissingAlerterTest {
 
+  private static final TenantWebhookResolver RESOLVER =
+      new TenantWebhookResolver("", "", null, Duration.ofSeconds(30));
+
   @Test
   void livePromotionMissingDispatchesRedEmbedWithTenantStrategyBrokerTargetReasonSignalId() {
     WebhookClient webhook = mock(WebhookClient.class);
-    LivePromotionMissingAlerter alerter = new LivePromotionMissingAlerter(webhook);
+    LivePromotionMissingAlerter alerter = new LivePromotionMissingAlerter(webhook, RESOLVER);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "111:0");
@@ -53,19 +57,20 @@ class LivePromotionMissingAlerterTest {
   @Test
   void nonLivePromotionKindDoesNotDispatch() {
     WebhookClient webhook = mock(WebhookClient.class);
-    LivePromotionMissingAlerter alerter = new LivePromotionMissingAlerter(webhook);
+    LivePromotionMissingAlerter alerter = new LivePromotionMissingAlerter(webhook, RESOLVER);
 
     alerter.onAuditEvent(event("SignalRejected", "wf-1", Map.of("signal_id", "1:0")));
     alerter.onAuditEvent(event("KillSwitchTripped", "wf-2", Map.of("reason", "auto:daily_loss")));
 
     verify(webhook, never())
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
   void nullKindAndNullSubjectAreSafe() {
     WebhookClient webhook = mock(WebhookClient.class);
-    LivePromotionMissingAlerter alerter = new LivePromotionMissingAlerter(webhook);
+    LivePromotionMissingAlerter alerter = new LivePromotionMissingAlerter(webhook, RESOLVER);
 
     AuditEvent nullKind = event(null, "wf-3", Map.of());
     AuditEvent nullSubject = event("LivePromotionMissing", "wf-3", null);
@@ -75,7 +80,8 @@ class LivePromotionMissingAlerterTest {
 
     // null-kind must not dispatch; null-subject (LivePromotionMissing) still pages with n/a fields.
     verify(webhook, times(1))
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
@@ -83,8 +89,9 @@ class LivePromotionMissingAlerterTest {
     WebhookClient webhook = mock(WebhookClient.class);
     org.mockito.Mockito.doThrow(new RuntimeException("webhook boom"))
         .when(webhook)
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
-    LivePromotionMissingAlerter alerter = new LivePromotionMissingAlerter(webhook);
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+    LivePromotionMissingAlerter alerter = new LivePromotionMissingAlerter(webhook, RESOLVER);
 
     AuditEvent event = event("LivePromotionMissing", "wf-4", Map.of("reason", "stale"));
 
@@ -97,7 +104,7 @@ class LivePromotionMissingAlerterTest {
     // without a configured webhook never fail. LivePromotionMissingAlerter delegates to it
     // directly.
     DiscordWebhookClient blankUrlClient = new DiscordWebhookClient("", "");
-    LivePromotionMissingAlerter alerter = new LivePromotionMissingAlerter(blankUrlClient);
+    LivePromotionMissingAlerter alerter = new LivePromotionMissingAlerter(blankUrlClient, RESOLVER);
 
     AuditEvent event = event("LivePromotionMissing", "wf-5", Map.of("reason", "verify_error"));
 
@@ -106,7 +113,8 @@ class LivePromotionMissingAlerterTest {
 
   private static WebhookEmbed capture(WebhookClient webhook) {
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.anyString(), captor.capture());
+    verify(webhook, times(1))
+        .postEmbedToUrl(org.mockito.ArgumentMatchers.anyString(), captor.capture());
     return captor.getValue();
   }
 

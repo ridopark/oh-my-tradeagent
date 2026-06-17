@@ -19,6 +19,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.orchestrator.alert.AuditEventCommitted;
 import com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter;
+import com.ohmytradeagent.orchestrator.alert.TenantWebhookResolver;
 import com.ohmytradeagent.orchestrator.alert.WebhookClient;
 import com.ohmytradeagent.orchestrator.alert.WebhookEmbed;
 import java.time.OffsetDateTime;
@@ -131,6 +132,7 @@ class AuditActivitiesImplTest {
                 throw new RuntimeException("discord down");
               }
             },
+            new TenantWebhookResolver("", "", null, java.time.Duration.ofSeconds(30)),
             "SignalRejected,OrphanSTC,EntryExpired",
             /* signalFeedEnabled= */ true);
     ApplicationEventPublisher publisher = listenerDrivingPublisher(throwingAlerter);
@@ -181,6 +183,7 @@ class AuditActivitiesImplTest {
                 order.add("dispatch");
               }
             },
+            new TenantWebhookResolver("", "", null, java.time.Duration.ofSeconds(30)),
             "SignalRejected,OrphanSTC,EntryExpired",
             /* signalFeedEnabled= */ true);
     ApplicationEventPublisher publisher = listenerDrivingPublisher(slowAlerter);

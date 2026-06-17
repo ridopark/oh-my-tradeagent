@@ -8,6 +8,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.ohmytradeagent.contract.AuditEvent;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -24,6 +25,9 @@ import org.mockito.ArgumentCaptor;
  */
 class OrderFailureAlerterTest {
 
+  private static final TenantWebhookResolver RESOLVER =
+      new TenantWebhookResolver("", "", null, Duration.ofSeconds(30));
+
   private static final String DEFAULT_ALLOWLIST = "SignalRejected,OrphanSTC,EntryExpired";
   // Issue #311: the production default from application.yml — no SignalRejected here, the union
   // happens automatically when the feed toggle is off.
@@ -32,7 +36,8 @@ class OrderFailureAlerterTest {
   @Test
   void signalRejectedDispatchesRedBtoEmbedWithYahooLinkedSymbolReasonAndIds() {
     WebhookClient webhook = mock(WebhookClient.class);
-    OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, DEFAULT_ALLOWLIST, true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "111:0");
@@ -60,7 +65,8 @@ class OrderFailureAlerterTest {
   @Test
   void orphanStcDispatchesStcEmbed() {
     WebhookClient webhook = mock(WebhookClient.class);
-    OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, DEFAULT_ALLOWLIST, true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "222:1");
@@ -79,7 +85,8 @@ class OrderFailureAlerterTest {
   @Test
   void entryExpiredDispatchesBtoEmbedWithKindAsReason() {
     WebhookClient webhook = mock(WebhookClient.class);
-    OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, DEFAULT_ALLOWLIST, true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "333:0");
@@ -100,29 +107,33 @@ class OrderFailureAlerterTest {
   @Test
   void nonAllowlistedKindDoesNotDispatch() {
     WebhookClient webhook = mock(WebhookClient.class);
-    OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, DEFAULT_ALLOWLIST, true);
 
     AuditEvent event = event("SignalReceived", "wf-recv-4", Map.of("signal_id", "444:0"));
 
     alerter.onAuditEvent(event);
 
     verify(webhook, never())
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
   void allowlistIsConfigurable() {
     WebhookClient webhook = mock(WebhookClient.class);
     // Only EntryFilled in the allowlist — SignalRejected must NOT alert.
-    OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, "EntryFilled", true);
+    OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, RESOLVER, "EntryFilled", true);
 
     alerter.onAuditEvent(event("SignalRejected", "wf-5", Map.of("signal_id", "555:0")));
     verify(webhook, never())
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
 
     alerter.onAuditEvent(event("EntryFilled", "wf-5", Map.of("signal_id", "555:0")));
     verify(webhook, times(1))
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
@@ -132,8 +143,10 @@ class OrderFailureAlerterTest {
     // be belt-and-suspenders non-blocking regardless).
     org.mockito.Mockito.doThrow(new RuntimeException("webhook boom"))
         .when(webhook)
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
-    OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, DEFAULT_ALLOWLIST, true);
 
     AuditEvent event = event("SignalRejected", "wf-6", Map.of("signal_id", "666:0"));
 
@@ -143,7 +156,8 @@ class OrderFailureAlerterTest {
   @Test
   void nullSubjectAndNullKindAreSafe() {
     WebhookClient webhook = mock(WebhookClient.class);
-    OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, DEFAULT_ALLOWLIST, true);
 
     AuditEvent nullKind = event(null, "wf-7", Map.of());
     AuditEvent nullSubject = event("SignalRejected", "wf-7", null);
@@ -154,7 +168,8 @@ class OrderFailureAlerterTest {
     // null-kind must not dispatch; null-subject (allowlisted kind) still dispatches with n/a
     // fields.
     verify(webhook, times(1))
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   // ---- Issue #311 regression guards: feed-toggle ⇄ effective allowlist invariant ----
@@ -169,7 +184,7 @@ class OrderFailureAlerterTest {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter =
         new OrderFailureAlerter(
-            webhook, PRODUCTION_DEFAULT_ALLOWLIST, /* signalFeedEnabled= */ false);
+            webhook, RESOLVER, PRODUCTION_DEFAULT_ALLOWLIST, /* signalFeedEnabled= */ false);
 
     // SignalRejected is auto-unioned into the effective allowlist.
     assertThat(alerter.failureKinds()).contains("SignalRejected");
@@ -199,7 +214,7 @@ class OrderFailureAlerterTest {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter =
         new OrderFailureAlerter(
-            webhook, PRODUCTION_DEFAULT_ALLOWLIST, /* signalFeedEnabled= */ true);
+            webhook, RESOLVER, PRODUCTION_DEFAULT_ALLOWLIST, /* signalFeedEnabled= */ true);
 
     // De-dupe invariant: SignalRejected is NOT here when the feed is on.
     assertThat(alerter.failureKinds()).doesNotContain("SignalRejected");
@@ -209,7 +224,8 @@ class OrderFailureAlerterTest {
     // SignalFeedAlerter instead in production).
     alerter.onAuditEvent(event("SignalRejected", "wf-311-dedupe", Map.of("signal_id", "888:0")));
     verify(webhook, never())
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   // ---- Issue #313 regression guard: operator-misconfig (double-post) is documented behavior ----
@@ -233,7 +249,10 @@ class OrderFailureAlerterTest {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter =
         new OrderFailureAlerter(
-            webhook, "SignalRejected,OrphanSTC,EntryExpired", /* signalFeedEnabled= */ true);
+            webhook,
+            RESOLVER,
+            "SignalRejected,OrphanSTC,EntryExpired",
+            /* signalFeedEnabled= */ true);
 
     // Operator-explicit wins: SignalRejected is in the effective allowlist even with feed-on.
     assertThat(alerter.failureKinds()).contains("SignalRejected");
@@ -284,7 +303,7 @@ class OrderFailureAlerterTest {
   void positionOrphan_rendersOrphanShapedEmbed_notBtoFailure_b3() {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter =
-        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+        new OrderFailureAlerter(webhook, RESOLVER, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
 
     AuditEvent event = event("PositionOrphan", "wf-recon-1", reconOrphanSubject("filled"));
 
@@ -307,7 +326,7 @@ class OrderFailureAlerterTest {
   void positionOrphanOngoing_rendersOrphanShapedEmbed_b3() {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter =
-        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+        new OrderFailureAlerter(webhook, RESOLVER, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
 
     AuditEvent event = event("PositionOrphanOngoing", "wf-recon-2", reconOrphanSubject("missing"));
 
@@ -325,7 +344,7 @@ class OrderFailureAlerterTest {
     // orphan branch must be null-safe on every key so the page always posts.
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter =
-        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+        new OrderFailureAlerter(webhook, RESOLVER, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
 
     // Subject missing every key (qty/option_symbol/expected_workflow_id/journal_status absent).
     AuditEvent event = event("PositionOrphan", "wf-recon-3", new LinkedHashMap<>());
@@ -333,27 +352,29 @@ class OrderFailureAlerterTest {
     assertThatCode(() -> alerter.onAuditEvent(event)).doesNotThrowAnyException();
     // The page still posts (not silently lost) even with an empty subject.
     verify(webhook, times(1))
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
   void positionOrphanWithNullSubject_isNullSafeAndStillPosts_b3() {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter =
-        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+        new OrderFailureAlerter(webhook, RESOLVER, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
 
     AuditEvent event = event("PositionOrphan", "wf-recon-4", null);
 
     assertThatCode(() -> alerter.onAuditEvent(event)).doesNotThrowAnyException();
     verify(webhook, times(1))
-        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
   void partialExitPlaceFailed_rendersAsStcExit_b3() {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter =
-        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+        new OrderFailureAlerter(webhook, RESOLVER, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "sig-fail-1");
@@ -379,32 +400,38 @@ class OrderFailureAlerterTest {
     // Construct with NO explicit allowlist override → the constructor's DEFAULT_FAILURE_KINDS is
     // exercised via the @Value default. Simulated here by passing the code-default literal.
     OrderFailureAlerter alerter =
-        new OrderFailureAlerter(webhook, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
+        new OrderFailureAlerter(webhook, RESOLVER, B3_PRODUCTION_DEFAULT_ALLOWLIST, true);
     assertThat(alerter.failureKinds())
         .contains("PositionOrphan", "PositionOrphanOngoing", "PartialExitPlaceFailed");
   }
 
   @Test
-  void dispatchesViaTenantScopedPostEmbedWithEventsTenantId() {
-    // Per-tenant alert routing: the alerter must pass the AuditEvent's tenant id to the
-    // tenant-scoped postEmbed overload so DiscordWebhookClient can route to that tenant's webhook.
+  void dispatchesViaResolvedUrlForEventsTenantAndStrategy() {
+    // Per-tenant alert routing: the alerter resolves the destination URL via TenantWebhookResolver
+    // using the AuditEvent's (tenantId, strategyId) and posts the embed to that explicit URL.
     WebhookClient webhook = mock(WebhookClient.class);
-    OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, DEFAULT_ALLOWLIST, true);
+    TenantWebhookResolver resolver = mock(TenantWebhookResolver.class);
+    String resolvedUrl = "https://example.test/webhook/dev";
+    org.mockito.Mockito.when(resolver.resolve("dev", "copytrade-v1")).thenReturn(resolvedUrl);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, resolver, DEFAULT_ALLOWLIST, true);
 
     AuditEvent event = event("EntryExpired", "wf-tenant-route", Map.of("signal_id", "123:0"));
-    // event(...) sets tenantId="dev".
+    // event(...) sets tenantId="dev", strategyId="copytrade-v1".
 
     alerter.onAuditEvent(event);
 
-    ArgumentCaptor<String> tenantCaptor = ArgumentCaptor.forClass(String.class);
-    verify(webhook, times(1)).postEmbed(tenantCaptor.capture(), org.mockito.ArgumentMatchers.any());
-    assertThat(tenantCaptor.getValue()).isEqualTo("dev");
+    verify(resolver, times(1)).resolve("dev", "copytrade-v1");
+    verify(webhook, times(1))
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.eq(resolvedUrl), org.mockito.ArgumentMatchers.any());
   }
 
   private static WebhookEmbed capture(WebhookClient webhook) {
-    // Alerters now dispatch through the tenant-scoped postEmbed(tenantId, embed) overload.
+    // Alerters now dispatch through postEmbedToUrl(resolvedUrl, embed).
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.anyString(), captor.capture());
+    verify(webhook, times(1))
+        .postEmbedToUrl(org.mockito.ArgumentMatchers.anyString(), captor.capture());
     return captor.getValue();
   }
 

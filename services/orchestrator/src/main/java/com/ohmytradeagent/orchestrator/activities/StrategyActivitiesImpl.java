@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.activities;
 
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.orchestrator.alert.TenantWebhookResolver;
 import com.ohmytradeagent.orchestrator.alert.WebhookClient;
 import com.ohmytradeagent.orchestrator.alert.WebhookEmbed;
 import com.ohmytradeagent.orchestrator.platform.CapitalAllocator;
@@ -46,6 +47,7 @@ public class StrategyActivitiesImpl implements StrategyActivities {
   private final CapitalAllocator capitalAllocator;
   private final MeterRegistry meterRegistry;
   private final WebhookClient webhookClient;
+  private final TenantWebhookResolver webhookResolver;
 
   private final ConcurrentMap<String, Counter> readFailureCounters = new ConcurrentHashMap<>();
 
@@ -56,11 +58,13 @@ public class StrategyActivitiesImpl implements StrategyActivities {
       StrategyRegistry registry,
       CapitalAllocator capitalAllocator,
       MeterRegistry meterRegistry,
-      WebhookClient webhookClient) {
+      WebhookClient webhookClient,
+      TenantWebhookResolver webhookResolver) {
     this.registry = registry;
     this.capitalAllocator = capitalAllocator;
     this.meterRegistry = meterRegistry;
     this.webhookClient = webhookClient;
+    this.webhookResolver = webhookResolver;
   }
 
   @Override
@@ -124,7 +128,8 @@ public class StrategyActivitiesImpl implements StrategyActivities {
     try {
       String key = tenantId + "|" + strategyId + "|" + reason;
       if (alertedKeys.add(key)) {
-        webhookClient.postEmbed(tenantId, failureEmbed(tenantId, strategyId, reason, e));
+        String url = webhookResolver.resolve(tenantId, strategyId);
+        webhookClient.postEmbedToUrl(url, failureEmbed(tenantId, strategyId, reason, e));
       }
     } catch (RuntimeException alertError) {
       log.warn(
@@ -156,7 +161,8 @@ public class StrategyActivitiesImpl implements StrategyActivities {
         }
       }
       for (String reason : resolved) {
-        webhookClient.postEmbed(tenantId, resolveEmbed(tenantId, strategyId, reason));
+        String url = webhookResolver.resolve(tenantId, strategyId);
+        webhookClient.postEmbedToUrl(url, resolveEmbed(tenantId, strategyId, reason));
       }
     } catch (RuntimeException resolveError) {
       log.warn(

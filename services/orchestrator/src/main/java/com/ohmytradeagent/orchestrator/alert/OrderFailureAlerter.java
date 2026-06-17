@@ -116,13 +116,16 @@ public class OrderFailureAlerter {
   private static final Set<String> STC_KINDS = Set.of("OrphanSTC", "PartialExitPlaceFailed");
 
   private final WebhookClient webhookClient;
+  private final TenantWebhookResolver webhookResolver;
   private final Set<String> failureKinds;
 
   public OrderFailureAlerter(
       WebhookClient webhookClient,
+      TenantWebhookResolver webhookResolver,
       @Value("${alert.discord.failure-kinds:" + DEFAULT_FAILURE_KINDS + "}") String failureKinds,
       @Value("${alert.discord.signal-feed.enabled:false}") boolean signalFeedEnabled) {
     this.webhookClient = webhookClient;
+    this.webhookResolver = webhookResolver;
     Set<String> parsed =
         Arrays.stream(failureKinds.split(","))
             .map(String::trim)
@@ -161,7 +164,8 @@ public class OrderFailureAlerter {
       }
       WebhookEmbed embed =
           ORPHAN_KINDS.contains(event.getKind()) ? buildOrphanEmbed(event) : buildEmbed(event);
-      webhookClient.postEmbed(event.getTenantId(), embed);
+      String url = webhookResolver.resolve(event.getTenantId(), event.getStrategyId());
+      webhookClient.postEmbedToUrl(url, embed);
     } catch (RuntimeException e) {
       // Defensive: a notification must never break the audit write / trading path.
       log.warn("order-failure-alert build/dispatch failed kind={}", safeKind(event), e);

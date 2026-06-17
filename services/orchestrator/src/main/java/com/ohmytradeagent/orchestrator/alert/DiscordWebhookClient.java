@@ -159,6 +159,16 @@ public class DiscordWebhookClient implements WebhookClient {
     send(resolve(tenantId), embedBody(embed), embed.title());
   }
 
+  @Override
+  public void postToUrl(String url, String content) {
+    send(url, "{\"content\":" + jsonString(content) + NO_MENTIONS + "}", content);
+  }
+
+  @Override
+  public void postEmbedToUrl(String url, WebhookEmbed embed) {
+    send(url, embedBody(embed), embed.title());
+  }
+
   /**
    * Resolves {@code tenantId} to its dedicated webhook URL, falling back to the global default when
    * the tenant has no per-tenant entry (or {@code tenantId} is {@code null}). The blank-URL no-op

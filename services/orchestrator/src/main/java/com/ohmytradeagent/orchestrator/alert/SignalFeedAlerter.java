@@ -61,12 +61,15 @@ public class SignalFeedAlerter {
   private static final String KIND_AVG_SKIPPED = "AvgSkipped";
 
   private final WebhookClient webhookClient;
+  private final TenantWebhookResolver webhookResolver;
   private final boolean enabled;
 
   public SignalFeedAlerter(
       WebhookClient webhookClient,
+      TenantWebhookResolver webhookResolver,
       @Value("${alert.discord.signal-feed.enabled:false}") boolean enabled) {
     this.webhookClient = webhookClient;
+    this.webhookResolver = webhookResolver;
     this.enabled = enabled;
   }
 
@@ -99,7 +102,8 @@ public class SignalFeedAlerter {
       if (embed == null) {
         return;
       }
-      webhookClient.postEmbed(event.getTenantId(), embed);
+      String url = webhookResolver.resolve(event.getTenantId(), event.getStrategyId());
+      webhookClient.postEmbedToUrl(url, embed);
     } catch (RuntimeException e) {
       // Defensive: a notification must never break the audit write / trading path.
       log.warn("signal-feed-alert build/dispatch failed kind={}", safeKind(event), e);

@@ -66,4 +66,35 @@ public interface WebhookClient {
   default void postEmbed(String tenantId, WebhookEmbed embed) {
     postEmbed(embed);
   }
+
+  /**
+   * Post {@code content} to an EXPLICIT, already-resolved webhook URL — the form used by callers
+   * that resolve the destination themselves (e.g. {@code TenantWebhookResolver}, which prefers the
+   * editable {@code strategy_config.alert_webhook_url} over the env-map/global default). Same
+   * best-effort contract: a blank/null URL is a no-op and transport failures are
+   * swallowed-and-logged, never propagated.
+   *
+   * <p>Default delegates to the no-arg {@link #post(String)} (i.e. the global default) so mocks and
+   * lambdas keep compiling; the real Discord transport overrides it to honor the explicit URL.
+   *
+   * @param url the resolved destination webhook URL (null/blank → no-op)
+   * @param content the message body to deliver
+   */
+  default void postToUrl(String url, String content) {
+    post(content);
+  }
+
+  /**
+   * Post a {@link WebhookEmbed} to an EXPLICIT, already-resolved webhook URL. Same best-effort
+   * contract and rationale as {@link #postToUrl(String, String)}.
+   *
+   * <p>Default delegates to the no-arg {@link #postEmbed(WebhookEmbed)} so mocks/lambdas keep
+   * compiling; the real Discord transport overrides it to honor the explicit URL.
+   *
+   * @param url the resolved destination webhook URL (null/blank → no-op)
+   * @param embed the embed to deliver
+   */
+  default void postEmbedToUrl(String url, WebhookEmbed embed) {
+    postEmbed(embed);
+  }
 }

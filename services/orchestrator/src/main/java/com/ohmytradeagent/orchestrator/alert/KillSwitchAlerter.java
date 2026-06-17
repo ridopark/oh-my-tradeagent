@@ -45,9 +45,11 @@ public class KillSwitchAlerter {
   private static final String KILL_SWITCH_TRIPPED_KIND = "KillSwitchTripped";
 
   private final WebhookClient webhookClient;
+  private final TenantWebhookResolver webhookResolver;
 
-  public KillSwitchAlerter(WebhookClient webhookClient) {
+  public KillSwitchAlerter(WebhookClient webhookClient, TenantWebhookResolver webhookResolver) {
     this.webhookClient = webhookClient;
+    this.webhookResolver = webhookResolver;
   }
 
   /**
@@ -74,7 +76,8 @@ public class KillSwitchAlerter {
           || !KILL_SWITCH_TRIPPED_KIND.equals(event.getKind())) {
         return;
       }
-      webhookClient.postEmbed(event.getTenantId(), buildEmbed(event));
+      String url = webhookResolver.resolve(event.getTenantId(), event.getStrategyId());
+      webhookClient.postEmbedToUrl(url, buildEmbed(event));
     } catch (RuntimeException e) {
       // Defensive: a notification must never break the audit write / trading path.
       log.warn("kill-switch-alert build/dispatch failed kind={}", safeKind(event), e);
