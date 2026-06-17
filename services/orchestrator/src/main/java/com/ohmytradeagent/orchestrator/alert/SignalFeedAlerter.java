@@ -99,7 +99,7 @@ public class SignalFeedAlerter {
       if (embed == null) {
         return;
       }
-      webhookClient.postEmbed(embed);
+      webhookClient.postEmbed(event.getTenantId(), embed);
     } catch (RuntimeException e) {
       // Defensive: a notification must never break the audit write / trading path.
       log.warn("signal-feed-alert build/dispatch failed kind={}", safeKind(event), e);

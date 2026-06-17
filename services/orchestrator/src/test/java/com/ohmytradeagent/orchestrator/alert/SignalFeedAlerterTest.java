@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.alert;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -193,7 +194,7 @@ class SignalFeedAlerterTest {
     AuditEvent event = event("SignalRejected", "wf-rej-2", Map.of("signal_id", "111:0"));
     alerter.onAuditEvent(event);
 
-    verify(webhook, times(1)).postEmbed(any());
+    verify(webhook, times(1)).postEmbed(anyString(), any());
   }
 
   @Test
@@ -206,7 +207,7 @@ class SignalFeedAlerterTest {
     alerter.onAuditEvent(event("OrphanSTC", "wf-1", Map.of("signal_id", "111:0")));
     alerter.onAuditEvent(event("EntryExpired", "wf-1", Map.of("signal_id", "111:0")));
 
-    verify(webhook, never()).postEmbed(any());
+    verify(webhook, never()).postEmbed(anyString(), any());
   }
 
   @Test
@@ -219,7 +220,7 @@ class SignalFeedAlerterTest {
     alerter.onAuditEvent(event("SignalAccepted", "wf-1", Map.of("signal_id", "111:0")));
     alerter.onAuditEvent(event("AvgSkipped", "wf-1", Map.of("signal_id", "111:0")));
 
-    verify(webhook, never()).postEmbed(any());
+    verify(webhook, never()).postEmbed(anyString(), any());
     assertThat(alerter.enabled()).isFalse();
   }
 
@@ -228,7 +229,7 @@ class SignalFeedAlerterTest {
     WebhookClient webhook = mock(WebhookClient.class);
     org.mockito.Mockito.doThrow(new RuntimeException("webhook boom"))
         .when(webhook)
-        .postEmbed(any());
+        .postEmbed(anyString(), any());
     SignalFeedAlerter alerter = new SignalFeedAlerter(webhook, /* enabled= */ true);
 
     AuditEvent event = event("SignalReceived", "wf-1", Map.of("signal_id", "111:0"));
@@ -248,12 +249,12 @@ class SignalFeedAlerterTest {
     assertThatCode(() -> alerter.onAuditEvent(nullSubject)).doesNotThrowAnyException();
 
     // null-kind must not dispatch; null-subject (feed kind) still dispatches with n/a fields.
-    verify(webhook, times(1)).postEmbed(any());
+    verify(webhook, times(1)).postEmbed(anyString(), any());
   }
 
   private static WebhookEmbed capture(WebhookClient webhook) {
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook, times(1)).postEmbed(captor.capture());
+    verify(webhook, times(1)).postEmbed(anyString(), captor.capture());
     return captor.getValue();
   }
 

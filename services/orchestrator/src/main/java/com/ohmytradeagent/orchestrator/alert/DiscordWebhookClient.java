@@ -6,7 +6,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,6 +28,15 @@ import org.springframework.stereotype.Component;
  * <p>When no webhook URL is configured ({@code alert.discord.webhook-url} blank/unset) the client
  * is a no-op: it logs the alert at INFO and returns. This lets the feature ship and be tested
  * without the live secret value — provisioning the real webhook is an operator follow-up.
+ *
+ * <p>Per-tenant routing: a second source ({@code alert.discord.webhook-urls} / {@code
+ * ALERT_DISCORD_WEBHOOK_URLS}) carries an optional map of {@code tenantId=url} entries (entries
+ * {@code ;}-separated, key/value split on the FIRST {@code =}). Parsed ONCE at construction into an
+ * immutable map. The tenant-scoped {@link #post(String, String)} / {@link #postEmbed(String,
+ * WebhookEmbed)} resolve {@code tenantId} to its dedicated URL, falling back to the global default
+ * ({@code webhook-url}) when the tenant is absent. The no-arg overloads always use the global
+ * default (back-compat). A malformed map entry is skipped with a single WARN that NEVER logs the
+ * URL/token — only the tenant key or a count.
  */
 @Component
 public class DiscordWebhookClient implements WebhookClient {
@@ -38,23 +49,87 @@ public class DiscordWebhookClient implements WebhookClient {
   private static final int MAX_FIELD_NAME = 256;
   private static final int MAX_FIELD_VALUE = 1024;
 
+  /** Global default webhook (back-compat). Used by the no-arg overloads and as the fallback. */
   private final String webhookUrl;
+
+  /** Immutable per-tenant routing map (tenantId → url), parsed once at construction. */
+  private final Map<String, String> webhookUrlsByTenant;
+
   private final HttpClient httpClient;
   private final Duration requestTimeout;
 
   @Autowired
-  public DiscordWebhookClient(@Value("${alert.discord.webhook-url:}") String webhookUrl) {
+  public DiscordWebhookClient(
+      @Value("${alert.discord.webhook-url:}") String webhookUrl,
+      @Value("${alert.discord.webhook-urls:}") String webhookUrls) {
     this(
         webhookUrl,
+        webhookUrls,
         HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build(),
         Duration.ofSeconds(3));
   }
 
-  /** Test seam: inject a stub {@link HttpClient} and a short timeout. */
-  DiscordWebhookClient(String webhookUrl, HttpClient httpClient, Duration requestTimeout) {
+  /**
+   * Test seam: inject a stub {@link HttpClient} and a short timeout. {@code webhookUrls} is the raw
+   * {@code tenant=url;tenant=url} string (parsed here exactly as in production); pass {@code ""}
+   * for the global-only case.
+   */
+  DiscordWebhookClient(
+      String webhookUrl, String webhookUrls, HttpClient httpClient, Duration requestTimeout) {
     this.webhookUrl = webhookUrl;
+    this.webhookUrlsByTenant = parseWebhookUrls(webhookUrls);
     this.httpClient = httpClient;
     this.requestTimeout = requestTimeout;
+  }
+
+  /**
+   * Parses the per-tenant map source ({@code tenant=url} entries, {@code ;}-separated, split on the
+   * FIRST {@code =} so a URL may itself contain {@code =}) into an immutable {@code tenantId → url}
+   * map. Trims keys/values; skips blank or malformed entries (missing {@code =}, blank key, or
+   * blank value) with a single WARN that logs ONLY the offending tenant key or a count — NEVER the
+   * URL/token. Never throws: a malformed source degrades to whatever entries parsed cleanly. Uses a
+   * {@link LinkedHashMap} for deterministic ordering. {@code null}/blank source → empty map.
+   */
+  private static Map<String, String> parseWebhookUrls(String raw) {
+    Map<String, String> parsed = new LinkedHashMap<>();
+    if (raw == null || raw.isBlank()) {
+      return Map.copyOf(parsed);
+    }
+    int skipped = 0;
+    StringBuilder skippedKeys = new StringBuilder();
+    for (String entry : raw.split(";")) {
+      String trimmed = entry.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      int eq = trimmed.indexOf('=');
+      if (eq <= 0) {
+        // Missing '=' or a blank key (leading '='). Do NOT log the value — it may carry a token.
+        skipped++;
+        continue;
+      }
+      String tenant = trimmed.substring(0, eq).trim();
+      String url = trimmed.substring(eq + 1).trim();
+      if (tenant.isEmpty() || url.isEmpty()) {
+        skipped++;
+        if (!tenant.isEmpty()) {
+          if (skippedKeys.length() > 0) {
+            skippedKeys.append(',');
+          }
+          skippedKeys.append(tenant);
+        }
+        continue;
+      }
+      parsed.put(tenant, url);
+    }
+    if (skipped > 0) {
+      log.warn(
+          "discord-alert webhook-urls: skipped {} malformed entr{} (tenant keys: {})",
+          skipped,
+          skipped == 1 ? "y" : "ies",
+          skippedKeys.length() == 0 ? "n/a" : skippedKeys.toString());
+    }
+    return Map.copyOf(parsed);
   }
 
   /**
@@ -66,12 +141,34 @@ public class DiscordWebhookClient implements WebhookClient {
 
   @Override
   public void post(String content) {
-    send("{\"content\":" + jsonString(content) + NO_MENTIONS + "}", content);
+    send(webhookUrl, "{\"content\":" + jsonString(content) + NO_MENTIONS + "}", content);
+  }
+
+  @Override
+  public void post(String tenantId, String content) {
+    send(resolve(tenantId), "{\"content\":" + jsonString(content) + NO_MENTIONS + "}", content);
   }
 
   @Override
   public void postEmbed(WebhookEmbed embed) {
-    send(embedBody(embed), embed.title());
+    send(webhookUrl, embedBody(embed), embed.title());
+  }
+
+  @Override
+  public void postEmbed(String tenantId, WebhookEmbed embed) {
+    send(resolve(tenantId), embedBody(embed), embed.title());
+  }
+
+  /**
+   * Resolves {@code tenantId} to its dedicated webhook URL, falling back to the global default when
+   * the tenant has no per-tenant entry (or {@code tenantId} is {@code null}). The blank-URL no-op
+   * and swallow-and-log contract is preserved downstream in {@link #send}.
+   */
+  private String resolve(String tenantId) {
+    if (tenantId == null) {
+      return webhookUrl;
+    }
+    return webhookUrlsByTenant.getOrDefault(tenantId, webhookUrl);
   }
 
   /**
@@ -125,13 +222,14 @@ public class DiscordWebhookClient implements WebhookClient {
   }
 
   /**
-   * Shared best-effort HTTP send. {@code jsonBody} is the fully-built request payload; {@code
-   * logHint} is a short identifier echoed in WARN logs (the plain content or the embed title). A
-   * blank URL is a no-op and EVERY failure mode (timeout, non-2xx, interruption, any exception) is
-   * caught and logged — never rethrown, so the trading/audit path is never disrupted.
+   * Shared best-effort HTTP send. {@code targetUrl} is the resolved destination (global default or
+   * a per-tenant URL); {@code jsonBody} is the fully-built request payload; {@code logHint} is a
+   * short identifier echoed in WARN logs (the plain content or the embed title). A blank URL is a
+   * no-op and EVERY failure mode (timeout, non-2xx, interruption, any exception) is caught and
+   * logged — never rethrown, so the trading/audit path is never disrupted.
    */
-  private void send(String jsonBody, String logHint) {
-    if (webhookUrl == null || webhookUrl.isBlank()) {
+  private void send(String targetUrl, String jsonBody, String logHint) {
+    if (targetUrl == null || targetUrl.isBlank()) {
       // No secret provisioned (operator follow-up). Log so the alert is still visible in stdout.
       log.info("discord-alert (no webhook configured): {}", logHint);
       return;
@@ -139,7 +237,7 @@ public class DiscordWebhookClient implements WebhookClient {
     try {
       HttpRequest request =
           HttpRequest.newBuilder()
-              .uri(URI.create(webhookUrl))
+              .uri(URI.create(targetUrl))
               .timeout(requestTimeout)
               .header("Content-Type", "application/json")
               .POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8))

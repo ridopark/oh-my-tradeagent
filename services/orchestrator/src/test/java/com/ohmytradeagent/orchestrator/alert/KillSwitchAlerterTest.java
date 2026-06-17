@@ -80,7 +80,8 @@ class KillSwitchAlerterTest {
     alerter.onAuditEvent(event("KillSwitchResetApproved", "wf-1", Map.of("approver_id_1", "a")));
     alerter.onAuditEvent(event("SignalRejected", "wf-2", Map.of("signal_id", "1:0")));
 
-    verify(webhook, never()).postEmbed(org.mockito.ArgumentMatchers.any());
+    verify(webhook, never())
+        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
@@ -95,7 +96,8 @@ class KillSwitchAlerterTest {
     assertThatCode(() -> alerter.onAuditEvent(nullSubject)).doesNotThrowAnyException();
 
     // null-kind must not dispatch; null-subject (KillSwitchTripped) still pages with n/a fields.
-    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.any());
+    verify(webhook, times(1))
+        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
@@ -103,7 +105,7 @@ class KillSwitchAlerterTest {
     WebhookClient webhook = mock(WebhookClient.class);
     org.mockito.Mockito.doThrow(new RuntimeException("webhook boom"))
         .when(webhook)
-        .postEmbed(org.mockito.ArgumentMatchers.any());
+        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
     KillSwitchAlerter alerter = new KillSwitchAlerter(webhook);
 
     AuditEvent event = event("KillSwitchTripped", "wf-4", Map.of("reason", "auto:daily_loss"));
@@ -115,7 +117,7 @@ class KillSwitchAlerterTest {
   void unconfiguredWebhookIsNoOpNoThrow() {
     // The real Discord transport with a blank URL must be a no-op (no HTTP, no throw) so CI / tests
     // without a configured webhook never fail. KillSwitchAlerter delegates to it directly.
-    DiscordWebhookClient blankUrlClient = new DiscordWebhookClient("");
+    DiscordWebhookClient blankUrlClient = new DiscordWebhookClient("", "");
     KillSwitchAlerter alerter = new KillSwitchAlerter(blankUrlClient);
 
     AuditEvent event = event("KillSwitchTripped", "wf-5", Map.of("reason", "auto:daily_loss"));
@@ -125,7 +127,7 @@ class KillSwitchAlerterTest {
 
   private static WebhookEmbed capture(WebhookClient webhook) {
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook, times(1)).postEmbed(captor.capture());
+    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.anyString(), captor.capture());
     return captor.getValue();
   }
 

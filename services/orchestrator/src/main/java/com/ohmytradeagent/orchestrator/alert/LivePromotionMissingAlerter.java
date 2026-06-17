@@ -71,7 +71,7 @@ public class LivePromotionMissingAlerter {
           || !LIVE_PROMOTION_MISSING_KIND.equals(event.getKind())) {
         return;
       }
-      webhookClient.postEmbed(buildEmbed(event));
+      webhookClient.postEmbed(event.getTenantId(), buildEmbed(event));
     } catch (RuntimeException e) {
       // Defensive: a notification must never break the audit write / trading path.
       log.warn("live-promotion-missing-alert build/dispatch failed kind={}", safeKind(event), e);

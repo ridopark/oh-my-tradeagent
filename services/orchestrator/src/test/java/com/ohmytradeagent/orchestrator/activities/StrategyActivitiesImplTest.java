@@ -81,7 +81,10 @@ class StrategyActivitiesImplTest {
 
     // Two failures → counter == 2, but the red alert fires exactly once (dedup, no per-retry spam).
     assertThat(counter("not_found")).isEqualTo(2.0);
-    verify(webhookClient, times(1)).postEmbed(org.mockito.ArgumentMatchers.any(WebhookEmbed.class));
+    verify(webhookClient, times(1))
+        .postEmbed(
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.any(WebhookEmbed.class));
   }
 
   @Test
@@ -135,7 +138,10 @@ class StrategyActivitiesImplTest {
         .isInstanceOf(StrategyNotFoundException.class);
 
     // 2 failure alerts + 1 resolve alert = 3 embeds total.
-    verify(webhookClient, times(3)).postEmbed(org.mockito.ArgumentMatchers.any(WebhookEmbed.class));
+    verify(webhookClient, times(3))
+        .postEmbed(
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.any(WebhookEmbed.class));
     assertThat(counter("not_found")).isEqualTo(2.0);
   }
 
@@ -147,6 +153,9 @@ class StrategyActivitiesImplTest {
     assertThat(activities.get(TENANT, STRATEGY)).isSameAs(cfg);
 
     assertThat(counter("not_found")).isEqualTo(0.0);
-    verify(webhookClient, never()).postEmbed(org.mockito.ArgumentMatchers.any(WebhookEmbed.class));
+    verify(webhookClient, never())
+        .postEmbed(
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.any(WebhookEmbed.class));
   }
 }
