@@ -24,7 +24,7 @@ class DiscordWebhookClientTest {
 
   @Test
   void blankUrlIsNoOpAndDoesNotThrow() {
-    DiscordWebhookClient client = new DiscordWebhookClient("");
+    DiscordWebhookClient client = new DiscordWebhookClient("", "");
     assertThatCode(() -> client.post("hello")).doesNotThrowAnyException();
   }
 
@@ -36,7 +36,8 @@ class DiscordWebhookClientTest {
                 Mockito.any(HttpRequest.class), Mockito.<HttpResponse.BodyHandler<Void>>any()))
         .thenThrow(new IOException("connection reset"));
     DiscordWebhookClient client =
-        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+        new DiscordWebhookClient(
+            "https://discord.example/webhook", "", http, Duration.ofSeconds(1));
 
     assertThatCode(() -> client.post("alert body")).doesNotThrowAnyException();
   }
@@ -52,14 +53,15 @@ class DiscordWebhookClientTest {
                 Mockito.any(HttpRequest.class), Mockito.<HttpResponse.BodyHandler<Void>>any()))
         .thenReturn(resp);
     DiscordWebhookClient client =
-        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+        new DiscordWebhookClient(
+            "https://discord.example/webhook", "", http, Duration.ofSeconds(1));
 
     assertThatCode(() -> client.post("alert body")).doesNotThrowAnyException();
   }
 
   @Test
   void postEmbedBlankUrlIsNoOpAndDoesNotThrow() {
-    DiscordWebhookClient client = new DiscordWebhookClient("");
+    DiscordWebhookClient client = new DiscordWebhookClient("", "");
     assertThatCode(() -> client.postEmbed(new WebhookEmbed("t", "d", 5763719, "f")))
         .doesNotThrowAnyException();
   }
@@ -75,7 +77,8 @@ class DiscordWebhookClientTest {
                 Mockito.any(HttpRequest.class), Mockito.<HttpResponse.BodyHandler<Void>>any()))
         .thenReturn(resp);
     DiscordWebhookClient client =
-        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+        new DiscordWebhookClient(
+            "https://discord.example/webhook", "", http, Duration.ofSeconds(1));
 
     client.postEmbed(new WebhookEmbed("Title \"q\"", "line1\nline2", 5763719, "via Author"));
 
@@ -102,7 +105,8 @@ class DiscordWebhookClientTest {
                 Mockito.any(HttpRequest.class), Mockito.<HttpResponse.BodyHandler<Void>>any()))
         .thenReturn(resp);
     DiscordWebhookClient client =
-        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+        new DiscordWebhookClient(
+            "https://discord.example/webhook", "", http, Duration.ofSeconds(1));
 
     client.postEmbed(
         new WebhookEmbed(
@@ -137,7 +141,8 @@ class DiscordWebhookClientTest {
   void postContentBodyCarriesContentAndSuppressesMentions() throws Exception {
     HttpClient http = okHttp();
     DiscordWebhookClient client =
-        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+        new DiscordWebhookClient(
+            "https://discord.example/webhook", "", http, Duration.ofSeconds(1));
 
     client.post("hello world");
 
@@ -150,7 +155,8 @@ class DiscordWebhookClientTest {
   void postEmbedBodyCarriesEmbedsAndSuppressesMentions() throws Exception {
     HttpClient http = okHttp();
     DiscordWebhookClient client =
-        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+        new DiscordWebhookClient(
+            "https://discord.example/webhook", "", http, Duration.ofSeconds(1));
 
     client.postEmbed(new WebhookEmbed("Title", "desc", 5763719, "via Author"));
 
@@ -163,7 +169,8 @@ class DiscordWebhookClientTest {
   void contentWithEveryoneMentionStillPostsButSuppressed() throws Exception {
     HttpClient http = okHttp();
     DiscordWebhookClient client =
-        new DiscordWebhookClient("https://discord.example/webhook", http, Duration.ofSeconds(1));
+        new DiscordWebhookClient(
+            "https://discord.example/webhook", "", http, Duration.ofSeconds(1));
 
     client.post("alert @everyone now");
 
@@ -171,6 +178,146 @@ class DiscordWebhookClientTest {
     // The literal @everyone is still posted (rendered as text) but cannot ping.
     assertThat(body).contains("@everyone");
     assertThat(body).contains("\"allowed_mentions\":{\"parse\":[]}");
+  }
+
+  // --- Per-tenant routing (ALERT_DISCORD_WEBHOOK_URLS) -------------------------------------------
+
+  @Test
+  void postEmbedConfiguredTenantRoutesToItsOwnWebhook() throws Exception {
+    HttpClient http = okHttp();
+    DiscordWebhookClient client =
+        new DiscordWebhookClient(
+            "https://discord.test/webhooks/0/global",
+            "acme=https://discord.test/webhooks/1/aaa;beta=https://discord.test/webhooks/2/bbb",
+            http,
+            Duration.ofSeconds(1));
+
+    client.postEmbed("beta", new WebhookEmbed("t", "d", 5763719, "f"));
+
+    assertThat(uriOf(http)).isEqualTo("https://discord.test/webhooks/2/bbb");
+  }
+
+  @Test
+  void postEmbedUnconfiguredTenantFallsBackToGlobalDefault() throws Exception {
+    HttpClient http = okHttp();
+    DiscordWebhookClient client =
+        new DiscordWebhookClient(
+            "https://discord.test/webhooks/0/global",
+            "acme=https://discord.test/webhooks/1/aaa",
+            http,
+            Duration.ofSeconds(1));
+
+    client.postEmbed("unknown-tenant", new WebhookEmbed("t", "d", 5763719, "f"));
+
+    assertThat(uriOf(http)).isEqualTo("https://discord.test/webhooks/0/global");
+  }
+
+  @Test
+  void postConfiguredTenantRoutesToItsOwnWebhook() throws Exception {
+    HttpClient http = okHttp();
+    DiscordWebhookClient client =
+        new DiscordWebhookClient(
+            "https://discord.test/webhooks/0/global",
+            "acme=https://discord.test/webhooks/1/aaa",
+            http,
+            Duration.ofSeconds(1));
+
+    client.post("acme", "hello tenant");
+
+    assertThat(uriOf(http)).isEqualTo("https://discord.test/webhooks/1/aaa");
+  }
+
+  @Test
+  void nullTenantFallsBackToGlobalDefault() throws Exception {
+    HttpClient http = okHttp();
+    DiscordWebhookClient client =
+        new DiscordWebhookClient(
+            "https://discord.test/webhooks/0/global",
+            "acme=https://discord.test/webhooks/1/aaa",
+            http,
+            Duration.ofSeconds(1));
+
+    client.postEmbed(null, new WebhookEmbed("t", "d", 5763719, "f"));
+
+    assertThat(uriOf(http)).isEqualTo("https://discord.test/webhooks/0/global");
+  }
+
+  @Test
+  void bothGlobalAndTenantBlankIsNoOpAndDoesNotThrow() throws Exception {
+    HttpClient http = Mockito.mock(HttpClient.class);
+    DiscordWebhookClient client = new DiscordWebhookClient("", "", http, Duration.ofSeconds(1));
+
+    // Unconfigured tenant resolves to the (blank) global default → no HTTP send at all.
+    assertThatCode(() -> client.postEmbed("acme", new WebhookEmbed("t", "d", 1, "f")))
+        .doesNotThrowAnyException();
+    Mockito.verify(http, Mockito.never())
+        .send(Mockito.any(HttpRequest.class), Mockito.<HttpResponse.BodyHandler<Void>>any());
+  }
+
+  // --- Map parsing ------------------------------------------------------------------------------
+
+  @Test
+  void mapParsingWellFormedMultiEntryRoutesEach() throws Exception {
+    HttpClient http = okHttp();
+    DiscordWebhookClient client =
+        new DiscordWebhookClient(
+            "https://discord.test/webhooks/0/global",
+            " acme = https://discord.test/webhooks/1/aaa ; beta=https://discord.test/webhooks/2/bbb ",
+            http,
+            Duration.ofSeconds(1));
+
+    // Both entries parsed (whitespace trimmed around key and value).
+    client.post("acme", "x");
+    assertThat(uriOf(http)).isEqualTo("https://discord.test/webhooks/1/aaa");
+  }
+
+  @Test
+  void mapParsingMalformedEntrySkippedWithoutThrowing() throws Exception {
+    HttpClient http = okHttp();
+    // "no-equals-here" is malformed (no '='); it must be skipped, the good entry still parsed.
+    DiscordWebhookClient client =
+        new DiscordWebhookClient(
+            "https://discord.test/webhooks/0/global",
+            "no-equals-here;acme=https://discord.test/webhooks/1/aaa",
+            http,
+            Duration.ofSeconds(1));
+
+    client.post("acme", "x");
+    assertThat(uriOf(http)).isEqualTo("https://discord.test/webhooks/1/aaa");
+  }
+
+  @Test
+  void mapParsingPreservesUrlContainingSlashAndSplitsOnFirstEquals() throws Exception {
+    HttpClient http = okHttp();
+    // The value carries both '/' and a literal '=' (a query string) — split on the FIRST '=' only,
+    // so the whole "https://.../path?a=b" is kept as the URL.
+    DiscordWebhookClient client =
+        new DiscordWebhookClient(
+            "https://discord.test/webhooks/0/global",
+            "acme=https://discord.test/webhooks/1/aaa?token=xyz",
+            http,
+            Duration.ofSeconds(1));
+
+    client.post("acme", "x");
+    assertThat(uriOf(http)).isEqualTo("https://discord.test/webhooks/1/aaa?token=xyz");
+  }
+
+  @Test
+  void mapParsingEmptyStringYieldsEmptyMapSoEveryTenantUsesGlobal() throws Exception {
+    HttpClient http = okHttp();
+    DiscordWebhookClient client =
+        new DiscordWebhookClient(
+            "https://discord.test/webhooks/0/global", "", http, Duration.ofSeconds(1));
+
+    client.post("acme", "x");
+    assertThat(uriOf(http)).isEqualTo("https://discord.test/webhooks/0/global");
+  }
+
+  /** Captures the single request URI sent through the mock client. */
+  private static String uriOf(HttpClient http) throws Exception {
+    ArgumentCaptor<HttpRequest> captor = ArgumentCaptor.forClass(HttpRequest.class);
+    Mockito.verify(http).send(captor.capture(), Mockito.<HttpResponse.BodyHandler<Void>>any());
+    return captor.getValue().uri().toString();
   }
 
   /** A mock HttpClient that returns a 204 for any send. */

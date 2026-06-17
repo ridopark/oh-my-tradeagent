@@ -124,7 +124,7 @@ public class StrategyActivitiesImpl implements StrategyActivities {
     try {
       String key = tenantId + "|" + strategyId + "|" + reason;
       if (alertedKeys.add(key)) {
-        webhookClient.postEmbed(failureEmbed(tenantId, strategyId, reason, e));
+        webhookClient.postEmbed(tenantId, failureEmbed(tenantId, strategyId, reason, e));
       }
     } catch (RuntimeException alertError) {
       log.warn(
@@ -156,7 +156,7 @@ public class StrategyActivitiesImpl implements StrategyActivities {
         }
       }
       for (String reason : resolved) {
-        webhookClient.postEmbed(resolveEmbed(tenantId, strategyId, reason));
+        webhookClient.postEmbed(tenantId, resolveEmbed(tenantId, strategyId, reason));
       }
     } catch (RuntimeException resolveError) {
       log.warn(

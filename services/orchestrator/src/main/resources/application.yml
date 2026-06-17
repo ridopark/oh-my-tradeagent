@@ -77,6 +77,12 @@ audit:
 alert:
   discord:
     webhook-url: ${ALERT_DISCORD_WEBHOOK_URL:}
+    # Optional per-tenant alert routing. `tenant=url` entries, ';'-separated (key/value split on the
+    # FIRST '=' so a URL may itself contain '='). A tenant present here routes its alerts to its own
+    # webhook; any tenant absent here falls back to webhook-url above. Blank/unset → global only.
+    # The real per-tenant URLs are operator secrets injected into the discord-alert-credentials
+    # Secret at deploy time (out of band) — never committed to the repo.
+    webhook-urls: ${ALERT_DISCORD_WEBHOOK_URLS:}
     # Comma-separated allowlist of audit kinds that trigger a failure alert (avoids channel spam).
     # SignalRejected intentionally absent (issue #308) — owned by the signal-feed outcome mirror.
     # B3 (PLAN-exit-place-duplicate-422-crash): PositionOrphan / PositionOrphanOngoing (recon's

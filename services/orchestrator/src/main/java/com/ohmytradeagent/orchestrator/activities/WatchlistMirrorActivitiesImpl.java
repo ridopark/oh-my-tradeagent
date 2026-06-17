@@ -50,10 +50,10 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
   public void postWatchlistAlert(WatchlistMirrorPayload payload) {
     ParseResult parsed = WatchlistParser.parse(payload.getRawText());
     if (parsed.clean() && !parsed.rows().isEmpty()) {
-      webhookClient.postEmbed(buildEmbed(payload, parsed.rows()));
+      webhookClient.postEmbed(payload.getTenantId(), buildEmbed(payload, parsed.rows()));
     } else {
       // Malformed/empty watchlist is never dropped — fall back to verbatim raw text.
-      webhookClient.post(format(payload));
+      webhookClient.post(payload.getTenantId(), format(payload));
     }
   }
 

@@ -93,7 +93,8 @@ class WatchlistMirrorActivitiesImplTest {
 
     WebhookEmbed embed = captureEmbed(webhook);
     // Raw fallback path must NOT fire when the parse is clean.
-    verify(webhook, never()).post(org.mockito.ArgumentMatchers.anyString());
+    verify(webhook, never())
+        .post(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
 
     assertThat(embed.title()).contains("Jun 3, 2026");
     assertThat(embed.color()).isEqualTo(5763719);
@@ -130,7 +131,8 @@ class WatchlistMirrorActivitiesImplTest {
     activity.postWatchlistAlert(payload(REAL_SAMPLE + "\n\nGood luck @everyone"));
 
     WebhookEmbed embed = captureEmbed(webhook);
-    verify(webhook, never()).post(org.mockito.ArgumentMatchers.anyString());
+    verify(webhook, never())
+        .post(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
     assertThat(embed.description()).contains("📈 **SPY 756C** — breaks above 755.30");
   }
 
@@ -142,7 +144,8 @@ class WatchlistMirrorActivitiesImplTest {
     activity.postWatchlistAlert(payload("lol no setups today"));
 
     String content = capture(webhook);
-    verify(webhook, never()).postEmbed(org.mockito.ArgumentMatchers.any());
+    verify(webhook, never())
+        .postEmbed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
     assertThat(content).contains("```\nlol no setups today\n```");
   }
 
@@ -165,13 +168,13 @@ class WatchlistMirrorActivitiesImplTest {
 
   private static String capture(WebhookClient webhook) {
     ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-    verify(webhook, times(1)).post(captor.capture());
+    verify(webhook, times(1)).post(org.mockito.ArgumentMatchers.anyString(), captor.capture());
     return captor.getValue();
   }
 
   private static WebhookEmbed captureEmbed(WebhookClient webhook) {
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook, times(1)).postEmbed(captor.capture());
+    verify(webhook, times(1)).postEmbed(org.mockito.ArgumentMatchers.anyString(), captor.capture());
     return captor.getValue();
   }
 
