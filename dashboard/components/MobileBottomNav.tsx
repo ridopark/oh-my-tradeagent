@@ -163,21 +163,24 @@ export function MobileBottomNav({
               More
             </DialogTitle>
             <nav className="flex flex-col text-sm">
-              {more.map((l) => (
-                <Link
-                  key={l.href}
-                  href={l.href}
-                  onClick={() => setOpen(false)}
-                  aria-current={isActive(pathname, l.href) ? "page" : undefined}
-                  className={`py-2 ${
-                    isActive(pathname, l.href)
-                      ? "text-white"
-                      : "text-slate-300 hover:text-white"
-                  }`}
-                >
-                  {l.label}
-                </Link>
-              ))}
+              {more.map((l) => {
+                const active = isActive(pathname, l.href);
+                return (
+                  <Link
+                    key={l.href}
+                    href={l.href}
+                    onClick={() => setOpen(false)}
+                    aria-current={active ? "page" : undefined}
+                    className={`py-2 ${
+                      active
+                        ? "text-white"
+                        : "text-slate-300 hover:text-white"
+                    }`}
+                  >
+                    {l.label}
+                  </Link>
+                );
+              })}
             </nav>
             <div className="my-3 border-t border-slate-800" />
             <div className="flex flex-col gap-3 text-sm text-slate-400">
