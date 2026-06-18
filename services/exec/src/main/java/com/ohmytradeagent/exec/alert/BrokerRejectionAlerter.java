@@ -88,8 +88,12 @@ public class BrokerRejectionAlerter {
     // webhook timeout never blocks the broker/order path. A failure to even enqueue (queue full /
     // executor rejected) is swallowed — dropping a notification beats blocking the order path.
     final WebhookEmbed embed;
+    final String tenantId;
     try {
       embed = buildEmbed(intent, clientOrderId, reason);
+      // Resolve the tenant on the caller thread (cheap, deterministic) so the alert routes to the
+      // rejecting tenant's own Discord channel; resolve() handles null → global default.
+      tenantId = (intent == null ? null : intent.getTenantId());
     } catch (RuntimeException e) {
       log.warn("broker-rejection-alert build failed intent_key={}", safeIntentKey(intent), e);
       return;
@@ -98,7 +102,7 @@ public class BrokerRejectionAlerter {
       dispatchExecutor.execute(
           () -> {
             try {
-              webhookClient.postEmbed(embed);
+              webhookClient.postEmbed(tenantId, embed);
             } catch (RuntimeException e) {
               // Defensive: an error on the dispatch thread must never surface — the order path has
               // already moved on and is rethrowing the original broker exception.
