@@ -63,6 +63,10 @@ cd dashboard
 [ -x node_modules/.bin/next ] || { echo "==> npm install (dashboard deps)"; npm install; }
 
 echo "==> dashboard (Next.js) :3000 — open http://localhost:3000 and click 'Dev login (local only)'"
+# Pin the dev-server port: `next dev` honors an inherited $PORT, so a stray `export PORT=...` in the
+# operator's shell would otherwise bind a non-:3000 port (breaks the Google OAuth redirect URI, which
+# is registered at :3000). Set it explicitly so the script's :3000 promise always holds.
+PORT=3000 \
 AUTH_DEV_LOGIN=true \
 AUTH_DEV_TENANT="${AUTH_DEV_TENANT:-dev}" \
 AUTH_SECRET="${AUTH_SECRET:-dev-secret-not-for-prod}" \

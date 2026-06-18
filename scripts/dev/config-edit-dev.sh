@@ -11,6 +11,11 @@
 #     + tenant-dashboard-bff :8083 (mvn)          — READS strategy_config (GET /api/strategy-config).
 #     + api-gateway          :8082 (mvn)          — WRITE forward (POST /strategy-config →
 #                                                  starts StrategyConfigUpdateWorkflow).
+#     + exec                 (mvn spring-boot:run) — broker activity worker on the
+#                                                  broker-alpaca-paper queue. Serves
+#                                                  AccountSnapshotActivity so the Portfolio page's
+#                                                  "Account equity" card resolves (without it the
+#                                                  BFF's snapshot times out → equity shows "—").
 #     + dashboard            :3000 (npm run dev)  — Next.js UI; /config page edits + saves.
 #
 # Open http://localhost:3000, click "Dev login (local only)", go to /config, edit + Save.
@@ -51,10 +56,11 @@ echo "==> registering Temporal search attributes (temporal-bootstrap)"
 $COMPOSE up temporal-bootstrap >/dev/null 2>&1 \
   || echo "    (search-attribute bootstrap failed — Positions/Portfolio may 500; config-edit is unaffected)"
 
-orch_pid="" ; bff_pid="" ; gw_pid="" ; web_pid=""
+orch_pid="" ; bff_pid="" ; gw_pid="" ; exec_pid="" ; web_pid=""
 cleanup() {
-  echo; echo "==> stopping dashboard + api-gateway + BFF + orchestrator (infra left running)"
+  echo; echo "==> stopping dashboard + exec + api-gateway + BFF + orchestrator (infra left running)"
   [ -n "$web_pid" ]  && kill "$web_pid"  2>/dev/null || true
+  [ -n "$exec_pid" ] && kill "$exec_pid" 2>/dev/null || true
   [ -n "$gw_pid" ]   && kill "$gw_pid"   2>/dev/null || true
   [ -n "$bff_pid" ]  && kill "$bff_pid"  2>/dev/null || true
   [ -n "$orch_pid" ] && kill "$orch_pid" 2>/dev/null || true
@@ -139,6 +145,56 @@ for _ in $(seq 1 120); do
   sleep 2
 done
 
+# ---- exec — broker activity worker on broker-alpaca-paper (serves AccountSnapshotActivity) -----
+# The Portfolio page's "Account equity" card needs a worker on the broker-<target> queue: the BFF
+# starts AccountSnapshotWorkflow (orchestrator-core) which dispatches AccountSnapshotActivity to
+# broker-alpaca-paper. With no worker there the activity never starts → BFF times out at 8s →
+# equity degrades to "—". exec also hosts the order-exec + reconciliation activities.
+#
+# Broker impl: alpaca-paper (REAL paper-account net-liq equity) when Alpaca paper creds are present
+# in the environment, else stub (boots clean — broker.impl=alpaca-* fail-fasts on blank creds — and
+# equity shows the sentinel $0.00 rather than a live figure). The exec env names are APCA_API_KEY_ID
+# / APCA_API_SECRET_KEY; fall back to the ALPACA_API_KEY / ALPACA_SECRET_KEY names the orchestrator
+# already uses locally so a single ~/.bashrc export drives both. EXEC_DB_URL points at the same
+# exec_alpaca_paper journal the BFF reads positions from. No HTTP health endpoint is polled — like
+# the orchestrator we tee to a log and wait on the broker-alpaca-paper poller marker.
+EXEC_APCA_KEY="${APCA_API_KEY_ID:-${ALPACA_API_KEY:-}}"
+EXEC_APCA_SECRET="${APCA_API_SECRET_KEY:-${ALPACA_SECRET_KEY:-}}"
+if [ -n "$EXEC_APCA_KEY" ] && [ -n "$EXEC_APCA_SECRET" ]; then
+  EXEC_BROKER_IMPL="alpaca-paper"
+  echo "==> exec worker (broker-alpaca-paper; BROKER_IMPL=alpaca-paper — REAL paper-account equity)"
+else
+  EXEC_BROKER_IMPL="stub"
+  echo "==> exec worker (broker-alpaca-paper; BROKER_IMPL=stub — no Alpaca creds in env, equity card shows \$0.00 sentinel)"
+fi
+EXEC_LOG="$(mktemp -t config-edit-exec.XXXXXX.log)"
+echo "    (exec log: $EXEC_LOG)"
+( cd services/exec && \
+  TEMPORAL_TARGET=localhost:7233 \
+  TEMPORAL_NAMESPACE=default \
+  TEMPORAL_TASK_QUEUE=broker-alpaca-paper \
+  EXEC_DB_URL=jdbc:postgresql://localhost:5432/exec_alpaca_paper \
+  EXEC_DB_USER=temporal \
+  EXEC_DB_PASS=temporal \
+  BROKER_IMPL="$EXEC_BROKER_IMPL" \
+  APCA_API_KEY_ID="$EXEC_APCA_KEY" \
+  APCA_API_SECRET_KEY="$EXEC_APCA_SECRET" \
+  APCA_API_BASE_URL="${APCA_API_BASE_URL:-https://paper-api.alpaca.markets}" \
+  mvn -q spring-boot:run ) > "$EXEC_LOG" 2>&1 &
+exec_pid=$!
+
+echo "==> waiting for exec worker (broker-alpaca-paper poller)"
+for _ in $(seq 1 180); do
+  if grep -q 'Started ExecApplication' "$EXEC_LOG" 2>/dev/null \
+     && grep -q 'Poller taskQueue="broker-alpaca-paper"' "$EXEC_LOG" 2>/dev/null; then
+    echo "    exec worker up (broker-alpaca-paper poller live)"; break
+  fi
+  if grep -qE "BUILD FAILURE|APPLICATION FAILED TO START" "$EXEC_LOG" 2>/dev/null; then
+    echo "    exec FAILED TO START — see $EXEC_LOG"; tail -30 "$EXEC_LOG"; exit 1
+  fi
+  sleep 2
+done
+
 # ---- dashboard :3000 — Next.js UI (dashboard-dev env + the write-path wiring) -----------------
 cd dashboard
 # Check the `next` binary, not just the dir: an empty/partial node_modules (e.g. a leftover dir
@@ -146,6 +202,10 @@ cd dashboard
 [ -x node_modules/.bin/next ] || { echo "==> npm ci (dashboard deps)"; npm ci; }
 
 echo "==> dashboard (Next.js) :3000 — open http://localhost:3000, 'Dev login (local only)', then /config"
+# Pin the dev-server port: `next dev` honors an inherited $PORT, so a stray `export PORT=...` in the
+# operator's shell would otherwise bind a non-:3000 port (breaks the Google OAuth redirect URI, which
+# is registered at :3000). Set it explicitly so the script's :3000 promise always holds.
+PORT=3000 \
 AUTH_DEV_LOGIN=true \
 AUTH_DEV_TENANT="${AUTH_DEV_TENANT:-dev}" \
 AUTH_SECRET="${AUTH_SECRET:-dev-secret-not-for-prod}" \
