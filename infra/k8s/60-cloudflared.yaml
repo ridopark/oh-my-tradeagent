@@ -1,0 +1,55 @@
+# Cloudflare Tunnel connector — exposes the dashboard (59-dashboard.yaml) on the public internet at
+# https://tradeagent.ridopark.com WITHOUT opening any inbound port (the homelab is behind double-NAT
+# on a dynamic residential IP). cloudflared dials OUT to Cloudflare and holds the tunnel open; an edge
+# Cloudflare Access policy gates every request (allowlisted Google emails) before it reaches the
+# tunnel, in front of the dashboard's own Google-OAuth + dashboard_user allowlist (defense in depth).
+#
+# LIVE-ONLY DEPENDENCY — the connector authenticates with a tunnel token stored in the Secret
+# `cloudflared-token` (key `token`), which is NOT in git and NOT applied by deploy.yml. Create it once,
+# out-of-band, from the Cloudflare API tunnel-token endpoint:
+#   kubectl -n copytrade create secret generic cloudflared-token --from-file=token=<(cf api .../token)
+# The Cloudflare-side objects (tunnel `homelab-dashboard` 7302d0ec…, ingress -> dashboard:3000, the
+# proxied DNS CNAME, and the Access app/policy) are also managed out-of-band via the Cloudflare API.
+#
+# deploy.yml does NOT apply this file (it only rollout-restarts allowlisted services); apply manually:
+#   kubectl apply -f infra/k8s/60-cloudflared.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: copytrade
+  labels:
+    app: cloudflared
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      containers:
+        - name: cloudflared
+          # Pinned (not :latest) so a pod restart can't silently change connector behavior.
+          image: cloudflare/cloudflared:2026.6.0
+          args: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"]
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-token
+                  key: token
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 2000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
