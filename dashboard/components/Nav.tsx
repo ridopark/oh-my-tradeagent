@@ -48,7 +48,7 @@ export async function Nav({ tenantId }: { tenantId?: string }) {
       <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-0">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
           <span className="font-semibold text-slate-100">Tenant Dashboard</span>
-          <nav className="hidden flex-wrap gap-x-4 gap-y-2 text-sm md:flex">
+          <nav className="hidden flex-wrap gap-x-4 gap-y-2 text-sm sm:flex">
             {LINKS.map((l) => (
               <Link
                 key={l.href}
@@ -60,7 +60,7 @@ export async function Nav({ tenantId }: { tenantId?: string }) {
             ))}
           </nav>
         </div>
-        <div className="hidden flex-wrap items-center gap-3 text-sm text-slate-400 md:flex">
+        <div className="hidden flex-wrap items-center gap-3 text-sm text-slate-400 sm:flex">
           {accountBlock}
         </div>
       </div>

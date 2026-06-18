@@ -111,7 +111,7 @@ export function MobileBottomNav({
 
   return (
     <>
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-800 bg-slate-900 pb-[env(safe-area-inset-bottom)] md:hidden">
+      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-800 bg-slate-900 pb-[env(safe-area-inset-bottom)] sm:hidden">
         <ul className="flex">
           {primary.map((l) => {
             const active = isActive(pathname, l.href);
@@ -145,7 +145,7 @@ export function MobileBottomNav({
         </ul>
       </nav>
 
-      <Dialog open={open} onClose={setOpen} className="relative z-50 md:hidden">
+      <Dialog open={open} onClose={setOpen} className="relative z-50 sm:hidden">
         <DialogBackdrop
           transition
           className="fixed inset-0 bg-black/50 transition-opacity duration-200 data-[closed]:opacity-0"

@@ -19,7 +19,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="min-h-screen pb-20 md:pb-0">{children}</body>
+      <body className="min-h-screen pb-20 sm:pb-0">{children}</body>
     </html>
   );
 }
