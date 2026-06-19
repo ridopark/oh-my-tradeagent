@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.AccountSnapshotRequest;
+import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.FillSignalPayload;
@@ -11,7 +13,11 @@ import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.ContractActivities;
+import com.ohmytradeagent.orchestrator.activities.ExecActivities;
+import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveInput;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
@@ -128,11 +134,29 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
           "src/test/resources/temporal/replay/"
               + "copytrade-signal-pre-p3a-live-dispatch-legacy-history.json");
 
+  // dynamic-account-cash-sizing (#427 follow-up): legacy (no account-cash-sizing-v1 marker)
+  // notional-cap in-flight BTO fixture. A faithful pre-#427 notional-cap BTO recorded the FULL
+  // post-#111 entry chain — including the AccountSnapshot dispatch (the cap gate already fired it
+  // pre-#427) — but carries NO account-cash-sizing-v1 marker. Replaying it under the current impl
+  // must take the v=DEFAULT_VERSION branch at account-cash-sizing-v1 (in BOTH
+  // dispatchAccountSnapshot
+  // and the sizing block): the snapshot dispatch stays gated purely on notionalCapConfigured (still
+  // true) so the SAME AccountSnapshot command is scheduled, and the sizing block falls through to
+  // the
+  // static capitalForStrategy read — byte-identical to the recorded command stream.
+  private static final String NOTIONAL_CAP_FIXTURE_RESOURCE =
+      "temporal/replay/copytrade-signal-pre-427-notional-cap-legacy-history.json";
+  private static final Path NOTIONAL_CAP_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "copytrade-signal-pre-427-notional-cap-legacy-history.json");
+
   private static final String CORE_QUEUE = "orchestrator-core";
   private static final String LEGACY_EMULATOR_WORKFLOW_ID = "legacy-pre-111-emulator";
   private static final String BREACH_ABORT_EMULATOR_WORKFLOW_ID = "legacy-pre-274-breach-emulator";
   private static final String TTL_EXPIRY_EMULATOR_WORKFLOW_ID = "legacy-pre-165-ttl-emulator";
   private static final String LIVE_PROMOTION_EMULATOR_WORKFLOW_ID = "legacy-pre-p3a-live-emulator";
+  private static final String NOTIONAL_CAP_EMULATOR_WORKFLOW_ID = "legacy-pre-427-notional-cap-emu";
 
   /**
    * Pins the version-marker constant name so a rename in {@link CopytradeSignalWorkflowImpl} fails
@@ -298,6 +322,50 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
 
     WorkflowReplayer.replayWorkflowExecutionFromResource(
         LIVE_PROMOTION_FIXTURE_RESOURCE, CopytradeSignalWorkflowImpl.class);
+  }
+
+  /**
+   * dynamic-account-cash-sizing (#427 follow-up): replays a pre-#427 notional-cap in-flight BTO
+   * history against the current impl. The recorded history is a cap-configured ({@code
+   * notional_cap_pct_of_capital_base} set), {@code capital_source=static}/absent BTO that ran the
+   * FULL post-#111 entry chain — pre-trade-dispatch-v2 → check-entry-with-limit →
+   * account-equity-dispatch-v1 → AccountSnapshot dispatch → CheckEntryWithLimit → Resolve →
+   * CapitalForStrategy → SignalAccepted → live-promotion-gate-v1 (paper: skipped) → PlaceOrder →
+   * OrderSubmitted → TTL await → cancel → ttl-filled-adoption-v1 (CANCELLED) → cancel/expire — but
+   * carries NO {@code account-cash-sizing-v1} marker (it predates #427).
+   *
+   * <p>So {@code getVersion(VERSION_ACCOUNT_CASH_SIZING, DEFAULT, 1)} returns {@code
+   * DEFAULT_VERSION} during replay in BOTH places it is read:
+   *
+   * <ul>
+   *   <li>{@code dispatchAccountSnapshot}: {@code cashSizingDispatch} is false, so the dispatch
+   *       stays gated purely on {@code notionalCapConfigured(config)} — still true for a
+   *       cap-configured strategy — and the SAME {@code AccountSnapshot} command is scheduled. The
+   *       #427 widening (cap OR cash-sizing) adds no command here; the cap term alone already fired
+   *       the dispatch.
+   *   <li>the sizing block: {@code cashSizingVersion < 1}, so it falls through to the static {@code
+   *       strategy.capitalForStrategy(...)} read — the same {@code CapitalForStrategy} command the
+   *       history recorded, not the account_cash reuse branch.
+   * </ul>
+   *
+   * <p>The result is a byte-identical command stream and no {@code NonDeterministicException}. This
+   * pins the property #427 promised: the snapshot dispatch determinism (the dispatch still fires
+   * for cap-configured histories) AND the static-sizing fallthrough for marker-less notional-cap
+   * histories. The fixture MUST contain the AccountSnapshot {@code ActivityTaskScheduled} event — a
+   * clean replay that omitted the snapshot dispatch would not exercise the property under test.
+   */
+  @Test
+  void notionalCapPre427HistoryReplaysAgainstCurrentImplWithoutNonDeterminism() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(NOTIONAL_CAP_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. Regenerate with"
+                + " `mvn -pl services/orchestrator test -Dgenerate.legacy.fixture=true"
+                + " -Dtest=CopytradeSignalWorkflowImplLegacyReplayTest#regenerateNotionalCapFixture`",
+            NOTIONAL_CAP_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    WorkflowReplayer.replayWorkflowExecutionFromResource(
+        NOTIONAL_CAP_FIXTURE_RESOURCE, CopytradeSignalWorkflowImpl.class);
   }
 
   // ---------------------------------------------------------------------------
@@ -565,6 +633,84 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
     Files.writeString(LIVE_PROMOTION_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
   }
 
+  /**
+   * dynamic-account-cash-sizing (#427 follow-up): one-shot generator for the pre-#427 notional-cap
+   * fixture. Disabled by default; run via {@code -Dgenerate.legacy.fixture=true}. The {@link
+   * LegacyNotionalCapEmulatorWorkflowImpl} mirrors the pre-#427 notional-cap TTL-expiry command
+   * order on a CANCELLED cancel result, using the SAME production activity interfaces ({@link
+   * RiskActivities}, {@link AccountSnapshotActivity}, {@link ContractActivities}, {@link
+   * ExecActivities}) as the impl so every recorded {@code activityType.name} matches what the
+   * current impl schedules on replay — crucially the {@code AccountSnapshot} dispatch and the 5-arg
+   * {@code CheckEntryWithLimit} call.
+   *
+   * <p>The StrategyConfig sets {@code notional_cap_pct_of_capital_base} (cap configured) and leaves
+   * {@code capital_source} ABSENT (so {@code accountCashSizing} is false / static sizing). The
+   * emulator records the version markers a faithful pre-#427 notional-cap history carries —
+   * pre-trade-dispatch-v2, check-entry-with-limit, account-equity-dispatch-v1,
+   * live-promotion-gate-v1, ttl-filled-adoption-v1 — but DELIBERATELY does NOT read
+   * account-cash-sizing-v1, so no marker for it lands in the history. The AccountSnapshot mock
+   * returns a representative cash snapshot.
+   */
+  @Test
+  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
+  void regenerateNotionalCapFixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(LegacyNotionalCapEmulatorWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      StrategyActivities strategy = Mockito.mock(StrategyActivities.class);
+      RiskActivities risk = Mockito.mock(RiskActivities.class);
+      ContractActivities contract = Mockito.mock(ContractActivities.class);
+      ExecActivities exec = Mockito.mock(ExecActivities.class);
+      AccountSnapshotActivity accountSnapshot = Mockito.mock(AccountSnapshotActivity.class);
+
+      StrategyConfig cfg = notionalCapStrategyConfig();
+      cfg.setPendingTtlPaperSecs(1L); // short TTL so the await expires quickly under test time-skip
+      when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+      when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+      // 5-arg slip-adjusted gate, approved (the cap math passes on the representative cash).
+      when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+          .thenReturn(RiskDecision.approved());
+      when(contract.resolve(any())).thenReturn(LEGACY_OCC);
+      when(exec.placeOrder(any())).thenReturn(submitted("intent-K", "brk-1"));
+      when(exec.cancelOrder(any())).thenReturn(cancelled("intent-K", "brk-1"));
+      AccountSnapshotResult snap = new AccountSnapshotResult();
+      snap.setSchemaVersion(1L);
+      snap.setCash(new BigDecimal("123456.78"));
+      when(accountSnapshot.accountSnapshot(any())).thenReturn(snap);
+
+      worker.registerActivitiesImplementations(audit, strategy, risk, contract);
+      // Exec + AccountSnapshot are pinned to broker-alpaca-paper (taskQueueFor("alpaca-paper")) —
+      // register them on that queue, otherwise the dispatches block forever.
+      Worker brokerWorker = env.newWorker("broker-alpaca-paper");
+      brokerWorker.registerActivitiesImplementations(exec, accountSnapshot);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      CopytradeSignalWorkflow wf =
+          client.newWorkflowStub(
+              CopytradeSignalWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(NOTIONAL_CAP_EMULATOR_WORKFLOW_ID)
+                  .build());
+      // No onFill / no breach: the TTL await expires (test env skips time) and the legacy
+      // cancel-then-expire sequence is recorded.
+      wf.process(btoPayload());
+
+      json = client.fetchHistory(NOTIONAL_CAP_EMULATOR_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
+    Files.createDirectories(NOTIONAL_CAP_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(NOTIONAL_CAP_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
@@ -619,6 +765,21 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
   private static StrategyConfig legacyLiveStrategyConfig() {
     StrategyConfig c = legacyStrategyConfig();
     c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_LIVE);
+    return c;
+  }
+
+  /**
+   * dynamic-account-cash-sizing (#427 follow-up): a notional-cap-configured paper variant of {@link
+   * #legacyStrategyConfig()}. Sets {@code notional_cap_pct_of_capital_base} (so {@code
+   * StrategyConfigs.notionalCapConfigured} is true and the AccountSnapshot dispatch fires) and
+   * leaves {@code capital_source} ABSENT (so {@code StrategyConfigs.accountCashSizing} is false →
+   * static sizing). pre_trade_check stays disabled so the recorded chain runs purely on the
+   * notional-cap math against the dispatched cash, with no PreTradeCheck activity in the stream.
+   */
+  private static StrategyConfig notionalCapStrategyConfig() {
+    StrategyConfig c = legacyStrategyConfig();
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfEquity(null);
     return c;
   }
 
@@ -912,6 +1073,140 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
 
       audit.log(auditEvent(payload, "OrderCancelRequested"));
       OrderIntentResult cancelResult = exec.cancelOrder(intentKey);
+      if (cancelResult.getState() == OrderIntentResult.State.CANCELLED) {
+        audit.log(auditEvent(payload, "OrderCancelled"));
+      } else {
+        audit.log(auditEvent(payload, "OrderCancelFailed"));
+      }
+      audit.log(auditEvent(payload, "EntryExpired"));
+      return payload.getSignalId();
+    }
+
+    @Override
+    public void onFill(FillSignalPayload event) {}
+
+    @Override
+    public void riskBreach(RiskBreachPayload payload) {}
+  }
+
+  /**
+   * dynamic-account-cash-sizing (#427 follow-up): emulator mirroring the pre-#427 notional-cap
+   * TTL-expiry command order on a CANCELLED cancel result. Uses the SAME production activity
+   * interfaces as {@link CopytradeSignalWorkflowImpl} ({@link RiskActivities}, {@link
+   * AccountSnapshotActivity}, {@link ContractActivities}, {@link ExecActivities}, {@link
+   * StrategyActivities}, {@link AuditActivities}) so every recorded {@code activityType.name} and
+   * task queue matches what the current impl schedules on replay — crucially the {@code
+   * AccountSnapshot} dispatch on {@code broker-alpaca-paper} and the 5-arg {@code
+   * CheckEntryWithLimit} call. Implements {@link CopytradeSignalWorkflow} so the recorded {@code
+   * workflowType.name} is what {@link WorkflowReplayer} expects.
+   *
+   * <p>The emulator reproduces the impl's notional-cap path {@code getVersion} reads IN ORDER and
+   * at the SAME command positions, recording the markers a faithful pre-#427 history carries —
+   * pre-trade-dispatch-v2, check-entry-with-limit, account-equity-dispatch-v1,
+   * live-promotion-gate-v1, ttl-filled-adoption-v1 — but DELIBERATELY NOT reading
+   * account-cash-sizing-v1 (the #427 marker), so no marker for it lands in the history. On replay
+   * the current impl reads account-cash-sizing-v1 in both dispatchAccountSnapshot and the sizing
+   * block, gets DEFAULT_VERSION (no marker), schedules no extra command (cap term already fired the
+   * dispatch) and falls through to the static capitalForStrategy read — byte-identical to this
+   * stream.
+   *
+   * <p>Command sequence ({@code pre_trade_check} disabled, cap configured, paper, no fill → TTL
+   * CANCELLED):
+   *
+   * <ol>
+   *   <li>{@code audit.log(SignalReceived)} (Log)
+   *   <li>{@code strategy.get} (Get)
+   *   <li>getVersion(pre-trade-dispatch-v2)=1 [no PreTradeCheck dispatch — gate disabled]
+   *   <li>getVersion(check-entry-with-limit)=1
+   *   <li>getVersion(account-equity-dispatch-v1)=1
+   *   <li>{@code accountSnapshot.accountSnapshot} (AccountSnapshot) — on broker-alpaca-paper
+   *   <li>{@code risk.checkEntryWithLimit} (CheckEntryWithLimit, approved)
+   *   <li>{@code contract.resolve} (Resolve)
+   *   <li>[sizing block: NO account-cash-sizing-v1 read] {@code strategy.capitalForStrategy}
+   *       (CapitalForStrategy)
+   *   <li>{@code audit.log(SignalAccepted)} (Log)
+   *   <li>getVersion(live-promotion-gate-v1)=1 [paper: body skipped, no verify activity]
+   *   <li>{@code exec.placeOrder} (PlaceOrder) — on broker-alpaca-paper
+   *   <li>{@code audit.log(OrderSubmitted)} (Log)
+   *   <li>{@code Workflow.await} TTL (START_TIMER), expires with no fill
+   *   <li>{@code audit.log(OrderCancelRequested)} (Log)
+   *   <li>{@code exec.cancelOrder} (CancelOrder, returns CANCELLED)
+   *   <li>getVersion(ttl-filled-adoption-v1)=1 [CANCELLED, not FILLED → legacy cancel path]
+   *   <li>{@code audit.log(OrderCancelled)} (Log)
+   *   <li>{@code audit.log(EntryExpired)} (Log)
+   * </ol>
+   */
+  public static class LegacyNotionalCapEmulatorWorkflowImpl implements CopytradeSignalWorkflow {
+    private static final ActivityOptions OPTS =
+        ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
+    private static final ActivityOptions BROKER_OPTS =
+        ActivityOptions.newBuilder()
+            .setTaskQueue("broker-alpaca-paper")
+            .setStartToCloseTimeout(Duration.ofSeconds(10))
+            .build();
+    private final AuditActivities audit = Workflow.newActivityStub(AuditActivities.class, OPTS);
+    private final StrategyActivities strategy =
+        Workflow.newActivityStub(StrategyActivities.class, OPTS);
+    private final RiskActivities risk = Workflow.newActivityStub(RiskActivities.class, OPTS);
+    private final ContractActivities contract =
+        Workflow.newActivityStub(ContractActivities.class, OPTS);
+    private final ExecActivities exec = Workflow.newActivityStub(ExecActivities.class, BROKER_OPTS);
+    private final AccountSnapshotActivity accountSnapshot =
+        Workflow.newActivityStub(AccountSnapshotActivity.class, BROKER_OPTS);
+
+    @Override
+    public String process(CopytradeSignalPayload payload) {
+      audit.log(auditEvent(payload, "SignalReceived"));
+      StrategyConfig cfg = strategy.get(payload.getTenantId(), payload.getStrategyId());
+
+      // Post-#111 entry chain markers, read in the impl's order. pre_trade_check disabled, so the
+      // v>=1 branch dispatches NO PreTradeCheck activity (dispatchPreTradeCheck returns null).
+      Workflow.getVersion("pre-trade-dispatch-v2", Workflow.DEFAULT_VERSION, 1);
+      Workflow.getVersion("check-entry-with-limit", Workflow.DEFAULT_VERSION, 1);
+      Workflow.getVersion("account-equity-dispatch-v1", Workflow.DEFAULT_VERSION, 1);
+      // Cap configured → AccountSnapshot dispatch fires (the property under test). NOTE: the impl
+      // reads account-cash-sizing-v1 INSIDE dispatchAccountSnapshot before this call; we
+      // DELIBERATELY
+      // do NOT read it so a faithful pre-#427 history has no marker for it. notionalCapConfigured
+      // is
+      // true at every version, so DEFAULT_VERSION on replay still schedules this same command.
+      AccountSnapshotRequest snapReq = new AccountSnapshotRequest();
+      snapReq.setSchemaVersion(1L);
+      snapReq.setBrokerTarget(
+          AccountSnapshotRequest.BrokerTarget.fromValue(cfg.getBrokerTarget().value()));
+      snapReq.setTenantId(payload.getTenantId());
+      snapReq.setCorrelationId(payload.getSignalId());
+      accountSnapshot.accountSnapshot(snapReq);
+
+      RiskDecision decision =
+          risk.checkEntryWithLimit(
+              payload, cfg, null, payload.getPrice(), new BigDecimal("123456.78"));
+      if (!decision.allowed()) {
+        audit.log(auditEvent(payload, "SignalRejected"));
+        return payload.getSignalId();
+      }
+      contract.resolve(ContractResolveInput.from(payload));
+
+      // Sizing block: a faithful pre-#427 history did NOT read account-cash-sizing-v1 here either,
+      // and took the static capitalForStrategy read. On replay the impl reads the marker
+      // (DEFAULT_VERSION, no command) and falls through to the SAME CapitalForStrategy command.
+      strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
+      audit.log(auditEvent(payload, "SignalAccepted"));
+
+      // live-promotion-gate-v1 (#381, predates #427) is read unconditionally; paper → body skipped,
+      // no verify activity scheduled.
+      Workflow.getVersion("live-promotion-gate-v1", Workflow.DEFAULT_VERSION, 1);
+
+      String intentKey = Workflow.getInfo().getWorkflowId() + ":entry";
+      exec.placeOrder(intent(payload, cfg, intentKey));
+      audit.log(auditEvent(payload, "OrderSubmitted"));
+
+      long ttlSecs = cfg.getPendingTtlPaperSecs() != null ? cfg.getPendingTtlPaperSecs() : 90L;
+      Workflow.await(Duration.ofSeconds(ttlSecs), () -> false); // never fills -> TTL expiry path.
+
+      audit.log(auditEvent(payload, "OrderCancelRequested"));
+      OrderIntentResult cancelResult = exec.cancelOrder(intentKey);
+      Workflow.getVersion("ttl-filled-adoption-v1", Workflow.DEFAULT_VERSION, 1);
       if (cancelResult.getState() == OrderIntentResult.State.CANCELLED) {
         audit.log(auditEvent(payload, "OrderCancelled"));
       } else {
