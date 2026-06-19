@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/position-snapshot-request.json",
+  "title": "PositionSnapshotRequest",
+  "description": "Dashboard live-marks input. The tenant-dashboard BFF (a Temporal CLIENT, which cannot dispatch an Activity directly) starts the short-lived PositionSnapshotWorkflow with this request; the workflow dispatches ReconciliationExecActivity.brokerListOpenPositions to the broker-<broker_target> task queue and returns the broker-held positions WITH their live marks (current_price / unrealized_pl / unrealized_intraday_pl). Mirrors AccountSnapshotRequest. The marks are account-level broker truth (shared across tenants on a broker_target), never a risk-gate input — tenant_id/strategy_id are forward-compat filter hooks the single-account Alpaca adapter ignores today.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.PositionSnapshotRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "broker_target"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version."
+    },
+    "broker_target": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "Routes the brokerListOpenPositions Activity to the broker-<value> task queue, mirroring AccountSnapshotRequest.broker_target."
+    },
+    "tenant_id": {
+      "type": "string",
+      "description": "Optional forward-compat filter hook passed through to brokerListOpenPositions. The single-account Alpaca adapter ignores it today (positions are account-level); future multi-account brokers will filter on it."
+    },
+    "strategy_id": {
+      "type": "string",
+      "description": "Optional forward-compat filter hook passed through to brokerListOpenPositions. Ignored by the single-account Alpaca adapter today."
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Optional cross-event correlation key for tracing the dashboard read."
+    }
+  }
+}

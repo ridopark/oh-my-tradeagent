@@ -21,7 +21,7 @@ class Side(StrEnum):
 
 class BrokerPosition(BaseModel):
     """
-    A broker-held position returned by ReconciliationExecActivity.brokerListOpenPositions. Used by Phase 3 reconciliation to detect filled positions with no corresponding running PositionWorkflow (issue #165).
+    A broker-held position returned by ReconciliationExecActivity.brokerListOpenPositions. Used by Phase 3 reconciliation to detect filled positions with no corresponding running PositionWorkflow (issue #165). Also carries OPTIONAL live broker marks (current_price, market_value, unrealized_pl, unrealized_intraday_pl) so the dashboard can surface per-position current price + today's/total unrealized P&L (PositionSnapshotWorkflow → BFF join-by-OCC). The marks are broker-ACCOUNT-level (shared across tenants on a broker_target), never a risk-gate input. Adapters without a marks-bearing positions endpoint (StubBroker) omit them — they stay out of `required` so the reconciliation contract is unchanged.
     """
 
     model_config = ConfigDict(
@@ -44,4 +44,20 @@ class BrokerPosition(BaseModel):
     avg_entry_price: Annotated[Decimal, Field(gt=0)] | None = None
     """
     Optional avg entry price from broker. May be omitted if broker doesn't carry it.
+    """
+    current_price: float | None = None
+    """
+    Optional live mark: broker's current price per unit for the position (Alpaca /v2/positions 'current_price'). Account-level broker truth, surfaced for the dashboard only — never a risk-gate input. Omitted by adapters without a marks-bearing positions endpoint.
+    """
+    market_value: float | None = None
+    """
+    Optional live mark: broker's current total market value of the position (Alpaca /v2/positions 'market_value'). Account-level broker truth, dashboard-only. Omitted when the broker adapter does not carry it.
+    """
+    unrealized_pl: float | None = None
+    """
+    Optional live mark: TOTAL unrealized P&L for the position since entry, in dollars, signed (Alpaca /v2/positions 'unrealized_pl'). Account-level broker truth, dashboard-only — never a risk-gate input. Omitted when the broker adapter does not carry it.
+    """
+    unrealized_intraday_pl: float | None = None
+    """
+    Optional live mark: TODAY'S (intraday) unrealized P&L for the position, in dollars, signed (Alpaca /v2/positions 'unrealized_intraday_pl'). Account-level broker truth, dashboard-only. Omitted when the broker adapter does not carry it.
     """

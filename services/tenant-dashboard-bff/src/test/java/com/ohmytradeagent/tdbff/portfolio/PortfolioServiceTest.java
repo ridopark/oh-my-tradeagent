@@ -21,16 +21,23 @@ class PortfolioServiceTest {
   private final PositionsReader positionsReader = mock(PositionsReader.class);
   private final RealizedPnlCalculator realizedPnl = mock(RealizedPnlCalculator.class);
   private final AccountEquityClient accountEquity = mock(AccountEquityClient.class);
+  private final BrokerPositionsClient brokerPositions = mock(BrokerPositionsClient.class);
   private final TenantStrategyResolver strategyResolver = mock(TenantStrategyResolver.class);
   private final DbStrategyConfigReader strategyRegistry = mock(DbStrategyConfigReader.class);
 
   private final PortfolioService service = newService(false, 9);
+
+  PortfolioServiceTest() {
+    // Default: no live marks (fail-open empty). Tests that exercise the join override this.
+    when(brokerPositions.marksFor(any(), any(), any())).thenReturn(Map.of());
+  }
 
   private PortfolioService newService(boolean exposeAccountNumber, long subreadTimeoutSeconds) {
     return new PortfolioService(
         positionsReader,
         realizedPnl,
         accountEquity,
+        brokerPositions,
         strategyResolver,
         strategyRegistry,
         exposeAccountNumber,
@@ -188,5 +195,84 @@ class PortfolioServiceTest {
     assertThat(equity.get(0)).containsEntry("equity", null);
     // Positions sub-read was fast -> unaffected.
     assertThat(body.get("open_positions_count")).isEqualTo(1);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void joinsLiveMarksByNormalizedCompactOcc_padInsensitively() {
+    // The tracked position carries the PADDED canonical OCC; the broker marks are keyed COMPACT.
+    // The join must normalize both to compact so a padded-vs-compact form still matches.
+    String paddedOcc = "SPY   260519C00737000";
+    String compactOcc = "SPY260519C00737000";
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                new OpenPosition(
+                    "wf1", "s1", paddedOcc, 5, new BigDecimal("0.84"), new BigDecimal("420.00"))));
+    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(BigDecimal.ZERO);
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
+    when(brokerPositions.marksFor("alpaca-paper", "acme", "s1"))
+        .thenReturn(
+            Map.of(
+                compactOcc,
+                new BrokerPositionsClient.PositionMarks(
+                    new BigDecimal("1.20"), new BigDecimal("180.00"), new BigDecimal("-15.00"))));
+
+    Map<String, Object> body = service.portfolio("acme");
+
+    var positions = (List<Map<String, Object>>) body.get("open_positions");
+    assertThat(positions).hasSize(1);
+    Map<String, Object> pos = positions.get(0);
+    // Existing fields preserved.
+    assertThat(pos).containsEntry("contract_symbol", paddedOcc);
+    assertThat(pos).containsEntry("remaining_qty", 5L);
+    assertThat(pos).containsEntry("entry_premium", new BigDecimal("0.84"));
+    // Live marks joined: current price + today's + total unrealized P&L (today is signed negative).
+    assertThat((BigDecimal) pos.get("current_price")).isEqualByComparingTo("1.20");
+    assertThat((BigDecimal) pos.get("unrealized_pl")).isEqualByComparingTo("180.00");
+    assertThat((BigDecimal) pos.get("unrealized_intraday_pl")).isEqualByComparingTo("-15.00");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void positionWithoutMatchingBrokerMark_staysCleanNoMarkFields() {
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                new OpenPosition(
+                    "wf1",
+                    "s1",
+                    "AAPL260116C00200000",
+                    1,
+                    new BigDecimal("2.00"),
+                    new BigDecimal("200.00"))));
+    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(BigDecimal.ZERO);
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
+    // Broker holds a DIFFERENT contract — no mark for this position's OCC.
+    when(brokerPositions.marksFor("alpaca-paper", "acme", "s1"))
+        .thenReturn(
+            Map.of(
+                "NVDA260516C00140000",
+                new BrokerPositionsClient.PositionMarks(
+                    new BigDecimal("3.00"), new BigDecimal("90.00"), new BigDecimal("10.00"))));
+
+    Map<String, Object> body = service.portfolio("acme");
+
+    var positions = (List<Map<String, Object>>) body.get("open_positions");
+    assertThat(positions).hasSize(1);
+    Map<String, Object> pos = positions.get(0);
+    // No mark for this OCC -> the row renders with only its base fields, no mark keys.
+    assertThat(pos).doesNotContainKey("current_price");
+    assertThat(pos).doesNotContainKey("unrealized_pl");
+    assertThat(pos).doesNotContainKey("unrealized_intraday_pl");
+    assertThat(pos).containsEntry("contract_symbol", "AAPL260116C00200000");
   }
 }

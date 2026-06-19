@@ -15,6 +15,12 @@ import java.math.BigDecimal;
  * "us_option"} — equities and crypto are excluded). {@code side} is {@code "long"} or {@code
  * "short"}; v0 of {@code BrokerPosition.side} only models {@code LONG}, so short positions are
  * dropped with a warn log.
+ *
+ * <p>The live-marks fields ({@code currentPrice}, {@code marketValue}, {@code unrealizedPl}, {@code
+ * unrealizedIntradayPl}) back the dashboard's per-position current price + today's/total unrealized
+ * P&amp;L. They are account-level broker truth (NOT a risk-gate input) and may be absent on some
+ * Alpaca responses, so they are nullable {@link BigDecimal} and {@code listOpenPositions} forwards
+ * them only when present.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record AlpacaPositionResponse(
@@ -22,4 +28,8 @@ public record AlpacaPositionResponse(
     @JsonProperty("asset_class") String assetClass,
     @JsonProperty("qty") String qty,
     @JsonProperty("side") String side,
-    @JsonProperty("avg_entry_price") BigDecimal avgEntryPrice) {}
+    @JsonProperty("avg_entry_price") BigDecimal avgEntryPrice,
+    @JsonProperty("current_price") BigDecimal currentPrice,
+    @JsonProperty("market_value") BigDecimal marketValue,
+    @JsonProperty("unrealized_pl") BigDecimal unrealizedPl,
+    @JsonProperty("unrealized_intraday_pl") BigDecimal unrealizedIntradayPl) {}

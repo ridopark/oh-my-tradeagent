@@ -3,6 +3,7 @@ import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
 import { getPortfolio, NotAuthenticatedError, type Portfolio } from "@/lib/bff";
 import { brokerMode, brokerProvider } from "@/lib/mode";
+import { Pnl, fmtCurrency } from "@/components/Pnl";
 
 export const dynamic = "force-dynamic";
 
@@ -36,7 +37,7 @@ export default async function StatusPage() {
       broker: brokerProvider(a.broker_target),
       mode: mode === "unknown" ? "—" : mode.toUpperCase(),
       account: a.account_number ?? "—",
-      equity: fmt(a.equity),
+      equity: fmtCurrency(a.equity),
       status: a.equity === null || a.equity === undefined ? "Unavailable" : "Connected",
     };
   });
@@ -47,6 +48,18 @@ export default async function StatusPage() {
     const n = a.equity == null ? NaN : Number(a.equity);
     return Number.isNaN(n) ? sum : (sum ?? 0) + n;
   }, null);
+
+  // Unrealized P&L summed across open positions' live broker marks (today / total). Seed null so a
+  // tenant whose positions carry NO marks degrades to "—" rather than a misleading $0; a row without
+  // the field simply doesn't contribute.
+  const sumMark = (field: "unrealized_intraday_pl" | "unrealized_pl"): number | null =>
+    p.open_positions.reduce<number | null>((sum, pos) => {
+      const raw = pos[field];
+      const n = raw == null ? NaN : Number(raw);
+      return Number.isNaN(n) ? sum : (sum ?? 0) + n;
+    }, null);
+  const unrealizedToday = sumMark("unrealized_intraday_pl");
+  const unrealizedTotal = sumMark("unrealized_pl");
 
   return (
     <>
@@ -78,16 +91,26 @@ export default async function StatusPage() {
         <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Stat
             label="Total account value"
-            value={fmt(totalAccountValue)}
+            value={fmtCurrency(totalAccountValue)}
             note="Net-liq equity (account-level, shared)."
           />
           <Stat label="Open positions" value={String(p.open_positions_count)} />
           <Stat
             label="Sum open notional"
-            value={fmt(p.sum_open_notional)}
+            value={fmtCurrency(p.sum_open_notional)}
             note="Cost basis at entry — not live mark."
           />
-          <Stat label="Realized P&L today" value={fmt(p.realized_pnl_today)} />
+          <Stat label="Realized P&L today" value={fmtCurrency(p.realized_pnl_today)} />
+          <PnlStat
+            label="Unrealized P&L (today)"
+            value={unrealizedToday}
+            note="Live broker marks summed across open positions."
+          />
+          <PnlStat
+            label="Unrealized P&L (total)"
+            value={unrealizedTotal}
+            note="Live broker marks summed across open positions."
+          />
         </section>
       </main>
     </>
@@ -170,16 +193,23 @@ function Stat({
   );
 }
 
-function fmt(v: string | number | null | undefined): string {
-  if (v === null || v === undefined) {
-    return "—";
-  }
-  const n = typeof v === "string" ? Number(v) : v;
-  if (Number.isNaN(n)) {
-    return String(v);
-  }
-  return n.toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-  });
+// Like Stat, but the value is a signed P&L rendered with the shared color-coded Pnl component.
+function PnlStat({
+  label,
+  value,
+  note,
+}: {
+  label: string;
+  value: number | null;
+  note?: string;
+}) {
+  return (
+    <div className="rounded border border-slate-800 bg-slate-900 px-4 py-3">
+      <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="mt-1 text-lg font-semibold">
+        <Pnl value={value} />
+      </div>
+      {note && <div className="mt-1 text-xs text-slate-500">{note}</div>}
+    </div>
+  );
 }

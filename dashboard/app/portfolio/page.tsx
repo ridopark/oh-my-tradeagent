@@ -2,6 +2,7 @@ import { auth } from "@/auth";
 import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
 import { contractCell } from "@/components/ContractLink";
+import { pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
 import { getPortfolio } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
@@ -23,10 +24,10 @@ export default async function PortfolioPage() {
           />
           <Stat
             label="Sum open notional"
-            value={fmt(p.sum_open_notional)}
+            value={fmtCurrency(p.sum_open_notional)}
             note="Cost basis at entry — not live mark."
           />
-          <Stat label="Realized P&L today" value={fmt(p.realized_pnl_today)} />
+          <Stat label="Realized P&L today" value={fmtCurrency(p.realized_pnl_today)} />
         </section>
 
         <section className="mb-6">
@@ -57,6 +58,9 @@ export default async function PortfolioPage() {
               { key: "remaining_qty", label: "Qty" },
               { key: "entry_premium", label: "Entry premium" },
               { key: "open_notional", label: "Open notional" },
+              { key: "current_price", label: "Current price", render: priceCell },
+              { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
+              { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
             ]}
             rows={p.open_positions}
           />
@@ -86,16 +90,3 @@ function Stat({
   );
 }
 
-function fmt(v: string | number | null): string {
-  if (v === null || v === undefined) {
-    return "—";
-  }
-  const n = typeof v === "string" ? Number(v) : v;
-  if (Number.isNaN(n)) {
-    return String(v);
-  }
-  return n.toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-  });
-}
