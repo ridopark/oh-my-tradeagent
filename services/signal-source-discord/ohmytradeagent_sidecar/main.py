@@ -36,7 +36,11 @@ def _required(name: str) -> str:
 def _parse_additional_targets(raw: str) -> list[tuple[str, str]]:
     """Parse ``SIGNAL_EMIT_ADDITIONAL_TARGETS`` (``tenant:strategy,tenant:strategy``) into a list of
     extra fan-out targets. Empty → no extras (single-tenant, unchanged). One browser/Discord session
-    can thus feed several tenants on the same channel (e.g. a live tenant + a paper shadow)."""
+    can thus feed several tenants on the same channel (e.g. a live tenant + a paper shadow).
+
+    NOTE: despite the ``SIGNAL_EMIT_`` name, this list drives BOTH per-tenant fan-outs — trading
+    signals (``Watcher``) AND the daily watchlist mirror (``WatchlistWatcher``) — kept in lockstep
+    on purpose so a shadow tenant never gets one without the other. Editing it moves both."""
     targets: list[tuple[str, str]] = []
     for item in raw.split(","):
         item = item.strip()
