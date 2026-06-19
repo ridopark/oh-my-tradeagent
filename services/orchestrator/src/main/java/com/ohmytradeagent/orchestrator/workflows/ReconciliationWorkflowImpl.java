@@ -24,7 +24,9 @@ import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -74,11 +76,17 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   // Plan-2A R-AA-4: a recon cycle issued an ABANDON-child AdoptionWorkflow start for an orphaned
   // FILLED position.
   private static final String KIND_RECON_AUTO_ADOPTION_INITIATED = "ReconAutoAdoptionInitiated";
+  // Issue #434: recon refused to auto-adopt a broker remnant whose OCC has physically expired. An
+  // expired contract has been dropped by the broker; adopting it would spawn a PositionWorkflow
+  // that lingers open (no buyer for a worthless contract) and gets re-adopted every cycle.
+  private static final String KIND_AUTO_ADOPT_REFUSED_EXPIRED = "AutoAdoptRefusedExpired";
 
   // Plan-2A R-AA-4: recon.auto_adopt.{initiated,already_owned,refused_not_held} metric outcomes.
   private static final String AUTO_ADOPT_INITIATED = "initiated";
   private static final String AUTO_ADOPT_ALREADY_OWNED = "already_owned";
   private static final String AUTO_ADOPT_REFUSED_NOT_HELD = "refused_not_held";
+  // Issue #434: recon refused to auto-adopt a physically-expired OCC.
+  private static final String AUTO_ADOPT_REFUSED_EXPIRED = "refused_expired";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -496,6 +504,30 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     String adoptWfId =
         WorkflowIds.adoption(in.getTenantId(), in.getStrategyId(), p.getOptionSymbol());
 
+    // Issue #434: refuse to adopt an OCC whose expiry has physically passed. The broker dropped the
+    // contract at expiry; a worthless expired contract has no buyer, so an adopted PositionWorkflow
+    // would never get a closing fill, linger "open", and be re-adopted every recon cycle (the TSLA
+    // 260618P incident). "Today" is derived deterministically from Workflow.currentTimeMillis() ->
+    // the America/New_York LocalDate (NOT LocalDate.now(), which is non-deterministic in workflow
+    // code). A null expiry (unparseable OCC) falls through to the normal adopt path (fail-safe: we
+    // do not silently skip a contract we cannot classify).
+    LocalDate occExpiry = OccSymbol.expiryOf(p.getOptionSymbol());
+    if (occExpiry != null && occExpiry.isBefore(workflowEtDate())) {
+      auditLog(
+          KIND_AUTO_ADOPT_REFUSED_EXPIRED,
+          subject(
+              "option_symbol",
+              p.getOptionSymbol(),
+              "qty",
+              p.getQty(),
+              "occ_expiry",
+              occExpiry.toString(),
+              "recon_et_date",
+              workflowEtDate().toString()));
+      recordAutoAdoptMetric(in, brokerTarget, AUTO_ADOPT_REFUSED_EXPIRED);
+      return;
+    }
+
     // Over-sell gate (b): refuse if any open/pending SELL for this OCC exists at the broker.
     String compactOcc = OccSymbol.compact(p.getOptionSymbol());
     for (BrokerOpenOrder o : brokerOpen) {
@@ -602,5 +634,17 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   private static OffsetDateTime workflowNow() {
     return OffsetDateTime.ofInstant(
         Instant.ofEpochMilli(Workflow.currentTimeMillis()), ZoneOffset.UTC);
+  }
+
+  /**
+   * Issue #434: the recon workflow's "today" in the US options market timezone, derived
+   * deterministically from {@link Workflow#currentTimeMillis()} (never {@code LocalDate.now()},
+   * which is non-deterministic in workflow code). Used to decide whether a broker remnant's OCC has
+   * physically expired.
+   */
+  private static LocalDate workflowEtDate() {
+    return Instant.ofEpochMilli(Workflow.currentTimeMillis())
+        .atZone(ZoneId.of("America/New_York"))
+        .toLocalDate();
   }
 }

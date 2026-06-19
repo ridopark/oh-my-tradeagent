@@ -116,7 +116,8 @@ public class ReconciliationMetricsActivitiesImpl implements ReconciliationMetric
                 Counter.builder(AUTO_ADOPT_COUNTER_NAME)
                     .description(
                         "Recon auto-adoption decisions for orphaned FILLED positions, by outcome "
-                            + "(initiated|already_owned|refused_not_held). Plan-2A R-AA-4.")
+                            + "(initiated|already_owned|refused_not_held|refused_expired). Plan-2A"
+                            + " R-AA-4 / issue #434.")
                     .tag("tenant", tenantId)
                     .tag("strategy", strategyId)
                     .tag("broker_target", brokerTarget)

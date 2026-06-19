@@ -115,4 +115,32 @@ class OccSymbolTest {
   void underlying_nullSafe() {
     assertThat(OccSymbol.underlying(null)).isNull();
   }
+
+  // Issue #434: expiryOf is the inverse of of() — parse the YYMMDD expiry back out of an OCC.
+
+  @Test
+  void expiryOf_parsesPaddedCanonicalForm() {
+    assertThat(OccSymbol.expiryOf("TSLA  260618P00380000")).isEqualTo(LocalDate.of(2026, 6, 18));
+  }
+
+  @Test
+  void expiryOf_parsesCompactBrokerForm() {
+    assertThat(OccSymbol.expiryOf("TSLA260618P00380000")).isEqualTo(LocalDate.of(2026, 6, 18));
+  }
+
+  @Test
+  void expiryOf_roundTripsWithOf() {
+    LocalDate expiry = LocalDate.of(2027, 1, 15);
+    OccSymbol s = OccSymbol.of("NVDA", expiry, new BigDecimal("140"), "C");
+    assertThat(OccSymbol.expiryOf(s.value())).isEqualTo(expiry);
+  }
+
+  @Test
+  void expiryOf_nullOrUnparseable_returnsNull() {
+    assertThat(OccSymbol.expiryOf(null)).isNull();
+    assertThat(OccSymbol.expiryOf("")).isNull();
+    assertThat(OccSymbol.expiryOf("SHORT")).isNull();
+    // 15 chars but the YYMMDD slice is non-numeric → null.
+    assertThat(OccSymbol.expiryOf("ABCDEFP00380000")).isNull();
+  }
 }
