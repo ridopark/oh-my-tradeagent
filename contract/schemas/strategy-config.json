@@ -98,7 +98,13 @@
       "type": "number",
       "exclusiveMinimum": 0,
       "maximum": 1,
-      "description": "Fraction of strategy capital allocated per signal. allocation = capital_per_strategy * capital_weight."
+      "description": "Fraction of strategy capital allocated per signal. allocation = capital_base * capital_weight, where capital_base is selected by capital_source."
+    },
+    "capital_source": {
+      "type": "string",
+      "enum": ["static", "account_cash"],
+      "default": "static",
+      "description": "Selects the capital base for capital-weight sizing (allocation = capital_base * capital_weight, clamped to min/max_contracts). 'static' (DEFAULT; null/absent treated as 'static') uses the global ORCHESTRATOR_CAPITAL_PER_STRATEGY via CapitalAllocator.capitalForStrategy — the same value for every tenant, which over-sizes a small live account (a $5k account sized as if it held the $100k global). 'account_cash' sizes from the broker account's live CASH balance (the same AccountSnapshotActivity cash the notional-cap gate reads), so a small real-money account is sized to its actual buying power. account_cash is fail-CLOSED: when the resolved cash is null/zero (broker outage → the ZERO sentinel, or a genuinely empty account) the BTO is REJECTED (SignalRejected reason capital_unavailable) — NO order, NO PositionWorkflow; it NEVER falls back to the static $100k. Selecting account_cash also forces the account-snapshot dispatch even when no notional cap is configured."
     },
     "min_contracts": {
       "type": "integer",

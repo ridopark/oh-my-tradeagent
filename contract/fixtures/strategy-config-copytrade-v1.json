@@ -9,6 +9,7 @@
   "bto_price_move_reject_pct": 0.1,
   "max_positions": 5,
   "capital_weight": 0.2,
+  "capital_source": "static",
   "min_contracts": 1,
   "max_contracts": 5,
   "skip_avg": true,

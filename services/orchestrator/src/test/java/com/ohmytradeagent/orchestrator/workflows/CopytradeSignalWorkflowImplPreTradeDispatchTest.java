@@ -1093,6 +1093,153 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
         .orElseThrow(() -> new AssertionError("no audit event with kind=" + kind));
   }
 
+  // ---------- dynamic-account-cash-sizing: capital_source=account_cash ----------
+
+  /**
+   * dynamic-account-cash-sizing: with {@code capital_source=account_cash} and NO notional cap, the
+   * workflow MUST still dispatch {@code AccountSnapshotActivity} (the cash-sizing widening of the
+   * dispatch enablement) and size from the broker CASH × capital_weight — NOT the global static
+   * $100k. cash=5000 × weight=0.2 = $1000 allocation; price=2.30 → $230/contract → floor(4.34)=4,
+   * inside [min=1,max=5]. If sizing had wrongly used the static $100k base, allocation=$20k → 86 →
+   * clamped to max=5, so a qty of 4 proves the cash base was used. {@code capitalForStrategy} (the
+   * static allocator) must NEVER be consulted on this path.
+   */
+  @Test
+  void handleBto_accountCashSizing_noNotionalCap_sizesFromBrokerCash_andDispatchesSnapshot() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setCapitalSource(StrategyConfig.CapitalSource.ACCOUNT_CASH);
+    // Deliberately NO notional cap: account_cash alone must force the snapshot dispatch.
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    AtomicInteger accountCalls = new AtomicInteger();
+    AccountSnapshotActivity accountStub =
+        request -> {
+          accountCalls.incrementAndGet();
+          AccountSnapshotResult r = new AccountSnapshotResult();
+          r.setSchemaVersion(1L);
+          r.setEquity(new BigDecimal("999999.99"));
+          r.setCash(new BigDecimal("5000"));
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub, accountStub);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-K"));
+    env.start();
+
+    runWorkflow(btoPayload());
+
+    // account_cash forced the snapshot dispatch even though no notional cap was configured.
+    assertThat(accountCalls.get()).isEqualTo(1);
+    // Sized from cash (5000 × 0.2 = 1000 / 230 = floor 4), NOT the static $100k (which would
+    // max=5).
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec).placeOrder(intentCaptor.capture());
+    assertThat(intentCaptor.getValue().getQty()).isEqualTo(4L);
+    // The static allocator must never be consulted under account_cash.
+    verify(strategy, Mockito.never()).capitalForStrategy(anyString(), anyString());
+  }
+
+  /**
+   * dynamic-account-cash-sizing fail-closed: with {@code capital_source=account_cash}, when the
+   * resolved cash is ZERO (broker outage → the {@code dispatchAccountSnapshot} ZERO sentinel, or a
+   * genuinely empty account) the entry is REJECTED with reason {@code capital_unavailable} — no
+   * placeOrder, no PositionWorkflow — and NEVER falls back to the static $100k. The risk gate
+   * APPROVES here (no notional cap, approved decision) so the reject is driven purely by the
+   * cash-sizing fail-closed branch, not the cap gate.
+   */
+  @Test
+  void handleBto_accountCashSizing_zeroCash_rejectsCapitalUnavailable_noOrder() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setCapitalSource(StrategyConfig.CapitalSource.ACCOUNT_CASH);
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    // Broker outage: the snapshot throws → dispatchAccountSnapshot fails closed to ZERO cash.
+    AccountSnapshotActivity throwingAccountStub =
+        request -> {
+          throw new RuntimeException("broker /v2/account timeout");
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub, throwingAccountStub);
+    env.start();
+
+    runWorkflow(btoPayload());
+
+    AuditEvent rejected = capture("SignalRejected");
+    assertThat(rejected.getSubject()).containsEntry("reason_code", "CAPITAL_UNAVAILABLE");
+    assertThat(rejected.getSubject()).containsEntry("reason_detail", "capital_unavailable");
+    assertThat(rejected.getSubject()).containsEntry("outcome", "REJECTED");
+    // Fail-closed: NO order placed, and the static allocator is NEVER used as a fallback.
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+    verify(strategy, Mockito.never()).capitalForStrategy(anyString(), anyString());
+  }
+
+  /**
+   * Back-compat: {@code capital_source} absent (defaults to {@code static}) sizes from the static
+   * allocator, byte-identical to the pre-change path. capital=$100k × 0.2 = $20k / $230 = 86 →
+   * clamped to max=5. No AccountSnapshotActivity is registered, proving the static path never
+   * dispatches one (no notional cap, no account_cash).
+   */
+  @Test
+  void handleBto_defaultStaticSource_sizesFromStaticAllocator_unchanged() {
+    StrategyConfig cfg = configWithPreTradeEnabled(); // capital_source unset → STATIC default
+    assertThat(cfg.getCapitalSource()).isEqualTo(StrategyConfig.CapitalSource.STATIC);
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-K"));
+    env.start();
+
+    runWorkflow(btoPayload());
+
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec).placeOrder(intentCaptor.capture());
+    assertThat(intentCaptor.getValue().getQty()).isEqualTo(5L); // static $100k → clamped to max
+    verify(strategy, Mockito.times(1)).capitalForStrategy("dev", "copytrade-v1");
+  }
+
   private static ContractResolveResult resolved() {
     return new ContractResolveResult(
         "NVDA  260516C00140000",

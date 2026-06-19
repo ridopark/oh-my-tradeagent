@@ -21,6 +21,15 @@ from pydantic import (
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
 
 
+class CapitalSource(StrEnum):
+    """
+    Selects the capital base for capital-weight sizing (allocation = capital_base * capital_weight, clamped to min/max_contracts). 'static' (DEFAULT; null/absent treated as 'static') uses the global ORCHESTRATOR_CAPITAL_PER_STRATEGY via CapitalAllocator.capitalForStrategy — the same value for every tenant, which over-sizes a small live account (a $5k account sized as if it held the $100k global). 'account_cash' sizes from the broker account's live CASH balance (the same AccountSnapshotActivity cash the notional-cap gate reads), so a small real-money account is sized to its actual buying power. account_cash is fail-CLOSED: when the resolved cash is null/zero (broker outage → the ZERO sentinel, or a genuinely empty account) the BTO is REJECTED (SignalRejected reason capital_unavailable) — NO order, NO PositionWorkflow; it NEVER falls back to the static $100k. Selecting account_cash also forces the account-snapshot dispatch even when no notional cap is configured.
+    """
+
+    static = "static"
+    account_cash = "account_cash"
+
+
 class MinPartialQtyBehavior(StrEnum):
     """
     Issue #205 (originally #16): governs partial_exit when remainingQty <= 1 AND floor(remainingQty * fraction) == 0 — the integer broker quantum can no longer represent a partial honestly. 'skip' (default) logs PartialExitSkippedMinQty and places no order; the runner rides to trail/EOD/STC. 'full_close' closes the last contract on the partial signal. Null/absent treated as 'skip'. PositionWorkflowImpl gates the new branch behind Workflow.getVersion('min-partial-qty-skip', DEFAULT, 1) so in-flight pre-#205 workflows preserve their legacy ceil(remainingQty * fraction) behavior on replay.
@@ -79,7 +88,11 @@ class StrategyConfig(BaseModel):
     """
     capital_weight: confloat(le=1.0, gt=0.0)
     """
-    Fraction of strategy capital allocated per signal. allocation = capital_per_strategy * capital_weight.
+    Fraction of strategy capital allocated per signal. allocation = capital_base * capital_weight, where capital_base is selected by capital_source.
+    """
+    capital_source: CapitalSource | None = CapitalSource.static
+    """
+    Selects the capital base for capital-weight sizing (allocation = capital_base * capital_weight, clamped to min/max_contracts). 'static' (DEFAULT; null/absent treated as 'static') uses the global ORCHESTRATOR_CAPITAL_PER_STRATEGY via CapitalAllocator.capitalForStrategy — the same value for every tenant, which over-sizes a small live account (a $5k account sized as if it held the $100k global). 'account_cash' sizes from the broker account's live CASH balance (the same AccountSnapshotActivity cash the notional-cap gate reads), so a small real-money account is sized to its actual buying power. account_cash is fail-CLOSED: when the resolved cash is null/zero (broker outage → the ZERO sentinel, or a genuinely empty account) the BTO is REJECTED (SignalRejected reason capital_unavailable) — NO order, NO PositionWorkflow; it NEVER falls back to the static $100k. Selecting account_cash also forces the account-snapshot dispatch even when no notional cap is configured.
     """
     min_contracts: conint(ge=1)
     """

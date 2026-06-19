@@ -177,6 +177,28 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * dynamic-account-cash-sizing: pins the account-cash-sizing version marker. The ONLY
+   * command-stream change the capital_source=account_cash feature introduces is WIDENING the
+   * account-snapshot dispatch enablement (cap OR cash-sizing) so an account_cash+no-notional-cap
+   * strategy dispatches a snapshot it previously did not. That widening is fenced behind {@code
+   * Workflow.getVersion(VERSION_ACCOUNT_CASH_SIZING, DEFAULT, 1)} (read unconditionally in both
+   * dispatchAccountSnapshot and the sizing block), so every in-flight history recorded with NO
+   * {@code account-cash-sizing-v1} marker replays at v=DEFAULT_VERSION: no widened dispatch, and
+   * the sizing block falls through to the static capitalForStrategy read — byte-identical to the
+   * recorded command stream. The static→cash capital switch itself is an activity-INPUT change (the
+   * contracts value), which Temporal replay ignores, so it needs no marker. Renaming the literal
+   * would silently re-version in-flight executions; this test fails loudly on that. Mirrors {@link
+   * #versionLivePromotionGateConstantNameIsStable}.
+   */
+  @Test
+  void versionAccountCashSizingConstantNameIsStable() throws Exception {
+    Field marker =
+        CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_ACCOUNT_CASH_SIZING");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("account-cash-sizing-v1");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#111 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The SDK's deterministic replay engine walks the
    * recorded events, calls into the current workflow code, and compares scheduled activity commands
