@@ -41,13 +41,12 @@ export default async function StatusPage() {
     };
   });
 
-  // Total account value = net-liquidation equity summed across the tenant's broker_targets. Null
-  // when no broker reported equity (all unavailable) so the Stat degrades to "—" rather than $0.
-  const equityValues = accounts
-    .map((a) => (a.equity === null || a.equity === undefined ? null : Number(a.equity)))
-    .filter((n): n is number => n !== null && !Number.isNaN(n));
-  const totalAccountValue =
-    equityValues.length > 0 ? equityValues.reduce((s, n) => s + n, 0) : null;
+  // Total account value = net-liquidation equity summed across the tenant's broker_targets. Stays
+  // null until a real number arrives (seed null, not 0) so "all unavailable" degrades to "—", not $0.
+  const totalAccountValue = accounts.reduce<number | null>((sum, a) => {
+    const n = a.equity == null ? NaN : Number(a.equity);
+    return Number.isNaN(n) ? sum : (sum ?? 0) + n;
+  }, null);
 
   return (
     <>
