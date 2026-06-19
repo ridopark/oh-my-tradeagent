@@ -21,6 +21,22 @@ public interface WebhookClient {
   void post(String content);
 
   /**
+   * Tenant-scoped overload of {@link #post(String)}: deliver {@code content} to the webhook
+   * configured for {@code tenantId}, falling back to the global default when that tenant has no
+   * dedicated webhook. Same best-effort contract: never throws.
+   *
+   * <p>Default delegates to the no-arg {@link #post(String)} (i.e. always the global default) so
+   * that mocks/lambdas keep compiling and only the real Discord transport implements per-tenant
+   * routing. A {@code null}/blank {@code tenantId} resolves to the global default.
+   *
+   * @param tenantId the tenant whose webhook should receive the message (null/blank → global)
+   * @param content the message body to deliver
+   */
+  default void post(String tenantId, String content) {
+    post(content);
+  }
+
+  /**
    * Post a rich {@link WebhookEmbed} to the configured webhook. Same best-effort contract as {@link
    * #post(String)}: blank URL is a no-op and transport failures are swallowed-and-logged, never
    * propagated to the caller.
@@ -32,5 +48,21 @@ public interface WebhookClient {
    */
   default void postEmbed(WebhookEmbed embed) {
     // No-op by default; the Discord transport overrides this.
+  }
+
+  /**
+   * Tenant-scoped overload of {@link #postEmbed(WebhookEmbed)}: deliver {@code embed} to the
+   * webhook configured for {@code tenantId}, falling back to the global default when that tenant
+   * has no dedicated webhook. Same best-effort contract: never throws.
+   *
+   * <p>Default delegates to the no-arg {@link #postEmbed(WebhookEmbed)} (i.e. always the global
+   * default) so that mocks/lambdas keep compiling and only the real Discord transport implements
+   * per-tenant routing. A {@code null}/blank {@code tenantId} resolves to the global default.
+   *
+   * @param tenantId the tenant whose webhook should receive the embed (null/blank → global)
+   * @param embed the embed to deliver
+   */
+  default void postEmbed(String tenantId, WebhookEmbed embed) {
+    postEmbed(embed);
   }
 }

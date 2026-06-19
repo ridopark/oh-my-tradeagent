@@ -36,7 +36,7 @@ class BrokerRejectionAlerterTest {
     alerter.onBrokerRejection(
         intent(OrderIntent.Side.BUY), "coid-abc", "Alpaca rejected (403): account blocked");
 
-    WebhookEmbed embed = captureEmbed(webhook);
+    WebhookEmbed embed = captureEmbed(webhook, "dev");
     assertThat(embed.title()).contains("BTO (entry)");
     assertThat(embed.color()).isEqualTo(15548997); // red
     // The contract field is a clickable Yahoo link over the padded OCC.
@@ -60,7 +60,7 @@ class BrokerRejectionAlerterTest {
 
     alerter.onBrokerRejection(intent(OrderIntent.Side.SELL), "coid-xyz", "422 too long");
 
-    WebhookEmbed embed = captureEmbed(webhook);
+    WebhookEmbed embed = captureEmbed(webhook, "dev");
     assertThat(embed.title()).contains("STC (exit)");
     assertThat(embed.color()).isEqualTo(15548997);
   }
@@ -72,7 +72,7 @@ class BrokerRejectionAlerterTest {
 
     alerter.onBrokerRejection(intent(OrderIntent.Side.BUY), "coid", "reason");
 
-    verify(webhook, never()).postEmbed(ArgumentMatchers.any());
+    verify(webhook, never()).postEmbed(ArgumentMatchers.any(), ArgumentMatchers.any());
   }
 
   @Test
@@ -80,7 +80,7 @@ class BrokerRejectionAlerterTest {
     WebhookClient webhook = mock(WebhookClient.class);
     org.mockito.Mockito.doThrow(new RuntimeException("boom"))
         .when(webhook)
-        .postEmbed(ArgumentMatchers.any());
+        .postEmbed(ArgumentMatchers.any(), ArgumentMatchers.any());
     BrokerRejectionAlerter alerter = new BrokerRejectionAlerter(webhook, true, Runnable::run);
 
     assertThatCode(() -> alerter.onBrokerRejection(intent(OrderIntent.Side.BUY), "coid", "reason"))
@@ -93,7 +93,8 @@ class BrokerRejectionAlerterTest {
     BrokerRejectionAlerter alerter = new BrokerRejectionAlerter(webhook, true, Runnable::run);
 
     assertThatCode(() -> alerter.onBrokerRejection(null, null, null)).doesNotThrowAnyException();
-    WebhookEmbed embed = captureEmbed(webhook);
+    // A null intent → null tenant → resolve() routes to the global default (verified here).
+    WebhookEmbed embed = captureEmbed(webhook, null);
     // Malformed/absent symbol → plain text, never a link, never a throw.
     assertThat(fieldByName(embed, "symbol").value()).isEqualTo("n/a");
   }
@@ -185,12 +186,19 @@ class BrokerRejectionAlerterTest {
 
     assertThatCode(() -> alerter.onBrokerRejection(intent(OrderIntent.Side.BUY), "coid", "reason"))
         .doesNotThrowAnyException();
-    verify(webhook, never()).postEmbed(ArgumentMatchers.any());
+    verify(webhook, never()).postEmbed(ArgumentMatchers.any(), ArgumentMatchers.any());
   }
 
-  private static WebhookEmbed captureEmbed(WebhookClient webhook) {
+  /**
+   * Captures the single {@code postEmbed(tenantId, embed)} interaction and asserts the alert is
+   * routed to {@code expectedTenant} (the rejecting intent's tenant; {@code null} → global default
+   * downstream). Returns the embed for further field assertions.
+   */
+  private static WebhookEmbed captureEmbed(WebhookClient webhook, String expectedTenant) {
+    ArgumentCaptor<String> tenantCaptor = ArgumentCaptor.forClass(String.class);
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook, times(1)).postEmbed(captor.capture());
+    verify(webhook, times(1)).postEmbed(tenantCaptor.capture(), captor.capture());
+    assertThat(tenantCaptor.getValue()).isEqualTo(expectedTenant);
     return captor.getValue();
   }
 

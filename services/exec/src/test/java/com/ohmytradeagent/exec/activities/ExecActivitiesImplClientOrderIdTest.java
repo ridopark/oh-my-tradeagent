@@ -135,7 +135,9 @@ class ExecActivitiesImplClientOrderIdTest {
     // rejection,
     // carrying the action, Yahoo-linked symbol, reason, and identifiers.
     ArgumentCaptor<WebhookEmbed> embedCaptor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook).postEmbed(embedCaptor.capture());
+    // Issue: the alert is now tenant-routed — dispatched via postEmbed(tenantId, embed) so the
+    // rejecting tenant's order-failure lands in ITS channel (not another tenant's).
+    verify(webhook).postEmbed(eq("dev"), embedCaptor.capture());
     WebhookEmbed embed = embedCaptor.getValue();
     assertThat(embed.title()).contains("STC (exit)");
     assertThat(fieldValue(embed, "symbol")).contains("TSLA260529C00435000");
@@ -156,7 +158,7 @@ class ExecActivitiesImplClientOrderIdTest {
     assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
 
     ArgumentCaptor<WebhookEmbed> embedCaptor = ArgumentCaptor.forClass(WebhookEmbed.class);
-    verify(webhook).postEmbed(embedCaptor.capture());
+    verify(webhook).postEmbed(eq("dev"), embedCaptor.capture());
     WebhookEmbed embed = embedCaptor.getValue();
     assertThat(embed.title()).contains("BTO (entry)");
     assertThat(fieldValue(embed, "symbol")).contains("AAPL260116C00200000");
@@ -177,7 +179,7 @@ class ExecActivitiesImplClientOrderIdTest {
     // propagates (so Temporal keeps its non-retryable classification; no #264 retry storm).
     org.mockito.Mockito.doThrow(new RuntimeException("discord down"))
         .when(webhook)
-        .postEmbed(any());
+        .postEmbed(any(), any());
 
     assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
 
@@ -203,7 +205,7 @@ class ExecActivitiesImplClientOrderIdTest {
     verify(journal, never()).markSubmittedIfRecorded(anyString(), anyString());
     verify(journal, never()).markPlaceFailed(anyString(), anyString());
     // Benign success path: the exception-only rejection alerter must NOT fire.
-    verify(webhook, never()).postEmbed(any());
+    verify(webhook, never()).postEmbed(any(), any());
   }
 
   private static JournaledOrder cancelledAlreadyFlatRow(String intentKey) {
