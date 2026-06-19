@@ -1,6 +1,7 @@
 import { auth } from "@/auth";
 import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
+import { contractCell } from "@/components/ContractLink";
 import { getPortfolio } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
@@ -52,7 +53,7 @@ export default async function PortfolioPage() {
             empty="No open positions."
             columns={[
               { key: "strategy_id", label: "Strategy" },
-              { key: "contract_symbol", label: "Contract" },
+              { key: "contract_symbol", label: "Contract", render: contractCell },
               { key: "remaining_qty", label: "Qty" },
               { key: "entry_premium", label: "Entry premium" },
               { key: "open_notional", label: "Open notional" },

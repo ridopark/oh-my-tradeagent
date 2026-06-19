@@ -1,10 +1,20 @@
+import type { ReactNode } from "react";
+
+// A table column. An optional `render` lets a cell emit rich content (e.g. a contract link or a
+// signed P&L) instead of the default string format — it receives the cell value and the whole row.
+export type Column = {
+  key: string;
+  label: string;
+  render?: (value: unknown, row: Record<string, unknown>) => ReactNode;
+};
+
 // Minimal read-only table for tabular BFF data. Server-component friendly (no client hooks).
 export function DataTable({
   columns,
   rows,
   empty = "No data.",
 }: {
-  columns: { key: string; label: string }[];
+  columns: Column[];
   // Accepts any array of row objects (typed BFF interfaces lack an index signature); each cell is
   // read by key via an internal cast.
   rows: readonly unknown[];
@@ -35,7 +45,7 @@ export function DataTable({
               <tr key={i} className="hover:bg-slate-800/50">
                 {columns.map((c) => (
                   <td key={c.key} className="px-3 py-2 text-slate-200">
-                    {format(r[c.key])}
+                    {c.render ? c.render(r[c.key], r) : format(r[c.key])}
                   </td>
                 ))}
               </tr>
