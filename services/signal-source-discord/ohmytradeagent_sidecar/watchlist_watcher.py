@@ -74,12 +74,19 @@ class WatchlistWatcher:
         author: str,
         log: logging.Logger,
         poll_interval_secs: float,
+        additional_targets: list[tuple[str, str]] | None = None,
     ) -> None:
         self._channel_url = channel_url
         self._state_dir = state_dir
         self._emitter = emitter
         self._tenant_id = tenant_id
         self._strategy_id = strategy_id
+        # Fan-out targets BEYOND the primary (tenant_id, strategy_id), mirroring the signal Watcher
+        # so the daily watchlist lands in the SAME channels signals do (e.g. a live tenant + a paper
+        # shadow). The primary stays the once-per-day / stale-dedup leader; extras are best-effort.
+        # Each target gets its own tenant-scoped WatchlistMirrorWorkflow id, so Temporal
+        # REJECT_DUPLICATE dedupes per tenant and a re-find never double-posts.
+        self._additional_targets: list[tuple[str, str]] = list(additional_targets or [])
         self._author = author
         self._log = log
         self._poll_interval = poll_interval_secs
@@ -101,6 +108,20 @@ class WatchlistWatcher:
             self._mirrored_date = et_date
             return True
         return False
+
+    def _payload_for(
+        self, tenant_id: str, strategy_id: str, m: RawMessage, et_date: str
+    ) -> WatchlistMirrorPayload:
+        """Build the per-target mirror payload (same message, per-tenant scope)."""
+        return WatchlistMirrorPayload(
+            schema_version=1,
+            tenant_id=tenant_id,
+            strategy_id=strategy_id,
+            et_date=date.fromisoformat(et_date),
+            author=m.author,
+            raw_text=m.content,
+            source_message_id=m.message_id,
+        )
 
     async def process(self, msgs: list[RawMessage], et_date: str) -> None:
         """Emit at most one watchlist for ``et_date`` from the given messages.
@@ -145,16 +166,9 @@ class WatchlistWatcher:
                     et_date,
                 )
                 continue
-            payload = WatchlistMirrorPayload(
-                schema_version=1,
-                tenant_id=self._tenant_id,
-                strategy_id=self._strategy_id,
-                et_date=date.fromisoformat(et_date),
-                author=m.author,
-                raw_text=m.content,
-                source_message_id=m.message_id,
+            result = await self._emitter.emit(
+                self._payload_for(self._tenant_id, self._strategy_id, m, et_date)
             )
-            result = await self._emitter.emit(payload)
             if result.deduped:
                 # Temporal already has this message's workflow — it's a stale
                 # re-find (e.g. yesterday's watchlist still newest right after
@@ -165,15 +179,38 @@ class WatchlistWatcher:
                     m.message_id,
                 )
                 continue
-            self._state.record(et_date=et_date, source_message_id=m.message_id)
-            self._mirrored_date = et_date
             self._log.info(
-                "mirrored watchlist for %s from %s (msg=%s workflow_id=%s)",
+                "mirrored watchlist for %s from %s (msg=%s tenant=%s workflow_id=%s)",
                 et_date,
                 m.author,
                 m.message_id,
+                self._tenant_id,
                 result.workflow_id,
             )
+            # Genuinely-new watchlist: fan out to the additional shadow tenants so the digest
+            # lands in their channels too. Best-effort — a per-target emit failure must never
+            # block recording the day or the other targets (the primary already posted).
+            for tenant_id, strategy_id in self._additional_targets:
+                try:
+                    extra = await self._emitter.emit(
+                        self._payload_for(tenant_id, strategy_id, m, et_date)
+                    )
+                    self._log.info(
+                        "mirrored watchlist for %s tenant=%s (msg=%s deduped=%s workflow_id=%s)",
+                        et_date,
+                        tenant_id,
+                        m.message_id,
+                        extra.deduped,
+                        extra.workflow_id,
+                    )
+                except Exception:  # noqa: BLE001 - best-effort fan-out, never block the day
+                    self._log.exception(
+                        "additional watchlist target emit failed tenant=%s (msg=%s) — continuing",
+                        tenant_id,
+                        m.message_id,
+                    )
+            self._state.record(et_date=et_date, source_message_id=m.message_id)
+            self._mirrored_date = et_date
             return
 
     async def run_on_page(self, page: Page) -> None:

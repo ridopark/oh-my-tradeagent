@@ -42,17 +42,22 @@ def _msg(
 
 
 def _make_watcher(
-    tmp_path: pathlib.Path, emitter: InMemoryWatchlistEmitter
+    tmp_path: pathlib.Path,
+    emitter: InMemoryWatchlistEmitter,
+    *,
+    tenant_id: str = "dev",
+    additional_targets: list[tuple[str, str]] | None = None,
 ) -> WatchlistWatcher:
     return WatchlistWatcher(
         channel_url="https://discord/channel/watchlist",
         state_dir=tmp_path,
         emitter=emitter,
-        tenant_id="dev",
+        tenant_id=tenant_id,
         strategy_id="copytrade-v1",
         author=AUTHOR,
         log=logging.getLogger("test"),
         poll_interval_secs=45.0,
+        additional_targets=additional_targets,
     )
 
 
@@ -243,6 +248,53 @@ async def test_todays_watchlist_mirrors(tmp_path: pathlib.Path) -> None:
     )
     assert len(emitter.emitted) == 1
     assert w._state.already_mirrored_today("2026-06-05") is True  # type: ignore[attr-defined]
+
+
+async def test_fans_out_to_additional_targets(tmp_path: pathlib.Path) -> None:
+    """A genuinely-new watchlist is mirrored once per fan-out target (primary +
+    extras), each tenant-scoped, so it lands in every tenant's channel. The day
+    is recorded once.
+    """
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(
+        tmp_path,
+        emitter,
+        tenant_id="prod_real",
+        additional_targets=[("staging_paper", "copytrade-v1")],
+    )
+    await w.process([_msg("msg-1")], et_date="2026-06-03")
+
+    assert len(emitter.emitted) == 2
+    assert {p.tenant_id for p in emitter.emitted} == {"prod_real", "staging_paper"}
+    # The PRIMARY is emitted first (it's the once-per-day leader).
+    assert emitter.emitted[0].tenant_id == "prod_real"
+    # Same source message mirrored to both, distinct per-tenant workflow ids.
+    assert all(p.source_message_id == "msg-1" for p in emitter.emitted)
+    assert {watchlist_workflow_id_for(p) for p in emitter.emitted} == {
+        "t-prod_real/s-copytrade-v1/watchlist/msg-1",
+        "t-staging_paper/s-copytrade-v1/watchlist/msg-1",
+    }
+    assert w._state.already_mirrored_today("2026-06-03") is True  # type: ignore[attr-defined]
+
+
+async def test_deduped_primary_does_not_fan_out(tmp_path: pathlib.Path) -> None:
+    """When the PRIMARY emit is deduped (stale re-find), no fan-out happens and
+    the day is not consumed — the extras only mirror alongside a genuinely-new
+    primary post.
+    """
+    emitter = InMemoryWatchlistEmitter()
+    emitter.preseed("t-prod_real/s-copytrade-v1/watchlist/stale")
+    w = _make_watcher(
+        tmp_path,
+        emitter,
+        tenant_id="prod_real",
+        additional_targets=[("staging_paper", "copytrade-v1")],
+    )
+    await w.process(
+        [_msg("stale", timestamp_iso="2026-06-04T15:00:00Z")], et_date="2026-06-04"
+    )
+    assert emitter.emitted == []  # primary deduped → no fan-out at all
+    assert w._state.already_mirrored_today("2026-06-04") is False  # type: ignore[attr-defined]
 
 
 async def test_missing_timestamp_is_skipped(

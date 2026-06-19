@@ -146,6 +146,9 @@ async def _amain() -> None:
             author=watchlist_author,
             log=log,
             poll_interval_secs=watchlist_poll_interval,
+            # Mirror the daily watchlist to the SAME fan-out targets as signals (e.g. a paper
+            # shadow), so each tenant's digest lands in its own channel — not just the primary's.
+            additional_targets=additional_targets,
         )
         log.info("watchlist mirror enabled (channel=%s author=%s)",
                  watchlist_channel_url, watchlist_author)
