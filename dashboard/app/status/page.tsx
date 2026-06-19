@@ -3,6 +3,7 @@ import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
 import { getPortfolio, NotAuthenticatedError, type Portfolio } from "@/lib/bff";
 import { brokerMode, brokerProvider } from "@/lib/mode";
+import { Pnl } from "@/components/Pnl";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +49,18 @@ export default async function StatusPage() {
     return Number.isNaN(n) ? sum : (sum ?? 0) + n;
   }, null);
 
+  // Unrealized P&L summed across open positions' live broker marks (today / total). Seed null so a
+  // tenant whose positions carry NO marks degrades to "—" rather than a misleading $0; a row without
+  // the field simply doesn't contribute.
+  const sumMark = (field: "unrealized_intraday_pl" | "unrealized_pl"): number | null =>
+    p.open_positions.reduce<number | null>((sum, pos) => {
+      const raw = pos[field];
+      const n = raw == null ? NaN : Number(raw);
+      return Number.isNaN(n) ? sum : (sum ?? 0) + n;
+    }, null);
+  const unrealizedToday = sumMark("unrealized_intraday_pl");
+  const unrealizedTotal = sumMark("unrealized_pl");
+
   return (
     <>
       <Nav tenantId={session?.tenantId} />
@@ -88,6 +101,16 @@ export default async function StatusPage() {
             note="Cost basis at entry — not live mark."
           />
           <Stat label="Realized P&L today" value={fmt(p.realized_pnl_today)} />
+          <PnlStat
+            label="Unrealized P&L (today)"
+            value={unrealizedToday}
+            note="Live broker marks summed across open positions."
+          />
+          <PnlStat
+            label="Unrealized P&L (total)"
+            value={unrealizedTotal}
+            note="Live broker marks summed across open positions."
+          />
         </section>
       </main>
     </>
@@ -165,6 +188,27 @@ function Stat({
     <div className="rounded border border-slate-800 bg-slate-900 px-4 py-3">
       <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
       <div className="mt-1 text-lg font-semibold text-slate-100">{value}</div>
+      {note && <div className="mt-1 text-xs text-slate-500">{note}</div>}
+    </div>
+  );
+}
+
+// Like Stat, but the value is a signed P&L rendered with the shared color-coded Pnl component.
+function PnlStat({
+  label,
+  value,
+  note,
+}: {
+  label: string;
+  value: number | null;
+  note?: string;
+}) {
+  return (
+    <div className="rounded border border-slate-800 bg-slate-900 px-4 py-3">
+      <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="mt-1 text-lg font-semibold">
+        <Pnl value={value} />
+      </div>
       {note && <div className="mt-1 text-xs text-slate-500">{note}</div>}
     </div>
   );

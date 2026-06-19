@@ -573,7 +573,9 @@ class AlpacaPaperBrokerTest {
                 "[{\"symbol\":\"AAPL\",\"asset_class\":\"us_equity\",\"qty\":\"100\","
                     + "\"side\":\"long\",\"avg_entry_price\":\"190.50\"},"
                     + "{\"symbol\":\"SPY260519C00737000\",\"asset_class\":\"us_option\","
-                    + "\"qty\":\"5\",\"side\":\"long\",\"avg_entry_price\":\"0.84\"},"
+                    + "\"qty\":\"5\",\"side\":\"long\",\"avg_entry_price\":\"0.84\","
+                    + "\"current_price\":\"1.20\",\"market_value\":\"600.00\","
+                    + "\"unrealized_pl\":\"180.00\",\"unrealized_intraday_pl\":\"-15.00\"},"
                     + "{\"symbol\":\"NVDA260516P00100000\",\"asset_class\":\"us_option\","
                     + "\"qty\":\"-2\",\"side\":\"short\",\"avg_entry_price\":\"1.10\"}]"));
 
@@ -585,10 +587,38 @@ class AlpacaPaperBrokerTest {
     assertThat(pos.getQty()).isEqualTo(5L);
     assertThat(pos.getSide()).isEqualTo(BrokerPosition.Side.LONG);
     assertThat(pos.getAvgEntryPrice()).isEqualByComparingTo(new BigDecimal("0.84"));
+    // Live marks (dashboard-only) pass through, including a SIGNED today's-P&L.
+    assertThat(pos.getCurrentPrice()).isEqualByComparingTo(new BigDecimal("1.20"));
+    assertThat(pos.getMarketValue()).isEqualByComparingTo(new BigDecimal("600.00"));
+    assertThat(pos.getUnrealizedPl()).isEqualByComparingTo(new BigDecimal("180.00"));
+    assertThat(pos.getUnrealizedIntradayPl()).isEqualByComparingTo(new BigDecimal("-15.00"));
 
     RecordedRequest req = server.takeRequest();
     assertThat(req.getMethod()).isEqualTo("GET");
     assertThat(req.getPath()).isEqualTo("/v2/positions");
+  }
+
+  @Test
+  void listOpenPositions_absentMarks_leavesMarkFieldsNull() throws Exception {
+    // A marks-free positions row (older Alpaca shape / a broker that omits them) must leave the
+    // mark fields null rather than defaulting to a misleading zero — the BFF then simply omits
+    // them.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"symbol\":\"SPY260519C00737000\",\"asset_class\":\"us_option\","
+                    + "\"qty\":\"5\",\"side\":\"long\",\"avg_entry_price\":\"0.84\"}]"));
+
+    List<BrokerPosition> positions = broker.listOpenPositions();
+
+    assertThat(positions).hasSize(1);
+    BrokerPosition pos = positions.get(0);
+    assertThat(pos.getCurrentPrice()).isNull();
+    assertThat(pos.getMarketValue()).isNull();
+    assertThat(pos.getUnrealizedPl()).isNull();
+    assertThat(pos.getUnrealizedIntradayPl()).isNull();
   }
 
   @Test

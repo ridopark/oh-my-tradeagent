@@ -20,6 +20,7 @@ import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.PositionSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.StrategyConfigUpdateWorkflowImpl;
@@ -104,6 +105,11 @@ public class TemporalWorkerConfig {
         // workflow dispatches AccountSnapshotActivity to broker-<target> (a Temporal client cannot
         // dispatch an Activity directly).
         AccountSnapshotWorkflowImpl.class,
+        // Started synchronously by the tenant-dashboard BFF to read broker-held positions WITH live
+        // marks (current price + today's/total unrealized P&L); the workflow dispatches
+        // ReconciliationExecActivity.brokerListOpenPositions to broker-<target>, same client-can't-
+        // dispatch-an-Activity reason as AccountSnapshotWorkflow.
+        PositionSnapshotWorkflowImpl.class,
         // Net-new single-step workflow: mirrors the verbatim daily watchlist to the trade-alert
         // Discord webhook. The signal-source-discord sidecar starts it by the type name
         // "WatchlistMirrorWorkflow" on this same orchestrator-core queue.

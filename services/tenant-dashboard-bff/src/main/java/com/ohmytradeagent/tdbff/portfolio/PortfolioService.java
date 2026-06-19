@@ -30,7 +30,11 @@ import org.springframework.stereotype.Service;
  *
  * <ul>
  *   <li>{@code open_positions} + {@code sum_open_notional} — cost basis (entry premium × qty ×
- *       100), NOT live mark (no market-data wired).
+ *       100), NOT live mark. Each open position MAY additionally carry live broker marks ({@code
+ *       current_price}, {@code unrealized_pl} = total, {@code unrealized_intraday_pl} = today),
+ *       joined by normalized-compact OCC from {@link BrokerPositionsClient}. These are
+ *       broker-ACCOUNT-level truth (shared across tenants on a broker_target), fail-open (a
+ *       degraded snapshot omits them, the row still renders), and never a risk-gate input.
  *   <li>{@code realized_pnl_today} — FIFO match of today's fills (America/New_York); see {@code
  *       RealizedPnlCalculator} for the documented intraday-match limitation.
  *   <li>{@code account_equity} — broker-account net-liq, SHARED across all tenants on a {@code
@@ -40,7 +44,9 @@ import org.springframework.stereotype.Service;
  *       bff.expose-broker-account-number} (default false, so it is never exposed in prod).
  * </ul>
  *
- * <p>Unrealized / mark-to-market P&L is out of scope (no quote source) — omitted, not faked.
+ * <p>The AGGREGATE {@code unrealized_pnl} body field stays null (no portfolio-wide quote source);
+ * the per-position live marks above come from broker truth, not a computed mark, so the two are
+ * distinct — per-row marks are present when the broker carries them, the aggregate is not faked.
  */
 @Service
 public class PortfolioService {
@@ -51,6 +57,7 @@ public class PortfolioService {
   private final PositionsReader positionsReader;
   private final RealizedPnlCalculator realizedPnl;
   private final AccountEquityClient accountEquity;
+  private final BrokerPositionsClient brokerPositions;
   private final TenantStrategyResolver strategyResolver;
   private final DbStrategyConfigReader strategyRegistry;
   // Dev-only gate: when true, account_equity rows also carry the informational brokerage
@@ -75,6 +82,7 @@ public class PortfolioService {
       PositionsReader positionsReader,
       RealizedPnlCalculator realizedPnl,
       AccountEquityClient accountEquity,
+      BrokerPositionsClient brokerPositions,
       TenantStrategyResolver strategyResolver,
       DbStrategyConfigReader strategyRegistry,
       @Value("${bff.expose-broker-account-number:false}") boolean exposeBrokerAccountNumber,
@@ -82,6 +90,7 @@ public class PortfolioService {
     this.positionsReader = positionsReader;
     this.realizedPnl = realizedPnl;
     this.accountEquity = accountEquity;
+    this.brokerPositions = brokerPositions;
     this.strategyResolver = strategyResolver;
     this.strategyRegistry = strategyRegistry;
     this.exposeBrokerAccountNumber = exposeBrokerAccountNumber;
@@ -99,18 +108,36 @@ public class PortfolioService {
 
     // Account equity per distinct broker_target (account-level, shared across tenants). Each
     // snapshot
-    // is an independent AccountSnapshotWorkflow round-trip — fetch them concurrently too.
+    // is an independent AccountSnapshotWorkflow round-trip — fetch them concurrently too. We also
+    // remember one representative strategy per broker_target to thread the (account-level)
+    // live-marks
+    // read's forward-compat tenant/strategy hooks.
     Set<String> brokerTargets = new LinkedHashSet<>();
+    Map<String, String> repStrategyByTarget = new LinkedHashMap<>();
     for (String strategyId : strategyIds) {
       String bt = strategyRegistry.brokerTarget(tenantId, strategyId);
       if (bt != null) {
         brokerTargets.add(bt);
+        repStrategyByTarget.putIfAbsent(bt, strategyId);
       }
     }
     Map<String, Future<AccountEquityClient.BrokerAccount>> equityFutures = new LinkedHashMap<>();
     for (String brokerTarget : brokerTargets) {
       equityFutures.put(
           brokerTarget, subreadPool.submit(() -> accountEquity.snapshotFor(brokerTarget)));
+    }
+
+    // Live marks per distinct broker_target (account-level broker truth — current price + today's /
+    // total unrealized P&L). Each is an independent PositionSnapshotWorkflow round-trip, fetched
+    // concurrently and fail-open: a degraded snapshot yields no marks for that target, dropping the
+    // mark columns rather than failing the page.
+    Map<String, Future<Map<String, BrokerPositionsClient.PositionMarks>>> marksFutures =
+        new LinkedHashMap<>();
+    for (String brokerTarget : brokerTargets) {
+      String repStrategy = repStrategyByTarget.get(brokerTarget);
+      marksFutures.put(
+          brokerTarget,
+          subreadPool.submit(() -> brokerPositions.marksFor(brokerTarget, tenantId, repStrategy)));
     }
 
     // Realized P&L today, summed across strategies. Audit-backed DB read — not gated on the
@@ -121,15 +148,32 @@ public class PortfolioService {
           realizedToday.add(realizedPnl.computeRealizedPnl(tenantId, strategyId, tradingDay));
     }
 
+    // Merge live marks across all broker_targets into one OCC-keyed map (account-level, so an OCC
+    // is
+    // unique to a contract regardless of which target holds it). Each fetch is fail-open under the
+    // sub-read budget — a stalled target contributes no marks rather than failing the page.
+    Map<String, BrokerPositionsClient.PositionMarks> marksByOcc = new LinkedHashMap<>();
+    for (Map.Entry<String, Future<Map<String, BrokerPositionsClient.PositionMarks>>> entry :
+        marksFutures.entrySet()) {
+      Map<String, BrokerPositionsClient.PositionMarks> m =
+          await(entry.getValue(), Map.of(), "marks broker_target=" + entry.getKey());
+      marksByOcc.putAll(m);
+    }
+
     // Join positions under the sub-read budget; a stalled query set degrades to "no positions
-    // shown".
+    // shown". Each open position picks up its live marks by normalized-compact OCC (the tracked
+    // position carries the padded canonical OCC; broker marks are keyed compact — both normalize
+    // the
+    // same way). No matching mark -> the row stays clean (mark fields omitted).
     List<OpenPosition> positions =
         await(positionsFuture, List.of(), "positions tenant=" + tenantId);
     BigDecimal sumOpenNotional = BigDecimal.ZERO;
     List<Map<String, Object>> positionItems = new ArrayList<>();
     for (OpenPosition p : positions) {
       sumOpenNotional = sumOpenNotional.add(p.openNotional());
-      positionItems.add(positionItem(p));
+      BrokerPositionsClient.PositionMarks marks =
+          marksByOcc.get(BrokerPositionsClient.compactOcc(p.contractSymbol()));
+      positionItems.add(positionItem(p, marks));
     }
 
     // Join equity per broker under the same budget; a stalled snapshot degrades to null equity.
@@ -198,7 +242,8 @@ public class PortfolioService {
     }
   }
 
-  private static Map<String, Object> positionItem(OpenPosition p) {
+  private static Map<String, Object> positionItem(
+      OpenPosition p, BrokerPositionsClient.PositionMarks marks) {
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("workflow_id", p.workflowId());
     m.put("strategy_id", p.strategyId());
@@ -206,6 +251,21 @@ public class PortfolioService {
     m.put("remaining_qty", p.remainingQty());
     m.put("entry_premium", p.entryPremium());
     m.put("open_notional", p.openNotional());
+    // Live broker marks (account-level), added only when this position matched a broker mark by
+    // OCC.
+    // current_price = per-unit mark; unrealized_pl = TOTAL since entry; unrealized_intraday_pl =
+    // TODAY'S. Omitted when there is no matching broker position (the row still renders).
+    if (marks != null) {
+      if (marks.currentPrice() != null) {
+        m.put("current_price", marks.currentPrice());
+      }
+      if (marks.unrealizedPl() != null) {
+        m.put("unrealized_pl", marks.unrealizedPl());
+      }
+      if (marks.unrealizedIntradayPl() != null) {
+        m.put("unrealized_intraday_pl", marks.unrealizedIntradayPl());
+      }
+    }
     return m;
   }
 }

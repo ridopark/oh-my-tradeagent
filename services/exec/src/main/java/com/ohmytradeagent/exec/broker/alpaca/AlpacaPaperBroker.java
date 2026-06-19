@@ -488,6 +488,22 @@ public class AlpacaPaperBroker implements OptionsBroker {
       if (pos.avgEntryPrice() != null) {
         bp.setAvgEntryPrice(pos.avgEntryPrice());
       }
+      // Live marks (dashboard-only, account-level broker truth — never a risk-gate input). Forward
+      // each only when Alpaca carries it so an absent field stays absent on the contract rather
+      // than
+      // becoming a misleading zero.
+      if (pos.currentPrice() != null) {
+        bp.setCurrentPrice(pos.currentPrice());
+      }
+      if (pos.marketValue() != null) {
+        bp.setMarketValue(pos.marketValue());
+      }
+      if (pos.unrealizedPl() != null) {
+        bp.setUnrealizedPl(pos.unrealizedPl());
+      }
+      if (pos.unrealizedIntradayPl() != null) {
+        bp.setUnrealizedIntradayPl(pos.unrealizedIntradayPl());
+      }
       out.add(bp);
     }
     return out;

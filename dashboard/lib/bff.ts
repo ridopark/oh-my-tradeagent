@@ -60,6 +60,12 @@ export interface Position {
   remaining_qty: number;
   entry_premium: string | number | null;
   open_notional: string | number | null;
+  // Live broker marks (account-level), present only when this position matched a broker mark by OCC.
+  // current_price = per-unit mark; unrealized_pl = TOTAL since entry; unrealized_intraday_pl = TODAY.
+  // Absent/null when the broker carries no mark for this contract (the row still renders).
+  current_price?: string | number | null;
+  unrealized_pl?: string | number | null;
+  unrealized_intraday_pl?: string | number | null;
 }
 
 export interface Trade {
