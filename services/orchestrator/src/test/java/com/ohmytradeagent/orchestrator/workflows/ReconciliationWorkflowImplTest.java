@@ -293,9 +293,12 @@ class ReconciliationWorkflowImplTest {
 
   @Test
   void run_brokerPositionWithNoRunningWorkflow_emitsPositionOrphan() {
-    // Issue #165 Phase 3: a broker-held position with no running PositionWorkflow must surface
-    // as a PositionOrphan audit + a position_orphans count on the summary. Workflow id is rebuilt
-    // from the most recent FILLED journal entry for the OCC.
+    // Issue #165 Phase 3 + #432: a broker-held position with a FILLED journal anchor but no running
+    // PositionWorkflow managing the OCC (findPositionWorkflowId returns null — never cached /
+    // Visibility finds nothing) must surface as a PositionOrphan audit + a position_orphans count.
+    // The owner is now resolved by OCC, so expected_workflow_id is the (null) resolved owner id,
+    // and
+    // the journal_entry_signal_id carries the most-recent FILLED entry's signal_id for provenance.
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
@@ -304,7 +307,9 @@ class ReconciliationWorkflowImplTest {
         .thenReturn(
             List.of(
                 filledJournal("intent-1", "chat-1506342699765338194:0", "SPY   260519C00737000")));
-    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+    // No live PositionWorkflow manages this OCC → genuine orphan.
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
 
     ReconciliationSummary summary = runWorkflow();
 
@@ -315,9 +320,7 @@ class ReconciliationWorkflowImplTest {
         .containsEntry("option_symbol", "SPY   260519C00737000")
         .containsEntry("journal_status", "filled")
         .containsEntry("journal_entry_signal_id", "chat-1506342699765338194:0")
-        .containsEntry(
-            "expected_workflow_id",
-            "t-dev/s-copytrade-v1/pos/SPY   260519C00737000/chat-1506342699765338194:0");
+        .containsEntry("expected_workflow_id", null);
     assertThat(((Number) orphan.getSubject().get("qty")).longValue()).isEqualTo(5L);
 
     AuditEvent completed = captureKind("ReconciliationCompleted");
@@ -326,16 +329,20 @@ class ReconciliationWorkflowImplTest {
 
   @Test
   void run_brokerPositionWithRunningWorkflow_noOrphan() {
-    // Workflow already running for this position → no PositionOrphan audit, count stays at 0.
+    // A live PositionWorkflow manages this OCC → no PositionOrphan audit, count stays at 0. Owner
+    // is
+    // resolved by OCC (#432) and confirmed RUNNING.
+    String paddedOcc = "SPY   260519C00737000";
+    String ownerWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-1506342699765338194:0";
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
-        .thenReturn(List.of(brokerPosition("SPY   260519C00737000", 5L, new BigDecimal("0.84"))));
-    when(exec.journalListFilledByOcc(anyString(), anyString(), eq("SPY   260519C00737000")))
-        .thenReturn(
-            List.of(
-                filledJournal("intent-1", "chat-1506342699765338194:0", "SPY   260519C00737000")));
-    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-1506342699765338194:0", paddedOcc)));
+    when(positionLookup.findPositionWorkflowId(eq("dev"), eq("copytrade-v1"), eq(paddedOcc)))
+        .thenReturn(ownerWfId);
+    when(positionLookup.isPositionWorkflowRunning(eq(ownerWfId))).thenReturn(true);
 
     ReconciliationSummary summary = runWorkflow();
 
@@ -346,14 +353,16 @@ class ReconciliationWorkflowImplTest {
 
   @Test
   void run_brokerCompactOccVsJournalPaddedOcc_resolvesOwnerNoOrphan() {
-    // Issue #243: the broker reports the *compact* OCC (Alpaca strips the space-padding on order
-    // placement and returns the compact symbol from listOpenPositions) while the journal row — and
-    // the running PositionWorkflow id, built at spawn from OccSymbol.of's %-6s padded root — hold
-    // the *padded* 21-char OCC. Recon must rebuild expected_workflow_id from the journal row's
-    // canonical (padded) option_symbol, not the broker's compact form, so the running owner is
-    // found and NO false PositionOrphan fires.
+    // Issue #243 + #432: the broker reports the *compact* OCC (Alpaca strips the space-padding)
+    // while
+    // the journal row — and the cache key / ContractSymbol search attribute the live
+    // PositionWorkflow
+    // registered under at spawn — hold the *padded* 21-char OCC. Recon must resolve the owner via
+    // findPositionWorkflowId keyed on the journal row's canonical (padded) option_symbol, not the
+    // broker's compact form, so the running owner is found and NO false PositionOrphan fires.
     String compactOcc = "SPY260519C00737000";
     String paddedOcc = "SPY   260519C00737000";
+    String ownerWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-1506342699765338194:0";
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
@@ -362,10 +371,10 @@ class ReconciliationWorkflowImplTest {
     // padding), so a compact broker OCC resolves the padded FILLED row.
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(compactOcc)))
         .thenReturn(List.of(filledJournal("intent-1", "chat-1506342699765338194:0", paddedOcc)));
-    // The live owner's workflow id carries the PADDED OCC (spawn-time form). Recon must look it up
-    // under that id, not the compact one.
-    String paddedWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-1506342699765338194:0";
-    when(positionLookup.isPositionWorkflowRunning(eq(paddedWfId))).thenReturn(true);
+    // The owner is resolved under the PADDED OCC (the cache / search-attribute spawn-time form).
+    when(positionLookup.findPositionWorkflowId(eq("dev"), eq("copytrade-v1"), eq(paddedOcc)))
+        .thenReturn(ownerWfId);
+    when(positionLookup.isPositionWorkflowRunning(eq(ownerWfId))).thenReturn(true);
 
     ReconciliationSummary summary = runWorkflow();
 
@@ -693,7 +702,9 @@ class ReconciliationWorkflowImplTest {
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
         .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
-    // Neither the PositionWorkflow owner nor the adoption id is running.
+    // No live PositionWorkflow manages the OCC (genuine orphan) and the adoption id is not running.
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
     when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
 
     ReconciliationSummary summary = runWorkflow();
@@ -715,8 +726,8 @@ class ReconciliationWorkflowImplTest {
     assertThat(initiated.getSubject())
         .containsEntry("option_symbol", paddedOcc)
         .containsEntry("adoption_workflow_id", adoptWfId)
-        .containsEntry(
-            "expected_workflow_id", "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-99:0");
+        // #432: owner resolved by OCC is null on a genuine orphan → expected_workflow_id is null.
+        .containsEntry("expected_workflow_id", null);
 
     verify(metrics, times(1))
         .recordAutoAdopt(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("initiated"));
@@ -729,15 +740,16 @@ class ReconciliationWorkflowImplTest {
     // bump `already_owned` instead. The PositionOrphan(filled) page itself is unchanged.
     String paddedOcc = "SPY   260519C00737000";
     String adoptWfId = WorkflowIds.adoption("dev", "copytrade-v1", paddedOcc);
-    String posWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-99:0";
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
         .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
-    // The owner is NOT running (so the orphan fires), but the adoption id IS running.
-    when(positionLookup.isPositionWorkflowRunning(eq(posWfId))).thenReturn(false);
+    // No live PositionWorkflow manages the OCC (so the orphan fires), but the adoption id IS
+    // running.
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
     when(positionLookup.isPositionWorkflowRunning(eq(adoptWfId))).thenReturn(true);
 
     ReconciliationSummary summary = runWorkflow();
@@ -766,6 +778,9 @@ class ReconciliationWorkflowImplTest {
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
         .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    // The adopted PositionWorkflow owner is resolved by OCC and is now RUNNING.
+    when(positionLookup.findPositionWorkflowId(eq("dev"), eq("copytrade-v1"), eq(paddedOcc)))
+        .thenReturn(posWfId);
     when(positionLookup.isPositionWorkflowRunning(eq(posWfId))).thenReturn(true);
 
     ReconciliationSummary summary = runWorkflow();
@@ -790,6 +805,8 @@ class ReconciliationWorkflowImplTest {
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
         .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
     when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
 
     ReconciliationSummary summary = runWorkflow();
@@ -840,6 +857,8 @@ class ReconciliationWorkflowImplTest {
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
         .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
     when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
 
     ReconciliationSummary summary = runWorkflow();
@@ -847,6 +866,81 @@ class ReconciliationWorkflowImplTest {
     // recon run() completed normally despite the child adoption failing.
     assertThat(summary.getPositionOrphans()).isEqualTo(1L);
     assertThat(summary.getSchemaVersion()).isEqualTo(1L);
+  }
+
+  @Test
+  void run_partialExitSellAnchorWithLiveOwner_noOrphanNoAutoAdopt() {
+    // Issue #432 regression: after a partial SELL, journalListFilledByOcc's most-recent row
+    // (filled.get(0)) is the EXIT order, whose signal_id is the *exit* signal's — DIFFERENT from
+    // the
+    // *entry* signal_id that named the live PositionWorkflow (pos/<occ>/<entrySignalId>). The buggy
+    // code rebuilt expected_workflow_id from that exit signal_id, pointed at a non-existent
+    // workflow,
+    // fired a false PositionOrphan, and auto-adopted a DUPLICATE PositionWorkflow for the broker's
+    // remaining qty. The fix resolves ownership by OCC (findPositionWorkflowId), which finds the
+    // live
+    // owner regardless of which signal_id named it → NO orphan, NO auto-adoption.
+    String paddedOcc = "SPY   260519C00737000";
+    String entrySignalId = "chat-entry:0";
+    String exitSignalId = "chat-exit:0"; // the partial-exit SELL's signal_id (most-recent fill)
+    String ownerWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/" + entrySignalId;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 12L, new BigDecimal("0.84"))));
+    // filled.get(0) is the partial-exit SELL, carrying the EXIT signal_id (not the entry's). If the
+    // owner check reconstructed an id from this signal_id it would miss the live owner.
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(
+            List.of(
+                filledJournal("intent-sell", exitSignalId, paddedOcc),
+                filledJournal("intent-buy", entrySignalId, paddedOcc)));
+    // The live PositionWorkflow (named by the ENTRY signal_id) is resolved by OCC and running.
+    when(positionLookup.findPositionWorkflowId(eq("dev"), eq("copytrade-v1"), eq(paddedOcc)))
+        .thenReturn(ownerWfId);
+    when(positionLookup.isPositionWorkflowRunning(eq(ownerWfId))).thenReturn(true);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    // No false orphan, no phantom auto-adoption.
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "ReconAutoAdoptionInitiated".equals(e.getKind())));
+    assertThat(ADOPT_STARTED).isEmpty();
+    verify(metrics, never()).recordAutoAdopt(anyString(), anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void run_filledAnchorButNoLiveOwner_emitsOrphanAndAutoAdopts() {
+    // Issue #432: the GENUINE-orphan path must still fire. A FILLED journal anchor exists but
+    // findPositionWorkflowId returns null (crash after place / before startPositionWorkflow → never
+    // cached, Visibility finds nothing) → PositionOrphan(filled) + auto-adopt.
+    String paddedOcc = "SPY   260519C00737000";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    // No live owner for the OCC → genuine orphan.
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    AuditEvent orphan = captureKind("PositionOrphan");
+    assertThat(orphan.getSubject()).containsEntry("journal_status", "filled");
+
+    String adoptWfId = WorkflowIds.adoption("dev", "copytrade-v1", paddedOcc);
+    waitUntilAdoptStarted(adoptWfId);
+    AuditEvent initiated = captureKind("ReconAutoAdoptionInitiated");
+    assertThat(initiated.getSubject()).containsEntry("adoption_workflow_id", adoptWfId);
+    verify(metrics, times(1))
+        .recordAutoAdopt(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("initiated"));
   }
 
   /**
