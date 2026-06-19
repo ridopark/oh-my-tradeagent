@@ -279,21 +279,36 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         continue;
       }
       JournalEntry recentFilled = filled.get(0);
-      // Issue #243: rebuild expected_workflow_id from the journal row's canonical option_symbol —
-      // the padded 21-char OCC (OccSymbol.of pads the root to 6 chars with %-6s) that was also used
-      // to build the live PositionWorkflow id at spawn (CopytradeSignalWorkflowImpl). The broker
-      // reports the compact OCC (Alpaca strips the space-padding on order placement), so anchoring
-      // on p.getOptionSymbol() would produce an id the running owner never registered under and
-      // fire a false PositionOrphan even when the owner is alive.
-      String expectedWfId =
-          WorkflowIds.position(
-              in.getTenantId(),
-              in.getStrategyId(),
-              recentFilled.getOptionSymbol(),
-              recentFilled.getSignalId());
-      if (!positionLookup.isPositionWorkflowRunning(expectedWfId)) {
+      // Issue #432: anchor the owner check on the OCC, NOT a reconstructed signal_id. After a
+      // partial SELL, filled.get(0) is the exit order, whose signal_id is the *exit* signal's — not
+      // the *entry* signal_id that named the live PositionWorkflow (pos/<occ>/<entrySignalId>).
+      // Rebuilding expectedWfId from recentFilled.getSignalId() therefore points at a non-existent
+      // workflow on every partial exit → a false PositionOrphan → maybeAutoAdopt spawns a DUPLICATE
+      // PositionWorkflow for the broker's remaining qty (one phantom per partial exit). Instead ask
+      // "is ANY live PositionWorkflow managing this contract?" via findPositionWorkflowId, which
+      // resolves the OCC through the Redis write-through cache (written on PositionWorkflow start
+      // via
+      // cachePositionMapping) → Visibility fallback (ContractSymbol = occ AND ExecutionStatus =
+      // RUNNING) — independent of which signal_id named the workflow. Pass the journal row's padded
+      // canonical option_symbol: the cache key + ContractSymbol search attribute are both
+      // registered
+      // under that exact form (CopytradeSignalWorkflowImpl / AdoptionWorkflowImpl), so a compact
+      // broker OCC must NOT be used here.
+      String occ = recentFilled.getOptionSymbol();
+      String ownerWfId =
+          positionLookup.findPositionWorkflowId(in.getTenantId(), in.getStrategyId(), occ);
+      // Confirm-running guards a stale cache pointing at a since-completed PositionWorkflow.
+      boolean ownerRunning =
+          ownerWfId != null && positionLookup.isPositionWorkflowRunning(ownerWfId);
+      if (!ownerRunning) {
+        // Genuine orphan: a FILLED journal anchor exists but no running PositionWorkflow manages
+        // the
+        // OCC (e.g. crash after place / before startPositionWorkflow → never cached, Visibility
+        // finds
+        // nothing → findPositionWorkflowId returns null). ownerWfId may be null; the audit's
+        // expected_workflow_id is null-safe and emitPositionOrphanWithDebounce tolerates it.
         emitPositionOrphanWithDebounce(
-            in, p, expectedWfId, recentFilled.getSignalId(), "filled", now, debounceSince);
+            in, p, ownerWfId, recentFilled.getSignalId(), "filled", now, debounceSince);
         positionOrphans++;
         // Plan-2A R-AA-4: a FILLED journal anchor exists (this branch) AND no running owner →
         // auto-adopt the orphaned-but-legit lot by starting AdoptionWorkflow as an ABANDON child.
@@ -301,7 +316,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // reaches here. No recon-side version gate: recon executions are short-lived per scheduled
         // run (workflowId carries {{.ScheduledRunID}}), so there is no long-lived in-flight history
         // to replay-protect — a getVersion marker here would be vacuous.
-        maybeAutoAdopt(in, brokerTarget, p, expectedWfId, brokerOpen);
+        maybeAutoAdopt(in, brokerTarget, p, ownerWfId, brokerOpen);
       }
     }
 
@@ -441,10 +456,12 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
 
   /**
    * Plan-2A R-AA-4: auto-adopt an orphaned FILLED position. Caller has already established that (a)
-   * a FILLED journal anchor exists for the OCC and (b) no PositionWorkflow with {@code
-   * expectedWfId} is running — that is the very condition that fires the {@code
-   * journal_status='filled'} PositionOrphan. This method adds the over-sell gate + idempotency
-   * precheck, then starts {@code AdoptionWorkflow} as a non-blocking ABANDON child.
+   * a FILLED journal anchor exists for the OCC and (b) no running PositionWorkflow manages the OCC
+   * (per {@code findPositionWorkflowId} — Issue #432) — that is the very condition that fires the
+   * {@code journal_status='filled'} PositionOrphan. This method adds the over-sell gate +
+   * idempotency precheck, then starts {@code AdoptionWorkflow} as a non-blocking ABANDON child.
+   * {@code ownerWfId} is the OCC-resolved owner id used for audit provenance only (may be {@code
+   * null} on a genuine orphan); the precheck below re-resolves the owner authoritatively by OCC.
    *
    * <p>Mechanism (fixed by the plan, mirrors {@code AdoptionWorkflowImpl} ~152-161):
    *
@@ -460,10 +477,11 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
    *       WorkflowExecutionAlreadyStarted} catch.
    * </ul>
    *
-   * <p>Idempotency = recon-side PRECHECK before the Async start: skip if {@code expectedWfId} (the
-   * PositionWorkflow owner) OR the adoption id is already running. This covers both the in-flight
-   * and post-complete windows. The residual sub-second TOCTOU child-already-started is a benign
-   * no-op — the failed child-start Promise is swallowed (NOT propagated to recon {@code run()}).
+   * <p>Idempotency = recon-side PRECHECK before the Async start: re-resolve the PositionWorkflow
+   * owner by OCC and skip if that owner OR the adoption id is already running. This covers both the
+   * in-flight and post-complete windows. The residual sub-second TOCTOU child-already-started is a
+   * benign no-op — the failed child-start Promise is swallowed (NOT propagated to recon {@code
+   * run()}).
    *
    * <p>Over-sell gate: only auto-adopt when no open/pending SELL for the OCC exists at the broker.
    * Matched on {@code side==SELL} with the OCC normalized via {@link OccSymbol#compact(String)} on
@@ -477,7 +495,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       ReconciliationWorkflowInput in,
       String brokerTarget,
       BrokerPosition p,
-      String expectedWfId,
+      String ownerWfId,
       List<BrokerOpenOrder> brokerOpen) {
     String adoptWfId =
         WorkflowIds.adoption(in.getTenantId(), in.getStrategyId(), p.getOptionSymbol());
@@ -494,9 +512,18 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     }
 
     // Idempotency precheck (in-flight AND post-complete windows): the owner is already known
-    // not-running (caller condition), but re-check it AND the adoption id. A running adoption id
-    // means a prior cycle already issued the start — skip to avoid a duplicate.
-    if (positionLookup.isPositionWorkflowRunning(expectedWfId)
+    // not-running (caller condition), but re-resolve it by OCC and re-check it AND the adoption id.
+    // Issue #432: resolving by OCC (not the caller-passed id, which may be null on a genuine
+    // orphan)
+    // makes the precheck authoritative — it answers "is ANY live PositionWorkflow managing this
+    // contract?" rather than probing a reconstructed signal-id that no live workflow ever
+    // registered
+    // under. A running adoption id means a prior cycle already issued the start — skip to avoid a
+    // duplicate.
+    String resolvedOwnerWfId =
+        positionLookup.findPositionWorkflowId(
+            in.getTenantId(), in.getStrategyId(), p.getOptionSymbol());
+    if ((resolvedOwnerWfId != null && positionLookup.isPositionWorkflowRunning(resolvedOwnerWfId))
         || positionLookup.isPositionWorkflowRunning(adoptWfId)) {
       recordAutoAdoptMetric(in, brokerTarget, AUTO_ADOPT_ALREADY_OWNED);
       return;
@@ -528,7 +555,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
             "adoption_workflow_id",
             adoptWfId,
             "expected_workflow_id",
-            expectedWfId);
+            ownerWfId);
     auditLog(KIND_RECON_AUTO_ADOPTION_INITIATED, subj);
     recordAutoAdoptMetric(in, brokerTarget, AUTO_ADOPT_INITIATED);
 
