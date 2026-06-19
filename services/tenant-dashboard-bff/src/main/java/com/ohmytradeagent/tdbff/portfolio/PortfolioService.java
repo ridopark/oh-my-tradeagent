@@ -56,13 +56,9 @@ public class PortfolioService {
   // Dev-only gate: when true, account_equity rows also carry the informational brokerage
   // account_number for dashboard verification. Default false so it is NEVER exposed in prod.
   private final boolean exposeBrokerAccountNumber;
-  // Per-section wall-clock bound for the two slow, Temporal-backed sub-reads (position-state
-  // queries
-  // and account snapshots). They run CONCURRENTLY, so the whole read costs ~max(one sub-read), not
-  // the serial sum — and must finish under the dashboard's own BFF call timeout (12s). Anything
-  // slower (e.g. the orchestrator worker mid-rollout or down) degrades that one section to
-  // empty/null
-  // instead of stacking past the budget and 500-ing the page.
+  // Per-section wall-clock bound for the concurrent Temporal-backed sub-reads (see await()). Must
+  // stay below the dashboard's BFF call timeout (12s) so a stall degrades a section rather than
+  // 500-ing the page; see application.yml bff.portfolio.subread-timeout-seconds for the invariant.
   private final long subreadTimeoutSeconds;
   // Daemon, cached pool: low-QPS dashboard reads; idle threads are reclaimed and never block JVM
   // exit. A timed-out sub-read is abandoned here and self-resolves when its own Temporal RPC

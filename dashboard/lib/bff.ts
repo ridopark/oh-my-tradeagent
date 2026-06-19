@@ -8,9 +8,11 @@ import { auth } from "@/auth";
 // the identity.
 const BFF_URL = process.env.BFF_INTERNAL_URL ?? "http://localhost:8083";
 const BFF_TOKEN = process.env.BFF_SHARED_TOKEN ?? "";
-// Upper bound on a single BFF call so an unreachable/slow BFF can't hang a page render. Sits above
-// the BFF's own ~8s equity wait (AccountEquityClient.RESULT_TIMEOUT_SECONDS) so a legitimate
-// /api/portfolio response is never cut off.
+// Upper bound on a single BFF call so an unreachable/slow BFF can't hang a page render. Top rung of
+// an ordering invariant that keeps /status degrading (not 500-ing) under an orchestrator stall:
+//   AccountEquityClient.RESULT_TIMEOUT_SECONDS (8s inner worker wait)
+//     <= bff.portfolio.subread-timeout-seconds (9s BFF per-section budget)
+//     <= this (12s). Lowering this below the BFF budget re-introduces the 500 it was meant to kill.
 const BFF_TIMEOUT_MS = 12_000;
 
 if (!BFF_TOKEN) {

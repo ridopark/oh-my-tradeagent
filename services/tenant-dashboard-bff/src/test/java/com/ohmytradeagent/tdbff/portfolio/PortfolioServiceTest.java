@@ -24,15 +24,18 @@ class PortfolioServiceTest {
   private final TenantStrategyResolver strategyResolver = mock(TenantStrategyResolver.class);
   private final DbStrategyConfigReader strategyRegistry = mock(DbStrategyConfigReader.class);
 
-  private final PortfolioService service =
-      new PortfolioService(
-          positionsReader,
-          realizedPnl,
-          accountEquity,
-          strategyResolver,
-          strategyRegistry,
-          false,
-          9);
+  private final PortfolioService service = newService(false, 9);
+
+  private PortfolioService newService(boolean exposeAccountNumber, long subreadTimeoutSeconds) {
+    return new PortfolioService(
+        positionsReader,
+        realizedPnl,
+        accountEquity,
+        strategyResolver,
+        strategyRegistry,
+        exposeAccountNumber,
+        subreadTimeoutSeconds);
+  }
 
   @Test
   @SuppressWarnings("unchecked")
@@ -112,29 +115,13 @@ class PortfolioServiceTest {
         .thenReturn(
             new AccountEquityClient.BrokerAccount(new BigDecimal("10000.00"), "PA3ER05HLHMB"));
 
-    PortfolioService flagOff =
-        new PortfolioService(
-            positionsReader,
-            realizedPnl,
-            accountEquity,
-            strategyResolver,
-            strategyRegistry,
-            false,
-            9);
+    PortfolioService flagOff = newService(false, 9);
     var offRows = (List<Map<String, Object>>) flagOff.portfolio("acme").get("account_equity");
     assertThat(offRows).hasSize(1);
     assertThat(offRows.get(0)).containsEntry("equity", new BigDecimal("10000.00"));
     assertThat(offRows.get(0)).doesNotContainKey("account_number");
 
-    PortfolioService flagOn =
-        new PortfolioService(
-            positionsReader,
-            realizedPnl,
-            accountEquity,
-            strategyResolver,
-            strategyRegistry,
-            true,
-            9);
+    PortfolioService flagOn = newService(true, 9);
     var onRows = (List<Map<String, Object>>) flagOn.portfolio("acme").get("account_equity");
     assertThat(onRows).hasSize(1);
     assertThat(onRows.get(0)).containsEntry("account_number", "PA3ER05HLHMB");
@@ -159,15 +146,7 @@ class PortfolioServiceTest {
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
 
     // 1s budget so the stalled sub-read degrades quickly under test.
-    PortfolioService fast =
-        new PortfolioService(
-            positionsReader,
-            realizedPnl,
-            accountEquity,
-            strategyResolver,
-            strategyRegistry,
-            false,
-            1);
+    PortfolioService fast = newService(false, 1);
     Map<String, Object> body = fast.portfolio("acme");
 
     assertThat(body.get("open_positions_count")).isEqualTo(0);
@@ -200,15 +179,7 @@ class PortfolioServiceTest {
               return new AccountEquityClient.BrokerAccount(new BigDecimal("999"), null);
             });
 
-    PortfolioService fast =
-        new PortfolioService(
-            positionsReader,
-            realizedPnl,
-            accountEquity,
-            strategyResolver,
-            strategyRegistry,
-            false,
-            1);
+    PortfolioService fast = newService(false, 1);
     Map<String, Object> body = fast.portfolio("acme");
 
     var equity = (List<Map<String, Object>>) body.get("account_equity");
