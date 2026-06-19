@@ -41,6 +41,13 @@ export default async function StatusPage() {
     };
   });
 
+  // Total account value = net-liquidation equity summed across the tenant's broker_targets. Stays
+  // null until a real number arrives (seed null, not 0) so "all unavailable" degrades to "—", not $0.
+  const totalAccountValue = accounts.reduce<number | null>((sum, a) => {
+    const n = a.equity == null ? NaN : Number(a.equity);
+    return Number.isNaN(n) ? sum : (sum ?? 0) + n;
+  }, null);
+
   return (
     <>
       <Nav tenantId={session?.tenantId} />
@@ -68,7 +75,12 @@ export default async function StatusPage() {
           <p className="mt-2 text-xs text-slate-500">{p.account_equity_scope}</p>
         </section>
 
-        <section className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Stat
+            label="Total account value"
+            value={fmt(totalAccountValue)}
+            note="Net-liq equity (account-level, shared)."
+          />
           <Stat label="Open positions" value={String(p.open_positions_count)} />
           <Stat
             label="Sum open notional"

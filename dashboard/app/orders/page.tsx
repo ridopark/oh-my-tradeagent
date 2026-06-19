@@ -1,6 +1,7 @@
 import { auth } from "@/auth";
 import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
+import { contractCell } from "@/components/ContractLink";
 import { getOrders } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
@@ -20,7 +21,7 @@ export default async function OrdersPage() {
           empty="No orders yet."
           columns={[
             { key: "recorded_at", label: "Recorded" },
-            { key: "option_symbol", label: "Contract" },
+            { key: "option_symbol", label: "Contract", render: contractCell },
             { key: "side", label: "Side" },
             { key: "qty", label: "Qty" },
             { key: "state", label: "State" },
