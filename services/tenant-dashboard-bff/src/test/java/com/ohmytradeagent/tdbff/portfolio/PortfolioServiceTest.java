@@ -26,7 +26,13 @@ class PortfolioServiceTest {
 
   private final PortfolioService service =
       new PortfolioService(
-          positionsReader, realizedPnl, accountEquity, strategyResolver, strategyRegistry, false);
+          positionsReader,
+          realizedPnl,
+          accountEquity,
+          strategyResolver,
+          strategyRegistry,
+          false,
+          9);
 
   @Test
   @SuppressWarnings("unchecked")
@@ -108,7 +114,13 @@ class PortfolioServiceTest {
 
     PortfolioService flagOff =
         new PortfolioService(
-            positionsReader, realizedPnl, accountEquity, strategyResolver, strategyRegistry, false);
+            positionsReader,
+            realizedPnl,
+            accountEquity,
+            strategyResolver,
+            strategyRegistry,
+            false,
+            9);
     var offRows = (List<Map<String, Object>>) flagOff.portfolio("acme").get("account_equity");
     assertThat(offRows).hasSize(1);
     assertThat(offRows.get(0)).containsEntry("equity", new BigDecimal("10000.00"));
@@ -116,9 +128,94 @@ class PortfolioServiceTest {
 
     PortfolioService flagOn =
         new PortfolioService(
-            positionsReader, realizedPnl, accountEquity, strategyResolver, strategyRegistry, true);
+            positionsReader,
+            realizedPnl,
+            accountEquity,
+            strategyResolver,
+            strategyRegistry,
+            true,
+            9);
     var onRows = (List<Map<String, Object>>) flagOn.portfolio("acme").get("account_equity");
     assertThat(onRows).hasSize(1);
     assertThat(onRows.get(0)).containsEntry("account_number", "PA3ER05HLHMB");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void positionSubReadTimeoutDegradesToEmptyNotWholePageFailure() throws Exception {
+    // A stalled position-state fan-out (e.g. orchestrator worker down) must NOT fail the page: the
+    // positions section degrades to empty while the (fast) equity section still comes through.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenAnswer(
+            inv -> {
+              Thread.sleep(3000);
+              return List.of();
+            });
+    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(BigDecimal.ZERO);
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
+
+    // 1s budget so the stalled sub-read degrades quickly under test.
+    PortfolioService fast =
+        new PortfolioService(
+            positionsReader,
+            realizedPnl,
+            accountEquity,
+            strategyResolver,
+            strategyRegistry,
+            false,
+            1);
+    Map<String, Object> body = fast.portfolio("acme");
+
+    assertThat(body.get("open_positions_count")).isEqualTo(0);
+    assertThat((List<Map<String, Object>>) body.get("open_positions")).isEmpty();
+    assertThat(body.get("sum_open_notional")).isEqualTo(BigDecimal.ZERO);
+    // Equity sub-read was fast -> unaffected.
+    var equity = (List<Map<String, Object>>) body.get("account_equity");
+    assertThat(equity).hasSize(1);
+    assertThat(equity.get(0)).containsEntry("equity", new BigDecimal("100"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void equitySnapshotTimeoutDegradesToNullEquityNotWholePageFailure() throws Exception {
+    // A stalled AccountSnapshotWorkflow must degrade to null equity for that broker only — the row
+    // is still present and the positions section is unaffected.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                new OpenPosition(
+                    "wf1", "s1", "SYM1", 1, new BigDecimal("2.00"), new BigDecimal("200.00"))));
+    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(BigDecimal.ZERO);
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("alpaca-paper"))
+        .thenAnswer(
+            inv -> {
+              Thread.sleep(3000);
+              return new AccountEquityClient.BrokerAccount(new BigDecimal("999"), null);
+            });
+
+    PortfolioService fast =
+        new PortfolioService(
+            positionsReader,
+            realizedPnl,
+            accountEquity,
+            strategyResolver,
+            strategyRegistry,
+            false,
+            1);
+    Map<String, Object> body = fast.portfolio("acme");
+
+    var equity = (List<Map<String, Object>>) body.get("account_equity");
+    assertThat(equity).hasSize(1);
+    assertThat(equity.get(0)).containsEntry("broker_target", "alpaca-paper");
+    assertThat(equity.get(0)).containsEntry("equity", null);
+    // Positions sub-read was fast -> unaffected.
+    assertThat(body.get("open_positions_count")).isEqualTo(1);
   }
 }

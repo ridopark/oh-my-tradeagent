@@ -1,7 +1,7 @@
 import { auth } from "@/auth";
 import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
-import { getPortfolio } from "@/lib/bff";
+import { getPortfolio, NotAuthenticatedError, type Portfolio } from "@/lib/bff";
 import { brokerMode, brokerProvider } from "@/lib/mode";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +11,20 @@ export const dynamic = "force-dynamic";
 // is this tenant trading real money (LIVE) or simulated (PAPER)?
 export default async function StatusPage() {
   const session = await auth();
-  const p = await getPortfolio();
+
+  // The portfolio read fans out to Temporal-backed sub-reads on the orchestrator worker. When that
+  // worker is unavailable (a deploy rollout, a crash) the BFF degrades each section but can still be
+  // slow enough to hit the request timeout — render a clear "unavailable" state at HTTP 200 instead
+  // of throwing into a 500. (#428)
+  let p: Portfolio;
+  try {
+    p = await getPortfolio();
+  } catch (err) {
+    if (err instanceof NotAuthenticatedError) {
+      throw err; // not a data outage — let the auth flow handle it.
+    }
+    return <StatusUnavailable tenantId={session?.tenantId} />;
+  }
 
   const accounts = p.account_equity;
   const anyLive = accounts.some((a) => brokerMode(a.broker_target) === "live");
@@ -64,6 +77,30 @@ export default async function StatusPage() {
           />
           <Stat label="Realized P&L today" value={fmt(p.realized_pnl_today)} />
         </section>
+      </main>
+    </>
+  );
+}
+
+// Degraded render when the portfolio read fails outright (BFF unreachable / timed out). Keeps the
+// page at HTTP 200 with the nav intact so the operator can still reach the kill switch and other
+// pages, rather than a hard 500. (#428)
+function StatusUnavailable({ tenantId }: { tenantId?: string }) {
+  return (
+    <>
+      <Nav tenantId={tenantId} />
+      <main className="mx-auto max-w-6xl px-4 py-6">
+        <h1 className="mb-1 text-xl font-semibold text-slate-100">Status</h1>
+        <p className="mb-4 text-sm text-slate-400">Tenant {tenantId}</p>
+        <div className="rounded border border-amber-600/60 bg-amber-950/40 px-4 py-3">
+          <div className="text-sm font-semibold text-amber-300">
+            Live status temporarily unavailable
+          </div>
+          <div className="mt-1 text-xs text-amber-200/80">
+            The data service didn&apos;t respond in time (the orchestrator may be restarting).
+            Refresh in a moment. This does not affect trading or the kill switch.
+          </div>
+        </div>
       </main>
     </>
   );
