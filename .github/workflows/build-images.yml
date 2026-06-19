@@ -35,8 +35,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Gate the image build on a green CI run for THIS commit, on main only.
+  # `build-images` and `CI` both fire on a push to main independently, and
+  # `deploy.yml` chains off `build-images` finishing — NOT off CI. Without this
+  # gate, the (faster) image build can finish and park `deploy` on its homelab
+  # approval before CI's test suite has even concluded. By blocking the build
+  # until CI is green, a red CI makes this workflow fail, which makes
+  # `deploy.yml`'s `workflow_run.conclusion == 'success'` preflight skip the
+  # whole deploy — no premature approval prompt, no shipping an unverified SHA.
+  # Skipped on pull_request: PR builds never push, and the PR's own required
+  # checks already gate the merge.
+  ci-gate:
+    name: Wait for CI
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for CI to conclude green for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "Gating image build on a green CI run for ${SHA}"
+          # CI fires on every push to main (no path filter), so a run is
+          # guaranteed to appear — poll until it concludes. 100 * 15s = 25 min.
+          for i in $(seq 1 100); do
+            resp=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=1" \
+              --jq '.workflow_runs[0] // {} | "\(.status // "none") \(.conclusion // "none")"')
+            status=${resp% *}
+            conclusion=${resp#* }
+            echo "[$i] CI status=${status} conclusion=${conclusion}"
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                echo "✅ CI passed — proceeding to build/push."
+                exit 0
+              fi
+              echo "❌ CI concluded '${conclusion}' — aborting build so deploy never fires."
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "⏱️ Timed out waiting for CI to conclude."
+          exit 1
+
   build:
     name: ${{ matrix.service }}
+    needs: ci-gate
+    # Run when ci-gate passed (push) OR was skipped (pull_request). Blocks only
+    # when ci-gate actually FAILED — i.e. CI was red on main.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
