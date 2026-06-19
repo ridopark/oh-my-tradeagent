@@ -72,6 +72,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   private static final String KIND_POSITION_CLOSED = "PositionClosed";
 
+  // Issue #434: terminal marker for a position whose option physically expired with no closing fill
+  // (worthless expiry — a no-bid contract has no buyer, so the scheduled expiry flatten's SELL
+  // never fills). The lot is closed as worthless (remainingQty -> 0) rather than lingering "open"
+  // forever waiting for a fill that can never come. Subject carries reason=worthless_expiry.
+  private static final String KIND_POSITION_EXPIRED = "PositionExpired";
+
   // Phase 4 audit kinds
   private static final String KIND_CHANDELIER_ARMED = "ChandelierArmed";
   private static final String KIND_CHANDELIER_TRAIL_FIRED = "ChandelierTrailFired";
@@ -382,6 +388,24 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * double-place).
    */
   private static final String VERSION_EXIT_STEPPED_REPRICE = "exit-stepped-reprice";
+
+  /**
+   * Issue #434 replay gate. When the PHYSICAL-expiry flatten (reason={@code expiry} only — NOT
+   * {@code expiry_lead}, which fires BEFORE expiry and must keep its real expiry-close attempt)
+   * completes its fill-await with NO fill (the bounded limit / marketable sell rested unfilled,
+   * {@code remainingQty} still &gt; 0) AND the contract has physically expired (its OCC expiry date
+   * &lt;= the workflow's current ET date, derived deterministically from {@link
+   * Workflow#currentTimeMillis()}), close the lot as WORTHLESS: zero {@code remainingQty}, emit the
+   * terminal {@link #KIND_POSITION_EXPIRED}, and let {@code run()} complete normally. A worthless
+   * option has no buyer, so the prior behavior — block ALIVE forever on a late fill that can never
+   * come — lingered the workflow "open" past physical expiry, where recon re-adopts it and the
+   * dashboard counts it (the TSLA 260618P incident). v=DEFAULT_VERSION (in-flight workflows started
+   * before this patch) keep the existing lingering behavior so their recorded histories replay
+   * byte-identically — the only new command on v=0 is this appended getVersion marker (resolving to
+   * DEFAULT_VERSION). Long-lived multi-day workflow: in-flight executions replay across a redeploy,
+   * so the gate is mandatory.
+   */
+  private static final String VERSION_EXPIRE_WORTHLESS = "expire-worthless-v1";
 
   /** Plan-2B R-AB-1 default: minutes before expiry close to arm the guaranteed flatten timer. */
   private static final long FLATTEN_LEAD_MINUTES_DEFAULT = 30L;
@@ -853,7 +877,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // than spin: the workflow stays running (no silent complete) until a late fill drains the lot
       // or an operator force-closes.
       boolean flat = flattenRemaining(reason);
-      if (!flat) {
+      if (!flat && !maybeCloseWorthlessAtExpiry(reason)) {
         // Stay ALIVE: block until a late fill (delivered via onFill -> a subsequent flatten cycle)
         // or some other path drains the lot. The bounded limit is resting at the broker; we never
         // emit PositionClosed with remaining > 0. A re-arm cycle re-places on the next late fill.
@@ -1580,6 +1604,71 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // cancel the still-open broker order.
       return;
     }
+  }
+
+  /**
+   * Issue #434: close the lot as WORTHLESS when the PHYSICAL-expiry flatten did not fill by expiry.
+   * Returns {@code true} iff it closed the position (caller must then skip the alive-block and let
+   * {@code run()} complete); {@code false} to fall through to the existing stay-ALIVE behavior.
+   *
+   * <p>Gated on three conditions, ALL required:
+   *
+   * <ul>
+   *   <li>{@code reason == "expiry"} — ONLY the physical-expiry flatten. NOT {@code expiry_lead}
+   *       (fires before expiry; its no-fill must keep the real expiry-close attempt) nor {@code
+   *       eod}/{@code risk_breach}/{@code force_close}/{@code chandelier} (a no-fill there is not a
+   *       worthless-at-expiry condition).
+   *   <li>The contract has PHYSICALLY expired: its OCC expiry date &lt;= the workflow's current ET
+   *       date, derived deterministically from {@link Workflow#currentTimeMillis()} (never {@code
+   *       LocalDate.now()}). The expiry timer can fire slightly before midnight-of-expiry in
+   *       degenerate configs, so this re-checks physical expiry rather than trusting the timer
+   *       alone.
+   *   <li>{@link #VERSION_EXPIRE_WORTHLESS} v&gt;=1. v=DEFAULT_VERSION (in-flight pre-#434
+   *       workflows) returns {@code false} → unchanged lingering behavior; the only new command on
+   *       v=0 is this appended getVersion marker.
+   * </ul>
+   *
+   * <p>On close: zero {@code remainingQty}, clear the late-fill flag, and emit the terminal {@link
+   * #KIND_POSITION_EXPIRED} (P&amp;L-neutral — a worthless expiry realizes no exit credit).
+   */
+  private boolean maybeCloseWorthlessAtExpiry(String reason) {
+    if (!"expiry".equals(reason)) {
+      return false;
+    }
+    LocalDate expiryDate = expiryDateFromOcc(input.getContractSymbol());
+    if (expiryDate == null || expiryDate.isAfter(currentEtDate())) {
+      return false;
+    }
+    int v = Workflow.getVersion(VERSION_EXPIRE_WORTHLESS, Workflow.DEFAULT_VERSION, 1);
+    if (v == Workflow.DEFAULT_VERSION) {
+      return false;
+    }
+    long remainingBefore = remainingQty;
+    remainingQty = 0;
+    flattenAwaitingLateFill = false;
+    auditLog(
+        KIND_POSITION_EXPIRED,
+        subject(
+            "entry_signal_id",
+            input.getEntrySignalId(),
+            "option_symbol",
+            input.getContractSymbol(),
+            "remaining_qty_before",
+            remainingBefore,
+            "reason",
+            "worthless_expiry"));
+    return true;
+  }
+
+  /**
+   * The workflow's "today" in the US options market timezone, derived deterministically from {@link
+   * Workflow#currentTimeMillis()} (never {@code LocalDate.now()}, which is non-deterministic in
+   * workflow code). Used to decide whether the managed contract has physically expired.
+   */
+  private static LocalDate currentEtDate() {
+    return Instant.ofEpochMilli(Workflow.currentTimeMillis())
+        .atZone(java.time.ZoneId.of("America/New_York"))
+        .toLocalDate();
   }
 
   /**

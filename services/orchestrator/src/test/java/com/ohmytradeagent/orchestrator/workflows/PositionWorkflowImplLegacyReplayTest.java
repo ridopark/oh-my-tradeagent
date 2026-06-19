@@ -162,10 +162,26 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Issue #434: pins the expire-worthless gate literal. This getVersion change-point keys the
+   * physical-expiry worthless-close fork in run()'s v&gt;=1 epilogue; a renamed string re-resolves
+   * to DEFAULT_VERSION for legacy histories, silently reverting the worthless-close fix on
+   * in-flight workflows (back to the lingering-open behavior).
+   */
+  @Test
+  void versionExpireWorthlessConstantNameIsStable() throws Exception {
+    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_EXPIRE_WORTHLESS");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("expire-worthless-v1");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#276 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The recorded {@code PartialExitFilled} subject has no
    * {@code option_symbol} key; the current impl's v=DEFAULT_VERSION branch must reproduce that
-   * command sequence exactly.
+   * command sequence exactly. Issue #434: this same pre-#434 history (recorded with NO {@code
+   * expire-worthless-v1} marker) doubles as the worthless-close replay regression — on replay every
+   * gate, including {@code VERSION_EXPIRE_WORTHLESS}, resolves to DEFAULT_VERSION so the legacy
+   * (lingering) branch runs and the recorded command stream is reproduced byte-identically.
    */
   @Test
   void legacyPre276HistoryReplaysAgainstCurrentImplWithoutNonDeterminism() throws Exception {
