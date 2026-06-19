@@ -273,4 +273,56 @@ class RoundTripTest {
 
     assertThat(roundTripped).isEqualTo(original);
   }
+
+  @Test
+  void strategyConfig_roundTrips_andCapitalSourceDefaultsToStatic() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("strategy-config-copytrade-v1.json"));
+
+    StrategyConfig deserialized = mapper.readValue(json, StrategyConfig.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getTenantId()).isEqualTo("dev");
+    assertThat(deserialized.getStrategyId()).isEqualTo("copytrade-v1");
+    // dynamic-account-cash-sizing: the fixture sets capital_source=static explicitly.
+    assertThat(deserialized.getCapitalSource()).isEqualTo(StrategyConfig.CapitalSource.STATIC);
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
+
+  @Test
+  void strategyConfig_absentCapitalSource_defaultsToStatic() throws Exception {
+    // Back-compat: a config with NO capital_source key deserializes to STATIC (the generated DTO's
+    // default-initialized value), preserving today's behavior for every existing strategy.
+    String json =
+        "{\"schema_version\":1,\"tenant_id\":\"dev\",\"strategy_id\":\"copytrade-v1\","
+            + "\"broker_target\":\"alpaca-paper\",\"author_whitelist\":[\"a\"],"
+            + "\"max_signal_age_bto_secs\":30,\"max_signal_age_stc_secs\":60,\"max_positions\":5,"
+            + "\"capital_weight\":0.2,\"min_contracts\":1,\"max_contracts\":5}";
+
+    StrategyConfig deserialized = mapper.readValue(json, StrategyConfig.class);
+
+    assertThat(deserialized.getCapitalSource()).isEqualTo(StrategyConfig.CapitalSource.STATIC);
+  }
+
+  @Test
+  void strategyConfig_accountCash_roundTrips() throws Exception {
+    String json =
+        "{\"schema_version\":1,\"tenant_id\":\"dev\",\"strategy_id\":\"copytrade-v1\","
+            + "\"broker_target\":\"alpaca-live\",\"author_whitelist\":[\"a\"],"
+            + "\"max_signal_age_bto_secs\":30,\"max_signal_age_stc_secs\":60,\"max_positions\":5,"
+            + "\"capital_weight\":0.2,\"capital_source\":\"account_cash\","
+            + "\"min_contracts\":1,\"max_contracts\":5}";
+
+    StrategyConfig deserialized = mapper.readValue(json, StrategyConfig.class);
+    assertThat(deserialized.getCapitalSource())
+        .isEqualTo(StrategyConfig.CapitalSource.ACCOUNT_CASH);
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    assertThat(mapper.readTree(reserialized).get("capital_source").asText())
+        .isEqualTo("account_cash");
+  }
 }

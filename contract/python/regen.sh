@@ -317,6 +317,55 @@ else:
     print("[positivefloat -> decimal] no files needed rewriting")
 PY
 
+# Post-process: coerce bare-string enum defaults to the enum member. datamodel-codegen
+# renders a JSON-Schema `"default": "<value>"` on an enum-typed field as a raw string literal
+# (e.g. `capital_source: CapitalSource | None = "static"`), which makes Pydantic v2 emit a
+# `PydanticSerializationUnexpectedValue` warning at serialization (the default is a str, not a
+# CapitalSource member). Rewriting it to the enum member (`CapitalSource.static`) silences the
+# warning and keeps the wire value identical ("static"). Mirrors the other post-processors:
+# fail-loud if the expected shape changes so we never ship a half-rewrite.
+uv run python - <<'PY'
+"""Rewrite `<field>: <Enum> | None = "<value>"` defaults to `<Enum>.<value>`."""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+OUT_DIR = Path("ohmytradeagent_contract/models")
+# Capture: field name, Enum type, optional ` | None`, and the quoted default value.
+DECL = re.compile(
+    r'^(?P<indent>\s*)(?P<field>\w+): (?P<enum>[A-Z]\w*)(?P<opt> \| None)? = "(?P<val>[^"]+)"$',
+    re.MULTILINE,
+)
+
+
+def _member(value: str) -> str:
+    # datamodel-codegen names enum members by their value verbatim for snake_case string enums
+    # (e.g. "static" -> static, "account_cash" -> account_cash). Keep this in lockstep with the
+    # generated `class <Enum>(StrEnum)` member names.
+    return value
+
+
+def process(path: Path) -> bool:
+    text = path.read_text()
+    new_text = DECL.sub(
+        lambda m: f'{m.group("indent")}{m.group("field")}: '
+        f'{m.group("enum")}{m.group("opt") or ""} = {m.group("enum")}.{_member(m.group("val"))}',
+        text,
+    )
+    if new_text == text:
+        return False
+    path.write_text(new_text)
+    return True
+
+
+touched = [py.name for py in sorted(OUT_DIR.glob("*.py")) if process(py)]
+if touched:
+    print(f"[enum string-default -> member] rewrote {len(touched)} file(s): {', '.join(touched)}")
+else:
+    print("[enum string-default -> member] no files needed rewriting")
+PY
+
 echo "Regenerated under $OUT_DIR/"
 find "$OUT_DIR" -name '*.py' | sort
 echo "---class names---"

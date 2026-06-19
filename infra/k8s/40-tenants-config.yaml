@@ -45,6 +45,13 @@ data:
     bto_price_move_reject_pct: 0.10
     max_positions: 5
     capital_weight: 0.2
+    # dynamic-account-cash-sizing: capital base for capital-weight sizing. static = global
+    # ORCHESTRATOR_CAPITAL_PER_STRATEGY ($100k) for every tenant (DEFAULT; null/absent = static);
+    # account_cash = the broker account's live CASH (fail-CLOSED: null/zero cash REJECTS the BTO,
+    # never falls back to $100k; also forces the account-snapshot dispatch). dev is paper → static.
+    # prod_real/copytrade-v1 (live-cluster-only) must be account_cash, set out-of-band. Keep in sync
+    # with tenants/dev/strategies/copytrade-v1.yaml.
+    capital_source: static
     min_contracts: 1
     max_contracts: 50
     # Issue #336 portfolio dollar-exposure cap (keep in sync): 25% of cost-basis capital base.

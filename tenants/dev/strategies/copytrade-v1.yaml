@@ -25,6 +25,18 @@ max_positions: 5
 
 # Phase 2a sizing
 capital_weight: 0.2
+# dynamic-account-cash-sizing: selects the capital base for capital-weight sizing
+# (allocation = capital_base * capital_weight, clamped to min/max_contracts).
+#   static       — global ORCHESTRATOR_CAPITAL_PER_STRATEGY ($100k on homelab) for every
+#                  tenant (DEFAULT; null/absent treated as static). Over-sizes a small
+#                  real-money account (a $5k account sized as if it held $100k).
+#   account_cash — sizes from the broker account's live CASH (the same AccountSnapshotActivity
+#                  cash the notional-cap gate reads). fail-CLOSED: null/zero cash REJECTS the BTO
+#                  (capital_unavailable), never falls back to the static $100k. Also forces the
+#                  account-snapshot dispatch even with no notional cap.
+# dev is paper and stays on static. prod_real/copytrade-v1 (live-cluster-only, NOT in this repo)
+# must be set to account_cash out-of-band in its strategy_config DB row + tenants mount.
+capital_source: static
 min_contracts: 1
 max_contracts: 50
 

@@ -163,6 +163,22 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // refused as STALE. Hardcoded by design — making it config-tunable is P3-b, NOT this phase.
   private static final Duration LIVE_PROMOTION_TTL = Duration.ofDays(30);
 
+  // dynamic-account-cash-sizing: gate the ONE place capital_source=account_cash adds a command to
+  // the history — the account-snapshot dispatch fired for a strategy that enabled cash-sizing but
+  // configured NO notional cap. Pre-this-change, dispatchAccountSnapshot returned null (no command)
+  // for a no-notional-cap config, so a legacy history of such a strategy has no AccountSnapshot
+  // command. Reading this marker unconditionally and only WIDENING the dispatch enablement at v>=1
+  // keeps every legacy execution's command stream byte-identical: a no-cap legacy history replays
+  // at
+  // DEFAULT_VERSION (no dispatch), a notional-cap history already dispatched (so its enablement is
+  // unchanged at either version), and only a freshly-started account_cash+no-cap execution takes
+  // the
+  // v>=1 dispatch. Sizing itself reads the resulting cash as an Activity-INPUT to computeContracts
+  // (the `contracts` value) — Temporal replay ignores activity-input payloads, so the static→cash
+  // sizing switch needs NO marker; only the command-ordering widening above does. Mirrors
+  // VERSION_LIVE_PROMOTION_GATE's "read unconditionally, branch only at v>=1" discipline.
+  private static final String VERSION_ACCOUNT_CASH_SIZING = "account-cash-sizing-v1";
+
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
 
@@ -267,6 +283,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     int preTradeDispatchVersion =
         Workflow.getVersion(VERSION_PRE_TRADE_DISPATCH, Workflow.DEFAULT_VERSION, 1);
     RiskDecision decision;
+    // The broker CASH read for the notional-cap gate, hoisted so account_cash sizing reuses the
+    // SAME value below (one dispatch, two consumers). Stays null on the legacy paths that never
+    // dispatch (DEFAULT_VERSION pre-trade / check-entry / account-equity branches); those paths are
+    // also incompatible with account_cash sizing only on already-running legacy histories, where
+    // capital_source physically could not have been account_cash anyway.
+    BigDecimal accountCash = null;
     if (preTradeDispatchVersion == Workflow.DEFAULT_VERSION) {
       // Legacy pre-#111 path: single checkEntry call with null preTradeResult. Reachable only by
       // CopytradeSignalWorkflow executions that began before the pre-trade-dispatch-v2 patch was
@@ -295,7 +317,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
           decision =
               risk.checkEntryWithLimit(payload, config, preTradeResult, priced.limit(), null);
         } else {
-          BigDecimal accountCash = dispatchAccountSnapshot(payload, config);
+          // One dispatch feeds BOTH the notional-cap gate AND account_cash sizing — the cash read
+          // is fetched once and reused at the sizing block below, never dispatched twice.
+          accountCash = dispatchAccountSnapshot(payload, config);
           decision =
               risk.checkEntryWithLimit(
                   payload, config, preTradeResult, priced.limit(), accountCash);
@@ -317,8 +341,34 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
     ContractResolveResult resolved = contract.resolve(ContractResolveInput.from(payload));
 
-    BigDecimal capital =
-        strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
+    // capital_source sizing switch. Read the marker UNCONDITIONALLY (before any branch) so the
+    // command stream is identical across versions; see VERSION_ACCOUNT_CASH_SIZING. 'static'
+    // (default; null/absent) is BYTE-IDENTICAL to the pre-change path: same capitalForStrategy
+    // read,
+    // same computeContracts, no new command. 'account_cash' sizes from the broker CASH already read
+    // for the notional-cap gate (accountCash above) and is FAIL-CLOSED: a null/zero cash (broker
+    // outage → the dispatchAccountSnapshot ZERO sentinel, or a genuinely empty account) REJECTS the
+    // entry — no placeOrder, no PositionWorkflow — and NEVER falls back to the static $100k.
+    int cashSizingVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_CASH_SIZING, Workflow.DEFAULT_VERSION, 1);
+    BigDecimal capital;
+    if (cashSizingVersion >= 1 && StrategyConfigs.accountCashSizing(config)) {
+      if (accountCash == null || accountCash.signum() <= 0) {
+        logAudit(
+            payload,
+            KIND_SIGNAL_REJECTED,
+            subject(
+                "signal_id", payload.getSignalId(),
+                "reason_code", "CAPITAL_UNAVAILABLE",
+                "reason_detail", "capital_unavailable",
+                "outcome", "REJECTED"));
+        // Fail-closed: NO placeOrder, NO PositionWorkflow.
+        return payload.getSignalId();
+      }
+      capital = accountCash;
+    } else {
+      capital = strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
+    }
     long contracts = Sizing.computeContracts(payload, config, capital, priced.limit());
 
     logAudit(
@@ -957,7 +1007,20 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // Activity result was serialized), so for any pre-existing execution capBase is null on replay
     // and this guard reduces to the old equity-only decision — the command stream is unchanged. The
     // new branch is reachable only by executions whose history was recorded post-#336.
-    if (!StrategyConfigs.notionalCapConfigured(config)) {
+    //
+    // dynamic-account-cash-sizing: account_cash sizing ALSO needs this dispatch even when no
+    // notional cap is configured. WIDENING the enablement (cap OR cash-sizing) adds an
+    // AccountSnapshot
+    // command for an account_cash+no-cap strategy that previously emitted none, so the widening is
+    // gated behind VERSION_ACCOUNT_CASH_SIZING (read unconditionally): a legacy no-cap history
+    // replays at DEFAULT_VERSION and still returns null here (no command), while a notional-cap
+    // history is unaffected (notionalCapConfigured already true at either version). Only a freshly-
+    // started account_cash+no-cap execution takes the new dispatch.
+    int cashSizingVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_CASH_SIZING, Workflow.DEFAULT_VERSION, 1);
+    boolean cashSizingDispatch =
+        cashSizingVersion >= 1 && StrategyConfigs.accountCashSizing(config);
+    if (!StrategyConfigs.notionalCapConfigured(config) && !cashSizingDispatch) {
       return null;
     }
     if (config.getBrokerTarget() == null) {

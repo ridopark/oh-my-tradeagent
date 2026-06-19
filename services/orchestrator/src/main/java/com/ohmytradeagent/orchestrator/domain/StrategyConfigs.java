@@ -21,4 +21,17 @@ public final class StrategyConfigs {
     return config.getNotionalCapPctOfCapitalBase() != null
         || config.getNotionalCapPctOfEquity() != null;
   }
+
+  /**
+   * True when capital-weight sizing should size from the broker account's live CASH balance rather
+   * than the static global capital base. Back-compat: null/absent {@code capital_source} is treated
+   * as {@code static} (the generated DTO also defaults the field to {@code static}), so this is
+   * false unless the strategy explicitly opted into {@code account_cash}. The workflow uses this in
+   * two lockstep places — the account-snapshot dispatch enablement (so cash is fetched even with no
+   * notional cap) and the sizing-source switch — exactly as {@link #notionalCapConfigured} keeps
+   * the dispatch guard and the notional-cap resolver in lockstep.
+   */
+  public static boolean accountCashSizing(StrategyConfig config) {
+    return config.getCapitalSource() == StrategyConfig.CapitalSource.ACCOUNT_CASH;
+  }
 }
