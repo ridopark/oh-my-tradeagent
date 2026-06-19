@@ -11,6 +11,8 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -34,6 +36,12 @@ public class PositionsReader {
   private static final Logger log = LoggerFactory.getLogger(PositionsReader.class);
   private static final String POSITION_WORKFLOW_TYPE = "PositionWorkflow";
   private static final BigDecimal CONTRACT_MULTIPLIER = new BigDecimal("100");
+  // Issue #434: an option whose physical expiry has passed has been dropped by the broker at
+  // expiry; a PositionWorkflow that rode a worthless contract to expiry can linger "open" until
+  // its durable worthless-close lands. The dashboard is a read-only view, so filter expired OCCs
+  // out of open_positions / sum_open_notional immediately. Expiry is compared against TODAY in the
+  // US options market timezone (the trading calendar the broker drops contracts on).
+  private static final ZoneId MARKET_TZ = ZoneId.of("America/New_York");
 
   private final WorkflowClient client;
   private final TenantStrategyResolver strategyResolver;
@@ -90,6 +98,19 @@ public class PositionsReader {
           || state.entryPremium() == null) {
         return null;
       }
+      // Issue #434: drop a physically-expired contract — it must not appear in open_positions nor
+      // contribute to sum_open_notional. Fail-OPEN: an unparseable OCC (parseExpiry -> null) is
+      // KEPT so a parse quirk never hides a real live position from the operator.
+      LocalDate expiry = parseExpiry(state.contractSymbol());
+      if (expiry != null && expiry.isBefore(LocalDate.now(MARKET_TZ))) {
+        log.debug(
+            "filtering expired position wf={} strategy={} occ={} expiry={}",
+            wfId,
+            strategyId,
+            state.contractSymbol(),
+            expiry);
+        return null;
+      }
       BigDecimal openNotional =
           state
               .entryPremium()
@@ -105,6 +126,34 @@ public class PositionsReader {
     } catch (RuntimeException e) {
       log.warn(
           "positionState query failed wf={} strategy={} err={}", wfId, strategyId, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Issue #434: BFF-local OCC expiry parser. The BFF must NOT depend on the orchestrator's {@code
+   * OccSymbol}, so this parses the expiry independently. The OCC tail is fixed-width: {@code
+   * YYMMDD}(6) + right{@code C|P}(1) + strike(8) = 15 chars, with the underlying root (variable,
+   * space-padded to 6 in the canonical form, e.g. {@code TSLA 260618P00380000}) leading. Spaces are
+   * stripped first so both the padded canonical form and the compact broker form parse; the expiry
+   * is then the 6-digit {@code YYMMDD} at {@code length-15}. Returns {@code null} on any parse
+   * failure (too short, non-numeric, invalid date) so the caller fails OPEN.
+   */
+  static LocalDate parseExpiry(String occ) {
+    if (occ == null) {
+      return null;
+    }
+    String compact = occ.replace(" ", "");
+    if (compact.length() < 15) {
+      return null;
+    }
+    String yymmdd = compact.substring(compact.length() - 15, compact.length() - 9);
+    try {
+      int yy = Integer.parseInt(yymmdd.substring(0, 2));
+      int mm = Integer.parseInt(yymmdd.substring(2, 4));
+      int dd = Integer.parseInt(yymmdd.substring(4, 6));
+      return LocalDate.of(2000 + yy, mm, dd);
+    } catch (RuntimeException e) {
       return null;
     }
   }
