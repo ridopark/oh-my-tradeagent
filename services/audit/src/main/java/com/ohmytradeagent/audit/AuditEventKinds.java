@@ -80,6 +80,11 @@ public final class AuditEventKinds {
           // hard-terminal-close family as Eod/Expiry force-flatten — it closes a lifecycle that
           // had a real entry.
           "ExpiryLeadForceFlattened",
+          // Issue #434: a PositionWorkflow whose option physically expired with no closing fill
+          // (worthless expiry — no buyer for the contract) closes the lot as worthless. It closes a
+          // lifecycle that had a real entry, so it is a HARD terminal close (same family as the
+          // force-flatten kinds).
+          "PositionExpired",
           "SignalAbortedByRiskBreach");
 
   /**
@@ -233,6 +238,8 @@ public final class AuditEventKinds {
           "ExpiryLeadFlattenRequested",
           "ExpiryLeadForceFlattened",
           "PositionClosed",
+          // Issue #434: terminal worthless-expiry close (also in HARD_TERMINAL_CLOSE_KINDS).
+          "PositionExpired",
           "ChandelierArmed",
           "ChandelierTrailFired",
           "ChandelierArmRejected",
@@ -269,6 +276,13 @@ public final class AuditEventKinds {
           // ledger ENTRY is the adopted workflow's PositionEntered). Intentionally placed in
           // ALL_KINDS only, not in ENTRY_KINDS or any *_TERMINAL_CLOSE_KINDS group.
           "ReconAutoAdoptionInitiated",
+          // Issue #434: emitted by ReconciliationWorkflowImpl when a recon cycle refuses to
+          // auto-adopt a broker remnant whose OCC has physically expired. An expired contract has
+          // been dropped by the broker; adopting it would spawn a PositionWorkflow that lingers
+          // open (no buyer for a worthless contract) and is re-adopted every cycle. Pure
+          // observability — NOT a lifecycle event (no workflow was started). Intentionally placed
+          // in ALL_KINDS only, not in ENTRY_KINDS or any *_TERMINAL_CLOSE_KINDS group.
+          "AutoAdoptRefusedExpired",
           // Issue #239/#285: emitted by AdoptionWorkflow when an operator-triggered
           // adoption reconstructs + starts a PositionWorkflow owner for a confirmed orphan. Pure
           // provenance / observability — NOT a lifecycle event. The real ledger ENTRY is the

@@ -39,6 +39,33 @@ public record OccSymbol(String value) {
     return compact.substring(0, compact.length() - 15);
   }
 
+  /**
+   * Issue #434: inverse of {@link #of} — extract the expiry {@link LocalDate} from an OCC option
+   * symbol. The OCC tail is fixed-width: {@code YYMMDD}(6) + right{@code C|P}(1) + strike(8) = 15
+   * chars, with the underlying root leading (variable, space-padded to 6 in the {@link #of}
+   * canonical form). Strips spaces first so both the padded canonical form and the compact broker
+   * form parse, then reads the 6-digit {@code YYMMDD} at {@code length-15}. Returns {@code null} on
+   * any parse failure (null, too short, non-numeric, invalid date) so callers can fail-safe.
+   */
+  public static LocalDate expiryOf(String occ) {
+    if (occ == null) {
+      return null;
+    }
+    String compact = occ.replace(" ", "");
+    if (compact.length() < 15) {
+      return null;
+    }
+    String yymmdd = compact.substring(compact.length() - 15, compact.length() - 9);
+    try {
+      int yy = Integer.parseInt(yymmdd.substring(0, 2));
+      int mm = Integer.parseInt(yymmdd.substring(2, 4));
+      int dd = Integer.parseInt(yymmdd.substring(4, 6));
+      return LocalDate.of(2000 + yy, mm, dd);
+    } catch (RuntimeException e) {
+      return null;
+    }
+  }
+
   public static OccSymbol of(String root, LocalDate expiry, BigDecimal strike, String right) {
     if (root == null || root.isBlank() || root.length() > 6) {
       throw new IllegalArgumentException("root must be 1..6 chars, got: " + root);

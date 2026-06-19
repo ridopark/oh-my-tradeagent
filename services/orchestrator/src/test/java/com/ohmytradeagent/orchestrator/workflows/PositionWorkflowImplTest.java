@@ -458,6 +458,54 @@ class PositionWorkflowImplTest {
     verify(calendar).durationUntilExpiryCloseEt(any(), isNull());
   }
 
+  /**
+   * Issue #434: a contract that expires WORTHLESS has no buyer, so the scheduled PHYSICAL-expiry
+   * flatten's SELL never fills. Before this fix the workflow blocked ALIVE forever waiting for a
+   * fill that can never come (remainingQty zeroed only from an actual fill under
+   * VERSION_FLATTEN_FILL_AWAIT) → it lingered "open" past physical expiry, where recon re-adopts it
+   * and the dashboard counts it (the TSLA 260618P incident). Under VERSION_EXPIRE_WORTHLESS v>=1
+   * (TestWorkflowEnvironment reports getVersion==1), when the reason=expiry flatten does not fill
+   * by its bounded TTL AND the OCC has physically expired (NVDA 260516 is well in the past), the
+   * lot is closed as worthless: remainingQty -> 0, a terminal PositionExpired audit, and run()
+   * completes normally instead of hanging.
+   */
+  @Test
+  void expiryNoFill_worthlessContract_closesAsExpired_completesInsteadOfLingering()
+      throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ofMillis(200));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-expiry-worthless");
+    PositionWorkflowInput in = input(25);
+    in.setExpiryDayFloor(new BigDecimal("0.05"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 25L);
+
+    // Let virtual time advance past the expiry timer; the flatten places its SELL then awaits a
+    // fill. NO fill is delivered — a worthless contract has no buyer — so the bounded exit-fill TTL
+    // elapses (time-skipped) and the worthless-close path fires.
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    // The workflow completes (does NOT hang ALIVE) despite the unfilled flatten.
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-expiry-worthless");
+
+    // The physical-expiry flatten was attempted (SELL placed) but never filled...
+    captureKind("ExpiryForceFlattenRequested");
+    // ...so the lot is closed as WORTHLESS: a terminal PositionExpired with the pre-close qty.
+    AuditEvent expired = captureKind("PositionExpired");
+    assertThat(asLong(expired.getSubject().get("remaining_qty_before"))).isEqualTo(25L);
+    assertThat(expired.getSubject())
+        .containsEntry("reason", "worthless_expiry")
+        .containsEntry("option_symbol", "NVDA  260516C00140000");
+
+    // No worthless-expiry exit credit: PositionExpired is P&L-neutral (no PartialExitFilled for the
+    // flatten, since nothing filled).
+    assertThat(captureAll("PartialExitFilled")).isEmpty();
+  }
+
   @Test
   void expiryTimer_configuredForceClose0dte_drivesBoundedLimitFlatten() throws Exception {
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
