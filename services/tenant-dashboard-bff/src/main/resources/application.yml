@@ -33,6 +33,13 @@ spring:
 bff:
   service-token: ${BFF_SHARED_TOKEN:dev-shared-token}
   tenants-dir: ${BFF_TENANTS_DIR:tenants}
+  portfolio:
+    # Per-section budget for the concurrent portfolio sub-reads (position-state queries + account
+    # snapshots). Part of an ordering invariant that MUST hold or /status 500s instead of degrading:
+    #   AccountEquityClient RESULT_TIMEOUT_SECONDS (8s, inner worker wait)
+    #     <= this budget (9s)
+    #     <= dashboard BFF_TIMEOUT_MS in dashboard/lib/bff.ts (12s, the page's abort).
+    subread-timeout-seconds: ${BFF_PORTFOLIO_SUBREAD_TIMEOUT_SECONDS:9}
   datasource:
     orchestrator:
       jdbc-url: ${BFF_ORCHESTRATOR_DB_URL:jdbc:postgresql://localhost:5432/orchestrator}

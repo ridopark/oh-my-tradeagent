@@ -13,6 +13,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -37,6 +45,7 @@ import org.springframework.stereotype.Service;
 @Service
 public class PortfolioService {
 
+  private static final Logger log = LoggerFactory.getLogger(PortfolioService.class);
   private static final ZoneId MARKET_TZ = ZoneId.of("America/New_York");
 
   private final PositionsReader positionsReader;
@@ -47,6 +56,20 @@ public class PortfolioService {
   // Dev-only gate: when true, account_equity rows also carry the informational brokerage
   // account_number for dashboard verification. Default false so it is NEVER exposed in prod.
   private final boolean exposeBrokerAccountNumber;
+  // Per-section wall-clock bound for the concurrent Temporal-backed sub-reads (see await()). Must
+  // stay below the dashboard's BFF call timeout (12s) so a stall degrades a section rather than
+  // 500-ing the page; see application.yml bff.portfolio.subread-timeout-seconds for the invariant.
+  private final long subreadTimeoutSeconds;
+  // Daemon, cached pool: low-QPS dashboard reads; idle threads are reclaimed and never block JVM
+  // exit. A timed-out sub-read is abandoned here and self-resolves when its own Temporal RPC
+  // returns.
+  private final ExecutorService subreadPool =
+      Executors.newCachedThreadPool(
+          r -> {
+            Thread t = new Thread(r, "bff-portfolio-subread");
+            t.setDaemon(true);
+            return t;
+          });
 
   public PortfolioService(
       PositionsReader positionsReader,
@@ -54,36 +77,29 @@ public class PortfolioService {
       AccountEquityClient accountEquity,
       TenantStrategyResolver strategyResolver,
       DbStrategyConfigReader strategyRegistry,
-      @Value("${bff.expose-broker-account-number:false}") boolean exposeBrokerAccountNumber) {
+      @Value("${bff.expose-broker-account-number:false}") boolean exposeBrokerAccountNumber,
+      @Value("${bff.portfolio.subread-timeout-seconds:9}") long subreadTimeoutSeconds) {
     this.positionsReader = positionsReader;
     this.realizedPnl = realizedPnl;
     this.accountEquity = accountEquity;
     this.strategyResolver = strategyResolver;
     this.strategyRegistry = strategyRegistry;
     this.exposeBrokerAccountNumber = exposeBrokerAccountNumber;
+    this.subreadTimeoutSeconds = subreadTimeoutSeconds;
   }
 
   public Map<String, Object> portfolio(String tenantId) {
     List<String> strategyIds = strategyResolver.strategyIdsForTenant(tenantId);
     LocalDate tradingDay = LocalDate.now(MARKET_TZ);
 
-    // Open positions + cost-basis notional.
-    List<OpenPosition> positions = positionsReader.openPositions(tenantId);
-    BigDecimal sumOpenNotional = BigDecimal.ZERO;
-    List<Map<String, Object>> positionItems = new ArrayList<>();
-    for (OpenPosition p : positions) {
-      sumOpenNotional = sumOpenNotional.add(p.openNotional());
-      positionItems.add(positionItem(p));
-    }
+    // Fire the two slow, orchestrator-worker-dependent sub-reads CONCURRENTLY so one stalled
+    // dependency degrades only its own section instead of serially stacking past the page budget.
+    Future<List<OpenPosition>> positionsFuture =
+        subreadPool.submit(() -> positionsReader.openPositions(tenantId));
 
-    // Realized P&L today, summed across strategies.
-    BigDecimal realizedToday = BigDecimal.ZERO;
-    for (String strategyId : strategyIds) {
-      realizedToday =
-          realizedToday.add(realizedPnl.computeRealizedPnl(tenantId, strategyId, tradingDay));
-    }
-
-    // Account equity per distinct broker_target (account-level, shared across tenants).
+    // Account equity per distinct broker_target (account-level, shared across tenants). Each
+    // snapshot
+    // is an independent AccountSnapshotWorkflow round-trip — fetch them concurrently too.
     Set<String> brokerTargets = new LinkedHashSet<>();
     for (String strategyId : strategyIds) {
       String bt = strategyRegistry.brokerTarget(tenantId, strategyId);
@@ -91,9 +107,41 @@ public class PortfolioService {
         brokerTargets.add(bt);
       }
     }
-    List<Map<String, Object>> equityByBroker = new ArrayList<>();
+    Map<String, Future<AccountEquityClient.BrokerAccount>> equityFutures = new LinkedHashMap<>();
     for (String brokerTarget : brokerTargets) {
-      AccountEquityClient.BrokerAccount acct = accountEquity.snapshotFor(brokerTarget);
+      equityFutures.put(
+          brokerTarget, subreadPool.submit(() -> accountEquity.snapshotFor(brokerTarget)));
+    }
+
+    // Realized P&L today, summed across strategies. Audit-backed DB read — not gated on the
+    // orchestrator worker — so it stays inline and cheap.
+    BigDecimal realizedToday = BigDecimal.ZERO;
+    for (String strategyId : strategyIds) {
+      realizedToday =
+          realizedToday.add(realizedPnl.computeRealizedPnl(tenantId, strategyId, tradingDay));
+    }
+
+    // Join positions under the sub-read budget; a stalled query set degrades to "no positions
+    // shown".
+    List<OpenPosition> positions =
+        await(positionsFuture, List.of(), "positions tenant=" + tenantId);
+    BigDecimal sumOpenNotional = BigDecimal.ZERO;
+    List<Map<String, Object>> positionItems = new ArrayList<>();
+    for (OpenPosition p : positions) {
+      sumOpenNotional = sumOpenNotional.add(p.openNotional());
+      positionItems.add(positionItem(p));
+    }
+
+    // Join equity per broker under the same budget; a stalled snapshot degrades to null equity.
+    List<Map<String, Object>> equityByBroker = new ArrayList<>();
+    for (Map.Entry<String, Future<AccountEquityClient.BrokerAccount>> entry :
+        equityFutures.entrySet()) {
+      String brokerTarget = entry.getKey();
+      AccountEquityClient.BrokerAccount acct =
+          await(
+              entry.getValue(),
+              new AccountEquityClient.BrokerAccount(null, null),
+              "equity broker_target=" + brokerTarget);
       Map<String, Object> m = new LinkedHashMap<>();
       m.put("broker_target", brokerTarget);
       m.put("equity", acct.equity());
@@ -121,6 +169,33 @@ public class PortfolioService {
     body.put("unrealized_pnl", null);
     body.put("unrealized_pnl_note", "Out of scope: no market-data / quote source wired.");
     return body;
+  }
+
+  /**
+   * Awaits one concurrent sub-read under {@link #subreadTimeoutSeconds}. On timeout or failure it
+   * logs and returns {@code fallback} so a single stalled dependency (a down/rolling orchestrator
+   * worker, a slow broker account-fetch) degrades just its section of this read-only view rather
+   * than failing the whole portfolio response — which would otherwise stack past the dashboard's
+   * BFF call timeout and 500 the page.
+   */
+  private <T> T await(Future<T> future, T fallback, String label) {
+    try {
+      return future.get(subreadTimeoutSeconds, TimeUnit.SECONDS);
+    } catch (TimeoutException e) {
+      future.cancel(true);
+      log.warn(
+          "portfolio sub-read timed out after {}s; degrading {}", subreadTimeoutSeconds, label);
+      return fallback;
+    } catch (ExecutionException e) {
+      Throwable cause = e.getCause() != null ? e.getCause() : e;
+      log.warn("portfolio sub-read failed; degrading {} err={}", label, cause.getMessage());
+      return fallback;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      future.cancel(true);
+      log.warn("portfolio sub-read interrupted; degrading {}", label);
+      return fallback;
+    }
   }
 
   private static Map<String, Object> positionItem(OpenPosition p) {
