@@ -143,7 +143,6 @@ export interface StrategyConfigResponse {
 export const getStrategyConfig = () =>
   bffGet<StrategyConfigResponse>("/api/strategy-config");
 
-export const getPositions = () => bffGet<Envelope<Position>>("/api/positions");
 export const getTrades = (limit = 100) =>
   bffGet<Envelope<Trade>>(`/api/trades?limit=${limit}`);
 export const getOrders = (limit = 100) =>

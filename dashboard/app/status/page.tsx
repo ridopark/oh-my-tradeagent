@@ -3,7 +3,7 @@ import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
 import { getPortfolio, NotAuthenticatedError, type Portfolio } from "@/lib/bff";
 import { brokerMode, brokerProvider } from "@/lib/mode";
-import { Pnl } from "@/components/Pnl";
+import { Pnl, fmtCurrency } from "@/components/Pnl";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +37,7 @@ export default async function StatusPage() {
       broker: brokerProvider(a.broker_target),
       mode: mode === "unknown" ? "—" : mode.toUpperCase(),
       account: a.account_number ?? "—",
-      equity: fmt(a.equity),
+      equity: fmtCurrency(a.equity),
       status: a.equity === null || a.equity === undefined ? "Unavailable" : "Connected",
     };
   });
@@ -91,16 +91,16 @@ export default async function StatusPage() {
         <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Stat
             label="Total account value"
-            value={fmt(totalAccountValue)}
+            value={fmtCurrency(totalAccountValue)}
             note="Net-liq equity (account-level, shared)."
           />
           <Stat label="Open positions" value={String(p.open_positions_count)} />
           <Stat
             label="Sum open notional"
-            value={fmt(p.sum_open_notional)}
+            value={fmtCurrency(p.sum_open_notional)}
             note="Cost basis at entry — not live mark."
           />
-          <Stat label="Realized P&L today" value={fmt(p.realized_pnl_today)} />
+          <Stat label="Realized P&L today" value={fmtCurrency(p.realized_pnl_today)} />
           <PnlStat
             label="Unrealized P&L (today)"
             value={unrealizedToday}
@@ -212,18 +212,4 @@ function PnlStat({
       {note && <div className="mt-1 text-xs text-slate-500">{note}</div>}
     </div>
   );
-}
-
-function fmt(v: string | number | null | undefined): string {
-  if (v === null || v === undefined) {
-    return "—";
-  }
-  const n = typeof v === "string" ? Number(v) : v;
-  if (Number.isNaN(n)) {
-    return String(v);
-  }
-  return n.toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-  });
 }
