@@ -280,20 +280,16 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       }
       JournalEntry recentFilled = filled.get(0);
       // Issue #432: anchor the owner check on the OCC, NOT a reconstructed signal_id. After a
-      // partial SELL, filled.get(0) is the exit order, whose signal_id is the *exit* signal's — not
-      // the *entry* signal_id that named the live PositionWorkflow (pos/<occ>/<entrySignalId>).
-      // Rebuilding expectedWfId from recentFilled.getSignalId() therefore points at a non-existent
-      // workflow on every partial exit → a false PositionOrphan → maybeAutoAdopt spawns a DUPLICATE
-      // PositionWorkflow for the broker's remaining qty (one phantom per partial exit). Instead ask
-      // "is ANY live PositionWorkflow managing this contract?" via findPositionWorkflowId, which
-      // resolves the OCC through the Redis write-through cache (written on PositionWorkflow start
-      // via
-      // cachePositionMapping) → Visibility fallback (ContractSymbol = occ AND ExecutionStatus =
-      // RUNNING) — independent of which signal_id named the workflow. Pass the journal row's padded
-      // canonical option_symbol: the cache key + ContractSymbol search attribute are both
-      // registered
-      // under that exact form (CopytradeSignalWorkflowImpl / AdoptionWorkflowImpl), so a compact
-      // broker OCC must NOT be used here.
+      // partial SELL, filled.get(0) is the EXIT order, whose signal_id never named the live
+      // PositionWorkflow (pos/<occ>/<entrySignalId>) — rebuilding the id from it false-fires a
+      // PositionOrphan on every partial exit and maybeAutoAdopt spawns a DUPLICATE PositionWorkflow
+      // for the broker's remaining qty (one phantom per partial exit). findPositionWorkflowId
+      // answers "is ANY live PositionWorkflow on this OCC?" via the padded-OCC cache/Visibility
+      // key,
+      // independent of signal_id (the cache→Visibility resolution detail is documented on the
+      // activity itself). Pass the journal row's padded canonical option_symbol, not the broker's
+      // (possibly compact) p.getOptionSymbol(): the cache key + ContractSymbol search attribute are
+      // registered under the padded form (CopytradeSignalWorkflowImpl / AdoptionWorkflowImpl).
       String occ = recentFilled.getOptionSymbol();
       String ownerWfId =
           positionLookup.findPositionWorkflowId(in.getTenantId(), in.getStrategyId(), occ);
@@ -305,8 +301,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // the
         // OCC (e.g. crash after place / before startPositionWorkflow → never cached, Visibility
         // finds
-        // nothing → findPositionWorkflowId returns null). ownerWfId may be null; the audit's
-        // expected_workflow_id is null-safe and emitPositionOrphanWithDebounce tolerates it.
+        // nothing → ownerWfId is null). emitPositionOrphanWithDebounce tolerates a null ownerWfId.
         emitPositionOrphanWithDebounce(
             in, p, ownerWfId, recentFilled.getSignalId(), "filled", now, debounceSince);
         positionOrphans++;
@@ -316,7 +311,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // reaches here. No recon-side version gate: recon executions are short-lived per scheduled
         // run (workflowId carries {{.ScheduledRunID}}), so there is no long-lived in-flight history
         // to replay-protect — a getVersion marker here would be vacuous.
-        maybeAutoAdopt(in, brokerTarget, p, ownerWfId, brokerOpen);
+        maybeAutoAdopt(in, brokerTarget, p, occ, brokerOpen);
       }
     }
 
@@ -460,8 +455,9 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
    * (per {@code findPositionWorkflowId} — Issue #432) — that is the very condition that fires the
    * {@code journal_status='filled'} PositionOrphan. This method adds the over-sell gate +
    * idempotency precheck, then starts {@code AdoptionWorkflow} as a non-blocking ABANDON child.
-   * {@code ownerWfId} is the OCC-resolved owner id used for audit provenance only (may be {@code
-   * null} on a genuine orphan); the precheck below re-resolves the owner authoritatively by OCC.
+   * {@code occ} is the journal row's padded canonical option_symbol (the cache / ContractSymbol key
+   * — NOT the broker's possibly-compact {@code p.getOptionSymbol()}); the precheck re-resolves the
+   * owner authoritatively by that OCC.
    *
    * <p>Mechanism (fixed by the plan, mirrors {@code AdoptionWorkflowImpl} ~152-161):
    *
@@ -495,7 +491,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       ReconciliationWorkflowInput in,
       String brokerTarget,
       BrokerPosition p,
-      String ownerWfId,
+      String occ,
       List<BrokerOpenOrder> brokerOpen) {
     String adoptWfId =
         WorkflowIds.adoption(in.getTenantId(), in.getStrategyId(), p.getOptionSymbol());
@@ -511,19 +507,15 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       }
     }
 
-    // Idempotency precheck (in-flight AND post-complete windows): the owner is already known
-    // not-running (caller condition), but re-resolve it by OCC and re-check it AND the adoption id.
-    // Issue #432: resolving by OCC (not the caller-passed id, which may be null on a genuine
-    // orphan)
-    // makes the precheck authoritative — it answers "is ANY live PositionWorkflow managing this
-    // contract?" rather than probing a reconstructed signal-id that no live workflow ever
-    // registered
-    // under. A running adoption id means a prior cycle already issued the start — skip to avoid a
-    // duplicate.
-    String resolvedOwnerWfId =
-        positionLookup.findPositionWorkflowId(
-            in.getTenantId(), in.getStrategyId(), p.getOptionSymbol());
-    if ((resolvedOwnerWfId != null && positionLookup.isPositionWorkflowRunning(resolvedOwnerWfId))
+    // Issue #432: authoritative idempotency precheck before the Async start. Re-resolve the owner
+    // by
+    // the canonical OCC (a fresh read closes the TOCTOU window between the caller's loop check and
+    // this write side-effect — a concurrent recon tick or adoption may have created/completed the
+    // owner since) and skip if that owner OR the adoption id is already running. A running adoption
+    // id means a prior cycle already issued the start — skip to avoid a duplicate.
+    String ownerWfId =
+        positionLookup.findPositionWorkflowId(in.getTenantId(), in.getStrategyId(), occ);
+    if ((ownerWfId != null && positionLookup.isPositionWorkflowRunning(ownerWfId))
         || positionLookup.isPositionWorkflowRunning(adoptWfId)) {
       recordAutoAdoptMetric(in, brokerTarget, AUTO_ADOPT_ALREADY_OWNED);
       return;
