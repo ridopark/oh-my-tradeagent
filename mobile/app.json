@@ -1,0 +1,11 @@
+{
+  "expo": {
+    "name": "oh-my-tradeagent (spike)",
+    "slug": "oh-my-tradeagent-mobile",
+    "version": "0.0.0",
+    "platforms": ["ios", "android"],
+    "scheme": "omta",
+    "ios": { "bundleIdentifier": "com.ridopark.ohmytradeagent" },
+    "android": { "package": "com.ridopark.ohmytradeagent" }
+  }
+}
