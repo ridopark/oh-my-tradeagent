@@ -141,7 +141,7 @@ class SubscribeEquityActivityImplTest {
   @Test
   @Timeout(value = 60, unit = TimeUnit.SECONDS)
   void subscribeAndPushTick_signalsCapturingWorkflow() {
-    String targetWfId = "wt-wf-test-1";
+    String targetWfId = "t-dev/s-watchlist-trigger-v1/wl/2026-06-23/NVDA/C";
     CapturingWorkflow target =
         env.getWorkflowClient()
             .newWorkflowStub(
@@ -214,7 +214,8 @@ class SubscribeEquityActivityImplTest {
             3600L);
 
     SubscribeEquityResult result =
-        activity.subscribeEquity(req("NVDA", "wf", "equityTick", "140.00", "0.0005"));
+        activity.subscribeEquity(
+            req("NVDA", "t-dev/s-watchlist-trigger-v1/wl/x", "equityTick", "140.00", "0.0005"));
 
     assertThat(result.getStatus()).isEqualTo(SubscribeEquityResult.Status.GATED);
     assertThat(result.getError()).contains("gated");
@@ -272,6 +273,26 @@ class SubscribeEquityActivityImplTest {
     Clock weekend =
         Clock.fixed(Instant.parse("2026-06-20T14:30:00Z"), ZoneId.of("America/New_York"));
     assertThat(newActivityWithClock(weekend).isRegularTradingHours()).isFalse();
+  }
+
+  // Finding #5: a target_workflow_id not owned by the requesting tenant (wrong t-{tenant}/ prefix)
+  // is refused FAILED before any subscribe — the activity never signals another tenant's workflow.
+  @Test
+  void crossTenantTargetWorkflowId_failsClosed_doesNotSubscribe() {
+    SubscribeEquityActivityImpl activity = newBareActivity();
+
+    SubscribeEquityResult result =
+        activity.subscribeEquity(
+            req(
+                "NVDA",
+                "t-otherTenant/s-x/wl/2026-06-23/NVDA/C",
+                "equityTick",
+                "140.00",
+                "0.0005"));
+
+    assertThat(result.getStatus()).isEqualTo(SubscribeEquityResult.Status.FAILED);
+    assertThat(result.getSubscriptionId()).isEmpty();
+    assertThat(result.getError()).contains("not owned by tenant");
   }
 
   // --- helpers ---

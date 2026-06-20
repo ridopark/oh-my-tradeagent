@@ -279,11 +279,11 @@ class StrategyConfig(BaseModel):
     """
     gap_tolerance_pct: confloat(ge=0.0) | None = 0.005
     """
-    Watchlist-trigger gap tolerance as a fraction of `trigger`. A trigger that gaps through its level by more than this fraction at open is treated as gapped (handled per entry_mode) rather than a clean breakout. Default 0.005 (0.5%) when null/absent.
+    Watchlist-trigger gap tolerance as a fraction of `trigger`. A trigger that gaps through its level by more than this fraction at open is treated as gapped (handled per entry_mode) rather than a clean breakout. Default 0.005 (0.5%) when null/absent. Reasonable range is typically 0.001-0.02 (0.1%-2%); values outside this are accepted but rarely sensible.
     """
     equity_emit_delta_pct: confloat(ge=0.0) | None = 0.0005
     """
-    Minimum fractional move in the underlying equity price before a new equity tick is emitted to the trigger-strategy workflow. Throttles tick volume. Default 0.0005 (0.05%) when null/absent.
+    Minimum fractional move in the underlying equity price before a new equity tick is emitted to the trigger-strategy workflow. Throttles tick volume. Default 0.0005 (0.05%) when null/absent. Reasonable range is typically 0.0002-0.002 (0.02%-0.2%); values outside this are accepted but rarely sensible.
     """
     enabled: bool | None = True
     """

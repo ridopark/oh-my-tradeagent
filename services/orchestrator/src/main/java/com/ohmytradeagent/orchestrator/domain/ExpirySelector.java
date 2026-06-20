@@ -66,6 +66,10 @@ public final class ExpirySelector {
       }
       day = day.minusDays(1);
     }
-    return day;
+    throw new IllegalStateException(
+        "no trading day within "
+            + MAX_SHIFT_DAYS
+            + " days preceding candidate expiry "
+            + candidate);
   }
 }

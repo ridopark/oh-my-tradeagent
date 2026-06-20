@@ -202,6 +202,29 @@ class WatchlistTriggerSessionWorkflowImplTest {
   }
 
   @Test
+  void malformedLegsDoNotConsumeCapSlots() {
+    // Finding #7: malformed legs are skipped BEFORE the cap check, so they must NOT eat into the
+    // MAX_FANOUT_LEGS budget. With several malformed legs ahead of MAX armable legs, all MAX
+    // armable legs still arm (the cap counts armable legs only).
+    List<WatchlistTriggerLeg> legs = new ArrayList<>();
+    for (int i = 0; i < 5; i++) {
+      legs.add(new WatchlistTriggerLeg(null, "BAD" + i, "P", "malformed_strike:xx"));
+    }
+    for (int i = 0; i < WatchlistTriggerSessionWorkflowImpl.MAX_FANOUT_LEGS; i++) {
+      legs.add(okLeg("T" + i, true));
+    }
+    when(parser.parseWatchlistTriggers(any())).thenReturn(legs);
+
+    String result = run(config());
+
+    assertThat(result)
+        .startsWith("armed=" + WatchlistTriggerSessionWorkflowImpl.MAX_FANOUT_LEGS + ";skipped=5");
+    verify(decider, times(WatchlistTriggerSessionWorkflowImpl.MAX_FANOUT_LEGS))
+        .evaluateWatchlistEntry(any(), any());
+    assertThat(auditKinds()).doesNotContain("WatchlistFanoutCapExceeded");
+  }
+
+  @Test
   void legAlreadyPastLevel_isStillArmed_parentDoesNotPreJudge() {
     // The parent has no price feed; it cannot and must not pre-judge a cross. A normal arm:true
     // leg is armed regardless of where the level sits — proven by exactly one child start.

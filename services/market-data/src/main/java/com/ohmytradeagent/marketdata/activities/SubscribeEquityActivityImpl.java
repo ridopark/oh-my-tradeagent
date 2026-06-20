@@ -25,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -117,6 +118,22 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
       return result;
     }
 
+    // Tenant-ownership guard: the activity must only ever signal a workflow owned by the requesting
+    // tenant. Child ids are minted as t-{tenant}/... (WorkflowIds.tenantStrategy), so a mismatched
+    // prefix means a cross-tenant target — fail closed rather than signalling someone else's leg.
+    final String tenantPrefix = "t-" + req.getTenantId() + "/";
+    if (req.getTargetWorkflowId() == null || !req.getTargetWorkflowId().startsWith(tenantPrefix)) {
+      log.error(
+          "AUDIT equity-subscribe-tenant-mismatch: tenant={} target_wf={} not owned by tenant;"
+              + " refusing to subscribe.",
+          req.getTenantId(),
+          req.getTargetWorkflowId());
+      result.setSubscriptionId("");
+      result.setStatus(SubscribeEquityResult.Status.FAILED);
+      result.setError("target_workflow_id not owned by tenant");
+      return result;
+    }
+
     try {
       final String targetWfId = req.getTargetWorkflowId();
       final String signalName = req.getSignalName();
@@ -174,16 +191,17 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
       return false;
     }
     BigDecimal last = tick.premium();
-    BigDecimal prevEmitted = throttle.lastEmitted;
-    if (prevEmitted == null) {
-      throttle.lastEmitted = last;
-      return true;
+    // Atomic compare-and-set so two simultaneous ticks cannot both win the same baseline and
+    // double-emit: only the thread that successfully advances lastEmitted emits.
+    while (true) {
+      BigDecimal prevEmitted = throttle.lastEmitted.get();
+      if (prevEmitted != null && last.subtract(prevEmitted).abs().compareTo(minMove) < 0) {
+        return false;
+      }
+      if (throttle.lastEmitted.compareAndSet(prevEmitted, last)) {
+        return true;
+      }
     }
-    if (last.subtract(prevEmitted).abs().compareTo(minMove) >= 0) {
-      throttle.lastEmitted = last;
-      return true;
-    }
-    return false;
   }
 
   private void armNoTickWatchdog(
@@ -270,7 +288,7 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
    * measures real elapsed time even when tests pin the clock for the RTH gate.
    */
   static final class ThrottleState {
-    volatile BigDecimal lastEmitted;
+    final AtomicReference<BigDecimal> lastEmitted = new AtomicReference<>();
     private volatile long lastTickMillis = System.currentTimeMillis();
     volatile ScheduledFuture<?> watchdogTask;
 

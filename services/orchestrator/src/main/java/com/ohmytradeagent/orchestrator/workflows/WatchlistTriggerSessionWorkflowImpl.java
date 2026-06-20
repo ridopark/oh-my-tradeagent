@@ -104,16 +104,8 @@ public class WatchlistTriggerSessionWorkflowImpl implements WatchlistTriggerSess
     List<String> startedChildIds = new ArrayList<>();
 
     for (WatchlistTriggerLeg leg : legs) {
-      if (considered >= MAX_FANOUT_LEGS) {
-        logAudit(
-            source,
-            KIND_FANOUT_CAP_EXCEEDED,
-            subject("cap", MAX_FANOUT_LEGS, "total_legs", legs.size()));
-        break;
-      }
-      considered++;
-
       // Malformed strike/right -> skip THIS leg + audit (fail at arm time, before any fire).
+      // Skipped BEFORE the cap check so malformed legs never consume a cap slot.
       if (!leg.armable()) {
         skipped++;
         logAudit(
@@ -125,6 +117,15 @@ public class WatchlistTriggerSessionWorkflowImpl implements WatchlistTriggerSess
                 "reason", leg.getSkipReason()));
         continue;
       }
+
+      if (considered >= MAX_FANOUT_LEGS) {
+        logAudit(
+            source,
+            KIND_FANOUT_CAP_EXCEEDED,
+            subject("cap", MAX_FANOUT_LEGS, "total_legs", legs.size()));
+        break;
+      }
+      considered++;
 
       WatchlistTriggerPayload payload = leg.getPayload();
       ArmDecision decision = decider.evaluateWatchlistEntry(payload, armCtx);

@@ -322,6 +322,12 @@ public final class AuditEventKinds {
           "TriggerCancelled",
           "TriggerFireRejected",
           "TriggerFeedStale",
+          // Emitted by WatchlistTriggerWorkflowImpl when the entry order receives no fill within
+          // the
+          // pending TTL: the resting order is best-effort cancelled and the leg completes WITHOUT
+          // starting a PositionWorkflow (no position lifecycle ever opened). Neutral observability
+          // event -- registered in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "TriggerEntryUnfilled",
           // Emitted by WatchlistTriggerWorkflowImpl when SubscribeEquityActivity returns a
           // non-SUBSCRIBED disposition (GATED = stock WS unset / fail-closed default posture, or
           // FAILED = source error). Loud observability for the silent-dead-feed condition (no ticks

@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.domain;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.LocalDate;
 import java.util.Set;
@@ -92,5 +93,18 @@ class ExpirySelectorTest {
         ExpirySelector.resolveNearestWeekly(LocalDate.of(2026, 9, 10), false, allTradingDays());
 
     assertThat(resolved).isEqualTo(LocalDate.of(2026, 9, 11));
+  }
+
+  @Test
+  void noTradingDayWithinBackWalk_throws() {
+    // Finding #4: a calendar where NO day is a trading day exhausts the 7-day back-walk; the
+    // resolver must throw rather than return a non-trading (holiday) date.
+    TradingCalendar neverTrading = date -> false;
+
+    assertThatThrownBy(
+            () ->
+                ExpirySelector.resolveNearestWeekly(LocalDate.of(2026, 6, 17), false, neverTrading))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("no trading day");
   }
 }

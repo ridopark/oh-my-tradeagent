@@ -319,6 +319,42 @@ class WatchlistTriggerWorkflowImplTest {
     verify(subscribeEquity, times(1)).subscribeEquity(any());
   }
 
+  // Finding #1: durationUntilEodEt returns null -> no NPE; leg fails safe to the EOD-cancel path
+  // with no order placed.
+  @Test
+  void nullEodDuration_failsSafeToEodCancel_noOrder() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(null);
+    WatchlistTriggerWorkflow wf = newStub("wl-null-eod");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":eod_cancelled");
+    verify(exec, never()).placeOrder(any());
+  }
+
+  // Finding #2: order placed but no fill arrives within the TTL -> the leg cancels the resting
+  // order, audits TriggerEntryUnfilled, and completes WITHOUT starting a PositionWorkflow.
+  @Test
+  void noFillWithinTtl_cancelsOrder_noPositionWorkflow() throws Exception {
+    when(exec.cancelOrder(any())).thenReturn(submittedResult());
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L); // short TTL so the await elapses quickly
+    WatchlistTriggerWorkflow wf = newStub("wl-no-fill");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+    // never send onFill; let the TTL elapse.
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":entry_unfilled");
+    verify(exec, times(1)).placeOrder(any());
+    verify(exec, times(1)).cancelOrder(any());
+    AuditEvent unfilled = captureKind("TriggerEntryUnfilled");
+    assertThat(unfilled.getSubject()).containsEntry("outcome", "UNFILLED");
+  }
+
   // (g) proceed:false -> no order.
   @Test
   void fireDeciderRejects_noOrder() throws Exception {

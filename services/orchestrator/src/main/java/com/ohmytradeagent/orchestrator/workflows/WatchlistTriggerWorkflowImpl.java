@@ -81,6 +81,7 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   private static final String KIND_TRIGGER_FIRE_REJECTED = "TriggerFireRejected";
   private static final String KIND_ORDER_SUBMITTED = "OrderSubmitted";
   private static final String KIND_ENTRY_FILLED = "EntryFilled";
+  private static final String KIND_ENTRY_UNFILLED = "TriggerEntryUnfilled";
   private static final String KIND_FEED_STALE = "TriggerFeedStale";
   private static final String KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE =
       "TriggerSubscriptionUnavailable";
@@ -193,9 +194,13 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     }
 
     // EOD timer: a Workflow.newTimer over the calendar-supplied duration (no wall-clock read).
+    // Fail-safe on a null/zero/negative duration (mirrors WatchlistTriggerSessionWorkflowImpl):
+    // treat as "EOD now" so the leg cancels un-fired instead of NPEing on eodIn.isZero().
     final boolean[] eodFired = {false};
     Duration eodIn = calendar.durationUntilEodEt();
-    if (!eodIn.isZero() && !eodIn.isNegative()) {
+    if (eodIn == null || eodIn.isZero() || eodIn.isNegative()) {
+      eodFired[0] = true;
+    } else {
       Promise<Void> eodTimer = Workflow.newTimer(eodIn);
       eodTimer.thenApply(
           v -> {
@@ -386,7 +391,30 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
             "limit_price", premium,
             "broker_target", config.getBrokerTarget().value()));
 
-    Workflow.await(Duration.ofSeconds(pendingTtlSecs(config)), () -> fillEvent != null);
+    long ttlSecs = pendingTtlSecs(config);
+    boolean filled = Workflow.await(Duration.ofSeconds(ttlSecs), () -> fillEvent != null);
+    if (!filled) {
+      // No fill within the entry TTL. Mirror CopytradeSignalWorkflowImpl's no-fill path
+      // (handleTtlExpired): best-effort cancel the resting order, then complete fail-closed WITHOUT
+      // starting a PositionWorkflow — the leg never opened a position, so spawning one off a null
+      // fill would orphan an empty lifecycle.
+      try {
+        exec.cancelOrder(intentKey);
+      } catch (RuntimeException ignored) {
+        // Best-effort: reconciliation closes any orphan broker order.
+      }
+      logAudit(
+          payload,
+          KIND_ENTRY_UNFILLED,
+          subject(
+              "intent_key", placed.getIntentKey(),
+              "broker_order_id", placed.getBrokerOrderId(),
+              "option_symbol", resolved.optionSymbol(),
+              "ttl_secs", ttlSecs,
+              "outcome", "UNFILLED"));
+      return outcome(payload, "entry_unfilled");
+    }
+
     FillSignalPayload fill = fillEvent;
     logAudit(
         payload,
@@ -397,11 +425,11 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
             "option_symbol",
             resolved.optionSymbol(),
             "broker_order_id",
-            fill == null ? placed.getBrokerOrderId() : fill.getBrokerOrderId(),
+            fill.getBrokerOrderId(),
             "filled_qty",
-            fill == null ? contracts : fill.getFilledQty(),
+            fill.getFilledQty(),
             "avg_fill_price",
-            fill == null ? premium : fill.getAvgFillPrice(),
+            fill.getAvgFillPrice(),
             "outcome",
             "FILLED"));
 
