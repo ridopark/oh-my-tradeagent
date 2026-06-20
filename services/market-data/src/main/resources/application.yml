@@ -17,7 +17,7 @@ temporal:
 market-data:
   provider: ${MARKET_DATA_PROVIDER:inmemory}
   alpaca:
-    data-base-url: ${ALPACA_DATA_BASE_URL:${APCA_LIVE_API_BASE_URL_DATA:https://data.alpaca.markets}}
+    data-base-url: ${ALPACA_DATA_BASE_URL:${APCA_API_BASE_URL_DATA:https://data.alpaca.markets}}
     data-ws-url: ${ALPACA_DATA_WS_URL:wss://stream.data.alpaca.markets/v1beta1/indicative}
     api-key-id: ${APCA_API_KEY_ID_DATA:${APCA_API_KEY_ID:}}
     api-secret-key: ${APCA_API_SECRET_KEY_DATA:${APCA_API_SECRET_KEY:}}
