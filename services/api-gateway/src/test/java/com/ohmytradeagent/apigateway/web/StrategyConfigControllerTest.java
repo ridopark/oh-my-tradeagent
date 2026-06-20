@@ -92,6 +92,52 @@ class StrategyConfigControllerTest {
   }
 
   @Test
+  void enabledFlip_isForwardedToWorkflow_withFlippedConfigAndExpectedVersion() {
+    // Phase 7: the per-tenant enable toggle reuses this existing write endpoint. A body that flips
+    // ONLY enabled (enabled is a SAFE field in StrategyConfigWriter's field-class guards — neither
+    // IDENTITY, DANGEROUS, nor EXPOSURE — so the CAS accepts it) is forwarded verbatim: the
+    // workflow
+    // is started with the flipped config and the caller's expected_version, and UPDATED maps to
+    // 200.
+    when(stub.update(any(StrategyConfigUpdateRequest.class)))
+        .thenReturn(resultOf(StrategyConfigUpdateResult.Outcome.UPDATED, 4L));
+
+    StrategyConfig disabled = new StrategyConfig();
+    disabled.setEnabled(false);
+    StrategyConfigWriteRequest body =
+        new StrategyConfigWriteRequest(TENANT, STRATEGY, disabled, 3L, "corr-enabled");
+
+    var resp = controller.write(reqWithTenant(TENANT), body);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(resp.getBody()).containsEntry("status", "UPDATED").containsEntry("new_version", 4L);
+
+    org.mockito.ArgumentCaptor<StrategyConfigUpdateRequest> captor =
+        org.mockito.ArgumentCaptor.forClass(StrategyConfigUpdateRequest.class);
+    verify(stub).update(captor.capture());
+    StrategyConfigUpdateRequest req = captor.getValue();
+    assertThat(req.getTenantId()).isEqualTo(TENANT);
+    assertThat(req.getStrategyId()).isEqualTo(STRATEGY);
+    assertThat(req.getExpectedVersion()).isEqualTo(3L);
+    assertThat(req.getConfig()).isSameAs(disabled);
+    assertThat(req.getConfig().getEnabled()).isFalse();
+  }
+
+  @Test
+  void enabledFlip_crossTenantBody_is403_noWorkflowStarted() {
+    // Phase 7: a flipped-enabled write whose body.tenant_id differs from the validated X-Tenant-Id
+    // is a cross-tenant write attempt — rejected 403 with no workflow started, same coarse guard as
+    // any other body/tenant mismatch.
+    StrategyConfig disabled = new StrategyConfig();
+    disabled.setEnabled(false);
+    StrategyConfigWriteRequest body =
+        new StrategyConfigWriteRequest("other-tenant", STRATEGY, disabled, 3L, "corr-enabled-x");
+
+    assertResponseStatus(() -> controller.write(reqWithTenant(TENANT), body), HttpStatus.FORBIDDEN);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
   void staleVersion_returns409() {
     assertStatus(StrategyConfigUpdateResult.Outcome.REJECTED_STALE_VERSION, HttpStatus.CONFLICT);
   }

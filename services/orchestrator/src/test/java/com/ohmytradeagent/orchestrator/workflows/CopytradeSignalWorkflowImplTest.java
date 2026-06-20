@@ -217,6 +217,112 @@ class CopytradeSignalWorkflowImplTest {
         .containsEntry("limit_price_strategy", "slip_min");
   }
 
+  // ---------- Phase 7: per-tenant strategy enable toggle ----------
+
+  @Test
+  void disabledStrategy_emitsSignalRejected_andPlacesNoOrder() {
+    // enabled == false: the strategy admits no new entries. The signal is rejected with
+    // reason_detail=strategy_disabled BEFORE any exec activity — no placeOrder, no
+    // PositionWorkflow.
+    StrategyConfig cfg = config();
+    cfg.setEnabled(false);
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+
+    String result = runWorkflow(btoPayload());
+    assertThat(result).isEqualTo("111:0");
+
+    verify(contract, never()).resolve(any());
+    verify(exec, never()).placeOrder(any());
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+
+    AuditEvent rejected = capture("SignalRejected");
+    assertThat(rejected.getSubject())
+        .containsEntry("signal_id", "111:0")
+        .containsEntry("reason_code", "STRATEGY_DISABLED")
+        .containsEntry("reason_detail", "strategy_disabled")
+        .containsEntry("outcome", "REJECTED");
+  }
+
+  @Test
+  void enabledNull_proceedsAsToday() {
+    // Absent/null enabled MUST be treated as enabled (no behavior change for older blobs / existing
+    // tenants). The entry proceeds exactly as the approved-signal path.
+    StrategyConfig cfg = config();
+    cfg.setEnabled(null);
+    cfg.setPendingTtlPaperSecs(1L);
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-intent-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-intent-K"));
+
+    runWorkflow(btoPayload());
+
+    verify(exec, times(1)).placeOrder(any());
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    assertThat(
+            all.getAllValues().stream()
+                .filter(e -> "SignalRejected".equals(e.getKind()))
+                .anyMatch(e -> "STRATEGY_DISABLED".equals(e.getSubject().get("reason_code"))))
+        .isFalse();
+  }
+
+  @Test
+  void enabledTrue_proceeds() {
+    // enabled == true: the entry proceeds (regression — same path as the approved signal).
+    StrategyConfig cfg = config();
+    cfg.setEnabled(true);
+    cfg.setPendingTtlPaperSecs(1L);
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy(anyString(), anyString()))
+        .thenReturn(new BigDecimal("100000"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-intent-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-intent-K"));
+
+    runWorkflow(btoPayload());
+
+    verify(exec, times(1)).placeOrder(any());
+  }
+
+  /**
+   * Phase 7: reflective constant-name pin for the enable-gate change-id, mirroring {@link
+   * #versionFilledAdoptionConstantNamesAreStable}. Renaming or re-valuing the {@code
+   * Workflow.getVersion} change-id after deploy would re-introduce non-determinism — in-flight
+   * histories minted with the OLD id would no longer find their marker and would replay through the
+   * wrong branch. The string VALUE is load-bearing, so this pins it exactly.
+   */
+  @Test
+  void versionStrategyEnabledGateConstantNameIsStable() throws Exception {
+    Field gate =
+        CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_STRATEGY_ENABLED_GATE");
+    gate.setAccessible(true);
+    assertThat((String) gate.get(null)).isEqualTo("strategy-enabled-gate-v1");
+  }
+
   // ---------- P3-a: live-promotion dispatch gate ----------
 
   @Test
