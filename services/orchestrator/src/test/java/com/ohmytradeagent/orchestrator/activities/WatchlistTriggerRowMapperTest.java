@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.activities;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ohmytradeagent.contract.WatchlistMirrorPayload;
+import com.ohmytradeagent.contract.WatchlistTriggerPayload;
 import com.ohmytradeagent.orchestrator.activities.WatchlistParser.Leg;
 import com.ohmytradeagent.orchestrator.activities.WatchlistParser.ParseResult;
 import com.ohmytradeagent.orchestrator.activities.WatchlistParser.TickerWatch;
@@ -61,5 +62,101 @@ class WatchlistTriggerRowMapperTest {
     assertThat(legs).hasSize(1);
     assertThat(legs.get(0).armable()).isFalse();
     assertThat(legs.get(0).getSkipReason()).contains("malformed_strike");
+  }
+
+  @Test
+  void negativeStrikeIsSkipped() {
+    Leg negStrike = new Leg("-5", 'p', new BigDecimal("100.00"));
+    ParseResult parsed = new ParseResult(List.of(new TickerWatch("SPY", null, negStrike)), true);
+
+    List<WatchlistTriggerLeg> legs = WatchlistTriggerRowMapper.map(source(), parsed);
+
+    assertThat(legs).hasSize(1);
+    assertThat(legs.get(0).armable()).isFalse();
+    assertThat(legs.get(0).getSkipReason()).contains("malformed_strike:-5");
+  }
+
+  @Test
+  void strikeWithSurroundingWhitespaceIsTrimmedAndMapped() {
+    Leg paddedStrike = new Leg("  7.5  ", 'c', new BigDecimal("8.00"));
+    ParseResult parsed = new ParseResult(List.of(new TickerWatch("F", paddedStrike, null)), true);
+
+    List<WatchlistTriggerLeg> legs = WatchlistTriggerRowMapper.map(source(), parsed);
+
+    assertThat(legs).hasSize(1);
+    assertThat(legs.get(0).armable()).isTrue();
+    assertThat(legs.get(0).getPayload().getStrike()).isEqualByComparingTo("7.5");
+  }
+
+  @Test
+  void strikeWithTrailingCharsIsSkipped() {
+    Leg trailing = new Leg("7.5abc", 'c', new BigDecimal("8.00"));
+    ParseResult parsed = new ParseResult(List.of(new TickerWatch("F", trailing, null)), true);
+
+    List<WatchlistTriggerLeg> legs = WatchlistTriggerRowMapper.map(source(), parsed);
+
+    assertThat(legs).hasSize(1);
+    assertThat(legs.get(0).armable()).isFalse();
+    assertThat(legs.get(0).getSkipReason()).contains("malformed_strike:7.5abc");
+  }
+
+  @Test
+  void wellFormedDecimalStrikeMapsThrough() {
+    Leg decimalStrike = new Leg("7.5", 'p', new BigDecimal("7.20"));
+    ParseResult parsed = new ParseResult(List.of(new TickerWatch("F", null, decimalStrike)), true);
+
+    List<WatchlistTriggerLeg> legs = WatchlistTriggerRowMapper.map(source(), parsed);
+
+    assertThat(legs).hasSize(1);
+    WatchlistTriggerLeg leg = legs.get(0);
+    assertThat(leg.armable()).isTrue();
+    assertThat(leg.getPayload().getStrike()).isEqualByComparingTo("7.5");
+    assertThat(leg.getPayload().getTrigger()).isEqualByComparingTo("7.20");
+  }
+
+  @Test
+  void callLegMapsToAboveAndRightC() {
+    Leg call = new Leg("100", 'c', new BigDecimal("99.00"));
+    ParseResult parsed = new ParseResult(List.of(new TickerWatch("SPY", call, null)), true);
+
+    List<WatchlistTriggerLeg> legs = WatchlistTriggerRowMapper.map(source(), parsed);
+
+    assertThat(legs).hasSize(1);
+    WatchlistTriggerLeg leg = legs.get(0);
+    assertThat(leg.armable()).isTrue();
+    assertThat(leg.getRightLabel()).isEqualTo("C");
+    assertThat(leg.getPayload().getDirection()).isEqualTo(WatchlistTriggerPayload.Direction.ABOVE);
+    assertThat(leg.getPayload().getRight()).isEqualTo(WatchlistTriggerPayload.Right.C);
+    assertThat(leg.getPayload().getTicker()).isEqualTo("SPY");
+  }
+
+  @Test
+  void putLegMapsToBelowAndRightP() {
+    Leg put = new Leg("100", 'p', new BigDecimal("101.00"));
+    ParseResult parsed = new ParseResult(List.of(new TickerWatch("SPY", null, put)), true);
+
+    List<WatchlistTriggerLeg> legs = WatchlistTriggerRowMapper.map(source(), parsed);
+
+    assertThat(legs).hasSize(1);
+    WatchlistTriggerLeg leg = legs.get(0);
+    assertThat(leg.armable()).isTrue();
+    assertThat(leg.getRightLabel()).isEqualTo("P");
+    assertThat(leg.getPayload().getDirection()).isEqualTo(WatchlistTriggerPayload.Direction.BELOW);
+    assertThat(leg.getPayload().getRight()).isEqualTo(WatchlistTriggerPayload.Right.P);
+  }
+
+  @Test
+  void rowWithBothLegsEmitsCallThenPut() {
+    Leg call = new Leg("105", 'c', new BigDecimal("104.00"));
+    Leg put = new Leg("95", 'p', new BigDecimal("96.00"));
+    ParseResult parsed = new ParseResult(List.of(new TickerWatch("SPY", call, put)), true);
+
+    List<WatchlistTriggerLeg> legs = WatchlistTriggerRowMapper.map(source(), parsed);
+
+    assertThat(legs).hasSize(2);
+    assertThat(legs.get(0).getRightLabel()).isEqualTo("C");
+    assertThat(legs.get(0).getPayload().getStrike()).isEqualByComparingTo("105");
+    assertThat(legs.get(1).getRightLabel()).isEqualTo("P");
+    assertThat(legs.get(1).getPayload().getStrike()).isEqualByComparingTo("95");
   }
 }

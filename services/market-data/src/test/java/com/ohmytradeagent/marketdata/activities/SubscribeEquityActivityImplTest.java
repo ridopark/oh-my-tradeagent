@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -324,6 +325,58 @@ class SubscribeEquityActivityImplTest {
     assertThat(provider.closed.await(10, TimeUnit.SECONDS))
         .as("first-tick teardown must close the subscription (subId was published before dispatch)")
         .isTrue();
+  }
+
+  // Resource-leak regression: tearDown(...) (first-tick WorkflowNotFoundException on a closed
+  // target) must cancel the periodic no-tick watchdog ScheduledFuture, not leave it firing forever
+  // against a torn-down subscription. A capturing scheduler records the future the watchdog arms;
+  // we
+  // assert it is cancelled once the subscription is torn down.
+  @Test
+  @Timeout(value = 60, unit = TimeUnit.SECONDS)
+  void tearDown_cancelsNoTickWatchdog() throws Exception {
+    // Spy the real scheduler so we can capture the ScheduledFuture the watchdog arms.
+    ScheduledExecutorService realWatchdog = Executors.newSingleThreadScheduledExecutor();
+    ScheduledExecutorService spyWatchdog = org.mockito.Mockito.spy(realWatchdog);
+
+    SyncFireProvider provider = new SyncFireProvider();
+    SubscribeEquityActivityImpl activity =
+        new SubscribeEquityActivityImpl(
+            provider,
+            env.getWorkflowClient(),
+            Executors.newSingleThreadExecutor(),
+            spyWatchdog,
+            RTH_CLOCK,
+            3600L);
+
+    final ScheduledFuture<?>[] armed = new ScheduledFuture<?>[1];
+    org.mockito.Mockito.doAnswer(
+            inv -> {
+              ScheduledFuture<?> f = (ScheduledFuture<?>) inv.callRealMethod();
+              armed[0] = f;
+              return f;
+            })
+        .when(spyWatchdog)
+        .scheduleAtFixedRate(
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.any());
+
+    SubscribeEquityResult result =
+        activity.subscribeEquity(
+            req("NVDA", "t-dev/s-x/wl/2026-06-23/NVDA/C", "equityTick", "140.00", "0.0005"));
+
+    assertThat(result.getStatus()).isEqualTo(SubscribeEquityResult.Status.SUBSCRIBED);
+    // First-tick WorkflowNotFoundException tears the subscription down (closes it)...
+    assertThat(provider.closed.await(10, TimeUnit.SECONDS)).isTrue();
+
+    assertThat((Object) armed[0]).as("watchdog must have been armed at subscribe time").isNotNull();
+    assertThat(armed[0].isCancelled())
+        .as("tearDown must cancel the no-tick watchdog so it stops firing")
+        .isTrue();
+
+    realWatchdog.shutdownNow();
   }
 
   /** Provider that fires one tick synchronously inside subscribeEquity, before it returns. */

@@ -75,6 +75,8 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
   private final long noTickAuditSeconds;
 
   private final ConcurrentHashMap<String, Subscription> active = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, ScheduledFuture<?>> watchdogTasks =
+      new ConcurrentHashMap<>();
 
   @Autowired
   public SubscribeEquityActivityImpl(
@@ -172,11 +174,14 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
               });
       subIdHolder[0] = sub.subscriptionId();
       active.put(sub.subscriptionId(), sub);
-      // Release the dispatch only after both subIdHolder AND active are published, so a first-tick
-      // WorkflowNotFoundException teardown can find the subscription in `active` to close it.
-      subIdReady.countDown();
       throttle.markTickSeen(); // seed the watchdog clock at subscribe time
+      // Arm (and register) the watchdog BEFORE releasing the dispatch, so a first-tick
+      // WorkflowNotFoundException teardown always finds the watchdog future to cancel it.
       armNoTickWatchdog(sub.subscriptionId(), ticker, targetWfId, throttle);
+      // Release the dispatch only after subIdHolder, active, AND the watchdog are published, so a
+      // first-tick teardown can find the subscription in `active` to close it and cancel the
+      // watchdog.
+      subIdReady.countDown();
 
       result.setSubscriptionId(sub.subscriptionId());
       result.setStatus(SubscribeEquityResult.Status.SUBSCRIBED);
@@ -243,7 +248,7 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
             noTickAuditSeconds,
             noTickAuditSeconds,
             TimeUnit.SECONDS);
-    throttle.watchdogTask = task;
+    watchdogTasks.put(subscriptionId, task);
   }
 
   /** Pure liveness predicate: the feed is dead when the last tick is older than the threshold. */
@@ -275,6 +280,10 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
   private void tearDown(String subscriptionId, String targetWfId, String reason) {
     if (subscriptionId == null) {
       return;
+    }
+    ScheduledFuture<?> watchdogTask = watchdogTasks.remove(subscriptionId);
+    if (watchdogTask != null) {
+      watchdogTask.cancel(false);
     }
     Subscription sub = active.remove(subscriptionId);
     if (sub != null) {
@@ -315,7 +324,6 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
   static final class ThrottleState {
     final AtomicReference<BigDecimal> lastEmitted = new AtomicReference<>();
     private volatile long lastTickMillis = System.currentTimeMillis();
-    volatile ScheduledFuture<?> watchdogTask;
 
     void markTickSeen() {
       lastTickMillis = System.currentTimeMillis();
