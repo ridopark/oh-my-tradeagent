@@ -7,6 +7,7 @@ import com.ohmytradeagent.contract.activities.SubscribeEquityActivity;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
 import com.ohmytradeagent.marketdata.provider.Subscription;
 import com.ohmytradeagent.marketdata.provider.Tick;
+import com.ohmytradeagent.marketdata.provider.alpaca.StockFeedGatedException;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;
@@ -147,9 +148,10 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
       result.setStatus(SubscribeEquityResult.Status.SUBSCRIBED);
       return result;
     } catch (RuntimeException e) {
-      // Includes the provider's stock-feed gate (stock WS unconfigured -> IllegalStateException).
+      // The provider's stock-feed gate (stock WS unconfigured) surfaces as a typed
+      // StockFeedGatedException -> GATED; any other failure -> FAILED.
       SubscribeEquityResult.Status status =
-          (e.getMessage() != null && e.getMessage().contains("gated"))
+          (e instanceof StockFeedGatedException)
               ? SubscribeEquityResult.Status.GATED
               : SubscribeEquityResult.Status.FAILED;
       log.warn(

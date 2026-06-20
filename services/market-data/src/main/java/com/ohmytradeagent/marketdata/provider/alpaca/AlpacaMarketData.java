@@ -196,7 +196,7 @@ public class AlpacaMarketData implements MarketDataProvider {
               + "refusing to subscribeEquity ticker={} (fail-closed, no connect). Set a real-time "
               + "stock feed to enable.",
           ticker);
-      throw new IllegalStateException("stock data WS not configured; equity subscription gated");
+      throw new StockFeedGatedException("stock data WS not configured; equity subscription gated");
     }
     List<Consumer<Tick>> listeners =
         byTicker.computeIfAbsent(ticker, k -> new CopyOnWriteArrayList<>());

@@ -292,7 +292,7 @@ class AlpacaMarketDataTest {
         new AlpacaMarketData(client, mapper, props, HttpClient.newHttpClient(), scheduler);
 
     org.assertj.core.api.Assertions.assertThatThrownBy(() -> gated.subscribeEquity("NVDA", t -> {}))
-        .isInstanceOf(IllegalStateException.class)
+        .isInstanceOf(StockFeedGatedException.class)
         .hasMessageContaining("gated");
   }
 

@@ -325,7 +325,8 @@ class SubscribeEquityActivityImplTest {
     public com.ohmytradeagent.marketdata.provider.Subscription subscribeEquity(
         String ticker,
         java.util.function.Consumer<com.ohmytradeagent.marketdata.provider.Tick> onTick) {
-      throw new IllegalStateException("stock data WS not configured; equity subscription gated");
+      throw new com.ohmytradeagent.marketdata.provider.alpaca.StockFeedGatedException(
+          "stock data WS not configured; equity subscription gated");
     }
   }
 
