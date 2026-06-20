@@ -47,6 +47,7 @@
     },
     "trigger": {
       "type": "number",
+      "exclusiveMinimum": 0,
       "description": "Underlying price level (dollars) that arms/fires the entry per `direction`."
     },
     "strike": {

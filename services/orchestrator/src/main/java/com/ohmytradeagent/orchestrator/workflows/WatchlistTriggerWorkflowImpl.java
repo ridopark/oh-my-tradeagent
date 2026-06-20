@@ -12,6 +12,7 @@ import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.SubscribeEquityRequest;
+import com.ohmytradeagent.contract.SubscribeEquityResult;
 import com.ohmytradeagent.contract.WatchlistTriggerPayload;
 import com.ohmytradeagent.contract.activities.MarketCalendarActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
@@ -81,6 +82,8 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   private static final String KIND_ORDER_SUBMITTED = "OrderSubmitted";
   private static final String KIND_ENTRY_FILLED = "EntryFilled";
   private static final String KIND_FEED_STALE = "TriggerFeedStale";
+  private static final String KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE =
+      "TriggerSubscriptionUnavailable";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -167,7 +170,24 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     }
 
     // Start the streaming equity subscription (async); it signals equityTick back into this id.
-    subscribeAsync(payload, config);
+    // The activity does NOT throw on GATED/FAILED — it returns the disposition — so inspect the
+    // Promise synchronously (it resolves fast) and emit a LOUD audit on any non-SUBSCRIBED status.
+    // GATED is the default ship posture (stock WS URL unset): no ticks ever arrive, so without this
+    // audit the leg would silently await until EOD. We still continue to the await/EOD path (the
+    // fail-safe is the EOD cancel), but the dead-feed condition is now observable.
+    SubscribeEquityResult subResult = subscribeAsync(payload, config).get();
+    if (subResult == null || subResult.getStatus() != SubscribeEquityResult.Status.SUBSCRIBED) {
+      logAudit(
+          payload,
+          KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE,
+          subject(
+              "ticker",
+              payload.getTicker(),
+              "status",
+              subResult == null ? "null" : subResult.getStatus().value(),
+              "detail",
+              subResult == null ? "" : subResult.getError()));
+    }
 
     // EOD timer: a Workflow.newTimer over the calendar-supplied duration (no wall-clock read).
     final boolean[] eodFired = {false};
@@ -184,7 +204,9 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     while (true) {
       Workflow.await(() -> !pendingTicks.isEmpty() || cancelRequested || eodFired[0]);
 
-      // Fixed drain order: cancel and EOD are terminal; otherwise feed buffered ticks.
+      // Fixed drain order: cancel and EOD are terminal; otherwise feed buffered ticks. Note the EOD
+      // branch below requires pendingTicks to be empty, so any ticks buffered before the EOD timer
+      // fired are drained through the state machine first (a last in-band cross can still FIRE).
       if (cancelRequested) {
         logAudit(payload, KIND_TRIGGER_CANCELLED, subject("ticker", payload.getTicker()));
         return outcome(payload, "cancelled");
@@ -245,7 +267,8 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     return carry;
   }
 
-  private void subscribeAsync(WatchlistTriggerPayload payload, StrategyConfig config) {
+  private Promise<SubscribeEquityResult> subscribeAsync(
+      WatchlistTriggerPayload payload, StrategyConfig config) {
     SubscribeEquityRequest req = new SubscribeEquityRequest();
     req.setSchemaVersion(1L);
     req.setTenantId(payload.getTenantId());
@@ -255,7 +278,7 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     req.setSignalName("equityTick");
     req.setTriggerLevel(payload.getTrigger());
     req.setEquityEmitDeltaPct(emitDeltaPct(config));
-    Async.function(subscribeEquity::subscribeEquity, req);
+    return Async.function(subscribeEquity::subscribeEquity, req);
   }
 
   /**
@@ -265,6 +288,8 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
    */
   private String fire(WatchlistTriggerPayload payload, StrategyConfig config, BigDecimal armMult) {
     // 1. Fire decider.
+    // cash is null here: the account snapshot is fetched in step 2 below, after the fire decider
+    // runs, so the ArmContext cannot carry a cash figure at this point.
     ArmContext armCtx = new ArmContext().withEtDate(payload.getEtDate()).withCash(null);
     FireDecision fd = fireDecider.evaluateTriggerFire(payload, armCtx);
     if (!Boolean.TRUE.equals(fd.getProceed())) {
@@ -309,6 +334,9 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     }
 
     // 3. Strategy-agnostic risk gates (premium is the BTO max-cost limit).
+    // Ordering: the risk gate MUST follow the option-quote fetch (step 5), not precede it. The
+    // notional-cap sub-gate (RiskActivitiesImpl.checkNotionalCap) sizes the entry notional from the
+    // fetched premium, so the gate is premium-dependent and cannot run before the quote exists.
     RiskDecision riskDecision = risk.checkWatchlistEntry(payload, config, null, premium, cash);
     if (!riskDecision.allowed()) {
       logAudit(

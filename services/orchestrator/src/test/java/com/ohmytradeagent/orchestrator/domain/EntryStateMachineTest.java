@@ -194,4 +194,16 @@ class EntryStateMachineTest {
     m.seed(State.BROKEN_OUT, p("765.50"));
     assertThat(m.onTick(p("763.20"))).isEqualTo(Decision.FIRE);
   }
+
+  @Test
+  void seed_brokenOut_retest_firstPostResumeTickAboveBand_doesNotFireSpuriously() {
+    // Finding 3: across continue-as-new, a resumed BROKEN_OUT leg must NOT fire on the first
+    // post-resume tick unless it is a valid in-zone pull-back. A tick still above bandHigh keeps
+    // waiting; only the subsequent pull-back into Z fires.
+    EntryStateMachine m = retest(Direction.ABOVE);
+    m.seed(State.BROKEN_OUT, p("765.50"));
+    assertThat(m.onTick(p("766.00"))).isEqualTo(Decision.NONE); // > bandHigh -> no spurious fire
+    assertThat(m.state()).isEqualTo(State.BROKEN_OUT);
+    assertThat(m.onTick(p("763.20"))).isEqualTo(Decision.FIRE); // valid pull-back into Z
+  }
 }

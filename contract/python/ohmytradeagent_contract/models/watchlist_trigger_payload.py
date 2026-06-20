@@ -67,7 +67,7 @@ class WatchlistTriggerPayload(BaseModel):
     """
     Price-trigger direction relative to `trigger`. ABOVE fires when the underlying trades above the level (breakout); BELOW fires when it trades below (breakdown).
     """
-    trigger: float
+    trigger: Annotated[Decimal, Field(gt=0)]
     """
     Underlying price level (dollars) that arms/fires the entry per `direction`.
     """

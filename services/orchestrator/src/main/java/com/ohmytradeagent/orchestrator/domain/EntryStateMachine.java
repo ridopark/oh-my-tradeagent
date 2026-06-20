@@ -157,6 +157,14 @@ public final class EntryStateMachine {
   }
 
   private Decision evaluateRetest(BigDecimal last) {
+    // No prev==null guard (unlike evaluateBreakout): RETEST does not compare prev against the
+    // level.
+    // A fire requires reaching BROKEN_OUT, and the only path into BROKEN_OUT is a prior tick that
+    // cleared the band (last > bandHigh, or < bandLow for BELOW) while ARMED. So the live-cross
+    // guarantee holds even across continue-as-new: a seeded BROKEN_OUT state by definition implies
+    // a
+    // prior live tick beyond the band, and a freshly resumed ARMED state still cannot fire until it
+    // first clears the band. The first post-resume tick is never evaluated against a missing prev.
     if (direction == Direction.ABOVE) {
       if (state == State.ARMED) {
         // Clear the zone (a confirmed breakout) before any pull-back can fire.

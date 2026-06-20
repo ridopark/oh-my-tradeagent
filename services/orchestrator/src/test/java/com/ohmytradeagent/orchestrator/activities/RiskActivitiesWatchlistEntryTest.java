@@ -150,6 +150,22 @@ class RiskActivitiesWatchlistEntryTest {
     assertThat(dZero.detail()).contains("cash_unavailable");
   }
 
+  // Finding 4: pre_trade_check_enabled=true but the workflow always passes a null preTradeResult on
+  // the watchlist path. The gate must fail CLOSED with a clear PRE_TRADE_CHECK_FAILED reject (no
+  // NPE), never admit the trade.
+  @Test
+  void rejects_whenPreTradeCheckEnabledButResultNull_failsClosed() {
+    StrategyConfig c = config();
+    c.setPreTradeCheckEnabled(true);
+
+    RiskDecision d =
+        risk.checkWatchlistEntry(
+            watchlistPayload(), c, null, new BigDecimal("2.30"), new BigDecimal("100000"));
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.PRE_TRADE_CHECK_FAILED);
+    assertThat(d.detail()).contains("null_result");
+  }
+
   // ----- copytrade-only pre-gates are NOT applied -----
 
   // An unknown author and an absent/old posted-at WOULD reject on checkEntry. checkWatchlistEntry

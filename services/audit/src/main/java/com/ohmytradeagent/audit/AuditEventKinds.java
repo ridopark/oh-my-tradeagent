@@ -322,6 +322,11 @@ public final class AuditEventKinds {
           "TriggerCancelled",
           "TriggerFireRejected",
           "TriggerFeedStale",
+          // Emitted by WatchlistTriggerWorkflowImpl when SubscribeEquityActivity returns a
+          // non-SUBSCRIBED disposition (GATED = stock WS unset / fail-closed default posture, or
+          // FAILED = source error). Loud observability for the silent-dead-feed condition (no ticks
+          // will arrive); the leg still proceeds to the EOD cancel fail-safe. Neutral event.
+          "TriggerSubscriptionUnavailable",
           // TenantConfigChangedEmitter (no KIND_ constant; literal string in the emitter)
           "TenantConfigChanged");
 }

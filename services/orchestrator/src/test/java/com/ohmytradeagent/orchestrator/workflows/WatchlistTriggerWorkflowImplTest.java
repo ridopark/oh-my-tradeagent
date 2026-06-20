@@ -19,6 +19,7 @@ import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.SubscribeEquityResult;
 import com.ohmytradeagent.contract.WatchlistTriggerPayload;
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.MarketCalendarActivity;
@@ -31,6 +32,7 @@ import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribeEquityActivity;
 import com.ohmytradeagent.orchestrator.activities.TriggerFireDecider;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
+import com.ohmytradeagent.orchestrator.domain.EntryStateMachine;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import io.temporal.api.enums.v1.IndexedValueType;
@@ -117,6 +119,9 @@ class WatchlistTriggerWorkflowImplTest {
                 new BigDecimal("762"),
                 "C",
                 ContractResolveResult.SOURCE_GENERATED));
+    lenient()
+        .when(subscribeEquity.subscribeEquity(any()))
+        .thenReturn(subscribeResult(SubscribeEquityResult.Status.SUBSCRIBED));
     lenient().when(optionQuote.getOptionQuote(any())).thenReturn(quoteOk(new BigDecimal("3.15")));
     lenient()
         .when(accountSnapshot.accountSnapshot(any()))
@@ -238,6 +243,50 @@ class WatchlistTriggerWorkflowImplTest {
     String result = WorkflowStub.fromTyped(wf).getResult(String.class);
     assertThat(result).endsWith(":eod_cancelled");
     verify(exec, never()).placeOrder(any());
+  }
+
+  // Finding 1: GATED subscription (default unentitled-feed posture) -> loud audit, no ticks ever
+  // arrive, leg fails closed to the EOD cancel with no order placed.
+  @Test
+  void gatedSubscription_emitsLoudAudit_noOrder_eodCancels() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(subscribeEquity.subscribeEquity(any()))
+        .thenReturn(subscribeResult(SubscribeEquityResult.Status.GATED));
+    WatchlistTriggerWorkflow wf = newStub("wl-gated");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    env.sleep(Duration.ofMinutes(1)); // fire the EOD timer; no ticks ever arrive
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":eod_cancelled");
+    verify(exec, never()).placeOrder(any());
+    AuditEvent gated = captureKind("TriggerSubscriptionUnavailable");
+    assertThat(gated.getSubject()).containsEntry("ticker", "NVDA");
+    assertThat(gated.getSubject()).containsEntry("status", "GATED");
+  }
+
+  // Finding 3: continue-as-new replay seeded with BROKEN_OUT (RETEST). The live-cross guarantee
+  // must hold across resume: a first post-resume tick still beyond the band must NOT fire; only a
+  // valid pull-back into the zone fires.
+  @Test
+  void retestResumedBrokenOut_firesOnlyOnValidPullback() throws Exception {
+    WatchlistTriggerWorkflow wf = newStub("wl-retest-resume");
+    WatchlistTriggerWorkflowInput in = input(breakoutAbovePayload(), retestConfig());
+    in.setCarriedState(EntryStateMachine.State.BROKEN_OUT);
+    in.setCarriedPrev(new BigDecimal("765.50"));
+    in.setEtDate(LocalDate.of(2026, 6, 24));
+    WorkflowStub.fromTyped(wf).start(in);
+
+    wf.equityTick(
+        tick(new BigDecimal("766.00"), false)); // still above bandHigh -> no spurious fire
+    waitNoPlaceOrder();
+    wf.equityTick(tick(new BigDecimal("763.20"), false)); // valid pull-back into Z -> FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("3.15")));
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+    verify(exec, times(1)).placeOrder(any());
   }
 
   // (g) proceed:false -> no order.
@@ -478,6 +527,15 @@ class WatchlistTriggerWorkflowImplTest {
         .withFilledQty(qty)
         .withAvgFillPrice(avg)
         .withFilledAt(OffsetDateTime.now());
+  }
+
+  private static SubscribeEquityResult subscribeResult(SubscribeEquityResult.Status status) {
+    SubscribeEquityResult r = new SubscribeEquityResult();
+    r.setSchemaVersion(1L);
+    r.setSubscriptionId(status == SubscribeEquityResult.Status.SUBSCRIBED ? "sub-1" : "");
+    r.setSubscribedAt(OffsetDateTime.now());
+    r.setStatus(status);
+    return r;
   }
 
   private static OptionQuoteResult quoteOk(BigDecimal mid) {
