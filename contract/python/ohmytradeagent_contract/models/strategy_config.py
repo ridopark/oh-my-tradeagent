@@ -39,6 +39,23 @@ class MinPartialQtyBehavior(StrEnum):
     full_close = "full_close"
 
 
+class EntryMode(StrEnum):
+    """
+    Watchlist-trigger entry style. BREAKOUT (DEFAULT; null/absent treated as BREAKOUT) enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional; absent preserves the BREAKOUT default for every existing strategy.
+    """
+
+    breakout = "BREAKOUT"
+    retest = "RETEST"
+
+
+class WatchlistExpiryRule(StrEnum):
+    """
+    Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY (DEFAULT; null/absent treated as NEAREST_WEEKLY) picks the nearest weekly expiry on/after et_date. Optional; absent preserves the default for every existing strategy.
+    """
+
+    nearest_weekly = "NEAREST_WEEKLY"
+
+
 class StrategyConfig(BaseModel):
     """
     Per-strategy configuration loaded from tenants/<tenant>/strategies/<strategy>.yaml. Drives risk gates, sizing, and exit logic in CopytradeSignalWorkflow + PositionWorkflow. Phase 2a consumes a minimal required subset (author whitelist, signal-age, max-positions, capital-weight sizing); fields used only in later phases are optional and documented inline.
@@ -251,4 +268,24 @@ class StrategyConfig(BaseModel):
     exit_reprice_tick: confloat(le=5.0, gt=0.0) | None = None
     """
     Plan-2B R-AB-2: per-step price concession (dollars per contract premium) the bounded stepped exit reprice walks toward the market each step. Each step's limit = max(floor, anchor - step * exit_reprice_tick) where anchor is the fresh live bid/mid. Conservative default ~0.05 in PositionWorkflowImpl when null. Bounded by exit_floor so the walk never crosses the configured fail-safe.
+    """
+    entry_mode: EntryMode | None = EntryMode.breakout
+    """
+    Watchlist-trigger entry style. BREAKOUT (DEFAULT; null/absent treated as BREAKOUT) enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional; absent preserves the BREAKOUT default for every existing strategy.
+    """
+    watchlist_expiry_rule: WatchlistExpiryRule | None = WatchlistExpiryRule.nearest_weekly
+    """
+    Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY (DEFAULT; null/absent treated as NEAREST_WEEKLY) picks the nearest weekly expiry on/after et_date. Optional; absent preserves the default for every existing strategy.
+    """
+    gap_tolerance_pct: confloat(ge=0.0) | None = 0.005
+    """
+    Watchlist-trigger gap tolerance as a fraction of `trigger`. A trigger that gaps through its level by more than this fraction at open is treated as gapped (handled per entry_mode) rather than a clean breakout. Default 0.005 (0.5%) when null/absent.
+    """
+    equity_emit_delta_pct: confloat(ge=0.0) | None = 0.0005
+    """
+    Minimum fractional move in the underlying equity price before a new equity tick is emitted to the trigger-strategy workflow. Throttles tick volume. Default 0.0005 (0.05%) when null/absent.
+    """
+    enabled: bool | None = True
+    """
+    Per-tenant strategy on/off toggle (operator requirement). When false the strategy is loaded but admits no new entries. Absent/null treated as true, so existing tenants are unaffected.
     """

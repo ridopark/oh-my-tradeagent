@@ -316,6 +316,35 @@
       "exclusiveMinimum": 0,
       "maximum": 5,
       "description": "Plan-2B R-AB-2: per-step price concession (dollars per contract premium) the bounded stepped exit reprice walks toward the market each step. Each step's limit = max(floor, anchor - step * exit_reprice_tick) where anchor is the fresh live bid/mid. Conservative default ~0.05 in PositionWorkflowImpl when null. Bounded by exit_floor so the walk never crosses the configured fail-safe."
+    },
+    "entry_mode": {
+      "type": "string",
+      "enum": ["BREAKOUT", "RETEST"],
+      "default": "BREAKOUT",
+      "description": "Watchlist-trigger entry style. BREAKOUT (DEFAULT; null/absent treated as BREAKOUT) enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional; absent preserves the BREAKOUT default for every existing strategy."
+    },
+    "watchlist_expiry_rule": {
+      "type": "string",
+      "enum": ["NEAREST_WEEKLY"],
+      "default": "NEAREST_WEEKLY",
+      "description": "Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY (DEFAULT; null/absent treated as NEAREST_WEEKLY) picks the nearest weekly expiry on/after et_date. Optional; absent preserves the default for every existing strategy."
+    },
+    "gap_tolerance_pct": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.005,
+      "description": "Watchlist-trigger gap tolerance as a fraction of `trigger`. A trigger that gaps through its level by more than this fraction at open is treated as gapped (handled per entry_mode) rather than a clean breakout. Default 0.005 (0.5%) when null/absent."
+    },
+    "equity_emit_delta_pct": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.0005,
+      "description": "Minimum fractional move in the underlying equity price before a new equity tick is emitted to the trigger-strategy workflow. Throttles tick volume. Default 0.0005 (0.05%) when null/absent."
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Per-tenant strategy on/off toggle (operator requirement). When false the strategy is loaded but admits no new entries. Absent/null treated as true, so existing tenants are unaffected."
     }
   }
 }

@@ -285,6 +285,9 @@ class RoundTripTest {
     assertThat(deserialized.getStrategyId()).isEqualTo("copytrade-v1");
     // dynamic-account-cash-sizing: the fixture sets capital_source=static explicitly.
     assertThat(deserialized.getCapitalSource()).isEqualTo(StrategyConfig.CapitalSource.STATIC);
+    // Phase 0 watchlist-trigger fields: the fixture carries their defaults explicitly.
+    assertThat(deserialized.getEntryMode()).isEqualTo(StrategyConfig.EntryMode.BREAKOUT);
+    assertThat(deserialized.getEnabled()).isTrue();
 
     String reserialized = mapper.writeValueAsString(deserialized);
     JsonNode original = mapper.readTree(json);
