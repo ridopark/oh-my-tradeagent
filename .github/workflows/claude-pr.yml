@@ -62,13 +62,11 @@ jobs:
                  * Security
                  * Test coverage
                - Verdict: READY | NEEDS FIXES | BLOCKED
-            5. Write the review markdown to /tmp/review.md. Do NOT put any HTML-comment
-               marker in the content — the post helper owns and prepends the canonical
-               marker so re-runs update one comment in place.
-            6. Post it by running this command EXACTLY as written — do not change the
-               marker string or any argument, and do not post the comment any other way:
-               scripts/gh-sticky-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" "<!-- claude-code-review -->" /tmp/review.md
+            5. Write the review to /tmp/review.md (start with the literal first line `${STICKY_MARKER}` so re-runs update in place).
+            6. Post via the project helper:
+               scripts/gh-sticky-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" "${STICKY_MARKER}" /tmp/review.md
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: "--allowed-tools 'Bash Read Grep'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STICKY_MARKER: ${{ env.STICKY_MARKER }}
