@@ -40,11 +40,13 @@ spec:
             - containerPort: 8080
               name: http
           envFrom:
-            # Alpaca paper credentials shared with exec-svc: APCA_API_KEY_ID + APCA_API_SECRET_KEY.
-            # The operator creates this Secret once (kubectl apply -f
-            # infra/secrets-template/secrets.template.yaml after filling values).
+            # market-data uses the DATA-entitled Alpaca credential (NOT the paper trading
+            # secret): the paper key is not entitled to stream stocks and returns 402. This
+            # secret provides APCA_API_KEY_ID_DATA + APCA_API_SECRET_KEY_DATA. The operator
+            # creates it once (kubectl apply -f infra/secrets-template/secrets.template.yaml
+            # after filling values).
             - secretRef:
-                name: alpaca-credentials
+                name: alpaca-credentials-data
           env:
             # Phase 5b.E: shared Temporal at temporal/temporal-frontend, Temporal-level ns `copytrade`.
             - name: TEMPORAL_TARGET

@@ -81,14 +81,13 @@ public class AlpacaMarketData implements MarketDataProvider {
   private final Object stockWsLock = new Object();
 
   // CONNECTION-LIMIT CAVEAT: this is a SECOND market-data WS on the SAME Alpaca key as the options
-  // `ws` above. Alpaca enforces a per-account market-data connection limit (HTTP 406 "connection
-  // limit exceeded"; a new connection may also kick the old one). This singleton fans out one WS
-  // per endpoint to all subscribers, so the connection count is fixed at 2 (options + stocks)
-  // regardless of strategy/leg count — and ONLY while market-data runs a SINGLE replica. Scaling
-  // market-data > 1 replica without symbol-sharding would multiply connections and trip the limit.
-  // Whether the stocks endpoint (/v2/<feed>) and options endpoint (/v1beta1/<feed>) count
-  // separately against the limit is undocumented — verify on the live account with
-  // scripts/alpaca-ws-conn-check.py before enabling both.
+  // `ws` above. This singleton fans out one WS per endpoint to all subscribers, so the connection
+  // count is fixed at 2 (options + stocks) regardless of strategy/leg count — and ONLY while
+  // market-data runs a SINGLE replica. VERIFIED 2026-06-20 (scripts/alpaca-ws-conn-check.py): the
+  // Alpaca limit is ONE connection PER ENDPOINT, not account-wide — stocks (/v2) and options
+  // (/v1beta1) coexist on one key; a 2nd connection to the SAME endpoint gets 406 and is refused
+  // (the existing one survives). So a 2nd market-data replica's duplicate connections would be
+  // 406'd — keep market-data a single replica.
   private volatile WebSocket stockWs;
   private final AtomicBoolean stockReconnectInFlight = new AtomicBoolean(false);
   private volatile Duration stockNextBackoff = Duration.ofSeconds(1);

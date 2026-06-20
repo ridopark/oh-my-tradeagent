@@ -34,13 +34,12 @@ equity_emit_delta_pct: 0.0005
 # entries (WatchlistMirrorActivitiesImpl skips the session start). enabled:false + an unconfigured
 # stock feed are the two independent live-trade gates.
 #
-# PRE-FLIGHT before enabling (Alpaca single-connection limit): the market-data worker holds ONE WS
-# per endpoint and fans out to all subscribers, so enabling this opens a SECOND Alpaca data
-# connection (stocks /v2/<feed>) alongside copytrade's options stream on the SAME key. Alpaca caps
-# market-data connections per account (HTTP 406 "connection limit exceeded"); whether stocks and
-# options count separately is undocumented. Verify on the real account first:
-#   uv run scripts/alpaca-ws-conn-check.py --stock-feed <iex|sip>
-# Also keep market-data at a single replica (scaling it without symbol-sharding multiplies connections).
+# PRE-FLIGHT before enabling: (1) the stock feed needs a real-time-entitled DATA key -- a paper key
+# returns 402 on the stocks WS (verified). market-data reads APCA_API_KEY_ID_DATA (the data-entitled
+# key). (2) Alpaca connection limit: VERIFIED 2026-06-20 via scripts/alpaca-ws-conn-check.py that the
+# limit is ONE connection PER ENDPOINT (not account-wide) -- the stocks (/v2) and options (/v1beta1)
+# streams coexist on one key, so this strategy's stocks WS does NOT collide with copytrade's options
+# WS. The only rule: keep market-data a single replica (a 2nd replica's duplicate connections get 406).
 enabled: false
 
 # Copytrade-only schema-required fields, set to safe inert values. The trigger path does NOT consult
