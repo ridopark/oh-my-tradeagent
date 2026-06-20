@@ -12,6 +12,7 @@ import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountResponse;
+import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaCalendarDay;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderRequest;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaPositionResponse;
@@ -19,6 +20,8 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -556,6 +559,51 @@ public class AlpacaPaperBroker implements OptionsBroker {
           "Alpaca /v2/account returned null/missing cash", "BrokerProtocolError");
     }
     return new AccountSummary(resp.equity(), resp.cash(), resp.accountNumber());
+  }
+
+  /**
+   * Alpaca {@code GET /v2/calendar?start=&end=} → the trading days in {@code [start, end]}
+   * inclusive. Alpaca omits non-trading days (weekends, holidays) entirely, so each returned entry
+   * is a trading day and we collect its {@code date}. Parses defensively: a null body yields an
+   * empty list, and an entry with a null/blank/unparseable {@code date} is skipped (the calendar is
+   * an advisory holiday source, not an order path — a malformed row must not crash expiry
+   * resolution). On {@code start}/{@code end} both an open trading window, the watchlist-trigger
+   * expiry resolver uses this to shift a holiday Friday to the preceding trading day.
+   */
+  @Override
+  public List<LocalDate> tradingDays(LocalDate start, LocalDate end) {
+    List<AlpacaCalendarDay> raw;
+    try {
+      raw =
+          client
+              .get()
+              .uri(
+                  uriBuilder ->
+                      uriBuilder
+                          .path("/v2/calendar")
+                          .queryParam("start", start.toString())
+                          .queryParam("end", end.toString())
+                          .build())
+              .retrieve()
+              .body(new ParameterizedTypeReference<List<AlpacaCalendarDay>>() {});
+    } catch (HttpStatusCodeException e) {
+      throw mapError(e);
+    }
+    if (raw == null) {
+      return List.of();
+    }
+    List<LocalDate> out = new ArrayList<>(raw.size());
+    for (AlpacaCalendarDay day : raw) {
+      if (day.date() == null || day.date().isBlank()) {
+        continue;
+      }
+      try {
+        out.add(LocalDate.parse(day.date()));
+      } catch (DateTimeParseException nfe) {
+        log.warn("Alpaca /v2/calendar returned unparseable date={}; skipping", day.date());
+      }
+    }
+    return out;
   }
 
   /**

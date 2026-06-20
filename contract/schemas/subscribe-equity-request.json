@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/subscribe-equity-request.json",
+  "title": "SubscribeEquityRequest",
+  "description": "Phase 2 (watchlist-trigger): request from WatchlistTriggerWorkflow to market-data-svc to subscribe a real-time equity trade stream for a ticker. The market-data worker, on each MEANINGFUL move (min-move throttle against trigger_level x equity_emit_delta_pct), signals signal_name on the named workflow with an EquityTick payload. Mirrors SubscribePremiumRequest's tenant/strategy scoping.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.SubscribeEquityRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "ticker",
+    "target_workflow_id",
+    "signal_name",
+    "trigger_level",
+    "equity_emit_delta_pct"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ticker": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Underlying equity symbol to subscribe (e.g. NVDA)."
+    },
+    "target_workflow_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target workflow_id to receive equity-tick signals (the WatchlistTriggerWorkflow child)."
+    },
+    "signal_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Signal method name to invoke on the target workflow for each emitted tick (e.g. equityTick)."
+    },
+    "trigger_level": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Reference price level T (the leg's trigger). Used as the min-move throttle base: a new tick is emitted only when |last - lastEmitted| >= equity_emit_delta_pct * T."
+    },
+    "equity_emit_delta_pct": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Minimum fractional move (of trigger_level) before a new tick is emitted. Throttles tick volume to keep workflow history bounded."
+    }
+  }
+}

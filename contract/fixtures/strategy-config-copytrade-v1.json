@@ -15,5 +15,10 @@
   "skip_avg": true,
   "max_slippage_abs": 0.05,
   "max_slippage_pct": 0.05,
-  "repeg_after_ms": 5000
+  "repeg_after_ms": 5000,
+  "entry_mode": "BREAKOUT",
+  "watchlist_expiry_rule": "NEAREST_WEEKLY",
+  "gap_tolerance_pct": 0.005,
+  "equity_emit_delta_pct": 0.0005,
+  "enabled": true
 }

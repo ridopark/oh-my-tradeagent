@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/watchlist-trigger-payload.json",
+  "title": "WatchlistTriggerPayload",
+  "description": "A single armed watchlist trigger derived from a parsed daily watchlist line and emitted toward the trigger-strategy workflow. Carries the underlying ticker, the price-trigger (direction + level), and the (strike, right) option tuple to enter on breakout/retest — NOT the resolved OCC option symbol (composed downstream). Reference: docs/plans/PLAN-watchlist-trigger.html.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.WatchlistTriggerPayload",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "ticker",
+    "direction",
+    "trigger",
+    "strike",
+    "right",
+    "action",
+    "et_date",
+    "source_message_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version. Start at 1; bump on non-backward-compatible field changes.",
+      "minimum": 1
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Tenant scope key. Required on every Activity payload and workflow input."
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Strategy scope key within the tenant."
+    },
+    "ticker": {
+      "type": "string",
+      "pattern": "^[A-Z]{1,6}$",
+      "description": "Underlying equity ticker (e.g. 'AAPL'); uppercase, no exchange suffix. The RAW underlying — not an OCC option symbol. The full OCC symbol is composed downstream from (ticker, et_date-derived expiry, strike, right)."
+    },
+    "direction": {
+      "type": "string",
+      "enum": ["ABOVE", "BELOW"],
+      "description": "Price-trigger direction relative to `trigger`. ABOVE fires when the underlying trades above the level (breakout); BELOW fires when it trades below (breakdown)."
+    },
+    "trigger": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Underlying price level (dollars) that arms/fires the entry per `direction`."
+    },
+    "strike": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Option strike price (dollars)."
+    },
+    "right": {
+      "type": "string",
+      "enum": ["C", "P"],
+      "description": "Option right: Call or Put. UPPERCASE."
+    },
+    "action": {
+      "type": "string",
+      "enum": ["BTO"],
+      "description": "Author intent. Watchlist triggers are entries only: buy-to-open."
+    },
+    "et_date": {
+      "type": "string",
+      "format": "date",
+      "description": "ET calendar date of the watchlist (YYYY-MM-DD). The America/New_York wall-clock date the trigger belongs to — NOT a timestamp. Named et_date (not date) to avoid shadowing the date type in generated models."
+    },
+    "source_message_id": {
+      "type": "string",
+      "description": "Discord message id the watchlist line was parsed from; the dedupe provenance."
+    }
+  }
+}

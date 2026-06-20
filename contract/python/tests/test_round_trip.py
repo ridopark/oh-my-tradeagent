@@ -47,7 +47,16 @@ from ohmytradeagent_contract.models.subscribe_premium_result import (
     Status,
     SubscribePremiumResult,
 )
+from ohmytradeagent_contract.models.arm_context import ArmContext
+from ohmytradeagent_contract.models.arm_decision import ArmDecision
+from ohmytradeagent_contract.models.fire_decision import FireDecision
 from ohmytradeagent_contract.models.watchlist_mirror_payload import WatchlistMirrorPayload
+from ohmytradeagent_contract.models.watchlist_trigger_payload import (
+    Action as TriggerAction,
+    Direction,
+    Right as TriggerRight,
+    WatchlistTriggerPayload,
+)
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
@@ -190,6 +199,12 @@ def test_strategy_config_round_trips() -> None:
     assert model.max_slippage_abs == Decimal("0.05")
     assert model.max_slippage_pct == 0.05
     assert model.repeg_after_ms == 5000
+    # Phase 0 watchlist-trigger fields: the fixture carries their defaults explicitly.
+    assert model.entry_mode == "BREAKOUT"
+    assert model.watchlist_expiry_rule == "NEAREST_WEEKLY"
+    assert model.gap_tolerance_pct == 0.005
+    assert model.equity_emit_delta_pct == 0.0005
+    assert model.enabled is True
 
     # StrategyConfig has many optional fields — drop None values to compare against the fixture.
     serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
@@ -463,3 +478,72 @@ def test_decimal_field_accepts_bare_number_and_string_inputs() -> None:
     assert m_bare.avg_fill_price == Decimal("3.14")
     assert m_quoted.avg_fill_price == Decimal("3.14")
     assert m_bare.avg_fill_price == m_quoted.avg_fill_price
+
+
+def test_watchlist_trigger_payload_round_trips() -> None:
+    original = _load("watchlist-trigger-payload.json")
+
+    model = WatchlistTriggerPayload.model_validate(original)
+
+    assert model.schema_version == 1
+    assert model.tenant_id == "dev"
+    assert model.strategy_id == "watchlist-trigger-v1"
+    assert model.ticker == "AAPL"
+    assert model.direction == Direction.above
+    assert model.trigger == 195.5
+    assert model.strike == Decimal("200.0")
+    assert model.right == TriggerRight.c
+    assert model.action == TriggerAction.bto
+    assert model.et_date.isoformat() == "2026-06-03"
+    assert model.source_message_id == "1234567890123456789"
+
+    serialized = json.loads(model.model_dump_json(by_alias=True))
+    assert serialized == original
+
+
+def test_arm_decision_round_trips() -> None:
+    original = _load("arm-decision.json")
+
+    model = ArmDecision.model_validate(original)
+
+    assert model.arm is True
+    assert model.size_multiplier == 1.0
+    assert model.reason == "trigger_armed"
+
+    serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert serialized == original
+
+
+def test_fire_decision_round_trips() -> None:
+    original = _load("fire-decision.json")
+
+    model = FireDecision.model_validate(original)
+
+    assert model.proceed is True
+    assert model.size_multiplier == 0.5
+    assert model.reason == "breakout_confirmed"
+
+    serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert serialized == original
+
+
+def test_arm_context_round_trips() -> None:
+    original = _load("arm-context.json")
+
+    model = ArmContext.model_validate(original)
+
+    assert model.et_date.isoformat() == "2026-06-03"
+    assert model.cash == 50000.0
+
+    serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert serialized == original
+
+
+def test_strategy_config_new_fields_default_when_absent() -> None:
+    """Phase 0: the five new optional fields default for any config that omits them."""
+    model = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
+    assert model.entry_mode == "BREAKOUT"
+    assert model.watchlist_expiry_rule == "NEAREST_WEEKLY"
+    assert model.gap_tolerance_pct == 0.005
+    assert model.equity_emit_delta_pct == 0.0005
+    assert model.enabled is True

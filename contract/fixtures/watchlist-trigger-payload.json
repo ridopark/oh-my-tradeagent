@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "watchlist-trigger-v1",
+  "ticker": "AAPL",
+  "direction": "ABOVE",
+  "trigger": 195.5,
+  "strike": 200.0,
+  "right": "C",
+  "action": "BTO",
+  "et_date": "2026-06-03",
+  "source_message_id": "1234567890123456789"
+}

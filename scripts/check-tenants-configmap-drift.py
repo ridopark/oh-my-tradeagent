@@ -29,6 +29,7 @@ CONFIGMAP = REPO_ROOT / "infra/k8s/40-tenants-config.yaml"
 KEY_TO_CANONICAL = {
     "tenant.yaml": "tenants/dev/tenant.yaml",
     "copytrade-v1.yaml": "tenants/dev/strategies/copytrade-v1.yaml",
+    "watchlist-trigger-v1.yaml": "tenants/dev/strategies/watchlist-trigger-v1.yaml",
 }
 
 

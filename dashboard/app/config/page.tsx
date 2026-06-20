@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
 import { SubmitButton } from "@/components/SubmitButton";
+import { StrategySwitch } from "@/components/StrategySwitch";
 import { getStrategyConfig } from "@/lib/bff";
 import { postStrategyConfig } from "@/lib/apiGateway";
 import type { StrategyConfigResponse } from "@/lib/bff";
@@ -14,6 +15,17 @@ export const dynamic = "force-dynamic";
 // is itself dark (404s) until its own flag is on, so even with this true the action degrades
 // gracefully on 404.
 const WRITE_ENABLED = process.env.STRATEGY_CONFIG_WRITE_ENABLED === "true";
+
+// The per-tenant strategy on/off field. It gets a dedicated Switch (rendered in the section header)
+// instead of the generic boolean select, so it's excluded from the field list below. Treat a missing
+// value as enabled (older configs predate the flag).
+const ENABLED_FIELD = "enabled";
+function resolveEnabled(config: Record<string, unknown>): boolean {
+  // Absent OR null (JSONB null / older configs that predate the flag) -> enabled, matching the
+  // backend's "absent/null treated as true" semantics; only an explicit false renders off.
+  const value = config[ENABLED_FIELD];
+  return value === undefined || value === null ? true : Boolean(value);
+}
 
 type FieldClass = "IDENTITY" | "DANGEROUS" | "EXPOSURE" | "SAFE";
 
@@ -185,6 +197,12 @@ export default async function ConfigPage({
     if (!item) {
       redirect("/config?error=404");
     }
+    // Optimistic-CAS guard: a missing/non-numeric version would send a bad expected_version to the
+    // gateway (a silent mis-CAS). Fail safe instead. In practice the DB column is BIGINT DEFAULT 1,
+    // so this only trips on an unseeded/degraded read.
+    if (!Number.isFinite(item.version)) {
+      redirect("/config?error=409");
+    }
 
     // Start from the stored config; overlay only the editable scalar fields. IDENTITY/DANGEROUS are
     // never read from the form (no input rendered) so they pass through untouched. Complex values
@@ -210,6 +228,13 @@ export default async function ConfigPage({
       } else {
         nextConfig[field] = String(raw);
       }
+    }
+
+    // The on/off Switch submits `enabled` on its own (the stored config may not yet contain it, so
+    // the loop above can't pick it up). Overlay it explicitly when present in the form.
+    const enabledRaw = formData.get(inputName(strategyId, ENABLED_FIELD));
+    if (enabledRaw !== null) {
+      nextConfig[ENABLED_FIELD] = String(enabledRaw) === "true";
     }
 
     const result = await postStrategyConfig({
@@ -256,16 +281,23 @@ export default async function ConfigPage({
             {[...cfg.items]
               .sort((a, b) => a.strategy_id.localeCompare(b.strategy_id))
               .map((item) => {
-              const fields = Object.entries(item.config).sort(([a], [b]) =>
-                a.localeCompare(b),
-              );
+              const fields = Object.entries(item.config)
+                .filter(([field]) => field !== ENABLED_FIELD)
+                .sort(([a], [b]) => a.localeCompare(b));
               return (
                 <section key={item.strategy_id}>
-                  <h2 className="mb-2 flex items-center gap-2 text-lg font-medium text-slate-100">
+                  <h2 className="mb-2 flex flex-wrap items-center gap-2 text-lg font-medium text-slate-100">
                     {item.strategy_id}
                     <span className="text-sm font-normal text-slate-400">
                       version {item.version}
                     </span>
+                    <StrategySwitch
+                      strategyId={item.strategy_id}
+                      enabled={resolveEnabled(item.config)}
+                      writeEnabled={WRITE_ENABLED}
+                      enabledFieldName={inputName(item.strategy_id, ENABLED_FIELD)}
+                      action={saveConfig}
+                    />
                   </h2>
 
                   <form action={saveConfig} className="flex flex-col gap-2">

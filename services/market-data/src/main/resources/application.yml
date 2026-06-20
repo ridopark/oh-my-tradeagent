@@ -17,10 +17,25 @@ temporal:
 market-data:
   provider: ${MARKET_DATA_PROVIDER:inmemory}
   alpaca:
-    data-base-url: ${ALPACA_DATA_BASE_URL:https://data.alpaca.markets}
+    data-base-url: ${ALPACA_DATA_BASE_URL:${APCA_API_BASE_URL_DATA:https://data.alpaca.markets}}
     data-ws-url: ${ALPACA_DATA_WS_URL:wss://stream.data.alpaca.markets/v1beta1/indicative}
-    api-key-id: ${APCA_API_KEY_ID:}
-    api-secret-key: ${APCA_API_SECRET_KEY:}
+    api-key-id: ${APCA_API_KEY_ID_DATA:${APCA_API_KEY_ID:}}
+    api-secret-key: ${APCA_API_SECRET_KEY_DATA:${APCA_API_SECRET_KEY:}}
+    # LIVE-USE GATE for the real-time STOCK trade stream that drives watchlist-trigger entries.
+    # Intentionally UNSET by default: when both are blank, subscribeEquity FAILS CLOSED (loud audit,
+    # no connect) so a delayed/wrong feed can never silently drive a price-level trigger. An operator
+    # opts in ONLY after confirming a real-time entitlement, by setting one of:
+    #   stock-data-ws-url : explicit WS URL, OR
+    #   stock-feed        : 'iex' | 'sip' -> wss://stream.data.alpaca.markets/v2/<feed>
+    # CAVEAT (Alpaca connection limit): setting this opens a SECOND market-data WS on the same key as
+    # the options premium stream (data-ws-url). This worker holds one WS per endpoint and fans out to
+    # all subscribers, so the count is fixed at 2 (options + stocks) regardless of strategy/leg count.
+    # VERIFIED 2026-06-20 (scripts/alpaca-ws-conn-check.py): the limit is ONE connection PER ENDPOINT,
+    # not account-wide -- stocks (/v2) and options (/v1beta1) coexist on one key; a 2nd connection to
+    # the SAME endpoint gets 406 and is refused (the existing one survives). So this is safe AS LONG
+    # AS market-data stays a single replica; a 2nd replica's duplicate connections would be 406'd.
+    stock-data-ws-url: ${ALPACA_STOCK_DATA_WS_URL:}
+    stock-feed: ${ALPACA_STOCK_FEED:}
 
 management:
   endpoints:

@@ -29,12 +29,52 @@ public final class Sizing {
    */
   public static long computeContracts(
       CopytradeSignalPayload payload, StrategyConfig config, BigDecimal capital, BigDecimal limit) {
+    return computeContracts(config, capital, limit);
+  }
+
+  /**
+   * Payload-free overload. {@code payload} was never read by the sizing math; the copytrade path
+   * delegates here so both keep byte-identical behavior. {@code limit} is the per-contract price.
+   */
+  public static long computeContracts(StrategyConfig config, BigDecimal capital, BigDecimal limit) {
+    long raw = rawContracts(config, capital, limit);
+    return Math.max(config.getMinContracts(), Math.min(config.getMaxContracts(), raw));
+  }
+
+  /**
+   * Decider-aware sizing for the watchlist-trigger path: scales the allocation by the arm and fire
+   * size multipliers, then resolves to a SKIP-or-count outcome. With {@code armMult == fireMult ==
+   * 1.0} the count is byte-identical to {@link #computeContracts(StrategyConfig, BigDecimal,
+   * BigDecimal)}.
+   *
+   * <p>Unlike the copytrade clamp, a raw below {@code min_contracts} SKIPs rather than flooring up,
+   * and a non-positive multiplier SKIPs rather than ever sizing zero.
+   */
+  public static SizingOutcome computeContractsWithDeciders(
+      StrategyConfig config,
+      BigDecimal capital,
+      BigDecimal limit,
+      BigDecimal armMult,
+      BigDecimal fireMult) {
+    if (armMult.signum() <= 0 || fireMult.signum() <= 0) {
+      return new SizingOutcome(true, 0L, "decider-zero");
+    }
+    long raw = rawContracts(config, capital.multiply(armMult).multiply(fireMult), limit);
+    if (raw < config.getMinContracts()) {
+      return new SizingOutcome(true, 0L, "below-min");
+    }
+    return new SizingOutcome(false, Math.min(config.getMaxContracts(), raw), "sized");
+  }
+
+  private static long rawContracts(StrategyConfig config, BigDecimal capital, BigDecimal limit) {
     BigDecimal allocation = capital.multiply(config.getCapitalWeight());
     BigDecimal pricePerContract = limit.multiply(CONTRACT_MULTIPLIER);
     if (pricePerContract.signum() <= 0) {
       throw new IllegalArgumentException("limit must be > 0, got: " + limit);
     }
-    long raw = allocation.divide(pricePerContract, 0, RoundingMode.FLOOR).longValueExact();
-    return Math.max(config.getMinContracts(), Math.min(config.getMaxContracts(), raw));
+    return allocation.divide(pricePerContract, 0, RoundingMode.FLOOR).longValueExact();
   }
+
+  /** Result of decider-aware sizing: either SKIP (with reason) or a positive contract count. */
+  public record SizingOutcome(boolean skip, long contracts, String reason) {}
 }

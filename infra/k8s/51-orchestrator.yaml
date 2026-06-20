@@ -161,6 +161,8 @@ spec:
                 path: dev/tenant.yaml
               - key: copytrade-v1.yaml
                 path: dev/strategies/copytrade-v1.yaml
+              - key: watchlist-trigger-v1.yaml
+                path: dev/strategies/watchlist-trigger-v1.yaml
         # Issue #88: emptyDir for TenantConfigChangedEmitter's snapshot file
         # (one JSON per (tenant, strategy)). Persists across in-pod restarts,
         # resets on pod replacement — re-arms one false-negative on first boot

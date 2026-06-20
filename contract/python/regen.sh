@@ -339,18 +339,28 @@ DECL = re.compile(
 )
 
 
-def _member(value: str) -> str:
-    # datamodel-codegen names enum members by their value verbatim for snake_case string enums
-    # (e.g. "static" -> static, "account_cash" -> account_cash). Keep this in lockstep with the
-    # generated `class <Enum>(StrEnum)` member names.
-    return value
+def _member(enum: str, value: str, text: str) -> str:
+    # Resolve the generated member NAME for a given enum value by reading the
+    # `class <enum>(StrEnum):` body in the same file (member lines are `<name> = "<value>"`).
+    # The member name is NOT always the value verbatim: datamodel-codegen snake-cases it, so a
+    # lowercase value like "static" stays `static` but an uppercase value like "BREAKOUT" becomes
+    # `breakout`. Looking the name up keeps this lockstep with the generator across any casing.
+    body = re.search(rf"^class {re.escape(enum)}\(StrEnum\):\n(?P<body>(?:.*\n)*?)(?=^\S|\Z)", text, re.MULTILINE)
+    if body:
+        for member, member_val in re.findall(r'^\s*(\w+) = "([^"]+)"$', body.group("body"), re.MULTILINE):
+            if member_val == value:
+                return member
+    raise SystemExit(
+        f"[enum string-default -> member] could not resolve member for {enum} value {value!r}; "
+        "the generated enum body shape may have changed."
+    )
 
 
 def process(path: Path) -> bool:
     text = path.read_text()
     new_text = DECL.sub(
         lambda m: f'{m.group("indent")}{m.group("field")}: '
-        f'{m.group("enum")}{m.group("opt") or ""} = {m.group("enum")}.{_member(m.group("val"))}',
+        f'{m.group("enum")}{m.group("opt") or ""} = {m.group("enum")}.{_member(m.group("enum"), m.group("val"), text)}',
         text,
     )
     if new_text == text:

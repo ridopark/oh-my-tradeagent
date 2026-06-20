@@ -74,6 +74,24 @@ public class AlpacaMarketData implements MarketDataProvider {
   private final AtomicBoolean reconnectInFlight = new AtomicBoolean(false);
   private volatile Duration nextBackoff = Duration.ofSeconds(1);
 
+  /** Equity subscriber registry: ticker -> {listener, ...}. Separate WS endpoint from options. */
+  private final ConcurrentHashMap<String, List<Consumer<Tick>>> byTicker =
+      new ConcurrentHashMap<>();
+
+  private final Object stockWsLock = new Object();
+
+  // CONNECTION-LIMIT CAVEAT: this is a SECOND market-data WS on the SAME Alpaca key as the options
+  // `ws` above. This singleton fans out one WS per endpoint to all subscribers, so the connection
+  // count is fixed at 2 (options + stocks) regardless of strategy/leg count — and ONLY while
+  // market-data runs a SINGLE replica. VERIFIED 2026-06-20 (scripts/alpaca-ws-conn-check.py): the
+  // Alpaca limit is ONE connection PER ENDPOINT, not account-wide — stocks (/v2) and options
+  // (/v1beta1) coexist on one key; a 2nd connection to the SAME endpoint gets 406 and is refused
+  // (the existing one survives). So a 2nd market-data replica's duplicate connections would be
+  // 406'd — keep market-data a single replica.
+  private volatile WebSocket stockWs;
+  private final AtomicBoolean stockReconnectInFlight = new AtomicBoolean(false);
+  private volatile Duration stockNextBackoff = Duration.ofSeconds(1);
+
   @Autowired
   public AlpacaMarketData(
       RestClient alpacaMarketDataRestClient,
@@ -174,6 +192,292 @@ public class AlpacaMarketData implements MarketDataProvider {
       }
     }
     return new AlpacaSubscription(occSymbol, onTick);
+  }
+
+  @Override
+  public Subscription subscribeEquity(String ticker, Consumer<Tick> onTick) {
+    // LIVE-USE GATE: the real-time stock feed is opt-in. With no explicit stock WS URL (and no
+    // stock-feed) configured, fail closed: a delayed/wrong feed must never silently drive a
+    // price-level trigger. Emit a LOUD audit and refuse to connect.
+    if (props.effectiveStockDataWsUrl().isEmpty()) {
+      log.error(
+          "AUDIT stock-feed-gated: market-data.alpaca.stock-data-ws-url (and stock-feed) unset; "
+              + "refusing to subscribeEquity ticker={} (fail-closed, no connect). Set a real-time "
+              + "stock feed to enable.",
+          ticker);
+      throw new StockFeedGatedException("stock data WS not configured; equity subscription gated");
+    }
+    List<Consumer<Tick>> listeners =
+        byTicker.computeIfAbsent(ticker, k -> new CopyOnWriteArrayList<>());
+    synchronized (listeners) {
+      boolean firstForTicker = listeners.isEmpty();
+      listeners.add(onTick);
+      if (firstForTicker) {
+        sendStockSubscribe(ticker);
+      }
+    }
+    return new AlpacaEquitySubscription(ticker, onTick);
+  }
+
+  /**
+   * Stocks-WS read-loop + test entry point. Parses one frame's array of trade/quote/status records
+   * and fans out a {@link Tick} (last trade price) to all equity subscribers for the matched
+   * ticker. Halted/stale prints are dropped (never emitted).
+   *
+   * <p>Frame shape (Alpaca stocks v2):
+   *
+   * <pre>
+   * [ {"T": "t", "S": "NVDA", "p": 140.12, "t": "2026-06-20T13:31:00.1Z", "c": ["@"]} ]
+   * </pre>
+   *
+   * A trade record carrying a halt/stale condition code (e.g. {@code "H"}/{@code "P"}) is dropped.
+   * Trade-status records ({@code T=="status"}) with a halt status are advisory only and emit no
+   * tick.
+   */
+  void dispatchStockWsMessage(String json) {
+    JsonNode root;
+    try {
+      root = mapper.readTree(json);
+    } catch (Exception e) {
+      log.debug("Alpaca stock WS: drop unparseable frame: {}", e.getMessage());
+      return;
+    }
+    if (!root.isArray()) {
+      return;
+    }
+    for (JsonNode rec : root) {
+      Tick tick = recordToEquityTick(rec);
+      if (tick == null) {
+        continue;
+      }
+      List<Consumer<Tick>> listeners = byTicker.get(tick.occSymbol());
+      if (listeners == null) {
+        continue;
+      }
+      for (Consumer<Tick> l : listeners) {
+        try {
+          l.accept(tick);
+        } catch (RuntimeException ignored) {
+          // One bad listener must not poison the stream.
+        }
+      }
+    }
+  }
+
+  /**
+   * Visible for tests. Projects a stocks-stream record onto a {@link Tick} (last trade price), or
+   * null when it isn't a usable trade (non-trade type, missing price, or a halted/stale condition).
+   */
+  Tick recordToEquityTick(JsonNode rec) {
+    String type = rec.path("T").asText("");
+    if (!"t".equals(type)) {
+      return null;
+    }
+    String sym = rec.path("S").asText("");
+    if (sym.isEmpty()) {
+      return null;
+    }
+    if (isHaltedOrStale(rec)) {
+      return null;
+    }
+    JsonNode price = rec.path("p");
+    if (!price.isNumber()) {
+      return null;
+    }
+    return new Tick(sym, price.decimalValue(), parseTimestamp(rec.path("t").asText("")));
+  }
+
+  /**
+   * A trade print is halted/stale when its condition list ({@code c}) carries a halt/stale code.
+   * Alpaca SIP/IEX trade conditions: {@code "H"} (halt), {@code "P"} (prior reference / late),
+   * {@code "Z"} (sold last / out of sequence). We treat any of these as not safe to trigger on.
+   */
+  private static boolean isHaltedOrStale(JsonNode rec) {
+    JsonNode conds = rec.path("c");
+    if (!conds.isArray()) {
+      return false;
+    }
+    for (JsonNode c : conds) {
+      String code = c.asText("");
+      if ("H".equals(code) || "P".equals(code) || "Z".equals(code)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Package-private so tests can spy on the per-ticker upstream subscribe count. */
+  void sendStockSubscribe(String ticker) {
+    WebSocket socket = ensureStockWs();
+    if (socket == null) {
+      return;
+    }
+    socket.sendText(subscribeAction("subscribe", ticker), true);
+  }
+
+  private void sendStockUnsubscribe(String ticker) {
+    WebSocket socket = stockWs;
+    if (socket == null) {
+      return;
+    }
+    try {
+      socket.sendText(subscribeAction("unsubscribe", ticker), true);
+    } catch (RuntimeException ignored) {
+      // Best-effort.
+    }
+  }
+
+  /**
+   * Opens the stocks WS if needed. Returns null when the connect is in flight or has failed.
+   * Package-private so tests can stub it without a real endpoint.
+   */
+  WebSocket ensureStockWs() {
+    WebSocket existing = stockWs;
+    if (existing != null) {
+      return existing;
+    }
+    synchronized (stockWsLock) {
+      if (stockWs != null) {
+        return stockWs;
+      }
+      try {
+        stockWs = connectStockBlocking();
+        stockNextBackoff = Duration.ofSeconds(1);
+        return stockWs;
+      } catch (RuntimeException e) {
+        log.error("AUDIT stock-ws-connect-failed: {}", e.getMessage());
+        scheduleStockReconnect();
+        return null;
+      }
+    }
+  }
+
+  private WebSocket connectStockBlocking() {
+    String url =
+        props
+            .effectiveStockDataWsUrl()
+            .orElseThrow(
+                () -> new IllegalStateException("stock data WS not configured; cannot connect"));
+    CompletableFuture<WebSocket> fut =
+        httpClient
+            .newWebSocketBuilder()
+            .header("APCA-API-KEY-ID", props.apiKeyId())
+            .header("APCA-API-SECRET-KEY", props.apiSecretKey())
+            .connectTimeout(Duration.ofSeconds(5))
+            .buildAsync(URI.create(url), new StockWsListener());
+    try {
+      return fut.get(10, TimeUnit.SECONDS);
+    } catch (Exception e) {
+      throw new RuntimeException("Alpaca stock WS connect failed", e);
+    }
+  }
+
+  /** Package-private so tests can drive the reconnect path directly. */
+  void scheduleStockReconnect() {
+    if (!stockReconnectInFlight.compareAndSet(false, true)) {
+      return;
+    }
+    Duration delay = stockNextBackoff;
+    stockNextBackoff = stockNextBackoff.multipliedBy(2);
+    if (stockNextBackoff.compareTo(MAX_BACKOFF) > 0) {
+      stockNextBackoff = MAX_BACKOFF;
+    }
+    scheduler.schedule(this::runStockReconnect, delay.toMillis(), TimeUnit.MILLISECONDS);
+  }
+
+  /** Package-private so tests can drive the reconnect body deterministically. */
+  void runStockReconnect() {
+    synchronized (stockWsLock) {
+      stockWs = null;
+    }
+    stockReconnectInFlight.set(false);
+    WebSocket socket = ensureStockWs();
+    if (socket == null) {
+      return;
+    }
+    for (String t : new LinkedHashSet<>(byTicker.keySet())) {
+      List<Consumer<Tick>> listeners = byTicker.get(t);
+      if (listeners != null && !listeners.isEmpty()) {
+        sendStockSubscribe(t);
+      }
+    }
+  }
+
+  /**
+   * Accumulate one message's fragments into {@code buf}, returning the complete frame (and
+   * resetting {@code buf}) only on the final fragment; otherwise null. The buffer is snapshotted
+   * and cleared BEFORE the caller dispatches, so a throwing dispatch can never leave a partial
+   * frame that corrupts the next message's reassembly. {@code java.net.http.WebSocket} delivers
+   * {@code onText} sequentially per connection, so this needs no locking — but it must be
+   * message-local-safe across the fragment boundary, which this is.
+   */
+  static String accumulateFrame(StringBuilder buf, CharSequence data, boolean last) {
+    buf.append(data);
+    if (!last) {
+      return null;
+    }
+    String frame = buf.toString();
+    buf.setLength(0);
+    return frame;
+  }
+
+  /** Stocks-WS listener wires raw text frames into {@link #dispatchStockWsMessage}. */
+  private final class StockWsListener implements WebSocket.Listener {
+    private final StringBuilder buf = new StringBuilder();
+
+    @Override
+    public CompletableFuture<?> onText(WebSocket socket, CharSequence data, boolean last) {
+      String frame = accumulateFrame(buf, data, last);
+      if (frame != null) {
+        dispatchStockWsMessage(frame);
+      }
+      socket.request(1);
+      return null;
+    }
+
+    @Override
+    public void onError(WebSocket socket, Throwable error) {
+      log.error("AUDIT stock-ws-error: {}", error.getMessage());
+      scheduleStockReconnect();
+    }
+
+    @Override
+    public CompletableFuture<?> onClose(WebSocket socket, int statusCode, String reason) {
+      log.error("AUDIT stock-ws-closed status={} reason={}", statusCode, reason);
+      scheduleStockReconnect();
+      return null;
+    }
+  }
+
+  private final class AlpacaEquitySubscription implements Subscription {
+    private final String id = UUID.randomUUID().toString();
+    private final String ticker;
+    private final Consumer<Tick> listener;
+
+    AlpacaEquitySubscription(String ticker, Consumer<Tick> listener) {
+      this.ticker = ticker;
+      this.listener = listener;
+    }
+
+    @Override
+    public String subscriptionId() {
+      return id;
+    }
+
+    @Override
+    public void close() {
+      List<Consumer<Tick>> listeners = byTicker.get(ticker);
+      if (listeners == null) {
+        return;
+      }
+      synchronized (listeners) {
+        listeners.remove(listener);
+        if (listeners.isEmpty()) {
+          byTicker.remove(ticker, listeners);
+          sendStockUnsubscribe(ticker);
+        }
+      }
+    }
   }
 
   /**
@@ -392,6 +696,14 @@ public class AlpacaMarketData implements MarketDataProvider {
         // Best-effort
       }
     }
+    WebSocket stockSocket = stockWs;
+    if (stockSocket != null) {
+      try {
+        stockSocket.sendClose(WebSocket.NORMAL_CLOSURE, "shutdown");
+      } catch (RuntimeException ignored) {
+        // Best-effort
+      }
+    }
   }
 
   /** WebSocket listener wires raw text frames into {@link #dispatchWsMessage}. */
@@ -400,10 +712,8 @@ public class AlpacaMarketData implements MarketDataProvider {
 
     @Override
     public CompletableFuture<?> onText(WebSocket socket, CharSequence data, boolean last) {
-      buf.append(data);
-      if (last) {
-        String frame = buf.toString();
-        buf.setLength(0);
+      String frame = accumulateFrame(buf, data, last);
+      if (frame != null) {
         dispatchWsMessage(frame);
       }
       socket.request(1);

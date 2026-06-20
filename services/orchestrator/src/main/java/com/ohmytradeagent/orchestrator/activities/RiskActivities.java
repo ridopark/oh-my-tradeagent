@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.activities;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.WatchlistTriggerPayload;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import io.temporal.activity.ActivityInterface;
 import java.math.BigDecimal;
@@ -38,6 +39,24 @@ public interface RiskActivities {
    */
   RiskDecision checkEntryWithLimit(
       CopytradeSignalPayload payload,
+      StrategyConfig config,
+      PreTradeCheckResult preTradeResult,
+      BigDecimal limit,
+      BigDecimal accountCash);
+
+  /**
+   * Watchlist-trigger entry gate: runs ONLY the strategy-agnostic risk gates (kill switch,
+   * max_positions, and the Issue #6 portfolio stream) shared with {@link #checkEntryWithLimit}. The
+   * copytrade-only pre-gates (author_whitelist, future-timestamp skew, max_signal_age) are NOT
+   * applied — a {@link WatchlistTriggerPayload} carries no author and no posted-at timestamp.
+   *
+   * <p>{@code limit} is the BTO max-cost (option premium) threaded into the {@code
+   * notional_cap_pct_of_equity} gate and the {@code pre_trade_check} buying-power compare,
+   * mirroring {@link #checkEntryWithLimit}. {@code accountCash} feeds the notional-cap gate's
+   * capital base and fails closed on null/zero.
+   */
+  RiskDecision checkWatchlistEntry(
+      WatchlistTriggerPayload payload,
       StrategyConfig config,
       PreTradeCheckResult preTradeResult,
       BigDecimal limit,

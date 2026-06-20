@@ -31,6 +31,7 @@ public class InMemoryMarketData implements MarketDataProvider {
   private record Listener(String subscriptionId, Consumer<Tick> onTick) {}
 
   private final ConcurrentHashMap<String, List<Listener>> bySymbol = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, List<Listener>> byTicker = new ConcurrentHashMap<>();
 
   @Override
   public Optional<Quote> snapshotQuote(String occSymbol) {
@@ -46,7 +47,31 @@ public class InMemoryMarketData implements MarketDataProvider {
     bySymbol
         .computeIfAbsent(occSymbol, k -> new CopyOnWriteArrayList<>())
         .add(new Listener(id, onTick));
-    return new InMemorySubscription(id, occSymbol);
+    return new InMemorySubscription(bySymbol, id, occSymbol);
+  }
+
+  @Override
+  public Subscription subscribeEquity(String ticker, Consumer<Tick> onTick) {
+    String id = UUID.randomUUID().toString();
+    byTicker
+        .computeIfAbsent(ticker, k -> new CopyOnWriteArrayList<>())
+        .add(new Listener(id, onTick));
+    return new InMemorySubscription(byTicker, id, ticker);
+  }
+
+  /**
+   * Test-only equity fan-out hook. Mirrors {@link #pushTickForTest}; the {@code premium} field of
+   * the delivered {@link Tick} carries the underlying's last trade price.
+   */
+  public void pushEquityTickForTest(String ticker, BigDecimal last, OffsetDateTime retrievedAt) {
+    List<Listener> listeners = byTicker.get(ticker);
+    if (listeners == null || listeners.isEmpty()) {
+      return;
+    }
+    Tick tick = new Tick(ticker, last, retrievedAt);
+    for (Listener l : listeners) {
+      l.onTick().accept(tick);
+    }
   }
 
   /**
@@ -67,11 +92,14 @@ public class InMemoryMarketData implements MarketDataProvider {
     }
   }
 
-  private final class InMemorySubscription implements Subscription {
+  private static final class InMemorySubscription implements Subscription {
+    private final ConcurrentHashMap<String, List<Listener>> registry;
     private final String id;
     private final String symbol;
 
-    InMemorySubscription(String id, String symbol) {
+    InMemorySubscription(
+        ConcurrentHashMap<String, List<Listener>> registry, String id, String symbol) {
+      this.registry = registry;
       this.id = id;
       this.symbol = symbol;
     }
@@ -83,7 +111,7 @@ public class InMemoryMarketData implements MarketDataProvider {
 
     @Override
     public void close() {
-      List<Listener> listeners = bySymbol.get(symbol);
+      List<Listener> listeners = registry.get(symbol);
       if (listeners == null) {
         return;
       }
@@ -92,7 +120,7 @@ public class InMemoryMarketData implements MarketDataProvider {
       // subscribe/close churn. Use two-arg remove so a concurrent subscribe that inserted a
       // fresh CopyOnWriteArrayList under the same key isn't clobbered.
       if (listeners.isEmpty()) {
-        bySymbol.remove(symbol, listeners);
+        registry.remove(symbol, listeners);
       }
     }
   }

@@ -240,9 +240,9 @@ services:
       BROKER_IMPL: ${BROKER_IMPL:-alpaca-paper}
       EXEC_FILL_LISTENER_ENABLED: ${EXEC_FILL_LISTENER_ENABLED:-true}
       EXEC_FILL_LISTENER_POLL_ENABLED: ${EXEC_FILL_LISTENER_POLL_ENABLED:-true}
-      APCA_API_KEY_ID: ${APCA_API_KEY_ID:-}
-      APCA_API_SECRET_KEY: ${APCA_API_SECRET_KEY:-}
-      APCA_API_BASE_URL: ${APCA_API_BASE_URL:-https://paper-api.alpaca.markets}
+      APCA_API_KEY_ID: ${APCA_API_KEY_ID_PAPER:-}
+      APCA_API_SECRET_KEY: ${APCA_API_SECRET_KEY_PAPER:-}
+      APCA_API_BASE_URL: ${APCA_API_BASE_URL_PAPER:-https://paper-api.alpaca.markets}
       ALERT_DISCORD_WEBHOOK_URL: ${ALERT_DISCORD_WEBHOOK_URL:-}
     ports:
       - "8085:8080"
@@ -264,9 +264,9 @@ services:
       TEMPORAL_TARGET: temporal:7233
       TEMPORAL_NAMESPACE: default
       MARKET_DATA_PROVIDER: alpaca
-      APCA_API_KEY_ID: ${APCA_API_KEY_ID:-}
-      APCA_API_SECRET_KEY: ${APCA_API_SECRET_KEY:-}
-      APCA_API_BASE_URL: ${APCA_API_BASE_URL:-https://paper-api.alpaca.markets}
+      APCA_API_KEY_ID_DATA: ${APCA_API_KEY_ID_DATA:-}
+      APCA_API_SECRET_KEY_DATA: ${APCA_API_SECRET_KEY_DATA:-}
+      ALPACA_DATA_BASE_URL: ${APCA_API_BASE_URL_DATA:-https://data.alpaca.markets}
     ports:
       - "8086:8080"
     profiles: ["services"]

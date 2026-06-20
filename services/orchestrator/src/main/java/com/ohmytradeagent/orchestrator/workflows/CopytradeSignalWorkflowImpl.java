@@ -179,6 +179,17 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // VERSION_LIVE_PROMOTION_GATE's "read unconditionally, branch only at v>=1" discipline.
   private static final String VERSION_ACCOUNT_CASH_SIZING = "account-cash-sizing-v1";
 
+  // Phase 7 (per-tenant strategy enable toggle): gate the fail-safe enable check added in process()
+  // immediately after the strategy.get() fetch. A strategy whose StrategyConfig.enabled is
+  // explicitly false admits no new entries — the signal is rejected before any exec stub is built
+  // or order placed (SignalRejected, reason strategy_disabled). FAIL-SAFE: absent/null/true ALL
+  // proceed unchanged (StrategyConfig.enabled defaults to true in schema; older blobs may carry
+  // null), so existing tenants see no behavior change. Read UNCONDITIONALLY (before the
+  // Boolean.FALSE test) and branch only at v>=1, mirroring VERSION_LIVE_PROMOTION_GATE: legacy
+  // in-flight histories (DEFAULT_VERSION) take the byte-identical pre-change path with no new
+  // command, and only freshly-started executions evaluate the gate.
+  private static final String VERSION_STRATEGY_ENABLED_GATE = "strategy-enabled-gate-v1";
+
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
 
@@ -254,6 +265,27 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     logAudit(payload, KIND_SIGNAL_RECEIVED, receivedSubject(payload));
 
     StrategyConfig config = strategy.get(payload.getTenantId(), payload.getStrategyId());
+
+    // Phase 7: per-tenant strategy enable toggle. Read the marker UNCONDITIONALLY so the command
+    // stream is identical across versions (see VERSION_STRATEGY_ENABLED_GATE). FAIL-SAFE: only an
+    // explicit enabled==false blocks; absent/null/true proceed. Rejecting BEFORE the exec-stub
+    // build means a disabled strategy is cleanly turned away regardless of broker_target
+    // routability
+    // — it never reaches placeOrder and starts no PositionWorkflow, mirroring the live-promotion
+    // refusal shape (SignalRejected + return signal_id).
+    int enabledGateVersion =
+        Workflow.getVersion(VERSION_STRATEGY_ENABLED_GATE, Workflow.DEFAULT_VERSION, 1);
+    if (enabledGateVersion >= 1 && Boolean.FALSE.equals(config.getEnabled())) {
+      logAudit(
+          payload,
+          KIND_SIGNAL_REJECTED,
+          subject(
+              "signal_id", payload.getSignalId(),
+              "reason_code", "STRATEGY_DISABLED",
+              "reason_detail", "strategy_disabled",
+              "outcome", "REJECTED"));
+      return payload.getSignalId();
+    }
 
     // Phase 2c.2: route exec Activities to broker-<broker_target>. The factory throws a
     // non-retryable ApplicationFailure on invalid targets; let it propagate so the workflow

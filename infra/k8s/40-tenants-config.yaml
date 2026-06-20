@@ -22,6 +22,7 @@ data:
     display_name: Local development tenant
     strategies:
       - copytrade-v1
+      - watchlist-trigger-v1
   copytrade-v1.yaml: |
     schema_version: 1
     tenant_id: dev
@@ -107,3 +108,31 @@ data:
     # +5%). No market orders. Keep in sync with the canonical strategy file.
     max_slippage_abs: 0.05
     max_slippage_pct: 0.05
+  # Keep semantically in sync with tenants/dev/strategies/watchlist-trigger-v1.yaml (the
+  # check-tenants-configmap-drift.py guard compares parsed YAML). SHIP DISABLED (enabled: false):
+  # the operator flips it on via the dashboard after entitling the real-time stock feed.
+  watchlist-trigger-v1.yaml: |
+    schema_version: 1
+    tenant_id: dev
+    strategy_id: watchlist-trigger-v1
+    broker_target: alpaca-paper
+    # REQUIRED for account-cash sizing: the trigger path sizes from the broker account's live CASH
+    # and only dispatches the account snapshot when capital_source=account_cash. fail-CLOSED.
+    capital_source: account_cash
+    capital_weight: 0.05
+    min_contracts: 1
+    max_contracts: 5
+    notional_cap_pct_of_capital_base: 0.10
+    max_positions: 3
+    entry_mode: BREAKOUT
+    watchlist_expiry_rule: NEAREST_WEEKLY
+    gap_tolerance_pct: 0.005
+    equity_emit_delta_pct: 0.0005
+    # SHIP DISABLED: enabled:false + the unconfigured stock feed are the two live-trade gates.
+    enabled: false
+    # Copytrade-only schema-required fields, inert here (the trigger path ignores them). The schema
+    # requires author_whitelist with minItems:1, so a single non-posting placeholder author is used.
+    author_whitelist:
+      - watchlist-trigger-unused
+    max_signal_age_bto_secs: 30
+    max_signal_age_stc_secs: 60

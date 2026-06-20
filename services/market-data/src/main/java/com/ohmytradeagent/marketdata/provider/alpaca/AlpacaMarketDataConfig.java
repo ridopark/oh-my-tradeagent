@@ -24,12 +24,12 @@ public class AlpacaMarketDataConfig {
       AlpacaMarketDataProperties props, RestClient.Builder builder) {
     if (props.apiKeyId() == null || props.apiKeyId().isBlank()) {
       throw new IllegalStateException(
-          "market-data.provider=alpaca requires APCA_API_KEY_ID; got blank/null. "
+          "market-data.provider=alpaca requires APCA_API_KEY_ID_DATA; got blank/null. "
               + "Set the alpaca-credentials Secret in your deployment.");
     }
     if (props.apiSecretKey() == null || props.apiSecretKey().isBlank()) {
       throw new IllegalStateException(
-          "market-data.provider=alpaca requires APCA_API_SECRET_KEY; got blank/null. "
+          "market-data.provider=alpaca requires APCA_API_SECRET_KEY_DATA; got blank/null. "
               + "Set the alpaca-credentials Secret in your deployment.");
     }
     return builder

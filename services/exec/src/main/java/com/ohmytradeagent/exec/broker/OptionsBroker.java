@@ -5,6 +5,7 @@ import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.PreTradeCheckRequest;
 import com.ohmytradeagent.contract.PreTradeCheckResult;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.List;
 
 /**
@@ -151,4 +152,18 @@ public interface OptionsBroker {
    * nullable, and not used by any gate.
    */
   record AccountSummary(BigDecimal equity, BigDecimal cash, String accountNumber) {}
+
+  /**
+   * Trading days in {@code [start, end]} inclusive, per the broker's market calendar. Used by the
+   * watchlist-trigger expiry resolver to holiday-shift a candidate Friday to the preceding trading
+   * day.
+   *
+   * <p>Default throws {@link UnsupportedOperationException} so only brokers that expose a calendar
+   * endpoint (Alpaca {@code GET /v2/calendar}) support it; the in-memory {@link
+   * com.ohmytradeagent.exec.broker.stub.StubBroker} and other adapters are unaffected until they
+   * opt in.
+   */
+  default List<LocalDate> tradingDays(LocalDate start, LocalDate end) {
+    throw new UnsupportedOperationException("tradingDays not supported by this broker");
+  }
 }

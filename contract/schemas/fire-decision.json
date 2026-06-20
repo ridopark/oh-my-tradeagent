@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/fire-decision.json",
+  "title": "FireDecision",
+  "description": "Outcome of the fire gate for an armed watchlist trigger: whether to proceed with the entry and at what size multiplier. Returned by the fire-decision step toward the trigger-strategy workflow.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.FireDecision",
+  "additionalProperties": false,
+  "required": [
+    "proceed",
+    "size_multiplier"
+  ],
+  "properties": {
+    "proceed": {
+      "type": "boolean",
+      "description": "True to proceed with the entry; false to hold (the trigger stays armed for later evaluation)."
+    },
+    "size_multiplier": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Position-size multiplier applied to the base allocation for this fire. 0 suppresses the entry without disarming."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Optional human-readable reason for the fire decision (audit)."
+    }
+  }
+}
