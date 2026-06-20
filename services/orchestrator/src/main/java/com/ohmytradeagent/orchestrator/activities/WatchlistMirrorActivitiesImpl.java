@@ -1,16 +1,28 @@
 package com.ohmytradeagent.orchestrator.activities;
 
+import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.WatchlistMirrorPayload;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.WatchlistParser.Leg;
 import com.ohmytradeagent.orchestrator.activities.WatchlistParser.ParseResult;
 import com.ohmytradeagent.orchestrator.activities.WatchlistParser.TickerWatch;
 import com.ohmytradeagent.orchestrator.alert.TenantWebhookResolver;
 import com.ohmytradeagent.orchestrator.alert.WebhookClient;
 import com.ohmytradeagent.orchestrator.alert.WebhookEmbed;
+import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.workflows.WatchlistTriggerSessionWorkflow;
+import com.ohmytradeagent.orchestrator.workflows.WatchlistTriggerSessionWorkflowInput;
+import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowOptions;
 import java.math.RoundingMode;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -41,13 +53,39 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
   private static final DateTimeFormatter EMBED_DATE =
       DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.ENGLISH);
 
+  private static final Logger log = LoggerFactory.getLogger(WatchlistMirrorActivitiesImpl.class);
+
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
 
+  // Ingest fan-out collaborators. Null/blank disables the fan-out entirely (the mirror still
+  // posts):
+  // the legacy 2-arg constructor leaves these unset so existing mirror-only wiring/tests are
+  // unaffected, and production injects them via the @Autowired constructor below.
+  private final WorkflowClient workflowClient;
+  private final StrategyRegistry strategyRegistry;
+  private final String triggerStrategyId;
+  private final String coreTaskQueue;
+
   public WatchlistMirrorActivitiesImpl(
       WebhookClient webhookClient, TenantWebhookResolver webhookResolver) {
+    this(webhookClient, webhookResolver, null, null, "", "orchestrator-core");
+  }
+
+  @Autowired
+  public WatchlistMirrorActivitiesImpl(
+      WebhookClient webhookClient,
+      TenantWebhookResolver webhookResolver,
+      WorkflowClient workflowClient,
+      StrategyRegistry strategyRegistry,
+      @Value("${watchlist.trigger.strategy-id:}") String triggerStrategyId,
+      @Value("${temporal.task-queue:orchestrator-core}") String coreTaskQueue) {
     this.webhookClient = webhookClient;
     this.webhookResolver = webhookResolver;
+    this.workflowClient = workflowClient;
+    this.strategyRegistry = strategyRegistry;
+    this.triggerStrategyId = triggerStrategyId == null ? "" : triggerStrategyId;
+    this.coreTaskQueue = coreTaskQueue;
   }
 
   @Override
@@ -59,6 +97,57 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
     } else {
       // Malformed/empty watchlist is never dropped — fall back to verbatim raw text.
       webhookClient.postToUrl(url, format(payload));
+    }
+    // Additive, defensive ingest fan-out AFTER the mirror post (mirror output is byte-identical):
+    // only on a clean parse, only for the configured trigger strategy, only when not explicitly
+    // disabled. A start failure is caught + logged and never disrupts the mirror.
+    maybeStartTriggerSession(payload, parsed);
+  }
+
+  /**
+   * Starts {@link WatchlistTriggerSessionWorkflow} when the parse is clean AND this strategy is the
+   * configured trigger strategy AND it is not explicitly disabled. Best-effort: any failure (no
+   * client wired, config miss, start error) is swallowed so the Discord mirror is never affected.
+   */
+  private void maybeStartTriggerSession(WatchlistMirrorPayload payload, ParseResult parsed) {
+    if (workflowClient == null || triggerStrategyId.isBlank() || strategyRegistry == null) {
+      return;
+    }
+    if (!parsed.clean() || parsed.rows().isEmpty()) {
+      return;
+    }
+    if (!triggerStrategyId.equals(payload.getStrategyId())) {
+      return;
+    }
+    try {
+      StrategyConfig config = strategyRegistry.get(payload.getTenantId(), payload.getStrategyId());
+      if (config == null || Boolean.FALSE.equals(config.getEnabled())) {
+        return;
+      }
+      String workflowId =
+          WorkflowIds.tenantStrategy(payload.getTenantId(), payload.getStrategyId())
+              + "/wl/"
+              + payload.getEtDate()
+              + "/session";
+      WatchlistTriggerSessionWorkflow session =
+          workflowClient.newWorkflowStub(
+              WatchlistTriggerSessionWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(coreTaskQueue)
+                  .setWorkflowId(workflowId)
+                  .setWorkflowIdReusePolicy(
+                      WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
+                  .build());
+      WorkflowClient.start(session::run, new WatchlistTriggerSessionWorkflowInput(payload, config));
+    } catch (RuntimeException e) {
+      // Includes WorkflowExecutionAlreadyStarted (same-day re-post idempotency) and any transport
+      // error. The mirror has already posted; the fan-out is strictly additive.
+      log.warn(
+          "watchlist trigger session start skipped tenant={} strategy={} et_date={} err={}",
+          payload.getTenantId(),
+          payload.getStrategyId(),
+          payload.getEtDate(),
+          e.getMessage());
     }
   }
 
