@@ -303,6 +303,25 @@ public final class AuditEventKinds {
           // a dedicated per-tenant credential hash chain (strategy_id sentinel '_broker'), so it is
           // intentionally in ALL_KINDS only, not in any *_KINDS lifecycle group.
           "BrokerCredentialWritten",
+          // WatchlistTriggerSessionWorkflowImpl + WatchlistTriggerWorkflowImpl (watchlist-trigger
+          // strategy). All NEUTRAL / pre-entry observability kinds: session lifecycle, per-leg
+          // arming, skip, cancel, fan-out cap, fire rejection, and feed staleness. None opens or
+          // closes a POSITION lifecycle in the ledger sense -- a fired leg's actual entry and exit
+          // reuse the existing EntryFilled / PositionEntered / PositionClosed kinds via the shared
+          // order + PositionWorkflow path, and an un-fired leg never opens a lifecycle to close.
+          // Intentionally registered in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "WatchlistSessionStarted",
+          "WatchlistSessionDisabled",
+          "WatchlistSessionEod",
+          "WatchlistFanoutCapExceeded",
+          "WatchlistLegArmed",
+          "WatchlistLegArmRejected",
+          "WatchlistLegSkipped",
+          "TriggerArmed",
+          "TriggerSkipped",
+          "TriggerCancelled",
+          "TriggerFireRejected",
+          "TriggerFeedStale",
           // TenantConfigChangedEmitter (no KIND_ constant; literal string in the emitter)
           "TenantConfigChanged");
 }
