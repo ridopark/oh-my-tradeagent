@@ -54,7 +54,9 @@ class AlpacaMarketDataTest {
             server.url("/").toString().replaceAll("/$", ""),
             "wss://example.invalid/should-not-connect",
             "key-id-for-test",
-            "key-secret-for-test");
+            "key-secret-for-test",
+            "",
+            "");
     scheduler = Executors.newSingleThreadScheduledExecutor();
     provider = new AlpacaMarketData(client, mapper, props, HttpClient.newHttpClient(), scheduler);
   }
@@ -210,6 +212,90 @@ class AlpacaMarketDataTest {
     assertThat(rxB).hasSize(1);
   }
 
+  // --- Phase 2 (watchlist-trigger): equity stock-feed ---
+
+  private AlpacaMarketData equityProvider() {
+    AlpacaMarketDataProperties props =
+        new AlpacaMarketDataProperties(
+            server.url("/").toString().replaceAll("/$", ""),
+            "wss://example.invalid/should-not-connect",
+            "key-id-for-test",
+            "key-secret-for-test",
+            "",
+            "iex"); // stock-feed=iex => effective stock URL set => gate OPEN
+    RestClient client = RestClient.builder().baseUrl(props.dataBaseUrl()).build();
+    // Subclass to skip the real WS connect (subscribeEquity's first-subscriber path would otherwise
+    // attempt to dial the derived wss URL); the fan-out is exercised via dispatchStockWsMessage.
+    return new AlpacaMarketData(client, mapper, props, HttpClient.newHttpClient(), scheduler) {
+      @Override
+      void sendStockSubscribe(String ticker) {
+        // no-op: test drives dispatchStockWsMessage directly
+      }
+    };
+  }
+
+  @Test
+  void subscribeEquity_tradeRecord_fansOutTickWithLastPrice() {
+    AlpacaMarketData eq = equityProvider();
+    CopyOnWriteArrayList<Tick> received = new CopyOnWriteArrayList<>();
+    eq.subscribeEquity("NVDA", received::add);
+
+    eq.dispatchStockWsMessage(
+        "[{\"T\":\"t\",\"S\":\"NVDA\",\"p\":140.12,\"t\":\"2026-06-20T13:31:00Z\"}]");
+
+    assertThat(received).hasSize(1);
+    assertThat(received.get(0).occSymbol()).isEqualTo("NVDA");
+    assertThat(received.get(0).premium()).isEqualByComparingTo("140.12");
+  }
+
+  @Test
+  void subscribeEquity_haltedOrStaleTrade_isDropped() {
+    AlpacaMarketData eq = equityProvider();
+    CopyOnWriteArrayList<Tick> received = new CopyOnWriteArrayList<>();
+    eq.subscribeEquity("NVDA", received::add);
+
+    // condition "H" = halt, "P" = prior reference/late
+    eq.dispatchStockWsMessage(
+        "[{\"T\":\"t\",\"S\":\"NVDA\",\"p\":140.12,\"t\":\"2026-06-20T13:31:00Z\",\"c\":[\"H\"]}]");
+    eq.dispatchStockWsMessage(
+        "[{\"T\":\"t\",\"S\":\"NVDA\",\"p\":140.50,\"t\":\"2026-06-20T13:31:01Z\",\"c\":[\"P\"]}]");
+
+    assertThat(received).isEmpty();
+  }
+
+  @Test
+  void subscribeEquity_quoteOrStatusRecord_emitsNoTick() {
+    AlpacaMarketData eq = equityProvider();
+    CopyOnWriteArrayList<Tick> received = new CopyOnWriteArrayList<>();
+    eq.subscribeEquity("NVDA", received::add);
+
+    eq.dispatchStockWsMessage(
+        "[{\"T\":\"q\",\"S\":\"NVDA\",\"bp\":140.0,\"ap\":140.2,\"t\":\"2026-06-20T13:31:00Z\"}]");
+    eq.dispatchStockWsMessage("[{\"T\":\"status\",\"S\":\"NVDA\",\"sc\":\"H\"}]");
+
+    assertThat(received).isEmpty();
+  }
+
+  @Test
+  void subscribeEquity_failsClosed_whenStockFeedUnconfigured() {
+    // Both stock-data-ws-url and stock-feed blank => gate CLOSED: must throw, never connect.
+    AlpacaMarketDataProperties props =
+        new AlpacaMarketDataProperties(
+            server.url("/").toString().replaceAll("/$", ""),
+            "wss://example.invalid/should-not-connect",
+            "key-id-for-test",
+            "key-secret-for-test",
+            "",
+            "");
+    RestClient client = RestClient.builder().baseUrl(props.dataBaseUrl()).build();
+    AlpacaMarketData gated =
+        new AlpacaMarketData(client, mapper, props, HttpClient.newHttpClient(), scheduler);
+
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> gated.subscribeEquity("NVDA", t -> {}))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("gated");
+  }
+
   @Test
   void dispatchWsMessage_malformedFrame_isNoOp() {
     CopyOnWriteArrayList<Tick> received = new CopyOnWriteArrayList<>();
@@ -237,7 +323,9 @@ class AlpacaMarketDataTest {
             server.url("/").toString().replaceAll("/$", ""),
             "wss://example.invalid/should-not-connect",
             "key-id-for-test",
-            "key-secret-for-test");
+            "key-secret-for-test",
+            "",
+            "");
     RestClient client = RestClient.builder().baseUrl(props.dataBaseUrl()).build();
     AlpacaMarketData countingProvider =
         new AlpacaMarketData(client, mapper, props, HttpClient.newHttpClient(), scheduler) {
@@ -295,7 +383,9 @@ class AlpacaMarketDataTest {
             server.url("/").toString().replaceAll("/$", ""),
             "wss://example.invalid/should-not-connect",
             "key-id-for-test",
-            "key-secret-for-test");
+            "key-secret-for-test",
+            "",
+            "");
     RestClient client = RestClient.builder().baseUrl(props.dataBaseUrl()).build();
 
     AtomicInteger scheduledTasks = new AtomicInteger();

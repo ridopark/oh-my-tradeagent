@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/subscribe-equity-result.json",
+  "title": "SubscribeEquityResult",
+  "description": "Phase 2 (watchlist-trigger): result of SubscribeEquityActivity.subscribeEquity. status=FAILED is returned (not thrown) so the workflow can audit and proceed without a feed. status=GATED is returned when live use is not enabled (stock WS not configured) — the worker fails closed and does not connect.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.SubscribeEquityResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "subscription_id",
+    "subscribed_at",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version."
+    },
+    "subscription_id": {
+      "type": "string",
+      "description": "Opaque ID for the active subscription. Empty string when status!=SUBSCRIBED."
+    },
+    "subscribed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp when the subscription was created (or attempted)."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["SUBSCRIBED", "FAILED", "GATED"],
+      "description": "Outcome. FAILED (source error) and GATED (live use not enabled / fail-closed) return instead of throwing so the workflow can audit and continue."
+    },
+    "error": {
+      "type": "string",
+      "description": "Error message when status=FAILED or GATED."
+    }
+  }
+}

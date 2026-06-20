@@ -21,6 +21,14 @@ market-data:
     data-ws-url: ${ALPACA_DATA_WS_URL:wss://stream.data.alpaca.markets/v1beta1/indicative}
     api-key-id: ${APCA_API_KEY_ID:}
     api-secret-key: ${APCA_API_SECRET_KEY:}
+    # LIVE-USE GATE for the real-time STOCK trade stream that drives watchlist-trigger entries.
+    # Intentionally UNSET by default: when both are blank, subscribeEquity FAILS CLOSED (loud audit,
+    # no connect) so a delayed/wrong feed can never silently drive a price-level trigger. An operator
+    # opts in ONLY after confirming a real-time entitlement, by setting one of:
+    #   stock-data-ws-url : explicit WS URL, OR
+    #   stock-feed        : 'iex' | 'sip' -> wss://stream.data.alpaca.markets/v2/<feed>
+    stock-data-ws-url: ${ALPACA_STOCK_DATA_WS_URL:}
+    stock-feed: ${ALPACA_STOCK_FEED:}
 
 management:
   endpoints:

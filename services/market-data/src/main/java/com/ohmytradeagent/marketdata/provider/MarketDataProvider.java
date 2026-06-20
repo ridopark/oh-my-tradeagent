@@ -34,4 +34,16 @@ public interface MarketDataProvider {
    * subscribers on the same symbol.
    */
   Subscription subscribePremium(String occSymbol, Consumer<Tick> onTick);
+
+  /**
+   * Opens a push subscription for an underlying equity {@code ticker} (e.g. {@code NVDA}). Each
+   * stock trade print from the provider feed is delivered to {@code onTick} as a {@link Tick} whose
+   * {@code premium} carries the last trade price. Halted/stale prints are dropped by the
+   * implementation and never delivered. Subscriptions are independent: closing one does not affect
+   * other subscribers on the same ticker.
+   *
+   * <p>Live use is gated: a provider whose stock-data feed is not explicitly configured MUST fail
+   * closed (loud audit, no connect) rather than drive triggers off a wrong/delayed feed.
+   */
+  Subscription subscribeEquity(String ticker, Consumer<Tick> onTick);
 }
