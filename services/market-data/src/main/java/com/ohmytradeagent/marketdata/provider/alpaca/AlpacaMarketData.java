@@ -79,6 +79,16 @@ public class AlpacaMarketData implements MarketDataProvider {
       new ConcurrentHashMap<>();
 
   private final Object stockWsLock = new Object();
+
+  // CONNECTION-LIMIT CAVEAT: this is a SECOND market-data WS on the SAME Alpaca key as the options
+  // `ws` above. Alpaca enforces a per-account market-data connection limit (HTTP 406 "connection
+  // limit exceeded"; a new connection may also kick the old one). This singleton fans out one WS
+  // per endpoint to all subscribers, so the connection count is fixed at 2 (options + stocks)
+  // regardless of strategy/leg count — and ONLY while market-data runs a SINGLE replica. Scaling
+  // market-data > 1 replica without symbol-sharding would multiply connections and trip the limit.
+  // Whether the stocks endpoint (/v2/<feed>) and options endpoint (/v1beta1/<feed>) count
+  // separately against the limit is undocumented — verify on the live account with
+  // scripts/alpaca-ws-conn-check.py before enabling both.
   private volatile WebSocket stockWs;
   private final AtomicBoolean stockReconnectInFlight = new AtomicBoolean(false);
   private volatile Duration stockNextBackoff = Duration.ofSeconds(1);
@@ -394,16 +404,32 @@ public class AlpacaMarketData implements MarketDataProvider {
     }
   }
 
+  /**
+   * Accumulate one message's fragments into {@code buf}, returning the complete frame (and resetting
+   * {@code buf}) only on the final fragment; otherwise null. The buffer is snapshotted and cleared
+   * BEFORE the caller dispatches, so a throwing dispatch can never leave a partial frame that
+   * corrupts the next message's reassembly. {@code java.net.http.WebSocket} delivers {@code onText}
+   * sequentially per connection, so this needs no locking — but it must be message-local-safe across
+   * the fragment boundary, which this is.
+   */
+  static String accumulateFrame(StringBuilder buf, CharSequence data, boolean last) {
+    buf.append(data);
+    if (!last) {
+      return null;
+    }
+    String frame = buf.toString();
+    buf.setLength(0);
+    return frame;
+  }
+
   /** Stocks-WS listener wires raw text frames into {@link #dispatchStockWsMessage}. */
   private final class StockWsListener implements WebSocket.Listener {
     private final StringBuilder buf = new StringBuilder();
 
     @Override
     public CompletableFuture<?> onText(WebSocket socket, CharSequence data, boolean last) {
-      buf.append(data);
-      if (last) {
-        String frame = buf.toString();
-        buf.setLength(0);
+      String frame = accumulateFrame(buf, data, last);
+      if (frame != null) {
         dispatchStockWsMessage(frame);
       }
       socket.request(1);
@@ -687,10 +713,8 @@ public class AlpacaMarketData implements MarketDataProvider {
 
     @Override
     public CompletableFuture<?> onText(WebSocket socket, CharSequence data, boolean last) {
-      buf.append(data);
-      if (last) {
-        String frame = buf.toString();
-        buf.setLength(0);
+      String frame = accumulateFrame(buf, data, last);
+      if (frame != null) {
         dispatchWsMessage(frame);
       }
       socket.request(1);

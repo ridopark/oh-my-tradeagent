@@ -201,11 +201,14 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     if (eodIn == null || eodIn.isZero() || eodIn.isNegative()) {
       eodFired[0] = true;
     } else {
-      Promise<Void> eodTimer = Workflow.newTimer(eodIn);
-      eodTimer.thenApply(
-          v -> {
+      // Side-effecting timer callback in its own coroutine: await the timer, then set the flag.
+      // Avoids thenApply, whose value-returning lambda completes the derived promise with any thrown
+      // exception INSTEAD of running the side-effect, silently swallowing the eodFired flag.
+      final Duration eod = eodIn;
+      Async.procedure(
+          () -> {
+            Workflow.newTimer(eod).get();
             eodFired[0] = true;
-            return null;
           });
     }
 

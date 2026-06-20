@@ -39,8 +39,12 @@ public record AlpacaMarketDataProperties(
       return java.util.Optional.of(stockDataWsUrl.trim());
     }
     if (stockFeed != null && !stockFeed.isBlank()) {
-      return java.util.Optional.of(
-          "wss://stream.data.alpaca.markets/v2/" + stockFeed.trim().toLowerCase());
+      String feed = stockFeed.trim().toLowerCase();
+      if (!"iex".equals(feed) && !"sip".equals(feed)) {
+        throw new IllegalStateException(
+            "market-data.alpaca.stock-feed must be 'iex' or 'sip', got: " + stockFeed);
+      }
+      return java.util.Optional.of("wss://stream.data.alpaca.markets/v2/" + feed);
     }
     return java.util.Optional.empty();
   }

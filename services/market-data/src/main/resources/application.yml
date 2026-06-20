@@ -27,6 +27,12 @@ market-data:
     # opts in ONLY after confirming a real-time entitlement, by setting one of:
     #   stock-data-ws-url : explicit WS URL, OR
     #   stock-feed        : 'iex' | 'sip' -> wss://stream.data.alpaca.markets/v2/<feed>
+    # CAVEAT (Alpaca single-connection limit): setting this opens a SECOND market-data WS on the same
+    # key as the options premium stream (data-ws-url). This worker holds one WS per endpoint and fans
+    # out to all subscribers, so the count is fixed at 2 (options + stocks) regardless of strategy/leg
+    # count -- AND only while market-data runs a single replica. Alpaca caps connections per account
+    # (HTTP 406 "connection limit exceeded"); whether stocks (/v2) and options (/v1beta1) count
+    # separately is undocumented -> verify before enabling: uv run scripts/alpaca-ws-conn-check.py
     stock-data-ws-url: ${ALPACA_STOCK_DATA_WS_URL:}
     stock-feed: ${ALPACA_STOCK_FEED:}
 

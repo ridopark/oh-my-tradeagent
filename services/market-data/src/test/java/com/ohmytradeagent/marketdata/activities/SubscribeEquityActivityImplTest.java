@@ -295,6 +295,77 @@ class SubscribeEquityActivityImplTest {
     assertThat(result.getError()).contains("not owned by tenant");
   }
 
+  // Race regression: a tick that fires DURING provider.subscribeEquity() (before the activity has
+  // assigned subIdHolder) must still dispatch with the real subscription id, so a first-tick
+  // WorkflowNotFoundException tears the subscription down instead of seeing a null id and skipping.
+  // The activity gates the dispatch read behind a latch released after subIdHolder is published.
+  @Test
+  @Timeout(value = 60, unit = TimeUnit.SECONDS)
+  void firstTickDuringSubscribe_dispatchesWithSubscriptionId_tearsDownOnClosedTarget()
+      throws Exception {
+    SyncFireProvider provider = new SyncFireProvider();
+    SubscribeEquityActivityImpl activity =
+        new SubscribeEquityActivityImpl(
+            provider,
+            env.getWorkflowClient(),
+            Executors.newSingleThreadExecutor(),
+            watchdog,
+            RTH_CLOCK,
+            3600L);
+
+    // Target a tenant-owned but non-existent workflow id => signal throws WorkflowNotFoundException
+    // => dispatchTick must tear down (close) the subscription, which only happens with a non-null id.
+    SubscribeEquityResult result =
+        activity.subscribeEquity(
+            req("NVDA", "t-dev/s-x/wl/2026-06-23/NVDA/C", "equityTick", "140.00", "0.0005"));
+
+    assertThat(result.getStatus()).isEqualTo(SubscribeEquityResult.Status.SUBSCRIBED);
+    assertThat(provider.closed.await(10, TimeUnit.SECONDS))
+        .as("first-tick teardown must close the subscription (subId was published before dispatch)")
+        .isTrue();
+  }
+
+  /** Provider that fires one tick synchronously inside subscribeEquity, before it returns. */
+  private static final class SyncFireProvider
+      implements com.ohmytradeagent.marketdata.provider.MarketDataProvider {
+    final java.util.concurrent.CountDownLatch closed = new java.util.concurrent.CountDownLatch(1);
+
+    @Override
+    public java.util.Optional<com.ohmytradeagent.marketdata.provider.Quote> snapshotQuote(
+        String occSymbol) {
+      return java.util.Optional.empty();
+    }
+
+    @Override
+    public com.ohmytradeagent.marketdata.provider.Subscription subscribePremium(
+        String occSymbol,
+        java.util.function.Consumer<com.ohmytradeagent.marketdata.provider.Tick> onTick) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public com.ohmytradeagent.marketdata.provider.Subscription subscribeEquity(
+        String ticker,
+        java.util.function.Consumer<com.ohmytradeagent.marketdata.provider.Tick> onTick) {
+      String id = java.util.UUID.randomUUID().toString();
+      // Fire a tick BEFORE returning the Subscription — the activity has not yet set subIdHolder.
+      onTick.accept(
+          new com.ohmytradeagent.marketdata.provider.Tick(
+              ticker, new BigDecimal("140.00"), OffsetDateTime.parse("2026-06-23T14:31:00Z")));
+      return new com.ohmytradeagent.marketdata.provider.Subscription() {
+        @Override
+        public String subscriptionId() {
+          return id;
+        }
+
+        @Override
+        public void close() {
+          closed.countDown();
+        }
+      };
+    }
+  }
+
   // --- helpers ---
 
   private SubscribeEquityActivityImpl newBareActivity() {

@@ -277,6 +277,38 @@ class AlpacaMarketDataTest {
   }
 
   @Test
+  void effectiveStockDataWsUrl_allowsIexAndSip_caseInsensitive() {
+    assertThat(propsWithFeed("iex").effectiveStockDataWsUrl())
+        .contains("wss://stream.data.alpaca.markets/v2/iex");
+    assertThat(propsWithFeed("SIP").effectiveStockDataWsUrl())
+        .contains("wss://stream.data.alpaca.markets/v2/sip");
+  }
+
+  @Test
+  void effectiveStockDataWsUrl_unknownFeed_failsFast() {
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> propsWithFeed("bogus").effectiveStockDataWsUrl())
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("iex")
+        .hasMessageContaining("sip");
+  }
+
+  @Test
+  void effectiveStockDataWsUrl_blankFeed_staysGated() {
+    assertThat(propsWithFeed("").effectiveStockDataWsUrl()).isEmpty();
+  }
+
+  private static AlpacaMarketDataProperties propsWithFeed(String feed) {
+    return new AlpacaMarketDataProperties(
+        "https://data.alpaca.markets",
+        "wss://example.invalid/should-not-connect",
+        "key-id-for-test",
+        "key-secret-for-test",
+        "",
+        feed);
+  }
+
+  @Test
   void subscribeEquity_failsClosed_whenStockFeedUnconfigured() {
     // Both stock-data-ws-url and stock-feed blank => gate CLOSED: must throw, never connect.
     AlpacaMarketDataProperties props =
@@ -294,6 +326,60 @@ class AlpacaMarketDataTest {
     org.assertj.core.api.Assertions.assertThatThrownBy(() -> gated.subscribeEquity("NVDA", t -> {}))
         .isInstanceOf(StockFeedGatedException.class)
         .hasMessageContaining("gated");
+  }
+
+  /**
+   * Fragmented WS delivery: {@code onText} may arrive in pieces (last=false ... last=true). The
+   * listener accumulation must reassemble one message's fragments and reset before the next, so a
+   * subsequent complete message never sees the prior message's buffer. Drives {@link
+   * AlpacaMarketData#accumulateFrame} (the shared listener accumulator) directly.
+   */
+  @Test
+  void accumulateFrame_reassemblesFragments_andResetsBetweenMessages() {
+    StringBuilder buf = new StringBuilder();
+
+    // Message 1 split across three onText calls; only the final (last=true) yields a frame.
+    assertThat(AlpacaMarketData.accumulateFrame(buf, "[{\"T\":\"t\",", false)).isNull();
+    assertThat(AlpacaMarketData.accumulateFrame(buf, "\"S\":\"NVDA\",", false)).isNull();
+    String frame1 =
+        AlpacaMarketData.accumulateFrame(buf, "\"p\":140.12,\"t\":\"2026-06-20T13:31:00Z\"}]", true);
+    assertThat(frame1)
+        .isEqualTo("[{\"T\":\"t\",\"S\":\"NVDA\",\"p\":140.12,\"t\":\"2026-06-20T13:31:00Z\"}]");
+
+    // Message 2 (single complete frame) must NOT carry any residue of message 1.
+    String frame2 =
+        AlpacaMarketData.accumulateFrame(
+            buf, "[{\"T\":\"t\",\"S\":\"AAPL\",\"p\":3.21,\"t\":\"2026-06-20T13:31:01Z\"}]", true);
+    assertThat(frame2)
+        .isEqualTo("[{\"T\":\"t\",\"S\":\"AAPL\",\"p\":3.21,\"t\":\"2026-06-20T13:31:01Z\"}]");
+    assertThat(buf.length()).isZero();
+  }
+
+  /**
+   * End-to-end through the dispatcher: reassembled fragments of one trade message fan out a single
+   * tick, and a following message does not inherit the prior buffer.
+   */
+  @Test
+  void fragmentedThenCompleteFrames_fanOutCorrectTicks() {
+    CopyOnWriteArrayList<Tick> received = new CopyOnWriteArrayList<>();
+    provider.subscribePremium("NVDA  260516C00140000", received::add);
+
+    StringBuilder buf = new StringBuilder();
+    assertThat(
+            AlpacaMarketData.accumulateFrame(
+                buf, "[{\"T\":\"t\",\"S\":\"NVDA  260516C00140000\",", false))
+        .isNull();
+    String frame1 = AlpacaMarketData.accumulateFrame(buf, "\"p\":1.45,\"t\":\"x\"}]", true);
+    provider.dispatchWsMessage(frame1);
+
+    String frame2 =
+        AlpacaMarketData.accumulateFrame(
+            buf, "[{\"T\":\"t\",\"S\":\"NVDA  260516C00140000\",\"p\":1.50,\"t\":\"y\"}]", true);
+    provider.dispatchWsMessage(frame2);
+
+    assertThat(received).hasSize(2);
+    assertThat(received.get(0).premium()).isEqualByComparingTo("1.45");
+    assertThat(received.get(1).premium()).isEqualByComparingTo("1.50");
   }
 
   @Test

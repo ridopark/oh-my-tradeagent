@@ -143,6 +143,13 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
       final BigDecimal minMove = trigger.multiply(deltaPct).abs();
 
       final String[] subIdHolder = new String[1];
+      // Published before any tick consumer can read subIdHolder. The provider registers the consumer
+      // INSIDE subscribeEquity() and the subscription id only exists once it returns, so a tick that
+      // fires before subIdHolder is set would otherwise dispatch with a null id — and a first-tick
+      // WorkflowNotFoundException would then skip teardown (tearDown(null) is a no-op). The dispatch
+      // task awaits this latch so it never reads subIdHolder before the id is published.
+      final java.util.concurrent.CountDownLatch subIdReady =
+          new java.util.concurrent.CountDownLatch(1);
       final ThrottleState throttle = new ThrottleState();
 
       Subscription sub =
@@ -153,11 +160,18 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
                 if (!shouldEmit(throttle, tick, minMove)) {
                   return;
                 }
+                EquityTick equityTick = toEquityTick(tick);
                 dispatcher.submit(
-                    () -> dispatchTick(targetWfId, signalName, subIdHolder[0], toEquityTick(tick)));
+                    () -> {
+                      awaitUninterruptibly(subIdReady);
+                      dispatchTick(targetWfId, signalName, subIdHolder[0], equityTick);
+                    });
               });
       subIdHolder[0] = sub.subscriptionId();
       active.put(sub.subscriptionId(), sub);
+      // Release the dispatch only after both subIdHolder AND active are published, so a first-tick
+      // WorkflowNotFoundException teardown can find the subscription in `active` to close it.
+      subIdReady.countDown();
       throttle.markTickSeen(); // seed the watchdog clock at subscribe time
       armNoTickWatchdog(sub.subscriptionId(), ticker, targetWfId, throttle);
 
@@ -232,6 +246,14 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
   /** Pure liveness predicate: the feed is dead when the last tick is older than the threshold. */
   boolean feedDead(long millisSinceLastTick) {
     return millisSinceLastTick >= noTickAuditSeconds * 1000;
+  }
+
+  private static void awaitUninterruptibly(java.util.concurrent.CountDownLatch latch) {
+    try {
+      latch.await();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
   }
 
   private void dispatchTick(
