@@ -155,7 +155,9 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
             gapTolerance(config));
     machine.seed(input.getCarriedState(), input.getCarriedPrev());
 
-    // Only audit + (re)subscribe on the first run, not on each continue-as-new resumption.
+    // Only audit + (re)subscribe on the first run, not on each continue-as-new resumption. On a
+    // resumed run the existing subscription (keyed to the SAME workflow id) keeps signalling ticks
+    // into the new run, so re-subscribing here would stack a duplicate listener per resume.
     boolean firstRun = input.getEtDate() == null;
     if (firstRun) {
       logAudit(
@@ -167,26 +169,27 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
               "trigger", payload.getTrigger(),
               "entry_mode", entryMode(config).value(),
               "size_multiplier", input.getSizeMultiplier()));
-    }
 
-    // Start the streaming equity subscription (async); it signals equityTick back into this id.
-    // The activity does NOT throw on GATED/FAILED — it returns the disposition — so inspect the
-    // Promise synchronously (it resolves fast) and emit a LOUD audit on any non-SUBSCRIBED status.
-    // GATED is the default ship posture (stock WS URL unset): no ticks ever arrive, so without this
-    // audit the leg would silently await until EOD. We still continue to the await/EOD path (the
-    // fail-safe is the EOD cancel), but the dead-feed condition is now observable.
-    SubscribeEquityResult subResult = subscribeAsync(payload, config).get();
-    if (subResult == null || subResult.getStatus() != SubscribeEquityResult.Status.SUBSCRIBED) {
-      logAudit(
-          payload,
-          KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE,
-          subject(
-              "ticker",
-              payload.getTicker(),
-              "status",
-              subResult == null ? "null" : subResult.getStatus().value(),
-              "detail",
-              subResult == null ? "" : subResult.getError()));
+      // Start the streaming equity subscription (async); it signals equityTick back into this id.
+      // The activity does NOT throw on GATED/FAILED — it returns the disposition — so inspect the
+      // Promise synchronously (it resolves fast) and emit a LOUD audit on any non-SUBSCRIBED
+      // status.
+      // GATED is the default ship posture (stock WS URL unset): no ticks ever arrive, so without
+      // this audit the leg would silently await until EOD. We still continue to the await/EOD path
+      // (the fail-safe is the EOD cancel), but the dead-feed condition is now observable.
+      SubscribeEquityResult subResult = subscribeAsync(payload, config).get();
+      if (subResult == null || subResult.getStatus() != SubscribeEquityResult.Status.SUBSCRIBED) {
+        logAudit(
+            payload,
+            KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE,
+            subject(
+                "ticker",
+                payload.getTicker(),
+                "status",
+                subResult == null ? "null" : subResult.getStatus().value(),
+                "detail",
+                subResult == null ? "" : subResult.getError()));
+      }
     }
 
     // EOD timer: a Workflow.newTimer over the calendar-supplied duration (no wall-clock read).
@@ -312,7 +315,7 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
       return outcome(payload, "capital_unavailable");
     }
 
-    // 4 (pre-quote): resolve expiry + OCC (needed for the option quote in step 5).
+    // 3. Resolve expiry + OCC (needed for the option quote in step 4).
     LocalDate expiry = resolveExpiry(payload, config);
     ContractResolveResult resolved =
         contract.resolve(
@@ -323,7 +326,7 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
                 payload.getStrike(),
                 payload.getRight().value()));
 
-    // 5. Option quote -> premium (fail-closed if no quote).
+    // 4. Option quote -> premium (fail-closed if no quote).
     BigDecimal premium = fetchPremium(payload, resolved.optionSymbol());
     if (premium == null || premium.signum() <= 0) {
       logAudit(
@@ -333,8 +336,8 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
       return outcome(payload, "no_option_quote");
     }
 
-    // 3. Strategy-agnostic risk gates (premium is the BTO max-cost limit).
-    // Ordering: the risk gate MUST follow the option-quote fetch (step 5), not precede it. The
+    // 5. Strategy-agnostic risk gates (premium is the BTO max-cost limit). The risk gate runs here,
+    // after the quote, because checkWatchlistEntry's notional cap needs the fetched premium: the
     // notional-cap sub-gate (RiskActivitiesImpl.checkNotionalCap) sizes the entry notional from the
     // fetched premium, so the gate is premium-dependent and cannot run before the quote exists.
     RiskDecision riskDecision = risk.checkWatchlistEntry(payload, config, null, premium, cash);

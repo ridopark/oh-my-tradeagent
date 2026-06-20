@@ -117,8 +117,9 @@ class WatchlistTriggerContractsTest {
 
   @Test
   void strategyConfig_copytradeV1Fixture_deserializesUnchanged_withDefaults() throws Exception {
-    // The committed copytrade-v1 fixture carries none of the five new fields; it must still
-    // deserialize and surface the new defaults without perturbing any existing value.
+    // The committed copytrade-v1 fixture now carries the five new fields explicitly; it must
+    // deserialize and surface those values without perturbing any existing value. (The
+    // absent-fields default behavior is covered by strategyConfig_absentNewFields_appliesDefaults.)
     String json = Files.readString(FIXTURES.resolve("strategy-config-copytrade-v1.json"));
 
     StrategyConfig deserialized = mapper.readValue(json, StrategyConfig.class);

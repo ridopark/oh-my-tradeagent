@@ -65,6 +65,7 @@ class WatchlistTriggerWorkflowImplTest {
   private static final String OCC = "NVDA  260626C00762000";
 
   private TestWorkflowEnvironment env;
+  private long savedHistoryLengthWatermark;
   private AuditActivities audit;
   private MarketCalendarActivities calendar;
   private RiskActivities risk;
@@ -78,6 +79,7 @@ class WatchlistTriggerWorkflowImplTest {
 
   @BeforeEach
   void setUp() {
+    savedHistoryLengthWatermark = WatchlistTriggerWorkflowImpl.historyLengthWatermark;
     env = TestWorkflowEnvironment.newInstance();
     env.registerSearchAttribute("TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
     env.registerSearchAttribute("ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
@@ -142,6 +144,7 @@ class WatchlistTriggerWorkflowImplTest {
 
   @AfterEach
   void tearDown() {
+    WatchlistTriggerWorkflowImpl.historyLengthWatermark = savedHistoryLengthWatermark;
     env.close();
   }
 
@@ -287,6 +290,33 @@ class WatchlistTriggerWorkflowImplTest {
     String result = WorkflowStub.fromTyped(wf).getResult(String.class);
     assertThat(result).endsWith(":fired");
     verify(exec, times(1)).placeOrder(any());
+  }
+
+  // Blocker: the streaming equity subscription is created exactly once across the whole lifecycle,
+  // even when the leg continues-as-new at the history watermark. A resumed run reuses the existing
+  // subscription (same workflow id) and must NOT re-subscribe, else every resume stacks another
+  // listener delivering duplicate ticks.
+  @Test
+  void subscriptionCreatedOnceAcrossContinueAsNew() throws Exception {
+    // Long EOD so the leg keeps looping; lower the watermark so a few non-firing ticks trip
+    // continue-as-new.
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(200));
+    WatchlistTriggerWorkflowImpl.historyLengthWatermark = 1L;
+    WatchlistTriggerWorkflow wf = newStub("wl-resub");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    // Sub-trigger ticks never cross (prev < T && last >= T is required), so the machine stays ARMED
+    // and the loop reaches the watermark check -> continue-as-new on each pass.
+    for (int i = 0; i < 5; i++) {
+      wf.equityTick(tick(new BigDecimal("759.00").add(new BigDecimal(i % 2)), false));
+    }
+    env.sleep(Duration.ofMinutes(1)); // fire the EOD timer on the resumed run -> terminate
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":eod_cancelled");
+    verify(exec, never()).placeOrder(any());
+    // Exactly one subscription across all continue-as-new cycles (not once-per-run).
+    verify(subscribeEquity, times(1)).subscribeEquity(any());
   }
 
   // (g) proceed:false -> no order.
