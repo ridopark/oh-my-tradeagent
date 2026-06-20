@@ -62,11 +62,28 @@ jobs:
                  * Security
                  * Test coverage
                - Verdict: READY | NEEDS FIXES | BLOCKED
-            5. Write the review to /tmp/review.md (start with the literal first line `${STICKY_MARKER}` so re-runs update in place).
-            6. Post via the project helper:
-               scripts/gh-sticky-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" "${STICKY_MARKER}" /tmp/review.md
+            5. Write ONLY the review markdown to /tmp/review.md. Do NOT add any HTML-comment
+               marker, and do NOT post a comment yourself — a deterministic workflow step
+               posts /tmp/review.md as a sticky comment after you finish.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: "--allowed-tools 'Bash Read Grep'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          STICKY_MARKER: ${{ env.STICKY_MARKER }}
+
+      # Post the review deterministically (the marker is owned by the script, never the
+      # model — an LLM does not reliably echo a literal sticky marker, which previously
+      # caused a brand-new comment every run instead of one updated-in-place sticky).
+      - name: Post sticky review comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -s /tmp/review.md ]; then
+            echo "::warning::no /tmp/review.md produced by the review step; nothing to post"
+            exit 0
+          fi
+          bash scripts/gh-sticky-comment.sh \
+            "${{ github.repository }}" \
+            "${{ github.event.pull_request.number }}" \
+            "$STICKY_MARKER" \
+            /tmp/review.md
