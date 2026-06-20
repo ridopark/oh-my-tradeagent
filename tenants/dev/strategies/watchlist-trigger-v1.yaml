@@ -1,0 +1,45 @@
+schema_version: 1
+tenant_id: dev
+strategy_id: watchlist-trigger-v1
+# DEFAULT is alpaca-paper. Real money (alpaca-live) is a deliberate per-cluster operator override
+# applied out-of-band, never the repo default — a fresh apply / local / CI never trades live.
+broker_target: alpaca-paper
+
+# REQUIRED for account-cash sizing. The trigger path sizes entries from the broker account's live
+# CASH (the same AccountSnapshotActivity cash the notional-cap gate reads); the session parent only
+# dispatches the account snapshot when capital_source=account_cash, so this MUST be set for sizing
+# to work. fail-CLOSED: null/zero cash REJECTS the entry, never falls back to the static $100k.
+capital_source: account_cash
+
+# Sizing (conservative). allocation = account_cash * capital_weight, clamped to min/max_contracts.
+capital_weight: 0.05
+min_contracts: 1
+max_contracts: 5
+# Issue #336 portfolio dollar-exposure cap: at most 10% of the cost-basis capital base deployed.
+notional_cap_pct_of_capital_base: 0.10
+max_positions: 3
+
+# Watchlist-trigger behaviour.
+#   entry_mode BREAKOUT       — enter when the underlying first trades through `trigger` in `direction`.
+#   watchlist_expiry_rule     — pick the nearest weekly expiry on/after et_date.
+#   gap_tolerance_pct 0.005   — a trigger that gaps through its level by >0.5% at open is treated as gapped.
+#   equity_emit_delta_pct     — min 0.05% underlying move before a new equity tick is emitted (tick throttle).
+entry_mode: BREAKOUT
+watchlist_expiry_rule: NEAREST_WEEKLY
+gap_tolerance_pct: 0.005
+equity_emit_delta_pct: 0.0005
+
+# SHIP DISABLED. The operator flips this on (dashboard per-tenant toggle) ONLY AFTER confirming the
+# real-time stock feed is entitled/configured. With enabled:false the strategy loads but admits no
+# entries (WatchlistMirrorActivitiesImpl skips the session start). enabled:false + an unconfigured
+# stock feed are the two independent live-trade gates.
+enabled: false
+
+# Copytrade-only schema-required fields, set to safe inert values. The trigger path does NOT consult
+# author_whitelist or the signal-age gates (those gate the Discord-author copytrade path); they are
+# present only to satisfy the shared strategy-config schema's `required` list (author_whitelist has
+# minItems:1, so it cannot be empty — a single inert non-posting author is used).
+author_whitelist:
+  - watchlist-trigger-unused
+max_signal_age_bto_secs: 30
+max_signal_age_stc_secs: 60

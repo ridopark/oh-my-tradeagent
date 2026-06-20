@@ -26,6 +26,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
@@ -73,6 +74,7 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
 
   private final ConcurrentHashMap<String, Subscription> active = new ConcurrentHashMap<>();
 
+  @Autowired
   public SubscribeEquityActivityImpl(
       MarketDataProvider provider,
       WorkflowClient workflowClient,

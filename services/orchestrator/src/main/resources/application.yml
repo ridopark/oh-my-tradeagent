@@ -48,6 +48,16 @@ orchestrator:
   capital:
     per-strategy: ${ORCHESTRATOR_CAPITAL_PER_STRATEGY:100000}
 
+# Watchlist-trigger ingest discriminator. WatchlistMirrorActivitiesImpl fans a clean watchlist parse
+# out to a WatchlistTriggerSessionWorkflow ONLY for the strategy_id named here. Setting it makes the
+# ingest wiring LIVE; actual live trading is still double-gated by the strategy's `enabled: false`
+# (watchlist-trigger-v1.yaml) AND the (unconfigured by default) real-time stock feed. The operator
+# enables trading by flipping enabled:true on the dashboard after entitling the stock feed — no
+# config change here is needed. Blank disables the fan-out entirely (mirror-only behaviour).
+watchlist:
+  trigger:
+    strategy-id: ${WATCHLIST_TRIGGER_STRATEGY_ID:watchlist-trigger-v1}
+
 # Issue #85: audit-log per-row SHA-256 hash chain. When enabled, AuditActivitiesImpl
 # takes a `pg_advisory_xact_lock(hashtext(tenant_id)::int4, hashtext(strategy_id)::int4)`
 # — two-arg form; 2^64 distinct key tuples; auto-releases at transaction commit —

@@ -6,6 +6,8 @@ import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.BrokerCredentialAuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
+import com.ohmytradeagent.orchestrator.activities.DefaultTriggerFireDecider;
+import com.ohmytradeagent.orchestrator.activities.DefaultWatchlistEntryDecider;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
@@ -15,6 +17,7 @@ import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyConfigUpdateActivities;
 import com.ohmytradeagent.orchestrator.activities.WatchlistMirrorActivities;
+import com.ohmytradeagent.orchestrator.activities.WatchlistTriggerActivities;
 import com.ohmytradeagent.orchestrator.workflows.AccountSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflowImpl;
@@ -25,6 +28,8 @@ import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.StrategyConfigUpdateWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistMirrorWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.WatchlistTriggerSessionWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.WatchlistTriggerWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
 import io.temporal.serviceclient.WorkflowServiceStubs;
@@ -87,7 +92,8 @@ public class TemporalWorkerConfig {
       LivePromotionActivities livePromotion,
       ReconciliationMetricsActivities reconciliationMetrics,
       AccountSnapshotMetricsActivities accountSnapshotMetrics,
-      WatchlistMirrorActivities watchlistMirror) {
+      WatchlistMirrorActivities watchlistMirror,
+      WatchlistTriggerActivities watchlistTrigger) {
     Worker worker = factory.newWorker(taskQueue);
     // Issue #239/#285: AdoptionWorkflow is the operator-triggered orphan-adoption entry point. It
     // runs as a workflow (not an in-process Activity) so its broker-truth
@@ -124,7 +130,14 @@ public class TemporalWorkerConfig {
         // StrategyConfigUpdateActivities.update Activity (in-process StrategyConfigWriter) on this
         // orchestrator-core queue and returns the coarse outcome. Started by the api-gateway
         // /strategy-config forward (dark-gated); the activity impl is registered below.
-        StrategyConfigUpdateWorkflowImpl.class);
+        StrategyConfigUpdateWorkflowImpl.class,
+        // Watchlist-trigger strategy. The session parent is started by
+        // WatchlistMirrorActivitiesImpl
+        // on a clean watchlist parse (for the configured trigger strategy, when enabled); it
+        // fans out one WatchlistTriggerWorkflow child per leg. Both run on this orchestrator-core
+        // queue; their activity impls (parse + arm/fire deciders) are registered below.
+        WatchlistTriggerSessionWorkflowImpl.class,
+        WatchlistTriggerWorkflowImpl.class);
     worker.registerActivitiesImplementations(
         audit,
         auditQuery,
@@ -147,7 +160,14 @@ public class TemporalWorkerConfig {
         livePromotion,
         reconciliationMetrics,
         accountSnapshotMetrics,
-        watchlistMirror);
+        watchlistMirror,
+        // Watchlist-trigger activities: the parse activity (@Component) plus the arm/fire decision
+        // hooks. The deciders are plain POJOs (default pass-through, no injected collaborators), so
+        // they are instantiated inline rather than wired as Spring beans — a strategy-specific
+        // decider would replace these here.
+        watchlistTrigger,
+        new DefaultWatchlistEntryDecider(),
+        new DefaultTriggerFireDecider());
     return worker;
   }
 }
