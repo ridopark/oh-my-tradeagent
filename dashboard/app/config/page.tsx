@@ -21,9 +21,10 @@ const WRITE_ENABLED = process.env.STRATEGY_CONFIG_WRITE_ENABLED === "true";
 // value as enabled (older configs predate the flag).
 const ENABLED_FIELD = "enabled";
 function resolveEnabled(config: Record<string, unknown>): boolean {
-  return config[ENABLED_FIELD] === undefined
-    ? true
-    : Boolean(config[ENABLED_FIELD]);
+  // Absent OR null (JSONB null / older configs that predate the flag) -> enabled, matching the
+  // backend's "absent/null treated as true" semantics; only an explicit false renders off.
+  const value = config[ENABLED_FIELD];
+  return value === undefined || value === null ? true : Boolean(value);
 }
 
 type FieldClass = "IDENTITY" | "DANGEROUS" | "EXPOSURE" | "SAFE";
@@ -195,6 +196,12 @@ export default async function ConfigPage({
     const item = current.items.find((i) => i.strategy_id === strategyId);
     if (!item) {
       redirect("/config?error=404");
+    }
+    // Optimistic-CAS guard: a missing/non-numeric version would send a bad expected_version to the
+    // gateway (a silent mis-CAS). Fail safe instead. In practice the DB column is BIGINT DEFAULT 1,
+    // so this only trips on an unseeded/degraded read.
+    if (!Number.isFinite(item.version)) {
+      redirect("/config?error=409");
     }
 
     // Start from the stored config; overlay only the editable scalar fields. IDENTITY/DANGEROUS are
