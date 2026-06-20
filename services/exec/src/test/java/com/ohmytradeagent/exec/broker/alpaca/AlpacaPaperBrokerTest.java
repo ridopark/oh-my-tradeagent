@@ -18,6 +18,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.failure.ApplicationFailure;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
 import okhttp3.mockwebserver.MockResponse;
@@ -394,6 +395,46 @@ class AlpacaPaperBrokerTest {
     RecordedRequest req = server.takeRequest();
     assertThat(req.getMethod()).isEqualTo("DELETE");
     assertThat(req.getPath()).isEqualTo("/v2/orders/alp-12345");
+  }
+
+  @Test
+  void tradingDays_parsesCalendarPayloadAndSendsStartEndAndAuth() throws Exception {
+    // Alpaca omits non-trading days; each returned entry is a trading day. 2026-07-03 (holiday)
+    // is absent so the resolver later shifts a candidate Friday back to Thursday 2026-07-02.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"date\":\"2026-07-01\",\"open\":\"09:30\",\"close\":\"16:00\"},"
+                    + "{\"date\":\"2026-07-02\",\"open\":\"09:30\",\"close\":\"16:00\"}]"));
+
+    List<LocalDate> days = broker.tradingDays(LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 3));
+
+    assertThat(days).containsExactly(LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 2));
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getRequestUrl().encodedPath()).isEqualTo("/v2/calendar");
+    assertThat(req.getRequestUrl().queryParameter("start")).isEqualTo("2026-07-01");
+    assertThat(req.getRequestUrl().queryParameter("end")).isEqualTo("2026-07-03");
+    assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
+    assertThat(req.getHeader("APCA-API-SECRET-KEY")).isEqualTo("key-secret-for-test");
+  }
+
+  @Test
+  void tradingDays_skipsBlankAndUnparseableDatesDefensively() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"date\":\"2026-07-01\"},{\"date\":\"\"},{\"date\":\"not-a-date\"},"
+                    + "{\"date\":null}]"));
+
+    List<LocalDate> days = broker.tradingDays(LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 1));
+
+    assertThat(days).containsExactly(LocalDate.of(2026, 7, 1));
   }
 
   @Test
