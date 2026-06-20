@@ -4,6 +4,7 @@ import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.PreTradeCheckResult;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.WatchlistTriggerPayload;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
@@ -194,12 +195,43 @@ public class RiskActivitiesImpl implements RiskActivities {
           RejectionReason.SIGNAL_TOO_OLD, "age_secs=" + ageSecs + " max=" + maxAgeSecs);
     }
 
-    RiskDecision killSwitchDecision = checkKillSwitch(payload, now);
+    return runStrategyAgnosticGates(
+        config,
+        payload.getTenantId(),
+        payload.getStrategyId(),
+        payload.getTicker(),
+        entryNotional,
+        accountCash,
+        preTradeResult,
+        now);
+  }
+
+  /**
+   * Strategy-agnostic risk gates 4-6: kill switch, max_positions, and the Issue #6 portfolio-level
+   * stream. Extracted from {@link #checkEntryInternal} so strategies that are NOT copytrade (e.g.
+   * the watchlist-trigger strategy via {@link #checkWatchlistEntry}) can run the same shared gates
+   * WITHOUT the copytrade-only author_whitelist / future-skew / max_signal_age pre-gates (1-3).
+   *
+   * <p>The agnostic gates read only {@code tenantId}, {@code strategyId}, and the underlying {@code
+   * ticker} from the (former) payload, plus the already-resolved {@code entryNotional}, {@code
+   * accountCash}, and {@code preTradeResult} — none of which is copytrade-specific. The verdict is
+   * bit-identical to the previous inline stream (verified by the unchanged copytrade risk suite).
+   */
+  private RiskDecision runStrategyAgnosticGates(
+      StrategyConfig config,
+      String tenantId,
+      String strategyId,
+      String ticker,
+      BigDecimal entryNotional,
+      BigDecimal accountCash,
+      PreTradeCheckResult preTradeResult,
+      OffsetDateTime now) {
+    RiskDecision killSwitchDecision = checkKillSwitch(tenantId, strategyId, now);
     if (killSwitchDecision != null) {
       return killSwitchDecision;
     }
 
-    long openPositions = positionCounter.countOpen(payload.getTenantId(), payload.getStrategyId());
+    long openPositions = positionCounter.countOpen(tenantId, strategyId);
     if (openPositions >= config.getMaxPositions()) {
       return RiskDecision.rejected(RejectionReason.MAX_POSITIONS_EXCEEDED, "open=" + openPositions);
     }
@@ -209,7 +241,8 @@ public class RiskActivitiesImpl implements RiskActivities {
     // the order below mirrors the recommendation list in issue #6. Positions are fetched once and
     // shared across the gates that need them (production impl is a Temporal Visibility query).
     PortfolioContext ctx =
-        new PortfolioContext(payload, config, preTradeResult, entryNotional, accountCash);
+        new PortfolioContext(
+            tenantId, strategyId, ticker, config, preTradeResult, entryNotional, accountCash);
     return Stream.<Supplier<RiskDecision>>of(
             () -> checkNotionalCap(ctx),
             () -> checkSameUnderlyingCount(ctx),
@@ -223,6 +256,32 @@ public class RiskActivitiesImpl implements RiskActivities {
         .orElseGet(RiskDecision::approved);
   }
 
+  @Override
+  public RiskDecision checkWatchlistEntry(
+      WatchlistTriggerPayload payload,
+      StrategyConfig config,
+      PreTradeCheckResult preTradeResult,
+      BigDecimal limit,
+      BigDecimal accountCash) {
+    // Watchlist-trigger entry: runs ONLY the strategy-agnostic gates (kill switch, max_positions,
+    // Issue #6 portfolio stream). The copytrade-only author_whitelist / future-skew /
+    // max_signal_age
+    // pre-gates are NOT applied — a watchlist trigger has no author and no posted-at timestamp.
+    // limit is the BTO max-cost (option premium); production always supplies it. The ZERO fallback
+    // keeps the unit-test surface ergonomic and only loosens the notional cap — the cap still fails
+    // closed on a null/zero accountCash.
+    BigDecimal price = limit != null ? limit : BigDecimal.ZERO;
+    return runStrategyAgnosticGates(
+        config,
+        payload.getTenantId(),
+        payload.getStrategyId(),
+        payload.getTicker(),
+        entryNotional(price, 1L),
+        accountCash,
+        preTradeResult,
+        OffsetDateTime.now(clock));
+  }
+
   /**
    * Per-call cache for the portfolio gates. Holds the open-position list (fetched lazily so a
    * deployment that disables all position-aware gates skips the Visibility query entirely) plus the
@@ -231,7 +290,9 @@ public class RiskActivitiesImpl implements RiskActivities {
    * slip-adjusted limit) so the gate bodies stay source-agnostic.
    */
   private final class PortfolioContext {
-    final CopytradeSignalPayload payload;
+    final String tenantId;
+    final String strategyId;
+    final String ticker;
     final StrategyConfig config;
     final PreTradeCheckResult preTradeResult;
     final BigDecimal entryNotional;
@@ -244,12 +305,16 @@ public class RiskActivitiesImpl implements RiskActivities {
     private List<PortfolioSnapshot.OpenPosition> openPositions;
 
     PortfolioContext(
-        CopytradeSignalPayload payload,
+        String tenantId,
+        String strategyId,
+        String ticker,
         StrategyConfig config,
         PreTradeCheckResult preTradeResult,
         BigDecimal entryNotional,
         BigDecimal accountCash) {
-      this.payload = payload;
+      this.tenantId = tenantId;
+      this.strategyId = strategyId;
+      this.ticker = ticker;
       this.config = config;
       this.preTradeResult = preTradeResult;
       this.entryNotional = entryNotional;
@@ -269,7 +334,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     List<PortfolioSnapshot.OpenPosition> openPositions() {
       if (openPositions == null) {
         List<PortfolioSnapshot.OpenPosition> positions =
-            portfolioSnapshot.openPositions(payload.getTenantId(), payload.getStrategyId());
+            portfolioSnapshot.openPositions(tenantId, strategyId);
         openPositions = positions == null ? List.of() : positions;
       }
       return openPositions;
@@ -414,7 +479,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     if (cap == null) {
       return null;
     }
-    String ticker = ctx.payload.getTicker();
+    String ticker = ctx.ticker;
     long matching =
         ctx.openPositions().stream()
             .filter(p -> Objects.equals(p.underlyingTicker(), ticker))
@@ -437,7 +502,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     if (cap == null) {
       return null;
     }
-    String sector = sectorResolver.resolve(ctx.payload.getTicker(), ctx.config);
+    String sector = sectorResolver.resolve(ctx.ticker, ctx.config);
     if (SectorResolver.UNKNOWN_SECTOR.equals(sector)) {
       return null;
     }
@@ -460,8 +525,7 @@ public class RiskActivitiesImpl implements RiskActivities {
       return null;
     }
     LocalDate today = OffsetDateTime.now(clock).toLocalDate();
-    long count =
-        dailyTradeCounter.count(ctx.payload.getTenantId(), ctx.payload.getStrategyId(), today);
+    long count = dailyTradeCounter.count(ctx.tenantId, ctx.strategyId, today);
     if (count >= cap) {
       return RiskDecision.rejected(
           RejectionReason.DAILY_TRADE_COUNT_EXCEEDED, "count=" + count + " max=" + cap);
@@ -474,9 +538,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     if (threshold == null) {
       return null;
     }
-    BigDecimal rate =
-        drawdownVelocitySampler.sampleLossRatePerMinute(
-            ctx.payload.getTenantId(), ctx.payload.getStrategyId());
+    BigDecimal rate = drawdownVelocitySampler.sampleLossRatePerMinute(ctx.tenantId, ctx.strategyId);
     if (rate == null) {
       // Fail closed on a missing sample so a broken sampler can't quietly skip the gate.
       return RiskDecision.rejected(RejectionReason.DRAWDOWN_VELOCITY_EXCEEDED, "rate_unavailable");
@@ -599,14 +661,14 @@ public class RiskActivitiesImpl implements RiskActivities {
    * covers WorkflowNotFoundException, WorkflowQueryException, WorkflowQueryRejectedException,
    * WorkflowServiceException, and any TimeoutException wrapped in a RuntimeException.
    */
-  private RiskDecision checkKillSwitch(CopytradeSignalPayload payload, OffsetDateTime now) {
+  private RiskDecision checkKillSwitch(String tenantId, String strategyId, OffsetDateTime now) {
     if (workflowClient == null) {
       // Defensive: production env always wires WorkflowClient; fail closed if it is somehow null.
       return RiskDecision.rejected(RejectionReason.KILL_SWITCH_UNAVAILABLE, "no_client");
     }
     KillSwitchState state;
     try {
-      String wfId = WorkflowIds.killswitch(payload.getTenantId(), payload.getStrategyId());
+      String wfId = WorkflowIds.killswitch(tenantId, strategyId);
       KillSwitchWorkflow stub = workflowClient.newWorkflowStub(KillSwitchWorkflow.class, wfId);
       state = stub.killswitchState();
     } catch (Exception e) {
