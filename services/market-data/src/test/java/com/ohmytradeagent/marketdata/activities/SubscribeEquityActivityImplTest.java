@@ -314,7 +314,8 @@ class SubscribeEquityActivityImplTest {
             3600L);
 
     // Target a tenant-owned but non-existent workflow id => signal throws WorkflowNotFoundException
-    // => dispatchTick must tear down (close) the subscription, which only happens with a non-null id.
+    // => dispatchTick must tear down (close) the subscription, which only happens with a non-null
+    // id.
     SubscribeEquityResult result =
         activity.subscribeEquity(
             req("NVDA", "t-dev/s-x/wl/2026-06-23/NVDA/C", "equityTick", "140.00", "0.0005"));

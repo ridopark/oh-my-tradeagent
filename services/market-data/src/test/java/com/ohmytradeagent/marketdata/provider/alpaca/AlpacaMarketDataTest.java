@@ -342,7 +342,8 @@ class AlpacaMarketDataTest {
     assertThat(AlpacaMarketData.accumulateFrame(buf, "[{\"T\":\"t\",", false)).isNull();
     assertThat(AlpacaMarketData.accumulateFrame(buf, "\"S\":\"NVDA\",", false)).isNull();
     String frame1 =
-        AlpacaMarketData.accumulateFrame(buf, "\"p\":140.12,\"t\":\"2026-06-20T13:31:00Z\"}]", true);
+        AlpacaMarketData.accumulateFrame(
+            buf, "\"p\":140.12,\"t\":\"2026-06-20T13:31:00Z\"}]", true);
     assertThat(frame1)
         .isEqualTo("[{\"T\":\"t\",\"S\":\"NVDA\",\"p\":140.12,\"t\":\"2026-06-20T13:31:00Z\"}]");
 

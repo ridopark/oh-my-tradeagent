@@ -143,10 +143,13 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
       final BigDecimal minMove = trigger.multiply(deltaPct).abs();
 
       final String[] subIdHolder = new String[1];
-      // Published before any tick consumer can read subIdHolder. The provider registers the consumer
-      // INSIDE subscribeEquity() and the subscription id only exists once it returns, so a tick that
+      // Published before any tick consumer can read subIdHolder. The provider registers the
+      // consumer
+      // INSIDE subscribeEquity() and the subscription id only exists once it returns, so a tick
+      // that
       // fires before subIdHolder is set would otherwise dispatch with a null id — and a first-tick
-      // WorkflowNotFoundException would then skip teardown (tearDown(null) is a no-op). The dispatch
+      // WorkflowNotFoundException would then skip teardown (tearDown(null) is a no-op). The
+      // dispatch
       // task awaits this latch so it never reads subIdHolder before the id is published.
       final java.util.concurrent.CountDownLatch subIdReady =
           new java.util.concurrent.CountDownLatch(1);

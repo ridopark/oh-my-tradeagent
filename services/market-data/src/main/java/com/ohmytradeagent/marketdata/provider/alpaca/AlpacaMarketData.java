@@ -405,12 +405,12 @@ public class AlpacaMarketData implements MarketDataProvider {
   }
 
   /**
-   * Accumulate one message's fragments into {@code buf}, returning the complete frame (and resetting
-   * {@code buf}) only on the final fragment; otherwise null. The buffer is snapshotted and cleared
-   * BEFORE the caller dispatches, so a throwing dispatch can never leave a partial frame that
-   * corrupts the next message's reassembly. {@code java.net.http.WebSocket} delivers {@code onText}
-   * sequentially per connection, so this needs no locking — but it must be message-local-safe across
-   * the fragment boundary, which this is.
+   * Accumulate one message's fragments into {@code buf}, returning the complete frame (and
+   * resetting {@code buf}) only on the final fragment; otherwise null. The buffer is snapshotted
+   * and cleared BEFORE the caller dispatches, so a throwing dispatch can never leave a partial
+   * frame that corrupts the next message's reassembly. {@code java.net.http.WebSocket} delivers
+   * {@code onText} sequentially per connection, so this needs no locking — but it must be
+   * message-local-safe across the fragment boundary, which this is.
    */
   static String accumulateFrame(StringBuilder buf, CharSequence data, boolean last) {
     buf.append(data);
