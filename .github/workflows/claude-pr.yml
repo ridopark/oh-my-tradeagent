@@ -37,8 +37,6 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      STICKY_MARKER: "<!-- claude-code-review -->"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,11 +60,14 @@ jobs:
                  * Security
                  * Test coverage
                - Verdict: READY | NEEDS FIXES | BLOCKED
-            5. Write the review to /tmp/review.md (start with the literal first line `${STICKY_MARKER}` so re-runs update in place).
-            6. Post via the project helper:
-               scripts/gh-sticky-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" "${STICKY_MARKER}" /tmp/review.md
+
+            Output the review as your FINAL message. Do NOT write files and do NOT post a
+            comment yourself — the action posts your output as a single sticky comment that
+            updates in place across re-runs (use_sticky_comment below). Relying on the model
+            to echo a literal marker into a self-posted comment was unreliable (it invented a
+            new marker each run, spamming a fresh comment instead of updating one).
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: "--allowed-tools 'Bash Read Grep'"
+          use_sticky_comment: "true"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          STICKY_MARKER: ${{ env.STICKY_MARKER }}
