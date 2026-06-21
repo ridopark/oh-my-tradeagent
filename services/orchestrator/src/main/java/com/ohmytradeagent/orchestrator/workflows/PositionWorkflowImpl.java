@@ -1512,9 +1512,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   /**
    * Phase 3 TARGET handler. Partial-closes {@code tp_partial_fraction} of the remaining qty via the
    * existing partial path ({@link #processOne(PartialExitRequest)}), moves the remainder stop to
-   * BREAKEVEN (entry basis), and arms the chandelier on the runner ({@link
-   * #processArm(ArmChandelierPayload)}) with peak=current bid and giveback=trail_giveback_pct so
-   * the runner trails. Single-shot via {@code exitTargetFired}.
+   * BREAKEVEN (entry basis), and arms the chandelier on the runner (trail state set directly off
+   * the exit feed armWatchlistExit already subscribed — no re-subscribe) with peak=current bid and
+   * giveback=trail_giveback_pct so the runner trails. Single-shot via {@code exitTargetFired}.
    */
   private void fireExitTarget(BigDecimal targetBid) {
     exitTargetFired = true;
@@ -1534,7 +1534,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             "contract_symbol", input.getContractSymbol(),
             "target_bid", targetBid,
             "remaining_qty_before", remainingBefore,
-            "qty_to_close", qtyToClose,
+            "qty_to_close_intended", qtyToClose,
             "fraction", fraction,
             "breakeven", breakeven));
 
@@ -1564,21 +1564,26 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       exitSubThresholdStreak = 0;
     }
 
-    // Arm the chandelier on the runner: peak = target bid, giveback = trail_giveback_pct. Reuses
-    // the
-    // existing processArm machinery (validation + subscribe + ChandelierArmed audit). The trail
+    // Arm the chandelier on the runner: peak = target bid, giveback = trail_giveback_pct. The
+    // runner
+    // already has the exit premium feed from armWatchlistExit()/subscribeExitPremium(), and
+    // processExitTick drives the chandelier via processTick(bidAsPremiumTick(...)), so set the
+    // trail
+    // state directly instead of calling processArm — re-subscribing would open a SECOND live
+    // premium subscription (SubscribePremiumActivity does not dedup), double-delivering every NBBO
+    // print and letting one market print satisfy the post-target breakeven-stop debounce. The trail
     // comparison in processTick uses tick.getPremium(); the bid-based breakeven stop above guards
     // the downside.
     if (exitTrailGiveback != null && exitTrailGiveback.signum() > 0) {
-      ArmChandelierPayload arm = new ArmChandelierPayload();
-      arm.setSchemaVersion(1L);
-      arm.setTenantId(input.getTenantId());
-      arm.setStrategyId(input.getStrategyId());
-      arm.setPositionWorkflowId(Workflow.getInfo().getWorkflowId());
-      arm.setSourceSignalId("watchlist_target");
-      arm.setPeakPremium(targetBid);
-      arm.setGivebackPct(exitTrailGiveback);
-      processArm(arm);
+      trailingArmed = true;
+      peakPremium = targetBid;
+      givebackPct = exitTrailGiveback;
+      auditLog(
+          KIND_CHANDELIER_ARMED,
+          subject(
+              "source_signal_id", "watchlist_target",
+              "peak_premium", targetBid,
+              "giveback_pct", exitTrailGiveback));
     }
   }
 

@@ -188,7 +188,7 @@ class PositionWorkflowImplWatchlistExitTest {
 
     // Target partial fired exactly once.
     AuditEvent targetFired = captureKind("WatchlistExitTargetFired");
-    assertThat(asLong(targetFired.getSubject().get("qty_to_close"))).isEqualTo(3L);
+    assertThat(asLong(targetFired.getSubject().get("qty_to_close_intended"))).isEqualTo(3L);
     assertThat(((Number) targetFired.getSubject().get("breakeven")).doubleValue()).isEqualTo(2.00);
 
     // Chandelier armed on the runner with peak = the target bid.
@@ -202,6 +202,43 @@ class PositionWorkflowImplWatchlistExitTest {
 
     // Two SELLs: the target partial (bounded LIMIT) + the chandelier trail (bounded LIMIT).
     verify(exec, times(2)).placeOrder(any());
+  }
+
+  /**
+   * Regression: arming the runner trail on a target fire must NOT open a second premium
+   * subscription. armWatchlistExit already subscribed the exit feed and processExitTick drives the
+   * chandelier off that same feed; a second subscribe double-delivers every NBBO print and lets one
+   * market print satisfy the post-target breakeven-stop debounce (EXIT_STOP_DEBOUNCE_TICKS). Assert
+   * subscribePremium is invoked EXACTLY once across the whole position (only the initial arm).
+   */
+  @Test
+  void targetFire_doesNotReSubscribePremium_subscribeOpenedExactlyOnce() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-wl-no-resub");
+    PositionWorkflowInput in = exitInput(5);
+    in.setTrailGivebackPct(new BigDecimal("0.10"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L, new BigDecimal("2.00"));
+
+    // Bid hits the +2R target (3.00) -> partial sold and the runner trail is armed.
+    stub.chandelierTick(bidTick(new BigDecimal("3.00")));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-target-partial", 3L, new BigDecimal("3.00")));
+
+    // The trail fired the target arm; the subscription must have been opened only by the initial
+    // armWatchlistExit, never again by the target fire.
+    waitForKind("ChandelierArmed");
+    verify(marketData, times(1)).subscribePremium(any());
+
+    // Drain the runner via the chandelier so the workflow terminates cleanly.
+    stub.chandelierTick(bidTick(new BigDecimal("2.70")));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-trail", 2L, new BigDecimal("2.70")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // Still exactly one subscription after the full lifecycle.
+    verify(marketData, times(1)).subscribePremium(any());
   }
 
   // ---------- (c) target fires, runner trails back to breakeven -> scratch ----------
@@ -606,6 +643,21 @@ class PositionWorkflowImplWatchlistExitTest {
       }
     }
     verify(exec, times(n)).placeOrder(any());
+  }
+
+  private void waitForKind(String kind) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 50_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        if (!captureAll(kind).isEmpty()) {
+          return;
+        }
+      } catch (AssertionError ignored) {
+        // no audits logged yet
+      }
+      Thread.sleep(50);
+    }
+    throw new AssertionError("no audit event with kind=" + kind);
   }
 
   private AuditEvent captureKind(String kind) {
