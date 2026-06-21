@@ -142,6 +142,20 @@ class AlpacaMarketDataTest {
   }
 
   @Test
+  void dispatchWsMessage_quoteRecord_carriesBidAsk() {
+    CopyOnWriteArrayList<Tick> received = new CopyOnWriteArrayList<>();
+    provider.subscribePremium("NVDA  260516C00140000", received::add);
+
+    provider.dispatchWsMessage(
+        "[{\"T\":\"q\",\"S\":\"NVDA  260516C00140000\",\"bp\":1.90,\"ap\":2.10,\"t\":\"2026-05-15T17:26:00Z\"}]");
+
+    assertThat(received).hasSize(1);
+    assertThat(received.get(0).premium()).isEqualByComparingTo("2.00");
+    assertThat(received.get(0).bid()).isEqualByComparingTo("1.90");
+    assertThat(received.get(0).ask()).isEqualByComparingTo("2.10");
+  }
+
+  @Test
   void dispatchWsMessage_unknownSymbol_dropsTick() {
     CopyOnWriteArrayList<Tick> received = new CopyOnWriteArrayList<>();
     provider.subscribePremium("NVDA  260516C00140000", received::add);
