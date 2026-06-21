@@ -126,6 +126,39 @@
       "exclusiveMinimum": 0,
       "maximum": 5,
       "description": "Plan-2B R-AB-2: carried over from StrategyConfig.exit_reprice_tick. Per-step price concession the bounded stepped exit reprice walks toward the market. Optional/null treated as the in-code default (~0.05). Consumption gated behind Workflow.getVersion."
+    },
+    "tp_ratio": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Carried from StrategyConfig.tp_ratio. Reward:risk ratio for the watchlist-trigger premium take-profit. The first take-profit triggers when the live bid reaches entry_premium * (1 + tp_ratio * sl_pct) (= +tp_ratio*R, where R = sl_pct * entry_premium). Opt-in: null/absent disables the premium TP/SL/trail exit entirely, preserving the copytrade-only (STC/chandelier-on-partial) exit behavior for every position that does not set it. Consumption getVersion-gated so in-flight positions spawned before this field existed replay deterministically."
+    },
+    "sl_pct": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "Carried from StrategyConfig.sl_pct. Hard stop as a fraction of entry premium. R = sl_pct * entry_premium; the -1R stop triggers when the live bid falls to entry_premium * (1 - sl_pct) and routes a MARKETABLE flatten (reason=stop_loss). Opt-in: null/absent disables the premium TP/SL/trail exit (see tp_ratio). getVersion-gated."
+    },
+    "tp_partial_fraction": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "Carried from StrategyConfig.tp_partial_fraction. Fraction of the remaining position closed when the +tp_ratio*R take-profit first triggers; the unclosed remainder moves its stop to breakeven (entry_premium) and arms the chandelier trail (trail_giveback_pct) on the runner. Optional/null treated as 0.5 in PositionWorkflowImpl when tp_ratio is set."
+    },
+    "trail_giveback_pct": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 0.5,
+      "description": "Carried from StrategyConfig.trail_giveback_pct. Chandelier-trail giveback fraction armed on the take-profit remainder (see tp_partial_fraction). Optional/null falls back to the in-code default. getVersion-gated."
+    },
+    "no_progress_time_stop_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Carried from StrategyConfig.no_progress_time_stop_secs. If neither the take-profit nor the hard stop has triggered within this many seconds of the first fill, PositionWorkflow flattens the position (reason=time_stop) so a stalled breakout does not bleed theta into the -1R stop. Opt-in: null/absent disables the time stop. getVersion-gated."
+    },
+    "force_close_eod_et": {
+      "type": "string",
+      "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+      "description": "Carried from StrategyConfig.force_close_eod_et. Wall-clock time (HH:MM US/Eastern) for the blanket EOD force-flatten timer, replacing the hardcoded 15:55 ET. Optional/null/absent falls back to the legacy 15:55 ET to preserve pre-change behavior for replays of positions spawned before this field existed. The value flows through MarketCalendarActivities.durationUntilEodEt(LocalTime)'s replay-ignored activity input; consumption is getVersion-gated where the timer-arming command sequence changes."
     }
   }
 }
