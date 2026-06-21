@@ -68,6 +68,13 @@ jobs:
             new marker each run, spamming a fresh comment instead of updating one).
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: "--allowed-tools 'Bash Read Grep'"
+          # This job triggers on `pull_request` with a `prompt:`, which claude-code-action
+          # auto-detects as "agent" mode. In agent mode use_sticky_comment alone does NOT post a
+          # PR comment (it only updates an existing tracking comment, which agent mode never creates)
+          # — so the review verdict was landing in the Actions log only, never on the PR.
+          # track_progress makes the action create + update a PR comment in agent mode;
+          # use_sticky_comment then dedupes that comment across re-pushes.
+          track_progress: "true"
           use_sticky_comment: "true"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
