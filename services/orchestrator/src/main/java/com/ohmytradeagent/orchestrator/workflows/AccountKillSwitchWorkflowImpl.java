@@ -188,6 +188,11 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     if (tripped) {
       return;
     }
+    // Post-reset cooldown: after a reset the cap stays inert until coolingDownUntil so a still-down
+    // book does not immediately re-trip the just-reset switch within the same window.
+    if (coolingDownUntil != null && workflowNow().isBefore(coolingDownUntil)) {
+      return;
+    }
     if (!calendar.isMarketOpen()) {
       return;
     }
@@ -353,6 +358,11 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     auditLog(KIND_KILL_SWITCH_TRIPPED, subj);
 
     String selfWfId = Workflow.getInfo().getWorkflowId();
+    // Best-effort async cascade: fired detached so the trip update returns promptly. Known
+    // follow-up (tracked, not a hard block): if this workflow continues-as-new before the cascade
+    // promise resolves, the detached cascade could be orphaned mid-fan-out. Accepted because the
+    // per-position EOD/expiry/time backstops still flatten each leg independently; the cascade only
+    // accelerates the flatten, it is not the sole safety net.
     Async.function(
         cascade::cascadeAccountRiskBreach, input.getTenantId(), selfWfId, tripReason, tripActor);
   }

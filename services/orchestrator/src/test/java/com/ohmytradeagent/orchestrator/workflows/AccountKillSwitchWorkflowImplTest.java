@@ -278,6 +278,51 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(s.getCoolingDownUntil()).isNotNull();
   }
 
+  // ---------- post-reset cooldown: a still-down book must not immediately re-trip ----------
+
+  // Auto-trip on a down book, RESET (sets coolingDownUntil = now + cooldownSecs), then heartbeat
+  // again WHILE the book is still down but BEFORE the cooldown elapses: the cap must stay inert
+  // (tripped=false). After the cooldown window passes the cap re-engages and trips again.
+  @Test
+  void heartbeat_afterReset_doesNotReTripDuringCooldown_thenReTripsAfter() {
+    // A single down position large enough to cross the 5000 cap: (2.00-12.00)*10*100 = -10000.
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation(
+                        "NVDA  250516C00140000", new BigDecimal("12.00"), 10L)),
+                1,
+                0));
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.00")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-cooldown");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // First heartbeat auto-trips on the down book.
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    // Reset with distinct approvers -> coolingDownUntil = now + DEFAULT_RESET_COOLDOWN_SECS (60s).
+    stub.reset(resetRequest("alice", "bob"));
+    KillSwitchState afterReset = stub.killswitchState();
+    assertThat(afterReset.getTripped()).isFalse();
+    assertThat(afterReset.getCoolingDownUntil()).isNotNull();
+
+    // Advance ~30s (one more heartbeat) but stay INSIDE the 60s cooldown: the still-down book must
+    // NOT re-trip. Without the cooldown guard this heartbeat would immediately re-trip.
+    env.sleep(Duration.ofSeconds(30));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+
+    // Past the cooldown window: the cap re-engages and trips again on the still-down book.
+    env.sleep(Duration.ofSeconds(90));
+    KillSwitchState afterCooldown = stub.killswitchState();
+    assertThat(afterCooldown.getTripped()).isTrue();
+    assertThat(afterCooldown.getReason()).isEqualTo("auto:account_daily_loss");
+  }
+
   // ---------- helpers ----------
 
   private AccountKillSwitchWorkflow newStub(String workflowId) {

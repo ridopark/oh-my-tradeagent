@@ -241,6 +241,50 @@ class PositionWorkflowImplWatchlistExitTest {
     verify(marketData, times(1)).subscribePremium(any());
   }
 
+  /**
+   * (b') Regression: tp_ratio SET but tp_partial_fraction NULL must book HALF at the target (the
+   * 0.5 default), NOT the whole position. With an even starting qty of 4, the +2R target closes 2
+   * (half) and leaves a 2-contract runner whose chandelier trail is armed. With the old {@code
+   * BigDecimal.ONE} fallback this would have closed all 4 and never armed the runner.
+   */
+  @Test
+  void bidCrossesTarget_nullPartialFraction_booksHalfAndArmsRunnerTrail() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-wl-null-fraction");
+    PositionWorkflowInput in = exitInputNullFraction(4);
+    in.setTrailGivebackPct(new BigDecimal("0.10"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 4L, new BigDecimal("2.00"));
+
+    // Bid hits the +2R target (3.00). Null fraction -> 0.5 default -> ceil(4*0.5)=2 sold.
+    stub.chandelierTick(bidTick(new BigDecimal("3.00")));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-target-half", 2L, new BigDecimal("3.00")));
+
+    // The runner's chandelier trail was armed (it did NOT fully close at the target).
+    waitForKind("ChandelierArmed");
+
+    // Drain the 2-contract runner via the trail so the workflow terminates cleanly.
+    stub.chandelierTick(bidTick(new BigDecimal("2.70")));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-runner", 2L, new BigDecimal("2.70")));
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-wl-null-fraction");
+
+    // The target booked HALF, not the whole lot: exactly 2 intended to close, fraction 0.5.
+    AuditEvent targetFired = captureKind("WatchlistExitTargetFired");
+    assertThat(asLong(targetFired.getSubject().get("qty_to_close_intended"))).isEqualTo(2L);
+    assertThat(asLong(targetFired.getSubject().get("remaining_qty_before"))).isEqualTo(4L);
+    assertThat(((Number) targetFired.getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
+
+    AuditEvent armed = captureKind("ChandelierArmed");
+    assertThat(((Number) armed.getSubject().get("peak_premium")).doubleValue()).isEqualTo(3.00);
+
+    AuditEvent closed = captureKind("PositionClosed");
+    assertThat(asLong(closed.getSubject().get("remaining_qty"))).isEqualTo(0L);
+  }
+
   // ---------- (c) target fires, runner trails back to breakeven -> scratch ----------
 
   /**
@@ -548,6 +592,17 @@ class PositionWorkflowImplWatchlistExitTest {
     in.setTpRatio(new BigDecimal("2"));
     in.setSlPct(new BigDecimal("0.25"));
     in.setTpPartialFraction(new BigDecimal("0.5"));
+    in.setTrailGivebackPct(new BigDecimal("0.10"));
+    return in;
+  }
+
+  /**
+   * exitInput with tp_ratio armed but tp_partial_fraction left NULL (exercises the 0.5 default).
+   */
+  private PositionWorkflowInput exitInputNullFraction(long qty) {
+    PositionWorkflowInput in = input(qty);
+    in.setTpRatio(new BigDecimal("2"));
+    in.setSlPct(new BigDecimal("0.25"));
     in.setTrailGivebackPct(new BigDecimal("0.10"));
     return in;
   }

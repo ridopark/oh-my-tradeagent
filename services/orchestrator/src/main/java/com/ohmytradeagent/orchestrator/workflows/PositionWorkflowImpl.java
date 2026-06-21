@@ -1520,10 +1520,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     exitTargetFired = true;
     long remainingBefore = remainingQty;
     BigDecimal breakeven = input.getEntryPremium();
+    // Default to half (book the 2:1 tier, trail the runner) when tp_partial_fraction is unset —
+    // matches the StrategyConfig.tp_partial_fraction schema default. ONE would close the entire
+    // position at the target and never arm the runner/trail.
     BigDecimal fraction =
         (exitTpPartialFraction != null && exitTpPartialFraction.signum() > 0)
             ? exitTpPartialFraction
-            : BigDecimal.ONE;
+            : new BigDecimal("0.5");
 
     long qtyToClose =
         Math.min(remainingQty, (long) Math.ceil(remainingQty * fraction.doubleValue()));
