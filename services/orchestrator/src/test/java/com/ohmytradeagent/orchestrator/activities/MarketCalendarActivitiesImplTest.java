@@ -42,6 +42,30 @@ class MarketCalendarActivitiesImplTest {
     assertThat(d).isEqualTo(Duration.ZERO);
   }
 
+  // ---------- Phase 4: configurable blanket-EOD force-flatten time ----------
+
+  @Test
+  void eodConfigured_beforeConfiguredTime_returnsPositiveDuration() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 9, 30));
+
+    // Configured 15:30 ET instead of the legacy 15:55 -> 6h from 9:30 to 15:30.
+    Duration d = svc.durationUntilEodEt(LocalTime.of(15, 30));
+
+    assertThat(d).isEqualTo(Duration.ofHours(6));
+  }
+
+  @Test
+  void eodConfigured_pastConfiguredTime_returnsZero() {
+    // 15:40 ET is already past a configured 15:30 EOD even though it precedes the legacy 15:55.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 15, 40));
+
+    Duration d = svc.durationUntilEodEt(LocalTime.of(15, 30));
+
+    assertThat(d).isEqualTo(Duration.ZERO);
+  }
+
   @Test
   void expiry_sameDayBeforeFifteenThirty_returnsPositive() {
     MarketCalendarActivitiesImpl svc =
