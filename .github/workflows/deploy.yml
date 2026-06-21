@@ -257,7 +257,15 @@ jobs:
           #     (absent in repo → apply strips them → staging_paper's encrypted-DB creds break)
           #   - dashboard + api-gateway: STRATEGY_CONFIG_WRITE_ENABLED=true (repo keeps the
           #     config-write path DARK by default → absent in repo → apply re-darks the config page)
-          RESTART_ONLY="orchestrator exec-alpaca-paper dashboard api-gateway"
+          #   - orchestrator (also): STRATEGY_CONFIG_SOURCE=db (configs read from the strategy_config
+          #     table, not the YAML ConfigMap, so the dashboard enable-toggle is the live control)
+          #   - market-data: ALPACA_STOCK_FEED=sip (repo keeps the equity feed UNSET/fail-closed by
+          #     default → absent in repo → apply re-gates it). Its alpaca-credentials-data secretRef
+          #     IS in repo; only the feed selector is the live override.
+          #   - signal-source-discord: SIGNAL_EMIT_ADDITIONAL_TARGETS=staging_paper:copytrade-v1,
+          #     staging_paper:watchlist-trigger-v1 (repo has no shadow targets → apply drops them →
+          #     staging_paper stops receiving the daily watchlist fan-out)
+          RESTART_ONLY="orchestrator exec-alpaca-paper dashboard api-gateway market-data signal-source-discord"
           for s in $RESTART_ONLY; do
             if [ "$s" = "${{ matrix.service }}" ]; then
               echo "::notice::${{ matrix.service }} has live-only overrides — skipping apply (rollout restart below still re-pulls :latest)."
