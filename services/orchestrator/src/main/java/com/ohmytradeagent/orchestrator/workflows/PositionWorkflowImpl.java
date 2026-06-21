@@ -180,9 +180,42 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // AuditEventKinds.ALL_KINDS only (NOT a lifecycle/fill kind).
   private static final String KIND_FLATTEN_QUOTE_UNAVAILABLE = "FlattenQuoteUnavailable";
 
+  // Phase 3 watchlist-trigger EXIT audit kinds. The bid-based STOP and TIME-STOP reuse the EOD
+  // force-flatten kinds in flattenRemaining (subject.reason disambiguates: stop_loss / time_stop) —
+  // mirroring the chandelier_trail convention — so only the TARGET-fire and feed-staleness/bid-
+  // degradation lifecycle markers get dedicated kinds here.
+  private static final String KIND_WATCHLIST_EXIT_ARMED = "WatchlistExitArmed";
+  private static final String KIND_WATCHLIST_EXIT_TARGET_FIRED = "WatchlistExitTargetFired";
+  private static final String KIND_WATCHLIST_EXIT_FEED_STALE = "WatchlistExitFeedStale";
+  private static final String KIND_WATCHLIST_EXIT_BID_DEGRADED = "WatchlistExitBidDegraded";
+
   private static final String VERSION_CHANDELIER = "chandelier-v1";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
   private static final String VERSION_FORCE_CLOSE = "force-close-v1";
+
+  /**
+   * Phase 3 replay gate for the watchlist-trigger options EXIT on the long option. Every new
+   * Workflow command the exit introduces — the at-first-fill premium subscribe, the
+   * no_progress_time_stop timer, the feed-staleness timer, and the swap of the blanket-EOD timer
+   * from the legacy no-arg {@code durationUntilEodEt()} to the configured {@code
+   * durationUntilEodCloseEt(LocalTime)} — is gated behind this marker so a watchlist-trigger
+   * position spawned BEFORE this change replays deterministically (it records none of the new
+   * commands; the only new command on v=0 is this getVersion marker). ORTHOGONAL to {@code
+   * tp_ratio}: the entire exit path is additionally inert at runtime whenever {@code
+   * input.getTpRatio() == null} (the copytrade-byte-identical invariant), so a copytrade position —
+   * which never sets tp_ratio — takes none of the new branches even under v&gt;=1.
+   */
+  private static final String VERSION_WATCHLIST_EXIT = "watchlist-exit-v1";
+
+  /**
+   * Phase 3 bid-based STOP debounce: require N consecutive ticks whose evaluated bid is at/below
+   * the stop level before flattening, so a single outlier bid print (bad NBBO, halted side) does
+   * not fire the stop. Reset on any tick at/above the stop level. Mirrors the {@code
+   * trail_debounce_ticks} default (2) documented in {@code contract/schemas/strategy-config.json};
+   * that StrategyConfig key is not yet plumbed onto PositionWorkflowInput, so the default is
+   * applied as a constant here rather than inventing a new input field.
+   */
+  private static final int EXIT_STOP_DEBOUNCE_TICKS = 2;
 
   /**
    * Issue #204 replay gate. v=DEFAULT_VERSION (in-flight workflows started before this patch) keep
@@ -554,6 +587,22 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    */
   private boolean flattenAwaitingLateFill;
 
+  // Phase 3: watchlist-trigger EXIT state (premium-space, bid-evaluated on the long option). All of
+  // this stays at its zero/false defaults — and none of the timers/subscription below is armed —
+  // unless the exit is enabled (input.getTpRatio() != null) under VERSION_WATCHLIST_EXIT v>=1.
+  private boolean exitArmed;
+  private BigDecimal exitStopLevel; // entry_premium*(1 - sl_pct), moves to breakeven after target
+  private BigDecimal exitTargetLevel; // entry_premium*(1 + tp_ratio*sl_pct)
+  private BigDecimal exitTpPartialFraction;
+  private BigDecimal exitTrailGiveback;
+  private boolean exitTargetFired; // target partial+arm is single-shot
+  private int exitSubThresholdStreak; // consecutive sub-stop ticks for the debounce
+  private boolean exitBidDegradedAudited; // one-shot audit when bid is null and we fall back to mid
+  private boolean exitStopFireRequested; // latched by processExitTick; main loop flattens stop_loss
+  private boolean exitTimeStopFired; // no_progress_time_stop timer fired
+  private boolean exitFeedStaleFired; // staleness backstop timer fired with no tick since arm
+  private boolean exitTickSeen; // any exit tick observed since arm (staleness check)
+
   // Phase 4: chandelier-trail state
   private boolean trailingArmed;
   private BigDecimal peakPremium;
@@ -646,7 +695,20 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             ? !Boolean.FALSE.equals(in.getEodForceFlatten())
             : Boolean.TRUE.equals(in.getEodForceFlatten());
 
-    Duration eodIn = calendar.durationUntilEodEt();
+    // Phase 3: the watchlist-trigger exit can drive the blanket EOD flatten at a configured ET time
+    // (e.g. 15:30) via the distinct durationUntilEodCloseEt(LocalTime) activity, replacing the
+    // hardcoded 15:55 path. Gated under VERSION_WATCHLIST_EXIT so the swapped activity command is
+    // recorded only for fresh executions; legacy histories keep the no-arg durationUntilEodEt().
+    // Null force_close_eod_et keeps the legacy 15:55 path even under v>=1.
+    int watchlistExitVersion =
+        Workflow.getVersion(VERSION_WATCHLIST_EXIT, Workflow.DEFAULT_VERSION, 1);
+    String eodCfg = in.getForceCloseEodEt();
+    Duration eodIn;
+    if (watchlistExitVersion >= 1 && eodCfg != null && !eodCfg.isBlank()) {
+      eodIn = calendar.durationUntilEodCloseEt(LocalTime.parse(eodCfg));
+    } else {
+      eodIn = calendar.durationUntilEodEt();
+    }
     Duration expiryIn = Duration.ZERO;
     LocalDate expiryDate = expiryDateFromOcc(in.getContractSymbol());
     if (expiryDate != null) {
@@ -753,6 +815,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // Clear lastFillEvent so the next processOne()'s await for the partial-exit fill doesn't
       // immediately observe the stale entry fill.
       this.lastFillEvent = null;
+
+      // Phase 3: arm the watchlist-trigger exit on the long option. Inert unless the exit is
+      // enabled
+      // (tp_ratio != null) under VERSION_WATCHLIST_EXIT v>=1 — a copytrade position never sets
+      // tp_ratio, so this opens no premium subscription and arms no timers for it. The R basis is
+      // the actual first-fill price (firstFillPrice above), so the stop/target levels track the lot
+      // we really hold.
+      if (watchlistExitVersion >= 1 && in.getTpRatio() != null) {
+        armWatchlistExit(firstFillPrice);
+      }
     }
 
     while (remainingQty > 0 && !eodFired && !expiryFired && !expiryLeadFired) {
@@ -771,6 +843,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   // under v>=1, where the timer was armed) — replay-neutral for v=0 histories.
                   || expiryLeadFired
                   || remainingQty == 0
+                  // Phase 3: wake on a watchlist-exit bid-stop / no-progress time-stop / feed-stale
+                  // backstop so the run() loop flattens. Predicate-only (these latch only under the
+                  // exit-enabled v>=1 path) — replay-neutral for v=0 / copytrade histories.
+                  || exitStopFireRequested
+                  || exitTimeStopFired
+                  || exitFeedStaleFired
                   // Plan-2A R-AA-1: an in-loop flatten (risk_breach/force_close/chandelier) whose
                   // bounded limit rested unfilled leaves the workflow alive; wake on a LATE fill of
                   // that resting order so it drains rather than hanging open. Predicate-only — not
@@ -793,6 +871,36 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         }
         continue;
       }
+      // Phase 3: a watchlist-exit bid-stop, no-progress time-stop, or feed-staleness backstop
+      // flattens the WHOLE remaining lot MARKETABLE (reason stop_loss / time_stop). Handled before
+      // the STC pipeline so a bracket exit is not blocked behind a queued STC, and ABOVE
+      // risk_breach/force_close is intentionally avoided — operator/kill-switch intent still wins.
+      if (exitStopFireRequested || exitTimeStopFired || exitFeedStaleFired) {
+        String reason = exitStopFireRequested ? "stop_loss" : "time_stop";
+        // Feed-blind failsafe: whenever we reach the time-based backstop (the staleness timer OR a
+        // no-progress time-stop) and NO exit tick has ever arrived since arm, the bid-feed went
+        // blind. Audit it so the degradation is visible (never a silent blind hold), then fall back
+        // to the time-based flatten. Only the bid-stop path (exitStopFireRequested) implies a live
+        // feed, so it is excluded.
+        if (!exitStopFireRequested && exitArmed && !exitTickSeen) {
+          auditLog(
+              KIND_WATCHLIST_EXIT_FEED_STALE,
+              subject(
+                  "contract_symbol",
+                  input.getContractSymbol(),
+                  "remaining_qty",
+                  remainingQty,
+                  "note",
+                  "feed_stale_failsafe_flatten"));
+        }
+        exitStopFireRequested = false;
+        exitTimeStopFired = false;
+        exitFeedStaleFired = false;
+        exitArmed = false;
+        closeReason = reason;
+        flattenRemaining(reason);
+        continue; // flatten drained (or awaits a late fill) -> next iteration re-evaluates.
+      }
       // Phase 5: risk_breach + force_close take priority over the normal exit pipeline so
       // operator intent and kill-switch cascades are not blocked behind a queued STC.
       if (!pendingRiskBreaches.isEmpty()) {
@@ -809,9 +917,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       while (!pendingArms.isEmpty()) {
         processArm(pendingArms.poll());
       }
-      // Then drain ticks; processTick latches chandelierFireRequested on threshold breach.
+      // Then drain ticks. For a watchlist-exit-active position (exit armed, or the target already
+      // armed the runner's trail) processExitTick owns the tick: it evaluates the bid-based stop /
+      // target AND feeds the chandelier trail on the BID (per spec). Otherwise processTick runs the
+      // copytrade chandelier path unchanged on the smoothed mid.
       while (!pendingTicks.isEmpty()) {
-        processTick(pendingTicks.poll());
+        PremiumTick t = pendingTicks.poll();
+        if (exitArmed || (exitTargetFired && trailingArmed)) {
+          processExitTick(t);
+        } else {
+          processTick(t);
+        }
       }
       if (chandelierFireRequested) {
         chandelierFireRequested = false;
@@ -1197,6 +1313,240 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             gb,
             "subscription_id",
             res.getSubscriptionId()));
+  }
+
+  /**
+   * Phase 3: arm the watchlist-trigger exit on the long option from the actual first-fill basis. R
+   * = sl_pct * entry_premium; the hard stop level is {@code entry*(1 - sl_pct)} and the target
+   * level is {@code entry*(1 + tp_ratio*sl_pct)}. Subscribes the premium feed (reusing {@link
+   * #subscribeExitPremium()}) and arms the no_progress_time_stop + feed-staleness timers. Only
+   * reached when the exit is enabled (tp_ratio != null) under VERSION_WATCHLIST_EXIT v>=1.
+   */
+  private void armWatchlistExit(BigDecimal entryBasis) {
+    BigDecimal tpRatio = input.getTpRatio();
+    BigDecimal slPct = input.getSlPct();
+    if (entryBasis == null
+        || entryBasis.signum() <= 0
+        || tpRatio == null
+        || slPct == null
+        || slPct.signum() <= 0) {
+      // Misconfigured exit DNA — do not arm (leaves the lot on its STC/EOD/expiry backstops).
+      return;
+    }
+    exitStopLevel = entryBasis.multiply(BigDecimal.ONE.subtract(slPct));
+    exitTargetLevel = entryBasis.multiply(BigDecimal.ONE.add(tpRatio.multiply(slPct)));
+    exitTpPartialFraction = input.getTpPartialFraction();
+    exitTrailGiveback = input.getTrailGivebackPct();
+
+    if (!subscribeExitPremium()) {
+      // Subscription failed: do NOT arm a blind bid-stop. The time-based timers below still arm as
+      // the backstop, and subscribeExitPremium already audited the failure.
+      exitArmed = false;
+    } else {
+      exitArmed = true;
+    }
+
+    // no_progress_time_stop: flatten remaining if neither stop nor target fires within the window.
+    Long timeStopSecs = input.getNoProgressTimeStopSecs();
+    if (timeStopSecs != null && timeStopSecs > 0) {
+      Workflow.newTimer(Duration.ofSeconds(timeStopSecs))
+          .thenApply(
+              v -> {
+                exitTimeStopFired = true;
+                return null;
+              });
+    }
+
+    // Feed-staleness backstop: if the exit is armed on the premium feed but no tick has arrived by
+    // the staleness window, fail safe to the time-based flatten rather than hold blind. Bounded by
+    // the exit-fill TTL (the same per-strategy knob the rest of the exit machinery uses).
+    if (exitArmed) {
+      long staleSecs = resolveExitFillTtlSecs();
+      Workflow.newTimer(Duration.ofSeconds(staleSecs))
+          .thenApply(
+              v -> {
+                if (!exitTickSeen) {
+                  exitFeedStaleFired = true;
+                }
+                return null;
+              });
+    }
+
+    auditLog(
+        KIND_WATCHLIST_EXIT_ARMED,
+        subject(
+            "contract_symbol", input.getContractSymbol(),
+            "entry_basis", entryBasis,
+            "stop_level", exitStopLevel,
+            "target_level", exitTargetLevel));
+  }
+
+  /**
+   * Phase 3: subscribe the premium feed for the watchlist exit. Reuses the same {@link
+   * SubscribePremiumActivity} + request shape as {@link #processArm(ArmChandelierPayload)}; ticks
+   * arrive via {@link #chandelierTick(PremiumTick)} and are evaluated by {@link
+   * #processExitTick(PremiumTick)}. Returns {@code true} on success.
+   */
+  private boolean subscribeExitPremium() {
+    SubscribePremiumRequest req = new SubscribePremiumRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId(input.getTenantId());
+    req.setStrategyId(input.getStrategyId());
+    req.setContractSymbol(input.getContractSymbol());
+    req.setPositionWorkflowId(Workflow.getInfo().getWorkflowId());
+    SubscribePremiumResult res = marketData.subscribePremium(req);
+    if (res.getStatus() == SubscribePremiumResult.Status.FAILED) {
+      auditLog(
+          KIND_CHANDELIER_SUBSCRIPTION_FAILED,
+          subject("source_signal_id", "watchlist_exit", "error", res.getError()));
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Phase 3 main-loop exit-tick processor. Evaluates against the BID ({@link
+   * PremiumTick#getBid()}); when the bid is null it falls back to the smoothed mid ({@link
+   * PremiumTick#getPremium()}) and emits a one-time degradation audit. STOP (debounced, {@link
+   * #EXIT_STOP_DEBOUNCE_TICKS} consecutive sub-threshold ticks): latch a stop_loss flatten. TARGET
+   * (single-shot): partial-close {@code tp_partial_fraction}, move the remainder stop to breakeven,
+   * and arm the chandelier on the runner with peak=current bid + giveback=trail_giveback_pct.
+   */
+  private void processExitTick(PremiumTick tick) {
+    exitTickSeen = true;
+    BigDecimal evalBid = tick.getBid();
+    if (evalBid == null) {
+      evalBid = tick.getPremium();
+      if (!exitBidDegradedAudited && evalBid != null) {
+        exitBidDegradedAudited = true;
+        auditLog(
+            KIND_WATCHLIST_EXIT_BID_DEGRADED,
+            subject(
+                "contract_symbol",
+                input.getContractSymbol(),
+                "note",
+                "bid_null_fallback_to_mid",
+                "eval_premium",
+                evalBid));
+      }
+    }
+    if (evalBid == null) {
+      return; // no usable price on this tick
+    }
+
+    // TARGET (single-shot): fires while the bracket is still whole (before any partial). bid >=
+    // target -> partial + breakeven + chandelier arm.
+    if (!exitTargetFired && evalBid.compareTo(exitTargetLevel) >= 0) {
+      fireExitTarget(evalBid);
+      return; // do not also evaluate the (now-breakeven) stop on the same tick
+    }
+
+    // STOP (debounced): bid <= stop level for N consecutive ticks. Reset the streak on any tick
+    // at/above the stop so a single outlier print cannot fire.
+    if (evalBid.compareTo(exitStopLevel) <= 0) {
+      exitSubThresholdStreak++;
+      if (exitSubThresholdStreak >= EXIT_STOP_DEBOUNCE_TICKS && !exitStopFireRequested) {
+        exitStopFireRequested = true;
+      }
+    } else {
+      exitSubThresholdStreak = 0;
+    }
+
+    // After the target armed the runner's trail, feed the chandelier on the BID (per spec the trail
+    // comparison for THIS flow uses bid, not the smoothed mid). Reuses the existing processTick
+    // ratchet/fire by handing it a tick whose premium IS the evaluated bid.
+    if (trailingArmed && !exitStopFireRequested) {
+      processTick(bidAsPremiumTick(tick, evalBid));
+    }
+  }
+
+  /**
+   * Phase 3: a copy of {@code tick} whose {@code premium} field is the evaluated BID, so the
+   * existing chandelier {@link #processTick(PremiumTick)} (which compares on {@code getPremium()})
+   * trails on the bid for the watchlist-exit runner. Deterministic — no command.
+   */
+  private static PremiumTick bidAsPremiumTick(PremiumTick tick, BigDecimal bid) {
+    PremiumTick t = new PremiumTick();
+    t.setSchemaVersion(tick.getSchemaVersion());
+    t.setContractSymbol(tick.getContractSymbol());
+    t.setPremium(bid);
+    t.setBid(tick.getBid());
+    t.setAsk(tick.getAsk());
+    t.setRetrievedAt(tick.getRetrievedAt());
+    return t;
+  }
+
+  /**
+   * Phase 3 TARGET handler. Partial-closes {@code tp_partial_fraction} of the remaining qty via the
+   * existing partial path ({@link #processOne(PartialExitRequest)}), moves the remainder stop to
+   * BREAKEVEN (entry basis), and arms the chandelier on the runner ({@link
+   * #processArm(ArmChandelierPayload)}) with peak=current bid and giveback=trail_giveback_pct so
+   * the runner trails. Single-shot via {@code exitTargetFired}.
+   */
+  private void fireExitTarget(BigDecimal targetBid) {
+    exitTargetFired = true;
+    long remainingBefore = remainingQty;
+    BigDecimal breakeven = input.getEntryPremium();
+    BigDecimal fraction =
+        (exitTpPartialFraction != null && exitTpPartialFraction.signum() > 0)
+            ? exitTpPartialFraction
+            : BigDecimal.ONE;
+
+    long qtyToClose =
+        Math.min(remainingQty, (long) Math.ceil(remainingQty * fraction.doubleValue()));
+
+    auditLog(
+        KIND_WATCHLIST_EXIT_TARGET_FIRED,
+        subject(
+            "contract_symbol", input.getContractSymbol(),
+            "target_bid", targetBid,
+            "remaining_qty_before", remainingBefore,
+            "qty_to_close", qtyToClose,
+            "fraction", fraction,
+            "breakeven", breakeven));
+
+    // Partial-close via the existing exit path. A synthetic STC request anchored on the target bid.
+    PartialExitRequest req = new PartialExitRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId(input.getTenantId());
+    req.setStrategyId(input.getStrategyId());
+    req.setSignalId(Workflow.getInfo().getWorkflowId() + ":watchlist-target");
+    req.setPositionWorkflowId(Workflow.getInfo().getWorkflowId());
+    req.setFraction(fraction);
+    req.setRefPremium(targetBid);
+    req.setReason("watchlist_target");
+    req.setOccurredAt(workflowNow());
+    processedSignalIds.add(req.getSignalId());
+    processOne(req);
+
+    if (remainingQty <= 0) {
+      // The partial took the whole lot (e.g. fraction=1.0 or a 1-contract runner): nothing to
+      // trail.
+      return;
+    }
+
+    // Move the remainder stop to breakeven so the runner can only give back to scratch.
+    if (breakeven != null && breakeven.signum() > 0) {
+      exitStopLevel = breakeven;
+      exitSubThresholdStreak = 0;
+    }
+
+    // Arm the chandelier on the runner: peak = target bid, giveback = trail_giveback_pct. Reuses
+    // the
+    // existing processArm machinery (validation + subscribe + ChandelierArmed audit). The trail
+    // comparison in processTick uses tick.getPremium(); the bid-based breakeven stop above guards
+    // the downside.
+    if (exitTrailGiveback != null && exitTrailGiveback.signum() > 0) {
+      ArmChandelierPayload arm = new ArmChandelierPayload();
+      arm.setSchemaVersion(1L);
+      arm.setTenantId(input.getTenantId());
+      arm.setStrategyId(input.getStrategyId());
+      arm.setPositionWorkflowId(Workflow.getInfo().getWorkflowId());
+      arm.setSourceSignalId("watchlist_target");
+      arm.setPeakPremium(targetBid);
+      arm.setGivebackPct(exitTrailGiveback);
+      processArm(arm);
+    }
   }
 
   /** Main-loop chandelier fire handler. Emits the audit then flattens the remaining quantity. */
@@ -1787,7 +2137,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
 
     // v>=1 (R-AA-1 + R-AA-3 + R-AA-6).
-    boolean immediacy = "risk_breach".equals(reason) || "force_close".equals(reason);
+    // Phase 3: the watchlist-exit hard stop and no-progress time-stop route MARKET
+    // (limitPrice=null)
+    // alongside risk_breach/force_close — a triggered bracket exit must hit the market NOW, not
+    // rest
+    // a bounded limit. The target partial + chandelier trail keep the existing bounded/stepped
+    // path.
+    boolean immediacy =
+        "risk_breach".equals(reason)
+            || "force_close".equals(reason)
+            || "stop_loss".equals(reason)
+            || "time_stop".equals(reason);
     BigDecimal flattenLimit = immediacy ? null : computeBoundedFlattenLimit(reason);
     OrderIntent intent = flattenIntent(flattenIntentKey, reason, flattenLimit);
 

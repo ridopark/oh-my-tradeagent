@@ -50,7 +50,7 @@ class MarketCalendarActivitiesImplTest {
         new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 9, 30));
 
     // Configured 15:30 ET instead of the legacy 15:55 -> 6h from 9:30 to 15:30.
-    Duration d = svc.durationUntilEodEt(LocalTime.of(15, 30));
+    Duration d = svc.durationUntilEodCloseEt(LocalTime.of(15, 30));
 
     assertThat(d).isEqualTo(Duration.ofHours(6));
   }
@@ -61,7 +61,7 @@ class MarketCalendarActivitiesImplTest {
     MarketCalendarActivitiesImpl svc =
         new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 15, 40));
 
-    Duration d = svc.durationUntilEodEt(LocalTime.of(15, 30));
+    Duration d = svc.durationUntilEodCloseEt(LocalTime.of(15, 30));
 
     assertThat(d).isEqualTo(Duration.ZERO);
   }
