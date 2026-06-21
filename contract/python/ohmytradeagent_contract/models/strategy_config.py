@@ -291,7 +291,7 @@ class StrategyConfig(BaseModel):
     """
     tp_ratio: Annotated[Decimal, Field(gt=0)] | None = None
     """
-    Watchlist-trigger exit: reward:risk ratio for the premium take-profit. The first take-profit triggers when the live bid reaches entry_premium * (1 + tp_ratio * sl_pct) (= +tp_ratio*R, where R = sl_pct * entry_premium). Carried into PositionWorkflowInput.tp_ratio at handoff. Opt-in: null/absent disables the premium TP/SL/trail exit entirely, preserving the copytrade-only exit behavior. PositionWorkflowImpl gates consumption behind Workflow.getVersion.
+    Watchlist-trigger exit: reward:risk ratio for the premium take-profit. The first take-profit triggers when the live bid reaches entry_premium * (1 + tp_ratio * sl_pct) (= +tp_ratio*R, where R = sl_pct * entry_premium). Carried into PositionWorkflowInput.tp_ratio at handoff. Opt-in: null/absent disables the premium TP/SL/trail exit entirely, preserving the copytrade-only exit behavior. The runner's trailing leg reuses the pre-existing trail_giveback_pct field (the Phase-4 chandelier giveback) rather than re-declaring it, which is why this exit feature adds tp_ratio/sl_pct/tp_partial_fraction/no_progress_time_stop_secs but not trail_giveback_pct. PositionWorkflowImpl gates consumption behind Workflow.getVersion.
     """
     sl_pct: confloat(le=1.0, gt=0.0) | None = None
     """
