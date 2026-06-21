@@ -29,6 +29,24 @@ watchlist_expiry_rule: NEAREST_WEEKLY
 gap_tolerance_pct: 0.005
 equity_emit_delta_pct: 0.0005
 
+# Exit policy (watchlist-trigger 2:1 reward:risk + trailing stop). All opt-in: omitting
+# sl_pct/tp_ratio disables the premium exit entirely (copytrade-only behaviour). Evaluated on the
+# live bid (the price a long must sell into), getVersion-gated so copytrade positions are unaffected.
+#   sl_pct 0.30                     — hard stop at -30% of entry premium (= -1R); routes MARKET.
+#   tp_ratio 2.0                    — first take-profit at +2R = +60% premium.
+#   tp_partial_fraction 0.5         — book half at the target; remainder moves to breakeven + trails.
+#   trail_giveback_pct 0.30         — chandelier giveback on the runner (off the premium peak).
+#   no_progress_time_stop_secs 1500 — flatten a stalled breakout after 25m (theta defense).
+#   force_close_eod_et 15:30        — hard EOD flatten 30m before the 16:00 ET close (flat by EOD).
+#   eod_force_flatten true          — arm the blanket EOD timer (watchlist is not an author-mirror).
+sl_pct: 0.30
+tp_ratio: 2.0
+tp_partial_fraction: 0.5
+trail_giveback_pct: 0.30
+no_progress_time_stop_secs: 1500
+force_close_eod_et: "15:30"
+eod_force_flatten: true
+
 # SHIP DISABLED. The operator flips this on (dashboard per-tenant toggle) ONLY AFTER confirming the
 # real-time stock feed is entitled/configured. With enabled:false the strategy loads but admits no
 # entries (WatchlistMirrorActivitiesImpl skips the session start). enabled:false + an unconfigured

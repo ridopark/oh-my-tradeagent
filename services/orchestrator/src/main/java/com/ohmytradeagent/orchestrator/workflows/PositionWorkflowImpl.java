@@ -189,6 +189,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String KIND_WATCHLIST_EXIT_FEED_STALE = "WatchlistExitFeedStale";
   private static final String KIND_WATCHLIST_EXIT_BID_DEGRADED = "WatchlistExitBidDegraded";
 
+  // Phase 7 measurement audit kind. Emitted on EACH exit leg of a watchlist-trigger position (the
+  // target partial AND the terminal close) so the realized 2:1 payoff ratio is computable from the
+  // audit log. Inert when tp_ratio == null (copytrade emits nothing new). Carries entry/exit
+  // premium, realized_R, premium_mfe/premium_mae, exit_rule, partial_fraction, hold_minutes, and
+  // dte_at_exit. Observability-only — registered in AuditEventKinds.ALL_KINDS only.
+  private static final String KIND_WATCHLIST_EXIT_MEASURED = "WatchlistExitMeasured";
+
   private static final String VERSION_CHANDELIER = "chandelier-v1";
   private static final String VERSION_RISK_BREACH = "risk-breach-v1";
   private static final String VERSION_FORCE_CLOSE = "force-close-v1";
@@ -602,6 +609,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private boolean exitTimeStopFired; // no_progress_time_stop timer fired
   private boolean exitFeedStaleFired; // staleness backstop timer fired with no tick since arm
   private boolean exitTickSeen; // any exit tick observed since arm (staleness check)
+
+  // Phase 7 measurement state. The entry basis (actual first-fill price) and the BID
+  // max-favorable / max-adverse excursion over the position life, all in premium $. MFE/MAE are
+  // fed from the same exit-tick stream processExitTick already evaluates (no extra subscription).
+  // exitFirstFillAt anchors hold_minutes. All inert unless the exit is enabled (tp_ratio != null).
+  private BigDecimal exitEntryBasis;
+  private BigDecimal exitBidMfe;
+  private BigDecimal exitBidMae;
+  private OffsetDateTime exitFirstFillAt;
 
   // Phase 4: chandelier-trail state
   private boolean trailingArmed;
@@ -1338,6 +1354,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     exitTpPartialFraction = input.getTpPartialFraction();
     exitTrailGiveback = input.getTrailGivebackPct();
 
+    // Phase 7: seed the measurement basis + MFE/MAE excursion trackers from the entry basis so a
+    // leg that exits before any tick still reports a coherent excursion (== entry).
+    exitEntryBasis = entryBasis;
+    exitBidMfe = entryBasis;
+    exitBidMae = entryBasis;
+    exitFirstFillAt = workflowNow();
+
     if (!subscribeExitPremium()) {
       // Subscription failed: do NOT arm a blind bid-stop. The time-based timers below still arm as
       // the backstop, and subscribeExitPremium already audited the failure.
@@ -1432,6 +1455,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
     if (evalBid == null) {
       return; // no usable price on this tick
+    }
+
+    // Phase 7: ratchet the BID max-favorable / max-adverse excursion over the position life
+    // (premium
+    // $), reusing this tick stream. Guarded for null so a pre-arm tick race can't NPE.
+    if (exitBidMfe == null || evalBid.compareTo(exitBidMfe) > 0) {
+      exitBidMfe = evalBid;
+    }
+    if (exitBidMae == null || evalBid.compareTo(exitBidMae) < 0) {
+      exitBidMae = evalBid;
     }
 
     // TARGET (single-shot): fires while the bracket is still whole (before any partial). bid >=
@@ -2512,6 +2545,96 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       exitSubject.put("option_symbol", input.getContractSymbol());
     }
     auditLog(KIND_PARTIAL_EXIT_FILLED, exitSubject);
+
+    // Phase 7: emit the per-leg payoff MEASUREMENT alongside every watchlist-trigger exit fill (the
+    // target partial AND the terminal close). filled is the leg qty; remainingQty was just
+    // decremented, so remainingQty + filled is the qty before this leg. Inert for copytrade
+    // (tp_ratio == null) and replay-gated under VERSION_WATCHLIST_EXIT.
+    emitWatchlistMeasurement(signalId, filled, remainingQty + filled, fillEvent.getAvgFillPrice());
+  }
+
+  /**
+   * Phase 7: emit {@link #KIND_WATCHLIST_EXIT_MEASURED} for one exit leg so the realized 2:1 payoff
+   * ratio is computable from the audit log. INERT unless the watchlist exit is enabled ({@code
+   * input.getTpRatio() != null}) under {@link #VERSION_WATCHLIST_EXIT} v&gt;=1 — a copytrade
+   * position emits nothing new (its event history stays byte-identical). The {@code exit_rule} is
+   * derived from the leg's {@code signalId}: {@code <wfId>:watchlist-target} -&gt; {@code target};
+   * {@code flatten-<reason>} -&gt; {@code reason} (stop_loss / time_stop / chandelier_trail / eod /
+   * expiry / expiry_lead). {@code realized_R = (exit - entry) / (sl_pct * entry)}; {@code
+   * partial_fraction = legQty / remainingBefore}; {@code hold_minutes} from the first-fill anchor;
+   * {@code dte_at_exit} from the OCC expiry vs now. Pure read of measurement state — the only new
+   * command is the {@code auditLog} below, recorded only under v&gt;=1.
+   */
+  private void emitWatchlistMeasurement(
+      String signalId, long legQty, long remainingBefore, BigDecimal exitPremium) {
+    if (input.getTpRatio() == null
+        || Workflow.getVersion(VERSION_WATCHLIST_EXIT, Workflow.DEFAULT_VERSION, 1) < 1) {
+      return;
+    }
+    String exitRule = watchlistExitRule(signalId);
+    if (exitRule == null) {
+      return; // not a recognized watchlist exit leg (defensive — no such fill on a measured lot)
+    }
+
+    BigDecimal entry = exitEntryBasis;
+    BigDecimal slPct = input.getSlPct();
+    BigDecimal realizedR = null;
+    if (entry != null
+        && entry.signum() > 0
+        && slPct != null
+        && slPct.signum() > 0
+        && exitPremium != null) {
+      BigDecimal rDollar = slPct.multiply(entry);
+      realizedR = exitPremium.subtract(entry).divide(rDollar, 6, java.math.RoundingMode.HALF_UP);
+    }
+
+    BigDecimal partialFraction =
+        remainingBefore > 0
+            ? BigDecimal.valueOf(legQty)
+                .divide(BigDecimal.valueOf(remainingBefore), 6, java.math.RoundingMode.HALF_UP)
+            : null;
+
+    long holdMinutes =
+        exitFirstFillAt != null ? Duration.between(exitFirstFillAt, workflowNow()).toMinutes() : 0L;
+
+    Long dteAtExit = null;
+    LocalDate expiry = expiryDateFromOcc(input.getContractSymbol());
+    if (expiry != null) {
+      dteAtExit = java.time.temporal.ChronoUnit.DAYS.between(workflowNow().toLocalDate(), expiry);
+    }
+
+    auditLog(
+        KIND_WATCHLIST_EXIT_MEASURED,
+        subject(
+            "contract_symbol", input.getContractSymbol(),
+            "exit_rule", exitRule,
+            "entry_premium", entry,
+            "exit_premium", exitPremium,
+            "realized_R", realizedR,
+            "premium_mfe", exitBidMfe,
+            "premium_mae", exitBidMae,
+            "partial_fraction", partialFraction,
+            "hold_minutes", holdMinutes,
+            "dte_at_exit", dteAtExit));
+  }
+
+  /**
+   * Phase 7: map an exit-leg {@code signalId} to its {@code exit_rule}. The target partial signal
+   * is {@code <wfId>:watchlist-target}; every scheduled/bracket flatten uses {@code
+   * flatten-<reason>} (see {@link #flattenIntent(String, String)} / {@link #emitExitFill(String,
+   * FillSignalPayload)}). Returns {@code null} for any other shape (no measurement emitted).
+   */
+  private static String watchlistExitRule(String signalId) {
+    if (signalId == null) {
+      return null;
+    }
+    if (signalId.endsWith(":watchlist-target")) {
+      return "target";
+    }
+    if (signalId.startsWith("flatten-")) {
+      return signalId.substring("flatten-".length());
+    }
+    return null;
   }
 
   /**

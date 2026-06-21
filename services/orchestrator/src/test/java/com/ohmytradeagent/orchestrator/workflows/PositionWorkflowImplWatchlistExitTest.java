@@ -340,6 +340,110 @@ class PositionWorkflowImplWatchlistExitTest {
     assertThat(req.getSubject()).containsEntry("reason", "eod");
   }
 
+  // ---------- (h) Phase 7 measurement: per-exit-leg WatchlistExitMeasured ----------
+
+  /**
+   * (h) a STOP exit emits a WatchlistExitMeasured leg audit. entry=2.00, sl_pct=0.30 -> R =
+   * 0.30*2.00 = 0.60; stop fill 1.40 -> realized_R = (1.40-2.00)/0.60 = -1.0. The leg closes the
+   * whole lot, so partial_fraction = 1.0 and exit_rule = stop_loss.
+   */
+  @Test
+  void stopExit_emitsMeasuredLeg_realizedRMinusOne() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-wl-measure-stop");
+    PositionWorkflowInput in = exitInput(5);
+    in.setSlPct(new BigDecimal("0.30")); // R = 0.30*2.00 = 0.60
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L, new BigDecimal("2.00"));
+
+    // stop level = 2.00*(1-0.30) = 1.40. Two bids at/below 1.40 satisfy debounce-2.
+    stub.chandelierTick(bidTick(new BigDecimal("1.40")));
+    stub.chandelierTick(bidTick(new BigDecimal("1.38")));
+
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-stop", 5L, new BigDecimal("1.40")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent measured = captureKind("WatchlistExitMeasured");
+    assertThat(measured.getSubject()).containsEntry("exit_rule", "stop_loss");
+    assertThat(((Number) measured.getSubject().get("entry_premium")).doubleValue()).isEqualTo(2.00);
+    assertThat(((Number) measured.getSubject().get("exit_premium")).doubleValue()).isEqualTo(1.40);
+    assertThat(((Number) measured.getSubject().get("realized_R")).doubleValue()).isEqualTo(-1.0);
+    assertThat(((Number) measured.getSubject().get("partial_fraction")).doubleValue())
+        .isEqualTo(1.0);
+  }
+
+  /**
+   * (h) a TARGET+trail exit emits a WatchlistExitMeasured leg for BOTH the target partial AND the
+   * terminal trail close. entry=2.00, sl_pct=0.30 -> R=0.60; target fill 3.20 -> realized_R =
+   * (3.20-2.00)/0.60 = +2.0. The trail close leg carries exit_rule=chandelier_trail.
+   */
+  @Test
+  void targetThenTrail_emitsMeasuredLegs_realizedRPlusTwoOnTarget() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-wl-measure-target");
+    PositionWorkflowInput in = exitInput(5);
+    in.setSlPct(new BigDecimal("0.30")); // R = 0.60; target = 2.00*(1+2*0.30) = 3.20
+    in.setTrailGivebackPct(new BigDecimal("0.10"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L, new BigDecimal("2.00"));
+
+    // Bid hits the +2R target (3.20) -> partial of 0.5 (ceil(2.5)=3) sold at 3.20.
+    stub.chandelierTick(bidTick(new BigDecimal("3.20")));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-target-partial", 3L, new BigDecimal("3.20")));
+
+    // Runner (2 left) trails: peak 3.20, giveback 0.10 -> threshold 2.88. A bid at 2.88 fires.
+    stub.chandelierTick(bidTick(new BigDecimal("2.88")));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-trail", 2L, new BigDecimal("2.88")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    List<AuditEvent> measured = captureAll("WatchlistExitMeasured");
+    assertThat(measured).hasSize(2);
+
+    AuditEvent targetLeg =
+        measured.stream()
+            .filter(e -> "target".equals(e.getSubject().get("exit_rule")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no target leg measured"));
+    assertThat(((Number) targetLeg.getSubject().get("exit_premium")).doubleValue()).isEqualTo(3.20);
+    assertThat(((Number) targetLeg.getSubject().get("realized_R")).doubleValue()).isEqualTo(2.0);
+    // 3 of 5 contracts closed on the target leg.
+    assertThat(((Number) targetLeg.getSubject().get("partial_fraction")).doubleValue())
+        .isEqualTo(0.6);
+
+    AuditEvent trailLeg =
+        measured.stream()
+            .filter(e -> "chandelier_trail".equals(e.getSubject().get("exit_rule")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no trail leg measured"));
+    assertThat(((Number) trailLeg.getSubject().get("exit_premium")).doubleValue()).isEqualTo(2.88);
+    // MFE rode to the 3.20 target bid; MAE never dipped below entry on this path.
+    assertThat(((Number) trailLeg.getSubject().get("premium_mfe")).doubleValue()).isEqualTo(3.20);
+  }
+
+  /** (h) copytrade (tp_ratio null) emits NO WatchlistExitMeasured — measurement is inert. */
+  @Test
+  void copytradePath_tpRatioNull_noMeasuredLeg() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-wl-measure-copytrade");
+    PositionWorkflowInput in = input(5);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L, new BigDecimal("2.30"));
+
+    stub.partialExit(partialExitRequest("sig-stc", "pos-wl-measure-copytrade", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-stc", 5L, new BigDecimal("3.20")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    assertThat(captureAll("WatchlistExitMeasured")).isEmpty();
+  }
+
   // ---------- (g) copytrade path unchanged ----------
 
   /**
