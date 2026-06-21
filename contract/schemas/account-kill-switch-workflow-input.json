@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/account-kill-switch-workflow-input.json",
+  "title": "AccountKillSwitchWorkflowInput",
+  "description": "Phase 6: input for AccountKillSwitchWorkflow. ONE workflow per tenant_id (NO strategy_id segment — the cap spans every strategy on the tenant's shared broker_target), bootstrapped on orchestrator startup with workflow_id t-<tenant>/account/killswitch. Mirrors KillSwitchWorkflowInput's carry-forward shape for continueAsNew. Fresh bootstrap inputs omit the carry-forward fields; replayed continueAsNew inputs populate them.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.AccountKillSwitchWorkflowInput",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2,
+      "description": "DTO contract version. v1 = bootstrap-only input; v2 adds optional carry-forward fields produced by continueAsNew. Workers reject newer-than-build inputs."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tripped": {
+      "type": "boolean",
+      "description": "Carry-forward state from a prior run. Absent on fresh bootstrap. Default false."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Carry-forward trip reason from a prior run. Absent on fresh bootstrap."
+    },
+    "actor": {
+      "type": "string",
+      "description": "Carry-forward trip actor from a prior run. Absent on fresh bootstrap."
+    },
+    "tripped_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Carry-forward trip timestamp from a prior run. Absent on fresh bootstrap."
+    },
+    "cooling_down_until": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Carry-forward reset cooldown deadline from a prior run. Absent on fresh bootstrap."
+    },
+    "trading_day": {
+      "type": "string",
+      "format": "date",
+      "description": "Carry-forward trading day from a prior run. Absent on fresh bootstrap; next heartbeat refreshes via calendar.todayEt()."
+    }
+  }
+}

@@ -33,4 +33,13 @@ class WorkflowIdsTest {
     assertThat(WorkflowIds.strategyConfigUpdate("acme", "copytrade-v1", "corr-123"))
         .isEqualTo("t-acme/s-copytrade-v1/cfg-write/corr-123");
   }
+
+  /**
+   * Phase 6: the account-level kill switch is tenant-scoped (NO {@code s-} segment) — the cap spans
+   * every strategy on the tenant's shared broker_target.
+   */
+  @Test
+  void accountKillswitchIsTenantScopedWithoutStrategySegment() {
+    assertThat(WorkflowIds.accountKillswitch("acme")).isEqualTo("t-acme/account/killswitch");
+  }
 }
