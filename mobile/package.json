@@ -1,0 +1,24 @@
+{
+  "name": "oh-my-tradeagent-mobile",
+  "version": "0.0.0",
+  "private": true,
+  "description": "P0 spike — native PKCE -> tenant. Throwaway; see docs/plans/P0-spike-mobile-auth.md",
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "ios": "expo start --ios",
+    "android": "expo start --android"
+  },
+  "dependencies": {
+    "expo": "~51.0.0",
+    "expo-auth-session": "~5.5.2",
+    "expo-secure-store": "~13.0.2",
+    "expo-web-browser": "~13.0.3",
+    "react": "18.2.0",
+    "react-native": "0.74.5"
+  },
+  "devDependencies": {
+    "@types/react": "~18.2.79",
+    "typescript": "~5.3.3"
+  }
+}
