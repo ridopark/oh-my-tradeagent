@@ -1574,7 +1574,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // print and letting one market print satisfy the post-target breakeven-stop debounce. The trail
     // comparison in processTick uses tick.getPremium(); the bid-based breakeven stop above guards
     // the downside.
-    if (exitTrailGiveback != null && exitTrailGiveback.signum() > 0) {
+    // Same accept criteria as processArm (gb in (0, MAX_GIVEBACK]) so a misconfigured
+    // trail_giveback_pct does not arm a looser-than-documented trail; out of bounds = no trail
+    // (the runner rides its breakeven bid-stop + EOD/expiry backstops), matching the replaced path.
+    if (exitTrailGiveback != null
+        && exitTrailGiveback.signum() > 0
+        && exitTrailGiveback.compareTo(MAX_GIVEBACK) <= 0) {
       trailingArmed = true;
       peakPremium = targetBid;
       givebackPct = exitTrailGiveback;
