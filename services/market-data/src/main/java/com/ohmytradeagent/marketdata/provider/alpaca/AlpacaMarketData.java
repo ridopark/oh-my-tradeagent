@@ -2,10 +2,12 @@ package com.ohmytradeagent.marketdata.provider.alpaca;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ohmytradeagent.marketdata.health.FeedHealth;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
 import com.ohmytradeagent.marketdata.provider.Quote;
 import com.ohmytradeagent.marketdata.provider.Subscription;
 import com.ohmytradeagent.marketdata.provider.Tick;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.annotation.PreDestroy;
 import java.math.BigDecimal;
 import java.net.URI;
@@ -64,6 +66,7 @@ public class AlpacaMarketData implements MarketDataProvider {
   private final AlpacaMarketDataProperties props;
   private final HttpClient httpClient;
   private final ScheduledExecutorService scheduler;
+  private final FeedHealth feedHealth;
 
   /** Subscriber registry: symbol -> {listener, ...}. */
   private final ConcurrentHashMap<String, List<Consumer<Tick>>> bySymbol =
@@ -96,27 +99,49 @@ public class AlpacaMarketData implements MarketDataProvider {
   public AlpacaMarketData(
       RestClient alpacaMarketDataRestClient,
       ObjectMapper objectMapper,
-      AlpacaMarketDataProperties props) {
+      AlpacaMarketDataProperties props,
+      FeedHealth feedHealth) {
     this(
         alpacaMarketDataRestClient,
         objectMapper,
         props,
         HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(),
-        defaultScheduler());
+        defaultScheduler(),
+        feedHealth);
   }
 
-  /** Visible for tests that want to inject a deterministic scheduler / fake HttpClient. */
+  /**
+   * Visible for tests that want to inject a deterministic scheduler / fake HttpClient. Uses a
+   * standalone {@link FeedHealth} (its own registry) so existing 5-arg callers are unaffected.
+   */
   AlpacaMarketData(
       RestClient alpacaMarketDataRestClient,
       ObjectMapper objectMapper,
       AlpacaMarketDataProperties props,
       HttpClient httpClient,
       ScheduledExecutorService scheduler) {
+    this(
+        alpacaMarketDataRestClient,
+        objectMapper,
+        props,
+        httpClient,
+        scheduler,
+        new FeedHealth(new SimpleMeterRegistry()));
+  }
+
+  AlpacaMarketData(
+      RestClient alpacaMarketDataRestClient,
+      ObjectMapper objectMapper,
+      AlpacaMarketDataProperties props,
+      HttpClient httpClient,
+      ScheduledExecutorService scheduler,
+      FeedHealth feedHealth) {
     this.rest = alpacaMarketDataRestClient;
     this.mapper = objectMapper;
     this.props = props;
     this.httpClient = httpClient;
     this.scheduler = scheduler;
+    this.feedHealth = feedHealth;
   }
 
   private static ScheduledExecutorService defaultScheduler() {
@@ -250,6 +275,7 @@ public class AlpacaMarketData implements MarketDataProvider {
       if (tick == null) {
         continue;
       }
+      feedHealth.recordTick(FeedHealth.Feed.EQUITY);
       List<Consumer<Tick>> listeners = byTicker.get(tick.occSymbol());
       if (listeners == null) {
         continue;
@@ -343,6 +369,7 @@ public class AlpacaMarketData implements MarketDataProvider {
       try {
         stockWs = connectStockBlocking();
         stockNextBackoff = Duration.ofSeconds(1);
+        feedHealth.markConnected(FeedHealth.Feed.EQUITY);
         return stockWs;
       } catch (RuntimeException e) {
         log.error("AUDIT stock-ws-connect-failed: {}", e.getMessage());
@@ -438,12 +465,14 @@ public class AlpacaMarketData implements MarketDataProvider {
     @Override
     public void onError(WebSocket socket, Throwable error) {
       log.error("AUDIT stock-ws-error: {}", error.getMessage());
+      feedHealth.markDisconnected(FeedHealth.Feed.EQUITY);
       scheduleStockReconnect();
     }
 
     @Override
     public CompletableFuture<?> onClose(WebSocket socket, int statusCode, String reason) {
       log.error("AUDIT stock-ws-closed status={} reason={}", statusCode, reason);
+      feedHealth.markDisconnected(FeedHealth.Feed.EQUITY);
       scheduleStockReconnect();
       return null;
     }
@@ -513,6 +542,7 @@ public class AlpacaMarketData implements MarketDataProvider {
       if (tick == null) {
         continue;
       }
+      feedHealth.recordTick(FeedHealth.Feed.OPTION);
       List<Consumer<Tick>> listeners = bySymbol.get(tick.occSymbol());
       if (listeners == null) {
         continue;
@@ -626,6 +656,7 @@ public class AlpacaMarketData implements MarketDataProvider {
       try {
         ws = connectBlocking();
         nextBackoff = Duration.ofSeconds(1);
+        feedHealth.markConnected(FeedHealth.Feed.OPTION);
         return ws;
       } catch (RuntimeException e) {
         log.warn("Alpaca WS connect failed: {}", e.getMessage());
@@ -725,12 +756,14 @@ public class AlpacaMarketData implements MarketDataProvider {
     @Override
     public void onError(WebSocket socket, Throwable error) {
       log.warn("Alpaca WS error: {}", error.getMessage());
+      feedHealth.markDisconnected(FeedHealth.Feed.OPTION);
       scheduleReconnect();
     }
 
     @Override
     public CompletableFuture<?> onClose(WebSocket socket, int statusCode, String reason) {
       log.info("Alpaca WS closed status={} reason={}", statusCode, reason);
+      feedHealth.markDisconnected(FeedHealth.Feed.OPTION);
       scheduleReconnect();
       return null;
     }
