@@ -143,6 +143,50 @@ export interface StrategyConfigResponse {
 export const getStrategyConfig = () =>
   bffGet<StrategyConfigResponse>("/api/strategy-config");
 
+// Live proximity (/live view). last_tick_age_ms is -1 before the first tick; status is "ok" when
+// the market-data actuator answered, "unknown" when it was unreachable (the tables still render).
+export interface FeedState {
+  connected: boolean;
+  lastTickAgeMs: number;
+}
+export interface FeedLiveness {
+  status: string;
+  equity?: FeedState;
+  option?: FeedState;
+}
+export interface WatchlistProximity {
+  workflow_id: string;
+  strategy_id: string;
+  ticker: string;
+  direction: string;
+  trigger_level: string | number | null;
+  band_low: string | number | null;
+  band_high: string | number | null;
+  last_price: string | number | null;
+  state: string;
+  distance_to_trigger_pct: number | null;
+}
+export interface PositionProximity {
+  workflow_id: string;
+  strategy_id: string;
+  contract_symbol: string;
+  entry_premium: string | number | null;
+  stop_level: string | number | null;
+  target_level: string | number | null;
+  last_bid: string | number | null;
+  peak_premium: string | number | null;
+  trailing_armed: boolean;
+  distance_to_stop_pct: number | null;
+  distance_to_target_pct: number | null;
+}
+export interface ProximityResponse {
+  tenant_id: string;
+  liveness: FeedLiveness;
+  watchlist: WatchlistProximity[];
+  positions: PositionProximity[];
+}
+export const getProximity = () => bffGet<ProximityResponse>("/api/proximity");
+
 export const getTrades = (limit = 100) =>
   bffGet<Envelope<Trade>>(`/api/trades?limit=${limit}`);
 export const getOrders = (limit = 100) =>
