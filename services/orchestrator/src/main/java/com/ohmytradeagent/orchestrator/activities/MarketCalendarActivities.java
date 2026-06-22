@@ -20,6 +20,21 @@ public interface MarketCalendarActivities {
   Duration durationUntilEodEt();
 
   /**
+   * Phase 4: duration from "now" (Activity wall clock) to today's {@code eodEt} ET; ZERO if already
+   * past. Lets PositionWorkflow force-flatten at a configured wall-clock time (e.g. 15:30 ET)
+   * instead of the hardcoded legacy 15:55. Same ET / already-past / market-day logic as the no-arg
+   * {@link #durationUntilEodEt()}.
+   *
+   * <p>This is a DISTINCT method name (not an overload of {@link #durationUntilEodEt()}):
+   * Temporal's {@code @ActivityInterface} forbids method overloads (a worker rejects registration
+   * with "Duplicated methods"), so the configurable variant mirrors the {@link
+   * #durationUntilExpiryCloseEt} naming pattern. Its Temporal activity type name {@code
+   * DurationUntilEodCloseEt} is distinct from the no-arg {@code DurationUntilEodEt}, so the
+   * workflow gates the swap (legacy no-arg vs configured) via {@code Workflow.getVersion}.
+   */
+  Duration durationUntilEodCloseEt(LocalTime eodEt);
+
+  /**
    * Duration from "now" to {@code closeTime} ET on {@code expiry}; ZERO if expiry is not today or
    * already past. Phase 3 only arms an expiry timer for 0DTE; future-dated expiries return ZERO so
    * the workflow can treat "no expiry timer" uniformly.

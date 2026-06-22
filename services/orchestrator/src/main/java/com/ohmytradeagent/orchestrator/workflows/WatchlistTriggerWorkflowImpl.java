@@ -479,6 +479,25 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     posInput.setBrokerTarget(
         PositionWorkflowInput.BrokerTarget.fromValue(config.getBrokerTarget().value()));
     posInput.setEodForceFlatten(config.getEodForceFlatten());
+    // Phase 5: forward the same exit/flatten tunables Copytrade/Adoption carry so a watchlist
+    // position gets exit parity. Floor/lead/reprice fields plumb the bounded-flatten machinery;
+    // null passes through verbatim (PositionWorkflowImpl applies its in-code defaults).
+    posInput.setForceClose0dteEt(config.getForceClose0dteEt());
+    posInput.setExitFloorAbs(config.getExitFloorAbs());
+    posInput.setExitFloorPct(config.getExitFloorPct());
+    posInput.setExpiryDayFloor(config.getExpiryDayFloor());
+    posInput.setFlattenLeadMinutes(config.getFlattenLeadMinutes());
+    posInput.setExitRepriceSteps(config.getExitRepriceSteps());
+    posInput.setExitRepriceTick(config.getExitRepriceTick());
+    // Phase 3 premium TP/SL/trail exit: enabled in PositionWorkflowImpl only when tp_ratio != null.
+    // Without these the watchlist position never arms the bid-based
+    // stop/target/chandelier/time-stop.
+    posInput.setTpRatio(config.getTpRatio());
+    posInput.setSlPct(config.getSlPct());
+    posInput.setTpPartialFraction(config.getTpPartialFraction());
+    posInput.setTrailGivebackPct(config.getTrailGivebackPct());
+    posInput.setNoProgressTimeStopSecs(config.getNoProgressTimeStopSecs());
+    posInput.setForceCloseEodEt(config.getForceCloseEodEt());
 
     Async.function(child::run, posInput);
     Workflow.getWorkflowExecution(child).get();

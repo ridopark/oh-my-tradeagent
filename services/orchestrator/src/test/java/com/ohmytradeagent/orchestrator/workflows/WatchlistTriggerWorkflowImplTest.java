@@ -10,14 +10,21 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.AccountSnapshotResult;
+import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.ArmContext;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.EquityTick;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.FireDecision;
+import com.ohmytradeagent.contract.ForceCloseRequest;
+import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
+import com.ohmytradeagent.contract.PartialExitRequest;
+import com.ohmytradeagent.contract.PositionWorkflowInput;
+import com.ohmytradeagent.contract.PremiumTick;
+import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.SubscribeEquityResult;
 import com.ohmytradeagent.contract.WatchlistTriggerPayload;
@@ -40,12 +47,15 @@ import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
+import io.temporal.workflow.Workflow;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -507,6 +517,125 @@ class WatchlistTriggerWorkflowImplTest {
     ArgumentCaptor<ArmContext> captor = ArgumentCaptor.forClass(ArmContext.class);
     verify(fireDecider, atLeastOnce()).evaluateTriggerFire(any(), captor.capture());
     assertThat(captor.getValue().getEtDate()).isEqualTo(LocalDate.of(2026, 6, 24));
+  }
+
+  // Phase 5: the fire->PositionWorkflow handoff must forward the Phase-3 premium exit params so the
+  // watchlist position arms TP/SL/trail. Drives the fire path against a recording child and asserts
+  // the captured PositionWorkflowInput carries the exit fields sourced from StrategyConfig.
+  @Test
+  void fire_handsOffExitParamsToPositionWorkflow() throws Exception {
+    RecordingPositionWorkflowImpl.STARTED.clear();
+    RecordingPositionWorkflowImpl.FILLS.clear();
+
+    TestWorkflowEnvironment localEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      localEnv.registerSearchAttribute(
+          "TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      localEnv.registerSearchAttribute(
+          "ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+
+      Worker core = localEnv.newWorker(CORE_QUEUE);
+      // Recording fake child (not the real PositionWorkflowImpl) so the handoff input is captured
+      // at start without running the full position lifecycle.
+      core.registerWorkflowImplementationTypes(
+          WatchlistTriggerWorkflowImpl.class, RecordingPositionWorkflowImpl.class);
+      core.registerActivitiesImplementations(audit, calendar, risk, contract, fireDecider);
+      Worker md = localEnv.newWorker(WatchlistTriggerWorkflowImpl.MARKET_DATA_TASK_QUEUE);
+      md.registerActivitiesImplementations(subscribeEquity, optionQuote);
+      Worker broker = localEnv.newWorker(BROKER_QUEUE);
+      broker.registerActivitiesImplementations(exec, accountSnapshot, tradingCalendar);
+      localEnv.start();
+
+      StrategyConfig c = config();
+      c.setTpRatio(new BigDecimal("2.0"));
+      c.setSlPct(new BigDecimal("0.35"));
+      c.setTpPartialFraction(new BigDecimal("0.5"));
+      c.setTrailGivebackPct(new BigDecimal("0.25"));
+      c.setNoProgressTimeStopSecs(900L);
+      c.setForceCloseEodEt("15:50");
+
+      WatchlistTriggerWorkflow wf =
+          localEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  WatchlistTriggerWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setTaskQueue(CORE_QUEUE)
+                      .setWorkflowId("wl-exit-handoff")
+                      .build());
+      WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+      wf.equityTick(tick(new BigDecimal("760.80"), false));
+      wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+      wf.onFill(fill(5L, new BigDecimal("3.15")));
+
+      WorkflowStub.fromTyped(wf).getResult(String.class);
+
+      long deadline = System.currentTimeMillis() + 10_000;
+      while (RecordingPositionWorkflowImpl.STARTED.isEmpty()
+          && System.currentTimeMillis() < deadline) {
+        sleep();
+      }
+      assertThat(RecordingPositionWorkflowImpl.STARTED).hasSize(1);
+      PositionWorkflowInput child =
+          RecordingPositionWorkflowImpl.STARTED.values().iterator().next();
+      assertThat(child.getTpRatio()).isEqualByComparingTo("2.0");
+      assertThat(child.getSlPct()).isEqualByComparingTo("0.35");
+      assertThat(child.getTpPartialFraction()).isEqualByComparingTo("0.5");
+      assertThat(child.getTrailGivebackPct()).isEqualByComparingTo("0.25");
+      assertThat(child.getNoProgressTimeStopSecs()).isEqualTo(900L);
+      assertThat(child.getForceCloseEodEt()).isEqualTo("15:50");
+    } finally {
+      localEnv.close();
+    }
+  }
+
+  /** Light PositionWorkflow double: records the start input and parks until terminated. */
+  public static final class RecordingPositionWorkflowImpl implements PositionWorkflow {
+    static final Map<String, PositionWorkflowInput> STARTED = new ConcurrentHashMap<>();
+    static final Map<String, FillSignalPayload> FILLS = new ConcurrentHashMap<>();
+
+    @Override
+    public String run(PositionWorkflowInput input) {
+      STARTED.put(Workflow.getInfo().getWorkflowId(), input);
+      Workflow.await(() -> FILLS.containsKey(Workflow.getInfo().getWorkflowId()));
+      return input.getEntrySignalId();
+    }
+
+    @Override
+    public void partialExit(PartialExitRequest req) {}
+
+    @Override
+    public void onFill(FillSignalPayload event) {
+      FILLS.put(Workflow.getInfo().getWorkflowId(), event);
+    }
+
+    @Override
+    public void armChandelier(ArmChandelierPayload payload) {}
+
+    @Override
+    public void chandelierTick(PremiumTick tick) {}
+
+    @Override
+    public void riskBreach(RiskBreachPayload payload) {}
+
+    @Override
+    public TrailingState trailingState() {
+      return null;
+    }
+
+    @Override
+    public PositionState positionState() {
+      return null;
+    }
+
+    @Override
+    public void forceCloseValidator(ForceCloseRequest request) {}
+
+    @Override
+    public ForceCloseResult forceClose(ForceCloseRequest request) {
+      return null;
+    }
   }
 
   // ---------- helpers ----------

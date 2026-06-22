@@ -6,7 +6,15 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import Field, AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    confloat,
+    conint,
+    constr,
+)
 
 
 class PremiumTick(BaseModel):
@@ -29,6 +37,14 @@ class PremiumTick(BaseModel):
     premium: Annotated[Decimal, Field(gt=0)]
     """
     Premium per contract, dollars. Source-of-truth field for the chandelier trail comparison. For chandelier-trail comparisons, market-data-svc fills this with the mid (bid+ask)/2 smoothed over a 5-10s window, not the last-trade price.
+    """
+    bid: confloat(ge=0.0) | None = None
+    """
+    Live NBBO bid per contract, dollars. Source-of-truth for the watchlist-trigger premium stop/target TRIGGER: a long option is exited at the bid (the price it can actually sell into), so the -1R stop and +2R target are evaluated against this, not the smoothed mid. A bid of 0 means no live bid (unexitable except by exercise). Optional/absent for back-compat with pre-bid tick producers and histories; consumers that require it fall back to `premium` (mid) when absent and audit the degradation.
+    """
+    ask: confloat(ge=0.0) | None = None
+    """
+    Live NBBO ask per contract, dollars. Carried alongside `bid` so a consumer can compute the spread and reject a blown/illiquid book. Optional/absent for back-compat.
     """
     retrieved_at: AwareDatetime
     """

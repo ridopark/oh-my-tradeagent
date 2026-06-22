@@ -107,6 +107,8 @@ public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
     out.setSchemaVersion(1L);
     out.setContractSymbol(t.occSymbol());
     out.setPremium(t.premium());
+    out.setBid(t.bid());
+    out.setAsk(t.ask());
     out.setRetrievedAt(t.retrievedAt());
     return out;
   }

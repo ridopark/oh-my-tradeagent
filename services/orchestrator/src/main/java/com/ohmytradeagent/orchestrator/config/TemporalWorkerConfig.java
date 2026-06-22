@@ -1,5 +1,7 @@
 package com.ohmytradeagent.orchestrator.config;
 
+import com.ohmytradeagent.orchestrator.activities.AccountKillSwitchCascadeActivities;
+import com.ohmytradeagent.orchestrator.activities.AccountPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.AccountSnapshotMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
@@ -16,8 +18,10 @@ import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivitie
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyConfigUpdateActivities;
+import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
 import com.ohmytradeagent.orchestrator.activities.WatchlistMirrorActivities;
 import com.ohmytradeagent.orchestrator.activities.WatchlistTriggerActivities;
+import com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AccountSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflowImpl;
@@ -89,6 +93,9 @@ public class TemporalWorkerConfig {
       MarketCalendarActivities calendar,
       KillSwitchCascadeActivities cascade,
       DailyPnlActivities dailyPnl,
+      TenantConfigActivities tenantConfig,
+      AccountPnlActivities accountPnl,
+      AccountKillSwitchCascadeActivities accountCascade,
       LivePromotionActivities livePromotion,
       ReconciliationMetricsActivities reconciliationMetrics,
       AccountSnapshotMetricsActivities accountSnapshotMetrics,
@@ -105,6 +112,9 @@ public class TemporalWorkerConfig {
         CopytradeSignalWorkflowImpl.class,
         PositionWorkflowImpl.class,
         KillSwitchWorkflowImpl.class,
+        // Phase 6: account-level (tenant-wide) loss cap. One per tenant, started by
+        // KillSwitchBootstrapper alongside the per-(tenant,strategy) KillSwitchWorkflow.
+        AccountKillSwitchWorkflowImpl.class,
         ReconciliationWorkflowImpl.class,
         AdoptionWorkflowImpl.class,
         // Started synchronously by the tenant-dashboard BFF to read broker-account equity; the
@@ -157,6 +167,11 @@ public class TemporalWorkerConfig {
         calendar,
         cascade,
         dailyPnl,
+        // Phase 6 account-level loss cap activities (tenant-config read, tenant-wide PnL+open book,
+        // account-scoped cascade).
+        tenantConfig,
+        accountPnl,
+        accountCascade,
         livePromotion,
         reconciliationMetrics,
         accountSnapshotMetrics,

@@ -289,3 +289,19 @@ class StrategyConfig(BaseModel):
     """
     Per-tenant strategy on/off toggle (operator requirement). When false the strategy is loaded but admits no new entries. Absent/null treated as true, so existing tenants are unaffected.
     """
+    tp_ratio: Annotated[Decimal, Field(gt=0)] | None = None
+    """
+    Watchlist-trigger exit: reward:risk ratio for the premium take-profit. The first take-profit triggers when the live bid reaches entry_premium * (1 + tp_ratio * sl_pct) (= +tp_ratio*R, where R = sl_pct * entry_premium). Carried into PositionWorkflowInput.tp_ratio at handoff. Opt-in: null/absent disables the premium TP/SL/trail exit entirely, preserving the copytrade-only exit behavior. The runner's trailing leg reuses the pre-existing trail_giveback_pct field (the Phase-4 chandelier giveback) rather than re-declaring it, which is why this exit feature adds tp_ratio/sl_pct/tp_partial_fraction/no_progress_time_stop_secs but not trail_giveback_pct. PositionWorkflowImpl gates consumption behind Workflow.getVersion.
+    """
+    sl_pct: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Watchlist-trigger exit: hard stop as a fraction of entry premium. R = sl_pct * entry_premium; the -1R stop triggers when the live bid falls to entry_premium * (1 - sl_pct) and routes a MARKETABLE flatten (reason=stop_loss). Carried into PositionWorkflowInput.sl_pct. Opt-in: null/absent disables the premium TP/SL/trail exit (see tp_ratio). getVersion-gated.
+    """
+    tp_partial_fraction: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Watchlist-trigger exit: fraction of the remaining position closed when the +tp_ratio*R take-profit first triggers. The unclosed remainder moves its stop to breakeven (entry_premium) and arms the chandelier trail (trail_giveback_pct) on the runner. Carried into PositionWorkflowInput.tp_partial_fraction. Default 0.5 in PositionWorkflowImpl when null and tp_ratio is set.
+    """
+    no_progress_time_stop_secs: conint(ge=1) | None = None
+    """
+    Watchlist-trigger exit: if neither the take-profit nor the hard stop has triggered within this many seconds of the first fill, PositionWorkflow flattens the position (reason=time_stop) so a stalled breakout does not bleed theta into the -1R stop. Carried into PositionWorkflowInput.no_progress_time_stop_secs. Opt-in: null/absent disables the time stop. getVersion-gated.
+    """

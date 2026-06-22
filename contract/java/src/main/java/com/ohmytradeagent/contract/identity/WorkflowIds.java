@@ -17,6 +17,17 @@ public final class WorkflowIds {
     return tenantStrategy(tenantId, strategyId) + "/killswitch";
   }
 
+  /**
+   * Workflow ID for the {@code AccountKillSwitchWorkflow} owning a whole tenant's account-level
+   * loss cap (Phase 6). Deliberately does NOT route through {@link #tenantStrategy}: the account
+   * cap spans EVERY strategy on the tenant's shared {@code broker_target}, so it is tenant-scoped
+   * and strategy-agnostic — there is no {@code s-} segment. One per tenant, started by {@code
+   * KillSwitchBootstrapper} alongside the per-(tenant,strategy) kill switches.
+   */
+  public static String accountKillswitch(String tenantId) {
+    return "t-" + tenantId + "/account/killswitch";
+  }
+
   /** Value of the {@code TenantStrategy} custom Search Attribute. */
   public static String tenantStrategy(String tenantId, String strategyId) {
     return "t-" + tenantId + "/s-" + strategyId;

@@ -549,7 +549,9 @@ public class AlpacaMarketData implements MarketDataProvider {
       if (!bp.isNumber() || !ap.isNumber()) {
         return null;
       }
-      return new Tick(sym, midPrice(bp.decimalValue(), ap.decimalValue()), ts);
+      BigDecimal bid = bp.decimalValue();
+      BigDecimal ask = ap.decimalValue();
+      return new Tick(sym, midPrice(bid, ask), bid, ask, ts);
     }
     return null;
   }

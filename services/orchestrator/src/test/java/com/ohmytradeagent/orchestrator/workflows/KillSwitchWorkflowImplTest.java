@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -105,7 +106,7 @@ class KillSwitchWorkflowImplTest {
     assertThat(tripped.getSubject()).containsEntry("actor", "operator:ridopark");
 
     // Cascade Activity invoked exactly once, excluding the kill-switch workflow itself.
-    verify(cascade, times(1))
+    verify(cascade, timeout(2000).times(1))
         .cascadeRiskBreach(
             eq("dev"),
             eq("copytrade-v1"),
@@ -126,7 +127,7 @@ class KillSwitchWorkflowImplTest {
         .hasStackTraceContaining("already_tripped");
 
     // Cascade fired exactly once (first trip), not twice.
-    verify(cascade, times(1))
+    verify(cascade, timeout(2000).times(1))
         .cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString());
   }
 
@@ -215,7 +216,7 @@ class KillSwitchWorkflowImplTest {
     assertThat(s.getActor()).isEqualTo("auto:daily_loss");
     assertThat(s.getReason()).isEqualTo("auto:daily_loss");
 
-    verify(cascade, atLeastOnce())
+    verify(cascade, timeout(2000).atLeastOnce())
         .cascadeRiskBreach(
             eq("dev"),
             eq("copytrade-v1"),

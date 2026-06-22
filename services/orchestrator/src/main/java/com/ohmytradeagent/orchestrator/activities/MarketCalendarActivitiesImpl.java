@@ -26,8 +26,13 @@ public class MarketCalendarActivitiesImpl implements MarketCalendarActivities {
 
   @Override
   public Duration durationUntilEodEt() {
+    return durationUntilEodCloseEt(EOD_TIME);
+  }
+
+  @Override
+  public Duration durationUntilEodCloseEt(LocalTime eodEt) {
     ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
-    ZonedDateTime eod = now.with(EOD_TIME).withSecond(0).withNano(0);
+    ZonedDateTime eod = now.with(eodEt).withSecond(0).withNano(0);
     if (!now.isBefore(eod)) {
       return Duration.ZERO;
     }

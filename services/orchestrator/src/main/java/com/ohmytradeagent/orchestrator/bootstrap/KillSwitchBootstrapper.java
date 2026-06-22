@@ -1,7 +1,9 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
+import com.ohmytradeagent.contract.AccountKillSwitchWorkflowInput;
 import com.ohmytradeagent.contract.KillSwitchWorkflowInput;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflow;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
 import io.temporal.client.WorkflowClient;
@@ -10,7 +12,9 @@ import io.temporal.client.WorkflowOptions;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -49,8 +53,15 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
       log.warn("tenants dir {} not found; skipping KillSwitchWorkflow bootstrap", tenantsDir);
       return;
     }
+    Set<String> tenantIds = new LinkedHashSet<>();
     for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       startKillSwitch(ts.tenantId(), ts.strategyId());
+      tenantIds.add(ts.tenantId());
+    }
+    // Phase 6: one account-level kill switch per distinct tenant, alongside the per-strategy loop
+    // above. Inert until the tenant sets account_daily_loss_threshold in tenant.yaml.
+    for (String tenantId : tenantIds) {
+      startAccountKillSwitch(tenantId);
     }
   }
 
@@ -81,6 +92,33 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
       log.info("KillSwitchWorkflow wf_id={} already running (warm boot)", wfId);
     } catch (RuntimeException e) {
       log.error("failed to start KillSwitchWorkflow wf_id={}", wfId, e);
+    }
+  }
+
+  private void startAccountKillSwitch(String tenantId) {
+    String wfId = WorkflowIds.accountKillswitch(tenantId);
+
+    WorkflowOptions opts =
+        WorkflowOptions.newBuilder()
+            .setWorkflowId(wfId)
+            .setTaskQueue(KILLSWITCH_TASK_QUEUE)
+            .setWorkflowIdReusePolicy(
+                WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
+            .build();
+
+    AccountKillSwitchWorkflow stub =
+        workflowClient.newWorkflowStub(AccountKillSwitchWorkflow.class, opts);
+    AccountKillSwitchWorkflowInput input = new AccountKillSwitchWorkflowInput();
+    input.setSchemaVersion(1L);
+    input.setTenantId(tenantId);
+
+    try {
+      WorkflowClient.start(stub::run, input);
+      log.info("started AccountKillSwitchWorkflow wf_id={}", wfId);
+    } catch (WorkflowExecutionAlreadyStarted alreadyStarted) {
+      log.info("AccountKillSwitchWorkflow wf_id={} already running (warm boot)", wfId);
+    } catch (RuntimeException e) {
+      log.error("failed to start AccountKillSwitchWorkflow wf_id={}", wfId, e);
     }
   }
 }

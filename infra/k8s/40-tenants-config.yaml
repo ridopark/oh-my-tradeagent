@@ -128,6 +128,14 @@ data:
     watchlist_expiry_rule: NEAREST_WEEKLY
     gap_tolerance_pct: 0.005
     equity_emit_delta_pct: 0.0005
+    # Exit policy (2:1 reward:risk + trailing stop), opt-in; evaluated on the live bid, getVersion-gated.
+    sl_pct: 0.30
+    tp_ratio: 2.0
+    tp_partial_fraction: 0.5
+    trail_giveback_pct: 0.30
+    no_progress_time_stop_secs: 1500
+    force_close_eod_et: "15:30"
+    eod_force_flatten: true
     # SHIP DISABLED: enabled:false + the unconfigured stock feed are the two live-trade gates.
     enabled: false
     # Copytrade-only schema-required fields, inert here (the trigger path ignores them). The schema

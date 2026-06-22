@@ -317,6 +317,20 @@ public final class AuditEventKinds {
           "WatchlistLegArmed",
           "WatchlistLegArmRejected",
           "WatchlistLegSkipped",
+          // PositionWorkflowImpl Phase 3 + Phase 7 watchlist-trigger options EXIT kinds. All
+          // NEUTRAL
+          // observability — the exit's realized P&L still rides the existing PartialExitFilled fill
+          // events and its terminal close still reuses the Eod*/PositionClosed terminal kinds, so
+          // none of these opens or closes a POSITION lifecycle in the ledger sense. WatchlistExit-
+          // Measured (Phase 7) is the per-exit-leg payoff-measurement audit (entry/exit premium,
+          // realized_R, MFE/MAE, exit_rule, partial_fraction, hold_minutes, dte_at_exit) emitted on
+          // each leg so the realized 2:1 payoff ratio is computable from the audit log. Registered
+          // in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "WatchlistExitArmed",
+          "WatchlistExitTargetFired",
+          "WatchlistExitFeedStale",
+          "WatchlistExitBidDegraded",
+          "WatchlistExitMeasured",
           "TriggerArmed",
           "TriggerSkipped",
           "TriggerCancelled",
