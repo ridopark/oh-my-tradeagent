@@ -618,6 +618,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private BigDecimal exitBidMfe;
   private BigDecimal exitBidMae;
   private OffsetDateTime exitFirstFillAt;
+  // Most recent evaluated exit price (live bid, or mid fallback when the bid is null). Unlike
+  // lastTickPremium (only updated once the trail arms) this tracks every exit tick, so the
+  // exitProximity() query has a live price to compare against stop/target before the trail arms.
+  private BigDecimal lastBid;
 
   // Phase 4: chandelier-trail state
   private boolean trailingArmed;
@@ -1456,6 +1460,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     if (evalBid == null) {
       return; // no usable price on this tick
     }
+    lastBid = evalBid; // expose the evaluated exit price to exitProximity()
 
     // Phase 7: ratchet the BID max-favorable / max-adverse excursion over the position life
     // (premium
@@ -1633,6 +1638,28 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       return new PositionState("", 0L, null);
     }
     return new PositionState(input.getContractSymbol(), remainingQty, input.getEntryPremium());
+  }
+
+  @Override
+  public ExitProximityView exitProximity() {
+    // input may be null if the query races run() before `this.input = in` (same guard the
+    // positionState() read uses).
+    if (input == null) {
+      return new ExitProximityView(
+          "", null, null, null, null, null, null, false, null, false, null);
+    }
+    return new ExitProximityView(
+        input.getContractSymbol(),
+        input.getEntryPremium(),
+        exitStopLevel,
+        exitTargetLevel,
+        lastBid,
+        lastTickPremium,
+        peakPremium,
+        trailingArmed,
+        givebackPct,
+        exitArmed,
+        lastTickAt);
   }
 
   private void processOne(PartialExitRequest req) {

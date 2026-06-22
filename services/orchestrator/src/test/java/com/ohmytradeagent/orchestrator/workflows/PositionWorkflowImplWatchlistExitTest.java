@@ -558,6 +558,46 @@ class PositionWorkflowImplWatchlistExitTest {
     verify(exec, times(1)).placeOrder(any());
   }
 
+  // Dashboard exit-proximity query: an armed watchlist-exit position exposes entry/stop/target and
+  // the most-recent evaluated bid for the /live view, before any target/stop fires.
+  @Test
+  void exitProximity_reportsLevelsAndLastBid() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-wl-exit-proximity");
+    PositionWorkflowInput in = exitInput(5);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L, new BigDecimal("2.00"));
+
+    // A bid between stop (1.50) and target (3.00): no fire, just records lastBid.
+    stub.chandelierTick(bidTick(new BigDecimal("2.40")));
+
+    ExitProximityView view = awaitExitProximity(stub);
+    assertThat(view.contractSymbol()).isEqualTo(SYMBOL);
+    assertThat(view.entryPremium()).isEqualByComparingTo("2.00");
+    assertThat(view.stopLevel()).isEqualByComparingTo("1.50"); // 2.00*(1-0.25)
+    assertThat(view.targetLevel()).isEqualByComparingTo("3.00"); // 2.00*(1+2*0.25)
+    assertThat(view.lastBid()).isEqualByComparingTo("2.40");
+    assertThat(view.armed()).isTrue();
+    assertThat(view.trailingArmed()).isFalse();
+
+    // Drain via a full STC so the workflow terminates cleanly.
+    stub.partialExit(partialExitRequest("sig-drain", "pos-wl-exit-proximity", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-drain", 5L, new BigDecimal("2.40")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+  }
+
+  private ExitProximityView awaitExitProximity(PositionWorkflow stub) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 10_000;
+    ExitProximityView view = stub.exitProximity();
+    while (view.lastBid() == null && System.currentTimeMillis() < deadline) {
+      Thread.sleep(50);
+      view = stub.exitProximity();
+    }
+    return view;
+  }
+
   // ---------- helpers ----------
 
   private static LocalTime eq1530() {

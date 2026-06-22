@@ -120,6 +120,12 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   private boolean cancelRequested;
   private FillSignalPayload fillEvent;
 
+  // Hoisted from run() so entryProximity() can read live entry state. Rebuilt + re-seeded from
+  // carried state on every run (incl. each continue-as-new), so the query stays correct after a
+  // resume. Null only in the window before run() assigns them; the query is null-safe.
+  private EntryStateMachine machine;
+  private WatchlistTriggerPayload activePayload;
+
   @Override
   public void equityTick(EquityTick tick) {
     pendingTicks.add(tick);
@@ -136,8 +142,26 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   }
 
   @Override
+  public EntryProximityView entryProximity() {
+    // Null window: query raced run() before it assigned the machine/payload. Same guard pattern as
+    // PositionWorkflowImpl.positionState().
+    if (machine == null || activePayload == null) {
+      return new EntryProximityView("", "", null, null, null, null, "INITIALIZING");
+    }
+    return new EntryProximityView(
+        activePayload.getTicker(),
+        machine.direction().name(),
+        machine.level(),
+        machine.bandLow(),
+        machine.bandHigh(),
+        machine.prev(),
+        machine.state().name());
+  }
+
+  @Override
   public String run(WatchlistTriggerWorkflowInput input) {
     WatchlistTriggerPayload payload = input.getPayload();
+    this.activePayload = payload;
     StrategyConfig config = input.getConfig();
     this.exec = ExecActivitiesFactory.forTarget(config.getBrokerTarget().value());
     this.tradingCalendar =
@@ -148,7 +172,7 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
                 .setStartToCloseTimeout(Duration.ofSeconds(15))
                 .build());
 
-    EntryStateMachine machine =
+    machine =
         new EntryStateMachine(
             entryMode(config),
             EntryStateMachine.directionOf(payload.getDirection()),

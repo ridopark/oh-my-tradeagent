@@ -5,6 +5,7 @@ import { MobileBottomNav } from "@/components/MobileBottomNav";
 
 const LINKS = [
   { href: "/status", label: "Status" },
+  { href: "/live", label: "Live" },
   { href: "/portfolio", label: "Portfolio" },
   { href: "/positions", label: "Positions" },
   { href: "/trades", label: "Trades" },
