@@ -1,9 +1,16 @@
-# Read-only ServiceAccount used by the CI k8s drift-check workflow
+# ServiceAccount used by the CI k8s drift-check workflow
 # (.github/workflows/k8s-drift.yml). The workflow runs `kubectl diff -f
-# infra/k8s/` against the live homelab cluster from a self-hosted runner;
-# binding the runner's kubeconfig to this SA (verbs: get, list, watch only)
-# means the workflow physically cannot mutate cluster state even if the
-# diff logic were buggy.
+# infra/k8s/` against the live homelab cluster from a self-hosted runner.
+#
+# NOTE on verbs: `kubectl diff` performs a server-side DRY-RUN apply, and the
+# apiserver authorizes the underlying write verb (create/patch/update) even
+# for a dry-run — a pure get/list/watch SA gets `Forbidden ... cannot patch`
+# and the diff fails. So this SA must hold create/patch/update on the diffed
+# namespaced kinds. The dry-run never persists, so no real mutation occurs;
+# the no-mutation guarantee is now PROCEDURAL (the workflow only ever runs
+# `kubectl diff`, never `apply`) plus the k8s-drift.yml layered defenses
+# (pull_request_target + required-reviewer environment + LAN-only runner),
+# rather than RBAC-enforced read-only.
 #
 # RBAC is split into two scopes (PR #134 review — namespace-scoping):
 #
@@ -51,24 +58,24 @@ rules:
       - configmaps
       - secrets
       - services
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, create, patch, update]
   # apps: deployments + statefulsets (used by 51-orchestrator, 10-postgres, etc.)
   - apiGroups: ["apps"]
     resources:
       - deployments
       - statefulsets
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, create, patch, update]
   # batch: jobs (31-temporal-bootstrap) + cronjobs (future).
   - apiGroups: ["batch"]
     resources:
       - jobs
       - cronjobs
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, create, patch, update]
   # networking: Ingress is namespaced (54-api-gateway).
   - apiGroups: ["networking.k8s.io"]
     resources:
       - ingresses
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, create, patch, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
