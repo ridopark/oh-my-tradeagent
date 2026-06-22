@@ -459,6 +459,12 @@ class PositionWorkflowImplLegacyReplayTest {
     }
 
     @Override
+    public ExitProximityView exitProximity() {
+      return new ExitProximityView(
+          "", null, null, null, null, null, null, false, null, false, null);
+    }
+
+    @Override
     public void forceCloseValidator(ForceCloseRequest request) {}
 
     @Override

@@ -89,6 +89,22 @@ public final class EntryStateMachine {
     return prev;
   }
 
+  public Direction direction() {
+    return direction;
+  }
+
+  public BigDecimal level() {
+    return level;
+  }
+
+  public BigDecimal bandLow() {
+    return bandLow;
+  }
+
+  public BigDecimal bandHigh() {
+    return bandHigh;
+  }
+
   /** Rehydrates the machine from carried continue-as-new state. Deterministic: no clock, no RNG. */
   public void seed(State carriedState, BigDecimal carriedPrev) {
     if (carriedState != null) {

@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.EquityTick;
 import com.ohmytradeagent.contract.FillSignalPayload;
+import io.temporal.workflow.QueryMethod;
 import io.temporal.workflow.SignalMethod;
 import io.temporal.workflow.WorkflowInterface;
 import io.temporal.workflow.WorkflowMethod;
@@ -28,4 +29,11 @@ public interface WatchlistTriggerWorkflow {
   /** Broker fill for the placed entry order (delivered by the fill listener / exec sidecar). */
   @SignalMethod
   void onFill(FillSignalPayload event);
+
+  /**
+   * Dashboard entry-proximity snapshot: trigger level, band, latest underlying price, and machine
+   * state. Synchronous, non-mutating — does not append to history.
+   */
+  @QueryMethod
+  EntryProximityView entryProximity();
 }

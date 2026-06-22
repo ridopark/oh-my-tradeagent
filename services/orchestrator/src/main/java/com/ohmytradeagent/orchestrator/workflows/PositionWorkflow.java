@@ -69,6 +69,14 @@ public interface PositionWorkflow {
   PositionState positionState();
 
   /**
+   * Dashboard exit-proximity snapshot: stop/target/trail levels and the most recent evaluated bid
+   * for an armed watchlist-exit position. Synchronous, non-mutating — does not append to history.
+   * Reports {@code armed=false} with null levels on positions that never armed the watchlist exit.
+   */
+  @QueryMethod
+  ExitProximityView exitProximity();
+
+  /**
    * Phase 5 operator-initiated force-close. Validator rejects blank {@code operator_id} or {@code
    * reason}. Handler enqueues a synthetic exit directive and returns immediately (does not block on
    * broker fills). On already-closed positions ({@code remainingQty == 0}), returns {@code

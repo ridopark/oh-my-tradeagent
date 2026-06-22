@@ -1671,6 +1671,11 @@ class CopytradeSignalWorkflowImplTest {
     }
 
     @Override
+    public ExitProximityView exitProximity() {
+      return null;
+    }
+
+    @Override
     public void forceCloseValidator(ForceCloseRequest request) {}
 
     @Override

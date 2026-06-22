@@ -630,12 +630,50 @@ class WatchlistTriggerWorkflowImplTest {
     }
 
     @Override
+    public ExitProximityView exitProximity() {
+      return null;
+    }
+
+    @Override
     public void forceCloseValidator(ForceCloseRequest request) {}
 
     @Override
     public ForceCloseResult forceClose(ForceCloseRequest request) {
       return null;
     }
+  }
+
+  // Dashboard entry-proximity query: a live un-fired leg exposes its trigger, band, machine state,
+  // and most-recent underlying price for the /live view.
+  @Test
+  void entryProximity_reportsTriggerBandStateAndLastPrice() throws Exception {
+    WatchlistTriggerWorkflow wf = newStub("wl-entry-proximity");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    wf.equityTick(tick(new BigDecimal("760.50"), false)); // seed prev; no cross -> stays ARMED
+
+    EntryProximityView view = awaitEntryProximity(wf);
+    assertThat(view.ticker()).isEqualTo("NVDA");
+    assertThat(view.direction()).isEqualTo("ABOVE");
+    assertThat(view.triggerLevel()).isEqualByComparingTo("761.00");
+    assertThat(view.bandLow()).isEqualByComparingTo("757.195"); // 761*(1-0.005)
+    assertThat(view.bandHigh()).isEqualByComparingTo("764.805"); // 761*(1+0.005)
+    assertThat(view.lastPrice()).isEqualByComparingTo("760.50");
+    assertThat(view.state()).isEqualTo("ARMED");
+
+    wf.cancel();
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":cancelled");
+  }
+
+  private EntryProximityView awaitEntryProximity(WatchlistTriggerWorkflow wf) {
+    long deadline = System.currentTimeMillis() + 10_000;
+    EntryProximityView view = wf.entryProximity();
+    while (view.lastPrice() == null && System.currentTimeMillis() < deadline) {
+      sleep();
+      view = wf.entryProximity();
+    }
+    return view;
   }
 
   // ---------- helpers ----------
