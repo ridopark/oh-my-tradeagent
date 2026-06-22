@@ -61,11 +61,14 @@ jobs:
                  * Test coverage
                - Verdict: READY | NEEDS FIXES | BLOCKED
 
-            Output the review as your FINAL message. Do NOT write files and do NOT post a
-            comment yourself — the action posts your output as a single sticky comment that
-            updates in place across re-runs (use_sticky_comment below). Relying on the model
-            to echo a literal marker into a self-posted comment was unreliable (it invented a
-            new marker each run, spamming a fresh comment instead of updating one).
+            Post the review by UPDATING your existing PR tracking comment (track_progress
+            provides that comment plus the update tool). Do NOT create additional comments and
+            do NOT write files. Your updated comment IS the review the reader sees, so it must
+            contain the full Overview / Findings / Verdict above — never leave the placeholder
+            ("I'll analyze this and get back to you") or a stub. Earlier this prompt told the
+            model to "output the review as your final message and not post a comment"; that
+            fought track_progress (which requires the model to update its comment), so the run
+            ended without posting — hence this explicit instruction.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: "--allowed-tools 'Bash Read Grep'"
           # This job triggers on `pull_request` with a `prompt:`, which claude-code-action
