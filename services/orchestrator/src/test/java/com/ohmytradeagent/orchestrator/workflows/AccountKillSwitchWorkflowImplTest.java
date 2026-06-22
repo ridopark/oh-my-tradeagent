@@ -7,7 +7,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -133,7 +133,7 @@ class AccountKillSwitchWorkflowImplTest {
 
     // Account-scoped cascade invoked at least once (the heartbeat keeps ticking but `tripped`
     // short-circuits subsequent ticks, so the trip fires exactly once).
-    verify(cascade, atLeastOnce())
+    verify(cascade, timeout(2000).atLeastOnce())
         .cascadeAccountRiskBreach(
             eq("dev"), anyString(), eq("auto:account_daily_loss"), eq("auto:account_daily_loss"));
 
@@ -209,7 +209,7 @@ class AccountKillSwitchWorkflowImplTest {
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isTrue();
     assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
-    verify(cascade, atLeastOnce())
+    verify(cascade, timeout(2000).atLeastOnce())
         .cascadeAccountRiskBreach(
             eq("dev"), anyString(), eq("auto:account_mtm_unavailable"), anyString());
   }
@@ -229,7 +229,7 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(state.getTripped()).isTrue();
     assertThat(state.getReason()).isEqualTo("manual:operator_initiated");
 
-    verify(cascade, times(1))
+    verify(cascade, timeout(2000).times(1))
         .cascadeAccountRiskBreach(
             eq("dev"),
             eq("t-dev/account/killswitch-trip"),
@@ -248,7 +248,7 @@ class AccountKillSwitchWorkflowImplTest {
         .isInstanceOf(WorkflowUpdateException.class)
         .hasStackTraceContaining("already_tripped");
 
-    verify(cascade, times(1))
+    verify(cascade, timeout(2000).times(1))
         .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
   }
 
