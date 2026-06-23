@@ -57,8 +57,9 @@ import java.util.Set;
 /**
  * Child workflow: one watchlist-trigger leg, fires at most once.
  *
- * <p>Net-new workflow type, so it carries NO {@code Workflow.getVersion} gates. Determinism: the
- * body reads no wall clock and no RNG except via {@code Workflow.*} helpers and Activity results.
+ * <p>Carries a single {@code Workflow.getVersion} gate ({@code watchlist-equity-resubscribe}) for
+ * the pre-open equity-subscribe deferral; otherwise net-new. Determinism: the body reads no wall
+ * clock and no RNG except via {@code Workflow.*} helpers and Activity results.
  *
  * <p>Loop discipline mirrors {@code PositionWorkflowImpl}: the {@code equityTick}/{@code cancel}
  * signal handlers only enqueue/flag; one main loop {@code Workflow.await}s the predicate union and
@@ -85,6 +86,11 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   private static final String KIND_FEED_STALE = "TriggerFeedStale";
   private static final String KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE =
       "TriggerSubscriptionUnavailable";
+  private static final String KIND_TRIGGER_SUBSCRIPTION_DEFERRED = "TriggerSubscriptionDeferred";
+
+  // getVersion change id for the pre-open equity-subscribe deferral. In-flight/old legs replay on
+  // DEFAULT_VERSION (no new timer command); new legs get the deferred re-subscribe.
+  private static final String VERSION_EQUITY_RESUBSCRIBE = "watchlist-equity-resubscribe";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -204,16 +210,57 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
       // (the fail-safe is the EOD cancel), but the dead-feed condition is now observable.
       SubscribeEquityResult subResult = subscribeAsync(payload, config).get();
       if (subResult == null || subResult.getStatus() != SubscribeEquityResult.Status.SUBSCRIBED) {
-        logAudit(
-            payload,
-            KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE,
-            subject(
-                "ticker",
-                payload.getTicker(),
-                "status",
-                subResult == null ? "null" : subResult.getStatus().value(),
-                "detail",
-                subResult == null ? "" : subResult.getError()));
+        boolean gated =
+            subResult != null && subResult.getStatus() == SubscribeEquityResult.Status.GATED;
+        int resubVersion =
+            Workflow.getVersion(VERSION_EQUITY_RESUBSCRIBE, Workflow.DEFAULT_VERSION, 1);
+        Duration untilOpen = gated ? calendar.durationUntilRthOpenEt() : null;
+        if (resubVersion >= 1
+            && gated
+            && untilOpen != null
+            && !untilOpen.isZero()
+            && !untilOpen.isNegative()) {
+          // Armed PRE-OPEN: SubscribeEquityActivity gates equity subscriptions to RTH, so the leg
+          // would otherwise sit feedless (and unfireable) until EOD. Defer and re-attach the feed
+          // at
+          // the open in a side coroutine (same pattern as the EOD timer below); the main loop keeps
+          // awaiting ticks, which start flowing once the retry subscribes at 09:30 ET.
+          logAudit(
+              payload,
+              KIND_TRIGGER_SUBSCRIPTION_DEFERRED,
+              subject("ticker", payload.getTicker(), "defer_secs", untilOpen.toSeconds()));
+          final Duration deferUntilOpen = untilOpen;
+          Async.procedure(
+              () -> {
+                Workflow.newTimer(deferUntilOpen).get();
+                SubscribeEquityResult retry = subscribeAsync(payload, config).get();
+                if (retry == null || retry.getStatus() != SubscribeEquityResult.Status.SUBSCRIBED) {
+                  logAudit(
+                      payload,
+                      KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE,
+                      subject(
+                          "ticker",
+                          payload.getTicker(),
+                          "status",
+                          retry == null ? "null" : retry.getStatus().value(),
+                          "detail",
+                          retry == null ? "" : retry.getError(),
+                          "phase",
+                          "rth_open_retry"));
+                }
+              });
+        } else {
+          logAudit(
+              payload,
+              KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE,
+              subject(
+                  "ticker",
+                  payload.getTicker(),
+                  "status",
+                  subResult == null ? "null" : subResult.getStatus().value(),
+                  "detail",
+                  subResult == null ? "" : subResult.getError()));
+        }
       }
     }
 

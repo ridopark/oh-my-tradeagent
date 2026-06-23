@@ -79,6 +79,14 @@ public interface MarketCalendarActivities {
    */
   boolean isMarketOpen();
 
+  /**
+   * Duration from "now" (Activity wall clock) to today's 09:30 ET regular-trading-hours open; ZERO
+   * if already at/after the open or on a weekend. Lets a watchlist leg that armed pre-open defer
+   * its equity-feed subscription until the feed will actually accept it (SubscribeEquityActivity
+   * gates subscriptions to RTH), instead of giving up for the whole session.
+   */
+  Duration durationUntilRthOpenEt();
+
   /** Today's date in America/New_York. */
   LocalDate todayEt();
 }

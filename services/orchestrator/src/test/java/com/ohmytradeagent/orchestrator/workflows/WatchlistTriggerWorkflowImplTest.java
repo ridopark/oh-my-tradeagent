@@ -643,6 +643,36 @@ class WatchlistTriggerWorkflowImplTest {
     }
   }
 
+  // Pre-open arm: the first equity subscribe (before 09:30 ET) is GATED; the leg must NOT give up.
+  // It defers and re-subscribes at the RTH open, then a live cross still fires. Regression for the
+  // "armed 6 min pre-open -> feedless + unfireable all day" incident.
+  @Test
+  void armedPreOpen_gatedThenResubscribesAtRthOpen_stillFires() throws Exception {
+    when(subscribeEquity.subscribeEquity(any()))
+        .thenReturn(subscribeResult(SubscribeEquityResult.Status.GATED))
+        .thenReturn(subscribeResult(SubscribeEquityResult.Status.SUBSCRIBED));
+    when(calendar.durationUntilRthOpenEt()).thenReturn(Duration.ofMinutes(6));
+
+    WatchlistTriggerWorkflow wf = newStub("wl-preopen-defer");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    // Advance past the 6-min defer so the RTH-open re-subscribe fires; EOD (8h default) is far off.
+    env.sleep(Duration.ofMinutes(7));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false)); // seed below T
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // live cross into band -> FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("3.15")));
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+    verify(exec, times(1)).placeOrder(any());
+    // Subscribed twice: the initial GATED attempt + the deferred RTH-open retry.
+    verify(subscribeEquity, times(2)).subscribeEquity(any());
+    AuditEvent deferred = captureKind("TriggerSubscriptionDeferred");
+    assertThat(deferred.getSubject()).containsEntry("ticker", "NVDA");
+  }
+
   // Dashboard entry-proximity query: a live un-fired leg exposes its trigger, band, machine state,
   // and most-recent underlying price for the /live view.
   @Test
