@@ -138,11 +138,22 @@ function PositionsTable({ rows }: { rows: PositionProximity[] }) {
         <p className="text-sm text-slate-500">No armed positions.</p>
       ) : (
         <Table
-          head={["Contract", "Bid", "Stop", "Target", "To stop", "To target", "Peak", "Trail"]}
+          head={[
+            "Contract",
+            "Stock",
+            "Bid",
+            "Stop",
+            "Target",
+            "To stop",
+            "To target",
+            "Peak",
+            "Trail",
+          ]}
         >
           {rows.map((r) => (
             <tr key={r.workflow_id} className="border-t border-slate-800">
               <Td>{r.contract_symbol}</Td>
+              <Td>{num(r.underlying_price)}</Td>
               <Td>{num(r.last_bid)}</Td>
               <Td>{num(r.stop_level)}</Td>
               <Td>{num(r.target_level)}</Td>

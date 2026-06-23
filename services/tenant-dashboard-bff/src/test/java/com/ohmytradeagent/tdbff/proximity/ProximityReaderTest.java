@@ -138,6 +138,22 @@ class ProximityReaderTest {
     assertThat(reader.positions("acme")).isEmpty();
   }
 
+  // ---------------- underlyingTicker (OCC root extraction) ----------------
+
+  @Test
+  void underlyingTicker_parsesPaddedAndCompactOcc() {
+    assertThat(ProximityReader.underlyingTicker("NVDA  260516C00140000")).isEqualTo("NVDA");
+    assertThat(ProximityReader.underlyingTicker("NVDA260516C00140000")).isEqualTo("NVDA");
+    assertThat(ProximityReader.underlyingTicker("SPY   260609P00731000")).isEqualTo("SPY");
+  }
+
+  @Test
+  void underlyingTicker_nullOrTooShort_isNull() {
+    assertThat(ProximityReader.underlyingTicker(null)).isNull();
+    assertThat(ProximityReader.underlyingTicker("")).isNull();
+    assertThat(ProximityReader.underlyingTicker("260516C00140000")).isNull(); // root empty
+  }
+
   // ---------------- helpers ----------------
 
   private static ExitProximityView armedExit(

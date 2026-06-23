@@ -1,10 +1,12 @@
 package com.ohmytradeagent.tdbff.web;
 
 import com.ohmytradeagent.tdbff.proximity.MarketDataLivenessClient;
+import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient;
 import com.ohmytradeagent.tdbff.proximity.ProximityReader;
 import com.ohmytradeagent.tdbff.proximity.ProximityReader.PositionProximity;
 import com.ohmytradeagent.tdbff.proximity.ProximityReader.WatchlistProximity;
 import jakarta.servlet.http.HttpServletRequest;
+import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,12 +25,17 @@ public class ProximityController {
 
   private final ProximityReader reader;
   private final MarketDataLivenessClient liveness;
+  private final MarketDataQuoteClient quotes;
   private final TenantContext ctx;
 
   public ProximityController(
-      ProximityReader reader, MarketDataLivenessClient liveness, TenantContext ctx) {
+      ProximityReader reader,
+      MarketDataLivenessClient liveness,
+      MarketDataQuoteClient quotes,
+      TenantContext ctx) {
     this.reader = reader;
     this.liveness = liveness;
+    this.quotes = quotes;
     this.ctx = ctx;
   }
 
@@ -37,8 +44,18 @@ public class ProximityController {
     String tenant = ctx.tenantId(req);
     List<Map<String, Object>> watchlist =
         reader.watchlist(tenant).stream().map(ProximityController::watchlistItem).toList();
+    List<PositionProximity> positionProx = reader.positions(tenant);
+    // Underlying spot per position, deduped so each distinct ticker is fetched once. Fail-soft: a
+    // null price (market-data unreachable / no snapshot) just renders "-".
+    Map<String, BigDecimal> underlyingSpot = new LinkedHashMap<>();
+    for (PositionProximity p : positionProx) {
+      String ticker = ProximityReader.underlyingTicker(p.contractSymbol());
+      if (ticker != null) {
+        underlyingSpot.computeIfAbsent(ticker, quotes::equityPrice);
+      }
+    }
     List<Map<String, Object>> positions =
-        reader.positions(tenant).stream().map(ProximityController::positionItem).toList();
+        positionProx.stream().map(p -> positionItem(p, underlyingSpot)).toList();
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("tenant_id", tenant);
     body.put("liveness", liveness.feedHealth());
@@ -62,11 +79,15 @@ public class ProximityController {
     return m;
   }
 
-  private static Map<String, Object> positionItem(PositionProximity p) {
+  private static Map<String, Object> positionItem(
+      PositionProximity p, Map<String, BigDecimal> underlyingSpot) {
+    String ticker = ProximityReader.underlyingTicker(p.contractSymbol());
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("workflow_id", p.workflowId());
     m.put("strategy_id", p.strategyId());
     m.put("contract_symbol", p.contractSymbol());
+    m.put("underlying", ticker);
+    m.put("underlying_price", ticker == null ? null : underlyingSpot.get(ticker));
     m.put("entry_premium", p.entryPremium());
     m.put("stop_level", p.stopLevel());
     m.put("target_level", p.targetLevel());

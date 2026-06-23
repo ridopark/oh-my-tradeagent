@@ -1,5 +1,6 @@
 package com.ohmytradeagent.marketdata.provider;
 
+import java.math.BigDecimal;
 import java.util.Optional;
 import java.util.function.Consumer;
 
@@ -27,6 +28,14 @@ public interface MarketDataProvider {
    * the provider's snapshot is unavailable or stale.
    */
   Optional<Quote> snapshotQuote(String occSymbol);
+
+  /**
+   * One-shot REST last-trade price for an underlying equity {@code ticker} (e.g. {@code NVDA}), or
+   * {@link Optional#empty()} when the snapshot is unavailable. Display-only (the dashboard /live
+   * underlying spot); never drives a trigger, so it is NOT subject to the RTH/feed-entitlement gate
+   * that {@link #subscribeEquity} enforces.
+   */
+  Optional<BigDecimal> snapshotEquityPrice(String ticker);
 
   /**
    * Opens a push subscription for {@code occSymbol}. Each premium tick from the provider feed is

@@ -202,6 +202,36 @@ public class AlpacaMarketData implements MarketDataProvider {
   }
 
   @Override
+  public Optional<BigDecimal> snapshotEquityPrice(String ticker) {
+    // Last-trade price from Alpaca's stock snapshot. Display-only (dashboard underlying spot); not
+    // a
+    // trigger input, so unlike subscribeEquity it has no RTH/entitlement gate. Fail-open: any
+    // error/missing field -> empty so the dashboard shows "-" rather than blocking the response.
+    try {
+      JsonNode body =
+          rest.get().uri("/v2/stocks/{s}/snapshot", ticker).retrieve().body(JsonNode.class);
+      if (body == null) {
+        return Optional.empty();
+      }
+      JsonNode p = body.path("latestTrade").path("p");
+      if (!p.isNumber()) {
+        return Optional.empty();
+      }
+      return Optional.of(p.decimalValue());
+    } catch (HttpStatusCodeException e) {
+      log.warn(
+          "Alpaca snapshotEquityPrice failed for {}: status={} body={}",
+          ticker,
+          e.getStatusCode().value(),
+          e.getResponseBodyAsString());
+      return Optional.empty();
+    } catch (RuntimeException e) {
+      log.warn("Alpaca snapshotEquityPrice failed for {}: {}", ticker, e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  @Override
   public Subscription subscribePremium(String occSymbol, Consumer<Tick> onTick) {
     List<Consumer<Tick>> listeners =
         bySymbol.computeIfAbsent(occSymbol, k -> new CopyOnWriteArrayList<>());

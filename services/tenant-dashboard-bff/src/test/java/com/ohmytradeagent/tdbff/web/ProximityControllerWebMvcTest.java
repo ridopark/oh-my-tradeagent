@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.ohmytradeagent.tdbff.proximity.MarketDataLivenessClient;
+import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient;
 import com.ohmytradeagent.tdbff.proximity.ProximityReader;
 import com.ohmytradeagent.tdbff.proximity.ProximityReader.PositionProximity;
 import com.ohmytradeagent.tdbff.proximity.ProximityReader.WatchlistProximity;
@@ -29,6 +30,7 @@ class ProximityControllerWebMvcTest {
   @Autowired private MockMvc mvc;
   @MockitoBean private ProximityReader reader;
   @MockitoBean private MarketDataLivenessClient liveness;
+  @MockitoBean private MarketDataQuoteClient quotes;
 
   @Test
   void missingTenantHeaderIs401() throws Exception {
@@ -40,6 +42,7 @@ class ProximityControllerWebMvcTest {
   @Test
   void returnsTenantScopedProximityWithLiveness() throws Exception {
     when(liveness.feedHealth()).thenReturn(Map.of("status", "ok"));
+    when(quotes.equityPrice("NVDA")).thenReturn(new BigDecimal("142.30"));
     when(reader.watchlist("acme"))
         .thenReturn(
             List.of(
@@ -77,6 +80,8 @@ class ProximityControllerWebMvcTest {
         .andExpect(jsonPath("$.watchlist[0].ticker").value("NVDA"))
         .andExpect(jsonPath("$.watchlist[0].distance_to_trigger_pct").value(0.0657))
         .andExpect(jsonPath("$.positions[0].distance_to_stop_pct").value(37.5))
-        .andExpect(jsonPath("$.positions[0].distance_to_target_pct").value(25.0));
+        .andExpect(jsonPath("$.positions[0].distance_to_target_pct").value(25.0))
+        .andExpect(jsonPath("$.positions[0].underlying").value("NVDA"))
+        .andExpect(jsonPath("$.positions[0].underlying_price").value(142.30));
   }
 }

@@ -41,9 +41,9 @@ management:
   endpoints:
     web:
       exposure:
-        # feedhealth: custom endpoint (FeedHealthEndpoint) the tenant-dashboard BFF reads for
-        # per-feed WS liveness (connected + last-tick age).
-        include: health,info,prometheus,feedhealth
+        # feedhealth: per-feed WS liveness (FeedHealthEndpoint). equityquote: underlying last-trade
+        # price by ticker (EquityQuoteEndpoint). Both read by the tenant-dashboard BFF for /live.
+        include: health,info,prometheus,feedhealth,equityquote
   endpoint:
     health:
       probes:
