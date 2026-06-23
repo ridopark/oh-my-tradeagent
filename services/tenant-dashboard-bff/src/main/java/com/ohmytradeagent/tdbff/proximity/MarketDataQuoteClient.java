@@ -40,8 +40,7 @@ public class MarketDataQuoteClient {
   /** Underlying last-trade price for {@code ticker}, or null when unavailable. */
   public BigDecimal equityPrice(String ticker) {
     try {
-      Map<String, Object> body =
-          rest.get().uri("/actuator/equityquote/{t}", ticker).retrieve().body(MAP_TYPE);
+      Map<String, Object> body = rest.get().uri("/md/equity/{t}", ticker).retrieve().body(MAP_TYPE);
       Object price = body == null ? null : body.get("price");
       return price == null ? null : new BigDecimal(price.toString());
     } catch (RuntimeException e) {
@@ -58,7 +57,7 @@ public class MarketDataQuoteClient {
     String compact = occ.replace(" ", "");
     try {
       Map<String, Object> body =
-          rest.get().uri("/actuator/optionquote/{o}", compact).retrieve().body(MAP_TYPE);
+          rest.get().uri("/md/option/{o}", compact).retrieve().body(MAP_TYPE);
       Object mid = body == null ? null : body.get("mid");
       return mid == null ? null : new BigDecimal(mid.toString());
     } catch (RuntimeException e) {
