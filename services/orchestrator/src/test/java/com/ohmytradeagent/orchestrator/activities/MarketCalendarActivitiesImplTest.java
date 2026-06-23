@@ -243,6 +243,35 @@ class MarketCalendarActivitiesImplTest {
   }
 
   @Test
+  void rthOpen_weekdayPreOpen_returnsPositiveDuration() {
+    // The incident: a leg armed at 09:24 ET, 6 minutes before the 09:30 open.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 9, 24));
+
+    assertThat(svc.durationUntilRthOpenEt()).isEqualTo(Duration.ofMinutes(6));
+  }
+
+  @Test
+  void rthOpen_weekdayAtOrAfterOpen_returnsZero() {
+    assertThat(
+            new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 9, 30))
+                .durationUntilRthOpenEt())
+        .isEqualTo(Duration.ZERO);
+    assertThat(
+            new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 12, 0))
+                .durationUntilRthOpenEt())
+        .isEqualTo(Duration.ZERO);
+  }
+
+  @Test
+  void rthOpen_weekend_returnsZero() {
+    // 2026-05-16 is a Saturday: no defer window.
+    assertThat(
+            new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 16, 8, 0)).durationUntilRthOpenEt())
+        .isEqualTo(Duration.ZERO);
+  }
+
+  @Test
   void todayEt_returnsLocalDateInEt() {
     // 2026-05-14 21:00 UTC is 2026-05-14 17:00 ET (DST in effect: UTC-4)
     MarketCalendarActivitiesImpl svc =

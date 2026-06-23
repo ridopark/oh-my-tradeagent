@@ -347,6 +347,13 @@ public final class AuditEventKinds {
           // FAILED = source error). Loud observability for the silent-dead-feed condition (no ticks
           // will arrive); the leg still proceeds to the EOD cancel fail-safe. Neutral event.
           "TriggerSubscriptionUnavailable",
+          // Emitted by WatchlistTriggerWorkflowImpl when a leg armed PRE-OPEN:
+          // SubscribeEquityActivity
+          // gates equity subscriptions to RTH, so the leg defers its subscription and re-attaches
+          // the
+          // feed at the 09:30 ET open (instead of giving up for the whole session). Neutral
+          // observability event -- registered in ALL_KINDS only.
+          "TriggerSubscriptionDeferred",
           // TenantConfigChangedEmitter (no KIND_ constant; literal string in the emitter)
           "TenantConfigChanged");
 }

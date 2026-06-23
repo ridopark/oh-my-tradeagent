@@ -83,6 +83,20 @@ public class MarketCalendarActivitiesImpl implements MarketCalendarActivities {
   }
 
   @Override
+  public Duration durationUntilRthOpenEt() {
+    ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
+    DayOfWeek dow = now.getDayOfWeek();
+    if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) {
+      return Duration.ZERO;
+    }
+    ZonedDateTime open = now.with(MARKET_OPEN_TIME).withSecond(0).withNano(0);
+    if (!now.isBefore(open)) {
+      return Duration.ZERO;
+    }
+    return Duration.between(now, open);
+  }
+
+  @Override
   public boolean isMarketOpen() {
     ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
     DayOfWeek dow = now.getDayOfWeek();
