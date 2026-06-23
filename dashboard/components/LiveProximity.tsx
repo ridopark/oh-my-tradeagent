@@ -108,12 +108,15 @@ function WatchlistTable({ rows }: { rows: WatchlistProximity[] }) {
       {rows.length === 0 ? (
         <p className="text-sm text-slate-500">No live watchlist legs.</p>
       ) : (
-        <Table head={["Ticker", "Dir", "Last", "Trigger", "Band", "To trigger", "State"]}>
+        <Table
+          head={["Ticker", "Dir", "Stock", "Opt prem", "Trigger", "Band", "To trigger", "State"]}
+        >
           {rows.map((r) => (
             <tr key={r.workflow_id} className="border-t border-slate-800">
               <Td>{r.ticker}</Td>
               <Td>{r.direction}</Td>
               <Td>{num(r.last_price)}</Td>
+              <Td>{num(r.option_premium)}</Td>
               <Td>{num(r.trigger_level)}</Td>
               <Td>
                 {num(r.band_low)} - {num(r.band_high)}
@@ -138,11 +141,22 @@ function PositionsTable({ rows }: { rows: PositionProximity[] }) {
         <p className="text-sm text-slate-500">No armed positions.</p>
       ) : (
         <Table
-          head={["Contract", "Bid", "Stop", "Target", "To stop", "To target", "Peak", "Trail"]}
+          head={[
+            "Contract",
+            "Stock",
+            "Bid",
+            "Stop",
+            "Target",
+            "To stop",
+            "To target",
+            "Peak",
+            "Trail",
+          ]}
         >
           {rows.map((r) => (
             <tr key={r.workflow_id} className="border-t border-slate-800">
               <Td>{r.contract_symbol}</Td>
+              <Td>{num(r.underlying_price)}</Td>
               <Td>{num(r.last_bid)}</Td>
               <Td>{num(r.stop_level)}</Td>
               <Td>{num(r.target_level)}</Td>

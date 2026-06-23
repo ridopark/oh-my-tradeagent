@@ -42,6 +42,13 @@ public class InMemoryMarketData implements MarketDataProvider {
   }
 
   @Override
+  public Optional<BigDecimal> snapshotEquityPrice(String ticker) {
+    // No backing feed in the in-memory provider — empty so the dashboard renders "-" rather than a
+    // synthetic price.
+    return Optional.empty();
+  }
+
+  @Override
   public Subscription subscribePremium(String occSymbol, Consumer<Tick> onTick) {
     String id = UUID.randomUUID().toString();
     bySymbol

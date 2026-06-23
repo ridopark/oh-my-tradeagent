@@ -115,7 +115,8 @@ public class ProximityReader {
           v.bandHigh(),
           v.lastPrice(),
           v.state(),
-          distanceToTrigger(v));
+          distanceToTrigger(v),
+          v.optionSymbol());
     } catch (RuntimeException e) {
       log.warn(
           "entryProximity query failed wf={} strategy={} err={}", wfId, strategyId, e.getMessage());
@@ -169,6 +170,25 @@ public class ProximityReader {
     return (a == null || b == null) ? null : a.subtract(b);
   }
 
+  /**
+   * Underlying root from an OCC option symbol (e.g. {@code NVDA 260516C00140000} or compact {@code
+   * NVDA260516C00140000} -> {@code NVDA}). The OCC tail is fixed-width:
+   * YYMMDD(6)+right(1)+strike(8) = 15 chars; the root is whatever precedes it (spaces stripped).
+   * Returns null on a too-short / unparseable symbol so the caller skips the underlying-price
+   * lookup.
+   */
+  public static String underlyingTicker(String occ) {
+    if (occ == null) {
+      return null;
+    }
+    String compact = occ.replace(" ", "");
+    if (compact.length() <= 15) {
+      return null;
+    }
+    String root = compact.substring(0, compact.length() - 15);
+    return root.isBlank() ? null : root;
+  }
+
   /** {@code numerator / denominator * 100}, rounded; null if either operand is null or denom 0. */
   static Double pct(BigDecimal numerator, BigDecimal denominator) {
     if (numerator == null || denominator == null || denominator.signum() == 0) {
@@ -192,7 +212,8 @@ public class ProximityReader {
       BigDecimal bandHigh,
       BigDecimal lastPrice,
       String state,
-      Double distanceToTriggerPct) {}
+      Double distanceToTriggerPct,
+      String optionSymbol) {}
 
   /** One armed position's exit proximity. */
   public record PositionProximity(
@@ -220,7 +241,8 @@ public class ProximityReader {
       BigDecimal bandLow,
       BigDecimal bandHigh,
       BigDecimal lastPrice,
-      String state) {}
+      String state,
+      String optionSymbol) {}
 
   /** Transport mirror of the orchestrator's {@code ExitProximityView} query result. */
   public record ExitProximityView(

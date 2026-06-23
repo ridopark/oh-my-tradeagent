@@ -391,6 +391,11 @@ class SubscribeEquityActivityImplTest {
     }
 
     @Override
+    public java.util.Optional<BigDecimal> snapshotEquityPrice(String ticker) {
+      return java.util.Optional.empty();
+    }
+
+    @Override
     public com.ohmytradeagent.marketdata.provider.Subscription subscribePremium(
         String occSymbol,
         java.util.function.Consumer<com.ohmytradeagent.marketdata.provider.Tick> onTick) {
@@ -457,6 +462,11 @@ class SubscribeEquityActivityImplTest {
     @Override
     public java.util.Optional<com.ohmytradeagent.marketdata.provider.Quote> snapshotQuote(
         String occSymbol) {
+      return java.util.Optional.empty();
+    }
+
+    @Override
+    public java.util.Optional<BigDecimal> snapshotEquityPrice(String ticker) {
       return java.util.Optional.empty();
     }
 

@@ -57,9 +57,10 @@ import java.util.Set;
 /**
  * Child workflow: one watchlist-trigger leg, fires at most once.
  *
- * <p>Carries a single {@code Workflow.getVersion} gate ({@code watchlist-equity-resubscribe}) for
- * the pre-open equity-subscribe deferral; otherwise net-new. Determinism: the body reads no wall
- * clock and no RNG except via {@code Workflow.*} helpers and Activity results.
+ * <p>Carries {@code Workflow.getVersion} gates ({@code watchlist-equity-resubscribe} for the
+ * pre-open equity-subscribe deferral; {@code watchlist-arm-occ-resolve} for the display-only OCC
+ * resolution at arm); otherwise net-new. Determinism: the body reads no wall clock and no RNG
+ * except via {@code Workflow.*} helpers and Activity results.
  *
  * <p>Loop discipline mirrors {@code PositionWorkflowImpl}: the {@code equityTick}/{@code cancel}
  * signal handlers only enqueue/flag; one main loop {@code Workflow.await}s the predicate union and
@@ -91,6 +92,8 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   // getVersion change id for the pre-open equity-subscribe deferral. In-flight/old legs replay on
   // DEFAULT_VERSION (no new timer command); new legs get the deferred re-subscribe.
   private static final String VERSION_EQUITY_RESUBSCRIBE = "watchlist-equity-resubscribe";
+  // getVersion change id for resolving the leg's OCC at arm (display-only, for entryProximity).
+  private static final String VERSION_ARM_OCC_RESOLVE = "watchlist-arm-occ-resolve";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -131,6 +134,10 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   // resume. Null only in the window before run() assigns them; the query is null-safe.
   private EntryStateMachine machine;
   private WatchlistTriggerPayload activePayload;
+  // OCC the leg would buy, resolved at arm (display-only, for entryProximity's indicative option
+  // premium). Null until resolved / on a resolution failure. Re-derived on each run from the same
+  // deterministic inputs, so it stays correct across continue-as-new.
+  private String resolvedOcc;
 
   @Override
   public void equityTick(EquityTick tick) {
@@ -152,7 +159,7 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     // Null window: query raced run() before it assigned the machine/payload. Same guard pattern as
     // PositionWorkflowImpl.positionState().
     if (machine == null || activePayload == null) {
-      return new EntryProximityView("", "", null, null, null, null, "INITIALIZING");
+      return new EntryProximityView("", "", null, null, null, null, "INITIALIZING", null);
     }
     return new EntryProximityView(
         activePayload.getTicker(),
@@ -161,7 +168,8 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
         machine.bandLow(),
         machine.bandHigh(),
         machine.prev(),
-        machine.state().name());
+        machine.state().name(),
+        resolvedOcc);
   }
 
   @Override
@@ -185,6 +193,30 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
             payload.getTrigger(),
             gapTolerance(config));
     machine.seed(input.getCarriedState(), input.getCarriedPrev());
+
+    // Resolve the OCC the leg would buy (the same resolution fire() uses) so entryProximity can
+    // show
+    // an indicative option premium for the un-fired leg. Display-only and best-effort: a resolution
+    // failure leaves resolvedOcc null (the dashboard shows "-"); it never blocks arming or changes
+    // the fire path (which re-resolves independently). Runs every run (incl. continue-as-new) from
+    // the same deterministic inputs. getVersion-gated so in-flight/old legs replay unchanged.
+    if (Workflow.getVersion(VERSION_ARM_OCC_RESOLVE, Workflow.DEFAULT_VERSION, 1) >= 1) {
+      try {
+        LocalDate expiry = resolveExpiry(payload, config);
+        ContractResolveResult resolved =
+            contract.resolve(
+                new ContractResolveInput(
+                    payload.getTenantId(),
+                    payload.getTicker(),
+                    expiry,
+                    payload.getStrike(),
+                    payload.getRight().value()));
+        resolvedOcc = resolved.optionSymbol();
+      } catch (RuntimeException e) {
+        // Best-effort display resolution: leave resolvedOcc null on any failure.
+        resolvedOcc = null;
+      }
+    }
 
     // Only audit + (re)subscribe on the first run, not on each continue-as-new resumption. On a
     // resumed run the existing subscription (keyed to the SAME workflow id) keeps signalling ticks
