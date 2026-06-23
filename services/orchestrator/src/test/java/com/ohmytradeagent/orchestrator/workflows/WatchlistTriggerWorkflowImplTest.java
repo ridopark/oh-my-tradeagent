@@ -690,6 +690,8 @@ class WatchlistTriggerWorkflowImplTest {
     assertThat(view.bandHigh()).isEqualByComparingTo("764.805"); // 761*(1+0.005)
     assertThat(view.lastPrice()).isEqualByComparingTo("760.50");
     assertThat(view.state()).isEqualTo("ARMED");
+    // OCC resolved at arm (same resolution fire() uses), for the dashboard's indicative premium.
+    assertThat(view.optionSymbol()).isEqualTo(OCC);
 
     wf.cancel();
     String result = WorkflowStub.fromTyped(wf).getResult(String.class);

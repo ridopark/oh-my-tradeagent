@@ -42,8 +42,17 @@ public class ProximityController {
   @GetMapping
   public ResponseEntity<Map<String, Object>> get(HttpServletRequest req) {
     String tenant = ctx.tenantId(req);
+    List<WatchlistProximity> watchProx = reader.watchlist(tenant);
+    // Indicative option premium per leg's resolved OCC, deduped so each OCC is fetched once.
+    // Fail-soft: a null premium (market-data unreachable / OCC unresolved) renders "-".
+    Map<String, BigDecimal> optionPremium = new LinkedHashMap<>();
+    for (WatchlistProximity w : watchProx) {
+      if (w.optionSymbol() != null && !w.optionSymbol().isBlank()) {
+        optionPremium.computeIfAbsent(w.optionSymbol(), quotes::optionPremium);
+      }
+    }
     List<Map<String, Object>> watchlist =
-        reader.watchlist(tenant).stream().map(ProximityController::watchlistItem).toList();
+        watchProx.stream().map(w -> watchlistItem(w, optionPremium)).toList();
     List<PositionProximity> positionProx = reader.positions(tenant);
     // Underlying spot per position, deduped so each distinct ticker is fetched once. Fail-soft: a
     // null price (market-data unreachable / no snapshot) just renders "-".
@@ -64,7 +73,8 @@ public class ProximityController {
     return ResponseEntity.ok(body);
   }
 
-  private static Map<String, Object> watchlistItem(WatchlistProximity w) {
+  private static Map<String, Object> watchlistItem(
+      WatchlistProximity w, Map<String, BigDecimal> optionPremium) {
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("workflow_id", w.workflowId());
     m.put("strategy_id", w.strategyId());
@@ -76,6 +86,8 @@ public class ProximityController {
     m.put("last_price", w.lastPrice());
     m.put("state", w.state());
     m.put("distance_to_trigger_pct", w.distanceToTriggerPct());
+    m.put("option_symbol", w.optionSymbol());
+    m.put("option_premium", w.optionSymbol() == null ? null : optionPremium.get(w.optionSymbol()));
     return m;
   }
 

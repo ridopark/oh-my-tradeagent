@@ -165,6 +165,8 @@ export interface WatchlistProximity {
   last_price: string | number | null;
   state: string;
   distance_to_trigger_pct: number | null;
+  option_symbol: string | null;
+  option_premium: string | number | null;
 }
 export interface PositionProximity {
   workflow_id: string;

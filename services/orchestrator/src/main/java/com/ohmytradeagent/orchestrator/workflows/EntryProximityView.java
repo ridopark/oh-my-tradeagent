@@ -21,6 +21,8 @@ import java.math.BigDecimal;
  * @param lastPrice most recent non-stale underlying price observed (null before the first tick)
  * @param state machine state: {@code ARMED} | {@code BROKEN_OUT} | {@code FIRED} | {@code SKIPPED}
  *     | {@code INITIALIZING}
+ * @param optionSymbol OCC the leg would buy, resolved at arm (null until resolved / on failure) so
+ *     the dashboard can show an indicative option premium for the un-fired leg
  */
 public record EntryProximityView(
     String ticker,
@@ -29,4 +31,5 @@ public record EntryProximityView(
     BigDecimal bandLow,
     BigDecimal bandHigh,
     BigDecimal lastPrice,
-    String state) {}
+    String state,
+    String optionSymbol) {}

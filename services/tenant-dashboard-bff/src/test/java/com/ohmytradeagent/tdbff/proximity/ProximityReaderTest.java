@@ -42,7 +42,8 @@ class ProximityReaderTest {
             new BigDecimal("757.195"),
             new BigDecimal("764.805"),
             new BigDecimal("760.50"),
-            "ARMED"));
+            "ARMED",
+            "NVDA  260516C00140000"));
 
     List<WatchlistProximity> out = reader.watchlist("acme");
 
@@ -50,6 +51,7 @@ class ProximityReaderTest {
     WatchlistProximity w = out.get(0);
     assertThat(w.ticker()).isEqualTo("NVDA");
     assertThat(w.state()).isEqualTo("ARMED");
+    assertThat(w.optionSymbol()).isEqualTo("NVDA  260516C00140000");
     // ABOVE: (761.00 - 760.50) / 761.00 * 100 = 0.0657%
     assertThat(w.distanceToTriggerPct()).isEqualTo(0.0657);
   }
@@ -65,7 +67,8 @@ class ProximityReaderTest {
                 null,
                 null,
                 new BigDecimal("404.00"),
-                "ARMED"));
+                "ARMED",
+                null));
     // BELOW: (404 - 400) / 400 * 100 = 1.0%
     assertThat(d).isEqualTo(1.0);
   }
@@ -75,7 +78,7 @@ class ProximityReaderTest {
     assertThat(
             ProximityReader.distanceToTrigger(
                 new EntryProximityView(
-                    "TSLA", "ABOVE", new BigDecimal("400"), null, null, null, "ARMED")))
+                    "TSLA", "ABOVE", new BigDecimal("400"), null, null, null, "ARMED", null)))
         .isNull();
   }
 

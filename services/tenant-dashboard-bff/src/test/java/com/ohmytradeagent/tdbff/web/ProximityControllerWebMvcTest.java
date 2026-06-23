@@ -43,6 +43,7 @@ class ProximityControllerWebMvcTest {
   void returnsTenantScopedProximityWithLiveness() throws Exception {
     when(liveness.feedHealth()).thenReturn(Map.of("status", "ok"));
     when(quotes.equityPrice("NVDA")).thenReturn(new BigDecimal("142.30"));
+    when(quotes.optionPremium("NVDA  260516C00140000")).thenReturn(new BigDecimal("3.15"));
     when(reader.watchlist("acme"))
         .thenReturn(
             List.of(
@@ -56,7 +57,8 @@ class ProximityControllerWebMvcTest {
                     new BigDecimal("764.805"),
                     new BigDecimal("760.50"),
                     "ARMED",
-                    0.0657)));
+                    0.0657,
+                    "NVDA  260516C00140000")));
     when(reader.positions("acme"))
         .thenReturn(
             List.of(
@@ -79,6 +81,7 @@ class ProximityControllerWebMvcTest {
         .andExpect(jsonPath("$.liveness.status").value("ok"))
         .andExpect(jsonPath("$.watchlist[0].ticker").value("NVDA"))
         .andExpect(jsonPath("$.watchlist[0].distance_to_trigger_pct").value(0.0657))
+        .andExpect(jsonPath("$.watchlist[0].option_premium").value(3.15))
         .andExpect(jsonPath("$.positions[0].distance_to_stop_pct").value(37.5))
         .andExpect(jsonPath("$.positions[0].distance_to_target_pct").value(25.0))
         .andExpect(jsonPath("$.positions[0].underlying").value("NVDA"))

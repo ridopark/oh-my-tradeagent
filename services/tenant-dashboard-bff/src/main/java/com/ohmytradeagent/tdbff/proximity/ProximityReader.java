@@ -115,7 +115,8 @@ public class ProximityReader {
           v.bandHigh(),
           v.lastPrice(),
           v.state(),
-          distanceToTrigger(v));
+          distanceToTrigger(v),
+          v.optionSymbol());
     } catch (RuntimeException e) {
       log.warn(
           "entryProximity query failed wf={} strategy={} err={}", wfId, strategyId, e.getMessage());
@@ -211,7 +212,8 @@ public class ProximityReader {
       BigDecimal bandHigh,
       BigDecimal lastPrice,
       String state,
-      Double distanceToTriggerPct) {}
+      Double distanceToTriggerPct,
+      String optionSymbol) {}
 
   /** One armed position's exit proximity. */
   public record PositionProximity(
@@ -239,7 +241,8 @@ public class ProximityReader {
       BigDecimal bandLow,
       BigDecimal bandHigh,
       BigDecimal lastPrice,
-      String state) {}
+      String state,
+      String optionSymbol) {}
 
   /** Transport mirror of the orchestrator's {@code ExitProximityView} query result. */
   public record ExitProximityView(

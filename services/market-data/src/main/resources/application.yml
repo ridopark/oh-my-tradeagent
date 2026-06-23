@@ -41,9 +41,10 @@ management:
   endpoints:
     web:
       exposure:
-        # feedhealth: per-feed WS liveness (FeedHealthEndpoint). equityquote: underlying last-trade
-        # price by ticker (EquityQuoteEndpoint). Both read by the tenant-dashboard BFF for /live.
-        include: health,info,prometheus,feedhealth,equityquote
+        # feedhealth: per-feed WS liveness (FeedHealthEndpoint). equityquote / optionquote:
+        # underlying last-trade price by ticker and option NBBO by OCC (EquityQuoteEndpoint /
+        # OptionQuoteEndpoint). All read by the tenant-dashboard BFF for /live.
+        include: health,info,prometheus,feedhealth,equityquote,optionquote
   endpoint:
     health:
       probes:

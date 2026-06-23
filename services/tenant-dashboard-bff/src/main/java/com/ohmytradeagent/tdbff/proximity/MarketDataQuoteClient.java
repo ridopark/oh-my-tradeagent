@@ -49,4 +49,21 @@ public class MarketDataQuoteClient {
       return null;
     }
   }
+
+  /**
+   * Indicative option premium (mid) for {@code occ}, or null when unavailable. The OCC is compacted
+   * (spaces stripped) so the canonical padded form is a valid path segment.
+   */
+  public BigDecimal optionPremium(String occ) {
+    String compact = occ.replace(" ", "");
+    try {
+      Map<String, Object> body =
+          rest.get().uri("/actuator/optionquote/{o}", compact).retrieve().body(MAP_TYPE);
+      Object mid = body == null ? null : body.get("mid");
+      return mid == null ? null : new BigDecimal(mid.toString());
+    } catch (RuntimeException e) {
+      log.warn("market-data optionquote read failed for {}: {}", compact, e.getMessage());
+      return null;
+    }
+  }
 }
