@@ -35,6 +35,7 @@ import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
+import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribeEquityActivity;
 import com.ohmytradeagent.orchestrator.activities.TriggerFireDecider;
@@ -86,6 +87,7 @@ class WatchlistTriggerWorkflowImplTest {
   private ExecActivities exec;
   private AccountSnapshotActivity accountSnapshot;
   private MarketCalendarActivity tradingCalendar;
+  private PositionLookupActivities positionLookup;
 
   @BeforeEach
   void setUp() {
@@ -108,6 +110,7 @@ class WatchlistTriggerWorkflowImplTest {
     exec = Mockito.mock(ExecActivities.class);
     accountSnapshot = Mockito.mock(AccountSnapshotActivity.class);
     tradingCalendar = Mockito.mock(MarketCalendarActivity.class);
+    positionLookup = Mockito.mock(PositionLookupActivities.class);
 
     // Defaults: no EOD pressure, all gates green, $100k cash, $3.15 premium, fills via signal.
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
@@ -143,7 +146,8 @@ class WatchlistTriggerWorkflowImplTest {
         .thenReturn(weekdayCalendar(LocalDate.of(2026, 6, 23), 21));
     lenient().when(exec.placeOrder(any())).thenReturn(submittedResult());
 
-    coreWorker.registerActivitiesImplementations(audit, calendar, risk, contract, fireDecider);
+    coreWorker.registerActivitiesImplementations(
+        audit, calendar, risk, contract, fireDecider, positionLookup);
     Worker mdWorker = env.newWorker(WatchlistTriggerWorkflowImpl.MARKET_DATA_TASK_QUEUE);
     mdWorker.registerActivitiesImplementations(subscribeEquity, optionQuote);
     Worker brokerWorker = env.newWorker(BROKER_QUEUE);
@@ -365,6 +369,211 @@ class WatchlistTriggerWorkflowImplTest {
     assertThat(unfilled.getSubject()).containsEntry("outcome", "UNFILLED");
   }
 
+  // Issue #165 port: the broker filled inside the TTL/cancel race. cancelOrder reconciles the
+  // journal to FILLED and returns the broker-confirmed fill -> adopt the lot inline (synth fill,
+  // EntryFilled(recovery=cancel_on_filled), spawn the PositionWorkflow). No TriggerEntryUnfilled.
+  @Test
+  void ttlExpired_cancelReturnsFilled_adoptsPosition() throws Exception {
+    when(exec.cancelOrder(any())).thenReturn(cancelFilledResult(5L, new BigDecimal("3.20")));
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L);
+    WatchlistTriggerWorkflow wf = newStub("wl-no-fill");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+    // never send onFill; let the TTL elapse.
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+    verify(exec, times(1)).placeOrder(any());
+    verify(exec, times(1)).cancelOrder(any());
+
+    AuditEvent filled = captureKind("EntryFilled");
+    assertThat(filled.getSubject()).containsEntry("recovery", "cancel_on_filled");
+    assertThat(filled.getSubject()).containsEntry("option_symbol", OCC);
+    // filled_qty round-trips through the audit JSON as a numeric; compare on long value.
+    assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(5L);
+    AuditEvent posStart = positionStartInput(wf);
+    assertThat(posStart).isNotNull();
+  }
+
+  // Partial fill: the broker filled fewer contracts than placed. The adopted PositionWorkflow must
+  // carry the BROKER-confirmed filled qty, not the placed qty.
+  @Test
+  void ttlExpired_cancelReturnsFilled_partialQty_adoptsBrokerQtyNotPlaced() throws Exception {
+    RecordingPositionWorkflowImpl.STARTED.clear();
+    RecordingPositionWorkflowImpl.FILLS.clear();
+
+    TestWorkflowEnvironment localEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      localEnv.registerSearchAttribute(
+          "TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      localEnv.registerSearchAttribute(
+          "ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      Worker core = localEnv.newWorker(CORE_QUEUE);
+      core.registerWorkflowImplementationTypes(
+          WatchlistTriggerWorkflowImpl.class, RecordingPositionWorkflowImpl.class);
+      core.registerActivitiesImplementations(
+          audit, calendar, risk, contract, fireDecider, positionLookup);
+      Worker md = localEnv.newWorker(WatchlistTriggerWorkflowImpl.MARKET_DATA_TASK_QUEUE);
+      md.registerActivitiesImplementations(subscribeEquity, optionQuote);
+      Worker broker = localEnv.newWorker(BROKER_QUEUE);
+      broker.registerActivitiesImplementations(exec, accountSnapshot, tradingCalendar);
+      localEnv.start();
+
+      // Placed 50 (flat sizing clamp), broker filled only 3.
+      when(exec.cancelOrder(any())).thenReturn(cancelFilledResult(3L, new BigDecimal("3.20")));
+      StrategyConfig c = config();
+      c.setPendingTtlPaperSecs(1L);
+
+      WatchlistTriggerWorkflow wf =
+          localEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  WatchlistTriggerWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setTaskQueue(CORE_QUEUE)
+                      .setWorkflowId("wl-no-fill")
+                      .build());
+      WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+      wf.equityTick(tick(new BigDecimal("760.80"), false));
+      wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+      String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+      assertThat(result).endsWith(":fired");
+
+      long deadline = System.currentTimeMillis() + 10_000;
+      while (RecordingPositionWorkflowImpl.STARTED.isEmpty()
+          && System.currentTimeMillis() < deadline) {
+        sleep();
+      }
+      assertThat(RecordingPositionWorkflowImpl.STARTED).hasSize(1);
+      PositionWorkflowInput child =
+          RecordingPositionWorkflowImpl.STARTED.values().iterator().next();
+      assertThat(child.getQty()).isEqualTo(3L); // broker filled qty, NOT the placed 50
+      assertThat(child.getEntryPremium()).isEqualByComparingTo("3.20");
+    } finally {
+      localEnv.close();
+    }
+  }
+
+  // FILLED state but the broker-confirmed filled qty is null/0 (no real fill) -> do NOT adopt; fall
+  // through to the legacy TriggerEntryUnfilled path, no child.
+  @Test
+  void ttlExpired_cancelReturnsFilledZeroQty_staysUnfilled() throws Exception {
+    when(exec.cancelOrder(any())).thenReturn(cancelFilledResult(null, null));
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L);
+    WatchlistTriggerWorkflow wf = newStub("wl-no-fill");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":entry_unfilled");
+    verify(exec, times(1)).cancelOrder(any());
+    AuditEvent unfilled = captureKind("TriggerEntryUnfilled");
+    assertThat(unfilled.getSubject()).containsEntry("outcome", "UNFILLED");
+  }
+
+  // KILL-SWITCH/HALT GUARD: the broker filled inside the race, but an ACCOUNT-scoped kill switch is
+  // active (the auto:account_daily_loss incident). Do NOT inline-adopt; fall through to the legacy
+  // unfilled path so recon's AdoptionWorkflow re-confirms broker truth safely.
+  @Test
+  void ttlExpired_killSwitchActive_skipsInlineAdoption() throws Exception {
+    when(exec.cancelOrder(any())).thenReturn(cancelFilledResult(5L, new BigDecimal("3.20")));
+    when(risk.checkKillSwitchHalt(any(), any()))
+        .thenReturn(RiskDecision.rejected(RejectionReason.KILL_SWITCH_TRIPPED, "scope=account"));
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L);
+    WatchlistTriggerWorkflow wf = newStub("wl-no-fill");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":entry_unfilled");
+    AuditEvent unfilled = captureKind("TriggerEntryUnfilled");
+    assertThat(unfilled.getSubject()).containsEntry("outcome", "UNFILLED");
+  }
+
+  // Owner-running precheck: a PositionWorkflow for this OCC is already running (recon won the
+  // race).
+  // The adoption must no-op (no second child start, no collision) and complete deterministically.
+  @Test
+  void ttlExpired_ownerAlreadyRunning_noDoubleStart() throws Exception {
+    when(exec.cancelOrder(any())).thenReturn(cancelFilledResult(5L, new BigDecimal("3.20")));
+    when(positionLookup.isPositionWorkflowRunning(any())).thenReturn(true);
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L);
+    WatchlistTriggerWorkflow wf = newStub("wl-no-fill");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":entry_unfilled");
+  }
+
+  // CANCELLED (the broker really cancelled, no fill) -> legacy TriggerEntryUnfilled, no child.
+  @Test
+  void ttlExpired_cancelReturnsCancelled_staysUnfilled() throws Exception {
+    when(exec.cancelOrder(any())).thenReturn(cancelledResult());
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L);
+    WatchlistTriggerWorkflow wf = newStub("wl-no-fill");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":entry_unfilled");
+    verify(exec, times(1)).cancelOrder(any());
+    AuditEvent unfilled = captureKind("TriggerEntryUnfilled");
+    assertThat(unfilled.getSubject()).containsEntry("outcome", "UNFILLED");
+  }
+
+  // cancelOrder throws -> the existing try/catch fails closed to the legacy unfilled path, no
+  // child.
+  @Test
+  void ttlExpired_cancelThrows_staysUnfilled_failClosed() throws Exception {
+    when(exec.cancelOrder(any())).thenThrow(new RuntimeException("broker down"));
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L);
+    WatchlistTriggerWorkflow wf = newStub("wl-no-fill");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":entry_unfilled");
+    AuditEvent unfilled = captureKind("TriggerEntryUnfilled");
+    assertThat(unfilled.getSubject()).containsEntry("outcome", "UNFILLED");
+  }
+
+  // Returns the EntryFilled audit (recovery=cancel_on_filled) if one was emitted, else null.
+  private AuditEvent positionStartInput(WatchlistTriggerWorkflow wf) {
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(captor.capture());
+    return captor.getAllValues().stream()
+        .filter(e -> "EntryFilled".equals(e.getKind()))
+        .filter(e -> "cancel_on_filled".equals(e.getSubject().get("recovery")))
+        .reduce((a, b) -> b)
+        .orElse(null);
+  }
+
   // (g) proceed:false -> no order.
   @Test
   void fireDeciderRejects_noOrder() throws Exception {
@@ -539,7 +748,8 @@ class WatchlistTriggerWorkflowImplTest {
       // at start without running the full position lifecycle.
       core.registerWorkflowImplementationTypes(
           WatchlistTriggerWorkflowImpl.class, RecordingPositionWorkflowImpl.class);
-      core.registerActivitiesImplementations(audit, calendar, risk, contract, fireDecider);
+      core.registerActivitiesImplementations(
+          audit, calendar, risk, contract, fireDecider, positionLookup);
       Worker md = localEnv.newWorker(WatchlistTriggerWorkflowImpl.MARKET_DATA_TASK_QUEUE);
       md.registerActivitiesImplementations(subscribeEquity, optionQuote);
       Worker broker = localEnv.newWorker(BROKER_QUEUE);
@@ -829,6 +1039,30 @@ class WatchlistTriggerWorkflowImplTest {
     r.setIntentKey("wl:entry");
     r.setBrokerOrderId("brk-1");
     r.setState(OrderIntentResult.State.SUBMITTED);
+    r.setLastStateAt(OffsetDateTime.now());
+    return r;
+  }
+
+  // cancelOrder result where the broker had already filled inside the TTL/cancel race: the exec
+  // sidecar reconciles the journal to FILLED and returns the broker-confirmed fill detail.
+  private static OrderIntentResult cancelFilledResult(Long filledQty, BigDecimal avgFillPrice) {
+    OrderIntentResult r = new OrderIntentResult();
+    r.setSchemaVersion(1L);
+    r.setIntentKey("wl-no-fill:entry");
+    r.setBrokerOrderId("brk-1");
+    r.setState(OrderIntentResult.State.FILLED);
+    r.setFilledQty(filledQty);
+    r.setAvgFillPrice(avgFillPrice);
+    r.setLastStateAt(OffsetDateTime.now());
+    return r;
+  }
+
+  private static OrderIntentResult cancelledResult() {
+    OrderIntentResult r = new OrderIntentResult();
+    r.setSchemaVersion(1L);
+    r.setIntentKey("wl-no-fill:entry");
+    r.setBrokerOrderId("brk-1");
+    r.setState(OrderIntentResult.State.CANCELLED);
     r.setLastStateAt(OffsetDateTime.now());
     return r;
   }

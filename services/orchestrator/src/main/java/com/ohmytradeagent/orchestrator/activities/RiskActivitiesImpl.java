@@ -11,6 +11,7 @@ import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import com.ohmytradeagent.orchestrator.domain.StrategyConfigs;
+import com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflow;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -661,6 +662,53 @@ public class RiskActivitiesImpl implements RiskActivities {
    * covers WorkflowNotFoundException, WorkflowQueryException, WorkflowQueryRejectedException,
    * WorkflowServiceException, and any TimeoutException wrapped in a RuntimeException.
    */
+  @Override
+  public RiskDecision checkKillSwitchHalt(String tenantId, String strategyId) {
+    OffsetDateTime now = OffsetDateTime.now(clock);
+    RiskDecision strategyScope = checkKillSwitch(tenantId, strategyId, now);
+    if (strategyScope != null) {
+      return strategyScope;
+    }
+    return checkAccountKillSwitch(tenantId, now);
+  }
+
+  /**
+   * Account-scope kill-switch read, keyed on {@code t-<tenant>/account/killswitch} via {@link
+   * AccountKillSwitchWorkflow#killswitchState()} ({@code account_killswitch_state} query). This is
+   * the scope the {@code auto:account_daily_loss} heartbeat trips — distinct from the per-strategy
+   * {@link #checkKillSwitch} read, which never reflects an account-wide trip. Same fail-closed
+   * semantics: any query failure or null state rejects with {@link
+   * RejectionReason#KILL_SWITCH_UNAVAILABLE}.
+   */
+  private RiskDecision checkAccountKillSwitch(String tenantId, OffsetDateTime now) {
+    if (workflowClient == null) {
+      return RiskDecision.rejected(RejectionReason.KILL_SWITCH_UNAVAILABLE, "no_client");
+    }
+    KillSwitchState state;
+    try {
+      String wfId = WorkflowIds.accountKillswitch(tenantId);
+      AccountKillSwitchWorkflow stub =
+          workflowClient.newWorkflowStub(AccountKillSwitchWorkflow.class, wfId);
+      state = stub.killswitchState();
+    } catch (Exception e) {
+      return RiskDecision.rejected(
+          RejectionReason.KILL_SWITCH_UNAVAILABLE, e.getClass().getSimpleName());
+    }
+    if (state == null) {
+      return RiskDecision.rejected(RejectionReason.KILL_SWITCH_UNAVAILABLE, "null_state");
+    }
+    if (Boolean.TRUE.equals(state.getTripped())) {
+      String detail = state.getReason() != null ? "reason=" + state.getReason() : null;
+      return RiskDecision.rejected(RejectionReason.KILL_SWITCH_TRIPPED, detail);
+    }
+    OffsetDateTime cd = state.getCoolingDownUntil();
+    if (cd != null && now.isBefore(cd)) {
+      return RiskDecision.rejected(
+          RejectionReason.KILL_SWITCH_COOLING_DOWN, "until=" + cd.toString());
+    }
+    return null;
+  }
+
   private RiskDecision checkKillSwitch(String tenantId, String strategyId, OffsetDateTime now) {
     if (workflowClient == null) {
       // Defensive: production env always wires WorkflowClient; fail closed if it is somehow null.
