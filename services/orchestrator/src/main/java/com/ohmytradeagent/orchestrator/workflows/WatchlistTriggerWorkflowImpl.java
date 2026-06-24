@@ -103,6 +103,15 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   // cancelOrder result does NOT add a command (cancelOrder is already on this path); only the
   // adoption branch's audit + child start are new and thus gated.
   private static final String VERSION_TTL_FILLED_ADOPTION = "watchlist-ttl-filled-adoption-v1";
+  // getVersion change id for seeding the Redis position-cache (OCC -> PositionWorkflow id) when a
+  // child PositionWorkflow starts. Closes the recon false-orphan gap: the other two entry paths
+  // (CopytradeSignalWorkflowImpl, AdoptionWorkflowImpl) already seed the cache, so recon's
+  // owner-lookup hits Redis before the lagged Visibility index; the watchlist path was the only
+  // gap. A new change id (NOT VERSION_TTL_FILLED_ADOPTION): a pre-fix history
+  // mid-startPositionWorkflow
+  // at deploy must replay WITHOUT the new cachePositionMapping command (preserving the v=0
+  // byte-identical happy-path command stream).
+  private static final String VERSION_POSITION_CACHE = "watchlist-position-cache-v1";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -732,12 +741,21 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     posInput.setForceCloseEodEt(config.getForceCloseEodEt());
 
     Async.function(child::run, posInput);
+    // Read the cache-seed version ONCE, in a deterministic position before the tolerateDuplicate
+    // branch, so a pre-fix replay (v=0) takes no new command on either path.
+    int cacheV = Workflow.getVersion(VERSION_POSITION_CACHE, Workflow.DEFAULT_VERSION, 1);
     if (!tolerateDuplicate) {
       // Happy-path fire: byte-identical to the original command stream (block on the start, then
       // forward the fill).
       Workflow.getWorkflowExecution(child).get();
       if (fill != null) {
         child.onFill(fill);
+      }
+      // Seed the OCC -> PositionWorkflow-id mapping so recon's owner-lookup hits Redis before the
+      // lagged Visibility index (the just-started child is otherwise invisible to recon). v=0
+      // histories replay without this command.
+      if (cacheV >= 1) {
+        positionLookup.cachePositionMapping(tenant, strategyId, resolved.optionSymbol(), posWfId);
       }
       return;
     }
@@ -773,6 +791,11 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     }
     if (fill != null) {
       child.onFill(fill);
+    }
+    // This run won the start race (startFailed is false here — the lost-race path returned above),
+    // so the cache must point at the child THIS run started. Gated identically to the happy path.
+    if (cacheV >= 1) {
+      positionLookup.cachePositionMapping(tenant, strategyId, resolved.optionSymbol(), posWfId);
     }
   }
 

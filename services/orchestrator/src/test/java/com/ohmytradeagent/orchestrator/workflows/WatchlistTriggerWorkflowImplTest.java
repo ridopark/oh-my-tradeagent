@@ -30,6 +30,7 @@ import com.ohmytradeagent.contract.SubscribeEquityResult;
 import com.ohmytradeagent.contract.WatchlistTriggerPayload;
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.MarketCalendarActivity;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
@@ -619,6 +620,138 @@ class WatchlistTriggerWorkflowImplTest {
     assertThat(result).endsWith(":entry_unfilled");
     AuditEvent unfilled = captureKind("TriggerEntryUnfilled");
     assertThat(unfilled.getSubject()).containsEntry("outcome", "UNFILLED");
+  }
+
+  // Recon false-orphan fix: a normal watchlist fire must seed the OCC -> PositionWorkflow-id
+  // mapping
+  // in the position cache (exactly as Copytrade/Adoption do), so recon's owner-lookup hits Redis
+  // before the lagged Visibility index. The seed args must be (tenant, strategy, OCC, posWfId)
+  // where
+  // posWfId is the same id the child was started under.
+  @Test
+  void fire_normalFill_seedsPositionCache() throws Exception {
+    WatchlistTriggerWorkflow wf = newStub("wl-cache-seed");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("3.15")));
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+
+    String posWfId = WorkflowIds.position("dev", "watchlist-trigger-v1", OCC, "msg-1");
+    verify(positionLookup, times(1))
+        .cachePositionMapping("dev", "watchlist-trigger-v1", OCC, posWfId);
+  }
+
+  // Inline #472 cancel-on-filled adoption that starts the child must seed the position cache with
+  // the same (tenant, strategy, OCC, posWfId) args, so the inline-adopted lot is also
+  // recon-visible.
+  @Test
+  void inlineAdoption_startsChild_seedsPositionCache() throws Exception {
+    when(exec.cancelOrder(any())).thenReturn(cancelFilledResult(5L, new BigDecimal("3.20")));
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L);
+    WatchlistTriggerWorkflow wf = newStub("wl-adopt-cache");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+    // never send onFill; let the TTL elapse so cancelOrder -> FILLED triggers inline adoption.
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+
+    String posWfId = WorkflowIds.position("dev", "watchlist-trigger-v1", OCC, "msg-1");
+    verify(positionLookup, times(1))
+        .cachePositionMapping("dev", "watchlist-trigger-v1", OCC, posWfId);
+  }
+
+  // Inline adoption that LOSES the child-start race to recon (a child already running under
+  // posWfId)
+  // must NOT seed the cache: the cache must never point at a workflow this run did not start. The
+  // owner-running precheck returns false (so adoption proceeds to startPositionWorkflow), and the
+  // real child start then collides with a pre-started workflow under the same id -> startFailed.
+  @Test
+  void inlineAdoption_lostStartRace_doesNotSeedCache() throws Exception {
+    RecordingPositionWorkflowImpl.STARTED.clear();
+    RecordingPositionWorkflowImpl.FILLS.clear();
+
+    TestWorkflowEnvironment localEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      localEnv.registerSearchAttribute(
+          "TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      localEnv.registerSearchAttribute(
+          "ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      Worker core = localEnv.newWorker(CORE_QUEUE);
+      core.registerWorkflowImplementationTypes(
+          WatchlistTriggerWorkflowImpl.class, RecordingPositionWorkflowImpl.class);
+      core.registerActivitiesImplementations(
+          audit, calendar, risk, contract, fireDecider, positionLookup);
+      Worker md = localEnv.newWorker(WatchlistTriggerWorkflowImpl.MARKET_DATA_TASK_QUEUE);
+      md.registerActivitiesImplementations(subscribeEquity, optionQuote);
+      Worker broker = localEnv.newWorker(BROKER_QUEUE);
+      broker.registerActivitiesImplementations(exec, accountSnapshot, tradingCalendar);
+      localEnv.start();
+
+      // Recon "won the race": a child PositionWorkflow is already running under posWfId, so the
+      // adoption's child-start collides (WorkflowExecutionAlreadyStarted) -> startFailed -> no
+      // seed.
+      // isPositionWorkflowRunning stays false (default) so adoption reaches startPositionWorkflow.
+      String posWfId = WorkflowIds.position("dev", "watchlist-trigger-v1", OCC, "msg-1");
+      PositionWorkflow squatter =
+          localEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  PositionWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setTaskQueue(CORE_QUEUE)
+                      .setWorkflowId(posWfId)
+                      .build());
+      WorkflowStub.fromTyped(squatter).start(parkInput());
+
+      when(exec.cancelOrder(any())).thenReturn(cancelFilledResult(5L, new BigDecimal("3.20")));
+      StrategyConfig c = config();
+      c.setPendingTtlPaperSecs(1L);
+      WatchlistTriggerWorkflow wf =
+          localEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  WatchlistTriggerWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setTaskQueue(CORE_QUEUE)
+                      .setWorkflowId("wl-adopt-lostrace")
+                      .build());
+      WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+      wf.equityTick(tick(new BigDecimal("760.80"), false));
+      wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+      String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+      assertThat(result).endsWith(":fired");
+
+      // The pre-started squatter is the only run that "started" posWfId; the adoption lost the race
+      // and must not have cached the mapping.
+      verify(positionLookup, never()).cachePositionMapping(any(), any(), any(), any());
+    } finally {
+      localEnv.close();
+    }
+  }
+
+  // Parked-child start input for the lost-race squatter.
+  private static PositionWorkflowInput parkInput() {
+    PositionWorkflowInput in = new PositionWorkflowInput();
+    in.setSchemaVersion(1L);
+    in.setTenantId("dev");
+    in.setStrategyId("watchlist-trigger-v1");
+    in.setEntrySignalId("msg-1");
+    in.setContractSymbol(OCC);
+    in.setQty(5L);
+    in.setEntryPremium(new BigDecimal("3.20"));
+    in.setBrokerTarget(PositionWorkflowInput.BrokerTarget.ALPACA_PAPER);
+    return in;
   }
 
   // Returns the EntryFilled audit (recovery=cancel_on_filled) if one was emitted, else null.
