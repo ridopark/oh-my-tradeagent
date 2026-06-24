@@ -30,6 +30,7 @@ import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
 import com.ohmytradeagent.orchestrator.domain.EntryStateMachine;
 import com.ohmytradeagent.orchestrator.domain.EntryStateMachine.Decision;
 import com.ohmytradeagent.orchestrator.domain.ExpirySelector;
+import com.ohmytradeagent.orchestrator.domain.OptionTick;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import com.ohmytradeagent.orchestrator.domain.Sizing.SizingOutcome;
@@ -457,6 +458,11 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
           subject("ticker", payload.getTicker(), "reason", "no_option_quote"));
       return outcome(payload, "no_option_quote");
     }
+    // Penny-tick the quote midpoint before it threads to the risk gate, sizing, and the BTO limit:
+    // Alpaca rejects a >2dp option limit with a non-retryable 422 (issues #263/#266 round once at
+    // the entry/exit limit; the watchlist entry path was the gap). Round here so every downstream
+    // consumer sees the same penny-rounded value.
+    premium = OptionTick.round(premium);
 
     // 5. Strategy-agnostic risk gates (premium is the BTO max-cost limit). The risk gate runs here,
     // after the quote, because checkWatchlistEntry's notional cap needs the fetched premium: the
