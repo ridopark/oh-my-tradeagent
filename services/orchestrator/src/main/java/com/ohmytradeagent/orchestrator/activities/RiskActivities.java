@@ -69,4 +69,19 @@ public interface RiskActivities {
    * any cross-service {@code PreTradeCheckActivity} dispatch.
    */
   void assertPreTradeCheckRoutable(StrategyConfig config);
+
+  /**
+   * Narrow kill-switch-ONLY read covering BOTH the per-(tenant, strategy) {@link
+   * com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow} and the tenant-wide {@link
+   * com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflow}. Returns a rejection when
+   * EITHER scope is tripped or within cool-down, else {@code null} (clear). Unlike {@link
+   * #checkWatchlistEntry} this applies NO max_positions / notional-cap / portfolio gates — it is
+   * the inline cancel-on-filled adoption guard, where the lot already exists at the broker and a
+   * position-count or notional refusal would wrongly defer a real position to reconciliation.
+   *
+   * <p>Fail-closed: any query failure (workflow-not-found, query rejection, timeout, null state)
+   * surfaces as a {@link RiskDecision#rejected} with {@code KILL_SWITCH_UNAVAILABLE} so the caller
+   * declines the inline adoption and lets recon re-confirm broker truth.
+   */
+  RiskDecision checkKillSwitchHalt(String tenantId, String strategyId);
 }

@@ -21,6 +21,7 @@ import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
+import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribeEquityActivity;
 import com.ohmytradeagent.orchestrator.activities.TriggerFireDecider;
@@ -94,6 +95,13 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   private static final String VERSION_EQUITY_RESUBSCRIBE = "watchlist-equity-resubscribe";
   // getVersion change id for resolving the leg's OCC at arm (display-only, for entryProximity).
   private static final String VERSION_ARM_OCC_RESOLVE = "watchlist-arm-occ-resolve";
+  // Issue #165 port to the watchlist path: gate the new EntryFilled-log + child-start commands the
+  // cancel-on-filled adoption emits. Pre-fix histories (DEFAULT_VERSION) replay the legacy
+  // TriggerEntryUnfilled path deterministically; new legs (v>=1) inspect the cancel result and
+  // adopt the lot inline when the broker filled inside the TTL/cancel race. Capturing the
+  // cancelOrder result does NOT add a command (cancelOrder is already on this path); only the
+  // adoption branch's audit + child start are new and thus gated.
+  private static final String VERSION_TTL_FILLED_ADOPTION = "watchlist-ttl-filled-adoption-v1";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -118,6 +126,8 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
       Workflow.newActivityStub(SubscribeEquityActivity.class, MARKET_DATA_OPTIONS);
   private final GetOptionQuoteActivity optionQuote =
       Workflow.newActivityStub(GetOptionQuoteActivity.class, MARKET_DATA_OPTIONS);
+  private final PositionLookupActivities positionLookup =
+      Workflow.newActivityStub(PositionLookupActivities.class, DEFAULT_OPTIONS);
 
   // Lazily built from config.broker_target (mirrors CopytradeSignalWorkflowImpl.exec): the order
   // path and the Alpaca trading-calendar lookup both route to broker-<broker_target>.
@@ -501,15 +511,31 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     long ttlSecs = pendingTtlSecs(config);
     boolean filled = Workflow.await(Duration.ofSeconds(ttlSecs), () -> fillEvent != null);
     if (!filled) {
-      // No fill within the entry TTL. Mirror CopytradeSignalWorkflowImpl's no-fill path
-      // (handleTtlExpired): best-effort cancel the resting order, then complete fail-closed WITHOUT
-      // starting a PositionWorkflow — the leg never opened a position, so spawning one off a null
-      // fill would orphan an empty lifecycle.
+      // No fill within the entry TTL. Best-effort cancel the resting order. Issue #165 port: when
+      // the broker filled inside the TTL/cancel race, exec.cancelOrder reconciles the journal to
+      // FILLED and returns the broker-confirmed fill detail — adopt the lot inline instead of
+      // orphaning it to recon. Capture the result (capturing it adds no command vs the prior
+      // result-discarded call). On a RuntimeException fall through fail-closed to the legacy
+      // TriggerEntryUnfilled path (broker down -> recon settles the orphan).
+      OrderIntentResult cancelResult = null;
       try {
-        exec.cancelOrder(intentKey);
+        cancelResult = exec.cancelOrder(intentKey);
       } catch (RuntimeException ignored) {
         // Best-effort: reconciliation closes any orphan broker order.
       }
+
+      int adoptionVersion =
+          Workflow.getVersion(VERSION_TTL_FILLED_ADOPTION, Workflow.DEFAULT_VERSION, 1);
+      if (adoptionVersion >= 1
+          && cancelResult != null
+          && cancelResult.getState() == OrderIntentResult.State.FILLED) {
+        String adopted =
+            handleTtlFilledAdoption(payload, config, resolved, cancelResult, contracts, premium);
+        if (adopted != null) {
+          return adopted;
+        }
+      }
+
       logAudit(
           payload,
           KIND_ENTRY_UNFILLED,
@@ -544,6 +570,92 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     return outcome(payload, "fired");
   }
 
+  /**
+   * Issue #165 port: recover from the cancel-on-filled race on the watchlist path. The broker
+   * filled inside the TTL/cancel window; {@code exec.cancelOrder} reconciled the journal to FILLED
+   * and returned the broker-confirmed fill. Synthesise a {@link FillSignalPayload}, emit {@code
+   * EntryFilled(recovery=cancel_on_filled)}, and spawn the missing PositionWorkflow so the lot is
+   * managed inline rather than waiting on the 5-min reconciliation auto-adopt.
+   *
+   * <p>Returns the {@code "fired"} outcome on adoption, or {@code null} to fall through to the
+   * legacy {@code TriggerEntryUnfilled} path when adoption is declined: a FILLED-with-zero-qty
+   * result, an active kill-switch/halt (strategy OR account scope), or a precheck that the owner
+   * PositionWorkflow is already running (recon won the race).
+   */
+  private String handleTtlFilledAdoption(
+      WatchlistTriggerPayload payload,
+      StrategyConfig config,
+      ContractResolveResult resolved,
+      OrderIntentResult cancelResult,
+      long placedQty,
+      BigDecimal premium) {
+    long filledQty = cancelResult.getFilledQty() != null ? cancelResult.getFilledQty() : 0L;
+    if (filledQty <= 0L) {
+      // FILLED state but no broker-confirmed quantity: no real lot to adopt.
+      return null;
+    }
+
+    // KILL-SWITCH/HALT GUARD (load-bearing safety): re-check kill-switch/halt for this
+    // tenant/strategy AND the ACCOUNT scope (the auto:account_daily_loss incident tripped an
+    // account-scoped switch, which the per-strategy read alone never reflects). Kill-switch-ONLY:
+    // NOT checkWatchlistEntry, whose max_positions/notional gates would wrongly refuse adoption of
+    // a
+    // lot that already exists at the broker. A halt -> decline inline adoption; recon's
+    // AdoptionWorkflow re-confirms broker truth and settles the lot safely.
+    RiskDecision halt = risk.checkKillSwitchHalt(payload.getTenantId(), payload.getStrategyId());
+    if (halt != null && !halt.allowed()) {
+      return null;
+    }
+
+    // Owner-running precheck: if the PositionWorkflow for this OCC is already running (recon
+    // adopted
+    // it first), do not start a second child. Log a no-op and fall through to the unfilled path.
+    String posWfId =
+        WorkflowIds.position(
+            payload.getTenantId(),
+            payload.getStrategyId(),
+            resolved.optionSymbol(),
+            payload.getSourceMessageId());
+    if (positionLookup.isPositionWorkflowRunning(posWfId)) {
+      logAudit(
+          payload,
+          KIND_ENTRY_FILLED,
+          subject(
+              "option_symbol",
+              resolved.optionSymbol(),
+              "broker_order_id",
+              cancelResult.getBrokerOrderId(),
+              "recovery",
+              "cancel_on_filled",
+              "note",
+              "owner_already_running"));
+      return null;
+    }
+
+    BigDecimal avgFillPrice =
+        cancelResult.getAvgFillPrice() != null ? cancelResult.getAvgFillPrice() : premium;
+    FillSignalPayload synth =
+        new FillSignalPayload()
+            .withBrokerOrderId(cancelResult.getBrokerOrderId())
+            .withFilledQty(filledQty)
+            .withAvgFillPrice(avgFillPrice)
+            .withFilledAt(workflowNow());
+
+    logAudit(
+        payload,
+        KIND_ENTRY_FILLED,
+        subject(
+            "option_symbol", resolved.optionSymbol(),
+            "broker_order_id", synth.getBrokerOrderId(),
+            "filled_qty", synth.getFilledQty(),
+            "avg_fill_price", synth.getAvgFillPrice(),
+            "outcome", "FILLED",
+            "recovery", "cancel_on_filled"));
+
+    startPositionWorkflow(payload, config, resolved, synth, placedQty, premium, true);
+    return outcome(payload, "fired");
+  }
+
   private void startPositionWorkflow(
       WatchlistTriggerPayload payload,
       StrategyConfig config,
@@ -551,6 +663,17 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
       FillSignalPayload fill,
       long placedQty,
       BigDecimal premium) {
+    startPositionWorkflow(payload, config, resolved, fill, placedQty, premium, false);
+  }
+
+  private void startPositionWorkflow(
+      WatchlistTriggerPayload payload,
+      StrategyConfig config,
+      ContractResolveResult resolved,
+      FillSignalPayload fill,
+      long placedQty,
+      BigDecimal premium,
+      boolean tolerateDuplicate) {
     String tenant = payload.getTenantId();
     String strategyId = payload.getStrategyId();
     String entrySignalId = payload.getSourceMessageId();
@@ -603,7 +726,45 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     posInput.setForceCloseEodEt(config.getForceCloseEodEt());
 
     Async.function(child::run, posInput);
-    Workflow.getWorkflowExecution(child).get();
+    if (!tolerateDuplicate) {
+      // Happy-path fire: byte-identical to the original command stream (block on the start, then
+      // forward the fill).
+      Workflow.getWorkflowExecution(child).get();
+      if (fill != null) {
+        child.onFill(fill);
+      }
+      return;
+    }
+    // Cancel-on-filled adoption: the owner-running precheck already guards the common race, but a
+    // sub-second TOCTOU vs recon's AdoptionWorkflow can still lose to a child already started under
+    // this id. Degrade that to a logged no-op (deterministic Promise.handle, NOT a forbidden
+    // client-side catch) instead of faulting this workflow. On a clean start, block until the child
+    // is durably scheduled, then forward the synthesised fill.
+    final boolean[] startFailed = {false};
+    Workflow.getWorkflowExecution(child)
+        .handle(
+            (exec, err) -> {
+              if (err != null) {
+                startFailed[0] = true;
+              }
+              return null;
+            })
+        .get();
+    if (startFailed[0]) {
+      logAudit(
+          payload,
+          KIND_ENTRY_FILLED,
+          subject(
+              "option_symbol",
+              resolved.optionSymbol(),
+              "broker_order_id",
+              fill == null ? null : fill.getBrokerOrderId(),
+              "recovery",
+              "cancel_on_filled",
+              "note",
+              "child_already_started"));
+      return;
+    }
     if (fill != null) {
       child.onFill(fill);
     }
