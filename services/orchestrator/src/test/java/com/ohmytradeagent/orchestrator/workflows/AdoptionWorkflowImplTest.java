@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -241,9 +242,9 @@ class AdoptionWorkflowImplTest {
 
     // PositionAdopted audit emitted with provenance (including the triggering operator).
     ArgumentCaptor<AuditEvent> auditCaptor = ArgumentCaptor.forClass(AuditEvent.class);
-    verify(audit).log(auditCaptor.capture());
-    AuditEvent ev = auditCaptor.getValue();
-    assertThat(ev.getKind()).isEqualTo("PositionAdopted");
+    verify(audit, atLeastOnce()).log(auditCaptor.capture());
+    AuditEvent ev = firstOfKind(auditCaptor.getAllValues(), "PositionAdopted");
+    assertThat(ev).isNotNull();
     assertThat(ev.getTenantId()).isEqualTo(TENANT);
     assertThat(ev.getStrategyId()).isEqualTo(STRATEGY);
     Map<String, Object> subject = ev.getSubject();
@@ -255,6 +256,55 @@ class AdoptionWorkflowImplTest {
     assertThat(subject).containsEntry("operator_id", OPERATOR);
     assertThat(subject).containsKey("qty");
     assertThat(subject).containsKey("entry_premium");
+  }
+
+  @Test
+  void adopt_emitsEntryFilled_withCostBasisFields() {
+    // Bug: the dashboard RealizedPnlCalculator builds per-contract cost basis ONLY from EntryFilled
+    // audit rows (option_symbol, filled_qty, avg_fill_price). The reconciliation AdoptionWorkflow
+    // never emitted EntryFilled, so an adopted-then-exited lot read as pure profit. Assert adoption
+    // now emits an EntryFilled carrying the exact fields the calc reads.
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(brokerLot(5L, new BigDecimal("7.84")));
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(List.of(filledJournalRow()));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
+    when(exec.journalReconcileToFilled(eq(INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
+
+    AdoptionResult result = runAdopt();
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ADOPTED);
+
+    ArgumentCaptor<AuditEvent> auditCaptor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(auditCaptor.capture());
+    // Exactly one EntryFilled — a second would double-count cost basis in RealizedPnlCalculator
+    // (which sums every EntryFilled row for the contract), turning the offset into a phantom loss.
+    long entryFilledCount =
+        auditCaptor.getAllValues().stream().filter(e -> "EntryFilled".equals(e.getKind())).count();
+    assertThat(entryFilledCount)
+        .as("adoption must emit EXACTLY ONE EntryFilled cost-basis row")
+        .isEqualTo(1L);
+    AuditEvent entryFilled = firstOfKind(auditCaptor.getAllValues(), "EntryFilled");
+    assertThat(entryFilled).as("adoption must emit an EntryFilled cost-basis row").isNotNull();
+    assertThat(entryFilled.getTenantId()).isEqualTo(TENANT);
+    assertThat(entryFilled.getStrategyId()).isEqualTo(STRATEGY);
+
+    Map<String, Object> subject = entryFilled.getSubject();
+    // These three keys are EXACTLY what RealizedPnlCalculator.fetchLots reads for cost basis:
+    // option_symbol, filled_qty, avg_fill_price.
+    assertThat(subject).containsEntry("option_symbol", OCC);
+    // filled_qty / avg_fill_price round-trip through the audit-log activity boundary as JSON, so
+    // Jackson deserializes them as Integer / Double; compare boxing-agnostically by numeric value
+    // (the dashboard calc reads these from jsonb numerically, so the boxed type is irrelevant).
+    assertThat(((Number) subject.get("filled_qty")).longValue()).isEqualTo(5L);
+    assertThat(new BigDecimal(subject.get("avg_fill_price").toString()))
+        .isEqualByComparingTo(new BigDecimal("7.84"));
+    // Marker distinguishing an adoption-synthesized fill from a normal broker fill.
+    assertThat(subject).containsEntry("recovery", "adopted");
+  }
+
+  private static AuditEvent firstOfKind(List<AuditEvent> events, String kind) {
+    return events.stream().filter(e -> kind.equals(e.getKind())).findFirst().orElse(null);
   }
 
   @Test

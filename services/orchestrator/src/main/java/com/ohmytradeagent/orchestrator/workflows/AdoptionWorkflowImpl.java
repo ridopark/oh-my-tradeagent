@@ -55,14 +55,24 @@ import java.util.Map;
 public class AdoptionWorkflowImpl implements AdoptionWorkflow {
 
   /**
-   * Forward-compat version anchor for this workflow type. New executions enter at v=1; any future
-   * deterministic branch is gated by bumping the max version here so in-flight adoptions on replay
-   * keep their recorded history. (Adoption is short-lived, but the anchor keeps the standard
-   * versioning discipline.)
+   * Forward-compat version anchor for this workflow type. New executions enter at v=2 (v=1 was the
+   * pre-EntryFilled anchor); each deterministic branch is gated by bumping the max version here so
+   * in-flight adoptions on replay keep their recorded history. (Adoption is short-lived, but the
+   * anchor keeps the standard versioning discipline.)
    */
   static final String VERSION_ADOPTION = "adoption-v1";
 
   private static final String KIND_POSITION_ADOPTED = "PositionAdopted";
+
+  /**
+   * EntryFilled cost-basis audit kind (registered in {@code AuditEventKinds.ENTRY_KINDS}/{@code
+   * ALL_KINDS}). The dashboard {@code RealizedPnlCalculator} builds per-contract entry cost basis
+   * ONLY from EntryFilled rows; without one, an adopted-then-exited lot reads as pure profit.
+   * Emitted with the SAME subject keys the calc reads (option_symbol / filled_qty / avg_fill_price)
+   * and mirroring the #472 inline-adoption EntryFilled.
+   */
+  private static final String KIND_ENTRY_FILLED = "EntryFilled";
+
   // Matches CopytradeSignalWorkflowImpl.DEFAULT_PENDING_TTL_PAPER_SECS / selectPendingTtlSecs.
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
 
@@ -82,8 +92,9 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
       throw new IllegalArgumentException(
           "AdoptionWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
-    // Forward-compat anchor (see VERSION_ADOPTION). v is always 1 for new executions today.
-    Workflow.getVersion(VERSION_ADOPTION, Workflow.DEFAULT_VERSION, 1);
+    // Forward-compat anchor (see VERSION_ADOPTION). v=2 for new executions; v<2 (pre-fix histories)
+    // replay WITHOUT the EntryFilled command below, preserving determinism on in-flight adoptions.
+    int adoptionVersion = Workflow.getVersion(VERSION_ADOPTION, Workflow.DEFAULT_VERSION, 2);
 
     String tenantId = in.getTenantId();
     String strategyId = in.getStrategyId();
@@ -188,6 +199,20 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
         "operator-triggered adoption -> broker truth confirms lot held -> reconstructed"
             + " PositionWorkflowInput started + onFill forwarded");
     audit.log(auditEvent(tenantId, strategyId, entrySignalId, posWfId, operatorId, subject));
+
+    // Emit an EntryFilled cost-basis row so the dashboard RealizedPnlCalculator can offset the
+    // adopted lot's exit proceeds. Version-gated: a new audit command changes the recorded command
+    // sequence, so pre-fix histories (adoptionVersion < 2) must replay without it.
+    if (adoptionVersion >= 2) {
+      Map<String, Object> entrySubject = new LinkedHashMap<>();
+      entrySubject.put("option_symbol", canonicalOcc);
+      entrySubject.put("filled_qty", qty);
+      entrySubject.put("avg_fill_price", entryPremium);
+      entrySubject.put("broker_order_id", anchor.getBrokerOrderId());
+      entrySubject.put("recovery", "adopted");
+      audit.log(
+          entryFilledEvent(tenantId, strategyId, entrySignalId, posWfId, operatorId, entrySubject));
+    }
 
     AdoptionResult result = new AdoptionResult();
     result.setSchemaVersion(1L);
@@ -311,6 +336,27 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
     event.setEventId(Workflow.randomUUID().toString());
     event.setOccurredAt(workflowNow());
     event.setKind(KIND_POSITION_ADOPTED);
+    event.setSubject(new LinkedHashMap<>(subject));
+    event.setActor("operator:" + operatorId);
+    event.setWorkflowId(posWfId);
+    event.setCorrelationId(entrySignalId);
+    return event;
+  }
+
+  private AuditEvent entryFilledEvent(
+      String tenantId,
+      String strategyId,
+      String entrySignalId,
+      String posWfId,
+      String operatorId,
+      Map<String, Object> subject) {
+    AuditEvent event = new AuditEvent();
+    event.setSchemaVersion(1L);
+    event.setTenantId(tenantId);
+    event.setStrategyId(strategyId);
+    event.setEventId(Workflow.randomUUID().toString());
+    event.setOccurredAt(workflowNow());
+    event.setKind(KIND_ENTRY_FILLED);
     event.setSubject(new LinkedHashMap<>(subject));
     event.setActor("operator:" + operatorId);
     event.setWorkflowId(posWfId);
