@@ -26,9 +26,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -72,10 +74,15 @@ public class AlpacaMarketData implements MarketDataProvider {
   private final ConcurrentHashMap<String, List<Consumer<Tick>>> bySymbol =
       new ConcurrentHashMap<>();
 
-  private final Object wsLock = new Object();
-  private volatile WebSocket ws;
-  private final AtomicBoolean reconnectInFlight = new AtomicBoolean(false);
-  private volatile Duration nextBackoff = Duration.ofSeconds(1);
+  // Option premium is a REST POLL (not a WS): one scheduled snapshotQuote task per distinct open
+  // OCC,
+  // started on the first subscriber and cancelled on the last. The dead options WS (header-auth +
+  // msgpack-unhandled — it never delivered ticks) was removed.
+  private final ConcurrentHashMap<String, ScheduledFuture<?>> premiumPolls =
+      new ConcurrentHashMap<>();
+  // Consecutive failed option polls (aggregate); markDisconnected(OPTION) once past the threshold.
+  private final AtomicInteger optionPollFailures = new AtomicInteger();
+  private static final int OPTION_POLL_FAIL_THRESHOLD = 3;
 
   /** Equity subscriber registry: ticker -> {listener, ...}. Separate WS endpoint from options. */
   private final ConcurrentHashMap<String, List<Consumer<Tick>>> byTicker =
@@ -150,11 +157,13 @@ public class AlpacaMarketData implements MarketDataProvider {
   }
 
   private static ScheduledExecutorService defaultScheduler() {
+    // Pool > 1 so a slow/blocking premium-poll snapshot for one OCC cannot serialize the others (or
+    // the stock reconnect). Each open option position gets its own fixed-rate poll task.
     ScheduledThreadPoolExecutor pool =
         new ScheduledThreadPoolExecutor(
-            1,
+            4,
             r -> {
-              Thread t = new Thread(r, "alpaca-md-reconnect");
+              Thread t = new Thread(r, "alpaca-md-poll");
               t.setDaemon(true);
               return t;
             });
@@ -240,15 +249,14 @@ public class AlpacaMarketData implements MarketDataProvider {
   public Subscription subscribePremium(String occSymbol, Consumer<Tick> onTick) {
     List<Consumer<Tick>> listeners =
         bySymbol.computeIfAbsent(occSymbol, k -> new CopyOnWriteArrayList<>());
-    // Lock the per-symbol list so the isEmpty()→add→sendSubscribe compound is atomic.
-    // Without this, two concurrent first-subscribers both see isEmpty()==true and both call
-    // sendSubscribe — duplicate WS subscribes. The lock is uncontended in steady state
-    // (subscribe/unsubscribe are rare) and scoped to one symbol, so it doesn't serialize fan-out.
+    // Lock the per-symbol list so the isEmpty()→add→startPremiumPoll compound is atomic: two
+    // concurrent first-subscribers must not both start a poll. Uncontended in steady state and
+    // scoped to one symbol, so it doesn't serialize fan-out.
     synchronized (listeners) {
       boolean firstForSymbol = listeners.isEmpty();
       listeners.add(onTick);
       if (firstForSymbol) {
-        sendSubscribe(occSymbol);
+        startPremiumPoll(occSymbol);
       }
     }
     return new AlpacaSubscription(occSymbol, onTick);
@@ -620,80 +628,72 @@ public class AlpacaMarketData implements MarketDataProvider {
   }
 
   /**
-   * Production WS read-loop entry point AND test entry point. Parses one frame's {@code data} field
-   * (an array of trade/quote records) and fans out a Tick to all subscribers for the matched
-   * symbol.
-   *
-   * <p>Frame shape (Alpaca options v1beta1):
-   *
-   * <pre>
-   * [
-   *   {"T": "t", "S": "AAPL250516C00190000", "p": 1.23, "t": "2026-05-15T17:22:31.123Z"},
-   *   {"T": "q", "S": "AAPL250516C00190000", "bp": 1.20, "ap": 1.25, "t": "..."}
-   * ]
-   * </pre>
-   *
-   * Trade records ({@code T=="t"}) drive the tick directly via {@code p}. Quote records ({@code
-   * T=="q"}) emit a mid computed from {@code bp}+{@code ap}.
+   * One option-premium poll iteration: REST snapshot -> {@code Tick(occ, mid, bid, ask)} -> fan out
+   * to the {@code bySymbol} listeners. Package-private so tests drive it directly. FAIL-SOFT: a
+   * missing/empty/throwing snapshot emits NO tick and does NOT cancel the recurring task (the
+   * scheduler keeps polling). The whole body is catch-all wrapped so a scheduled task can never
+   * die.
    */
-  void dispatchWsMessage(String json) {
-    JsonNode root;
+  void pollOnce(String occSymbol) {
     try {
-      root = mapper.readTree(json);
-    } catch (Exception e) {
-      log.debug("Alpaca WS: drop unparseable frame: {}", e.getMessage());
-      return;
-    }
-    if (!root.isArray()) {
-      return;
-    }
-    for (JsonNode rec : root) {
-      Tick tick = recordToTick(rec);
-      if (tick == null) {
-        continue;
+      Optional<Quote> snapshot = snapshotQuote(occSymbol);
+      if (snapshot.isEmpty()) {
+        onPollFailure();
+        return;
       }
+      Quote q = snapshot.get();
+      Tick tick = new Tick(q.occSymbol(), q.mid(), q.bid(), q.ask(), q.retrievedAt());
       feedHealth.recordTick(FeedHealth.Feed.OPTION);
-      List<Consumer<Tick>> listeners = bySymbol.get(tick.occSymbol());
+      optionPollFailures.set(0);
+      List<Consumer<Tick>> listeners = bySymbol.get(occSymbol);
       if (listeners == null) {
-        continue;
+        return;
       }
       for (Consumer<Tick> l : listeners) {
         try {
           l.accept(tick);
         } catch (RuntimeException ignored) {
-          // Listener errors are caller's problem; drop them so one bad listener can't poison the
-          // whole stream.
+          // One bad listener must not poison the poll.
         }
       }
+    } catch (RuntimeException e) {
+      log.warn("Alpaca premium poll failed for {}: {}", occSymbol, e.getMessage());
+      onPollFailure();
     }
   }
 
-  /** Visible for tests. Returns null when the record can't be projected onto a Tick. */
-  Tick recordToTick(JsonNode rec) {
-    String type = rec.path("T").asText("");
-    String sym = rec.path("S").asText("");
-    if (sym.isEmpty()) {
-      return null;
+  private void onPollFailure() {
+    if (optionPollFailures.incrementAndGet() >= OPTION_POLL_FAIL_THRESHOLD) {
+      feedHealth.markDisconnected(FeedHealth.Feed.OPTION);
     }
-    OffsetDateTime ts = parseTimestamp(rec.path("t").asText(""));
-    if ("t".equals(type)) {
-      JsonNode price = rec.path("p");
-      if (!price.isNumber()) {
-        return null;
-      }
-      return new Tick(sym, price.decimalValue(), ts);
+  }
+
+  /**
+   * Starts the per-OCC premium poll (once, on the first subscriber, under the per-symbol lock).
+   * Package-private so tests can override it to count the lifecycle without real scheduling.
+   */
+  void startPremiumPoll(String occSymbol) {
+    long intervalMs = props.effectivePremiumPollIntervalMs();
+    ScheduledFuture<?> task =
+        scheduler.scheduleAtFixedRate(
+            () -> pollOnce(occSymbol), 0L, intervalMs, TimeUnit.MILLISECONDS);
+    ScheduledFuture<?> prev = premiumPolls.put(occSymbol, task);
+    if (prev != null) {
+      prev.cancel(false); // defensive: one start per first-subscriber, but never leak a task
     }
-    if ("q".equals(type)) {
-      JsonNode bp = rec.path("bp");
-      JsonNode ap = rec.path("ap");
-      if (!bp.isNumber() || !ap.isNumber()) {
-        return null;
-      }
-      BigDecimal bid = bp.decimalValue();
-      BigDecimal ask = ap.decimalValue();
-      return new Tick(sym, midPrice(bid, ask), bid, ask, ts);
+  }
+
+  /**
+   * Cancels the per-OCC premium poll (when the last subscriber leaves, under the per-symbol lock).
+   */
+  void stopPremiumPoll(String occSymbol) {
+    ScheduledFuture<?> task = premiumPolls.remove(occSymbol);
+    if (task != null) {
+      task.cancel(false);
     }
-    return null;
+    if (premiumPolls.isEmpty()) {
+      feedHealth.markDisconnected(FeedHealth.Feed.OPTION);
+    }
   }
 
   private static BigDecimal midPrice(BigDecimal bid, BigDecimal ask) {
@@ -708,28 +708,6 @@ public class AlpacaMarketData implements MarketDataProvider {
       return OffsetDateTime.parse(raw);
     } catch (RuntimeException e) {
       return OffsetDateTime.ofInstant(Instant.now(), ZoneOffset.UTC);
-    }
-  }
-
-  /** Package-private so tests can spy on the per-symbol upstream subscribe count. */
-  void sendSubscribe(String occSymbol) {
-    WebSocket socket = ensureWs();
-    if (socket == null) {
-      // WS not yet open; reconnect will re-send via activeSymbols snapshot.
-      return;
-    }
-    socket.sendText(subscribeAction("subscribe", occSymbol), true);
-  }
-
-  private void sendUnsubscribe(String occSymbol) {
-    WebSocket socket = ws;
-    if (socket == null) {
-      return;
-    }
-    try {
-      socket.sendText(subscribeAction("unsubscribe", occSymbol), true);
-    } catch (RuntimeException ignored) {
-      // Best-effort — the reconnect path won't resubscribe a symbol with zero listeners anyway.
     }
   }
 
@@ -749,96 +727,10 @@ public class AlpacaMarketData implements MarketDataProvider {
     }
   }
 
-  /**
-   * Opens the WS if needed. Returns null when the connect is still in flight or has failed.
-   *
-   * <p>Package-private so tests can stub it without standing up a real WS endpoint.
-   */
-  WebSocket ensureWs() {
-    WebSocket existing = ws;
-    if (existing != null) {
-      return existing;
-    }
-    synchronized (wsLock) {
-      if (ws != null) {
-        return ws;
-      }
-      try {
-        ws = connectBlocking();
-        nextBackoff = Duration.ofSeconds(1);
-        feedHealth.markConnected(FeedHealth.Feed.OPTION);
-        return ws;
-      } catch (RuntimeException e) {
-        log.warn("Alpaca WS connect failed: {}", e.getMessage());
-        scheduleReconnect();
-        return null;
-      }
-    }
-  }
-
-  private WebSocket connectBlocking() {
-    CompletableFuture<WebSocket> fut =
-        httpClient
-            .newWebSocketBuilder()
-            .header("APCA-API-KEY-ID", props.apiKeyId())
-            .header("APCA-API-SECRET-KEY", props.apiSecretKey())
-            .connectTimeout(Duration.ofSeconds(5))
-            .buildAsync(URI.create(props.dataWsUrl()), new WsListener());
-    try {
-      return fut.get(10, TimeUnit.SECONDS);
-    } catch (Exception e) {
-      throw new RuntimeException("Alpaca WS connect failed", e);
-    }
-  }
-
-  /** Package-private so tests can drive the reconnect path directly. */
-  void scheduleReconnect() {
-    if (!reconnectInFlight.compareAndSet(false, true)) {
-      return;
-    }
-    Duration delay = nextBackoff;
-    nextBackoff = nextBackoff.multipliedBy(2);
-    if (nextBackoff.compareTo(MAX_BACKOFF) > 0) {
-      nextBackoff = MAX_BACKOFF;
-    }
-    scheduler.schedule(this::runReconnect, delay.toMillis(), TimeUnit.MILLISECONDS);
-  }
-
-  /** Package-private so tests can drive the reconnect body deterministically. */
-  void runReconnect() {
-    // Null the socket BEFORE clearing the in-flight guard. If a stale WsListener.onClose
-    // fires (originating from the just-failed socket) while we're mid-reconnect, it must
-    // see reconnectInFlight==true and skip — otherwise it races us to open a second socket.
-    synchronized (wsLock) {
-      ws = null;
-    }
-    reconnectInFlight.set(false);
-    WebSocket socket = ensureWs();
-    if (socket == null) {
-      return;
-    }
-    // Re-send subscribe for every symbol that still has a listener. Lossy: any tick that
-    // landed during the gap is gone. Iterate a snapshot so concurrent close()s during the
-    // resubscribe walk can't NPE.
-    for (String s : new LinkedHashSet<>(bySymbol.keySet())) {
-      List<Consumer<Tick>> listeners = bySymbol.get(s);
-      if (listeners != null && !listeners.isEmpty()) {
-        sendSubscribe(s);
-      }
-    }
-  }
-
   @PreDestroy
   void shutdown() {
+    // shutdownNow cancels the premium-poll tasks (they run on this scheduler) + stock reconnect.
     scheduler.shutdownNow();
-    WebSocket socket = ws;
-    if (socket != null) {
-      try {
-        socket.sendClose(WebSocket.NORMAL_CLOSURE, "shutdown");
-      } catch (RuntimeException ignored) {
-        // Best-effort
-      }
-    }
     WebSocket stockSocket = stockWs;
     if (stockSocket != null) {
       try {
@@ -846,36 +738,6 @@ public class AlpacaMarketData implements MarketDataProvider {
       } catch (RuntimeException ignored) {
         // Best-effort
       }
-    }
-  }
-
-  /** WebSocket listener wires raw text frames into {@link #dispatchWsMessage}. */
-  private final class WsListener implements WebSocket.Listener {
-    private final StringBuilder buf = new StringBuilder();
-
-    @Override
-    public CompletableFuture<?> onText(WebSocket socket, CharSequence data, boolean last) {
-      String frame = accumulateFrame(buf, data, last);
-      if (frame != null) {
-        dispatchWsMessage(frame);
-      }
-      socket.request(1);
-      return null;
-    }
-
-    @Override
-    public void onError(WebSocket socket, Throwable error) {
-      log.warn("Alpaca WS error: {}", error.getMessage());
-      feedHealth.markDisconnected(FeedHealth.Feed.OPTION);
-      scheduleReconnect();
-    }
-
-    @Override
-    public CompletableFuture<?> onClose(WebSocket socket, int statusCode, String reason) {
-      log.info("Alpaca WS closed status={} reason={}", statusCode, reason);
-      feedHealth.markDisconnected(FeedHealth.Feed.OPTION);
-      scheduleReconnect();
-      return null;
     }
   }
 
@@ -912,7 +774,7 @@ public class AlpacaMarketData implements MarketDataProvider {
         listeners.remove(listener);
         if (listeners.isEmpty()) {
           bySymbol.remove(symbol, listeners);
-          sendUnsubscribe(symbol);
+          stopPremiumPoll(symbol);
         }
       }
     }
