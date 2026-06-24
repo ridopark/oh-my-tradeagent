@@ -94,6 +94,11 @@ public class AlpacaMarketData implements MarketDataProvider {
   private volatile WebSocket stockWs;
   private final AtomicBoolean stockReconnectInFlight = new AtomicBoolean(false);
   private volatile Duration stockNextBackoff = Duration.ofSeconds(1);
+  // Alpaca's v2 stocks DATA stream is authenticated by an in-band {"action":"auth"} MESSAGE (NOT
+  // HTTP headers) and rejects subscribes until it replies {"T":"success","msg":"authenticated"}.
+  // Subscribes are gated on this flag; the authenticated control frame applies the byTicker set.
+  // Package-private for test assertions. Reset on every (re)connect/close.
+  volatile boolean stockAuthenticated;
 
   @Autowired
   public AlpacaMarketData(
@@ -301,6 +306,23 @@ public class AlpacaMarketData implements MarketDataProvider {
       return;
     }
     for (JsonNode rec : root) {
+      String type = rec.path("T").asText("");
+      // Control frames (previously dropped silently, which hid the rejected auth/subscribe).
+      if ("success".equals(type)) {
+        handleStockControlSuccess(rec.path("msg").asText(""));
+        continue;
+      }
+      if ("error".equals(type)) {
+        log.error(
+            "AUDIT stock-ws-auth-error: code={} msg={}",
+            rec.path("code").asText(""),
+            rec.path("msg").asText(""));
+        continue;
+      }
+      if ("subscription".equals(type)) {
+        log.debug("Alpaca stock WS: subscription confirmed {}", rec);
+        continue;
+      }
       Tick tick = recordToEquityTick(rec);
       if (tick == null) {
         continue;
@@ -317,6 +339,28 @@ public class AlpacaMarketData implements MarketDataProvider {
           // One bad listener must not poison the stream.
         }
       }
+    }
+  }
+
+  /**
+   * Handles a stocks-stream {@code {"T":"success"}} control frame. The {@code authenticated} reply
+   * is the gate: only then can subscriptions be sent and only then is the feed "connected" for
+   * health.
+   */
+  private void handleStockControlSuccess(String msg) {
+    if ("authenticated".equals(msg)) {
+      feedHealth.markConnected(FeedHealth.Feed.EQUITY);
+      log.info("Alpaca stock WS authenticated; subscribing {} ticker(s)", byTicker.size());
+      // Set the flag + subscribe under the lock so a ticker added concurrently in subscribeEquity
+      // is
+      // sent by exactly one path (here or its own sendStockSubscribe), never dropped.
+      synchronized (stockWsLock) {
+        stockAuthenticated = true;
+        resubscribeAllStocks();
+      }
+    } else {
+      // The initial {"msg":"connected"} greeting precedes auth; nothing to do.
+      log.debug("Alpaca stock WS: {}", msg);
     }
   }
 
@@ -368,7 +412,42 @@ public class AlpacaMarketData implements MarketDataProvider {
     if (socket == null) {
       return;
     }
-    socket.sendText(subscribeAction("subscribe", ticker), true);
+    // Lock so the auth flag check + send is ordered against handleStockControlSuccess (which sets
+    // the
+    // flag and resubscribes under the same lock). A ticker registered just as auth completes is
+    // then
+    // sent by exactly one of the two paths, never dropped. stockWsLock is reentrant w.r.t.
+    // ensureStockWs above.
+    synchronized (stockWsLock) {
+      if (!stockAuthenticated) {
+        // Pre-auth: the ticker is already in byTicker and gets subscribed when the `authenticated`
+        // control frame arrives (resubscribeAllStocks). Sending now would be ignored by Alpaca.
+        return;
+      }
+      socket.sendText(subscribeAction("subscribe", ticker), true);
+    }
+  }
+
+  /**
+   * Builds the v2 stocks DATA-stream auth frame: {@code {"action":"auth","key":..,"secret":..}}.
+   */
+  String authAction() {
+    try {
+      return mapper.writeValueAsString(
+          Map.of("action", "auth", "key", props.apiKeyId(), "secret", props.apiSecretKey()));
+    } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+      throw new IllegalStateException("failed to serialize stock auth frame", e);
+    }
+  }
+
+  /** Subscribes every currently-registered equity ticker (called once on `authenticated`). */
+  private void resubscribeAllStocks() {
+    for (String t : new LinkedHashSet<>(byTicker.keySet())) {
+      List<Consumer<Tick>> listeners = byTicker.get(t);
+      if (listeners != null && !listeners.isEmpty()) {
+        sendStockSubscribe(t);
+      }
+    }
   }
 
   private void sendStockUnsubscribe(String ticker) {
@@ -397,9 +476,12 @@ public class AlpacaMarketData implements MarketDataProvider {
         return stockWs;
       }
       try {
+        stockAuthenticated = false;
         stockWs = connectStockBlocking();
         stockNextBackoff = Duration.ofSeconds(1);
-        feedHealth.markConnected(FeedHealth.Feed.EQUITY);
+        // Authenticate in-band; FeedHealth.markConnected(EQUITY) is deferred to the `authenticated`
+        // control frame (handleStockControlSuccess), which is when data can actually flow.
+        stockWs.sendText(authAction(), true);
         return stockWs;
       } catch (RuntimeException e) {
         log.error("AUDIT stock-ws-connect-failed: {}", e.getMessage());
@@ -415,11 +497,13 @@ public class AlpacaMarketData implements MarketDataProvider {
             .effectiveStockDataWsUrl()
             .orElseThrow(
                 () -> new IllegalStateException("stock data WS not configured; cannot connect"));
+    // No HTTP-header auth: the v2 stocks DATA stream authenticates via the in-band
+    // {"action":"auth"}
+    // message sent in ensureStockWs() after the socket opens. Header auth leaves the socket
+    // connected-but-unauthenticated, so Alpaca honors no subscriptions and pushes zero data.
     CompletableFuture<WebSocket> fut =
         httpClient
             .newWebSocketBuilder()
-            .header("APCA-API-KEY-ID", props.apiKeyId())
-            .header("APCA-API-SECRET-KEY", props.apiSecretKey())
             .connectTimeout(Duration.ofSeconds(5))
             .buildAsync(URI.create(url), new StockWsListener());
     try {
@@ -447,17 +531,11 @@ public class AlpacaMarketData implements MarketDataProvider {
     synchronized (stockWsLock) {
       stockWs = null;
     }
+    stockAuthenticated = false;
     stockReconnectInFlight.set(false);
-    WebSocket socket = ensureStockWs();
-    if (socket == null) {
-      return;
-    }
-    for (String t : new LinkedHashSet<>(byTicker.keySet())) {
-      List<Consumer<Tick>> listeners = byTicker.get(t);
-      if (listeners != null && !listeners.isEmpty()) {
-        sendStockSubscribe(t);
-      }
-    }
+    // ensureStockWs reconnects + re-sends the auth message; the `authenticated` control frame then
+    // re-subscribes every byTicker symbol (resubscribeAllStocks). No explicit re-subscribe here.
+    ensureStockWs();
   }
 
   /**
@@ -495,6 +573,7 @@ public class AlpacaMarketData implements MarketDataProvider {
     @Override
     public void onError(WebSocket socket, Throwable error) {
       log.error("AUDIT stock-ws-error: {}", error.getMessage());
+      stockAuthenticated = false;
       feedHealth.markDisconnected(FeedHealth.Feed.EQUITY);
       scheduleStockReconnect();
     }
@@ -502,6 +581,7 @@ public class AlpacaMarketData implements MarketDataProvider {
     @Override
     public CompletableFuture<?> onClose(WebSocket socket, int statusCode, String reason) {
       log.error("AUDIT stock-ws-closed status={} reason={}", statusCode, reason);
+      stockAuthenticated = false;
       feedHealth.markDisconnected(FeedHealth.Feed.EQUITY);
       scheduleStockReconnect();
       return null;

@@ -50,17 +50,35 @@ public class TemporalWorkerConfig {
    * Single-threaded dispatcher for tick fan-out. Keeps the (potentially feed-driven) stream
    * callback decoupled from Temporal RPC latency.
    */
-  // @Primary so ExecutorService injections (the tick-fan-out dispatcher in both the premium and
-  // equity activities) resolve to this bean and not the ScheduledExecutorService watchdog below
-  // (which is also an ExecutorService). The watchdog injects by its narrower
-  // ScheduledExecutorService
-  // type, so it stays unambiguous.
+  // @Primary: the PREMIUM (options/chandelier) fan-out dispatcher. Unqualified ExecutorService
+  // injections (SubscribePremiumActivityImpl) resolve here, not the ScheduledExecutorService
+  // watchdog
+  // below (which injects by its narrower type). The EQUITY activity injects equityTickDispatcher()
+  // by
+  // qualifier instead, so the equity feed (now that it actually delivers ticks) cannot starve
+  // premium
+  // dispatch on a shared single thread.
   @Bean
   @Primary
   public ExecutorService tickDispatcher() {
     return Executors.newSingleThreadExecutor(
         r -> {
-          Thread t = new Thread(r, "market-data-tick-dispatch");
+          Thread t = new Thread(r, "market-data-premium-tick-dispatch");
+          t.setDaemon(true);
+          return t;
+        });
+  }
+
+  /**
+   * Dedicated fan-out dispatcher for the EQUITY (watchlist-trigger) feed, separate from the premium
+   * dispatcher so a burst of equity ticks (or a slow equity signal RPC) cannot delay copytrade's
+   * chandelier-tick dispatch. Injected into {@code SubscribeEquityActivityImpl} by qualifier.
+   */
+  @Bean
+  public ExecutorService equityTickDispatcher() {
+    return Executors.newSingleThreadExecutor(
+        r -> {
+          Thread t = new Thread(r, "market-data-equity-tick-dispatch");
           t.setDaemon(true);
           return t;
         });
