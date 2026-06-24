@@ -55,10 +55,10 @@ import java.util.Map;
 public class AdoptionWorkflowImpl implements AdoptionWorkflow {
 
   /**
-   * Forward-compat version anchor for this workflow type. New executions enter at v=1; any future
-   * deterministic branch is gated by bumping the max version here so in-flight adoptions on replay
-   * keep their recorded history. (Adoption is short-lived, but the anchor keeps the standard
-   * versioning discipline.)
+   * Forward-compat version anchor for this workflow type. New executions enter at v=2 (v=1 was the
+   * pre-EntryFilled anchor); each deterministic branch is gated by bumping the max version here so
+   * in-flight adoptions on replay keep their recorded history. (Adoption is short-lived, but the
+   * anchor keeps the standard versioning discipline.)
    */
   static final String VERSION_ADOPTION = "adoption-v1";
 
