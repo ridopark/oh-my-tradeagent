@@ -277,6 +277,13 @@ class AdoptionWorkflowImplTest {
 
     ArgumentCaptor<AuditEvent> auditCaptor = ArgumentCaptor.forClass(AuditEvent.class);
     verify(audit, atLeastOnce()).log(auditCaptor.capture());
+    // Exactly one EntryFilled — a second would double-count cost basis in RealizedPnlCalculator
+    // (which sums every EntryFilled row for the contract), turning the offset into a phantom loss.
+    long entryFilledCount =
+        auditCaptor.getAllValues().stream().filter(e -> "EntryFilled".equals(e.getKind())).count();
+    assertThat(entryFilledCount)
+        .as("adoption must emit EXACTLY ONE EntryFilled cost-basis row")
+        .isEqualTo(1L);
     AuditEvent entryFilled = firstOfKind(auditCaptor.getAllValues(), "EntryFilled");
     assertThat(entryFilled).as("adoption must emit an EntryFilled cost-basis row").isNotNull();
     assertThat(entryFilled.getTenantId()).isEqualTo(TENANT);
