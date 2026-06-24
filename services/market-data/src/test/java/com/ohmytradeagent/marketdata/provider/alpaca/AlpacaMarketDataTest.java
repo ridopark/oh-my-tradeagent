@@ -290,6 +290,88 @@ class AlpacaMarketDataTest {
     assertThat(received).isEmpty();
   }
 
+  private AlpacaMarketData equityProviderRecording(
+      com.ohmytradeagent.marketdata.health.FeedHealth feedHealth,
+      java.util.List<String> subscribed) {
+    AlpacaMarketDataProperties props =
+        new AlpacaMarketDataProperties(
+            server.url("/").toString().replaceAll("/$", ""),
+            "wss://example.invalid/should-not-connect",
+            "key-id-for-test",
+            "key-secret-for-test",
+            "",
+            "iex");
+    RestClient client = RestClient.builder().baseUrl(props.dataBaseUrl()).build();
+    return new AlpacaMarketData(
+        client, mapper, props, HttpClient.newHttpClient(), scheduler, feedHealth) {
+      @Override
+      void sendStockSubscribe(String ticker) {
+        subscribed.add(ticker); // record instead of dialing a real WS
+      }
+    };
+  }
+
+  @Test
+  void stockAuthenticatedFrame_marksConnectedAndResubscribesAllTickers() {
+    com.ohmytradeagent.marketdata.health.FeedHealth fh =
+        new com.ohmytradeagent.marketdata.health.FeedHealth(
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+    CopyOnWriteArrayList<String> subscribed = new CopyOnWriteArrayList<>();
+    AlpacaMarketData eq = equityProviderRecording(fh, subscribed);
+    eq.subscribeEquity("NVDA", t -> {});
+    eq.subscribeEquity("SPY", t -> {});
+    subscribed.clear();
+    assertThat(eq.stockAuthenticated).isFalse();
+    assertThat(fh.connected(com.ohmytradeagent.marketdata.health.FeedHealth.Feed.EQUITY)).isFalse();
+
+    eq.dispatchStockWsMessage("[{\"T\":\"success\",\"msg\":\"authenticated\"}]");
+
+    assertThat(eq.stockAuthenticated).isTrue();
+    assertThat(fh.connected(com.ohmytradeagent.marketdata.health.FeedHealth.Feed.EQUITY)).isTrue();
+    assertThat(subscribed).containsExactlyInAnyOrder("NVDA", "SPY");
+  }
+
+  @Test
+  void stockConnectedGreeting_doesNotAuthenticate() {
+    com.ohmytradeagent.marketdata.health.FeedHealth fh =
+        new com.ohmytradeagent.marketdata.health.FeedHealth(
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+    AlpacaMarketData eq = equityProviderRecording(fh, new CopyOnWriteArrayList<>());
+
+    eq.dispatchStockWsMessage("[{\"T\":\"success\",\"msg\":\"connected\"}]");
+
+    assertThat(eq.stockAuthenticated).isFalse();
+    assertThat(fh.connected(com.ohmytradeagent.marketdata.health.FeedHealth.Feed.EQUITY)).isFalse();
+  }
+
+  @Test
+  void stockErrorFrame_doesNotAuthenticate() {
+    com.ohmytradeagent.marketdata.health.FeedHealth fh =
+        new com.ohmytradeagent.marketdata.health.FeedHealth(
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+    AlpacaMarketData eq = equityProviderRecording(fh, new CopyOnWriteArrayList<>());
+
+    eq.dispatchStockWsMessage("[{\"T\":\"error\",\"code\":402,\"msg\":\"auth failed\"}]");
+
+    assertThat(eq.stockAuthenticated).isFalse();
+    assertThat(fh.connected(com.ohmytradeagent.marketdata.health.FeedHealth.Feed.EQUITY)).isFalse();
+  }
+
+  @Test
+  void authAction_buildsMessageAuthFrameWithConfiguredCreds() throws Exception {
+    AlpacaMarketData eq =
+        equityProviderRecording(
+            new com.ohmytradeagent.marketdata.health.FeedHealth(
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+            new CopyOnWriteArrayList<>());
+
+    com.fasterxml.jackson.databind.JsonNode auth = mapper.readTree(eq.authAction());
+
+    assertThat(auth.get("action").asText()).isEqualTo("auth");
+    assertThat(auth.get("key").asText()).isEqualTo("key-id-for-test");
+    assertThat(auth.get("secret").asText()).isEqualTo("key-secret-for-test");
+  }
+
   @Test
   void effectiveStockDataWsUrl_allowsIexAndSip_caseInsensitive() {
     assertThat(propsWithFeed("iex").effectiveStockDataWsUrl())

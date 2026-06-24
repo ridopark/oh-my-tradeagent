@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 /**
@@ -82,7 +83,7 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
   public SubscribeEquityActivityImpl(
       MarketDataProvider provider,
       WorkflowClient workflowClient,
-      ExecutorService dispatcher,
+      @Qualifier("equityTickDispatcher") ExecutorService dispatcher,
       ScheduledExecutorService watchdog) {
     this(provider, workflowClient, dispatcher, watchdog, Clock.system(ET), 30L);
   }
