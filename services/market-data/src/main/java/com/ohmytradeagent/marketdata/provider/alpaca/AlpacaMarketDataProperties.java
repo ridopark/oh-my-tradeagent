@@ -9,8 +9,12 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * every quote.
  *
  * @param dataBaseUrl base URL for REST snapshots (e.g. {@code https://data.alpaca.markets})
- * @param dataWsUrl WebSocket URL for the options stream (e.g. {@code
- *     wss://stream.data.alpaca.markets/v1beta1/indicative})
+ * @param dataWsUrl NO LONGER USED for the options premium feed — that is now a REST poll of {@code
+ *     snapshotQuote} ({@code AlpacaMarketData#pollOnce}). Retained to avoid config/test churn; the
+ *     Alpaca options WS (v1beta1) is msgpack/binary + message-auth and was never delivering ticks.
+ * @param premiumPollIntervalMs option-premium snapshot poll cadence in ms; null -> 2000ms default
+ *     ({@link #effectivePremiumPollIntervalMs()}). Sized against Alpaca's data-REST limit (~200
+ *     req/min): one poll per distinct open OCC = 60000/interval req/min/contract.
  * @param stockDataWsUrl WebSocket URL for the real-time STOCK trade stream (e.g. {@code
  *     wss://stream.data.alpaca.markets/v2/iex} or {@code .../v2/sip}). LIVE-USE GATE: intentionally
  *     UNSET by default. When blank, {@link AlpacaMarketData#subscribeEquity} fails closed (loud
@@ -28,7 +32,15 @@ public record AlpacaMarketDataProperties(
     String apiKeyId,
     String apiSecretKey,
     String stockDataWsUrl,
-    String stockFeed) {
+    String stockFeed,
+    Long premiumPollIntervalMs) {
+
+  /** Poll cadence (ms) for the option-premium snapshot; defaults to 2000ms when unset. */
+  public long effectivePremiumPollIntervalMs() {
+    return (premiumPollIntervalMs != null && premiumPollIntervalMs > 0)
+        ? premiumPollIntervalMs
+        : 2000L;
+  }
 
   /**
    * Effective stock-stream WS URL, or empty when live equity use is not enabled. Prefers an

@@ -1,9 +1,11 @@
 package com.ohmytradeagent.marketdata.provider.alpaca;
 
+import java.time.Duration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
 /**
@@ -32,8 +34,15 @@ public class AlpacaMarketDataConfig {
           "market-data.provider=alpaca requires APCA_API_SECRET_KEY_DATA; got blank/null. "
               + "Set the alpaca-credentials Secret in your deployment.");
     }
+    // Bounded timeouts so a slow Alpaca snapshot cannot pin a premium-poll thread past the poll
+    // interval (default 2s): read < interval. Without this the default RestClient has no read
+    // timeout.
+    SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+    requestFactory.setConnectTimeout(Duration.ofSeconds(1));
+    requestFactory.setReadTimeout(Duration.ofMillis(1500));
     return builder
         .baseUrl(props.dataBaseUrl())
+        .requestFactory(requestFactory)
         .defaultHeader("APCA-API-KEY-ID", props.apiKeyId())
         .defaultHeader("APCA-API-SECRET-KEY", props.apiSecretKey())
         .defaultHeader("Accept", "application/json")
