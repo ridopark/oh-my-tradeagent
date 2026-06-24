@@ -30,7 +30,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,14 +46,16 @@ import org.springframework.web.client.RestClient;
  * RestClient}. JSON shape per Alpaca options market-data docs: {@code {"snapshots": {"<symbol>":
  * {"latestQuote": {"bp": 1.2, "ap": 1.3, "t": "..."} }}}}.
  *
- * <p>WebSocket stream: uses Java's {@code java.net.http.WebSocket} (no Netty/Spring-WebSocket dep).
- * On {@link #subscribePremium} the first subscriber per symbol triggers an upstream {@code
- * subscribe} message; the last subscriber's {@link Subscription#close()} sends {@code unsubscribe}
- * (best-effort). Reconnect uses exponential backoff capped at 30s and re-sends {@code subscribe}
- * for currently-active symbols — lossy semantics, no replay buffer.
+ * <p>Option premium: a REST POLL, not a stream. On {@link #subscribePremium} the first subscriber
+ * per OCC starts a fixed-rate {@link #snapshotQuote} poll ({@link #startPremiumPoll}); the last
+ * subscriber's {@link Subscription#close()} cancels it ({@link #stopPremiumPoll}). The poll is
+ * fail-soft ({@link #pollOnce}): a missing/429/5xx snapshot emits no tick and never cancels the
+ * task. (The Alpaca v1beta1 options WS was msgpack/binary + message-auth and never delivered ticks,
+ * so it was removed.)
  *
- * <p>The WS frame parser ({@link #dispatchWsMessage(String)}) is package-private so unit tests can
- * drive the fan-out path without standing up a real WS server.
+ * <p>Stock trade stream: the real-time equity feed still uses Java's {@code
+ * java.net.http.WebSocket} (no Netty/Spring-WebSocket dep) with in-band message auth; see {@link
+ * #ensureStockWs}.
  */
 @Component
 @ConditionalOnProperty(name = "market-data.provider", havingValue = "alpaca")
@@ -80,8 +81,11 @@ public class AlpacaMarketData implements MarketDataProvider {
   // msgpack-unhandled — it never delivered ticks) was removed.
   private final ConcurrentHashMap<String, ScheduledFuture<?>> premiumPolls =
       new ConcurrentHashMap<>();
-  // Consecutive failed option polls (aggregate); markDisconnected(OPTION) once past the threshold.
-  private final AtomicInteger optionPollFailures = new AtomicInteger();
+  // Consecutive failed polls PER OCC (a healthy contract clears its own count on success). The
+  // OPTION feed is marked disconnected only when EVERY subscribed OCC is past the threshold (whole
+  // feed dead) — a single contract's transient miss must not flip the aggregate gauge, and one
+  // healthy contract ticking proves the feed is alive.
+  private final ConcurrentHashMap<String, Integer> optionPollFailures = new ConcurrentHashMap<>();
   private static final int OPTION_POLL_FAIL_THRESHOLD = 3;
 
   /** Equity subscriber registry: ticker -> {listener, ...}. Separate WS endpoint from options. */
@@ -90,9 +94,10 @@ public class AlpacaMarketData implements MarketDataProvider {
 
   private final Object stockWsLock = new Object();
 
-  // CONNECTION-LIMIT CAVEAT: this is a SECOND market-data WS on the SAME Alpaca key as the options
-  // `ws` above. This singleton fans out one WS per endpoint to all subscribers, so the connection
-  // count is fixed at 2 (options + stocks) regardless of strategy/leg count — and ONLY while
+  // CONNECTION-LIMIT CAVEAT: this stock stream is the ONLY market-data WS now (the options premium
+  // feed is a REST poll, not a socket). This singleton fans out one WS to all equity subscribers,
+  // so
+  // the stocks connection count is fixed at 1 regardless of strategy/leg count — and ONLY while
   // market-data runs a SINGLE replica. VERIFIED 2026-06-20 (scripts/alpaca-ws-conn-check.py): the
   // Alpaca limit is ONE connection PER ENDPOINT, not account-wide — stocks (/v2) and options
   // (/v1beta1) coexist on one key; a 2nd connection to the SAME endpoint gets 406 and is refused
@@ -638,13 +643,13 @@ public class AlpacaMarketData implements MarketDataProvider {
     try {
       Optional<Quote> snapshot = snapshotQuote(occSymbol);
       if (snapshot.isEmpty()) {
-        onPollFailure();
+        onPollFailure(occSymbol);
         return;
       }
       Quote q = snapshot.get();
       Tick tick = new Tick(q.occSymbol(), q.mid(), q.bid(), q.ask(), q.retrievedAt());
       feedHealth.recordTick(FeedHealth.Feed.OPTION);
-      optionPollFailures.set(0);
+      optionPollFailures.remove(occSymbol);
       List<Consumer<Tick>> listeners = bySymbol.get(occSymbol);
       if (listeners == null) {
         return;
@@ -658,14 +663,31 @@ public class AlpacaMarketData implements MarketDataProvider {
       }
     } catch (RuntimeException e) {
       log.warn("Alpaca premium poll failed for {}: {}", occSymbol, e.getMessage());
-      onPollFailure();
+      onPollFailure(occSymbol);
     }
   }
 
-  private void onPollFailure() {
-    if (optionPollFailures.incrementAndGet() >= OPTION_POLL_FAIL_THRESHOLD) {
+  private void onPollFailure(String occSymbol) {
+    optionPollFailures.merge(occSymbol, 1, Integer::sum);
+    // Whole-feed-dead check: every subscribed OCC must be past the threshold. A healthy OCC clears
+    // its own count on success (and recordTick keeps the gauge connected), so this only trips when
+    // nothing is ticking — not when one of several contracts has a transient miss.
+    if (allSubscribedOccsFailing()) {
       feedHealth.markDisconnected(FeedHealth.Feed.OPTION);
     }
+  }
+
+  private boolean allSubscribedOccsFailing() {
+    if (bySymbol.isEmpty()) {
+      return false;
+    }
+    for (String occ : bySymbol.keySet()) {
+      Integer fails = optionPollFailures.get(occ);
+      if (fails == null || fails < OPTION_POLL_FAIL_THRESHOLD) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -674,23 +696,31 @@ public class AlpacaMarketData implements MarketDataProvider {
    */
   void startPremiumPoll(String occSymbol) {
     long intervalMs = props.effectivePremiumPollIntervalMs();
-    ScheduledFuture<?> task =
-        scheduler.scheduleAtFixedRate(
-            () -> pollOnce(occSymbol), 0L, intervalMs, TimeUnit.MILLISECONDS);
-    ScheduledFuture<?> prev = premiumPolls.put(occSymbol, task);
-    if (prev != null) {
-      prev.cancel(false); // defensive: one start per first-subscriber, but never leak a task
-    }
+    // compute() holds the per-key bin lock, so a concurrent stopPremiumPoll on the same OCC cannot
+    // interleave: start and stop are mutually exclusive even though subscribePremium/close() lock
+    // different per-symbol-list monitors. Never start a second task if one is already live.
+    premiumPolls.compute(
+        occSymbol,
+        (k, existing) ->
+            existing != null
+                ? existing
+                : scheduler.scheduleAtFixedRate(
+                    () -> pollOnce(occSymbol), 0L, intervalMs, TimeUnit.MILLISECONDS));
   }
 
   /**
    * Cancels the per-OCC premium poll (when the last subscriber leaves, under the per-symbol lock).
    */
   void stopPremiumPoll(String occSymbol) {
-    ScheduledFuture<?> task = premiumPolls.remove(occSymbol);
-    if (task != null) {
-      task.cancel(false);
-    }
+    // computeIfPresent holds the same bin lock startPremiumPoll uses, so cancel+remove is atomic
+    // against a racing re-subscribe — no lost-cancel and no orphaned task left in the map.
+    premiumPolls.computeIfPresent(
+        occSymbol,
+        (k, task) -> {
+          task.cancel(false);
+          return null;
+        });
+    optionPollFailures.remove(occSymbol);
     if (premiumPolls.isEmpty()) {
       feedHealth.markDisconnected(FeedHealth.Feed.OPTION);
     }
@@ -731,6 +761,7 @@ public class AlpacaMarketData implements MarketDataProvider {
   void shutdown() {
     // shutdownNow cancels the premium-poll tasks (they run on this scheduler) + stock reconnect.
     scheduler.shutdownNow();
+    premiumPolls.clear();
     WebSocket stockSocket = stockWs;
     if (stockSocket != null) {
       try {

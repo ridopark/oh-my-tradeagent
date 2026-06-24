@@ -155,11 +155,17 @@ class AlpacaMarketDataTest {
   }
 
   private static MockResponse optionSnapshot(String bid, String ask) {
+    return optionSnapshotFor("NVDA260516C00140000", bid, ask);
+  }
+
+  private static MockResponse optionSnapshotFor(String compactOcc, String bid, String ask) {
     return new MockResponse()
         .setResponseCode(200)
         .setHeader("Content-Type", "application/json")
         .setBody(
-            "{\"snapshots\":{\"NVDA260516C00140000\":{\"latestQuote\":{\"bp\":"
+            "{\"snapshots\":{\""
+                + compactOcc
+                + "\":{\"latestQuote\":{\"bp\":"
                 + bid
                 + ",\"ap\":"
                 + ask
@@ -249,6 +255,28 @@ class AlpacaMarketDataTest {
     }
 
     assertThat(fh.connected(com.ohmytradeagent.marketdata.health.FeedHealth.Feed.OPTION)).isFalse();
+  }
+
+  @Test
+  void pollOnce_oneHealthyOcc_keepsOptionConnected_whileAnotherFailsPastThreshold() {
+    com.ohmytradeagent.marketdata.health.FeedHealth fh = newFeedHealth();
+    AlpacaMarketData p = premiumProvider(fh);
+    p.subscribePremium("NVDA  260516C00140000", t -> {});
+    p.subscribePremium("AAPL  260516C00190000", t -> {});
+
+    // NVDA is healthy...
+    server.enqueue(optionSnapshotFor("NVDA260516C00140000", "1.20", "1.30"));
+    p.pollOnce("NVDA  260516C00140000");
+
+    // ...while AAPL fails three straight polls (past the per-OCC threshold).
+    for (int i = 0; i < 3; i++) {
+      server.enqueue(new MockResponse().setResponseCode(503).setBody("{\"message\":\"down\"}"));
+      p.pollOnce("AAPL  260516C00190000");
+    }
+
+    // One healthy contract proves the feed is alive: the aggregate gauge must stay connected. The
+    // OPTION feed only flips disconnected when EVERY subscribed OCC is failing.
+    assertThat(fh.connected(com.ohmytradeagent.marketdata.health.FeedHealth.Feed.OPTION)).isTrue();
   }
 
   /**
