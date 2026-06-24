@@ -187,6 +187,64 @@ class WatchlistTriggerWorkflowImplTest {
     assertThat(intent.getQty()).isEqualTo(50L);
   }
 
+  // Sub-penny option-quote midpoint (e.g. (2.65+2.70)/2 = 2.675) must be rounded to a 2-decimal
+  // penny tick before it becomes the BTO limit, else Alpaca rejects the order with a non-retryable
+  // 422. HALF_UP at the half-cent rounds up: 2.675 -> 2.68.
+  @Test
+  void fire_halfCentMid_placesPennyRoundedLimit() throws Exception {
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteOk(new BigDecimal("2.675")));
+    WatchlistTriggerWorkflow wf = newStub("wl-halfcent");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("2.68")));
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+    ArgumentCaptor<OrderIntent> captor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(1)).placeOrder(captor.capture());
+    BigDecimal limit = captor.getValue().getLimitPrice();
+    assertThat(limit).isEqualByComparingTo("2.68");
+    assertThat(limit.scale()).isEqualTo(2);
+  }
+
+  // Below the half-cent, HALF_UP rounds down: 2.674 -> 2.67.
+  @Test
+  void fire_roundsDownBelowHalfCent() throws Exception {
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteOk(new BigDecimal("2.674")));
+    WatchlistTriggerWorkflow wf = newStub("wl-rounddown");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("2.67")));
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+    ArgumentCaptor<OrderIntent> captor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(1)).placeOrder(captor.capture());
+    assertThat(captor.getValue().getLimitPrice()).isEqualByComparingTo("2.67");
+  }
+
+  // Already a 2-decimal penny tick: rounding is a no-op (no drift).
+  @Test
+  void fire_alreadyTwoDecimals_unchanged() throws Exception {
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteOk(new BigDecimal("2.65")));
+    WatchlistTriggerWorkflow wf = newStub("wl-twodp");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("2.65")));
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+    ArgumentCaptor<OrderIntent> captor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(1)).placeOrder(captor.capture());
+    assertThat(captor.getValue().getLimitPrice()).isEqualByComparingTo("2.65");
+  }
+
   // (c) BREAKOUT first tick already past band -> SKIP, no order.
   @Test
   void breakoutAbove_firstCrossPastBand_skips() throws Exception {
