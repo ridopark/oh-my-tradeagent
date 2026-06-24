@@ -373,6 +373,47 @@ class AlpacaMarketDataTest {
   }
 
   @Test
+  void sendStockSubscribe_gatedUntilAuthenticated() {
+    java.net.http.WebSocket fake = org.mockito.Mockito.mock(java.net.http.WebSocket.class);
+    org.mockito.Mockito.when(
+            fake.sendText(
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean()))
+        .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(fake));
+    AlpacaMarketDataProperties props =
+        new AlpacaMarketDataProperties(
+            server.url("/").toString().replaceAll("/$", ""),
+            "wss://example.invalid/should-not-connect",
+            "key-id-for-test",
+            "key-secret-for-test",
+            "",
+            "iex");
+    RestClient client = RestClient.builder().baseUrl(props.dataBaseUrl()).build();
+    AlpacaMarketData eq =
+        new AlpacaMarketData(client, mapper, props, HttpClient.newHttpClient(), scheduler) {
+          @Override
+          java.net.http.WebSocket ensureStockWs() {
+            return fake; // skip the real connect/auth; exercise the real sendStockSubscribe gate
+          }
+        };
+
+    // Pre-auth: the real sendStockSubscribe must NOT send a subscribe frame.
+    eq.sendStockSubscribe("NVDA");
+    org.mockito.Mockito.verify(fake, org.mockito.Mockito.never())
+        .sendText(
+            org.mockito.ArgumentMatchers.contains("subscribe"),
+            org.mockito.ArgumentMatchers.anyBoolean());
+
+    // After the `authenticated` control frame, a subscribe IS sent.
+    eq.dispatchStockWsMessage("[{\"T\":\"success\",\"msg\":\"authenticated\"}]");
+    eq.sendStockSubscribe("NVDA");
+    org.mockito.Mockito.verify(fake, org.mockito.Mockito.atLeastOnce())
+        .sendText(
+            org.mockito.ArgumentMatchers.contains("\"subscribe\""),
+            org.mockito.ArgumentMatchers.eq(true));
+  }
+
+  @Test
   void effectiveStockDataWsUrl_allowsIexAndSip_caseInsensitive() {
     assertThat(propsWithFeed("iex").effectiveStockDataWsUrl())
         .contains("wss://stream.data.alpaca.markets/v2/iex");

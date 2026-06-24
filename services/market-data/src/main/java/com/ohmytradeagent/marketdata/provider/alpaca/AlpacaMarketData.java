@@ -349,10 +349,15 @@ public class AlpacaMarketData implements MarketDataProvider {
    */
   private void handleStockControlSuccess(String msg) {
     if ("authenticated".equals(msg)) {
-      stockAuthenticated = true;
       feedHealth.markConnected(FeedHealth.Feed.EQUITY);
       log.info("Alpaca stock WS authenticated; subscribing {} ticker(s)", byTicker.size());
-      resubscribeAllStocks();
+      // Set the flag + subscribe under the lock so a ticker added concurrently in subscribeEquity
+      // is
+      // sent by exactly one path (here or its own sendStockSubscribe), never dropped.
+      synchronized (stockWsLock) {
+        stockAuthenticated = true;
+        resubscribeAllStocks();
+      }
     } else {
       // The initial {"msg":"connected"} greeting precedes auth; nothing to do.
       log.debug("Alpaca stock WS: {}", msg);
@@ -407,12 +412,20 @@ public class AlpacaMarketData implements MarketDataProvider {
     if (socket == null) {
       return;
     }
-    if (!stockAuthenticated) {
-      // Pre-auth: the ticker is already in byTicker and gets subscribed when the `authenticated`
-      // control frame arrives (resubscribeAllStocks). Sending now would be ignored by Alpaca.
-      return;
+    // Lock so the auth flag check + send is ordered against handleStockControlSuccess (which sets
+    // the
+    // flag and resubscribes under the same lock). A ticker registered just as auth completes is
+    // then
+    // sent by exactly one of the two paths, never dropped. stockWsLock is reentrant w.r.t.
+    // ensureStockWs above.
+    synchronized (stockWsLock) {
+      if (!stockAuthenticated) {
+        // Pre-auth: the ticker is already in byTicker and gets subscribed when the `authenticated`
+        // control frame arrives (resubscribeAllStocks). Sending now would be ignored by Alpaca.
+        return;
+      }
+      socket.sendText(subscribeAction("subscribe", ticker), true);
     }
-    socket.sendText(subscribeAction("subscribe", ticker), true);
   }
 
   /**
