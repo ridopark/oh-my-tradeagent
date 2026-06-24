@@ -7,6 +7,7 @@ import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
+import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -88,12 +89,26 @@ public class ProximityReader {
         if (!seen.add(wfId)) {
           continue;
         }
-        WatchlistProximity w = entryProximity(wfId, strategyId);
-        if (w != null) {
-          out.add(w);
-        } else {
-          // Gone/unarmed/race: lazily evict from the key it came from so the set self-heals.
-          srem(e.getValue(), wfId);
+        try {
+          WatchlistProximity w = entryProximity(wfId, strategyId);
+          if (w != null) {
+            out.add(w);
+          } else {
+            // Definitively gone/unarmed (workflow not found, or it answered with a blank ticker):
+            // lazily evict from the key it came from so the set self-heals.
+            srem(e.getValue(), wfId);
+          }
+        } catch (TransientQueryException ex) {
+          // A transient query blip (timeout / worker restart / query rejected) is NOT proof the leg
+          // is gone. Skip it for THIS poll but leave it in the set — the SADD happens once at arm
+          // with no intraday re-seed, so an SREM here would permanently drop a still-live leg from
+          // the dashboard for the rest of the day. It is retried next poll.
+          log.warn(
+              "entryProximity transient query failure, skipping without evict wf={} strategy={}"
+                  + " err={}",
+              wfId,
+              strategyId,
+              ex.getMessage());
         }
       }
     }
@@ -139,6 +154,13 @@ public class ProximityReader {
         WorkflowIds.escapeForVisibilityQuery(WorkflowIds.tenantStrategy(tenantId, strategyId)));
   }
 
+  /**
+   * Queries one armed leg's entry proximity. Returns null when the leg is DEFINITIVELY gone (the
+   * workflow is not found, or it answered with a blank ticker) — the caller evicts it. Throws
+   * {@link TransientQueryException} on a transient query blip (timeout / worker restart / query
+   * rejected), which is NOT proof the leg is gone — the caller skips it for this poll WITHOUT
+   * evicting.
+   */
   private WatchlistProximity entryProximity(String wfId, String strategyId) {
     try {
       WorkflowStub stub = client.newUntypedWorkflowStub(wfId);
@@ -158,10 +180,22 @@ public class ProximityReader {
           v.state(),
           distanceToTrigger(v),
           v.optionSymbol());
-    } catch (RuntimeException e) {
-      log.warn(
-          "entryProximity query failed wf={} strategy={} err={}", wfId, strategyId, e.getMessage());
+    } catch (WorkflowNotFoundException e) {
+      // Definitive: no execution by this id. Evictable.
+      log.warn("entryProximity workflow not found, evicting wf={} strategy={}", wfId, strategyId);
       return null;
+    } catch (RuntimeException e) {
+      // Transient (query timeout / worker blip / query rejected). Do NOT evict — retry next poll.
+      throw new TransientQueryException(e);
+    }
+  }
+
+  /**
+   * Wraps a transient {@code entryProximity} query failure so the caller skips without evicting.
+   */
+  private static final class TransientQueryException extends RuntimeException {
+    TransientQueryException(Throwable cause) {
+      super(cause);
     }
   }
 

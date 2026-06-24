@@ -286,11 +286,19 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
       // re-arm/replay is a safe no-op (no eviction from the workflow; the key's 2-day TTL reaps
       // it).
       if (Workflow.getVersion(VERSION_ARMED_CACHE, Workflow.DEFAULT_VERSION, 1) >= 1) {
-        armedCacheLookup.cacheArmedLeg(
-            payload.getTenantId(),
-            payload.getStrategyId(),
-            payload.getEtDate(),
-            Workflow.getInfo().getWorkflowId());
+        try {
+          armedCacheLookup.cacheArmedLeg(
+              payload.getTenantId(),
+              payload.getStrategyId(),
+              payload.getEtDate(),
+              Workflow.getInfo().getWorkflowId());
+        } catch (RuntimeException e) {
+          // Best-effort cache seed: the impl swallows a fast Redis-down RuntimeException, but a
+          // HUNG Redis blocks until the 5s StartToClose fires SERVER-SIDE, raising an
+          // ActivityFailure (a RuntimeException) here. Swallow it so the arm continues — the cache
+          // is a display hint, never a gate (DestroyWorkflowThreadError is an Error, not caught, so
+          // replay stays safe). Mirrors the best-effort OCC-resolve block above.
+        }
       }
 
       // Start the streaming equity subscription (async); it signals equityTick back into this id.

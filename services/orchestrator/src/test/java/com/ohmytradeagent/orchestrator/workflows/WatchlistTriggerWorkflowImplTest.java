@@ -809,6 +809,31 @@ class WatchlistTriggerWorkflowImplTest {
     verify(positionLookup, times(1)).cacheArmedLeg(any(), any(), any(), any());
   }
 
+  // Best-effort guarantee, throw/timeout path: a Redis HANG can't reach the impl's own swallow — it
+  // blocks until the 5s StartToClose fires server-side, raising an ActivityFailure (a
+  // RuntimeException) in the workflow. The seed call MUST catch it so the arm continues. Stubbing
+  // cacheArmedLeg to THROW reproduces that surfaced failure; arming + the fire path must still
+  // complete normally (:fired, NOT a workflow failure). Distinct from the no-op (swallow-success)
+  // test above: this exercises the throw the bare call mishandled.
+  @Test
+  void arm_cacheSeedThrows_doesNotFailArming() throws Exception {
+    Mockito.doThrow(new RuntimeException("redis hung -> activity timeout"))
+        .when(positionLookup)
+        .cacheArmedLeg(any(), any(), any(), any());
+    WatchlistTriggerWorkflow wf = newStub("wl-armed-throw");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // live cross -> FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("3.15")));
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+    verify(exec, times(1)).placeOrder(any());
+    verify(positionLookup, atLeastOnce()).cacheArmedLeg(any(), any(), any(), any());
+  }
+
   // Version-gate stability: the armed-cache change id is a load-bearing constant (a pre-fix history
   // replays on DEFAULT_VERSION and must NOT seed). Pin the literal so a rename can't silently break
   // determinism for in-flight legs.

@@ -19,6 +19,7 @@ import com.ohmytradeagent.tdbff.proximity.ProximityReader.WatchlistProximity;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
+import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -96,8 +97,8 @@ class ProximityReaderTest {
     verify(client, never()).listExecutions(anyString());
   }
 
-  // A wfId whose entryProximity query returns null (gone/unarmed/race) is excluded from the result
-  // AND lazily SREM'd from the exact key it was read from (the set self-heals).
+  // A wfId whose workflow is DEFINITIVELY gone (WorkflowNotFoundException, the not-found/closed
+  // case) is excluded AND lazily SREM'd from the exact key it was read from (the set self-heals).
   @Test
   void watchlist_deadEntry_skippedAndEvicted() {
     wireStrategies("acme", "wl");
@@ -107,15 +108,54 @@ class ProximityReaderTest {
     lenient().when(setOps.members(armedKey("acme", "wl", today.minusDays(1)))).thenReturn(Set.of());
     when(redis.opsForSet()).thenReturn(setOps);
     wireEntry("wf-live", armedEntry("NVDA"));
-    // wf-dead: a blank ticker -> entryProximity returns null (the leg is gone/unarmed).
-    wireEntry(
-        "wf-dead",
-        new EntryProximityView("", "ABOVE", null, null, null, null, "INITIALIZING", null));
+    // wf-dead: the workflow no longer exists -> WorkflowNotFoundException -> definitively gone.
+    wireEntryThrows("wf-dead", notFound("wf-dead"));
 
     List<WatchlistProximity> out = reader.watchlist("acme");
 
     assertThat(out).extracting(WatchlistProximity::workflowId).containsExactly("wf-live");
     verify(setOps).remove(todayKey, "wf-dead");
+    verify(setOps, never()).remove(todayKey, "wf-live");
+  }
+
+  // A leg that answers with a blank ticker is unarmed/gone -> excluded AND evicted (same definitive
+  // semantics as a not-found workflow: it responded, just with no live state).
+  @Test
+  void watchlist_blankTicker_skippedAndEvicted() {
+    wireStrategies("acme", "wl");
+    LocalDate today = LocalDate.now(MARKET_TZ);
+    String todayKey = armedKey("acme", "wl", today);
+    when(setOps.members(todayKey)).thenReturn(Set.of("wf-blank"));
+    lenient().when(setOps.members(armedKey("acme", "wl", today.minusDays(1)))).thenReturn(Set.of());
+    when(redis.opsForSet()).thenReturn(setOps);
+    wireEntry(
+        "wf-blank",
+        new EntryProximityView("", "ABOVE", null, null, null, null, "INITIALIZING", null));
+
+    assertThat(reader.watchlist("acme")).isEmpty();
+    verify(setOps).remove(todayKey, "wf-blank");
+  }
+
+  // A TRANSIENT query failure (timeout / worker blip / query rejected, surfaced as a generic
+  // RuntimeException, NOT WorkflowNotFoundException) is NOT proof the leg is gone. The leg is
+  // excluded from THIS poll's result but must NOT be SREM'd — the SADD happens once at arm with no
+  // intraday re-seed, so an eviction here would permanently drop a still-live leg for the day.
+  @Test
+  void watchlist_transientQueryError_skippedButNotEvicted() {
+    wireStrategies("acme", "wl");
+    LocalDate today = LocalDate.now(MARKET_TZ);
+    String todayKey = armedKey("acme", "wl", today);
+    when(setOps.members(todayKey)).thenReturn(Set.of("wf-live", "wf-blip"));
+    lenient().when(setOps.members(armedKey("acme", "wl", today.minusDays(1)))).thenReturn(Set.of());
+    when(redis.opsForSet()).thenReturn(setOps);
+    wireEntry("wf-live", armedEntry("NVDA"));
+    wireEntryThrows("wf-blip", new RuntimeException("query timeout"));
+
+    List<WatchlistProximity> out = reader.watchlist("acme");
+
+    assertThat(out).extracting(WatchlistProximity::workflowId).containsExactly("wf-live");
+    // The still-armed leg stays in the set: NO eviction on a transient blip.
+    verify(setOps, never()).remove(todayKey, "wf-blip");
     verify(setOps, never()).remove(todayKey, "wf-live");
   }
 
@@ -274,6 +314,20 @@ class ProximityReaderTest {
     when(client.newUntypedWorkflowStub(eq(workflowId))).thenReturn(stub);
     when(stub.query(eq("entryProximity"), eq(EntryProximityView.class), any(Object[].class)))
         .thenReturn(view);
+  }
+
+  private void wireEntryThrows(String workflowId, RuntimeException ex) {
+    WorkflowStub stub = mock(WorkflowStub.class);
+    when(client.newUntypedWorkflowStub(eq(workflowId))).thenReturn(stub);
+    when(stub.query(eq("entryProximity"), eq(EntryProximityView.class), any(Object[].class)))
+        .thenThrow(ex);
+  }
+
+  private static WorkflowNotFoundException notFound(String workflowId) {
+    return new WorkflowNotFoundException(
+        WorkflowExecution.newBuilder().setWorkflowId(workflowId).build(),
+        "WatchlistTriggerWorkflow",
+        new RuntimeException("not found"));
   }
 
   private void wireExit(String workflowId, ExitProximityView view) {
