@@ -765,6 +765,59 @@ class WatchlistTriggerWorkflowImplTest {
         .orElse(null);
   }
 
+  // Armed-watchlist Redis seed: arming a leg must SADD its workflow id into the armed-watchlist set
+  // exactly once, keyed on (tenant, strategy, et_date, workflowId), so the BFF enumerates the armed
+  // legs from Redis instead of a lagging listExecutions visibility query.
+  @Test
+  void arm_seedsArmedLegCache() throws Exception {
+    WatchlistTriggerWorkflow wf = newStub("wl-armed-seed");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    // Seed a sub-trigger tick + cancel so the leg arms then completes deterministically (the seed
+    // happens on the first run regardless of the eventual fire/cancel outcome).
+    wf.equityTick(tick(new BigDecimal("760.50"), false));
+    wf.cancel();
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    verify(positionLookup, times(1))
+        .cacheArmedLeg("dev", "watchlist-trigger-v1", LocalDate.of(2026, 6, 24), "wl-armed-seed");
+  }
+
+  // Best-effort guarantee: a Redis failure must NOT fail or stall arming. The activity impl
+  // swallows
+  // Redis errors (PositionLookupActivitiesImplTest.cacheArmedLeg_redisThrows_swallowed), so the
+  // activity returns normally on a Redis outage. This test pins the matching workflow-side
+  // property:
+  // arming + the fire path complete normally when the seed is a no-op (the real impl's behaviour on
+  // a Redis failure). The seed runs on a dedicated short-timeout, single-attempt stub
+  // (ARMED_CACHE_OPTIONS) so even a hung Redis cannot stall the live arm past 5s.
+  @Test
+  void arm_cacheSeedNoOp_doesNotFailArming() throws Exception {
+    // positionLookup.cacheArmedLeg is unstubbed -> returns normally (mirrors the impl swallowing a
+    // Redis error and returning).
+    WatchlistTriggerWorkflow wf = newStub("wl-armed-noop");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // live cross -> FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("3.15")));
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+    verify(exec, times(1)).placeOrder(any());
+    verify(positionLookup, times(1)).cacheArmedLeg(any(), any(), any(), any());
+  }
+
+  // Version-gate stability: the armed-cache change id is a load-bearing constant (a pre-fix history
+  // replays on DEFAULT_VERSION and must NOT seed). Pin the literal so a rename can't silently break
+  // determinism for in-flight legs.
+  @Test
+  void armedCacheVersionIdIsStable() {
+    assertThat(WatchlistTriggerWorkflowImpl.VERSION_ARMED_CACHE)
+        .isEqualTo("watchlist-armed-cache-v1");
+  }
+
   // (g) proceed:false -> no order.
   @Test
   void fireDeciderRejects_noOrder() throws Exception {

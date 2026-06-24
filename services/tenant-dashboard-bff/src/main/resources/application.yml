@@ -1,6 +1,13 @@
 spring:
   application:
     name: tenant-dashboard-bff-svc
+  # Redis holds the armed-watchlist set the orchestrator seeds on arm; ProximityReader.watchlist
+  # enumerates it instead of a lagging listExecutions visibility query. Default localhost for parity
+  # with the orchestrator; the k8s manifest supplies `redis`.
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
   # This service wires TWO read-only datasources by hand (orchestrator + exec_<broker>), so the
   # single-datasource auto-config must be off — otherwise Spring tries to build one DataSource from
   # spring.datasource and a single auto DSLContext, which collides with our qualified beans.

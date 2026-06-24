@@ -29,6 +29,7 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
   private static final Logger log = LoggerFactory.getLogger(PositionLookupActivitiesImpl.class);
 
   static final Duration CACHE_TTL = Duration.ofSeconds(86400);
+  static final Duration ARMED_CACHE_TTL = Duration.ofDays(2);
   static final String WORKFLOW_TYPE = "PositionWorkflow";
 
   private final StringRedisTemplate redis;
@@ -76,6 +77,26 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
   public void cachePositionMapping(
       String tenantId, String strategyId, String occ, String workflowId) {
     redis.opsForValue().set(key(tenantId, strategyId, occ), workflowId, CACHE_TTL);
+  }
+
+  @Override
+  public void cacheArmedLeg(
+      String tenantId, String strategyId, java.time.LocalDate etDate, String workflowId) {
+    // BEST-EFFORT: the armed-watchlist set is a display hint for the BFF, never a gate on arming.
+    // Swallow + log any Redis failure so this activity ALWAYS returns normally — a Redis outage can
+    // never fail or stall the live WatchlistTriggerWorkflow's arm. SADD is idempotent (arm happens
+    // once; stable workflow id across continue-as-new), so a retry/replay is a safe no-op.
+    String armedKey = WorkflowIds.armedWatchlistCacheKey(tenantId, strategyId, etDate);
+    try {
+      redis.opsForSet().add(armedKey, workflowId);
+      redis.expire(armedKey, ARMED_CACHE_TTL);
+    } catch (RuntimeException e) {
+      log.warn(
+          "cacheArmedLeg best-effort seed failed key={} wf_id={} err={}",
+          armedKey,
+          workflowId,
+          e.getMessage());
+    }
   }
 
   @Override

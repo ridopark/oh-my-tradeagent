@@ -10,62 +10,103 @@ import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 /**
  * Entry/exit proximity for a tenant's live watchlist legs and open positions, for the dashboard
- * {@code /live} view. Per strategy it runs the same {@code TenantStrategy='t-<t>/s-<sid>' AND
- * ExecutionStatus='Running'} Visibility query {@code PositionsReader} uses (both {@code
- * WatchlistTriggerWorkflow} and {@code PositionWorkflow} carry the {@code TenantStrategy} search
- * attribute), then fans out the {@code entryProximity} / {@code exitProximity} query per workflow.
- * Distances are computed here so the workflow queries stay deterministic (no clock read).
+ * {@code /live} view. The armed watchlist legs are enumerated from the Redis set the orchestrator
+ * seeds on arm ({@link WorkflowIds#armedWatchlistCacheKey}) — robust against the Visibility-index
+ * lag that misreports armed legs under postgres load. Open positions still use the {@code
+ * TenantStrategy='t-<t>/s-<sid>' AND ExecutionStatus='Running'} Visibility query {@code
+ * PositionsReader} uses. Both then fan out the {@code entryProximity} / {@code exitProximity} query
+ * per workflow. Distances are computed here so the workflow queries stay deterministic (no clock
+ * read).
  */
 @Component
 public class ProximityReader {
 
   private static final Logger log = LoggerFactory.getLogger(ProximityReader.class);
   private static final String POSITION_WORKFLOW_TYPE = "PositionWorkflow";
-  private static final String WATCHLIST_WORKFLOW_TYPE = "WatchlistTriggerWorkflow";
   private static final BigDecimal HUNDRED = new BigDecimal("100");
   private static final int PCT_SCALE = 4;
+  private static final ZoneId MARKET_TZ = ZoneId.of("America/New_York");
 
   private final WorkflowClient client;
   private final TenantStrategyResolver strategyResolver;
+  private final StringRedisTemplate redis;
 
-  public ProximityReader(WorkflowClient client, TenantStrategyResolver strategyResolver) {
+  public ProximityReader(
+      WorkflowClient client, TenantStrategyResolver strategyResolver, StringRedisTemplate redis) {
     this.client = client;
     this.strategyResolver = strategyResolver;
+    this.redis = redis;
   }
 
-  /** Live un-fired watchlist legs for the tenant, unioned across strategies, deduped by wf id. */
+  /**
+   * Live un-fired watchlist legs for the tenant, unioned across strategies, deduped by wf id.
+   *
+   * <p>Enumerates the armed-leg workflow ids from the Redis set the orchestrator seeds on arm
+   * ({@link WorkflowIds#armedWatchlistCacheKey}) instead of a {@code listExecutions} visibility
+   * query, which lags minutes under postgres load and misreports armed legs. Reads BOTH today's and
+   * yesterday's (ET) keys and unions them, covering a leg armed just before midnight that the
+   * dashboard views just after. The per-workflow {@code entryProximity} QUERY is unchanged (it is
+   * not lag-affected); a wfId whose query returns null (gone/unarmed/race) is lazily {@code SREM}'d
+   * from the key it came from.
+   */
   public List<WatchlistProximity> watchlist(String tenantId) {
+    LocalDate today = LocalDate.now(MARKET_TZ);
+    LocalDate yesterday = today.minusDays(1);
     List<WatchlistProximity> out = new ArrayList<>();
     Set<String> seen = new LinkedHashSet<>();
     for (String strategyId : strategyResolver.strategyIdsForTenant(tenantId)) {
-      try (Stream<WorkflowExecutionMetadata> stream =
-          client.listExecutions(runningQuery(WATCHLIST_WORKFLOW_TYPE, tenantId, strategyId))) {
-        var it = stream.iterator();
-        while (it.hasNext()) {
-          String wfId = it.next().getExecution().getWorkflowId();
-          if (!seen.add(wfId)) {
-            continue;
-          }
-          WatchlistProximity w = entryProximity(wfId, strategyId);
-          if (w != null) {
-            out.add(w);
-          }
+      String todayKey = WorkflowIds.armedWatchlistCacheKey(tenantId, strategyId, today);
+      String yesterdayKey = WorkflowIds.armedWatchlistCacheKey(tenantId, strategyId, yesterday);
+      // wfId -> the key it was read from, so a dead entry is SREM'd from its own key. today wins on
+      // a dup (a leg present in both keys is treated as today's).
+      Map<String, String> wfIdToKey = new LinkedHashMap<>();
+      for (String wfId : smembers(yesterdayKey)) {
+        wfIdToKey.put(wfId, yesterdayKey);
+      }
+      for (String wfId : smembers(todayKey)) {
+        wfIdToKey.put(wfId, todayKey);
+      }
+      for (Map.Entry<String, String> e : wfIdToKey.entrySet()) {
+        String wfId = e.getKey();
+        if (!seen.add(wfId)) {
+          continue;
+        }
+        WatchlistProximity w = entryProximity(wfId, strategyId);
+        if (w != null) {
+          out.add(w);
+        } else {
+          // Gone/unarmed/race: lazily evict from the key it came from so the set self-heals.
+          srem(e.getValue(), wfId);
         }
       }
     }
     return out;
+  }
+
+  private Set<String> smembers(String key) {
+    Set<String> members = redis.opsForSet().members(key);
+    return members == null ? Set.of() : members;
+  }
+
+  private void srem(String key, String wfId) {
+    redis.opsForSet().remove(key, wfId);
   }
 
   /** Armed watchlist-exit positions for the tenant, unioned across strategies, deduped by wf id. */

@@ -108,6 +108,12 @@ spec:
               value: copytrade
             - name: TEMPORAL_ORCHESTRATOR_TASK_QUEUE
               value: orchestrator-core
+            # Armed-watchlist enumeration reads the Redis set the orchestrator seeds on arm (mirrors
+            # 51-orchestrator.yaml). Same in-cluster `redis` service.
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
             # Strategy/broker_target resolution reads the mounted tenants tree (same ConfigMap as
             # orchestrator).
             - name: BFF_TENANTS_DIR

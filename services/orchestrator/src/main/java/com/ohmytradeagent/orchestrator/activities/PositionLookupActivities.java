@@ -21,6 +21,17 @@ public interface PositionLookupActivities {
   void cachePositionMapping(String tenantId, String strategyId, String occ, String workflowId);
 
   /**
+   * Seeds the armed-watchlist Redis set ({@link
+   * com.ohmytradeagent.contract.identity.WorkflowIds#armedWatchlistCacheKey}) with this leg's
+   * workflow id when a {@code WatchlistTriggerWorkflow} arms. The BFF enumerates this set instead
+   * of a lagging {@code listExecutions} visibility query. BEST-EFFORT: a Redis failure is swallowed
+   * and logged so it can never fail or stall arming (the cache is a hint, never a gate); SADD is
+   * idempotent and the key expires after 2 days.
+   */
+  void cacheArmedLeg(
+      String tenantId, String strategyId, java.time.LocalDate etDate, String workflowId);
+
+  /**
    * Issue #165 Phase 3: returns {@code true} iff a Temporal workflow with this id is currently
    * RUNNING. Returns {@code false} on {@code NotFound} (no execution by that id), and for any
    * non-RUNNING terminal status (COMPLETED, FAILED, TERMINATED, CANCELED, TIMED_OUT,

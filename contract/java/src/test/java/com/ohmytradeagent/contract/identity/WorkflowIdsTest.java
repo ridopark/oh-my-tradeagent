@@ -42,4 +42,18 @@ class WorkflowIdsTest {
   void accountKillswitchIsTenantScopedWithoutStrategySegment() {
     assertThat(WorkflowIds.accountKillswitch("acme")).isEqualTo("t-acme/account/killswitch");
   }
+
+  /**
+   * Armed-watchlist Redis set key: raw {@code tenant}/{@code strategy} form (no {@code t-}/{@code
+   * s-} prefixes) consistent with {@code PositionLookupActivitiesImpl}'s {@code pos:} key. The
+   * orchestrator (seed on arm) and the BFF (enumerate the watchlist) both build this literal — a
+   * single source so the two cannot drift on the key shape.
+   */
+  @Test
+  void armedWatchlistCacheKeyIsRawTenantStrategyDateForm() {
+    assertThat(
+            WorkflowIds.armedWatchlistCacheKey(
+                "acme", "watchlist-trigger-v1", java.time.LocalDate.of(2026, 6, 24)))
+        .isEqualTo("wl-armed:acme:watchlist-trigger-v1:2026-06-24");
+  }
 }
