@@ -112,9 +112,27 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   // at deploy must replay WITHOUT the new cachePositionMapping command (preserving the v=0
   // byte-identical happy-path command stream).
   private static final String VERSION_POSITION_CACHE = "watchlist-position-cache-v1";
+  // getVersion change id for seeding the armed-watchlist Redis set on arm (so the BFF enumerates
+  // the
+  // armed legs from Redis instead of a lagging listExecutions visibility query). A NEW change id: a
+  // pre-fix history mid-arm at deploy must replay WITHOUT the new cacheArmedLeg command, preserving
+  // the v=0 byte-identical command stream.
+  // Package-private so WatchlistTriggerWorkflowImplTest can pin the literal (the gate is
+  // load-bearing
+  // for in-flight-leg determinism).
+  static final String VERSION_ARMED_CACHE = "watchlist-armed-cache-v1";
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
+
+  // Dedicated short-timeout stub for the best-effort armed-cache seed. A 5s StartToCloseTimeout and
+  // minimal retries mean a Redis outage can never block the live arm: the impl already swallows
+  // Redis errors (returns fast), and even a hung Redis cannot stall the trigger past 5s.
+  private static final ActivityOptions ARMED_CACHE_OPTIONS =
+      ActivityOptions.newBuilder()
+          .setStartToCloseTimeout(Duration.ofSeconds(5))
+          .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
+          .build();
 
   private static final ActivityOptions MARKET_DATA_OPTIONS =
       ActivityOptions.newBuilder()
@@ -138,6 +156,12 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
       Workflow.newActivityStub(GetOptionQuoteActivity.class, MARKET_DATA_OPTIONS);
   private final PositionLookupActivities positionLookup =
       Workflow.newActivityStub(PositionLookupActivities.class, DEFAULT_OPTIONS);
+  // Best-effort armed-cache seed on a short-timeout stub: a Redis outage must not stall the live
+  // arm
+  // (see ARMED_CACHE_OPTIONS). Separate from positionLookup so isPositionWorkflowRunning keeps its
+  // own 10s budget.
+  private final PositionLookupActivities armedCacheLookup =
+      Workflow.newActivityStub(PositionLookupActivities.class, ARMED_CACHE_OPTIONS);
 
   // Lazily built from config.broker_target (mirrors CopytradeSignalWorkflowImpl.exec): the order
   // path and the Alpaca trading-calendar lookup both route to broker-<broker_target>.
@@ -252,6 +276,30 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
               "trigger", payload.getTrigger(),
               "entry_mode", entryMode(config).value(),
               "size_multiplier", input.getSizeMultiplier()));
+
+      // Seed the armed-watchlist Redis set so the BFF enumerates this armed leg from Redis instead
+      // of a lagging listExecutions visibility query. Best-effort + version-gated: the activity
+      // impl
+      // swallows Redis errors and runs on a short-timeout stub, so a Redis outage can never fail or
+      // stall arming. getVersion read in a deterministic position; a pre-fix (v=0) replay takes no
+      // new command. The workflow id is stable across continue-as-new and SADD is idempotent, so a
+      // re-arm/replay is a safe no-op (no eviction from the workflow; the key's 2-day TTL reaps
+      // it).
+      if (Workflow.getVersion(VERSION_ARMED_CACHE, Workflow.DEFAULT_VERSION, 1) >= 1) {
+        try {
+          armedCacheLookup.cacheArmedLeg(
+              payload.getTenantId(),
+              payload.getStrategyId(),
+              payload.getEtDate(),
+              Workflow.getInfo().getWorkflowId());
+        } catch (RuntimeException e) {
+          // Best-effort cache seed: the impl swallows a fast Redis-down RuntimeException, but a
+          // HUNG Redis blocks until the 5s StartToClose fires SERVER-SIDE, raising an
+          // ActivityFailure (a RuntimeException) here. Swallow it so the arm continues — the cache
+          // is a display hint, never a gate (DestroyWorkflowThreadError is an Error, not caught, so
+          // replay stays safe). Mirrors the best-effort OCC-resolve block above.
+        }
+      }
 
       // Start the streaming equity subscription (async); it signals equityTick back into this id.
       // The activity does NOT throw on GATED/FAILED — it returns the disposition — so inspect the

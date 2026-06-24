@@ -97,6 +97,19 @@ public final class WorkflowIds {
   }
 
   /**
+   * Redis set key holding the armed {@code WatchlistTriggerWorkflow} ids for a {@code (tenant,
+   * strategy, et_date)} on a given trading day. The orchestrator SADDs the leg's workflow id here
+   * on arm; the BFF SMEMBERS it to enumerate the armed watchlist without a SQL-visibility {@code
+   * listExecutions} (which lags under postgres load). Raw {@code tenant}/{@code strategy} form (no
+   * {@code t-}/{@code s-} prefixes) matching {@code PositionLookupActivitiesImpl}'s {@code pos:}
+   * key.
+   */
+  public static String armedWatchlistCacheKey(
+      String tenantId, String strategyId, java.time.LocalDate etDate) {
+    return "wl-armed:" + tenantId + ":" + strategyId + ":" + etDate;
+  }
+
+  /**
    * Escape a value before interpolating it into a Temporal Visibility query. Visibility query
    * grammar uses single-quoted strings; a single-quote inside a value would break the query (or, in
    * a hostile setting, allow query injection). Doubles every quote per ANSI-SQL convention.

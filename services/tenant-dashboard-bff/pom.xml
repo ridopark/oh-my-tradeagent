@@ -32,6 +32,13 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-jdbc</artifactId>
     </dependency>
+    <!-- Armed-watchlist enumeration: ProximityReader.watchlist reads the armed-leg Redis set the
+         orchestrator seeds on arm, instead of a lagging listExecutions visibility query. Version
+         BOM-managed (mirrors orchestrator pom.xml). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-jooq</artifactId>
