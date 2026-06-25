@@ -135,6 +135,7 @@ data:
     trail_giveback_pct: 0.30
     no_progress_time_stop_secs: 1500
     force_close_eod_et: "15:30"
+    no_entry_within_close_minutes: 30
     eod_force_flatten: true
     # SHIP DISABLED: enabled:false + the unconfigured stock feed are the two live-trade gates.
     enabled: false
