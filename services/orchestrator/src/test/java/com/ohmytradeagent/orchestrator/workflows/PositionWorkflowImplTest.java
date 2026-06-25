@@ -1056,6 +1056,131 @@ class PositionWorkflowImplTest {
     assertThat(partialFills.get(0).getSubject()).containsEntry("signal_id", "sig-follow");
   }
 
+  // ---------- Phase 1 (PLAN-2026-06-25-trading-remediation): partial-target place-failure
+  // retry-next-session ----------
+
+  /**
+   * Phase 1 headline (the 2026-06-25 QQQ 720p 09:43 incident reproduction): a partial-target exit
+   * whose {@code placeOrder} retries are exhausted must NOT be silently dropped. Under {@code
+   * VERSION_PARTIAL_PLACE_RETRY_NEXT_SESSION} v&gt;=1 the place-failure catch (a) still emits the
+   * paging {@code PartialExitPlaceFailed}, (b) leaves {@code remainingQty} intact (nothing was
+   * sold), and (c) arms a one-shot timer to the NEXT RTH open; on the timer firing the partial is
+   * re-driven through the normal {@code processOne} cycle with a fresh {@code :retry-1}-suffixed
+   * intent key (no duplicate client_order_id), emitting the informational {@code
+   * PartialExitRetryRequested} marker. TestWorkflowEnvironment resolves getVersion to the max (1),
+   * so this exercises the v&gt;=1 retry path.
+   */
+  @Test
+  void partialExit_placeOrderThrows_v1_schedulesRetryNextSession() throws Exception {
+    // Next-session open is 5 minutes out (virtual time); env.sleep past it fires the re-drive
+    // timer.
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofMinutes(5));
+    // First placeOrder (the partial) throws; the next-session re-drive succeeds (submitted) so the
+    // re-attempt can fill and complete normally.
+    when(exec.placeOrder(any()))
+        .thenThrow(
+            ApplicationFailure.newNonRetryableFailure(
+                "Alpaca PlaceOrder rejected (422): client_order_id must be unique",
+                "InvalidRequestError"))
+        .thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-partial-retry");
+    WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
+
+    // Partial target STC: first placeOrder throws -> PartialExitPlaceFailed page, lot intact.
+    stub.partialExit(partialExitRequest("sig-qqq", "pos-partial-retry", 0.5));
+    waitForPlaceOrderCount(1);
+    // A query settles the workflow so the post-catch audit command is committed before we capture.
+    // remainingQty NOT decremented (the failed partial sold nothing).
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    AuditEvent placeFailed = captureKind("PartialExitPlaceFailed");
+    assertThat(placeFailed.getSubject()).containsEntry("signal_id", "sig-qqq");
+
+    // Advance past the next-session open -> re-drive timer fires -> PartialExitRetryRequested +
+    // a second placeOrder with a :retry-1 intent key.
+    env.sleep(Duration.ofMinutes(6));
+    waitForPlaceOrderCount(2);
+    // Query barrier: settle the workflow so the re-drive's audit command is committed.
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    AuditEvent retried = captureKind("PartialExitRetryRequested");
+    assertThat(retried.getSubject())
+        .containsEntry("signal_id", "sig-qqq")
+        .containsEntry("retry_attempt", 1);
+
+    // The re-driven partial MUST use a DISTINCT :retry-1 intent key (fresh client_order_id) — the
+    // first attempt kept the un-suffixed key. Reusing it would re-POST a duplicate cid.
+    ArgumentCaptor<OrderIntent> intents = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(2)).placeOrder(intents.capture());
+    List<String> keys = intents.getAllValues().stream().map(OrderIntent::getIntentKey).toList();
+    assertThat(keys).hasSize(2).doesNotHaveDuplicates();
+    assertThat(keys).contains("pos-partial-retry:exit:sig-qqq");
+    assertThat(keys).contains("pos-partial-retry:exit:sig-qqq:retry-1");
+
+    // The re-driven partial fills; no terminal-exhausted page was needed.
+    stub.onFill(fill("brk-retry", 3L, new BigDecimal("3.00")));
+    assertThat(captureAll("PartialExitRetryExhausted")).isEmpty();
+  }
+
+  /**
+   * Phase 1 bound + exhaustion: after {@code MAX_PARTIAL_PLACE_RETRY_SESSIONS} (1) next-session
+   * re-drives still failing to place, the workflow emits the terminal paging {@code
+   * PartialExitRetryExhausted}, stops re-driving (no third placeOrder), and the lot remains managed
+   * and free for a later STC — exactly how the real QQQ lot still cleanly closed via a later
+   * flatten.
+   */
+  @Test
+  void partialExit_placeRetry_boundedAndExhausts_pagesTerminal() throws Exception {
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofMinutes(5));
+    // Both the original partial AND its single next-session re-drive throw; a later STC succeeds.
+    when(exec.placeOrder(any()))
+        .thenThrow(
+            ApplicationFailure.newNonRetryableFailure(
+                "Alpaca PlaceOrder rejected (422)", "InvalidRequestError"))
+        .thenThrow(
+            ApplicationFailure.newNonRetryableFailure(
+                "Alpaca PlaceOrder rejected (422)", "InvalidRequestError"))
+        .thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-partial-exhaust");
+    WorkflowStub.fromTyped(stub).start(input(5));
+    confirmEntry(stub, 5L);
+
+    // Original partial fails (place #1) -> page + schedule re-drive.
+    stub.partialExit(partialExitRequest("sig-qqq", "pos-partial-exhaust", 0.5));
+    waitForPlaceOrderCount(1);
+    // Query barrier: settle the workflow so the post-catch audit command is committed.
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    captureKind("PartialExitPlaceFailed");
+
+    // Next session: the single budgeted re-drive (place #2) also fails -> budget spent -> terminal
+    // PartialExitRetryExhausted page, NO further re-drive.
+    env.sleep(Duration.ofMinutes(6));
+    waitForPlaceOrderCount(2);
+    // Query barrier: settle the workflow so the post-catch exhausted audit command is committed.
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    AuditEvent exhausted = captureKind("PartialExitRetryExhausted");
+    assertThat(exhausted.getSubject())
+        .containsEntry("signal_id", "sig-qqq")
+        .containsEntry("attempts", 1)
+        .containsEntry("option_symbol", "NVDA  260516C00140000");
+
+    // Bounded: no third placeOrder for the partial. Sleep generously to prove no further re-drive.
+    env.sleep(Duration.ofMinutes(30));
+    AuditEvent secondPlaceFailed = captureKind("PartialExitPlaceFailed");
+    // Still exactly one PartialExitRetryExhausted; no runaway re-driving.
+    assertThat(captureAll("PartialExitRetryExhausted")).hasSize(1);
+    assertThat(secondPlaceFailed).isNotNull();
+
+    // The lot stays managed at the unchanged qty and a later STC drains it (place #3 succeeds).
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    stub.partialExit(partialExitRequest("sig-later", "pos-partial-exhaust", 1.0));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-later", 5L, new BigDecimal("2.90")));
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-partial-exhaust");
+  }
+
   // ---------- B2 (PLAN-exit-place-duplicate-422-crash): exit-place-failure guard ----------
 
   /**

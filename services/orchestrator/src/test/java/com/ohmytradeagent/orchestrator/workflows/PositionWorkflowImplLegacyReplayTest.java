@@ -175,6 +175,25 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Phase 1 (PLAN-2026-06-25-trading-remediation): pins the partial-place-retry-next-session gate
+   * literal. This getVersion change-point keys the return-vs-re-drive fork in processOne's
+   * place-failure catch; a renamed string re-resolves to DEFAULT_VERSION for legacy histories (the
+   * live QQQ-era pods), silently arming a next-session timer + re-enqueue that those histories
+   * never recorded — tripping a NonDeterministicWorkflowError. The pre-fix legacy history above
+   * (recorded with NO {@code partial-exit-place-retry-next-session-v1} marker) doubles as the v=0
+   * replay regression: on replay this gate resolves to DEFAULT_VERSION so the legacy {@code
+   * releaseExitInFlightLatches()+return} branch runs and the recorded command stream is reproduced
+   * byte-identically.
+   */
+  @Test
+  void versionPartialPlaceRetryNextSessionConstantNameIsStable() throws Exception {
+    Field marker =
+        PositionWorkflowImpl.class.getDeclaredField("VERSION_PARTIAL_PLACE_RETRY_NEXT_SESSION");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("partial-exit-place-retry-next-session-v1");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#276 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The recorded {@code PartialExitFilled} subject has no
    * {@code option_symbol} key; the current impl's v=DEFAULT_VERSION branch must reproduce that

@@ -175,6 +175,18 @@ public final class AuditEventKinds {
           // second timeout, after which the STC is dropped) closes the cycle. Intentionally
           // placed in ALL_KINDS only, not in PARTIAL_EXIT_REQUEST_KINDS or _FILL_KINDS.
           "PartialExitRetryRequested",
+          // Phase 1 (PLAN-2026-06-25-trading-remediation): emitted by PositionWorkflowImpl when a
+          // partial-target exit's placeOrder retries were exhausted (PartialExitPlaceFailed) and
+          // the bounded next-session re-drive budget (MAX_PARTIAL_PLACE_RETRY_SESSIONS) is also
+          // spent — the discretionary partial is given up and normal exits (STC / chandelier / EOD
+          // flatten) continue to govern the lot (the 2026-06-25 QQQ 720p incident). Terminal
+          // failure that MUST page: registered here AND in
+          // OrderFailureAlerter.DEFAULT_FAILURE_KINDS
+          // + application.yml's failure-kinds IMAGE default. NOT a lifecycle/fill event (nothing
+          // was
+          // sold) — placed in ALL_KINDS only, not in any *_KINDS lifecycle group. The per-attempt
+          // marker (PartialExitRetryRequested above, reused) is informational and does NOT page.
+          "PartialExitRetryExhausted",
           // Exit-retry late-fill reconcile (VERSION_EXIT_RETRY_LATE_FILL_RECONCILE): emitted by
           // PositionWorkflowImpl when a timed-out exit order fills LATE during the best-effort
           // cancel and that late fill already satisfies the exit intent, so the retry is SKIPPED

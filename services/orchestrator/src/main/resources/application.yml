@@ -104,7 +104,11 @@ alert:
     # rested unfilled and was silently held overnight on 2026-06-24) and FlattenRetryExhausted (the
     # bounded next-session retry budget spent, lot still unfilled) page. FlattenRetryScheduled is
     # informational and intentionally absent so a retry-in-progress does not page.
-    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,EodForceFlattenFailed,FlattenRetryExhausted}
+    # Phase 1 (PLAN-2026-06-25-trading-remediation): PartialExitRetryExhausted (a partial-target exit
+    # whose placeOrder failed and whose bounded next-session re-drive budget is spent — the
+    # 2026-06-25 QQQ 720p incident) pages for the same reason. PartialExitRetryRequested is the
+    # informational per-attempt marker and intentionally absent so a retry-in-progress does not page.
+    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted}
     signal-feed:
       # Issue #308: mirror every BTO/STC/AVG signal (received + outcome) to the same webhook.
       # Off by default — opt in via ALERT_SIGNAL_FEED_ENABLED=true. Independent of failure alerts.
