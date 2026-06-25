@@ -694,6 +694,114 @@ class ReconciliationWorkflowImplTest {
         .containsEntry("first_seen_at", tick3FirstSeen.toString());
   }
 
+  // ---------- Cross-strategy recon orphan suppression (shared broker account) ----------
+
+  @Test
+  void missingBranch_siblingFullyCoversOcc_suppressesOrphan() {
+    // A broker-held position with NO FILLED journal row in THIS strategy (missing branch), but a
+    // running sibling-strategy PositionWorkflow on the shared account fully covers the broker lot
+    // qty → suppress the PositionOrphan page, count stays 0, and emit the non-paging
+    // PositionOrphanSuppressedSiblingOwner audit instead.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(paddedOcc))).thenReturn(5L);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphanOngoing".equals(e.getKind())));
+
+    AuditEvent suppressed = captureKind("PositionOrphanSuppressedSiblingOwner");
+    assertThat(suppressed.getSubject()).containsEntry("option_symbol", paddedOcc);
+    assertThat(((Number) suppressed.getSubject().get("broker_qty")).longValue()).isEqualTo(5L);
+    assertThat(((Number) suppressed.getSubject().get("covered_qty")).longValue()).isEqualTo(5L);
+    verify(metrics, times(1))
+        .recordSiblingOwnerSuppression(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"));
+  }
+
+  @Test
+  void missingBranch_noSiblingOwner_stillPages() {
+    // Genuine-orphan regression guard: missing branch, no running sibling owner (coverage 0) → the
+    // PositionOrphan still pages.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(anyString(), anyString())).thenReturn(0L);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    AuditEvent orphan = captureKind("PositionOrphan");
+    assertThat(orphan.getSubject())
+        .containsEntry("option_symbol", paddedOcc)
+        .containsEntry("journal_status", "missing");
+    verify(metrics, never()).recordSiblingOwnerSuppression(anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void missingBranch_partialSiblingCoverage_stillPages() {
+    // SAFETY-CRITICAL: a sibling owner covers only PART of the broker lot (5 of 10) → suppression
+    // must NOT fire (the uncovered 5 is a genuine orphan), so the PositionOrphan still pages.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 10L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(paddedOcc))).thenReturn(5L);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    AuditEvent orphan = captureKind("PositionOrphan");
+    assertThat(orphan.getSubject()).containsEntry("journal_status", "missing");
+    Mockito.verify(audit, never())
+        .log(
+            Mockito.argThat(
+                e -> e != null && "PositionOrphanSuppressedSiblingOwner".equals(e.getKind())));
+    verify(metrics, never()).recordSiblingOwnerSuppression(anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void filledBranch_siblingSuppressionDoesNotApply_stillPagesAndAutoAdopts() {
+    // Scope guard: the sibling-coverage check is missing-branch ONLY. A FILLED-anchor orphan (no
+    // live same-strategy owner) still pages AND still reaches maybeAutoAdopt, even though a sibling
+    // owner would cover the qty — the filled branch never consults
+    // sumRunningOwnerRemainingQtyForOcc.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(anyString(), anyString())).thenReturn(5L);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    AuditEvent orphan = captureKind("PositionOrphan");
+    assertThat(orphan.getSubject()).containsEntry("journal_status", "filled");
+    String adoptWfId = WorkflowIds.adoption("dev", "copytrade-v1", paddedOcc);
+    waitUntilAdoptStarted(adoptWfId);
+    verify(metrics, times(1))
+        .recordAutoAdopt(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("initiated"));
+    verify(metrics, never()).recordSiblingOwnerSuppression(anyString(), anyString(), anyString());
+  }
+
   // ---------- Plan-2A R-AA-4: recon auto-adopts orphaned FILLED positions ----------
 
   @Test

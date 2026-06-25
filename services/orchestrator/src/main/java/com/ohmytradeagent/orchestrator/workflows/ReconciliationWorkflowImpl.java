@@ -80,6 +80,12 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   // expired contract has been dropped by the broker; adopting it would spawn a PositionWorkflow
   // that lingers open (no buyer for a worthless contract) and gets re-adopted every cycle.
   private static final String KIND_AUTO_ADOPT_REFUSED_EXPIRED = "AutoAdoptRefusedExpired";
+  // Cross-strategy recon-orphan suppression: a PositionOrphan(missing) page was suppressed because
+  // a
+  // running sibling-strategy PositionWorkflow on the shared broker account fully covers the broker
+  // lot qty for this OCC. Non-paging observability only (NOT in OrderFailureAlerter's allowlist).
+  private static final String KIND_POSITION_ORPHAN_SUPPRESSED_SIBLING =
+      "PositionOrphanSuppressedSiblingOwner";
 
   // Plan-2A R-AA-4: recon.auto_adopt.{initiated,already_owned,refused_not_held} metric outcomes.
   private static final String AUTO_ADOPT_INITIATED = "initiated";
@@ -281,6 +287,27 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       if (filled.isEmpty()) {
         // No FILLED journal row for this OCC — stronger orphan signal. We can't rebuild the
         // expected PositionWorkflow id because there is no entry_signal_id to anchor it on.
+        //
+        // Cross-strategy suppression: multiple strategies share one broker account, so this OCC may
+        // be managed by a running PositionWorkflow under a DIFFERENT strategy (whose journal/cache
+        // is invisible to this strategy-scoped recon). Before paging, sum the remaining qty across
+        // confirmed-RUNNING sibling owners on the account; if they fully cover the broker lot, this
+        // is not an orphan. Partial coverage still pages (the uncovered qty is a genuine orphan).
+        String occPadded = OccSymbol.padded(p.getOptionSymbol());
+        long coveredQty =
+            positionLookup.sumRunningOwnerRemainingQtyForOcc(in.getTenantId(), occPadded);
+        long brokerQty = p.getQty() == null ? 0L : p.getQty();
+        if (brokerQty > 0 && coveredQty >= brokerQty) {
+          recordSiblingSuppressionMetric(in, brokerTarget);
+          auditLog(
+              KIND_POSITION_ORPHAN_SUPPRESSED_SIBLING,
+              subject(
+                  "option_symbol", occPadded,
+                  "broker_qty", brokerQty,
+                  "covered_qty", coveredQty,
+                  "broker_target", brokerTarget));
+          continue;
+        }
         emitPositionOrphanWithDebounce(
             in, p, /* expectedWfId= */ null, /* signalId= */ null, "missing", now, debounceSince);
         positionOrphans++;
@@ -598,6 +625,15 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     } catch (RuntimeException e) {
       // Metrics are non-fatal (mirrors the recordCycle convention) — a meter outage cannot break a
       // recon cycle. Swallow; the audit row is the durable record of the decision.
+    }
+  }
+
+  private void recordSiblingSuppressionMetric(ReconciliationWorkflowInput in, String brokerTarget) {
+    try {
+      metrics.recordSiblingOwnerSuppression(in.getTenantId(), in.getStrategyId(), brokerTarget);
+    } catch (RuntimeException e) {
+      // Metrics are non-fatal (mirrors recordAutoAdoptMetric) — the audit row is the durable
+      // record.
     }
   }
 
