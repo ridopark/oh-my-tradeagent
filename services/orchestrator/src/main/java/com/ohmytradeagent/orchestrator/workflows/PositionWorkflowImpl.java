@@ -128,6 +128,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // exit cycle. Registered in AuditEventKinds.ALL_KINDS only.
   private static final String KIND_PARTIAL_EXIT_RETRY_REQUESTED = "PartialExitRetryRequested";
 
+  // Phase 1 (PLAN-2026-06-25-trading-remediation): a partial-target exit whose placeOrder retries
+  // were exhausted (PartialExitPlaceFailed) is re-driven ONCE at the next RTH open instead of being
+  // silently dropped (the 2026-06-25 QQQ 720p 09:43 incident). KIND_PARTIAL_EXIT_RETRY_REQUESTED
+  // (above, #216) is reused as the informational per-attempt marker (does NOT page);
+  // KIND_PARTIAL_EXIT_RETRY_EXHAUSTED is the terminal page emitted once the bounded
+  // next-session retry budget (MAX_PARTIAL_PLACE_RETRY_SESSIONS) is spent and the partial still
+  // failed to place — the discretionary partial is given up and normal exits (STC / chandelier /
+  // EOD flatten) continue to govern the lot. Registered in AuditEventKinds.ALL_KINDS and paged by
+  // OrderFailureAlerter.
+  private static final String KIND_PARTIAL_EXIT_RETRY_EXHAUSTED = "PartialExitRetryExhausted";
+
   // Exit-retry late-fill reconcile audit kind (VERSION_EXIT_RETRY_LATE_FILL_RECONCILE v>=1):
   // emitted by processOne()'s v=1 timeout branch when, AFTER the best-effort cancel of a timed-out
   // exit order, a LATE fill of the original order is reconciled and already satisfies the exit
@@ -482,6 +493,41 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    */
   private static final int MAX_FLATTEN_RETRY_SESSIONS = 3;
 
+  /**
+   * Phase 1 (PLAN-2026-06-25-trading-remediation) replay gate. When a partial-target exit's {@code
+   * placeOrder} retries are exhausted, the {@link #VERSION_EXIT_PLACE_FAILURE_GUARD} v&gt;=1 catch
+   * emits {@link #KIND_PARTIAL_EXIT_PLACE_FAILED} (which pages) and {@code return}s out of {@link
+   * #processOne(PartialExitRequest)} — the intended partial profit-take is silently DROPPED (the
+   * 2026-06-25 QQQ 720p 09:43 incident). Under v&gt;=1 the catch ADDITIONALLY arms a one-shot timer
+   * to the NEXT market-session open ({@link
+   * MarketCalendarActivities#durationUntilNextRthOpenEt()}); on wake the main loop re-enqueues the
+   * failed partial into {@code pendingExits} so the normal {@code processOne} cycle re-attempts it
+   * with a fresh {@code :retry-N}-suffixed intent key, bounded to {@link
+   * #MAX_PARTIAL_PLACE_RETRY_SESSIONS}. This is a DEFERRED re-drive — NOT the same-session reprice
+   * loop ({@code VERSION_EXIT_STEPPED_REPRICE}) — so the lot stays free for a later STC /
+   * chandelier / EOD flatten between attempts (a discretionary partial must never block the main
+   * loop).
+   *
+   * <p>v=DEFAULT_VERSION (in-flight workflows started before this patch, incl. the live QQQ-era
+   * pods) keep the exact current {@code return} so their recorded histories replay byte-identically
+   * — every new command (the next-open Activity call, its timer, the per-attempt re-enqueue, and
+   * the PartialExitRetry* audits) is strictly behind this gate. The gate is read ONCE at the catch
+   * scope, mirroring how {@link #VERSION_FLATTEN_RETRY_NEXT_SESSION} is read once. This is a
+   * long-lived multi-day workflow: in-flight executions replay across a redeploy, so the gate is
+   * mandatory.
+   */
+  private static final String VERSION_PARTIAL_PLACE_RETRY_NEXT_SESSION =
+      "partial-exit-place-retry-next-session-v1";
+
+  /**
+   * Phase 1: maximum number of NEXT-SESSION re-drives of a failed-to-place partial-target exit
+   * before the workflow gives up retrying, emits the terminal {@link
+   * #KIND_PARTIAL_EXIT_RETRY_EXHAUSTED} page, and lets normal exits govern the lot. A partial
+   * profit-take that missed its target is far less urgent than an unflattened EOD lot, so the
+   * default is a SINGLE re-attempt at the next open — not an unbounded loop.
+   */
+  private static final int MAX_PARTIAL_PLACE_RETRY_SESSIONS = 1;
+
   /** Plan-2B R-AB-1 default: minutes before expiry close to arm the guaranteed flatten timer. */
   private static final long FLATTEN_LEAD_MINUTES_DEFAULT = 30L;
 
@@ -639,6 +685,28 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private boolean retryFlattenArmed;
 
   private int flattenRetrySessions;
+
+  /**
+   * Phase 1 (PLAN-2026-06-25-trading-remediation): the failed-to-place partial-target exit latched
+   * for a DEFERRED next-session re-drive, armed in {@link #processOne(PartialExitRequest)}'s
+   * place-failure catch under {@link #VERSION_PARTIAL_PLACE_RETRY_NEXT_SESSION} v&gt;=1. The
+   * one-shot next-open timer sets {@code partialPlaceRetryArmed}; the main loop then re-enqueues
+   * {@code partialPlaceRetryPending} into {@code pendingExits} so the normal {@code processOne}
+   * cycle re-attempts it. {@code partialPlaceRetrySessions} counts the re-drives so the budget
+   * terminates at {@link #MAX_PARTIAL_PLACE_RETRY_SESSIONS}; {@code partialPlaceRetryAttempts} maps
+   * a signal_id to its re-drive count so the re-driven intent key carries a distinct {@code
+   * :retry-N} suffix (no two attempts reuse a broker client_order_id — the same fix as the
+   * flatten/{@code :reprice-N} pattern). All stay at their zero/null/empty defaults unless a
+   * partial placeOrder actually fails under v&gt;=1, so they are replay-neutral for legacy
+   * histories.
+   */
+  private boolean partialPlaceRetryArmed;
+
+  private PartialExitRequest partialPlaceRetryPending;
+
+  private int partialPlaceRetrySessions;
+
+  private final LinkedHashMap<String, Integer> partialPlaceRetryAttempts = new LinkedHashMap<>();
 
   // Phase 3: watchlist-trigger EXIT state (premium-space, bid-evaluated on the long option). All of
   // this stays at its zero/false defaults — and none of the timers/subscription below is armed —
@@ -920,7 +988,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   // that resting order so it drains rather than hanging open. Predicate-only — not
                   // a
                   // recorded command, so this addition is replay-neutral for v=0 histories.
-                  || (flattenAwaitingLateFill && lastFillEvent != null));
+                  || (flattenAwaitingLateFill && lastFillEvent != null)
+                  // Phase 1 (PLAN-2026-06-25-trading-remediation): wake on the next-session
+                  // re-drive timer for a failed-to-place partial so the main loop re-enqueues it
+                  // into pendingExits. Predicate-only — partialPlaceRetryArmed latches only under
+                  // VERSION_PARTIAL_PLACE_RETRY_NEXT_SESSION v>=1, where the timer was armed — so
+                  // this addition is replay-neutral for v=0 histories.
+                  || partialPlaceRetryArmed);
       if (eodFired || expiryFired || expiryLeadFired || remainingQty == 0) {
         break;
       }
@@ -999,6 +1073,38 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         chandelierFireRequested = false;
         fireChandelier();
         // flattenRemaining sets remainingQty=0 -> next iteration exits the loop.
+        continue;
+      }
+      // Phase 1 (PLAN-2026-06-25-trading-remediation): the next-session re-drive timer for a
+      // failed-to-place partial fired. Count the re-drive, bump the per-signal attempt so the
+      // re-attempt's intent key carries a distinct :retry-N suffix (no duplicate client_order_id),
+      // emit the informational per-attempt marker, and re-enqueue the latched partial into
+      // pendingExits so the normal processOne cycle re-attempts it. The latch is one-shot; the
+      // re-attempt's own place-failure (if any) re-arms under the bounded budget.
+      if (partialPlaceRetryArmed) {
+        partialPlaceRetryArmed = false;
+        PartialExitRequest pending = partialPlaceRetryPending;
+        partialPlaceRetryPending = null;
+        if (pending != null) {
+          partialPlaceRetrySessions++;
+          int attempt = partialPlaceRetryAttempts.merge(pending.getSignalId(), 1, Integer::sum);
+          auditLog(
+              KIND_PARTIAL_EXIT_RETRY_REQUESTED,
+              subject(
+                  "signal_id",
+                  pending.getSignalId(),
+                  "retry_attempt",
+                  attempt,
+                  "source_premium",
+                  "next_session_place_retry",
+                  "intent_key",
+                  Workflow.getInfo().getWorkflowId()
+                      + ":exit:"
+                      + pending.getSignalId()
+                      + ":retry-"
+                      + attempt));
+          pendingExits.add(pending);
+        }
         continue;
       }
       if (!pendingExits.isEmpty()) {
@@ -1881,7 +1987,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       String intentKey;
       OrderIntent intent;
       if (retryCount == 0) {
+        // Phase 1 (PLAN-2026-06-25-trading-remediation): a partial re-driven at the next RTH open
+        // after a prior placeOrder FAILURE carries a :retry-N suffix so it does not reuse the prior
+        // attempt's client_order_id (the same fix as the flatten/:reprice-N pattern). For a
+        // first-time partial (no prior place-failure) the attempt count is 0 and the key is the
+        // legacy un-suffixed workflowId:exit:<signalId>, so this is replay-neutral.
+        int placeRetryAttempt = partialPlaceRetryAttempts.getOrDefault(req.getSignalId(), 0);
         intentKey = Workflow.getInfo().getWorkflowId() + ":exit:" + req.getSignalId();
+        if (placeRetryAttempt > 0) {
+          intentKey = intentKey + ":retry-" + placeRetryAttempt;
+        }
         intent = exitIntent(req, qtyToClose, intentKey, req.getRefPremium());
       } else if (steppedRepriceVersion >= 1) {
         // Plan-2B R-AB-2: bounded STEPPED reprice. Per-step intent key uses a distinct :reprice-N
@@ -2002,6 +2117,48 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   intent.getQty(),
                   "error",
                   e.getMessage()));
+          // Phase 1 (PLAN-2026-06-25-trading-remediation): instead of silently dropping the
+          // intended partial (the 2026-06-25 QQQ 720p 09:43 incident), re-drive it ONCE at the
+          // next RTH open. The gate is read ONCE here at the catch scope (mirrors how
+          // VERSION_FLATTEN_RETRY_NEXT_SESSION is read once). v=DEFAULT_VERSION keeps the exact
+          // legacy releaseExitInFlightLatches()+return so in-flight histories replay
+          // byte-identically — every command below (the next-open Activity call, its timer) is
+          // strictly behind this gate. Bounded by MAX_PARTIAL_PLACE_RETRY_SESSIONS; on budget
+          // exhaustion emit the terminal page and give the partial up (normal exits still govern).
+          int partialRetryVersion =
+              Workflow.getVersion(
+                  VERSION_PARTIAL_PLACE_RETRY_NEXT_SESSION, Workflow.DEFAULT_VERSION, 1);
+          if (partialRetryVersion >= 1) {
+            if (partialPlaceRetrySessions >= MAX_PARTIAL_PLACE_RETRY_SESSIONS) {
+              // Budget spent: the partial failed to place across all allotted sessions. Page the
+              // terminal exhausted audit and give the discretionary partial up — the lot stays
+              // managed and free for a later STC / chandelier / EOD flatten.
+              auditLog(
+                  KIND_PARTIAL_EXIT_RETRY_EXHAUSTED,
+                  subject(
+                      "signal_id", req.getSignalId(),
+                      "option_symbol", input.getContractSymbol(),
+                      "qty", intent.getQty(),
+                      "attempts", partialPlaceRetrySessions));
+            } else {
+              // Arm a one-shot timer to the NEXT session open. durationUntilNextRthOpenEt always
+              // advances to a STRICTLY-FUTURE open (across the close and weekends). On fire, the
+              // main loop re-enqueues the latched partial into pendingExits for a fresh
+              // processOne cycle. A null/zero duration (no sane next open) falls through to the
+              // legacy give-up (no re-drive).
+              Duration untilNextOpen = calendar.durationUntilNextRthOpenEt();
+              if (untilNextOpen != null && !untilNextOpen.isZero() && !untilNextOpen.isNegative()) {
+                partialPlaceRetryPending = req;
+                partialPlaceRetryArmed = false;
+                Workflow.newTimer(untilNextOpen)
+                    .thenApply(
+                        v -> {
+                          partialPlaceRetryArmed = true;
+                          return null;
+                        });
+              }
+            }
+          }
           releaseExitInFlightLatches();
           return;
         }

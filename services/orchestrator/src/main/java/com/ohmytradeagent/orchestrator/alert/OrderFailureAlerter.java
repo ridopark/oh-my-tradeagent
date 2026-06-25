@@ -104,9 +104,13 @@ public class OrderFailureAlerter {
   // relying on config would silently reopen the no-alert gap. application.yml's
   // alert.discord.failure-kinds default mirrors this string. FlattenRetryScheduled is informational
   // (a retry IS being attempted) and is intentionally NOT here so it does not page.
+  // Phase 1 (PLAN-2026-06-25-trading-remediation): PartialExitRetryExhausted (a partial-target exit
+  // whose placeOrder failed AND whose bounded next-session re-drive budget is spent) pages for the
+  // same reason — relying on config would silently reopen the no-alert gap. The per-attempt marker
+  // (PartialExitRetryRequested) is informational and intentionally NOT here so it does not page.
   private static final String DEFAULT_FAILURE_KINDS =
       "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
-          + "EodForceFlattenFailed,FlattenRetryExhausted";
+          + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -120,9 +124,12 @@ public class OrderFailureAlerter {
   /**
    * STC (exit) failure kinds; everything else in the allowlist is treated as a BTO (entry). B3 adds
    * {@code PartialExitPlaceFailed} (an exit placeOrder that failed) so it labels as an exit, not a
-   * BTO.
+   * BTO. Phase 1 (PLAN-2026-06-25-trading-remediation) adds {@code PartialExitRetryExhausted} — the
+   * terminal page for a failed partial whose next-session re-drive budget is spent; its subject
+   * carries {@code signal_id} + {@code option_symbol}, the same shape, so it labels as an exit too.
    */
-  private static final Set<String> STC_KINDS = Set.of("OrphanSTC", "PartialExitPlaceFailed");
+  private static final Set<String> STC_KINDS =
+      Set.of("OrphanSTC", "PartialExitPlaceFailed", "PartialExitRetryExhausted");
 
   // Phase 4: force-flatten failure kinds. Their subject is a DIFFERENT shape than a BTO/STC order
   // failure — PositionWorkflowImpl emits contract_symbol / entry_signal_id / reason / remaining_qty
