@@ -405,6 +405,71 @@ class WatchlistTriggerWorkflowImplTest {
     verify(exec, never()).placeOrder(any());
   }
 
+  // Phase 1 (root cause): a live cross inside the EOD entry cutoff must NOT open a position. The
+  // 2026-06-24 incident fired at 15:33 ET, 3 min AFTER its own force_close_eod_et=15:30, and could
+  // not flatten before the 16:00 bell. With no_entry_within_close_minutes set and the calendar
+  // reporting little/no time to the cutoff, fire() rejects (reason=too_close_to_eod), returns
+  // eod_skip, and NEVER places an order.
+  @Test
+  void crossInsideEodCutoff_rejects_noOrder() throws Exception {
+    // Cutoff (force_close_eod_et=15:30) is essentially now -> zero duration to close.
+    when(calendar.durationUntilEodCloseEt(any())).thenReturn(Duration.ZERO);
+    StrategyConfig c = config();
+    c.setForceCloseEodEt("15:30");
+    c.setNoEntryWithinCloseMinutes(30L);
+    WatchlistTriggerWorkflow wf = newStub("wl-eod-entry-guard");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false)); // seed below T
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // live cross into band -> FIRE attempt
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":eod_skip");
+    verify(exec, never()).placeOrder(any());
+    AuditEvent rejected = captureKind("TriggerFireRejected");
+    assertThat(rejected.getSubject()).containsEntry("reason", "too_close_to_eod");
+    assertThat(rejected.getSubject()).containsEntry("cutoff_et", "15:30");
+  }
+
+  // Phase 1: cutoff configured but the calendar reports plenty of time before the close (toClose
+  // minutes >= no_entry_within_close_minutes) -> the guard is inert and entry proceeds as today.
+  @Test
+  void crossWellBeforeEodCutoff_placesOrder() throws Exception {
+    when(calendar.durationUntilEodCloseEt(any())).thenReturn(Duration.ofHours(2));
+    StrategyConfig c = config();
+    c.setForceCloseEodEt("15:30");
+    c.setNoEntryWithinCloseMinutes(30L);
+    WatchlistTriggerWorkflow wf = newStub("wl-eod-guard-clear");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // live cross into band -> FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("3.15")));
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+    verify(exec, times(1)).placeOrder(any());
+  }
+
+  // Phase 1: no_entry_within_close_minutes absent -> guard disabled, behaviour unchanged even with
+  // the calendar reporting zero time to close (the guard never consults the calendar when null).
+  @Test
+  void nullEntryCutoff_guardDisabled_placesOrder() throws Exception {
+    lenient().when(calendar.durationUntilEodCloseEt(any())).thenReturn(Duration.ZERO);
+    WatchlistTriggerWorkflow wf = newStub("wl-eod-guard-null");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // live cross into band -> FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("3.15")));
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+    verify(exec, times(1)).placeOrder(any());
+  }
+
   // Finding #2: order placed but no fill arrives within the TTL -> the leg cancels the resting
   // order, audits TriggerEntryUnfilled, and completes WITHOUT starting a PositionWorkflow.
   @Test
