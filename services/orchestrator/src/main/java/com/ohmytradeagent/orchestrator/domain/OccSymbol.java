@@ -66,6 +66,24 @@ public record OccSymbol(String value) {
     }
   }
 
+  /**
+   * Normalize any OCC — compact ({@code NVDA260706P00190000}) or already-padded ({@code NVDA
+   * 260706P00190000}) — to the 21-char padded canonical form {@link #of} produces (the cache key /
+   * {@code ContractSymbol} search-attribute form the PositionWorkflow seed sites register under).
+   * Compacts first, then re-pads the root to 6 chars with {@code %-6s}. Idempotent ({@code
+   * padded(padded(x)) == padded(x)}) and null-safe. An input too short to carry the fixed 15-char
+   * {@code YYMMDD+right+strike} tail is returned unchanged (no root to pad).
+   */
+  public static String padded(String occ) {
+    String compact = compact(occ);
+    if (compact == null || compact.length() < 15) {
+      return occ;
+    }
+    String root = compact.substring(0, compact.length() - 15);
+    String tail = compact.substring(compact.length() - 15);
+    return String.format(Locale.ROOT, "%-6s%s", root, tail);
+  }
+
   public static OccSymbol of(String root, LocalDate expiry, BigDecimal strike, String right) {
     if (root == null || root.isBlank() || root.length() > 6) {
       throw new IllegalArgumentException("root must be 1..6 chars, got: " + root);

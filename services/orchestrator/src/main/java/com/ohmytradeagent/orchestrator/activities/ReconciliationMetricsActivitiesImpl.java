@@ -31,6 +31,9 @@ public class ReconciliationMetricsActivitiesImpl implements ReconciliationMetric
   // Plan-2A R-AA-4: recon.auto_adopt.{initiated,already_owned,refused_not_held} — one counter,
   // distinguished by the `outcome` tag (Prometheus convention; queryable per outcome).
   static final String AUTO_ADOPT_COUNTER_NAME = "recon_auto_adopt_total";
+  // Cross-strategy recon-orphan suppression: one PositionOrphan(missing) page suppressed because a
+  // running sibling-strategy PositionWorkflow on the shared broker account covers the broker lot.
+  static final String SIBLING_SUPPRESSION_COUNTER_NAME = "recon_sibling_owner_suppression_total";
 
   private static final Logger log =
       LoggerFactory.getLogger(ReconciliationMetricsActivitiesImpl.class);
@@ -41,6 +44,8 @@ public class ReconciliationMetricsActivitiesImpl implements ReconciliationMetric
   private final ConcurrentMap<String, Counter> intentCounters = new ConcurrentHashMap<>();
   // Keyed on (tenant|strategy|broker_target|outcome) so each outcome gets its own counter.
   private final ConcurrentMap<String, Counter> autoAdoptCounters = new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, Counter> siblingSuppressionCounters =
+      new ConcurrentHashMap<>();
 
   public ReconciliationMetricsActivitiesImpl(MeterRegistry meterRegistry) {
     this.meterRegistry = meterRegistry;
@@ -130,6 +135,30 @@ public class ReconciliationMetricsActivitiesImpl implements ReconciliationMetric
         strategyId,
         brokerTarget,
         outcome);
+  }
+
+  @Override
+  public void recordSiblingOwnerSuppression(
+      String tenantId, String strategyId, String brokerTarget) {
+    String key = tagKey(tenantId, strategyId, brokerTarget);
+    Counter c =
+        siblingSuppressionCounters.computeIfAbsent(
+            key,
+            k ->
+                Counter.builder(SIBLING_SUPPRESSION_COUNTER_NAME)
+                    .description(
+                        "PositionOrphan(missing) pages suppressed because a running sibling-strategy"
+                            + " PositionWorkflow on the shared broker account covers the broker lot.")
+                    .tag("tenant", tenantId)
+                    .tag("strategy", strategyId)
+                    .tag("broker_target", brokerTarget)
+                    .register(meterRegistry));
+    c.increment();
+    log.debug(
+        "recon sibling-owner suppression metric tenant={} strategy={} broker_target={}",
+        tenantId,
+        strategyId,
+        brokerTarget);
   }
 
   private static String tagKey(String tenantId, String strategyId, String brokerTarget) {

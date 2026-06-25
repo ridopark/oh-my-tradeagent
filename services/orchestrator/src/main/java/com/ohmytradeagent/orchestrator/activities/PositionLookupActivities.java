@@ -39,4 +39,20 @@ public interface PositionLookupActivities {
    * orphans without leaning on Visibility (which lags behind the durable history).
    */
   boolean isPositionWorkflowRunning(String workflowId);
+
+  /**
+   * Account-scoped (any-strategy) sibling-owner coverage probe for the cross-strategy
+   * recon-orphan-suppression fix. Multiple strategies under one tenant route to the SAME broker
+   * account, so a broker-held OCC managed by a DIFFERENT strategy's running {@code
+   * PositionWorkflow} would otherwise false-page as a {@code PositionOrphan} in this strategy's
+   * recon. Returns the summed {@code remainingQty} across every confirmed-RUNNING PositionWorkflow
+   * (under ANY strategy of {@code tenantId}) that manages {@code occPadded}.
+   *
+   * <p>Resolution is cache-driven (Redis SCAN of {@code pos:{tenant}:*:{occPadded}}), confirmed
+   * RUNNING per owner via {@link #isPositionWorkflowRunning}, with remaining qty read from each
+   * owner's {@code positionState} query. BEST-EFFORT / read-only: any error returns {@code 0L}
+   * (zero coverage → recon pages → safe degrade to today's behavior). {@code occPadded} must
+   * already be in the padded canonical form (see {@code OccSymbol.padded}).
+   */
+  long sumRunningOwnerRemainingQtyForOcc(String tenantId, String occPadded);
 }

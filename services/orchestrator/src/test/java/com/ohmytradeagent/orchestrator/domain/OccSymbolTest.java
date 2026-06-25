@@ -143,4 +143,42 @@ class OccSymbolTest {
     // 15 chars but the YYMMDD slice is non-numeric → null.
     assertThat(OccSymbol.expiryOf("ABCDEFP00380000")).isNull();
   }
+
+  // padded(): normalize any OCC (compact or padded) to the 21-char padded canonical cache-key form.
+
+  @Test
+  void padded_compactNormalizesToPaddedCanonicalForm() {
+    assertThat(OccSymbol.padded("NVDA260706P00190000")).isEqualTo("NVDA  260706P00190000");
+  }
+
+  @Test
+  void padded_alreadyPaddedIsUnchanged() {
+    assertThat(OccSymbol.padded("NVDA  260706P00190000")).isEqualTo("NVDA  260706P00190000");
+  }
+
+  @Test
+  void padded_isIdempotent() {
+    String once = OccSymbol.padded("NVDA260706P00190000");
+    assertThat(OccSymbol.padded(once)).isEqualTo(once);
+  }
+
+  @Test
+  void padded_nullSafe() {
+    assertThat(OccSymbol.padded(null)).isNull();
+  }
+
+  @Test
+  void padded_shortInputReturnedUnchanged() {
+    assertThat(OccSymbol.padded("SHORT")).isEqualTo("SHORT");
+  }
+
+  @Test
+  void padded_differentStrikeOrExpiryDoesNotCollide() {
+    // A different strike normalizes to a DIFFERENT padded string (no cache-key collision).
+    assertThat(OccSymbol.padded("NVDA260706P00190000"))
+        .isNotEqualTo(OccSymbol.padded("NVDA260706P00195000"));
+    // A different expiry likewise.
+    assertThat(OccSymbol.padded("NVDA260706P00190000"))
+        .isNotEqualTo(OccSymbol.padded("NVDA260713P00190000"));
+  }
 }

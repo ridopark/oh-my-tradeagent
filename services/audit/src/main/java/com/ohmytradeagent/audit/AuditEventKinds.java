@@ -283,6 +283,13 @@ public final class AuditEventKinds {
           // observability — NOT a lifecycle event (no workflow was started). Intentionally placed
           // in ALL_KINDS only, not in ENTRY_KINDS or any *_TERMINAL_CLOSE_KINDS group.
           "AutoAdoptRefusedExpired",
+          // Cross-strategy recon-orphan suppression: emitted by ReconciliationWorkflowImpl when a
+          // PositionOrphan(missing) page is suppressed because a running sibling-strategy
+          // PositionWorkflow on the shared broker account fully covers the broker lot qty for the
+          // OCC. Pure non-paging observability — NOT a lifecycle event and intentionally NOT in
+          // OrderFailureAlerter's DEFAULT_FAILURE_KINDS, so it does not page Discord. Placed in
+          // ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "PositionOrphanSuppressedSiblingOwner",
           // Issue #239/#285: emitted by AdoptionWorkflow when an operator-triggered
           // adoption reconstructs + starts a PositionWorkflow owner for a confirmed orphan. Pure
           // provenance / observability — NOT a lifecycle event. The real ledger ENTRY is the

@@ -48,4 +48,13 @@ public interface ReconciliationMetricsActivities {
    * lot racing the adopt); only {@code initiated} reflects a real ABANDON-child start.
    */
   void recordAutoAdopt(String tenantId, String strategyId, String brokerTarget, String outcome);
+
+  /**
+   * Cross-strategy recon-orphan suppression: records one suppressed {@code PositionOrphan(missing)}
+   * page where a running sibling-strategy PositionWorkflow on the shared broker account fully
+   * covers the broker lot qty. Emits {@code recon_sibling_owner_suppression_total} tagged with
+   * {@code tenant}, {@code strategy}, {@code broker_target}. Non-paging observability only —
+   * confirms the suppression fires without re-introducing orphan-page noise.
+   */
+  void recordSiblingOwnerSuppression(String tenantId, String strategyId, String brokerTarget);
 }

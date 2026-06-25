@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.activities;
 
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.orchestrator.workflows.PositionState;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.temporal.api.common.v1.WorkflowExecution;
@@ -9,12 +10,17 @@ import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionRequest;
 import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionResponse;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
+import io.temporal.client.WorkflowStub;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.Optional;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.Cursor;
+import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -128,6 +134,56 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
       // Conservative: treat unknown as "not running" so recon emits a PositionOrphan rather than
       // silently dropping a possibly-orphan signal. Operator's runbook covers the false-positive.
       return false;
+    }
+  }
+
+  @Override
+  public long sumRunningOwnerRemainingQtyForOcc(String tenantId, String occPadded) {
+    // BEST-EFFORT / read-only: any systemic failure (e.g. a Redis SCAN outage) returns 0 — zero
+    // coverage means recon pages, the safe degrade to pre-fix behavior (a false page, never a
+    // masked genuine orphan). A per-owner query failure is contained below (skip that owner).
+    try {
+      Set<String> ownerWfIds = new LinkedHashSet<>();
+      ScanOptions opts =
+          ScanOptions.scanOptions().match("pos:" + tenantId + ":*:" + occPadded).count(256).build();
+      try (Cursor<String> cursor = redis.scan(opts)) {
+        while (cursor.hasNext()) {
+          String wfId = redis.opsForValue().get(cursor.next());
+          if (wfId != null) {
+            ownerWfIds.add(wfId);
+          }
+        }
+      }
+      long sum = 0L;
+      for (String wfId : ownerWfIds) {
+        if (!isPositionWorkflowRunning(wfId)) {
+          continue;
+        }
+        try {
+          WorkflowStub stub = workflowClient.newUntypedWorkflowStub(wfId);
+          PositionState state = stub.query("positionState", PositionState.class);
+          if (state != null && state.remainingQty() > 0) {
+            sum += state.remainingQty();
+          }
+        } catch (RuntimeException e) {
+          // Skip this owner (treat its coverage as 0) — a since-closed owner or a query race must
+          // not abort the whole sum. Mirrors the cacheArmedLeg best-effort warn pattern.
+          log.warn(
+              "sumRunningOwnerRemainingQtyForOcc owner positionState query failed wf_id={} occ={}"
+                  + " err={}",
+              wfId,
+              occPadded,
+              e.getMessage());
+        }
+      }
+      return sum;
+    } catch (RuntimeException e) {
+      log.warn(
+          "sumRunningOwnerRemainingQtyForOcc best-effort probe failed tenant={} occ={} err={}",
+          tenantId,
+          occPadded,
+          e.getMessage());
+      return 0L;
     }
   }
 
