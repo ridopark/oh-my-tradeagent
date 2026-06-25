@@ -428,6 +428,7 @@ class WatchlistTriggerWorkflowImplTest {
     verify(exec, never()).placeOrder(any());
     AuditEvent rejected = captureKind("TriggerFireRejected");
     assertThat(rejected.getSubject()).containsEntry("reason", "too_close_to_eod");
+    assertThat(rejected.getSubject()).containsEntry("cutoff_et", "15:30");
   }
 
   // Phase 1: cutoff configured but the calendar reports plenty of time before the close (toClose
