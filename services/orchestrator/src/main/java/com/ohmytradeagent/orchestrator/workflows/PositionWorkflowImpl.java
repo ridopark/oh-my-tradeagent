@@ -2275,7 +2275,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       return true;
     }
 
-    String flattenIntentKey = Workflow.getInfo().getWorkflowId() + ":exit:flatten-" + reason;
+    // Phase 4 (PLAN-2026-06-24-trading-remediation): each next-session retry MUST use a DISTINCT
+    // intent_key so it derives a fresh client_order_id. Reusing the first attempt's key would
+    // re-POST a duplicate client_order_id — Alpaca rejects it (or the by-cid lookup resolves the
+    // prior terminal order), so the 2nd retry would FAIL the workflow instead of gracefully
+    // exhausting its budget. The first attempt (flattenRetrySessions == 0) keeps the original key
+    // byte-identically so legacy histories replay unchanged.
+    String flattenIntentKey =
+        Workflow.getInfo().getWorkflowId()
+            + ":exit:flatten-"
+            + reason
+            + (flattenRetrySessions > 0 ? ":retry-" + flattenRetrySessions : "");
 
     // Plan-2A R-AA-1 decision point. The getVersion marker is appended AFTER the shared prologue
     // (kindReq audit + best-effort cancel) and BEFORE the place/zero, so legacy histories — which

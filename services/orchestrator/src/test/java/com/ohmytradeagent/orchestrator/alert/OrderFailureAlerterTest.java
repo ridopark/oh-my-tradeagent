@@ -467,13 +467,16 @@ class OrderFailureAlerterTest {
     alerter.onAuditEvent(event);
 
     WebhookEmbed embed = capture(webhook);
-    assertThat(embed.title()).contains("order FAILED");
+    // Phase 4 dedicated flatten embed: the title surfaces a STUCK position (symbol + qty), the
+    // symbol resolves from contract_symbol (NOT n/a), and reason/qty are operator-actionable.
+    assertThat(embed.title()).contains("Force-flatten FAILED").contains("(exit unfilled)");
+    assertThat(embed.title()).contains("QQQ");
     assertThat(embed.color()).isEqualTo(15548997); // red
     assertThat(field(embed, "kind")).isEqualTo("EodForceFlattenFailed");
-    // Note: the flatten audit carries the symbol under "contract_symbol"; the generic buildEmbed
-    // reads "option_symbol", so the symbol field is "n/a" here. The page still fires (kind +
-    // reason + footer carry the actionable detail) — this is the documented generic-embed shape.
-    assertThat(field(embed, "kind")).isNotBlank();
+    assertThat(field(embed, "symbol")).contains("QQQ");
+    assertThat(field(embed, "reason")).isEqualTo("time_stop");
+    assertThat(field(embed, "remaining_qty")).isEqualTo("3");
+    assertThat(field(embed, "signal_id")).isEqualTo("sig-flatten-1");
   }
 
   @Test
@@ -493,8 +496,13 @@ class OrderFailureAlerterTest {
     alerter.onAuditEvent(event);
 
     WebhookEmbed embed = capture(webhook);
-    assertThat(embed.title()).contains("order FAILED");
+    assertThat(embed.title()).contains("Force-flatten FAILED").contains("(retry budget exhausted)");
+    assertThat(embed.title()).contains("QQQ");
     assertThat(field(embed, "kind")).isEqualTo("FlattenRetryExhausted");
+    assertThat(field(embed, "symbol")).contains("QQQ");
+    assertThat(field(embed, "reason")).isEqualTo("eod");
+    assertThat(field(embed, "remaining_qty")).isEqualTo("5");
+    assertThat(field(embed, "attempts")).isEqualTo("3");
   }
 
   @Test

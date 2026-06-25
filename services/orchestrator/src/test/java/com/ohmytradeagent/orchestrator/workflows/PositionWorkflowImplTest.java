@@ -688,6 +688,22 @@ class PositionWorkflowImplTest {
     AuditEvent exhausted = captureKind("FlattenRetryExhausted");
     assertThat(exhausted.getSubject()).containsEntry("attempts", 3).containsEntry("reason", "eod");
 
+    // Each next-session retry MUST use a DISTINCT intent_key (→ a fresh client_order_id). Reusing
+    // the first attempt's key would re-POST a duplicate client_order_id and FAIL the 2nd retry
+    // instead of gracefully exhausting the budget. First attempt keeps the un-suffixed key.
+    ArgumentCaptor<OrderIntent> intents = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(4)).placeOrder(intents.capture());
+    List<String> flattenKeys =
+        intents.getAllValues().stream()
+            .map(OrderIntent::getIntentKey)
+            .filter(k -> k.contains(":exit:flatten-"))
+            .toList();
+    assertThat(flattenKeys).hasSize(4).doesNotHaveDuplicates();
+    assertThat(flattenKeys).anyMatch(k -> k.endsWith(":exit:flatten-eod")); // first attempt
+    assertThat(flattenKeys).anyMatch(k -> k.endsWith(":retry-1"));
+    assertThat(flattenKeys).anyMatch(k -> k.endsWith(":retry-2"));
+    assertThat(flattenKeys).anyMatch(k -> k.endsWith(":retry-3"));
+
     // Bounded: no further retries past MAX, and the workflow is still alive (no PositionClosed).
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
     assertThat(captureAll("PositionClosed")).isEmpty();
