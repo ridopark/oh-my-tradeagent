@@ -62,7 +62,9 @@ class PositionLookupActivitiesImplIT {
     // Wipe between tests.
     redisTemplate.getConnectionFactory().getConnection().serverCommands().flushAll();
     workflowClient = mock(WorkflowClient.class);
-    svc = new PositionLookupActivitiesImpl(redisTemplate, workflowClient);
+    svc =
+        new PositionLookupActivitiesImpl(
+            redisTemplate, workflowClient, tenantId -> java.util.List.of());
   }
 
   @AfterEach
