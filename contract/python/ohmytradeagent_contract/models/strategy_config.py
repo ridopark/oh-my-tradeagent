@@ -305,3 +305,7 @@ class StrategyConfig(BaseModel):
     """
     Watchlist-trigger exit: if neither the take-profit nor the hard stop has triggered within this many seconds of the first fill, PositionWorkflow flattens the position (reason=time_stop) so a stalled breakout does not bleed theta into the -1R stop. Carried into PositionWorkflowInput.no_progress_time_stop_secs. Opt-in: null/absent disables the time stop. getVersion-gated.
     """
+    no_entry_within_close_minutes: conint(ge=0) | None = None
+    """
+    Watchlist-trigger EOD entry cutoff: refuse to open a new position when fewer than this many minutes remain until the strategy's close/flatten time (force_close_eod_et if set, else the 16:00 ET market close). WatchlistTriggerWorkflowImpl.fire rejects with reason=too_close_to_eod and the leg completes with NO order (outcome=eod_skip), so a late breakout cannot open a lot that cannot be flattened before the bell. Opt-in: null/absent disables the cutoff. getVersion-gated (watchlist-eod-entry-guard-v1).
+    """

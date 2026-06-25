@@ -46,6 +46,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayDeque;
@@ -121,6 +122,15 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   // load-bearing
   // for in-flight-leg determinism).
   static final String VERSION_ARMED_CACHE = "watchlist-armed-cache-v1";
+  // getVersion change id for the EOD entry cutoff (root cause of the 2026-06-24 orphan: a leg fired
+  // at 15:33 ET, 3 min after its own force_close_eod_et=15:30, and could not flatten before the
+  // 16:00 close). New change id: a pre-fix history mid-fire at deploy must replay WITHOUT the new
+  // guard's logAudit command, preserving the v=0 byte-identical command stream.
+  static final String VERSION_EOD_ENTRY_GUARD = "watchlist-eod-entry-guard-v1";
+
+  // 16:00 ET regular-session close — the cutoff reference when force_close_eod_et is unset. Mirrors
+  // MarketCalendarActivitiesImpl.MARKET_CLOSE_TIME (which is package-private to that class).
+  private static final LocalTime MARKET_CLOSE_TIME = LocalTime.of(16, 0);
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -470,6 +480,43 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
    * audits and completes with NO order.
    */
   private String fire(WatchlistTriggerPayload payload, StrategyConfig config, BigDecimal armMult) {
+    // 0. EOD entry cutoff (root cause of the 2026-06-24 orphan): refuse to open a position when too
+    // few minutes remain until the strategy's close/flatten time, so a late breakout cannot open a
+    // lot that cannot be flattened before the bell. Fail-closed: a null/zero/negative duration to
+    // the cutoff is treated as "already at/past the cutoff" -> reject. getVersion-gated so
+    // in-flight
+    // / pre-fix histories replay WITHOUT the guard's logAudit command. Disabled (no calendar call,
+    // behaviour unchanged) when no_entry_within_close_minutes is null/absent.
+    if (Workflow.getVersion(VERSION_EOD_ENTRY_GUARD, Workflow.DEFAULT_VERSION, 1) >= 1) {
+      Long cutoffMinutes = config.getNoEntryWithinCloseMinutes();
+      if (cutoffMinutes != null) {
+        String eodCfg = config.getForceCloseEodEt();
+        LocalTime cutoff =
+            (eodCfg != null && !eodCfg.isBlank()) ? LocalTime.parse(eodCfg) : MARKET_CLOSE_TIME;
+        Duration toClose = calendar.durationUntilEodCloseEt(cutoff);
+        if (toClose == null
+            || toClose.isZero()
+            || toClose.isNegative()
+            || toClose.toMinutes() < cutoffMinutes) {
+          logAudit(
+              payload,
+              KIND_TRIGGER_FIRE_REJECTED,
+              subject(
+                  "ticker",
+                  payload.getTicker(),
+                  "reason",
+                  "too_close_to_eod",
+                  "cutoff_et",
+                  cutoff.toString(),
+                  "min_minutes",
+                  cutoffMinutes,
+                  "mins_to_close",
+                  toClose == null ? null : toClose.toMinutes()));
+          return outcome(payload, "eod_skip");
+        }
+      }
+    }
+
     // 1. Fire decider.
     // cash is null here: the account snapshot is fetched in step 2 below, after the fire decider
     // runs, so the ArmContext cannot carry a cash figure at this point.

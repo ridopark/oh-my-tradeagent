@@ -39,12 +39,16 @@ equity_emit_delta_pct: 0.0005
 #   no_progress_time_stop_secs 1500 — flatten a stalled breakout after 25m (theta defense).
 #   force_close_eod_et 15:30        — hard EOD flatten 30m before the 16:00 ET close (flat by EOD).
 #   eod_force_flatten true          — arm the blanket EOD timer (watchlist is not an author-mirror).
+#   no_entry_within_close_minutes 30 — refuse a new entry within 30m of force_close_eod_et (root-cause
+#                                     guard for the 2026-06-24 orphan: a leg fired at 15:33, 3m after
+#                                     its own 15:30 flatten, and could not close before the 16:00 bell).
 sl_pct: 0.30
 tp_ratio: 2.0
 tp_partial_fraction: 0.5
 trail_giveback_pct: 0.30
 no_progress_time_stop_secs: 1500
 force_close_eod_et: "15:30"
+no_entry_within_close_minutes: 30
 eod_force_flatten: true
 
 # SHIP DISABLED. The operator flips this on (dashboard per-tenant toggle) ONLY AFTER confirming the
