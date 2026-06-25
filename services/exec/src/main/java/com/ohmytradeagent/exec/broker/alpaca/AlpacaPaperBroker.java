@@ -85,7 +85,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
    * broker by user request. This can never resolve on retry, so it short-circuits Temporal's retry
    * policy and the placeOrder Activity terminalizes the intent to {@code ERRORED}.
    */
-  static final String ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE = "AccountOrdersBlockedError";
+  public static final String ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE = "AccountOrdersBlockedError";
 
   /** Regulatory PDT day-trade limit for sub-$25k margin accounts. */
   private static final int PDT_DAYTRADE_LIMIT = 3;

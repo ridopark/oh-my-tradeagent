@@ -18,6 +18,7 @@ import com.ohmytradeagent.exec.broker.ClientOrderId;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
+import com.ohmytradeagent.exec.broker.alpaca.AlpacaPaperBroker;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
@@ -179,7 +180,7 @@ class ExecActivitiesImplClientOrderIdTest {
     ApplicationFailure rejection =
         ApplicationFailure.newNonRetryableFailure(
             "Alpaca rejected order (account orders blocked): new orders are rejected by user request",
-            "AccountOrdersBlockedError");
+            AlpacaPaperBroker.ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE);
     when(broker.placeOrder(any())).thenThrow(rejection);
 
     assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);

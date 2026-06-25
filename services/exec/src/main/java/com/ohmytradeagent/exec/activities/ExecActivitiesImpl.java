@@ -10,6 +10,7 @@ import com.ohmytradeagent.exec.broker.ClientOrderId;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
+import com.ohmytradeagent.exec.broker.alpaca.AlpacaPaperBroker;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
@@ -121,7 +122,8 @@ public class ExecActivitiesImpl implements ExecActivities {
       // retry.
       boolean accountOrdersBlocked =
           e instanceof ApplicationFailure
-              && "AccountOrdersBlockedError".equals(((ApplicationFailure) e).getType());
+              && AlpacaPaperBroker.ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE.equals(
+                  ((ApplicationFailure) e).getType());
       try {
         if (accountOrdersBlocked) {
           journal.markErrored(intent.getIntentKey(), e.getMessage());

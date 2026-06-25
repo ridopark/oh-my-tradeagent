@@ -247,7 +247,8 @@ class AlpacaPaperBrokerTest {
         .isInstanceOfSatisfying(
             ApplicationFailure.class,
             f -> {
-              assertThat(f.getType()).isEqualTo("AccountOrdersBlockedError");
+              assertThat(f.getType())
+                  .isEqualTo(AlpacaPaperBroker.ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE);
               assertThat(f.isNonRetryable()).isTrue();
               assertThat(f.getMessage()).contains("new orders are rejected by user request");
             });
