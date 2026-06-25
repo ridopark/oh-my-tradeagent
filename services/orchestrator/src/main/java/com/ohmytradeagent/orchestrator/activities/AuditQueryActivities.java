@@ -43,6 +43,24 @@ public interface AuditQueryActivities {
       OffsetDateTime since);
 
   /**
+   * Phase 3 (2026-06-24 remediation): counts prior non-paging {@code PositionOrphanObserved} marker
+   * rows for {@code (tenant_id, strategy_id)} with the same debounce key (option_symbol +
+   * journal_status) within the window. Drives the FIRST-page debounce on the {@code "missing"}
+   * branch: the first sweep that observes a missing-no-owner position writes a marker and
+   * suppresses the page; the page only fires once a prior marker proves the position was observed
+   * on a prior consecutive sweep. This absorbs the entry-race transient (a sweep that fires just
+   * before EntryFilled + the position-cache seed). Distinct from {@link
+   * #countPriorPositionOrphans}, which counts the actual paging rows and continues to drive the
+   * {@code Ongoing} escalation.
+   */
+  long countPriorPositionOrphanObserved(
+      String tenantId,
+      String strategyId,
+      String optionSymbol,
+      String journalStatus,
+      OffsetDateTime since);
+
+  /**
    * Counts prior {@code JournalOrphan} audit rows for {@code (tenant_id, strategy_id)} where the
    * subject's {@code intent_key} matches and {@code occurred_at >= since}.
    *

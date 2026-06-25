@@ -59,6 +59,23 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
         WORKFLOW_TYPE);
   }
 
+  /**
+   * Phase 3 (2026-06-24): tenant-wide (any-strategy) Visibility query for {@link
+   * #hasRunningOwnerForOcc}. Drops the exact {@code TenantStrategy} predicate in favor of a {@code
+   * STARTS_WITH 't-<tenant>/s-'} prefix on the {@code TenantStrategy} Keyword SA so a sibling
+   * strategy's RUNNING PositionWorkflow on the same OCC is matched. {@code STARTS_WITH} is a
+   * supported operator on a custom Keyword Search Attribute under Advanced Visibility (this is NOT
+   * a {@code WorkflowId STARTS_WITH}, which is forbidden).
+   */
+  static String tenantWideVisibilityQuery(String tenantId, String occ) {
+    return String.format(
+        "TenantStrategy STARTS_WITH '%s' AND ContractSymbol = '%s' AND ExecutionStatus = '%s' AND WorkflowType = '%s'",
+        WorkflowIds.escapeForVisibilityQuery("t-" + tenantId + "/s-"),
+        WorkflowIds.escapeForVisibilityQuery(occ),
+        WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING.name(),
+        WORKFLOW_TYPE);
+  }
+
   @Override
   public String findPositionWorkflowId(String tenantId, String strategyId, String occ) {
     String cacheKey = key(tenantId, strategyId, occ);
@@ -184,6 +201,26 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
           occPadded,
           e.getMessage());
       return 0L;
+    }
+  }
+
+  @Override
+  public boolean hasRunningOwnerForOcc(String tenantId, String occPadded) {
+    // BEST-EFFORT / read-only: any Visibility outage returns false (no owner found → recon pages,
+    // the safe degrade — a false page never masks a genuine orphan). Unlike the Redis SCAN this
+    // reads Temporal Visibility directly, so it survives a cold/lagging pos:* cache. The query is
+    // bounded to RUNNING PositionWorkflows for this OCC across ANY strategy of the tenant; the
+    // mere existence of one such execution proves a sibling owner manages the lot.
+    try {
+      String query = tenantWideVisibilityQuery(tenantId, occPadded);
+      return workflowClient.listExecutions(query).findAny().isPresent();
+    } catch (RuntimeException e) {
+      log.warn(
+          "hasRunningOwnerForOcc best-effort Visibility probe failed tenant={} occ={} err={}",
+          tenantId,
+          occPadded,
+          e.getMessage());
+      return false;
     }
   }
 

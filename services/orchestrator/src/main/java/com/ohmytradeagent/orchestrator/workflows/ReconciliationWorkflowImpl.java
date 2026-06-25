@@ -86,6 +86,22 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   // lot qty for this OCC. Non-paging observability only (NOT in OrderFailureAlerter's allowlist).
   private static final String KIND_POSITION_ORPHAN_SUPPRESSED_SIBLING =
       "PositionOrphanSuppressedSiblingOwner";
+  // Phase 3 (2026-06-24 remediation): non-paging first-sweep observation marker for the missing
+  // branch. Emitted instead of a PositionOrphan when a missing-no-owner position is seen for the
+  // FIRST time in the debounce window; the actual page only fires once a prior marker proves a
+  // second consecutive sweep. Absorbs the entry-race transient. NOT in OrderFailureAlerter's
+  // allowlist (observability only).
+  private static final String KIND_POSITION_ORPHAN_OBSERVED = "PositionOrphanObserved";
+
+  /**
+   * Phase 3 (2026-06-24 remediation) change id. Gates two new workflow commands on the {@code
+   * missing} branch: (1) the {@link PositionLookupActivities#hasRunningOwnerForOcc} Temporal
+   * Visibility fallback when the Redis cross-strategy SCAN misses, and (2) the first-page debounce
+   * marker lookup/emit. Behind the marker so existing reconciliation histories replay
+   * byte-identically.
+   */
+  private static final String VERSION_MISSING_VISIBILITY_FALLBACK =
+      "recon-missing-visibility-fallback-v1";
 
   // Plan-2A R-AA-4: recon.auto_adopt.{initiated,already_owned,refused_not_held} metric outcomes.
   private static final String AUTO_ADOPT_INITIATED = "initiated";
@@ -280,6 +296,11 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     // emits a PositionOrphan + count and stops there; auto-adoption is a follow-up.
     List<BrokerPosition> brokerPositions =
         exec.brokerListOpenPositions(in.getTenantId(), in.getStrategyId());
+    // Phase 3 (2026-06-24): one version marker for the whole position-orphan loop. Gates the
+    // missing-branch Visibility fallback + first-page debounce. Read once (outside the loop) so the
+    // command stream is deterministic regardless of how many broker positions are present.
+    int missingVisibilityFallback =
+        Workflow.getVersion(VERSION_MISSING_VISIBILITY_FALLBACK, Workflow.DEFAULT_VERSION, 1);
     long positionOrphans = 0;
     for (BrokerPosition p : brokerPositions) {
       List<JournalEntry> filled =
@@ -308,8 +329,35 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
                   "broker_target", brokerTarget));
           continue;
         }
+        // Phase 3 (2026-06-24): the cross-strategy Redis SCAN above returns 0 on a cache miss/lag
+        // (no Visibility consulted), which previously false-paged a watchlist-owned OCC under the
+        // copytrade recon schedule. Before paging, fall back to a Temporal Visibility probe for ANY
+        // running sibling-strategy PositionWorkflow on this OCC. A running owner covers the lot →
+        // suppress (reuse the existing sibling-owner suppression audit). Gated behind the version
+        // marker so existing recon histories replay byte-identically.
+        if (missingVisibilityFallback >= 1
+            && brokerQty > 0
+            && positionLookup.hasRunningOwnerForOcc(in.getTenantId(), occPadded)) {
+          recordSiblingSuppressionMetric(in, brokerTarget);
+          auditLog(
+              KIND_POSITION_ORPHAN_SUPPRESSED_SIBLING,
+              subject(
+                  "option_symbol", occPadded,
+                  "broker_qty", brokerQty,
+                  "covered_qty", coveredQty,
+                  "broker_target", brokerTarget,
+                  "owner_source", "visibility"));
+          continue;
+        }
         emitPositionOrphanWithDebounce(
-            in, p, /* expectedWfId= */ null, /* signalId= */ null, "missing", now, debounceSince);
+            in,
+            p,
+            /* expectedWfId= */ null,
+            /* signalId= */ null,
+            "missing",
+            now,
+            debounceSince,
+            missingVisibilityFallback);
         positionOrphans++;
         continue;
       }
@@ -338,7 +386,14 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // finds
         // nothing → ownerWfId is null). emitPositionOrphanWithDebounce tolerates a null ownerWfId.
         emitPositionOrphanWithDebounce(
-            in, p, ownerWfId, recentFilled.getSignalId(), "filled", now, debounceSince);
+            in,
+            p,
+            ownerWfId,
+            recentFilled.getSignalId(),
+            "filled",
+            now,
+            debounceSince,
+            missingVisibilityFallback);
         positionOrphans++;
         // Plan-2A R-AA-4: a FILLED journal anchor exists (this branch) AND no running owner →
         // auto-adopt the orphaned-but-legit lot by starting AdoptionWorkflow as an ABANDON child.
@@ -410,7 +465,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       String signalId,
       String journalStatus,
       OffsetDateTime now,
-      OffsetDateTime debounceSince) {
+      OffsetDateTime debounceSince,
+      int missingVisibilityFallback) {
     long priorCount =
         auditQuery.countPriorPositionOrphans(
             in.getTenantId(),
@@ -419,6 +475,35 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
             journalStatus,
             debounceSince);
     if (priorCount == 0L) {
+      // Phase 3 (2026-06-24): FIRST-page debounce on the `missing` branch. A single transient
+      // observation (e.g. a recon sweep that fires just before EntryFilled + the position-cache
+      // seed) must not page. Require a prior observation marker (a 2nd consecutive sweep) before
+      // emitting the actual PositionOrphan; the first sweep writes only the non-paging marker.
+      // Scoped to `missing` (the entry-race / cross-strategy surface); the `filled` branch keeps
+      // its single-sweep paging. Gated behind the version marker for replay determinism.
+      if (missingVisibilityFallback >= 1 && "missing".equals(journalStatus)) {
+        long priorObserved =
+            auditQuery.countPriorPositionOrphanObserved(
+                in.getTenantId(),
+                in.getStrategyId(),
+                p.getOptionSymbol(),
+                journalStatus,
+                debounceSince);
+        if (priorObserved == 0L) {
+          auditLog(
+              KIND_POSITION_ORPHAN_OBSERVED,
+              subject(
+                  "option_symbol",
+                  p.getOptionSymbol(),
+                  "qty",
+                  p.getQty(),
+                  "journal_status",
+                  journalStatus));
+          return;
+        }
+        // priorObserved >= 1: a prior consecutive sweep already observed this orphan → fall through
+        // and emit the real first PositionOrphan page.
+      }
       Map<String, Object> subj =
           subject(
               "option_symbol",

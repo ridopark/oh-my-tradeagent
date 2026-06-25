@@ -398,6 +398,12 @@ class ReconciliationWorkflowImplTest {
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(PADDED_OCC, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    // Phase 3 (2026-06-24): the missing-branch first page is now debounced (>= 2 consecutive
+    // sweeps). A prior observation marker (priorObserved=1) means this is the 2nd sweep → the
+    // first real PositionOrphan page fires.
+    when(auditQuery.countPriorPositionOrphanObserved(
+            eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC), eq("missing"), any()))
+        .thenReturn(1L);
 
     ReconciliationSummary summary = runWorkflow();
 
@@ -606,17 +612,22 @@ class ReconciliationWorkflowImplTest {
 
   @Test
   void positionOrphan_realStateMachine_emitsOngoingAfterEscalationWindow() {
-    // Issue #219: drive the workflow through 3 sequential ticks with the real audit_log shape —
-    // count is 0 on tick 1 (first sighting), then 1 on every subsequent tick because debounce
-    // suppression freezes it. The firstSeen timestamp advances from null (tick 1, nothing in the
-    // window yet) → t-2min (tick 2, within escalation window) → t-31min (tick 3, past the 30m
-    // escalation window).
+    // Issue #219 + Phase 3 (2026-06-24): drive the workflow through 4 sequential ticks with the
+    // real audit_log shape. Phase 3 adds a first-page debounce on the `missing` branch: the first
+    // sighting writes a non-paging PositionOrphanObserved marker (no page) and the actual
+    // PositionOrphan only fires on the 2nd consecutive sweep. From there the issue-#219 escalation
+    // sequence is unchanged (driven by countPriorPositionOrphans + firstSeen).
+    //
+    // Counters across ticks (cron-fresh — derived from audit_log, not in-workflow state):
+    //   countPriorPositionOrphans (PAGED rows):     0, 0, 1, 1
+    //   countPriorPositionOrphanObserved (markers): 0, 1, 1, 1
+    //   firstSeenPositionOrphan (only when paged>=1): tick3=t-31m
     //
     // Expected emission sequence:
-    //   tick 1 → PositionOrphan (first sighting)
-    //   tick 2 → suppressed (firstSeen too recent)
+    //   tick 1 → PositionOrphanObserved (first sighting, page debounced)
+    //   tick 2 → PositionOrphan (2nd consecutive sweep — first real page)
     //   tick 3 → PositionOrphanOngoing (firstSeen > escalation window)
-    OffsetDateTime tick2FirstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(2);
+    //   tick 4 → suppressed (priorOngoing >= 1)
     OffsetDateTime tick3FirstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(31);
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenOrders()).thenReturn(List.of());
@@ -625,23 +636,29 @@ class ReconciliationWorkflowImplTest {
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
     when(auditQuery.countPriorPositionOrphans(
             eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC), eq("missing"), any()))
-        .thenReturn(0L, 1L, 1L);
-    // firstSeenPositionOrphan is only invoked on tick 2 and tick 3 (tick 1 takes the
-    // priorCount==0 first-emission branch and skips the firstSeen lookup).
+        .thenReturn(0L, 0L, 1L, 1L);
+    // Marker counter: 0 on tick 1 (suppress → write marker), 1 thereafter (page).
+    when(auditQuery.countPriorPositionOrphanObserved(
+            eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC), eq("missing"), any()))
+        .thenReturn(0L, 1L, 1L, 1L);
+    // firstSeenPositionOrphan is only invoked when priorCount>=1 (ticks 3 and 4); tick 3 is past
+    // the escalation window so it escalates; tick 4 is suppressed by the priorOngoing guard.
     when(auditQuery.firstSeenPositionOrphan(
             eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC), eq("missing"), any()))
-        .thenReturn(tick2FirstSeen, tick3FirstSeen);
-    // countPriorPositionOrphanOngoing is only invoked on tick 3 (tick 1 skips it, tick 2's
-    // firstSeen is too recent so the time-gate short-circuits before it's called).
+        .thenReturn(tick3FirstSeen);
+    // countPriorPositionOrphanOngoing: 0 on tick 3 (emit Ongoing), 1 on tick 4 (suppress).
     when(auditQuery.countPriorPositionOrphanOngoing(
             eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC), eq("missing"), any()))
-        .thenReturn(0L);
+        .thenReturn(0L, 1L);
 
     runWorkflow(); // tick 1
     runWorkflow(); // tick 2
     runWorkflow(); // tick 3
+    runWorkflow(); // tick 4
 
-    // Exactly one PositionOrphan (tick 1) and exactly one PositionOrphanOngoing (tick 3).
+    // Exactly one Observed marker (tick 1), one PositionOrphan (tick 2), one Ongoing (tick 3).
+    Mockito.verify(audit, times(1))
+        .log(Mockito.argThat(e -> e != null && "PositionOrphanObserved".equals(e.getKind())));
     Mockito.verify(audit, times(1))
         .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
     Mockito.verify(audit, times(1))
@@ -737,6 +754,11 @@ class ReconciliationWorkflowImplTest {
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
     when(positionLookup.sumRunningOwnerRemainingQtyForOcc(anyString(), anyString())).thenReturn(0L);
+    when(positionLookup.hasRunningOwnerForOcc(anyString(), anyString())).thenReturn(false);
+    // Phase 3: past the first-page debounce (2nd sweep — prior observation marker exists).
+    when(auditQuery.countPriorPositionOrphanObserved(
+            eq("dev"), eq("copytrade-v1"), eq(paddedOcc), eq("missing"), any()))
+        .thenReturn(1L);
 
     ReconciliationSummary summary = runWorkflow();
 
@@ -759,6 +781,12 @@ class ReconciliationWorkflowImplTest {
         .thenReturn(List.of(brokerPosition(paddedOcc, 10L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
     when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(paddedOcc))).thenReturn(5L);
+    // Visibility fallback also does not fully cover (no running owner found) → falls through.
+    when(positionLookup.hasRunningOwnerForOcc(anyString(), anyString())).thenReturn(false);
+    // Phase 3: past the first-page debounce (2nd sweep — prior observation marker exists).
+    when(auditQuery.countPriorPositionOrphanObserved(
+            eq("dev"), eq("copytrade-v1"), eq(paddedOcc), eq("missing"), any()))
+        .thenReturn(1L);
 
     ReconciliationSummary summary = runWorkflow();
 
@@ -769,6 +797,95 @@ class ReconciliationWorkflowImplTest {
         .log(
             Mockito.argThat(
                 e -> e != null && "PositionOrphanSuppressedSiblingOwner".equals(e.getKind())));
+    verify(metrics, never()).recordSiblingOwnerSuppression(anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void missingBranch_coldCacheButVisibilityFindsSiblingOwner_suppressesOrphan() {
+    // Phase 3 (Plan 2026-06-24): the #477 cross-strategy Redis SCAN returns 0 on a cache
+    // miss/lag (no key for the OCC), but a running sibling-strategy PositionWorkflow DOES manage
+    // the OCC. The Temporal Visibility fallback (ContractSymbol = padded OCC, any strategy of the
+    // tenant) must find that owner and suppress the page → ZERO PositionOrphan + the existing
+    // PositionOrphanSuppressedSiblingOwner audit. This closes the cache-miss false page.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    // COLD Redis cache: the cross-strategy SCAN finds no covering qty.
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(paddedOcc))).thenReturn(0L);
+    // But Visibility reports a running owner for the padded OCC across the tenant's strategies.
+    when(positionLookup.hasRunningOwnerForOcc(eq("dev"), eq(paddedOcc))).thenReturn(true);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphanOngoing".equals(e.getKind())));
+
+    AuditEvent suppressed = captureKind("PositionOrphanSuppressedSiblingOwner");
+    assertThat(suppressed.getSubject()).containsEntry("option_symbol", paddedOcc);
+    verify(metrics, times(1))
+        .recordSiblingOwnerSuppression(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"));
+  }
+
+  @Test
+  void missingBranch_transientSingleObservation_isDebouncedNoFirstPage() {
+    // Phase 3: a single transient `missing` observation with no covering owner (cold SCAN +
+    // Visibility finds nothing) must NOT page on the FIRST sweep — the new first-page debounce
+    // requires >= 2 consecutive sweeps. This absorbs the entry-race transient (a sweep that fires
+    // just before EntryFilled + the cache seed). priorCount==0 → suppress the initial page.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(anyString(), anyString())).thenReturn(0L);
+    when(positionLookup.hasRunningOwnerForOcc(anyString(), anyString())).thenReturn(false);
+    // First sweep: no prior PositionOrphan page AND no prior observation marker in the window
+    // (both default to 0). The marker is emitted, the page is suppressed.
+
+    ReconciliationSummary summary = runWorkflow();
+
+    // The orphan is still COUNTED (broker state unchanged), but the page is debounced on sweep 1.
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+    // A non-paging observation marker IS emitted so the next sweep can page.
+    AuditEvent observed = captureKind("PositionOrphanObserved");
+    assertThat(observed.getSubject()).containsEntry("option_symbol", paddedOcc);
+  }
+
+  @Test
+  void missingBranch_genuineOrphanSecondSweep_stillPages() {
+    // Phase 3 regression guard (don't over-suppress): a genuine orphan — no FILLED row, no running
+    // owner (cold SCAN + Visibility empty) — observed for a SECOND consecutive sweep (priorCount=1)
+    // MUST still page PositionOrphan. The first-page debounce only delays by one sweep.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(anyString(), anyString())).thenReturn(0L);
+    when(positionLookup.hasRunningOwnerForOcc(anyString(), anyString())).thenReturn(false);
+    // Second consecutive observation in the window: a prior observation marker exists
+    // (priorObserved=1) → past the first-page debounce, so the real PositionOrphan page fires.
+    when(auditQuery.countPriorPositionOrphanObserved(
+            eq("dev"), eq("copytrade-v1"), eq(paddedOcc), eq("missing"), any()))
+        .thenReturn(1L);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    AuditEvent orphan = captureKind("PositionOrphan");
+    assertThat(orphan.getSubject())
+        .containsEntry("option_symbol", paddedOcc)
+        .containsEntry("journal_status", "missing");
     verify(metrics, never()).recordSiblingOwnerSuppression(anyString(), anyString(), anyString());
   }
 
@@ -947,6 +1064,10 @@ class ReconciliationWorkflowImplTest {
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    // Phase 3: past the first-page debounce (2nd sweep — prior observation marker exists).
+    when(auditQuery.countPriorPositionOrphanObserved(
+            eq("dev"), eq("copytrade-v1"), eq(paddedOcc), eq("missing"), any()))
+        .thenReturn(1L);
 
     ReconciliationSummary summary = runWorkflow();
 

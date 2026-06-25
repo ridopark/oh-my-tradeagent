@@ -131,6 +131,47 @@ class PositionLookupActivitiesImplTest {
     assertThat(svc.sumRunningOwnerRemainingQtyForOcc("dev", OCC)).isEqualTo(0L);
   }
 
+  // hasRunningOwnerForOcc: Phase 3 (2026-06-24) tenant-wide Visibility fallback.
+
+  @Test
+  void hasRunningOwner_visibilityFindsRunningOwner_returnsTrue() {
+    when(workflowClient.listExecutions(anyString()))
+        .thenReturn(
+            java.util.stream.Stream.of(mock(io.temporal.client.WorkflowExecutionMetadata.class)));
+
+    assertThat(svc.hasRunningOwnerForOcc("dev", OCC)).isTrue();
+  }
+
+  @Test
+  void hasRunningOwner_visibilityEmpty_returnsFalse() {
+    when(workflowClient.listExecutions(anyString())).thenReturn(java.util.stream.Stream.empty());
+
+    assertThat(svc.hasRunningOwnerForOcc("dev", OCC)).isFalse();
+  }
+
+  @Test
+  void hasRunningOwner_visibilityThrows_returnsFalseNoThrow() {
+    when(workflowClient.listExecutions(anyString()))
+        .thenThrow(new RuntimeException("visibility down"));
+
+    // Best-effort: any error returns false (recon pages — the safe degrade, never masks an orphan).
+    assertThat(svc.hasRunningOwnerForOcc("dev", OCC)).isFalse();
+  }
+
+  @Test
+  void tenantWideVisibilityQuery_usesStartsWithPrefixAndContractSymbol() {
+    String q = PositionLookupActivitiesImpl.tenantWideVisibilityQuery("dev", OCC);
+    // Tenant-wide (any strategy) via STARTS_WITH on the TenantStrategy Keyword SA — NOT a
+    // WorkflowId STARTS_WITH; keyed on the padded ContractSymbol; bounded to RUNNING
+    // PositionWorkflows.
+    assertThat(q)
+        .contains("TenantStrategy STARTS_WITH 't-dev/s-'")
+        .contains("ContractSymbol = '" + OCC + "'")
+        .contains("ExecutionStatus = 'WORKFLOW_EXECUTION_STATUS_RUNNING'")
+        .contains("WorkflowType = 'PositionWorkflow'")
+        .doesNotContain("WorkflowId");
+  }
+
   @SuppressWarnings("unchecked")
   private static Cursor<String> cursorOf(String... keys) {
     Cursor<String> cursor = mock(Cursor.class);
