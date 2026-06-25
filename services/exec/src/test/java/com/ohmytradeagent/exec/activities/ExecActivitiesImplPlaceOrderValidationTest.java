@@ -234,6 +234,11 @@ class ExecActivitiesImplPlaceOrderValidationTest {
     }
 
     @Override
+    public boolean markErrored(String intentKey, String reason) {
+      throw fail();
+    }
+
+    @Override
     public boolean markCancelledIfSubmitted(String intentKey) {
       throw fail();
     }

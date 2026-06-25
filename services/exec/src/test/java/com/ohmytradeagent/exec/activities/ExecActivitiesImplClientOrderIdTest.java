@@ -18,6 +18,7 @@ import com.ohmytradeagent.exec.broker.ClientOrderId;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
+import com.ohmytradeagent.exec.broker.alpaca.AlpacaPaperBroker;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
@@ -165,6 +166,31 @@ class ExecActivitiesImplClientOrderIdTest {
     assertThat(fieldValue(embed, "reason")).contains("account blocked");
     assertThat(fieldValue(embed, "client_order_id"))
         .isEqualTo(ClientOrderId.forIntent(ENTRY_INTENT_KEY));
+  }
+
+  @Test
+  void placeOrder_accountOrdersBlocked_marksErroredTerminal_alertsOnce_thenRethrows() {
+    // Phase 2: a 403 40310000 account-orders-blocked rejection is terminal+non-retryable. The
+    // intent must transition to a TERMINAL state (markErrored / ERRORED), NOT stay RECORDED via
+    // markPlaceFailed (which is the retryable place-path). The alerter still fires once and the
+    // exception still propagates unchanged so Temporal records a single terminal attempt.
+    OrderIntent intent = entryIntent();
+    JournaledOrder recorded = recordedBuyRow(ENTRY_INTENT_KEY);
+    when(journal.findByIntentKey(ENTRY_INTENT_KEY)).thenReturn(Optional.of(recorded));
+    ApplicationFailure rejection =
+        ApplicationFailure.newNonRetryableFailure(
+            "Alpaca rejected order (account orders blocked): new orders are rejected by user request",
+            AlpacaPaperBroker.ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE);
+    when(broker.placeOrder(any())).thenThrow(rejection);
+
+    assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
+
+    // Terminal transition — NOT the RECORDED-preserving markPlaceFailed.
+    verify(journal).markErrored(eq(ENTRY_INTENT_KEY), anyString());
+    verify(journal, never()).markPlaceFailed(anyString(), anyString());
+    verify(journal, never()).markSubmittedIfRecorded(anyString(), anyString());
+    // Single alert.
+    verify(webhook).postEmbed(eq("dev"), any(WebhookEmbed.class));
   }
 
   @Test

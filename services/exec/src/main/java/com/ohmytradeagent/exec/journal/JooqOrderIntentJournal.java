@@ -257,6 +257,14 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public boolean markErrored(String intentKey, String reason) {
+    // Phase 2: terminalize a place-path account-orders-blocked rejection RECORDED -> ERRORED. Guard
+    // on state='RECORDED' so an at-least-once retry of the placeOrder Activity lands as a silent
+    // no-op once the first call terminalized the row. last_error carries the broker reason.
+    return markTerminalIfInState(intentKey, OrderState.RECORDED, OrderState.ERRORED, reason);
+  }
+
+  @Override
   public boolean markClosedAlreadyFlat(String intentKey, String reason) {
     // PLAN-over-exit-422: RECORDED → CANCELLED for a broker-confirmed over-exit (the lot was
     // already

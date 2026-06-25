@@ -79,6 +79,14 @@ public class AlpacaPaperBroker implements OptionsBroker {
 
   private static final Logger log = LoggerFactory.getLogger(AlpacaPaperBroker.class);
 
+  /**
+   * Typed non-retryable failure for an operator-halted account: Alpaca returns a 403 carrying
+   * {@code 40310000} / "new orders are rejected by user request" for an account blocked at the
+   * broker by user request. This can never resolve on retry, so it short-circuits Temporal's retry
+   * policy and the placeOrder Activity terminalizes the intent to {@code ERRORED}.
+   */
+  public static final String ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE = "AccountOrdersBlockedError";
+
   /** Regulatory PDT day-trade limit for sub-$25k margin accounts. */
   private static final int PDT_DAYTRADE_LIMIT = 3;
 
@@ -841,6 +849,18 @@ public class AlpacaPaperBroker implements OptionsBroker {
     if (status == 422) {
       return ApplicationFailure.newNonRetryableFailure(
           "Alpaca rejected order (422, non-duplicate): " + message, "InvalidRequestError");
+    }
+    // Phase 2 (prod_real intentional halt): a 403 carrying Alpaca code 40310000 / "new orders are
+    // rejected by user request" is an operator-requested account block at the broker. It can never
+    // resolve on retry — classify it non-retryable so Temporal records a single terminal attempt
+    // (no 6× retry storm) and the placeOrder Activity terminalizes the intent to ERRORED instead of
+    // parking it in RECORDED. NOTE: this does NOT trip the kill switch — the halt is deliberate.
+    if (status == 403
+        && (haystack.contains("40310000")
+            || haystack.contains("new orders are rejected by user request"))) {
+      return ApplicationFailure.newNonRetryableFailure(
+          "Alpaca rejected order (account orders blocked): " + message,
+          ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE);
     }
     return e; // unchanged → Temporal retries by default
   }

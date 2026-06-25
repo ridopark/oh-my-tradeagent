@@ -97,6 +97,19 @@ public interface OrderIntentJournal {
   void markPlaceFailed(String intentKey, String brokerReason);
 
   /**
+   * Phase 2: terminalizes a place-path rejection that can never resolve on retry (e.g. a 403
+   * account-orders-blocked halt — Alpaca {@code 40310000} "new orders are rejected by user
+   * request"). Guarded, boolean-returning: transitions {@code RECORDED → ERRORED} only and records
+   * {@code reason} in {@code last_error}, bumping {@code version} / {@code last_state_at}. Distinct
+   * from {@link #markPlaceFailed} (which deliberately KEEPS {@code RECORDED} so a retry can still
+   * place) and from {@link #markBrokerRejected} (which terminalizes {@code SUBMITTED → ERRORED}
+   * after the order already reached the broker). Idempotent under at-least-once retry: a repeat
+   * call no longer matches {@code state='RECORDED'} and is a silent no-op. Returns true iff the row
+   * was updated.
+   */
+  boolean markErrored(String intentKey, String reason);
+
+  /**
    * Records a broker-confirmed fill discovered during a cancel attempt (cancel-on-filled race) or
    * via reconciliation. Transitions state to FILLED and records fill detail. Conditional on current
    * state in (RECORDED, SUBMITTED) so a repeat call is a no-op; returns true iff the row was
