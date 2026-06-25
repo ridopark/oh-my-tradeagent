@@ -40,10 +40,13 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
 
   private final StringRedisTemplate redis;
   private final WorkflowClient workflowClient;
+  private final TenantStrategies tenantStrategies;
 
-  public PositionLookupActivitiesImpl(StringRedisTemplate redis, WorkflowClient workflowClient) {
+  public PositionLookupActivitiesImpl(
+      StringRedisTemplate redis, WorkflowClient workflowClient, TenantStrategies tenantStrategies) {
     this.redis = redis;
     this.workflowClient = workflowClient;
+    this.tenantStrategies = tenantStrategies;
   }
 
   static String key(String tenantId, String strategyId, String occ) {
@@ -184,6 +187,44 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
           occPadded,
           e.getMessage());
       return 0L;
+    }
+  }
+
+  @Override
+  public boolean hasRunningOwnerForOcc(String tenantId, String occPadded) {
+    // BEST-EFFORT / read-only: any Visibility outage returns false (no owner found → recon pages,
+    // the safe degrade — a false page never masks a genuine orphan). Unlike the Redis SCAN this
+    // reads Temporal Visibility directly, so it survives a cold/lagging pos:* cache.
+    //
+    // Tenant-wide enumeration reuses the proven #323 idiom (AccountKillSwitchCascadeActivitiesImpl
+    // /
+    // AccountPnlActivitiesImpl): resolve the tenant's strategy ids, then run ONE per-strategy
+    // `TenantStrategy='...'` EQUALITY query against the shared ContractSymbol. Temporal SQL
+    // Visibility supports neither `STARTS_WITH` nor `IN (...)`, so a per-strategy equality loop is
+    // the only correct way to span all of a tenant's strategies. Short-circuits on the first hit.
+    try {
+      for (String sid : tenantStrategies.strategyIdsForTenant(tenantId)) {
+        if (sid == null || sid.isBlank()) {
+          continue;
+        }
+        String query = visibilityQuery(tenantId, sid, occPadded);
+        // Close the Visibility stream (gRPC paging iterator) per the #323 idiom
+        // (AccountKillSwitchCascadeActivitiesImpl / AccountPnlActivitiesImpl).
+        try (java.util.stream.Stream<WorkflowExecutionMetadata> stream =
+            workflowClient.listExecutions(query)) {
+          if (stream.findAny().isPresent()) {
+            return true;
+          }
+        }
+      }
+      return false;
+    } catch (RuntimeException e) {
+      log.warn(
+          "hasRunningOwnerForOcc best-effort Visibility probe failed tenant={} occ={} err={}",
+          tenantId,
+          occPadded,
+          e.getMessage());
+      return false;
     }
   }
 

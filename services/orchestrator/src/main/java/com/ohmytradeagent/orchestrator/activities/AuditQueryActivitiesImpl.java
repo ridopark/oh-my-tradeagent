@@ -126,6 +126,43 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
   }
 
   @Override
+  public long countPriorPositionOrphanObserved(
+      String tenantId,
+      String strategyId,
+      String optionSymbol,
+      String journalStatus,
+      OffsetDateTime since) {
+    if (dsl == null) {
+      return 0L;
+    }
+    try {
+      Record r =
+          dsl.fetchOne(
+              "SELECT COUNT(*) FROM audit_log "
+                  + "WHERE tenant_id = ? AND strategy_id = ? AND kind = 'PositionOrphanObserved' "
+                  + "AND occurred_at >= ? "
+                  + "AND subject ->> 'option_symbol' = ? "
+                  + "AND subject ->> 'journal_status' = ?",
+              tenantId,
+              strategyId,
+              Timestamp.from(since.toInstant()),
+              optionSymbol,
+              journalStatus);
+      return r == null ? 0L : r.get(0, Long.class);
+    } catch (RuntimeException e) {
+      log.warn(
+          "countPriorPositionOrphanObserved failed tenant={} strategy={} occ={} status={};"
+              + " returning 0",
+          tenantId,
+          strategyId,
+          optionSymbol,
+          journalStatus,
+          e);
+      return 0L;
+    }
+  }
+
+  @Override
   public long countPriorJournalOrphans(
       String tenantId, String strategyId, String intentKey, OffsetDateTime since) {
     if (dsl == null) {

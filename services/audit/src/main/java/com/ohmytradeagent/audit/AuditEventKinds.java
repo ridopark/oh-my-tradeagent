@@ -290,6 +290,13 @@ public final class AuditEventKinds {
           // OrderFailureAlerter's DEFAULT_FAILURE_KINDS, so it does not page Discord. Placed in
           // ALL_KINDS only, not in any *_KINDS lifecycle group.
           "PositionOrphanSuppressedSiblingOwner",
+          // Phase 3 (2026-06-24 remediation): non-paging first-sweep observation marker emitted by
+          // ReconciliationWorkflowImpl on the missing branch. The first sweep observing a
+          // missing-no-owner position writes this marker instead of paging; the actual
+          // PositionOrphan only fires once a prior marker proves a 2nd consecutive sweep (absorbs
+          // the entry-race transient). Pure observability — NOT a lifecycle event and intentionally
+          // NOT in OrderFailureAlerter's DEFAULT_FAILURE_KINDS. Placed in ALL_KINDS only.
+          "PositionOrphanObserved",
           // Issue #239/#285: emitted by AdoptionWorkflow when an operator-triggered
           // adoption reconstructs + starts a PositionWorkflow owner for a confirmed orphan. Pure
           // provenance / observability — NOT a lifecycle event. The real ledger ENTRY is the

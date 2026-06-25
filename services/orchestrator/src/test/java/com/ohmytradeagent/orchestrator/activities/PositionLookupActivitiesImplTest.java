@@ -35,8 +35,12 @@ class PositionLookupActivitiesImplTest {
 
   private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
   private final WorkflowClient workflowClient = mock(WorkflowClient.class);
+  // Phase 3: the cross-strategy Visibility fallback resolves the tenant's strategies via this
+  // resolver (the #323 idiom). The single-tenant fixture returns the two homelab strategies.
+  private final TenantStrategies tenantStrategies =
+      tenantId -> List.of("copytrade-v1", "watchlist-trigger-v1");
   private final PositionLookupActivitiesImpl svc =
-      new PositionLookupActivitiesImpl(redis, workflowClient);
+      new PositionLookupActivitiesImpl(redis, workflowClient, tenantStrategies);
 
   @Test
   void cacheArmedLeg_seedsSetAndSetsTwoDayTtl() {
@@ -129,6 +133,55 @@ class PositionLookupActivitiesImplTest {
     when(redis.scan(any(ScanOptions.class))).thenThrow(new RuntimeException("redis down"));
 
     assertThat(svc.sumRunningOwnerRemainingQtyForOcc("dev", OCC)).isEqualTo(0L);
+  }
+
+  // hasRunningOwnerForOcc: Phase 3 (2026-06-24) tenant-wide Visibility fallback. Enumerates the
+  // tenant's strategies and runs ONE per-strategy `TenantStrategy='...'` EQUALITY query (the #323
+  // idiom — Temporal SQL Visibility supports neither STARTS_WITH nor IN).
+
+  @Test
+  void hasRunningOwner_siblingStrategyHasRunningOwner_returnsTrue() {
+    // The owner lives under the SECOND strategy; the first strategy's query is empty.
+    String firstQuery = PositionLookupActivitiesImpl.visibilityQuery("dev", "copytrade-v1", OCC);
+    String secondQuery =
+        PositionLookupActivitiesImpl.visibilityQuery("dev", "watchlist-trigger-v1", OCC);
+    when(workflowClient.listExecutions(firstQuery)).thenReturn(java.util.stream.Stream.empty());
+    when(workflowClient.listExecutions(secondQuery))
+        .thenReturn(
+            java.util.stream.Stream.of(mock(io.temporal.client.WorkflowExecutionMetadata.class)));
+
+    assertThat(svc.hasRunningOwnerForOcc("dev", OCC)).isTrue();
+  }
+
+  @Test
+  void hasRunningOwner_noStrategyHasRunningOwner_returnsFalse() {
+    when(workflowClient.listExecutions(anyString())).thenReturn(java.util.stream.Stream.empty());
+
+    assertThat(svc.hasRunningOwnerForOcc("dev", OCC)).isFalse();
+  }
+
+  @Test
+  void hasRunningOwner_visibilityThrows_returnsFalseNoThrow() {
+    when(workflowClient.listExecutions(anyString()))
+        .thenThrow(new RuntimeException("visibility down"));
+
+    // Best-effort: any error returns false (recon pages — the safe degrade, never masks an orphan).
+    assertThat(svc.hasRunningOwnerForOcc("dev", OCC)).isFalse();
+  }
+
+  @Test
+  void hasRunningOwner_usesPerStrategyEqualityQueryNotPrefix() {
+    // Guard the #323 idiom: the query must be a per-strategy TenantStrategy EQUALITY query keyed on
+    // ContractSymbol — NOT a STARTS_WITH prefix (unsupported by Temporal SQL Visibility) and NOT a
+    // WorkflowId predicate.
+    String q = PositionLookupActivitiesImpl.visibilityQuery("dev", "copytrade-v1", OCC);
+    assertThat(q)
+        .contains("TenantStrategy = 't-dev/s-copytrade-v1'")
+        .contains("ContractSymbol = '" + OCC + "'")
+        .contains("ExecutionStatus = 'WORKFLOW_EXECUTION_STATUS_RUNNING'")
+        .contains("WorkflowType = 'PositionWorkflow'")
+        .doesNotContain("STARTS_WITH")
+        .doesNotContain("WorkflowId");
   }
 
   @SuppressWarnings("unchecked")

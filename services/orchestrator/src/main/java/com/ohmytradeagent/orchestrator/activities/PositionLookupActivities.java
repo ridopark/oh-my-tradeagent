@@ -55,4 +55,21 @@ public interface PositionLookupActivities {
    * already be in the padded canonical form (see {@code OccSymbol.padded}).
    */
   long sumRunningOwnerRemainingQtyForOcc(String tenantId, String occPadded);
+
+  /**
+   * Phase 3 (2026-06-24 remediation): Temporal Visibility fallback for cross-strategy recon-orphan
+   * suppression when the Redis cross-strategy SCAN ({@link #sumRunningOwnerRemainingQtyForOcc})
+   * returns 0 on a cache miss/lag. Unlike that SCAN (which reads only the Redis {@code pos:*}
+   * cache), this probe queries Temporal Visibility for ANY RUNNING {@code PositionWorkflow} keyed
+   * on {@code ContractSymbol = occPadded} across ALL strategies of {@code tenantId} (no {@code
+   * TenantStrategy} predicate), so a sibling-strategy owner that was never cached (or whose cache
+   * key lags) is still found.
+   *
+   * <p>Returns {@code true} iff at least one RUNNING PositionWorkflow on the tenant's shared broker
+   * account manages {@code occPadded}. BEST-EFFORT / read-only: any error returns {@code false} (no
+   * owner found → recon proceeds to page → safe degrade to pre-fix behavior, never masks a genuine
+   * orphan). {@code occPadded} must already be in the padded canonical form (see {@code
+   * OccSymbol.padded}).
+   */
+  boolean hasRunningOwnerForOcc(String tenantId, String occPadded);
 }
