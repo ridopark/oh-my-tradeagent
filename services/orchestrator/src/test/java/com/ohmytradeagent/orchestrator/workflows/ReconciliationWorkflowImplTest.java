@@ -827,7 +827,11 @@ class ReconciliationWorkflowImplTest {
         .log(Mockito.argThat(e -> e != null && "PositionOrphanOngoing".equals(e.getKind())));
 
     AuditEvent suppressed = captureKind("PositionOrphanSuppressedSiblingOwner");
-    assertThat(suppressed.getSubject()).containsEntry("option_symbol", paddedOcc);
+    assertThat(suppressed.getSubject())
+        .containsEntry("option_symbol", paddedOcc)
+        // Pin the path: the suppression came from the Visibility fallback (not the Redis SCAN,
+        // which the cold-cache stub forced to 0). owner_source distinguishes the two.
+        .containsEntry("owner_source", "visibility");
     verify(metrics, times(1))
         .recordSiblingOwnerSuppression(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"));
   }

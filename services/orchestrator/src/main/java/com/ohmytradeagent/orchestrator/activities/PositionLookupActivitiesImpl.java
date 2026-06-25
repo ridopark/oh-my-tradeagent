@@ -208,8 +208,13 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
           continue;
         }
         String query = visibilityQuery(tenantId, sid, occPadded);
-        if (workflowClient.listExecutions(query).findAny().isPresent()) {
-          return true;
+        // Close the Visibility stream (gRPC paging iterator) per the #323 idiom
+        // (AccountKillSwitchCascadeActivitiesImpl / AccountPnlActivitiesImpl).
+        try (java.util.stream.Stream<WorkflowExecutionMetadata> stream =
+            workflowClient.listExecutions(query)) {
+          if (stream.findAny().isPresent()) {
+            return true;
+          }
         }
       }
       return false;
