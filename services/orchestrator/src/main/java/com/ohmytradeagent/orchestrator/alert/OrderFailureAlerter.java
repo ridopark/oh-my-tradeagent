@@ -96,8 +96,17 @@ public class OrderFailureAlerter {
   // homelab and not applied by deploy.yml. Relying on config would silently reopen the 3-day
   // orphan-blind-spot from the QQQ-725 incident. application.yml's alert.discord.failure-kinds
   // default mirrors this string.
+  // Phase 4 (PLAN-2026-06-24-trading-remediation): EodForceFlattenFailed (a force-flatten that
+  // rested UNFILLED — submitted at/after the close on 2026-06-24, then silently held overnight with
+  // no alert) and FlattenRetryExhausted (the bounded next-session retry budget spent with the lot
+  // still unfilled) MUST page. Shipped in the IMAGE default — NOT via ALERT_DISCORD_FAILURE_KINDS
+  // env (unset on homelab, not applied by deploy.yml) — for the same reason as the orphan kinds:
+  // relying on config would silently reopen the no-alert gap. application.yml's
+  // alert.discord.failure-kinds default mirrors this string. FlattenRetryScheduled is informational
+  // (a retry IS being attempted) and is intentionally NOT here so it does not page.
   private static final String DEFAULT_FAILURE_KINDS =
-      "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed";
+      "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
+          + "EodForceFlattenFailed,FlattenRetryExhausted";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 

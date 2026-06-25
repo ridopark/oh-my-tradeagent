@@ -97,6 +97,25 @@ public class MarketCalendarActivitiesImpl implements MarketCalendarActivities {
   }
 
   @Override
+  public Duration durationUntilNextRthOpenEt() {
+    ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
+    // Candidate = today's 09:30 ET. If "now" is already at/after it, roll to the next day so the
+    // result is always a STRICTLY-FUTURE open (the after-close force-flatten retry case).
+    ZonedDateTime open = now.with(MARKET_OPEN_TIME).withSecond(0).withNano(0);
+    if (!now.isBefore(open)) {
+      open = open.plusDays(1);
+    }
+    // Weekend roll-FORWARD: a Saturday/Sunday open is moved to the following Monday.
+    DayOfWeek dow = open.getDayOfWeek();
+    if (dow == DayOfWeek.SATURDAY) {
+      open = open.plusDays(2);
+    } else if (dow == DayOfWeek.SUNDAY) {
+      open = open.plusDays(1);
+    }
+    return Duration.between(now, open);
+  }
+
+  @Override
   public boolean isMarketOpen() {
     ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
     DayOfWeek dow = now.getDayOfWeek();

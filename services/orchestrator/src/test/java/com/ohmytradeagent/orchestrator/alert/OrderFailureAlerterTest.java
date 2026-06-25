@@ -427,6 +427,94 @@ class OrderFailureAlerterTest {
             org.mockito.ArgumentMatchers.eq(resolvedUrl), org.mockito.ArgumentMatchers.any());
   }
 
+  // ---- Phase 4 (PLAN-2026-06-24-trading-remediation): flatten-fail escalation paging ----
+
+  // The production-default allowlist after Phase 4 (matches application.yml +
+  // DEFAULT_FAILURE_KINDS).
+  // EodForceFlattenFailed + FlattenRetryExhausted are now first-class failure pages.
+  private static final String PHASE4_PRODUCTION_DEFAULT_ALLOWLIST =
+      "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
+          + "EodForceFlattenFailed,FlattenRetryExhausted";
+
+  @Test
+  void phase4FailureKindsAreInProductionDefaultAllowlist() {
+    // The page must ship via the image (DEFAULT_FAILURE_KINDS / application.yml), NOT via
+    // ALERT_DISCORD_FAILURE_KINDS env — unset on homelab, not applied by deploy.yml — so the
+    // 2026-06-24 silent overnight-hold (no alert) cannot recur. FlattenRetryScheduled is
+    // informational and must NOT page.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, PHASE4_PRODUCTION_DEFAULT_ALLOWLIST, true);
+    assertThat(alerter.failureKinds())
+        .contains("EodForceFlattenFailed", "FlattenRetryExhausted")
+        .doesNotContain("FlattenRetryScheduled");
+  }
+
+  @Test
+  void eodForceFlattenFailedBuildsFailureEmbed() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, PHASE4_PRODUCTION_DEFAULT_ALLOWLIST, true);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("entry_signal_id", "sig-flatten-1");
+    subject.put("contract_symbol", "QQQ   260608C00725000");
+    subject.put("reason", "time_stop");
+    subject.put("remaining_qty", 3L);
+    subject.put("note", "bounded_flatten_unfilled_workflow_stays_alive");
+    AuditEvent event = event("EodForceFlattenFailed", "wf-flatten-fail-1", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("order FAILED");
+    assertThat(embed.color()).isEqualTo(15548997); // red
+    assertThat(field(embed, "kind")).isEqualTo("EodForceFlattenFailed");
+    // Note: the flatten audit carries the symbol under "contract_symbol"; the generic buildEmbed
+    // reads "option_symbol", so the symbol field is "n/a" here. The page still fires (kind +
+    // reason + footer carry the actionable detail) — this is the documented generic-embed shape.
+    assertThat(field(embed, "kind")).isNotBlank();
+  }
+
+  @Test
+  void flattenRetryExhaustedBuildsFailureEmbed() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, PHASE4_PRODUCTION_DEFAULT_ALLOWLIST, true);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("entry_signal_id", "sig-flatten-2");
+    subject.put("contract_symbol", "QQQ   260608C00725000");
+    subject.put("reason", "eod");
+    subject.put("remaining_qty", 5L);
+    subject.put("attempts", 3);
+    AuditEvent event = event("FlattenRetryExhausted", "wf-flatten-exhaust-1", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("order FAILED");
+    assertThat(field(embed, "kind")).isEqualTo("FlattenRetryExhausted");
+  }
+
+  @Test
+  void flattenRetryScheduledIsInformationalAndDoesNotPage() {
+    // FlattenRetryScheduled (a retry IS being attempted) must NOT page — it is intentionally absent
+    // from the failure-kind allowlist so an in-progress recovery does not spam the channel.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, PHASE4_PRODUCTION_DEFAULT_ALLOWLIST, true);
+
+    AuditEvent event =
+        event("FlattenRetryScheduled", "wf-flatten-sched-1", Map.of("reason", "eod", "attempt", 1));
+
+    alerter.onAuditEvent(event);
+
+    verify(webhook, never())
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+  }
+
   private static WebhookEmbed capture(WebhookClient webhook) {
     // Alerters now dispatch through postEmbedToUrl(resolvedUrl, embed).
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);

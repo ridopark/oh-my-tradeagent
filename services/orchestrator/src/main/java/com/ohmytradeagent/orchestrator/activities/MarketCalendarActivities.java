@@ -87,6 +87,23 @@ public interface MarketCalendarActivities {
    */
   Duration durationUntilRthOpenEt();
 
+  /**
+   * Phase 4 (PLAN-2026-06-24-trading-remediation): duration from "now" (Activity wall clock) to the
+   * NEXT STRICTLY-FUTURE 09:30 ET regular-trading-hours open. Unlike {@link
+   * #durationUntilRthOpenEt()} — which returns ZERO once "now" is at/after today's open (so it is
+   * useless for a force-flatten that failed AFTER the 16:00 close) — this method always advances to
+   * a future open: when called intraday/after-close it rolls to the NEXT trading day's 09:30 ET,
+   * skipping Saturday and Sunday. This is the "retry at next session open" surface for an unfilled
+   * force-flatten. KISS like the rest of this calendar: no US-market-holiday awareness (lands with
+   * the full MarketCalendar) — weekend roll-forward is the minimum to avoid arming a retry timer
+   * for a closed market.
+   *
+   * <p>Returns a POSITIVE Duration always (never ZERO/negative for a sane clock). Determinism: the
+   * value flows only through the (replay-ignored) Activity result payload; the workflow gates the
+   * timer-arm command itself via {@code Workflow.getVersion}.
+   */
+  Duration durationUntilNextRthOpenEt();
+
   /** Today's date in America/New_York. */
   LocalDate todayEt();
 }

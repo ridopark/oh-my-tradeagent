@@ -271,6 +271,47 @@ class MarketCalendarActivitiesImplTest {
         .isEqualTo(Duration.ZERO);
   }
 
+  // ---- Phase 4 (PLAN-2026-06-24-trading-remediation): durationUntilNextRthOpenEt ----
+
+  @Test
+  void nextRthOpen_afterClose_returnsDurationToNextDayOpen() {
+    // The incident: a force-flatten failed at/after the 16:00 close. Unlike durationUntilRthOpenEt
+    // (which returns ZERO here and would spin), nextRthOpen must roll to the NEXT day's 09:30 ET.
+    // 2026-05-14 (Thu) 16:30 ET -> 2026-05-15 (Fri) 09:30 ET = 17h.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 16, 30));
+
+    assertThat(svc.durationUntilNextRthOpenEt()).isEqualTo(Duration.ofHours(17));
+  }
+
+  @Test
+  void nextRthOpen_fridayAfterClose_rollsForwardToMondayOpen() {
+    // 2026-05-15 (Fri) 16:30 ET -> 2026-05-18 (Mon) 09:30 ET = 3 days minus 7h = 65h.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 15, 16, 30));
+
+    assertThat(svc.durationUntilNextRthOpenEt()).isEqualTo(Duration.ofHours(65));
+  }
+
+  @Test
+  void nextRthOpen_weekdayPreOpen_returnsTodayOpen() {
+    // Before today's 09:30 the next strictly-future open is today's. 2026-05-14 (Thu) 09:24 -> 6m.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 14, 9, 24));
+
+    assertThat(svc.durationUntilNextRthOpenEt()).isEqualTo(Duration.ofMinutes(6));
+  }
+
+  @Test
+  void nextRthOpen_saturday_rollsForwardToMondayOpen() {
+    // 2026-05-16 (Sat) 10:00 ET -> 2026-05-18 (Mon) 09:30 ET. Sat-candidate today 09:30 is past
+    // (10:00 > 09:30) -> +1 day = Sun -> weekend roll +1 = Mon 09:30. = 2 days minus 30m = 47h30m.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEt(2026, 5, 16, 10, 0));
+
+    assertThat(svc.durationUntilNextRthOpenEt()).isEqualTo(Duration.ofHours(47).plusMinutes(30));
+  }
+
   @Test
   void todayEt_returnsLocalDateInEt() {
     // 2026-05-14 21:00 UTC is 2026-05-14 17:00 ET (DST in effect: UTC-4)
