@@ -168,6 +168,31 @@ class ExecActivitiesImplClientOrderIdTest {
   }
 
   @Test
+  void placeOrder_accountOrdersBlocked_marksErroredTerminal_alertsOnce_thenRethrows() {
+    // Phase 2: a 403 40310000 account-orders-blocked rejection is terminal+non-retryable. The
+    // intent must transition to a TERMINAL state (markErrored / ERRORED), NOT stay RECORDED via
+    // markPlaceFailed (which is the retryable place-path). The alerter still fires once and the
+    // exception still propagates unchanged so Temporal records a single terminal attempt.
+    OrderIntent intent = entryIntent();
+    JournaledOrder recorded = recordedBuyRow(ENTRY_INTENT_KEY);
+    when(journal.findByIntentKey(ENTRY_INTENT_KEY)).thenReturn(Optional.of(recorded));
+    ApplicationFailure rejection =
+        ApplicationFailure.newNonRetryableFailure(
+            "Alpaca rejected order (account orders blocked): new orders are rejected by user request",
+            "AccountOrdersBlockedError");
+    when(broker.placeOrder(any())).thenThrow(rejection);
+
+    assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
+
+    // Terminal transition — NOT the RECORDED-preserving markPlaceFailed.
+    verify(journal).markErrored(eq(ENTRY_INTENT_KEY), anyString());
+    verify(journal, never()).markPlaceFailed(anyString(), anyString());
+    verify(journal, never()).markSubmittedIfRecorded(anyString(), anyString());
+    // Single alert.
+    verify(webhook).postEmbed(eq("dev"), any(WebhookEmbed.class));
+  }
+
+  @Test
   void placeOrder_alertWebhookFailure_doesNotMaskBrokerRejection() {
     OrderIntent intent = exitIntent();
     JournaledOrder recorded = recordedRow(EXIT_INTENT_KEY);

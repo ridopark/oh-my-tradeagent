@@ -170,6 +170,33 @@ class JooqOrderIntentJournalIT {
   }
 
   @Test
+  void markErrored_onRecordedRow_flipsToErroredSetsLastErrorReturnsTrue() {
+    // Phase 2: a terminal, non-retryable account-orders-blocked rejection terminalizes the place
+    // path RECORDED -> ERRORED with the broker reason in last_error (distinct from markPlaceFailed,
+    // which keeps RECORDED for retry).
+    journal.upsertIntent(intent("intent-A"));
+
+    boolean updated = journal.markErrored("intent-A", "account orders blocked: 40310000");
+
+    assertThat(updated).isTrue();
+    JournaledOrder row = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(row.state()).isEqualTo(OrderState.ERRORED);
+    assertThat(row.lastError()).isEqualTo("account orders blocked: 40310000");
+  }
+
+  @Test
+  void markErrored_twice_secondReturnsFalse_idempotent() {
+    journal.upsertIntent(intent("intent-A"));
+    journal.markErrored("intent-A", "account orders blocked: 40310000");
+
+    boolean second = journal.markErrored("intent-A", "account orders blocked again");
+
+    assertThat(second).isFalse();
+    assertThat(journal.findByIntentKey("intent-A").orElseThrow().lastError())
+        .isEqualTo("account orders blocked: 40310000");
+  }
+
+  @Test
   void markFilled_flipsState() {
     // Issue #165: markFilled transitions SUBMITTED → FILLED and records the
     // broker-confirmed fill detail discovered during a cancel-on-filled race.

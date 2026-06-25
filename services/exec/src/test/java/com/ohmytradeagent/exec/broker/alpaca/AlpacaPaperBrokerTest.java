@@ -232,6 +232,43 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void placeOrder_accountOrdersBlocked_throwsAccountOrdersBlockedErrorNonRetryable() {
+    // prod_real intentional halt: Alpaca returns 403 {"code":40310000,"message":"new orders are
+    // rejected by user request"} for an operator-halted account. This must fail fast as a terminal,
+    // non-retryable AccountOrdersBlockedError (not burn 6 retries while parking in RECORDED).
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(403)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"code\":40310000,\"message\":\"new orders are rejected by user request\"}"));
+
+    assertThatThrownBy(() -> broker.placeOrder(request("intent-A")))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("AccountOrdersBlockedError");
+              assertThat(f.isNonRetryable()).isTrue();
+              assertThat(f.getMessage()).contains("new orders are rejected by user request");
+            });
+  }
+
+  @Test
+  void placeOrder_serverError5xx_rethrowsRetryable() {
+    // Regression guard: a generic 5xx must stay a retryable HttpStatusCodeException (NOT a
+    // non-retryable ApplicationFailure) so Temporal retries a transient broker outage.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(503)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"service unavailable\"}"));
+
+    assertThatThrownBy(() -> broker.placeOrder(request("intent-A")))
+        .isInstanceOf(org.springframework.web.client.HttpStatusCodeException.class)
+        .isNotInstanceOf(ApplicationFailure.class);
+  }
+
+  @Test
   void placeOrder_invalidContract_throwsInvalidContractErrorNonRetryable() {
     server.enqueue(
         new MockResponse()

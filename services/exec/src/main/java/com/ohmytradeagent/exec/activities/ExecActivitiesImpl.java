@@ -112,8 +112,22 @@ public class ExecActivitiesImpl implements ExecActivities {
       // retryable/non-retryable classification Temporal relies on (a swallowed InvalidRequestError
       // replaced by a generic DB RuntimeException would retry forever — the #264 retry-storm
       // class).
+      // Phase 2 (prod_real intentional halt): a 403 40310000 "account orders blocked" rejection is
+      // terminal and non-retryable. For THAT class only, terminalize the intent RECORDED -> ERRORED
+      // (markErrored) so it does not park in RECORDED with the failure burning Temporal retries;
+      // the
+      // non-retryable classification already caps Temporal at a single attempt. All OTHER errors
+      // keep the existing markPlaceFailed/RECORDED behaviour so a transient failure can still
+      // retry.
+      boolean accountOrdersBlocked =
+          e instanceof ApplicationFailure
+              && "AccountOrdersBlockedError".equals(((ApplicationFailure) e).getType());
       try {
-        journal.markPlaceFailed(intent.getIntentKey(), e.getMessage());
+        if (accountOrdersBlocked) {
+          journal.markErrored(intent.getIntentKey(), e.getMessage());
+        } else {
+          journal.markPlaceFailed(intent.getIntentKey(), e.getMessage());
+        }
       } catch (RuntimeException persistFailure) {
         e.addSuppressed(persistFailure);
       }
