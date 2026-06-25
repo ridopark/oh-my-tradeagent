@@ -106,6 +106,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // that decision. Registered in AuditEventKinds.ALL_KINDS.
   private static final String KIND_SUPERSEDED_BY_CORRECTION = "PositionSupersededByCorrection";
 
+  // F1: dedicated flatten request/done kinds for the bto_corrected supersede flatten — parity with
+  // the expiry_lead carve-out (which exists precisely so a non-EOD flatten is NOT mislabeled as the
+  // blanket EodForceFlatten* sweep). A real-money auto-cancel is at least as audit-sensitive, so
+  // its
+  // intermediate flatten events get their own kinds rather than falling through to Eod*. The
+  // terminal close still rides PositionClosed (closeReason=bto_corrected). Registered in
+  // AuditEventKinds.ALL_KINDS.
+  private static final String KIND_BTO_CORRECTION_FLATTEN_REQUESTED =
+      "BtoCorrectionFlattenRequested";
+  private static final String KIND_BTO_CORRECTION_FLATTENED = "BtoCorrectionFlattened";
+
   // Issue #203 audit kind: BTO submission never reached FILLED within the bounded
   // first-fill TTL. Reconciliation uses this signal to prune the stale SUBMITTED
   // journal row instead of leaving an orphan that downstream STCs could target.
@@ -2505,6 +2516,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // would mislabel the multi-day expiry-lead flatten as the blanket EOD sweep.
       kindReq = KIND_EXPIRY_LEAD_FLATTEN_REQUESTED;
       kindDone = KIND_EXPIRY_LEAD_FORCE_FLATTENED;
+    } else if ("bto_corrected".equals(reason)) {
+      // F1: dedicated supersede-flatten kinds (parity with expiry_lead) — do NOT fall through to
+      // the
+      // Eod* kinds, which would mislabel the edited-signal auto-cancel as the blanket EOD sweep and
+      // inflate EodForceFlattened dashboard counts.
+      kindReq = KIND_BTO_CORRECTION_FLATTEN_REQUESTED;
+      kindDone = KIND_BTO_CORRECTION_FLATTENED;
     } else {
       // chandelier_trail or other Phase 4+ reasons: re-use the EOD audit kinds so downstream
       // dashboards see a single force-flatten pattern (the audit subject carries `reason` for

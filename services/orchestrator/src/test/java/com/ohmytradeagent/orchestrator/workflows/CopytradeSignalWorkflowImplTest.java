@@ -829,8 +829,9 @@ class CopytradeSignalWorkflowImplTest {
     assertThat(childAudit.getSubject())
         .containsEntry("contract_symbol", SPY_0706)
         .containsEntry("corrected_option_symbol", SPY_0708);
-    // The prior leg attempted the cancel-then-flatten (the auto-cancel of the wrong-expiry leg).
-    AuditEvent flattenReq = capture("EodForceFlattenRequested");
+    // The prior leg attempted the cancel-then-flatten (the auto-cancel of the wrong-expiry leg),
+    // audited under the dedicated supersede-flatten kind (NOT the EOD sweep kind).
+    AuditEvent flattenReq = capture("BtoCorrectionFlattenRequested");
     assertThat(flattenReq.getSubject())
         .containsEntry("contract_symbol", SPY_0706)
         .containsEntry("reason", "bto_corrected");

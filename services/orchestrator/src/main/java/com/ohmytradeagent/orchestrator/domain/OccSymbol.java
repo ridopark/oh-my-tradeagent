@@ -79,11 +79,8 @@ public record OccSymbol(String value) {
    * matched.
    */
   public static BigDecimal strikeOf(String occ) {
-    if (occ == null) {
-      return null;
-    }
-    String compact = occ.replace(" ", "");
-    if (compact.length() < 15) {
+    String compact = compact(occ);
+    if (compact == null || compact.length() < 15) {
       return null;
     }
     String strike8 = compact.substring(compact.length() - 8);
@@ -104,11 +101,8 @@ public record OccSymbol(String value) {
    * fail-safe.
    */
   public static String rightOf(String occ) {
-    if (occ == null) {
-      return null;
-    }
-    String compact = occ.replace(" ", "");
-    if (compact.length() < 15) {
+    String compact = compact(occ);
+    if (compact == null || compact.length() < 15) {
       return null;
     }
     String right = compact.substring(compact.length() - 9, compact.length() - 8);

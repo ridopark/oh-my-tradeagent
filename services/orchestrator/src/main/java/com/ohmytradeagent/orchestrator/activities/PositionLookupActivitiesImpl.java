@@ -12,12 +12,16 @@ import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionResponse;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.Cursor;
@@ -248,7 +252,7 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
       String tenantId,
       String strategyId,
       String underlying,
-      java.math.BigDecimal strike,
+      BigDecimal strike,
       String right,
       String correctedExpiryDay) {
     // BEST-EFFORT / read-only: any failure returns null (no supersede — never auto-cancels a live
@@ -256,15 +260,14 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
     if (underlying == null || strike == null || right == null) {
       return null;
     }
-    java.math.BigDecimal wantStrike = strike.stripTrailingZeros();
+    BigDecimal wantStrike = strike.stripTrailingZeros();
     try {
       String query = tenantStrategyRunningQuery(tenantId, strategyId);
       // Earliest-started match wins (the leg most likely to be the just-placed-then-corrected one).
       // Stream the Visibility paging iterator (close it per the #323 idiom), reading each owner's
       // positionState to match underlying+strike+right with a DIFFERENT expiry than the correction.
-      java.util.List<WorkflowExecutionMetadata> owners;
-      try (java.util.stream.Stream<WorkflowExecutionMetadata> stream =
-          workflowClient.listExecutions(query)) {
+      List<WorkflowExecutionMetadata> owners;
+      try (Stream<WorkflowExecutionMetadata> stream = workflowClient.listExecutions(query)) {
         owners =
             stream
                 .sorted(
@@ -291,36 +294,11 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
         if (state == null || state.remainingQty() <= 0) {
           continue;
         }
-        String occ = state.contractSymbol();
-        if (occ == null || occ.isBlank()) {
-          continue;
+        if (matchesSupersedeTarget(
+            state.contractSymbol(), underlying, wantStrike, right, correctedExpiryDay)) {
+          return new SupersedeCandidate(
+              wfId, state.contractSymbol(), state.entryAt(), state.partialExited());
         }
-        // Match underlying (case-insensitive root) + strike (numeric) + right; require a DIFFERENT
-        // expiry day (same expiry/same OCC is the existing dedup path, not a supersede).
-        String candUnderlying = OccSymbol.underlying(occ);
-        java.math.BigDecimal candStrike = OccSymbol.strikeOf(occ);
-        String candRight = OccSymbol.rightOf(occ);
-        java.time.LocalDate candExpiry = OccSymbol.expiryOf(occ);
-        if (candUnderlying == null
-            || candStrike == null
-            || candRight == null
-            || candExpiry == null) {
-          continue;
-        }
-        if (!candUnderlying.equalsIgnoreCase(underlying)) {
-          continue;
-        }
-        if (candStrike.compareTo(wantStrike) != 0) {
-          continue;
-        }
-        if (!candRight.equals(right)) {
-          continue;
-        }
-        if (candExpiry.toString().equals(correctedExpiryDay)) {
-          // Same expiry — that is the existing OCC-exact dedup path, NOT a supersede target.
-          continue;
-        }
-        return new SupersedeCandidate(wfId, occ, state.entryAt(), state.partialExited());
       }
       return null;
     } catch (RuntimeException e) {
@@ -333,6 +311,35 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
           e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * F1 supersede contract-identity predicate (pure, no I/O): the candidate OCC matches the
+   * corrected signal on underlying (case-insensitive root) + strike + right, AND carries a
+   * DIFFERENT expiry day. A same-expiry/same-OCC candidate is the existing OCC-exact dedup path,
+   * NOT a supersede target. Returns false on a blank/unparseable candidate OCC (fail-safe — an
+   * unmatchable leg is never superseded).
+   */
+  static boolean matchesSupersedeTarget(
+      String occ,
+      String underlying,
+      BigDecimal wantStrike,
+      String right,
+      String correctedExpiryDay) {
+    if (occ == null || occ.isBlank()) {
+      return false;
+    }
+    String candUnderlying = OccSymbol.underlying(occ);
+    BigDecimal candStrike = OccSymbol.strikeOf(occ);
+    String candRight = OccSymbol.rightOf(occ);
+    LocalDate candExpiry = OccSymbol.expiryOf(occ);
+    if (candUnderlying == null || candStrike == null || candRight == null || candExpiry == null) {
+      return false;
+    }
+    return candUnderlying.equalsIgnoreCase(underlying)
+        && candStrike.compareTo(wantStrike) == 0
+        && candRight.equals(right)
+        && !candExpiry.toString().equals(correctedExpiryDay);
   }
 
   private static Comparator<Instant> instantNullsLast() {
