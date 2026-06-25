@@ -108,10 +108,13 @@ public class OrderFailureAlerter {
   // whose placeOrder failed AND whose bounded next-session re-drive budget is spent) pages for the
   // same reason — relying on config would silently reopen the no-alert gap. The per-attempt marker
   // (PartialExitRetryRequested) is informational and intentionally NOT here so it does not page.
-  // Edited-signal supersede (F1): BtoCorrectionSuperseded MUST page — it records an AUTO cancel of a
+  // Edited-signal supersede (F1): BtoCorrectionSuperseded MUST page — it records an AUTO cancel of
+  // a
   // REAL trade (a corrected BTO superseded a prior wrong-expiry leg). Shipped in the IMAGE default
-  // (NOT via ALERT_DISCORD_FAILURE_KINDS env, unset on homelab and not applied by deploy.yml) so the
-  // auto-cancel is never silent. application.yml's alert.discord.failure-kinds default mirrors this.
+  // (NOT via ALERT_DISCORD_FAILURE_KINDS env, unset on homelab and not applied by deploy.yml) so
+  // the
+  // auto-cancel is never silent. application.yml's alert.discord.failure-kinds default mirrors
+  // this.
   private static final String DEFAULT_FAILURE_KINDS =
       "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
           + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,"
