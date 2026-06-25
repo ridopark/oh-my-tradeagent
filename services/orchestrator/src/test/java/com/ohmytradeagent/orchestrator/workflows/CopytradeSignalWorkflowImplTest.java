@@ -714,6 +714,195 @@ class CopytradeSignalWorkflowImplTest {
         .containsEntry("option_symbol", "NVDA  260516C00140000");
   }
 
+  // ---------- F1 edited-signal supersede / auto-correct ----------
+
+  private static final String SPY_0706 = "SPY   260706P00710000"; // prior wrong-expiry leg
+  private static final String SPY_0708 = "SPY   260708P00710000"; // corrected leg
+
+  /** A SPY put BTO for the given expiry/signal, posted at the given time. */
+  private CopytradeSignalPayload spyPut(
+      LocalDate expiry, String signalId, OffsetDateTime postedAt) {
+    CopytradeSignalPayload p = new CopytradeSignalPayload();
+    p.setSchemaVersion(1L);
+    p.setTenantId("dev");
+    p.setStrategyId("copytrade-v1");
+    p.setSignalId(signalId);
+    p.setMessageId(signalId.split(":")[0]);
+    p.setAuthor("acme_trader");
+    p.setPostedAt(postedAt);
+    p.setAction(CopytradeSignalPayload.Action.BTO);
+    p.setTicker("SPY");
+    p.setExpiry(expiry);
+    p.setStrike(new BigDecimal("710"));
+    p.setRight(CopytradeSignalPayload.Right.P);
+    p.setPrice(new BigDecimal("3.00"));
+    p.setRawLine("BTO SPY " + expiry + " 710P @ 3.00");
+    return p;
+  }
+
+  private void setupApprovedSpyMocks(String correctedOcc) {
+    StrategyConfig cfg = config();
+    cfg.setPendingTtlPaperSecs(1L);
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                correctedOcc,
+                "SPY",
+                LocalDate.of(2026, 7, 8),
+                new BigDecimal("710"),
+                "P",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-corrected"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-corrected"));
+  }
+
+  /**
+   * Reproduction of the 2026-06-25 incident: a corrected SPY 7/08 710P BTO arriving within the 120s
+   * window of a prior SPY 7/06 710P leg AUTO-supersedes (cancels/flattens) the prior wrong-expiry
+   * leg, leaving ONE position. The supersede DECISION is audited (BtoCorrectionSuperseded carrying
+   * BOTH OCCs) and the prior leg's PositionWorkflow actions the supersede signal
+   * (PositionSupersededByCorrection + a force-flatten to zero).
+   */
+  @Test
+  void correctedBto_withinWindow_supersedesPriorWrongExpiryLeg() throws Exception {
+    // 1. Start a REAL prior PositionWorkflow (SPY 7/06) and confirm it with a 50-contract fill so
+    //    positionState reports a non-null entryAt + partialExited=false.
+    String priorWfId = "t-dev/s-copytrade-v1/pos/" + SPY_0706 + "/prior-1";
+    PositionWorkflow prior =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                PositionWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId(priorWfId)
+                    .build());
+    com.ohmytradeagent.contract.PositionWorkflowInput priorIn = positionInput();
+    priorIn.setContractSymbol(SPY_0706);
+    priorIn.setEntrySignalId("700:0");
+    priorIn.setQty(50L);
+    WorkflowStub.fromTyped(prior).start(priorIn);
+    prior.onFill(
+        new FillSignalPayload()
+            .withBrokerOrderId("brk-prior")
+            .withFilledQty(50L)
+            .withAvgFillPrice(new BigDecimal("3.00"))
+            .withFilledAt(OffsetDateTime.parse("2026-07-05T14:30:00Z")));
+
+    // Wait until the prior leg has confirmed (PositionEntered emitted) so entryAt is stamped.
+    awaitAudit("PositionEntered");
+
+    // 2. The lookup activity finds the prior leg as a different-expiry match. Window is satisfied:
+    //    the corrected signal is posted ~30s after the prior entry.
+    OffsetDateTime priorEntryAt = OffsetDateTime.parse("2026-07-05T14:30:00Z");
+    when(positionLookup.findOpenPositionByUnderlyingStrikeRight(
+            eq("dev"), eq("copytrade-v1"), eq("SPY"), any(), eq("P"), eq("2026-07-08")))
+        .thenReturn(
+            new PositionLookupActivities.SupersedeCandidate(
+                priorWfId, SPY_0706, priorEntryAt, false));
+
+    setupApprovedSpyMocks(SPY_0708);
+
+    // 3. Run the corrected BTO (SPY 7/08), posted within the window.
+    runWorkflow(spyPut(LocalDate.of(2026, 7, 8), "701:0", priorEntryAt.plusSeconds(30)));
+
+    // 4. The supersede DECISION audit carries BOTH OCCs.
+    AuditEvent superseded = capture("BtoCorrectionSuperseded");
+    assertThat(superseded.getSubject())
+        .containsEntry("corrected_option_symbol", SPY_0708)
+        .containsEntry("superseded_option_symbol", SPY_0706)
+        .containsEntry("superseded_workflow_id", priorWfId)
+        .containsEntry("signal_id", "701:0");
+
+    // 5. The prior leg actioned the supersede: PositionSupersededByCorrection audit (the
+    // wrong-expiry
+    //    leg ties itself to the corrected leg) followed by a force-flatten (cancel/replace). The
+    //    flatten cancels any in-flight order then places a MARKET exit (immediacy) — the wrong leg
+    // is
+    //    being unwound. We assert on the audits rather than blocking on terminal completion (the
+    //    flatten then awaits the broker fill, which the SUBMITTED-only mock never delivers).
+    awaitAudit("PositionSupersededByCorrection");
+    AuditEvent childAudit = capture("PositionSupersededByCorrection");
+    assertThat(childAudit.getSubject())
+        .containsEntry("contract_symbol", SPY_0706)
+        .containsEntry("corrected_option_symbol", SPY_0708);
+    // The prior leg attempted the cancel-then-flatten (the auto-cancel of the wrong-expiry leg).
+    AuditEvent flattenReq = capture("EodForceFlattenRequested");
+    assertThat(flattenReq.getSubject())
+        .containsEntry("contract_symbol", SPY_0706)
+        .containsEntry("reason", "bto_corrected");
+  }
+
+  @Test
+  void correctedBto_outsideWindow_doesNotSupersede() {
+    // The prior leg matches on underlying/strike/right + different expiry, BUT its entry is 10 min
+    // before the corrected signal — outside the 120s correction window. NO auto-cancel.
+    setupApprovedSpyMocks(SPY_0708);
+    OffsetDateTime priorEntryAt = OffsetDateTime.parse("2026-07-05T14:30:00Z");
+    when(positionLookup.findOpenPositionByUnderlyingStrikeRight(
+            eq("dev"), eq("copytrade-v1"), eq("SPY"), any(), eq("P"), eq("2026-07-08")))
+        .thenReturn(
+            new PositionLookupActivities.SupersedeCandidate(
+                "wf-prior", SPY_0706, priorEntryAt, false));
+
+    runWorkflow(spyPut(LocalDate.of(2026, 7, 8), "702:0", priorEntryAt.plusMinutes(10)));
+
+    assertNoAudit("BtoCorrectionSuperseded");
+  }
+
+  @Test
+  void correctedBto_priorLegAlreadyPartiallyExited_doesNotSupersede() {
+    setupApprovedSpyMocks(SPY_0708);
+    OffsetDateTime priorEntryAt = OffsetDateTime.parse("2026-07-05T14:30:00Z");
+    when(positionLookup.findOpenPositionByUnderlyingStrikeRight(
+            eq("dev"), eq("copytrade-v1"), eq("SPY"), any(), eq("P"), eq("2026-07-08")))
+        .thenReturn(
+            // partialExited=true → never auto-cancel an already-exiting leg.
+            new PositionLookupActivities.SupersedeCandidate(
+                "wf-prior", SPY_0706, priorEntryAt, true));
+
+    runWorkflow(spyPut(LocalDate.of(2026, 7, 8), "703:0", priorEntryAt.plusSeconds(30)));
+
+    assertNoAudit("BtoCorrectionSuperseded");
+  }
+
+  @Test
+  void correctedBto_priorLegNotConfirmed_doesNotSupersede() {
+    setupApprovedSpyMocks(SPY_0708);
+    when(positionLookup.findOpenPositionByUnderlyingStrikeRight(
+            eq("dev"), eq("copytrade-v1"), eq("SPY"), any(), eq("P"), eq("2026-07-08")))
+        .thenReturn(
+            // entryAt == null → leg not yet confirmed; never supersede an unconfirmed leg.
+            new PositionLookupActivities.SupersedeCandidate("wf-prior", SPY_0706, null, false));
+
+    runWorkflow(
+        spyPut(LocalDate.of(2026, 7, 8), "704:0", OffsetDateTime.parse("2026-07-05T14:30:30Z")));
+
+    assertNoAudit("BtoCorrectionSuperseded");
+  }
+
+  @Test
+  void correctedBto_noMatchingPriorLeg_doesNotSupersede() {
+    // The lookup activity (which owns the underlying/strike/right + different-expiry filter) finds
+    // no match — e.g. a different strike/right, or the same OCC (existing dedup path). NO
+    // supersede.
+    setupApprovedSpyMocks(SPY_0708);
+    when(positionLookup.findOpenPositionByUnderlyingStrikeRight(
+            anyString(), anyString(), anyString(), any(), anyString(), anyString()))
+        .thenReturn(null);
+
+    runWorkflow(
+        spyPut(LocalDate.of(2026, 7, 8), "705:0", OffsetDateTime.parse("2026-07-05T14:30:30Z")));
+
+    assertNoAudit("BtoCorrectionSuperseded");
+    verify(positionLookup, atLeastOnce())
+        .findOpenPositionByUnderlyingStrikeRight(
+            eq("dev"), eq("copytrade-v1"), eq("SPY"), any(), eq("P"), eq("2026-07-08"));
+  }
+
   @Test
   void avgAction_skipAvgTrue_emitsAvgSkipped_andNoExecCalls() {
     when(strategy.get(anyString(), anyString())).thenReturn(config());
@@ -1401,6 +1590,29 @@ class CopytradeSignalWorkflowImplTest {
         .orElseThrow(() -> new AssertionError("no audit event with kind=" + kind));
   }
 
+  /** F1: assert NO audit event of the given kind was ever logged. */
+  private void assertNoAudit(String kind) {
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(captor.capture());
+    assertThat(captor.getAllValues().stream().anyMatch(e -> kind.equals(e.getKind())))
+        .as("expected NO audit event with kind=%s", kind)
+        .isFalse();
+  }
+
+  /** F1: poll until an audit event of the given kind has been logged (test-env time-skips). */
+  private void awaitAudit(String kind) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        capture(kind);
+        return;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+    capture(kind); // final attempt — throws the AssertionError if still absent.
+  }
+
   private CopytradeSignalPayload btoPayload() {
     CopytradeSignalPayload p = new CopytradeSignalPayload();
     p.setSchemaVersion(1L);
@@ -1659,6 +1871,9 @@ class CopytradeSignalWorkflowImplTest {
 
     @Override
     public void riskBreach(RiskBreachPayload payload) {}
+
+    @Override
+    public void supersede(String correctedSignalId, String correctedOcc) {}
 
     @Override
     public TrailingState trailingState() {

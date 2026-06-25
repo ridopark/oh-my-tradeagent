@@ -97,6 +97,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String KIND_FORCE_CLOSE_REQUESTED = "ForceCloseRequested";
   private static final String KIND_FORCE_CLOSE_NOOP = "ForceCloseNoop";
 
+  // Edited-signal supersede (F1) child-side audit. Emitted by processSupersede when the parent
+  // CopytradeSignalWorkflow's supersede signal lands on a confirmed, just-filled, not-partially-
+  // exited leg whose expiry was corrected by a follow-up BTO. Records the wrong-expiry leg this
+  // workflow holds + the corrected leg's identifiers, then drives flattenRemaining("bto_corrected")
+  // (an immediate market exit, like force_close). The PARENT emits BtoCorrectionSuperseded carrying
+  // BOTH OCCs as the auditable supersede decision; this child-side kind ties the actual flatten to
+  // that decision. Registered in AuditEventKinds.ALL_KINDS.
+  private static final String KIND_SUPERSEDED_BY_CORRECTION = "PositionSupersededByCorrection";
+
   // Issue #203 audit kind: BTO submission never reached FILLED within the bounded
   // first-fill TTL. Reconciliation uses this signal to prune the stale SUBMITTED
   // journal row instead of leaving an orphan that downstream STCs could target.
@@ -485,6 +494,21 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_FLATTEN_RETRY_NEXT_SESSION = "flatten-retry-next-session-v1";
 
   /**
+   * Edited-signal supersede (F1) replay gate. The {@code supersede} signal handler buffers a
+   * directive and the main loop drains it into {@link #processSupersede(SupersedeDirective)}, which
+   * emits {@link #KIND_SUPERSEDED_BY_CORRECTION} then drives the shared {@link
+   * #flattenRemaining(String)} cancel-then-market-sell with reason {@code bto_corrected}. ALL of
+   * those are new commands. v=DEFAULT_VERSION (in-flight pre-F1 PositionWorkflows replaying across
+   * a redeploy) take the byte-identical pre-F1 path: the signal handler is a no-op (no buffer
+   * append) and the main-loop drain branch is unreachable (the pending deque stays empty and the
+   * await predicate's {@code !pendingSupersedes.isEmpty()} term is constant-false), so the recorded
+   * command stream is unchanged. Read ONCE in the handler (a stable scope per delivered signal) and
+   * gating the drain branch behind the same marker. Mirrors {@link #VERSION_RISK_BREACH} /​ {@link
+   * #VERSION_FORCE_CLOSE}.
+   */
+  private static final String VERSION_BTO_CORRECTION_SUPERSEDE = "bto-correction-supersede-v1";
+
+  /**
    * Phase 4: maximum number of NEXT-SESSION retry attempts for an unfilled force-flatten before the
    * workflow gives up retrying, emits the terminal {@link #KIND_FLATTEN_RETRY_EXHAUSTED} page, and
    * falls back to the legacy await-late-fill (stay-alive) behaviour. Small constant: a flatten that
@@ -777,8 +801,41 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private final ArrayDeque<RiskBreachPayload> pendingRiskBreaches = new ArrayDeque<>();
   private final ArrayDeque<ForceCloseDirective> pendingForceCloses = new ArrayDeque<>();
 
+  /**
+   * Edited-signal supersede (F1): buffered supersede directives. Same pattern as
+   * pendingRiskBreaches/pendingForceCloses — the {@code supersede} signal handler only enqueues
+   * (under VERSION_BTO_CORRECTION_SUPERSEDE v>=1); the main loop drains and acts. Stays empty on
+   * v=DEFAULT_VERSION (the handler no-ops), so the await predicate term is constant-false and the
+   * recorded command stream is unchanged on replay.
+   */
+  private final ArrayDeque<SupersedeDirective> pendingSupersedes = new ArrayDeque<>();
+
   /** Internal directive emitted by the force_close Update handler into the main loop. */
   private record ForceCloseDirective(String operatorId, String reason, String exitSignalId) {}
+
+  /**
+   * Edited-signal supersede (F1) directive: the corrected (replacement) leg's identifiers carried
+   * by the parent's supersede signal, recorded on the child-side {@link
+   * #KIND_SUPERSEDED_BY_CORRECTION} audit so every auto-cancel is traceable to the BTO that
+   * superseded it.
+   */
+  private record SupersedeDirective(String correctedSignalId, String correctedOcc) {}
+
+  /**
+   * Edited-signal supersede (F1) guardrail field: the deterministic instant the position was
+   * confirmed (first entry fill). Reported by {@link #positionState()} so the parent's supersede
+   * check can enforce the 120s correction-window guardrail against the prior leg's REAL entry time.
+   * Null until {@code positionConfirmed} latches.
+   */
+  private OffsetDateTime entryAt;
+
+  /**
+   * Edited-signal supersede (F1) guardrail field: latched true the first time a partial-exit fill
+   * decrements {@code remainingQty} (see {@link #emitExitFill}). Reported by {@link
+   * #positionState()} so the supersede check NEVER auto-cancels a leg that has already partially
+   * exited — only an untouched just-filled leg may be superseded.
+   */
+  private boolean partialExited;
 
   @Override
   public String run(PositionWorkflowInput in) {
@@ -803,6 +860,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // without a non-determinism error.
       this.remainingQty = in.getQty();
       this.positionConfirmed = true;
+      // F1 supersede guardrail: stamp the confirm instant (deterministic Workflow clock).
+      this.entryAt = workflowNow();
       auditLog(
           KIND_POSITION_ENTERED,
           subject(
@@ -935,6 +994,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               : in.getEntryPremium();
       this.remainingQty = firstFilledQty;
       this.positionConfirmed = true;
+      // F1 supersede guardrail: stamp the confirm instant (deterministic Workflow clock).
+      this.entryAt = workflowNow();
       auditLog(
           KIND_POSITION_ENTERED,
           subject(
@@ -969,6 +1030,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   || !pendingTicks.isEmpty()
                   || !pendingRiskBreaches.isEmpty()
                   || !pendingForceCloses.isEmpty()
+                  // F1: wake on a buffered supersede. Constant-false on v=DEFAULT_VERSION (the
+                  // handler never appends at that version), so this predicate term is
+                  // replay-neutral
+                  // for legacy histories.
+                  || !pendingSupersedes.isEmpty()
                   || chandelierFireRequested
                   || eodFired
                   || expiryFired
@@ -1051,6 +1117,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       if (!pendingForceCloses.isEmpty()) {
         ForceCloseDirective fc = pendingForceCloses.poll();
         processForceClose(fc);
+        continue;
+      }
+      // F1: a supersede (auto-cancel of a corrected wrong-expiry leg) is operator/automation intent
+      // of the same priority class as force_close — drain it ahead of the normal STC pipeline. The
+      // deque is only ever non-empty under VERSION_BTO_CORRECTION_SUPERSEDE v>=1 (the handler
+      // no-ops at DEFAULT_VERSION), so this branch is unreachable on legacy-history replay.
+      if (!pendingSupersedes.isEmpty()) {
+        SupersedeDirective sd = pendingSupersedes.poll();
+        processSupersede(sd);
         continue;
       }
       // Drain arms first so a co-arriving tick sees armed=true.
@@ -1371,6 +1446,19 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   }
 
   @Override
+  public void supersede(String correctedSignalId, String correctedOcc) {
+    int v = Workflow.getVersion(VERSION_BTO_CORRECTION_SUPERSEDE, Workflow.DEFAULT_VERSION, 1);
+    if (v == Workflow.DEFAULT_VERSION) {
+      // Pre-F1 replay: no-op so the pending deque stays empty and the main-loop drain branch is
+      // unreachable — byte-identical command stream for in-flight pre-F1 PositionWorkflows.
+      return;
+    }
+    // Buffer only — the main loop emits the audit + drives flattenRemaining. Keeps signal handlers
+    // free of activity calls (deterministic), matching partialExit / riskBreach.
+    pendingSupersedes.add(new SupersedeDirective(correctedSignalId, correctedOcc));
+  }
+
+  @Override
   public void forceCloseValidator(ForceCloseRequest request) {
     if (request == null) {
       throw new IllegalArgumentException("request_required");
@@ -1467,6 +1555,28 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private void processForceClose(ForceCloseDirective d) {
     closeReason = "force_close";
     flattenRemaining("force_close");
+  }
+
+  /**
+   * Edited-signal supersede (F1) main-loop processor. Emits the child-side {@link
+   * #KIND_SUPERSEDED_BY_CORRECTION} audit tying THIS wrong-expiry leg to the corrected leg that
+   * superseded it, then drives the shared cancel-then-MARKET-sell via {@link
+   * #flattenRemaining(String)} with reason {@code bto_corrected}. {@code flattenRemaining} treats
+   * {@code bto_corrected} like {@code force_close} (immediacy=true → market exit) so the wrong leg
+   * is closed NOW, not rested as a bounded limit. {@code closeReason} is set so the run()-tail
+   * close-disposition audit reflects the cause.
+   */
+  private void processSupersede(SupersedeDirective d) {
+    auditLog(
+        KIND_SUPERSEDED_BY_CORRECTION,
+        subject(
+            "entry_signal_id", input.getEntrySignalId(),
+            "contract_symbol", input.getContractSymbol(),
+            "remaining_qty", remainingQty,
+            "corrected_signal_id", d.correctedSignalId(),
+            "corrected_option_symbol", d.correctedOcc()));
+    closeReason = "bto_corrected";
+    flattenRemaining("bto_corrected");
   }
 
   /** Main-loop tick processor: drops ticks while unarmed, ratchets the peak, latches on breach. */
@@ -1855,9 +1965,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // input may be null if the query races run() before `this.input = in` (same guard the
     // killswitch-state read uses); report an empty contract + zero qty in that window.
     if (input == null) {
-      return new PositionState("", 0L, null);
+      return new PositionState("", 0L, null, null, false);
     }
-    return new PositionState(input.getContractSymbol(), remainingQty, input.getEntryPremium());
+    // F1: entryAt + partialExited let the parent's supersede check enforce the correction-window
+    // and not-already-exiting guardrails authoritatively against THIS leg's real state.
+    return new PositionState(
+        input.getContractSymbol(), remainingQty, input.getEntryPremium(), entryAt, partialExited);
   }
 
   @Override
@@ -2500,6 +2613,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     boolean immediacy =
         "risk_breach".equals(reason)
             || "force_close".equals(reason)
+            // F1: a superseded wrong-expiry leg must hit the market NOW (like force_close), not
+            // rest
+            // a bounded limit that could linger past the correction it is cancelling.
+            || "bto_corrected".equals(reason)
             || "stop_loss".equals(reason)
             || "time_stop".equals(reason);
     BigDecimal flattenLimit = immediacy ? null : computeBoundedFlattenLimit(reason);
@@ -2845,6 +2962,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private void emitExitFill(String signalId, FillSignalPayload fillEvent) {
     long filled = fillEvent.getFilledQty();
     remainingQty -= filled;
+    // F1 supersede guardrail: any exit fill that reduces the lot marks it as no-longer-untouched.
+    // Conservative by direction — it only makes the supersede check MORE restrictive (a leg that
+    // has begun exiting is never auto-cancelled). Set unconditionally (no version gate): it mutates
+    // a query-only field, appends no command, and is replay-neutral.
+    if (filled > 0) {
+      partialExited = true;
+    }
     Map<String, Object> exitSubject =
         subject(
             "signal_id",

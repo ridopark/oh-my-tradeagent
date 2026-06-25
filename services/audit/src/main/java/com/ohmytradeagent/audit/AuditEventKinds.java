@@ -156,6 +156,13 @@ public final class AuditEventKinds {
           "AvgSkipped",
           "ChandelierArmRequested",
           "SignalAbortedByRiskBreach",
+          // Edited-signal supersede (F1): emitted by CopytradeSignalWorkflowImpl when a corrected
+          // BTO auto-cancels a prior wrong-expiry leg. The auditable supersede DECISION (carries
+          // BOTH legs' OCC). Pages via OrderFailureAlerter (IMAGE default). Pure observability —
+          // NOT
+          // a lifecycle event (the corrected leg's own entry rides EntryFilled/PositionEntered; the
+          // superseded leg's close rides its PositionWorkflow flatten kinds). In ALL_KINDS only.
+          "BtoCorrectionSuperseded",
           // PositionWorkflowImpl
           "PositionEntered",
           "PositionNeverFilled",
@@ -272,6 +279,12 @@ public final class AuditEventKinds {
           "RiskBreachActed",
           "ForceCloseRequested",
           "ForceCloseNoop",
+          // Edited-signal supersede (F1): child-side audit emitted by PositionWorkflowImpl's
+          // processSupersede when the parent's supersede signal lands on a confirmed, just-filled,
+          // not-partially-exited wrong-expiry leg. Records the corrected leg's identifiers, then
+          // drives flattenRemaining("bto_corrected"). Pure observability — the actual flatten rides
+          // the EodForceFlatten* kinds (reason=bto_corrected in the subject). In ALL_KINDS only.
+          "PositionSupersededByCorrection",
           // KillSwitchWorkflowImpl
           "KillSwitchTripped",
           "KillSwitchResetApproved",

@@ -108,7 +108,9 @@ alert:
     # whose placeOrder failed and whose bounded next-session re-drive budget is spent — the
     # 2026-06-25 QQQ 720p incident) pages for the same reason. PartialExitRetryRequested is the
     # informational per-attempt marker and intentionally absent so a retry-in-progress does not page.
-    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted}
+    # F1: BtoCorrectionSuperseded pages — an AUTO cancel of a REAL trade (a corrected BTO superseded
+    # a prior wrong-expiry leg) must never be silent. Mirrors OrderFailureAlerter.DEFAULT_FAILURE_KINDS.
+    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,BtoCorrectionSuperseded}
     signal-feed:
       # Issue #308: mirror every BTO/STC/AVG signal (received + outcome) to the same webhook.
       # Off by default — opt in via ALERT_SIGNAL_FEED_ENABLED=true. Independent of failure alerts.

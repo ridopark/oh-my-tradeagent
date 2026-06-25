@@ -56,6 +56,22 @@ public interface PositionWorkflow {
   @SignalMethod
   void riskBreach(RiskBreachPayload payload);
 
+  /**
+   * Edited-signal supersede (F1): the parent {@link CopytradeSignalWorkflow} has detected that THIS
+   * leg's expiry was corrected by a follow-up BTO posted within the correction window, and that all
+   * supersede guardrails held (same tenant/strategy/underlying/strike/right, different expiry,
+   * just-filled, not partially exited). Cancels any in-flight exit then drives an immediate market
+   * flatten of the remaining qty (cancel/replace of the wrong-expiry leg). Version-gated in the
+   * impl ({@code bto-correction-supersede-v1}): a no-op on pre-F1 in-flight workflows so their
+   * recorded histories replay byte-identically. Multi-arg (no JSON-schema DTO) to keep F1
+   * Java-only.
+   *
+   * @param correctedSignalId the corrected BTO's signal_id (recorded on the supersede audit)
+   * @param correctedOcc the corrected leg's OCC option symbol (recorded on the supersede audit)
+   */
+  @SignalMethod
+  void supersede(String correctedSignalId, String correctedOcc);
+
   @QueryMethod
   TrailingState trailingState();
 

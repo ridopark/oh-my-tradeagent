@@ -468,6 +468,9 @@ class PositionWorkflowImplLegacyReplayTest {
     public void riskBreach(RiskBreachPayload payload) {}
 
     @Override
+    public void supersede(String correctedSignalId, String correctedOcc) {}
+
+    @Override
     public TrailingState trailingState() {
       return new TrailingState(false, null, null, null, null, null, 0L);
     }

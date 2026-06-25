@@ -223,6 +223,25 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * F1 edited-signal supersede: pins the supersede version marker. The corrected-BTO auto-supersede
+   * block in {@code handleBto} (lookup Activity + supersede signal + BtoCorrectionSuperseded audit)
+   * is fenced behind {@code Workflow.getVersion(VERSION_BTO_CORRECTION_SUPERSEDE, DEFAULT, 1)} so
+   * pre-F1 in-flight histories (recorded with NO {@code bto-correction-supersede-v1} marker) replay
+   * through the v=DEFAULT_VERSION branch and skip the block — byte-identical to their recorded
+   * command stream. Renaming the literal would silently re-version live executions; this fails
+   * loudly. The {@link #legacyPre111HistoryReplaysAgainstCurrentImplWithoutNonDeterminism} et al.
+   * replay tests above ALSO exercise this: every existing marker-less fixture replays through the
+   * v=DEFAULT_VERSION branch of the new gate and must not introduce a supersede command.
+   */
+  @Test
+  void versionBtoCorrectionSupersedeConstantNameIsStable() throws Exception {
+    Field marker =
+        CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_BTO_CORRECTION_SUPERSEDE");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("bto-correction-supersede-v1");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#111 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The SDK's deterministic replay engine walks the
    * recorded events, calls into the current workflow code, and compares scheduled activity commands

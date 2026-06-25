@@ -67,6 +67,55 @@ public record OccSymbol(String value) {
   }
 
   /**
+   * Edited-signal supersede (F1): extract the strike {@link BigDecimal} from an OCC option symbol.
+   * The OCC tail is fixed-width: {@code YYMMDD}(6) + right{@code C|P}(1) + strike(8) = 15 chars;
+   * the 8-digit strike encodes the dollar strike in thousandths (the {@link #of} encoder does
+   * {@code strike.movePointRight(3)}), so this divides the parsed 8-digit integer by 1000 to
+   * recover the dollar strike. The returned value is {@code stripTrailingZeros()} so {@code
+   * 00140000} parses to {@code 140} (matching the {@code CopytradeSignalPayload.strike} canonical
+   * form) rather than {@code 140.000}. Strips spaces first so both the padded canonical form and
+   * the compact broker form parse. Returns {@code null} on any parse failure (null, too short,
+   * non-numeric) so callers can fail-safe — a candidate whose strike cannot be parsed is simply not
+   * matched.
+   */
+  public static BigDecimal strikeOf(String occ) {
+    if (occ == null) {
+      return null;
+    }
+    String compact = occ.replace(" ", "");
+    if (compact.length() < 15) {
+      return null;
+    }
+    String strike8 = compact.substring(compact.length() - 8);
+    try {
+      long millis = Long.parseLong(strike8);
+      return BigDecimal.valueOf(millis, 3).stripTrailingZeros();
+    } catch (RuntimeException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Edited-signal supersede (F1): extract the option right ({@code C} or {@code P}) from an OCC
+   * option symbol. The right is the single char at {@code length-9} (immediately before the 8-digit
+   * strike), per the fixed 15-char {@code YYMMDD+right+strike} tail. Strips spaces first so both
+   * the padded canonical form and the compact broker form parse. Returns {@code null} when the
+   * symbol is too short or the extracted char is neither {@code C} nor {@code P}, so callers can
+   * fail-safe.
+   */
+  public static String rightOf(String occ) {
+    if (occ == null) {
+      return null;
+    }
+    String compact = occ.replace(" ", "");
+    if (compact.length() < 15) {
+      return null;
+    }
+    String right = compact.substring(compact.length() - 9, compact.length() - 8);
+    return "C".equals(right) || "P".equals(right) ? right : null;
+  }
+
+  /**
    * Normalize any OCC — compact ({@code NVDA260706P00190000}) or already-padded ({@code NVDA
    * 260706P00190000}) — to the 21-char padded canonical form {@link #of} produces (the cache key /
    * {@code ContractSymbol} search-attribute form the PositionWorkflow seed sites register under).
