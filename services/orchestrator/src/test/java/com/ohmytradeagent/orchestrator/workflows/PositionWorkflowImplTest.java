@@ -613,6 +613,140 @@ class PositionWorkflowImplTest {
         .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
   }
 
+  // ---------- Phase 4 (PLAN-2026-06-24-trading-remediation): flatten-fail retry-next-session
+  // ------
+
+  /**
+   * Phase 4 (PLAN-2026-06-24-trading-remediation), v&gt;=1 happy retry: an EOD bounded flatten that
+   * rests UNFILLED (orders submitted at/after the close) must (a) emit the alert-eligible
+   * EodForceFlattenFailed, and (b) re-attempt the flatten at the NEXT market-session open —
+   * emitting FlattenRetryScheduled and re-calling placeOrder — instead of being held silently
+   * overnight. TestWorkflowEnvironment resolves getVersion to the max (1), so this exercises the
+   * v&gt;=1 retry path.
+   */
+  @Test
+  void phase4_unfilledFlatten_retriesAtNextSessionOpen() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    // Next-session open is 5 minutes out (virtual time); env.sleep past it fires the retry timer.
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofMinutes(5));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-flatten-retry");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L); // short TTL so each unfilled await elapses fast under virtual time
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // EOD fires -> bounded flatten placed (#1) -> TTL elapses unfilled -> cancel + loud failure.
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    AuditEvent failed = captureKind("EodForceFlattenFailed");
+    assertThat(failed.getSubject())
+        .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
+
+    // Advance past the next-session open -> retry timer fires -> FlattenRetryScheduled +
+    // placeOrder.
+    env.sleep(Duration.ofMinutes(6));
+    waitForPlaceOrderCount(2);
+    AuditEvent scheduled = captureKind("FlattenRetryScheduled");
+    assertThat(scheduled.getSubject()).containsEntry("attempt", 1).containsEntry("reason", "eod");
+
+    // Still alive (no fill ever arrived), no PositionClosed emitted.
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    assertThat(captureAll("PositionClosed")).isEmpty();
+  }
+
+  /**
+   * Phase 4: after MAX_FLATTEN_RETRY_SESSIONS (3) unfilled next-session re-attempts the workflow
+   * gives up retrying, emits the terminal FlattenRetryExhausted page, and stays ALIVE (falls back
+   * to the legacy await-late-fill) — never silently completing with a live lot.
+   */
+  @Test
+  void phase4_retryBudgetExhausted_emitsTerminalPageAndStaysAlive() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofMinutes(5));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-flatten-exhaust");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // EOD fires (placement #1) then 3 next-session retries (placements #2,#3,#4). Each retry =
+    // 5min timer + a 2s unfilled await; sleep generously to drive all three under virtual time.
+    env.sleep(Duration.ofMinutes(1));
+    env.sleep(Duration.ofMinutes(30));
+
+    // Three FlattenRetryScheduled (attempts 1..3) then the terminal FlattenRetryExhausted page.
+    waitForPlaceOrderCount(4);
+    assertThat(captureAll("FlattenRetryScheduled")).hasSize(3);
+    AuditEvent exhausted = captureKind("FlattenRetryExhausted");
+    assertThat(exhausted.getSubject()).containsEntry("attempts", 3).containsEntry("reason", "eod");
+
+    // Each next-session retry MUST use a DISTINCT intent_key (→ a fresh client_order_id). Reusing
+    // the first attempt's key would re-POST a duplicate client_order_id and FAIL the 2nd retry
+    // instead of gracefully exhausting the budget. First attempt keeps the un-suffixed key.
+    ArgumentCaptor<OrderIntent> intents = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(4)).placeOrder(intents.capture());
+    List<String> flattenKeys =
+        intents.getAllValues().stream()
+            .map(OrderIntent::getIntentKey)
+            .filter(k -> k.contains(":exit:flatten-"))
+            .toList();
+    assertThat(flattenKeys).hasSize(4).doesNotHaveDuplicates();
+    assertThat(flattenKeys).anyMatch(k -> k.endsWith(":exit:flatten-eod")); // first attempt
+    assertThat(flattenKeys).anyMatch(k -> k.endsWith(":retry-1"));
+    assertThat(flattenKeys).anyMatch(k -> k.endsWith(":retry-2"));
+    assertThat(flattenKeys).anyMatch(k -> k.endsWith(":retry-3"));
+
+    // Bounded: no further retries past MAX, and the workflow is still alive (no PositionClosed).
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    assertThat(captureAll("PositionClosed")).isEmpty();
+  }
+
+  /**
+   * Phase 4 regression guard: a LATE fill of the resting bounded limit arriving BEFORE the
+   * next-session retry timer must close the position normally — no retry is scheduled (no
+   * FlattenRetryScheduled), proving the retry path does not interfere with the existing late-fill
+   * recovery.
+   */
+  @Test
+  void phase4_lateFillBeforeNextSession_closesNormallyNoRetry() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    // Next open far out so the retry timer cannot fire before the late fill arrives.
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofHours(12));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-flatten-latefill");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // EOD fires -> flatten placed -> TTL elapses unfilled -> alive-block arms the (far) retry
+    // timer.
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    captureKind("EodForceFlattenFailed");
+
+    // A LATE fill of the resting flatten drains the lot before the next-session timer fires.
+    stub.onFill(fill("brk-flatten-late", 5L, new BigDecimal("2.50")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // Closed normally; no retry was scheduled.
+    assertThat(captureAll("FlattenRetryScheduled")).isEmpty();
+    assertThat(captureAll("FlattenRetryExhausted")).isEmpty();
+    captureKind("PositionClosed");
+  }
+
   /**
    * Plan-2A R-AA-1 broker-confirmed-zero invariant: a PARTIAL flatten fill must NOT close the
    * position — PositionClosed is emitted only at broker-confirmed remaining==0. A first flatten

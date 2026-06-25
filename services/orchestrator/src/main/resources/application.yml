@@ -100,7 +100,11 @@ alert:
     # IMAGE default — NOT via 40-tenants-config, which deploy.yml never applies — so the orphan-blind
     # spot from the QQQ-725 incident cannot silently reopen. Mirrors DEFAULT_FAILURE_KINDS in
     # OrderFailureAlerter.java.
-    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed}
+    # Phase 4 (PLAN-2026-06-24-trading-remediation): EodForceFlattenFailed (a force-flatten that
+    # rested unfilled and was silently held overnight on 2026-06-24) and FlattenRetryExhausted (the
+    # bounded next-session retry budget spent, lot still unfilled) page. FlattenRetryScheduled is
+    # informational and intentionally absent so a retry-in-progress does not page.
+    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,EodForceFlattenFailed,FlattenRetryExhausted}
     signal-feed:
       # Issue #308: mirror every BTO/STC/AVG signal (received + outcome) to the same webhook.
       # Off by default — opt in via ALERT_SIGNAL_FEED_ENABLED=true. Independent of failure alerts.

@@ -58,6 +58,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String KIND_EOD_FORCE_FLATTEN_REQUESTED = "EodForceFlattenRequested";
   private static final String KIND_EOD_FORCE_FLATTENED = "EodForceFlattened";
   private static final String KIND_EOD_FORCE_FLATTEN_FAILED = "EodForceFlattenFailed";
+  // Phase 4 (PLAN-2026-06-24-trading-remediation): a force-flatten that rested UNFILLED is
+  // re-attempted at the NEXT market-session open. KIND_FLATTEN_RETRY_SCHEDULED is the
+  // informational per-attempt marker (does NOT page); KIND_FLATTEN_RETRY_EXHAUSTED is the terminal
+  // page emitted once the bounded session-retry budget is spent and the lot is still unfilled.
+  private static final String KIND_FLATTEN_RETRY_SCHEDULED = "FlattenRetryScheduled";
+  private static final String KIND_FLATTEN_RETRY_EXHAUSTED = "FlattenRetryExhausted";
   private static final String KIND_EXPIRY_FORCE_FLATTEN_REQUESTED = "ExpiryForceFlattenRequested";
   private static final String KIND_EXPIRY_FORCE_FLATTENED = "ExpiryForceFlattened";
 
@@ -447,6 +453,35 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    */
   private static final String VERSION_EXPIRE_WORTHLESS = "expire-worthless-v1";
 
+  /**
+   * Phase 4 (PLAN-2026-06-24-trading-remediation) replay gate. When a force-flatten
+   * (stop_loss/time_stop/eod/expiry) rests UNFILLED — typically because the orders were submitted
+   * at/after the 16:00 close — the legacy behaviour is to emit {@link
+   * #KIND_EOD_FORCE_FLATTEN_FAILED} and block ALIVE indefinitely awaiting a late fill, with NO
+   * alert and NO retry (the 2026-06-24 overnight-hold incident). Under v&gt;=1 the run()-tail
+   * alive-block arms a one-shot timer to the NEXT market-session open ({@link
+   * MarketCalendarActivities#durationUntilNextRthOpenEt()}); on wake it re-attempts the bounded
+   * flatten, bounded to {@link #MAX_FLATTEN_RETRY_SESSIONS}. The alert itself is config-only (the
+   * {@link #KIND_EOD_FORCE_FLATTEN_FAILED} audit already pages via OrderFailureAlerter).
+   *
+   * <p>v=DEFAULT_VERSION (in-flight workflows started before this patch) keep the legacy
+   * await-late-fill behaviour so their recorded histories replay byte-identically — every new
+   * command (the next-open Activity call, its timer, the extra await condition, and the
+   * FlattenRetry* audits) is strictly behind this gate. The gate is read ONCE per run()-tail entry,
+   * outside the retry loop, so the command count is stable across replays. This is a long-lived
+   * multi-day workflow: in-flight executions replay across a redeploy, so the gate is mandatory.
+   */
+  private static final String VERSION_FLATTEN_RETRY_NEXT_SESSION = "flatten-retry-next-session-v1";
+
+  /**
+   * Phase 4: maximum number of NEXT-SESSION retry attempts for an unfilled force-flatten before the
+   * workflow gives up retrying, emits the terminal {@link #KIND_FLATTEN_RETRY_EXHAUSTED} page, and
+   * falls back to the legacy await-late-fill (stay-alive) behaviour. Small constant: a flatten that
+   * cannot fill across three consecutive sessions needs operator attention, not unbounded
+   * re-arming.
+   */
+  private static final int MAX_FLATTEN_RETRY_SESSIONS = 3;
+
   /** Plan-2B R-AB-1 default: minutes before expiry close to arm the guaranteed flatten timer. */
   private static final long FLATTEN_LEAD_MINUTES_DEFAULT = 30L;
 
@@ -593,6 +628,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * the lot drains.
    */
   private boolean flattenAwaitingLateFill;
+
+  /**
+   * Phase 4 (PLAN-2026-06-24-trading-remediation): latched true by the one-shot next-session timer
+   * armed in the run()-tail alive-block under {@link #VERSION_FLATTEN_RETRY_NEXT_SESSION} v&gt;=1.
+   * On wake the loop re-attempts the bounded flatten and resets the latch. {@code
+   * flattenRetrySessions} counts the attempts so the loop terminates at {@link
+   * #MAX_FLATTEN_RETRY_SESSIONS}.
+   */
+  private boolean retryFlattenArmed;
+
+  private int flattenRetrySessions;
 
   // Phase 3: watchlist-trigger EXIT state (premium-space, bid-evaluated on the long option). All of
   // this stays at its zero/false defaults — and none of the timers/subscription below is armed —
@@ -1014,11 +1060,79 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // or an operator force-closes.
       boolean flat = flattenRemaining(reason);
       if (!flat && !maybeCloseWorthlessAtExpiry(reason)) {
+        // Phase 4 (PLAN-2026-06-24-trading-remediation): the bounded flatten rested UNFILLED — most
+        // commonly because the orders were submitted at/after the 16:00 close (the 2026-06-24
+        // overnight-hold incident). flattenRemaining already emitted the loud EodForceFlattenFailed
+        // audit (which pages via OrderFailureAlerter, Phase-4 config). Under v>=1 re-attempt the
+        // flatten at the NEXT market-session open, bounded to MAX_FLATTEN_RETRY_SESSIONS. v=DEFAULT
+        // (legacy in-flight histories) keeps the await-late-fill-forever behaviour
+        // byte-identically.
+        // The gate is read ONCE here, outside the retry loop, so the command count is stable.
+        int retryVersion =
+            Workflow.getVersion(VERSION_FLATTEN_RETRY_NEXT_SESSION, Workflow.DEFAULT_VERSION, 1);
         // Stay ALIVE: block until a late fill (delivered via onFill -> a subsequent flatten cycle)
         // or some other path drains the lot. The bounded limit is resting at the broker; we never
-        // emit PositionClosed with remaining > 0. A re-arm cycle re-places on the next late fill.
+        // emit PositionClosed with remaining > 0. Under v>=1 a next-session timer also wakes the
+        // await so the unfilled flatten is re-attempted instead of held silently overnight.
         while (remainingQty > 0) {
-          // Wait for a late fill of the resting bounded limit; apply it and re-evaluate.
+          // Arm a one-shot timer to the NEXT session open. durationUntilNextRthOpenEt always
+          // advances to a STRICTLY-FUTURE open (across the close and weekends) — distinct from
+          // durationUntilRthOpenEt, which returns ZERO once past today's open and would spin.
+          // Computed unconditionally only when a retry is still budgeted; a null/zero duration
+          // (no sane next open) falls through to the legacy await-late-fill below.
+          boolean retryBudgeted =
+              retryVersion >= 1 && flattenRetrySessions < MAX_FLATTEN_RETRY_SESSIONS;
+          Duration untilNextOpen = retryBudgeted ? calendar.durationUntilNextRthOpenEt() : null;
+          boolean timerArmed =
+              untilNextOpen != null && !untilNextOpen.isZero() && !untilNextOpen.isNegative();
+          if (timerArmed) {
+            retryFlattenArmed = false;
+            Workflow.newTimer(untilNextOpen)
+                .thenApply(
+                    v -> {
+                      retryFlattenArmed = true;
+                      return null;
+                    });
+            // Wake on either a late fill of the resting order OR the next-session retry timer.
+            Workflow.await(() -> lastFillEvent != null || retryFlattenArmed);
+            if (lastFillEvent != null) {
+              // A late fill drained (some of) the resting order before the next session — apply it
+              // and re-evaluate; no retry needed for what already filled.
+              emitExitFill("flatten-" + reason, lastFillEvent);
+              lastFillEvent = null;
+              continue;
+            }
+            // Next-session timer woke us with the lot still unfilled: re-attempt the flatten.
+            flattenRetrySessions++;
+            retryFlattenArmed = false;
+            auditLog(
+                KIND_FLATTEN_RETRY_SCHEDULED,
+                subject(
+                    "entry_signal_id", input.getEntrySignalId(),
+                    "contract_symbol", input.getContractSymbol(),
+                    "reason", reason,
+                    "remaining_qty", remainingQty,
+                    "attempt", flattenRetrySessions));
+            boolean retried = flattenRemaining(reason);
+            if (retried) {
+              break; // broker-confirmed flat -> exit the alive-block.
+            }
+            if (flattenRetrySessions >= MAX_FLATTEN_RETRY_SESSIONS) {
+              // Budget exhausted: emit the terminal page and fall through to the legacy
+              // await-late-fill (stay-alive) behaviour below.
+              auditLog(
+                  KIND_FLATTEN_RETRY_EXHAUSTED,
+                  subject(
+                      "entry_signal_id", input.getEntrySignalId(),
+                      "contract_symbol", input.getContractSymbol(),
+                      "reason", reason,
+                      "remaining_qty", remainingQty,
+                      "attempts", flattenRetrySessions));
+            }
+            continue;
+          }
+          // Legacy (v=DEFAULT) OR retry budget spent: wait for a late fill of the resting bounded
+          // limit; apply it and re-evaluate. A re-arm cycle re-places on the next late fill.
           Workflow.await(() -> lastFillEvent != null);
           if (lastFillEvent != null) {
             emitExitFill("flatten-" + reason, lastFillEvent);
@@ -2161,7 +2275,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       return true;
     }
 
-    String flattenIntentKey = Workflow.getInfo().getWorkflowId() + ":exit:flatten-" + reason;
+    // Phase 4 (PLAN-2026-06-24-trading-remediation): each next-session retry MUST use a DISTINCT
+    // intent_key so it derives a fresh client_order_id. Reusing the first attempt's key would
+    // re-POST a duplicate client_order_id — Alpaca rejects it (or the by-cid lookup resolves the
+    // prior terminal order), so the 2nd retry would FAIL the workflow instead of gracefully
+    // exhausting its budget. The first attempt (flattenRetrySessions == 0) keeps the original key
+    // byte-identically so legacy histories replay unchanged.
+    String flattenIntentKey =
+        Workflow.getInfo().getWorkflowId()
+            + ":exit:flatten-"
+            + reason
+            + (flattenRetrySessions > 0 ? ":retry-" + flattenRetrySessions : "");
 
     // Plan-2A R-AA-1 decision point. The getVersion marker is appended AFTER the shared prologue
     // (kindReq audit + best-effort cancel) and BEFORE the place/zero, so legacy histories — which

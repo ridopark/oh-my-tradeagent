@@ -96,8 +96,17 @@ public class OrderFailureAlerter {
   // homelab and not applied by deploy.yml. Relying on config would silently reopen the 3-day
   // orphan-blind-spot from the QQQ-725 incident. application.yml's alert.discord.failure-kinds
   // default mirrors this string.
+  // Phase 4 (PLAN-2026-06-24-trading-remediation): EodForceFlattenFailed (a force-flatten that
+  // rested UNFILLED — submitted at/after the close on 2026-06-24, then silently held overnight with
+  // no alert) and FlattenRetryExhausted (the bounded next-session retry budget spent with the lot
+  // still unfilled) MUST page. Shipped in the IMAGE default — NOT via ALERT_DISCORD_FAILURE_KINDS
+  // env (unset on homelab, not applied by deploy.yml) — for the same reason as the orphan kinds:
+  // relying on config would silently reopen the no-alert gap. application.yml's
+  // alert.discord.failure-kinds default mirrors this string. FlattenRetryScheduled is informational
+  // (a retry IS being attempted) and is intentionally NOT here so it does not page.
   private static final String DEFAULT_FAILURE_KINDS =
-      "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed";
+      "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
+          + "EodForceFlattenFailed,FlattenRetryExhausted";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -114,6 +123,13 @@ public class OrderFailureAlerter {
    * BTO.
    */
   private static final Set<String> STC_KINDS = Set.of("OrphanSTC", "PartialExitPlaceFailed");
+
+  // Phase 4: force-flatten failure kinds. Their subject is a DIFFERENT shape than a BTO/STC order
+  // failure — PositionWorkflowImpl emits contract_symbol / entry_signal_id / reason / remaining_qty
+  // (NOT option_symbol / signal_id), so buildEmbed would render symbol=n/a and a wrong BTO label.
+  // Rendered by buildFlattenEmbed instead (mirrors buildOrphanEmbed's subject-shape split).
+  private static final Set<String> FLATTEN_KINDS =
+      Set.of("EodForceFlattenFailed", "FlattenRetryExhausted");
 
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
@@ -162,8 +178,14 @@ public class OrderFailureAlerter {
       if (event == null || event.getKind() == null || !failureKinds.contains(event.getKind())) {
         return;
       }
-      WebhookEmbed embed =
-          ORPHAN_KINDS.contains(event.getKind()) ? buildOrphanEmbed(event) : buildEmbed(event);
+      WebhookEmbed embed;
+      if (ORPHAN_KINDS.contains(event.getKind())) {
+        embed = buildOrphanEmbed(event);
+      } else if (FLATTEN_KINDS.contains(event.getKind())) {
+        embed = buildFlattenEmbed(event);
+      } else {
+        embed = buildEmbed(event);
+      }
       String url = webhookResolver.resolve(event.getTenantId(), event.getStrategyId());
       webhookClient.postEmbedToUrl(url, embed);
     } catch (RuntimeException e) {
@@ -229,6 +251,40 @@ public class OrderFailureAlerter {
     fields.add(
         new WebhookEmbed.Field(
             "expected_workflow_id", subjectStr(subject, "expected_workflow_id"), false));
+
+    return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
+
+  /**
+   * Phase 4 (PLAN-2026-06-24-trading-remediation): render a force-flatten failure ({@code
+   * EodForceFlattenFailed} / {@code FlattenRetryExhausted}). PositionWorkflowImpl emits {@code
+   * contract_symbol} / {@code entry_signal_id} / {@code reason} / {@code remaining_qty} (NOT {@code
+   * option_symbol} / {@code signal_id}), so this reads that shape directly — a position is stuck
+   * unflattened and the title makes that operator-actionable. Every key is read NULL-SAFE (a
+   * throwing render is swallowed by {@link #onAuditEvent} and would lose the page).
+   */
+  private WebhookEmbed buildFlattenEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    String symbolRaw = rawSubject(subject, "contract_symbol");
+    String qty = subjectStr(subject, "remaining_qty");
+    String reason = subjectStr(subject, "reason");
+
+    boolean exhausted = "FlattenRetryExhausted".equals(event.getKind());
+    String title =
+        ":rotating_light: Force-flatten FAILED — broker still holds "
+            + qty
+            + " "
+            + orNa(symbolRaw)
+            + (exhausted ? " (retry budget exhausted)" : " (exit unfilled)");
+
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("kind", String.valueOf(event.getKind()), false));
+    fields.add(new WebhookEmbed.Field("symbol", YahooOptionLink.markdown(symbolRaw), false));
+    fields.add(new WebhookEmbed.Field("reason", reason, false));
+    fields.add(new WebhookEmbed.Field("remaining_qty", qty, false));
+    // attempts is present on FlattenRetryExhausted; n/a (omitted-as-n/a) on EodForceFlattenFailed.
+    fields.add(new WebhookEmbed.Field("attempts", subjectStr(subject, "attempts"), false));
+    fields.add(new WebhookEmbed.Field("signal_id", subjectStr(subject, "entry_signal_id"), false));
 
     return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
   }

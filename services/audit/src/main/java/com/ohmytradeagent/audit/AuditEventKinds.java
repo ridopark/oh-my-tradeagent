@@ -225,6 +225,17 @@ public final class AuditEventKinds {
           "EodForceFlattenRequested",
           "EodForceFlattened",
           "EodForceFlattenFailed",
+          // Phase 4 (PLAN-2026-06-24-trading-remediation): emitted by PositionWorkflowImpl's
+          // run()-tail alive-block under VERSION_FLATTEN_RETRY_NEXT_SESSION v>=1 when an unfilled
+          // force-flatten is re-attempted at the next market-session open. FlattenRetryScheduled is
+          // the informational per-attempt marker (does NOT page); FlattenRetryExhausted is the
+          // terminal page once the bounded MAX_FLATTEN_RETRY_SESSIONS budget is spent and the lot
+          // is
+          // still unfilled. NEITHER opens or closes a position lifecycle (the lot's real terminal
+          // close still rides the Eod*/Expiry*/PositionClosed kinds when a fill finally lands), so
+          // both are intentionally in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "FlattenRetryScheduled",
+          "FlattenRetryExhausted",
           "ExpiryForceFlattenRequested",
           "ExpiryForceFlattened",
           // Plan-2B R-AB-1: dedicated expiry-LEAD flatten kinds. PositionWorkflow arms a guaranteed
