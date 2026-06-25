@@ -156,6 +156,13 @@ public final class AuditEventKinds {
           "AvgSkipped",
           "ChandelierArmRequested",
           "SignalAbortedByRiskBreach",
+          // Edited-signal supersede (F1): emitted by CopytradeSignalWorkflowImpl when a corrected
+          // BTO auto-cancels a prior wrong-expiry leg. The auditable supersede DECISION (carries
+          // BOTH legs' OCC). Pages via OrderFailureAlerter (IMAGE default). Pure observability —
+          // NOT
+          // a lifecycle event (the corrected leg's own entry rides EntryFilled/PositionEntered; the
+          // superseded leg's close rides its PositionWorkflow flatten kinds). In ALL_KINDS only.
+          "BtoCorrectionSuperseded",
           // PositionWorkflowImpl
           "PositionEntered",
           "PositionNeverFilled",
@@ -272,6 +279,21 @@ public final class AuditEventKinds {
           "RiskBreachActed",
           "ForceCloseRequested",
           "ForceCloseNoop",
+          // Edited-signal supersede (F1): child-side audit emitted by PositionWorkflowImpl's
+          // processSupersede when the parent's supersede signal lands on a confirmed, just-filled,
+          // not-partially-exited wrong-expiry leg. Records the corrected leg's identifiers, then
+          // drives flattenRemaining("bto_corrected"). Pure observability — in ALL_KINDS only.
+          "PositionSupersededByCorrection",
+          // F1: dedicated supersede-flatten request/done kinds (parity with the ExpiryLead* carve-
+          // out) so the edited-signal auto-cancel flatten is NOT mislabeled as the blanket EOD
+          // sweep. BtoCorrectionFlattened is the broker-confirmed terminal flatten marker (P&L
+          // rides
+          // the accompanying PartialExitFilled); the request kind is the cause-of-flatten marker.
+          // Neither opens/closes a ledger lifecycle (the terminal close still rides
+          // PositionClosed).
+          // In ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "BtoCorrectionFlattenRequested",
+          "BtoCorrectionFlattened",
           // KillSwitchWorkflowImpl
           "KillSwitchTripped",
           "KillSwitchResetApproved",

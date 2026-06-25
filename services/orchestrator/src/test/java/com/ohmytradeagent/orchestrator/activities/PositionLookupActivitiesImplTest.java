@@ -17,6 +17,7 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.Cursor;
@@ -182,6 +183,138 @@ class PositionLookupActivitiesImplTest {
         .contains("WorkflowType = 'PositionWorkflow'")
         .doesNotContain("STARTS_WITH")
         .doesNotContain("WorkflowId");
+  }
+
+  // findOpenPositionByUnderlyingStrikeRight (F1 edited-signal supersede): enumerate RUNNING
+  // PositionWorkflows for (tenant, strategy) keyed on TenantStrategy ONLY (no ContractSymbol
+  // predicate — the match is expiry-agnostic and ContractSymbol is equality-only), filter
+  // in-process
+  // by underlying+strike+right with a DIFFERENT expiry.
+
+  private static final String SPY_0706 = "SPY   260706P00710000"; // SPY 7/06 710P (prior wrong leg)
+  private static final String SPY_0708 = "SPY   260708P00710000"; // SPY 7/08 710P (corrected leg)
+
+  @Test
+  void findOpenPosition_differentExpirySameStrikeRight_returnsCandidate() {
+    String query = PositionLookupActivitiesImpl.tenantStrategyRunningQuery("dev", "copytrade-v1");
+    io.temporal.client.WorkflowExecutionMetadata m = meta("wf-0706");
+    when(workflowClient.listExecutions(query)).thenReturn(java.util.stream.Stream.of(m));
+    OffsetDateTime entryAt = OffsetDateTime.parse("2026-07-05T14:30:00Z");
+    stubSupersedeState("wf-0706", SPY_0706, 50L, entryAt, false);
+
+    PositionLookupActivities.SupersedeCandidate c =
+        svc.findOpenPositionByUnderlyingStrikeRight(
+            "dev", "copytrade-v1", "SPY", new BigDecimal("710"), "P", "2026-07-08");
+
+    assertThat(c).isNotNull();
+    assertThat(c.workflowId()).isEqualTo("wf-0706");
+    assertThat(c.occ()).isEqualTo(SPY_0706);
+    assertThat(c.entryAt()).isEqualTo(entryAt);
+    assertThat(c.partialExited()).isFalse();
+  }
+
+  @Test
+  void findOpenPosition_sameExpiry_returnsNull() {
+    // Same OCC/expiry is the existing dedup path, NOT a supersede target.
+    String query = PositionLookupActivitiesImpl.tenantStrategyRunningQuery("dev", "copytrade-v1");
+    io.temporal.client.WorkflowExecutionMetadata m = meta("wf-0708");
+    when(workflowClient.listExecutions(query)).thenReturn(java.util.stream.Stream.of(m));
+    stubSupersedeState(
+        "wf-0708", SPY_0708, 50L, OffsetDateTime.parse("2026-07-05T14:30:00Z"), false);
+
+    assertThat(
+            svc.findOpenPositionByUnderlyingStrikeRight(
+                "dev", "copytrade-v1", "SPY", new BigDecimal("710"), "P", "2026-07-08"))
+        .isNull();
+  }
+
+  @Test
+  void findOpenPosition_differentStrike_returnsNull() {
+    String query = PositionLookupActivitiesImpl.tenantStrategyRunningQuery("dev", "copytrade-v1");
+    io.temporal.client.WorkflowExecutionMetadata m = meta("wf-0706");
+    when(workflowClient.listExecutions(query)).thenReturn(java.util.stream.Stream.of(m));
+    stubSupersedeState(
+        "wf-0706", SPY_0706, 50L, OffsetDateTime.parse("2026-07-05T14:30:00Z"), false);
+
+    // Corrected strike 715 != prior 710 → no match.
+    assertThat(
+            svc.findOpenPositionByUnderlyingStrikeRight(
+                "dev", "copytrade-v1", "SPY", new BigDecimal("715"), "P", "2026-07-08"))
+        .isNull();
+  }
+
+  @Test
+  void findOpenPosition_differentRight_returnsNull() {
+    String query = PositionLookupActivitiesImpl.tenantStrategyRunningQuery("dev", "copytrade-v1");
+    io.temporal.client.WorkflowExecutionMetadata m = meta("wf-0706");
+    when(workflowClient.listExecutions(query)).thenReturn(java.util.stream.Stream.of(m));
+    stubSupersedeState(
+        "wf-0706", SPY_0706, 50L, OffsetDateTime.parse("2026-07-05T14:30:00Z"), false);
+
+    // Corrected right C != prior P → no match.
+    assertThat(
+            svc.findOpenPositionByUnderlyingStrikeRight(
+                "dev", "copytrade-v1", "SPY", new BigDecimal("710"), "C", "2026-07-08"))
+        .isNull();
+  }
+
+  @Test
+  void findOpenPosition_carriesEntryAtAndPartialExitedFromState() {
+    String query = PositionLookupActivitiesImpl.tenantStrategyRunningQuery("dev", "copytrade-v1");
+    io.temporal.client.WorkflowExecutionMetadata m = meta("wf-0706");
+    when(workflowClient.listExecutions(query)).thenReturn(java.util.stream.Stream.of(m));
+    OffsetDateTime entryAt = OffsetDateTime.parse("2026-07-05T14:31:00Z");
+    stubSupersedeState("wf-0706", SPY_0706, 25L, entryAt, true);
+
+    PositionLookupActivities.SupersedeCandidate c =
+        svc.findOpenPositionByUnderlyingStrikeRight(
+            "dev", "copytrade-v1", "SPY", new BigDecimal("710"), "P", "2026-07-08");
+
+    // The activity does NOT apply the partial-exited guardrail — it surfaces it for the caller.
+    assertThat(c).isNotNull();
+    assertThat(c.partialExited()).isTrue();
+    assertThat(c.entryAt()).isEqualTo(entryAt);
+  }
+
+  @Test
+  void findOpenPosition_visibilityThrows_returnsNullNoThrow() {
+    when(workflowClient.listExecutions(anyString())).thenThrow(new RuntimeException("vis down"));
+
+    assertThat(
+            svc.findOpenPositionByUnderlyingStrikeRight(
+                "dev", "copytrade-v1", "SPY", new BigDecimal("710"), "P", "2026-07-08"))
+        .isNull();
+  }
+
+  @Test
+  void findOpenPosition_usesTenantStrategyQueryWithoutContractSymbolOrPrefix() {
+    String q = PositionLookupActivitiesImpl.tenantStrategyRunningQuery("dev", "copytrade-v1");
+    assertThat(q)
+        .contains("TenantStrategy = 't-dev/s-copytrade-v1'")
+        .contains("ExecutionStatus = 'WORKFLOW_EXECUTION_STATUS_RUNNING'")
+        .contains("WorkflowType = 'PositionWorkflow'")
+        .doesNotContain("ContractSymbol")
+        .doesNotContain("STARTS_WITH")
+        .doesNotContain("WorkflowId");
+  }
+
+  private static io.temporal.client.WorkflowExecutionMetadata meta(String wfId) {
+    io.temporal.client.WorkflowExecutionMetadata m =
+        mock(io.temporal.client.WorkflowExecutionMetadata.class);
+    io.temporal.api.common.v1.WorkflowExecution exec =
+        io.temporal.api.common.v1.WorkflowExecution.newBuilder().setWorkflowId(wfId).build();
+    when(m.getExecution()).thenReturn(exec);
+    when(m.getStartTime()).thenReturn(java.time.Instant.parse("2026-07-05T14:30:00Z"));
+    return m;
+  }
+
+  private void stubSupersedeState(
+      String wfId, String occ, long remainingQty, OffsetDateTime entryAt, boolean partialExited) {
+    WorkflowStub stub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(wfId)).thenReturn(stub);
+    when(stub.query("positionState", PositionState.class))
+        .thenReturn(
+            new PositionState(occ, remainingQty, new BigDecimal("3.00"), entryAt, partialExited));
   }
 
   @SuppressWarnings("unchecked")

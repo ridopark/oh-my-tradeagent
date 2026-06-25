@@ -443,6 +443,9 @@ class AdoptionWorkflowImplLegacyReplayTest {
     public void riskBreach(RiskBreachPayload payload) {}
 
     @Override
+    public void supersede(String correctedSignalId, String correctedOcc) {}
+
+    @Override
     public TrailingState trailingState() {
       return null;
     }

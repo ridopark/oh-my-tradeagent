@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.activities;
 
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.orchestrator.domain.OccSymbol;
 import com.ohmytradeagent.orchestrator.workflows.PositionState;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -11,12 +12,16 @@ import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionResponse;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.Cursor;
@@ -58,6 +63,20 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
         "TenantStrategy = '%s' AND ContractSymbol = '%s' AND ExecutionStatus = '%s' AND WorkflowType = '%s'",
         WorkflowIds.escapeForVisibilityQuery(WorkflowIds.tenantStrategy(tenantId, strategyId)),
         WorkflowIds.escapeForVisibilityQuery(occ),
+        WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING.name(),
+        WORKFLOW_TYPE);
+  }
+
+  /**
+   * Edited-signal supersede (F1): enumerate ALL RUNNING PositionWorkflows for a (tenant, strategy)
+   * — NO {@code ContractSymbol} predicate, because the supersede match is expiry-agnostic and
+   * {@code ContractSymbol} is equality-only. The in-process filter (underlying+strike+right,
+   * different expiry) is applied on each enumerated owner's {@code positionState} query.
+   */
+  static String tenantStrategyRunningQuery(String tenantId, String strategyId) {
+    return String.format(
+        "TenantStrategy = '%s' AND ExecutionStatus = '%s' AND WorkflowType = '%s'",
+        WorkflowIds.escapeForVisibilityQuery(WorkflowIds.tenantStrategy(tenantId, strategyId)),
         WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING.name(),
         WORKFLOW_TYPE);
   }
@@ -226,6 +245,101 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
           e.getMessage());
       return false;
     }
+  }
+
+  @Override
+  public SupersedeCandidate findOpenPositionByUnderlyingStrikeRight(
+      String tenantId,
+      String strategyId,
+      String underlying,
+      BigDecimal strike,
+      String right,
+      String correctedExpiryDay) {
+    // BEST-EFFORT / read-only: any failure returns null (no supersede — never auto-cancels a live
+    // trade on a probe error). The window + partial-exited guardrails are applied by the caller.
+    if (underlying == null || strike == null || right == null) {
+      return null;
+    }
+    BigDecimal wantStrike = strike.stripTrailingZeros();
+    try {
+      String query = tenantStrategyRunningQuery(tenantId, strategyId);
+      // Earliest-started match wins (the leg most likely to be the just-placed-then-corrected one).
+      // Stream the Visibility paging iterator (close it per the #323 idiom), reading each owner's
+      // positionState to match underlying+strike+right with a DIFFERENT expiry than the correction.
+      List<WorkflowExecutionMetadata> owners;
+      try (Stream<WorkflowExecutionMetadata> stream = workflowClient.listExecutions(query)) {
+        owners =
+            stream
+                .sorted(
+                    Comparator.comparing(
+                        WorkflowExecutionMetadata::getStartTime, instantNullsLast()))
+                .toList();
+      }
+      for (WorkflowExecutionMetadata meta : owners) {
+        String wfId = meta.getExecution().getWorkflowId();
+        PositionState state;
+        try {
+          state =
+              workflowClient
+                  .newUntypedWorkflowStub(wfId)
+                  .query("positionState", PositionState.class);
+        } catch (RuntimeException e) {
+          // A since-closed owner or a query race must not abort the whole scan — skip this owner.
+          log.warn(
+              "findOpenPositionByUnderlyingStrikeRight positionState query failed wf_id={} err={}",
+              wfId,
+              e.getMessage());
+          continue;
+        }
+        if (state == null || state.remainingQty() <= 0) {
+          continue;
+        }
+        if (matchesSupersedeTarget(
+            state.contractSymbol(), underlying, wantStrike, right, correctedExpiryDay)) {
+          return new SupersedeCandidate(
+              wfId, state.contractSymbol(), state.entryAt(), state.partialExited());
+        }
+      }
+      return null;
+    } catch (RuntimeException e) {
+      log.warn(
+          "findOpenPositionByUnderlyingStrikeRight best-effort probe failed tenant={} strategy={}"
+              + " underlying={} err={}",
+          tenantId,
+          strategyId,
+          underlying,
+          e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * F1 supersede contract-identity predicate (pure, no I/O): the candidate OCC matches the
+   * corrected signal on underlying (case-insensitive root) + strike + right, AND carries a
+   * DIFFERENT expiry day. A same-expiry/same-OCC candidate is the existing OCC-exact dedup path,
+   * NOT a supersede target. Returns false on a blank/unparseable candidate OCC (fail-safe — an
+   * unmatchable leg is never superseded).
+   */
+  static boolean matchesSupersedeTarget(
+      String occ,
+      String underlying,
+      BigDecimal wantStrike,
+      String right,
+      String correctedExpiryDay) {
+    if (occ == null || occ.isBlank()) {
+      return false;
+    }
+    String candUnderlying = OccSymbol.underlying(occ);
+    BigDecimal candStrike = OccSymbol.strikeOf(occ);
+    String candRight = OccSymbol.rightOf(occ);
+    LocalDate candExpiry = OccSymbol.expiryOf(occ);
+    if (candUnderlying == null || candStrike == null || candRight == null || candExpiry == null) {
+      return false;
+    }
+    return candUnderlying.equalsIgnoreCase(underlying)
+        && candStrike.compareTo(wantStrike) == 0
+        && candRight.equals(right)
+        && !candExpiry.toString().equals(correctedExpiryDay);
   }
 
   private static Comparator<Instant> instantNullsLast() {

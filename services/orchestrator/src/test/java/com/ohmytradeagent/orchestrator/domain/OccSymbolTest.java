@@ -181,4 +181,46 @@ class OccSymbolTest {
     assertThat(OccSymbol.padded("NVDA260706P00190000"))
         .isNotEqualTo(OccSymbol.padded("NVDA260713P00190000"));
   }
+
+  // ---- F1 edited-signal supersede: strikeOf / rightOf ----
+
+  @Test
+  void strikeOf_integerStrike_compactAndPadded() {
+    assertThat(OccSymbol.strikeOf("SPY260706P00710000"))
+        .isEqualByComparingTo(new BigDecimal("710"));
+    assertThat(OccSymbol.strikeOf("SPY   260706P00710000"))
+        .isEqualByComparingTo(new BigDecimal("710"));
+  }
+
+  @Test
+  void strikeOf_fractionalStrike() {
+    // 00192500 thousandths = 192.5
+    assertThat(OccSymbol.strikeOf("NVDA260706P00192500"))
+        .isEqualByComparingTo(new BigDecimal("192.5"));
+  }
+
+  @Test
+  void strikeOf_roundTripsWithOf() {
+    OccSymbol s = OccSymbol.of("SPY", LocalDate.of(2026, 7, 6), new BigDecimal("710"), "P");
+    assertThat(OccSymbol.strikeOf(s.value())).isEqualByComparingTo(new BigDecimal("710"));
+  }
+
+  @Test
+  void strikeOf_nullOrShort_returnsNull() {
+    assertThat(OccSymbol.strikeOf(null)).isNull();
+    assertThat(OccSymbol.strikeOf("SHORT")).isNull();
+  }
+
+  @Test
+  void rightOf_callAndPut_compactAndPadded() {
+    assertThat(OccSymbol.rightOf("SPY260706P00710000")).isEqualTo("P");
+    assertThat(OccSymbol.rightOf("SPY260706C00710000")).isEqualTo("C");
+    assertThat(OccSymbol.rightOf("SPY   260706P00710000")).isEqualTo("P");
+  }
+
+  @Test
+  void rightOf_nullOrShort_returnsNull() {
+    assertThat(OccSymbol.rightOf(null)).isNull();
+    assertThat(OccSymbol.rightOf("SHORT")).isNull();
+  }
 }

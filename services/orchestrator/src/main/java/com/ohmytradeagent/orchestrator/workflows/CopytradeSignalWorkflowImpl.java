@@ -80,6 +80,15 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // AuditEventKinds.ALL_KINDS + SOFT_TERMINAL_CLOSE_KINDS (refused before any broker activity).
   private static final String KIND_LIVE_PROMOTION_MISSING = "LivePromotionMissing";
 
+  // Edited-signal supersede (F1): emitted by handleBto when a corrected BTO auto-cancels a prior
+  // wrong-expiry leg. This is the AUDITABLE supersede DECISION — its subject carries BOTH legs' OCC
+  // (the superseded prior leg + this corrected leg) plus both signal_ids so every auto-cancel of a
+  // REAL trade is traceable. Pages via OrderFailureAlerter (IMAGE default). The child
+  // PositionWorkflow
+  // emits its own PositionSupersededByCorrection + the flatten kinds when it actions the signal.
+  // Registered in AuditEventKinds.ALL_KINDS.
+  private static final String KIND_BTO_CORRECTION_SUPERSEDED = "BtoCorrectionSuperseded";
+
   private static final String REASON_TTL_EXPIRED = "ttl_expired";
   // Issue: orphan-STC alerting. handleStc's stale Redis lookup can return a DEAD (terminal)
   // PositionWorkflow id; these reason codes tag the OrphanSTC audit emitted instead of crashing.
@@ -189,6 +198,28 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // in-flight histories (DEFAULT_VERSION) take the byte-identical pre-change path with no new
   // command, and only freshly-started executions evaluate the gate.
   private static final String VERSION_STRATEGY_ENABLED_GATE = "strategy-enabled-gate-v1";
+
+  // Edited-signal supersede (F1): gate the corrected-BTO auto-supersede block added in handleBto
+  // (after the SignalAccepted audit, BEFORE newIntent/placeOrder). The block dispatches a lookup
+  // Activity (findOpenPositionByUnderlyingStrikeRight) and, when ALL guardrails hold, signals the
+  // prior leg's PositionWorkflow to flatten + emits BtoCorrectionSuperseded — ALL new commands.
+  // Read UNCONDITIONALLY (before any branch) and branch only at v>=1: legacy in-flight histories
+  // (DEFAULT_VERSION) take the byte-identical pre-F1 path (no lookup, no signal, no audit). The
+  // guardrails are conservative-by-design (see SUPERSEDE_WINDOW): supersede fires ONLY when same
+  // tenant+strategy+underlying+strike+right, DIFFERENT expiry, prior leg confirmed within the
+  // window
+  // and NOT already partially exited. Mirrors VERSION_LIVE_PROMOTION_GATE's read-once discipline.
+  private static final String VERSION_BTO_CORRECTION_SUPERSEDE = "bto-correction-supersede-v1";
+
+  // Edited-signal supersede (F1) correction window: a prior leg may be auto-superseded ONLY when
+  // its
+  // confirmed entry is within this window of the corrected signal's posted_at. A CODE CONSTANT by
+  // design (NOT a strategy-config field) — keeps F1 Java-only, no schema/ConfigMap/live-YAML
+  // surface.
+  // Conservative: a correction posted minutes later (a deliberate new position) is OUT of window
+  // and
+  // never auto-cancels a real trade.
+  private static final Duration SUPERSEDE_WINDOW = Duration.ofSeconds(120);
 
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
@@ -412,6 +443,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "contracts", contracts,
             "ref_premium", payload.getPrice()));
 
+    // Edited-signal supersede (F1): when this corrected BTO matches a prior just-filled leg on
+    // tenant+strategy+underlying+strike+right but a DIFFERENT expiry, and the prior leg's entry is
+    // within the correction window, AUTO cancel/replace the wrong-expiry leg before placing this
+    // one. Version-gated (read unconditionally): legacy in-flight histories take the byte-identical
+    // pre-F1 path. Conservative — supersede fires ONLY when ALL guardrails hold.
+    maybeSupersedePriorLeg(payload, config, resolved);
+
     // P3-a (multi-tenant-broker-credentials): the LIVE-only live-promotion dispatch gate. A real-
     // money BTO may only place an order when a fresh (not-stale) LivePromotionApproved row exists
     // for (tenant_id, strategy_id, broker_target). The verify fails CLOSED — ABSENT/STALE/VERIFY_
@@ -543,6 +581,90 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
     handleTtlExpired(payload, config, resolved, placed, intentKey, ttlSecs);
     return payload.getSignalId();
+  }
+
+  /**
+   * Edited-signal supersede (F1). Conservative auto-cancel of a prior wrong-expiry leg when a
+   * corrected BTO arrives. Fires the supersede ONLY when ALL guardrails hold:
+   *
+   * <ul>
+   *   <li>same tenant + strategy + underlying + strike + right, DIFFERENT expiry (enforced by the
+   *       lookup Activity);
+   *   <li>the prior leg's confirmed entry ({@code candidate.entryAt}) is within {@link
+   *       #SUPERSEDE_WINDOW} of this corrected signal's {@code posted_at};
+   *   <li>the prior leg is confirmed (non-null {@code entryAt}) and has NOT already partially
+   *       exited.
+   * </ul>
+   *
+   * <p>Replay: {@link #VERSION_BTO_CORRECTION_SUPERSEDE} is read UNCONDITIONALLY at the top; the
+   * lookup Activity + supersede signal + audit are reachable only at v&gt;=1, so legacy in-flight
+   * histories (DEFAULT_VERSION) emit no new command. Required signal fields missing (no strike /
+   * right / expiry / posted_at) short-circuit BEFORE the lookup dispatch so the command stream
+   * stays stable for malformed signals. The window comparison uses the deterministic {@code
+   * posted_at} and the candidate's deterministic {@code entryAt} — no wall-clock read.
+   */
+  private void maybeSupersedePriorLeg(
+      CopytradeSignalPayload payload, StrategyConfig config, ContractResolveResult resolved) {
+    int v = Workflow.getVersion(VERSION_BTO_CORRECTION_SUPERSEDE, Workflow.DEFAULT_VERSION, 1);
+    if (v == Workflow.DEFAULT_VERSION) {
+      return;
+    }
+    // Required fields for an expiry-correction match. Any missing → no lookup, no command.
+    if (payload.getStrike() == null
+        || payload.getRight() == null
+        || payload.getExpiry() == null
+        || payload.getPostedAt() == null) {
+      return;
+    }
+    PositionLookupActivities.SupersedeCandidate candidate =
+        positionLookup.findOpenPositionByUnderlyingStrikeRight(
+            payload.getTenantId(),
+            payload.getStrategyId(),
+            payload.getTicker(),
+            payload.getStrike(),
+            payload.getRight().value(),
+            payload.getExpiry().toString());
+    if (candidate == null) {
+      return;
+    }
+    // Guardrail: prior leg must be confirmed (entryAt stamped) and NOT already partially exited.
+    if (candidate.entryAt() == null || candidate.partialExited()) {
+      return;
+    }
+    // Guardrail: prior leg's entry within the 120s correction window of the corrected posted_at.
+    Duration delta = Duration.between(candidate.entryAt(), payload.getPostedAt()).abs();
+    if (delta.compareTo(SUPERSEDE_WINDOW) > 0) {
+      return;
+    }
+
+    // All guardrails held — emit the auditable supersede DECISION (BOTH OCCs) then signal the prior
+    // leg's PositionWorkflow to cancel/flatten the wrong-expiry leg.
+    logAudit(
+        payload,
+        KIND_BTO_CORRECTION_SUPERSEDED,
+        subject(
+            "signal_id", payload.getSignalId(),
+            "corrected_option_symbol", resolved.optionSymbol(),
+            "superseded_option_symbol", candidate.occ(),
+            "superseded_workflow_id", candidate.workflowId(),
+            "window_secs", SUPERSEDE_WINDOW.toSeconds(),
+            "delta_secs", delta.toSeconds(),
+            // option_symbol mirrors the corrected leg so OrderFailureAlerter's BTO embed renders
+            // it.
+            "option_symbol", resolved.optionSymbol()));
+
+    ExternalWorkflowStub priorLeg = Workflow.newUntypedExternalWorkflowStub(candidate.workflowId());
+    try {
+      priorLeg.signal("supersede", payload.getSignalId(), resolved.optionSymbol());
+    } catch (SignalExternalWorkflowException | ApplicationFailure e) {
+      // The prior leg died between the lookup and the signal (TOCTOU) — the wrong leg is already
+      // gone; the supersede decision audit above stands. Do NOT fail the corrected BTO over it.
+      Workflow.getLogger(CopytradeSignalWorkflowImpl.class)
+          .warn(
+              "supersede signal dispatch failed (prior leg likely already closed) wf_id={} err={}",
+              candidate.workflowId(),
+              e.getMessage());
+    }
   }
 
   private void auditRiskBreachAbort(
