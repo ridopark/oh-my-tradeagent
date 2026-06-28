@@ -60,6 +60,12 @@ exec:
   fill-listener:
     enabled: ${EXEC_FILL_LISTENER_ENABLED:false}
     ws-url: ${EXEC_FILL_LISTENER_WS_URL:wss://paper-api.alpaca.markets/stream}
+    # Phase G dark flag. FALSE (default) = today's SINGLE pod-wide trade-updates socket on ws-url
+    # using the pod-wide env creds (byte-identical to pre-Phase-G). TRUE = one independently
+    # supervised socket per enumerated live tenant, each authenticating with THAT tenant's resolved
+    # credentials (multi-account real-time fills). Stays FALSE in every manifest until the
+    # leader-elected multi-pod router lands; flipping it on a multi-pod deployment duplicates fills.
+    per-tenant-enabled: ${EXEC_FILL_LISTENER_PER_TENANT_ENABLED:false}
     reconnect-base-ms: 1000
     reconnect-cap-ms: 60000
     dedup-cache-size: 1024

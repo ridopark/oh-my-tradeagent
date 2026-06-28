@@ -10,6 +10,8 @@ import com.ohmytradeagent.exec.broker.BrokerCredentials;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCrypto;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCryptoException;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record;
@@ -171,6 +173,20 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
             .and(PROVIDER.eq(provider))
             .fetchOne(VERSION);
     return version == null ? "absent" : Long.toString(version);
+  }
+
+  /**
+   * Roster of tenants with a credential row for the provider: {@code SELECT DISTINCT tenant_id FROM
+   * broker_credentials WHERE provider = ?}. Per-pod-broker-target-scoped by construction (the pod's
+   * exec DB holds only that broker's rows), so no {@code broker_target} filter is needed.
+   */
+  @Override
+  public Set<String> liveTenants(String provider) {
+    return new LinkedHashSet<>(
+        dsl.selectDistinct(TENANT_ID)
+            .from(table(TABLE))
+            .where(PROVIDER.eq(provider))
+            .fetch(TENANT_ID));
   }
 
   /**

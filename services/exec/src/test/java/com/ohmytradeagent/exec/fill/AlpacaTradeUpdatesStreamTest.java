@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
+import com.ohmytradeagent.exec.broker.BrokerCredentials;
 import com.ohmytradeagent.exec.broker.alpaca.AlpacaProperties;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.math.BigDecimal;
@@ -14,6 +16,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -56,10 +60,14 @@ class AlpacaTradeUpdatesStreamTest {
     metrics = new FillListenerMetrics(registry);
 
     FillListenerProperties props =
-        new FillListenerProperties(true, "ws://localhost:" + port + "/stream", 100L, 1_000L, 32);
+        new FillListenerProperties(
+            true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32);
     AlpacaProperties alpaca = new AlpacaProperties("http://unused", "test-key", "test-secret");
     ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
-    stream = new AlpacaTradeUpdatesStream(props, alpaca, dispatcher, metrics, mapper);
+    // OFF path: the credential source is unused (single socket authenticates with alpacaProps).
+    stream =
+        new AlpacaTradeUpdatesStream(
+            props, alpaca, new ThrowingCredentialSource(), dispatcher, metrics, mapper);
   }
 
   @AfterEach
@@ -263,9 +271,10 @@ class AlpacaTradeUpdatesStreamTest {
     stream =
         new AlpacaTradeUpdatesStream(
             new FillListenerProperties(
-                true, "ws://localhost:" + port + "/stream", 100L, 1_000L, 32),
+                true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32),
             new com.ohmytradeagent.exec.broker.alpaca.AlpacaProperties(
                 "http://unused", "test-key", "test-secret"),
+            new ThrowingCredentialSource(),
             throwing,
             metrics,
             new ObjectMapper().registerModule(new JavaTimeModule()));
@@ -286,6 +295,144 @@ class AlpacaTradeUpdatesStreamTest {
     BrokerFillEvent second = seen.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
     assertThat(second).isNotNull();
     assertThat(second.brokerOrderId()).isEqualTo("brk-after");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Phase G — per-tenant path (exec.fill-listener.per-tenant.enabled = true)
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void perTenantOpensOneSocketPerTenantWithThatTenantsCreds() throws Exception {
+    // Two tenants, both pointing at the same loopback server (so the single RecordingWsServer
+    // collects both auth handshakes), each with DISTINCT resolved creds. Assert both tenants'
+    // keys authenticate — and NOT the pod-wide alpacaProps "test-key".
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of(
+                "alice", new BrokerCredentials("alice-key", "alice-secret", "", url, ""),
+                "bob", new BrokerCredentials("bob-key", "bob-secret", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+
+    // 2 tenants × (auth + listen) = 4 frames.
+    Set<String> auths = new java.util.HashSet<>();
+    for (int i = 0; i < 4; i++) {
+      String frame = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+      assertThat(frame).isNotNull();
+      if (frame.contains("\"authenticate\"")) {
+        auths.add(frame);
+      }
+    }
+    assertThat(auths).hasSize(2);
+    String joined = String.join("\n", auths);
+    assertThat(joined).contains("\"key_id\":\"alice-key\"");
+    assertThat(joined).contains("\"key_id\":\"bob-key\"");
+    assertThat(joined).doesNotContain("test-key");
+  }
+
+  @Test
+  void perTenantSkipsTenantWhoseCredsFailButKeepsOthers() throws Exception {
+    // alice resolves fine; "broken" throws on resolve. Independent supervision: alice's socket
+    // still authenticates while broken's is skipped (logged), never opened.
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of("alice", new BrokerCredentials("alice-key", "alice-secret", "", url, "")));
+    creds.enumerate(
+        "alice", "broken"); // both enumerated, but "broken" has no entry → resolve throws
+    stream = perTenantStream(creds);
+    stream.start();
+
+    Set<String> auths = new java.util.HashSet<>();
+    String f1 = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    String f2 = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    for (String f : new String[] {f1, f2}) {
+      if (f != null && f.contains("\"authenticate\"")) {
+        auths.add(f);
+      }
+    }
+    assertThat(auths).hasSize(1);
+    assertThat(auths.iterator().next()).contains("\"key_id\":\"alice-key\"");
+    // "broken" never authenticated — no third client connected.
+    assertThat(server.frames.poll(500, TimeUnit.MILLISECONDS)).isNull();
+  }
+
+  @Test
+  void perTenantBlankCredsSkippedNotInfiniteBlankAuth() throws Exception {
+    // A blank-key/secret resolution must be SKIPPED at startup, not spun into a blank-auth storm.
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(Map.of("blankguy", new BrokerCredentials("", "", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+
+    // No socket should ever authenticate (the only tenant has blank creds).
+    assertThat(server.frames.poll(800, TimeUnit.MILLISECONDS)).isNull();
+  }
+
+  @Test
+  void perTenantDedupIsTenantScoped() throws Exception {
+    // Same broker_order_id arriving on TWO different tenants' sockets must BOTH dispatch (a
+    // broker_order_id is only unique per account); a duplicate WITHIN one tenant is deduped.
+    // Two separate servers so a broadcast reaches only one tenant's socket.
+    int portB = findFreePort();
+    RecordingWsServer serverB = new RecordingWsServer(portB);
+    serverB.setReuseAddr(true);
+    serverB.start();
+    serverB.awaitStarted(AWAIT_MS, TimeUnit.MILLISECONDS);
+    try {
+      String urlA = "ws://localhost:" + port + "/stream";
+      String urlB = "ws://localhost:" + portB + "/stream";
+      MapCredentialSource creds =
+          new MapCredentialSource(
+              Map.of(
+                  "alice", new BrokerCredentials("alice-key", "alice-secret", "", urlA, ""),
+                  "bob", new BrokerCredentials("bob-key", "bob-secret", "", urlB, "")));
+      stream = perTenantStream(creds);
+      stream.start();
+      // Wait for both handshakes (4 frames across the two servers).
+      assertThat(server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS)).isNotNull();
+      assertThat(server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS)).isNotNull();
+      assertThat(serverB.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS)).isNotNull();
+      assertThat(serverB.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS)).isNotNull();
+
+      String sharedId = "brk-shared";
+      String payload =
+          "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+              + "\"order\":{\"id\":\""
+              + sharedId
+              + "\",\"client_order_id\":\"ck\","
+              + "\"filled_qty\":\"5\",\"filled_avg_price\":\"0.84\","
+              + "\"filled_at\":\"2026-05-19T17:08:11Z\"}}}";
+      // alice gets it once, bob gets the SAME broker_order_id once → both dispatched.
+      server.broadcast(payload);
+      serverB.broadcast(payload);
+
+      BrokerFillEvent first = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+      BrokerFillEvent second = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+      assertThat(first).isNotNull();
+      assertThat(second).isNotNull();
+      assertThat(first.brokerOrderId()).isEqualTo(sharedId);
+      assertThat(second.brokerOrderId()).isEqualTo(sharedId);
+
+      // A duplicate WITHIN alice's socket is deduped → no third dispatch.
+      server.broadcast(payload);
+      assertThat(dispatcher.events.poll(700, TimeUnit.MILLISECONDS)).isNull();
+    } finally {
+      serverB.stop(500);
+    }
+  }
+
+  private AlpacaTradeUpdatesStream perTenantStream(BrokerCredentialSource creds) {
+    return new AlpacaTradeUpdatesStream(
+        new FillListenerProperties(
+            true, "ws://localhost:" + port + "/stream", true, 100L, 1_000L, 32),
+        new AlpacaProperties("http://unused", "test-key", "test-secret"),
+        creds,
+        dispatcher,
+        metrics,
+        new ObjectMapper().registerModule(new JavaTimeModule()));
   }
 
   private void awaitHandshake() throws InterruptedException {
@@ -383,6 +530,48 @@ class AlpacaTradeUpdatesStreamTest {
     @Override
     public void dispatch(BrokerFillEvent event) {
       events.add(event);
+    }
+  }
+
+  /** Always throws on resolve; used on the OFF path where the source must never be touched. */
+  private static class ThrowingCredentialSource implements BrokerCredentialSource {
+    @Override
+    public BrokerCredentials resolve(String tenantId, String provider) {
+      throw new IllegalStateException(
+          "credential source must not be used on the single-socket path");
+    }
+  }
+
+  /**
+   * In-memory per-tenant credential source. The roster defaults to the map keys; {@link #enumerate}
+   * overrides it to include tenants that have NO entry (so resolve throws for them — the
+   * skip-on-failure case).
+   */
+  private static class MapCredentialSource implements BrokerCredentialSource {
+    private final Map<String, BrokerCredentials> byTenant;
+    private Set<String> roster;
+
+    MapCredentialSource(Map<String, BrokerCredentials> byTenant) {
+      this.byTenant = byTenant;
+      this.roster = byTenant.keySet();
+    }
+
+    void enumerate(String... tenants) {
+      this.roster = Set.of(tenants);
+    }
+
+    @Override
+    public BrokerCredentials resolve(String tenantId, String provider) {
+      BrokerCredentials c = byTenant.get(tenantId);
+      if (c == null) {
+        throw BrokerCredentialSource.unavailable("no creds for tenant=" + tenantId);
+      }
+      return c;
+    }
+
+    @Override
+    public Set<String> liveTenants(String provider) {
+      return roster;
     }
   }
 }

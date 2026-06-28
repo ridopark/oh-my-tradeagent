@@ -6,9 +6,13 @@ import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
 import com.ohmytradeagent.exec.broker.BrokerCredentials;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashSet;
+import java.util.Set;
+import java.util.stream.Stream;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -138,6 +142,36 @@ public class FileMountedBrokerCredentialSource implements BrokerCredentialSource
     } catch (IOException e) {
       throw new IllegalStateException("failed reading credential mount mtime at " + snap, e);
     }
+  }
+
+  /**
+   * Roster of mounted tenants for the provider: the {@code <tenant>-<provider>} directories under
+   * the mount root, with the {@code -<provider>} suffix stripped back to the tenant id. A k8s
+   * projected Secret adds bookkeeping entries ({@code ..data}, {@code ..data_tmp}, and dotfile
+   * symlinks); only real directories whose name ends in {@code -<provider>} count, and the leading
+   * dotfiles are skipped, so the roster is exactly the operator-declared tenant set. A missing
+   * mount root yields an EMPTY roster (the per-tenant listener then opens no sockets) rather than
+   * throwing — enumeration is best-effort; {@link #resolve} is the fail-closed gate.
+   */
+  @Override
+  public Set<String> liveTenants(String provider) {
+    if (!Files.isDirectory(root)) {
+      return Set.of();
+    }
+    String suffix = "-" + provider;
+    Set<String> tenants = new LinkedHashSet<>();
+    try (Stream<Path> entries = Files.list(root)) {
+      entries
+          .filter(Files::isDirectory)
+          .map(p -> p.getFileName().toString())
+          .filter(name -> !name.startsWith("."))
+          .filter(name -> name.endsWith(suffix) && name.length() > suffix.length())
+          .map(name -> name.substring(0, name.length() - suffix.length()))
+          .forEach(tenants::add);
+    } catch (IOException e) {
+      throw new UncheckedIOException("failed listing broker credential mount root at " + root, e);
+    }
+    return tenants;
   }
 
   private Path scopedDir(String tenant, String provider) {

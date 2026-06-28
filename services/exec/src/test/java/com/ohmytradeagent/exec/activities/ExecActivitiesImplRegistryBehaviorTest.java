@@ -62,7 +62,7 @@ class ExecActivitiesImplRegistryBehaviorTest {
     // /v2/account read precedes the order — identical to the pre-P4-a single-broker placement.
     EnvFallbackBrokerCredentialSource source =
         new EnvFallbackBrokerCredentialSource(
-            new AlpacaProperties(baseUrl, "key-id-for-test", "key-secret-for-test"), "", "");
+            new AlpacaProperties(baseUrl, "key-id-for-test", "key-secret-for-test"), "", "", "");
     // The MockWebServer URL is localhost (not a "paper" host), so use an impl suffix that leaves
     // the
     // base-url mode-coherence branch inert; the order body — the thing under test — is independent

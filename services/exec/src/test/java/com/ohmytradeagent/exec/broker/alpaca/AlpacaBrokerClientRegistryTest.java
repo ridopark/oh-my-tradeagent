@@ -106,7 +106,7 @@ class AlpacaBrokerClientRegistryTest {
     // registry passes and that both tenants resolve to a usable broker.
     EnvFallbackBrokerCredentialSource envSource =
         new EnvFallbackBrokerCredentialSource(
-            new AlpacaProperties(baseUrl, "key", "secret"), "", "");
+            new AlpacaProperties(baseUrl, "key", "secret"), "", "", "");
     AlpacaBrokerClientRegistry reg = registry(envSource, "alpaca-x");
 
     assertThat(reg.brokerFor("dev", "alpaca")).isNotNull();
