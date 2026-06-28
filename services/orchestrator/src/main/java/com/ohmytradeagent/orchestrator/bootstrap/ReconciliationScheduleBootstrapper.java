@@ -146,13 +146,19 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
    * tenant has no prior {@code broker_target}-renamed schedules to reap; broker-target-rename
    * cleanup stays a boot-only concern. Returns silently (logs) on a missing/whitelist-invalid
    * config so a single bad tenant can't wedge the loop.
+   *
+   * <p>Returns {@code true} only when the schedule is confirmed present (freshly created or
+   * already-running); {@code false} if the config is missing/whitelist-invalid or the create hit an
+   * unexpected error. The reconcile loop uses this to retry a pair next tick rather than latch it
+   * as done after a transient failure.
    */
-  void ensureForTenantStrategy(ScheduleClient scheduleClient, String tenantId, String strategyId) {
+  boolean ensureForTenantStrategy(
+      ScheduleClient scheduleClient, String tenantId, String strategyId) {
     String brokerTarget = resolveValidBrokerTarget(tenantId, strategyId);
     if (brokerTarget == null) {
-      return;
+      return false;
     }
-    ensureSchedule(scheduleClient, tenantId, strategyId, brokerTarget);
+    return ensureSchedule(scheduleClient, tenantId, strategyId, brokerTarget);
   }
 
   /**
@@ -252,7 +258,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
    * registry collision; the old zombie metadata stays in Temporal forever but is inert (doesn't
    * fire, doesn't appear in listings, doesn't consume resources).
    */
-  private void ensureSchedule(
+  private boolean ensureSchedule(
       ScheduleClient scheduleClient, String tenantId, String strategyId, String brokerTarget) {
     String scheduleId = "recon-v2-t-" + tenantId + "-s-" + strategyId + "-" + brokerTarget;
     String wfIdPrefix = WorkflowIds.reconciliationPrefix(tenantId, strategyId, brokerTarget);
@@ -293,10 +299,13 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
           tenantId,
           strategyId,
           brokerTarget);
+      return true;
     } catch (ScheduleAlreadyRunningException already) {
       log.info("Reconciliation Schedule id={} already exists (warm boot)", scheduleId);
+      return true;
     } catch (RuntimeException e) {
       log.error("failed to create Reconciliation Schedule id={}", scheduleId, e);
+      return false;
     }
   }
 }

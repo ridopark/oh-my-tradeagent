@@ -74,13 +74,20 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
    * already running (both use {@code REJECT_DUPLICATE}, so a re-assert is a benign no-op). Shared
    * by the boot {@link #run} path and {@code TenantReconcileLoop}, so a runtime-inserted tenant
    * gets the same kill-switch coverage as a mounted one without an orchestrator restart.
+   *
+   * <p>Returns {@code true} only when BOTH kill-switches are confirmed running (freshly started or
+   * already-running); {@code false} if either start hit an unexpected error. Both starts are always
+   * attempted (no short-circuit). The reconcile loop uses this so it retries a pair next tick
+   * rather than latching it as done after a transient failure (e.g. Temporal briefly unreachable) —
+   * which would otherwise leave a live tenant with no kill-switch until a restart.
    */
-  public void ensureForTenantStrategy(String tenantId, String strategyId) {
-    startKillSwitch(tenantId, strategyId);
-    startAccountKillSwitch(tenantId);
+  public boolean ensureForTenantStrategy(String tenantId, String strategyId) {
+    boolean perStrategy = startKillSwitch(tenantId, strategyId);
+    boolean perAccount = startAccountKillSwitch(tenantId);
+    return perStrategy && perAccount;
   }
 
-  private void startKillSwitch(String tenantId, String strategyId) {
+  private boolean startKillSwitch(String tenantId, String strategyId) {
     String wfId = WorkflowIds.killswitch(tenantId, strategyId);
     Map<String, Object> sa = new HashMap<>();
     sa.put("TenantStrategy", WorkflowIds.tenantStrategy(tenantId, strategyId));
@@ -103,14 +110,17 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
     try {
       WorkflowClient.start(stub::run, input);
       log.info("started KillSwitchWorkflow wf_id={}", wfId);
+      return true;
     } catch (WorkflowExecutionAlreadyStarted alreadyStarted) {
       log.info("KillSwitchWorkflow wf_id={} already running (warm boot)", wfId);
+      return true;
     } catch (RuntimeException e) {
       log.error("failed to start KillSwitchWorkflow wf_id={}", wfId, e);
+      return false;
     }
   }
 
-  private void startAccountKillSwitch(String tenantId) {
+  private boolean startAccountKillSwitch(String tenantId) {
     String wfId = WorkflowIds.accountKillswitch(tenantId);
 
     WorkflowOptions opts =
@@ -130,10 +140,13 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
     try {
       WorkflowClient.start(stub::run, input);
       log.info("started AccountKillSwitchWorkflow wf_id={}", wfId);
+      return true;
     } catch (WorkflowExecutionAlreadyStarted alreadyStarted) {
       log.info("AccountKillSwitchWorkflow wf_id={} already running (warm boot)", wfId);
+      return true;
     } catch (RuntimeException e) {
       log.error("failed to start AccountKillSwitchWorkflow wf_id={}", wfId, e);
+      return false;
     }
   }
 }

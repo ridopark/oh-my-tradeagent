@@ -40,6 +40,10 @@ class TenantReconcileLoopTest {
     recon = mock(ReconciliationScheduleBootstrapper.class);
     scheduleClient = mock(ScheduleClient.class);
     when(recon.newScheduleClient()).thenReturn(scheduleClient);
+    // Default: both ensures succeed, so a pair is marked seen and not re-ensured. Tests that
+    // exercise the failure/retry path override these for specific args.
+    when(killSwitch.ensureForTenantStrategy(any(), any())).thenReturn(true);
+    when(recon.ensureForTenantStrategy(any(), any(), any())).thenReturn(true);
     loop = new TenantReconcileLoop(registry, killSwitch, recon);
   }
 
@@ -105,6 +109,31 @@ class TenantReconcileLoopTest {
     loop.reconcileTick();
     verify(killSwitch, times(1)).ensureForTenantStrategy("beta", "strat-b");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "beta", "strat-b");
+  }
+
+  /**
+   * A transient ensure failure must NOT latch the pair as seen — it is retried on subsequent ticks
+   * and marked seen only once it succeeds. Guards the restart-free safety guarantee: a pair whose
+   * first ensure fails (e.g. Temporal briefly unreachable) must not be left without a kill-switch /
+   * recon schedule until an orchestrator restart.
+   */
+  @Test
+  void failedEnsureIsNotLatchedAndRetriesUntilSuccess() {
+    when(registry.list()).thenReturn(List.of(A));
+
+    // Tick 1: kill-switch ensure transiently fails → A must NOT be marked seen.
+    when(killSwitch.ensureForTenantStrategy("acme", "strat-a")).thenReturn(false);
+    loop.reconcileTick();
+    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
+
+    // Tick 2: still not seen → retried; now it succeeds → marked seen.
+    when(killSwitch.ensureForTenantStrategy("acme", "strat-a")).thenReturn(true);
+    loop.reconcileTick();
+    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
+
+    // Tick 3: now seen → no further ensure call.
+    loop.reconcileTick();
+    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
   }
 
   /** A failing registry.list() must not throw out of the tick (loop stays alive). */

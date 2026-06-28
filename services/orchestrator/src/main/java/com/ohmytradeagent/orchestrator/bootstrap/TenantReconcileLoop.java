@@ -82,19 +82,44 @@ public class TenantReconcileLoop {
       if (seen.contains(ts)) {
         continue;
       }
-      if (scheduleClient == null) {
-        // Lazily build the ScheduleClient only when there is at least one new pair to ensure.
-        scheduleClient = reconciliationScheduleBootstrapper.newScheduleClient();
+      // A pair is marked seen ONLY once both ensures report success, so a transient failure
+      // (e.g. Temporal briefly unreachable) is retried on the next tick instead of latched as
+      // done — otherwise a live tenant could be left with no kill-switch until a restart. The
+      // per-pair try/catch keeps an unexpected throw (e.g. newScheduleClient) from aborting the
+      // tick or starving later pairs; an un-added pair is simply retried next tick.
+      try {
+        if (scheduleClient == null) {
+          // Lazily build the ScheduleClient only when there is at least one new pair to ensure.
+          scheduleClient = reconciliationScheduleBootstrapper.newScheduleClient();
+        }
+        boolean killSwitchOk =
+            killSwitchBootstrapper.ensureForTenantStrategy(ts.tenantId(), ts.strategyId());
+        boolean reconOk =
+            reconciliationScheduleBootstrapper.ensureForTenantStrategy(
+                scheduleClient, ts.tenantId(), ts.strategyId());
+        if (killSwitchOk && reconOk) {
+          seen.add(ts);
+          ensured++;
+          log.info(
+              "tenant reconcile: ensured kill-switch + recon schedule for tenant={} strategy={}",
+              ts.tenantId(),
+              ts.strategyId());
+        } else {
+          log.warn(
+              "tenant reconcile: tenant={} strategy={} not fully ensured"
+                  + " (kill_switch_ok={} recon_ok={}); will retry next tick",
+              ts.tenantId(),
+              ts.strategyId(),
+              killSwitchOk,
+              reconOk);
+        }
+      } catch (RuntimeException e) {
+        log.error(
+            "tenant reconcile: unexpected failure ensuring tenant={} strategy={}; will retry next tick",
+            ts.tenantId(),
+            ts.strategyId(),
+            e);
       }
-      killSwitchBootstrapper.ensureForTenantStrategy(ts.tenantId(), ts.strategyId());
-      reconciliationScheduleBootstrapper.ensureForTenantStrategy(
-          scheduleClient, ts.tenantId(), ts.strategyId());
-      seen.add(ts);
-      ensured++;
-      log.info(
-          "tenant reconcile: ensured kill-switch + recon schedule for tenant={} strategy={}",
-          ts.tenantId(),
-          ts.strategyId());
     }
     if (ensured > 0) {
       log.info("tenant reconcile: ensured {} new (tenant, strategy) pair(s) this tick", ensured);
