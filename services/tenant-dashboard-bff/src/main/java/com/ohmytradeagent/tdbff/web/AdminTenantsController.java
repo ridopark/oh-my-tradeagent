@@ -90,9 +90,7 @@ public class AdminTenantsController {
       // until" the dashboard renders); STALE/DEACTIVATED carry no live "valid until".
       m.put(
           "expires_at",
-          st.state() == LivePromotionStateReader.State.VALID && st.expiresAt() != null
-              ? st.expiresAt().toString()
-              : null);
+          st.state() == LivePromotionStateReader.State.VALID ? st.expiresAt().toString() : null);
       m.put("at_risk", st.atRisk());
     } else {
       // Paper never hits the promotion gate.

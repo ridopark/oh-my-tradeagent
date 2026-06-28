@@ -2,6 +2,7 @@ package com.ohmytradeagent.tdbff.credentials;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import org.jooq.DSLContext;
@@ -83,7 +84,7 @@ class AdminTenantAccountReaderIT {
   void reset() {
     paperDsl.execute("DELETE FROM broker_credentials");
     liveDsl.execute("DELETE FROM broker_credentials");
-    reader = new AdminTenantAccountReader(paperDsl, liveDsl);
+    reader = new AdminTenantAccountReader(new BrokerDataSourceRouter(paperDsl, liveDsl));
   }
 
   @Test
