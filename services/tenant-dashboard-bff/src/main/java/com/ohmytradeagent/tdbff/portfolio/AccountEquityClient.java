@@ -93,19 +93,29 @@ public class AccountEquityClient {
       // long after this request already degraded to null.
       log.warn(
           "AccountSnapshotWorkflow timed out broker_target={}; cancelling orphan", brokerTarget);
-      try {
-        stub.cancel();
-      } catch (RuntimeException cancelErr) {
-        log.warn(
-            "AccountSnapshotWorkflow cancel failed broker_target={} err={}",
-            brokerTarget,
-            cancelErr.getMessage());
-      }
+      cancelQuietly(stub, brokerTarget);
       return new BrokerAccount(null, null);
     } catch (RuntimeException e) {
+      // start() may have already succeeded before getResult() threw (e.g. transient Temporal
+      // connectivity), leaving the workflow running. Cancel it too so it doesn't orphan until its
+      // scheduleToClose timeout.
       log.warn(
-          "AccountSnapshotWorkflow failed broker_target={} err={}", brokerTarget, e.getMessage());
+          "AccountSnapshotWorkflow failed broker_target={} err={}; cancelling orphan",
+          brokerTarget,
+          e.getMessage());
+      cancelQuietly(stub, brokerTarget);
       return new BrokerAccount(null, null);
+    }
+  }
+
+  private void cancelQuietly(WorkflowStub stub, String brokerTarget) {
+    try {
+      stub.cancel();
+    } catch (RuntimeException cancelErr) {
+      log.warn(
+          "AccountSnapshotWorkflow cancel failed broker_target={} err={}",
+          brokerTarget,
+          cancelErr.getMessage());
     }
   }
 }

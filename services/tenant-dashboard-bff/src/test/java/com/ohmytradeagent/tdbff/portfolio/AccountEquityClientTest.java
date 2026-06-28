@@ -60,7 +60,7 @@ class AccountEquityClientTest {
   }
 
   @Test
-  void runtimeFailureDegradesToNullWithoutCancelling() throws Exception {
+  void runtimeFailureAfterStartCancelsOrphanAndDegradesToNull() throws Exception {
     WorkflowClient client = mock(WorkflowClient.class);
     WorkflowStub stub = stubReturning(client);
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
@@ -70,6 +70,9 @@ class AccountEquityClientTest {
 
     assertThat(acct.equity()).isNull();
     assertThat(acct.accountNumber()).isNull();
-    verify(stub, never()).cancel(); // cancel is timeout-only; a start/connect failure has no orphan
+    // start() succeeded before getResult() threw, so the workflow is running — it must be
+    // cancelled,
+    // not left to orphan until its scheduleToClose timeout.
+    verify(stub).cancel();
   }
 }
