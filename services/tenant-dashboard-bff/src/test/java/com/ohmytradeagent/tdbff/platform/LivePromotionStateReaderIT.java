@@ -92,6 +92,21 @@ class LivePromotionStateReaderIT {
         broker);
   }
 
+  private void seedConfigChange(String tenant, String strategy, String interval, String... keys) {
+    String arr =
+        java.util.Arrays.stream(keys)
+            .map(k -> "\"" + k + "\"")
+            .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+    dsl.execute(
+        "INSERT INTO audit_log (schema_version, tenant_id, strategy_id, event_id, occurred_at,"
+            + " kind, subject) VALUES (1, ?, ?, gen_random_uuid(), now() + interval '"
+            + interval
+            + "', 'TenantConfigChanged', jsonb_build_object('changed_keys', ?::jsonb))",
+        tenant,
+        strategy,
+        arr);
+  }
+
   private LivePromotionState read() {
     return reader.stateOf(TENANT, STRATEGY, BROKER, OffsetDateTime.now(ZoneOffset.UTC));
   }
@@ -163,6 +178,45 @@ class LivePromotionStateReaderIT {
   void deactivationForDifferentBrokerTarget_doesNotVoidApproval() {
     seed("LivePromotionApproved", TENANT, STRATEGY, BROKER, "-1 hour");
     seed("LivePromotionDeactivated", TENANT, STRATEGY, "tradier-live", "0 seconds");
+
+    assertThat(read().state()).isEqualTo(State.VALID);
+  }
+
+  @Test
+  void staleApprovalWithLaterDeactivation_isStale_matchingGateOrdering() {
+    // The gate checks the STALE floor BEFORE the deactivation probe, so a >30d-old approval that
+    // was
+    // ALSO later deactivated reports STALE (the gate's actual disposition), not DEACTIVATED.
+    seed("LivePromotionApproved", TENANT, STRATEGY, BROKER, "-31 days");
+    seed("LivePromotionDeactivated", TENANT, STRATEGY, BROKER, "-1 hour");
+
+    assertThat(read().state()).isEqualTo(State.STALE);
+  }
+
+  @Test
+  void riskRelevantConfigChangeAfterApproval_isConfigChanged() {
+    // A risk-relevant TenantConfigChanged strictly after the approval voids it (the gate refuses
+    // live orders) — the dashboard must NOT show VALID.
+    seed("LivePromotionApproved", TENANT, STRATEGY, BROKER, "-1 hour");
+    seedConfigChange(TENANT, STRATEGY, "0 seconds", "daily_loss_threshold");
+
+    assertThat(read().state()).isEqualTo(State.CONFIG_CHANGED);
+  }
+
+  @Test
+  void nonRiskConfigChangeAfterApproval_staysValid() {
+    // A config change touching only non-risk keys does NOT void the promotion.
+    seed("LivePromotionApproved", TENANT, STRATEGY, BROKER, "0 seconds");
+    seedConfigChange(TENANT, STRATEGY, "1 second", "some_cosmetic_label");
+
+    assertThat(read().state()).isEqualTo(State.VALID);
+  }
+
+  @Test
+  void riskConfigChangeBeforeApproval_doesNotVoid() {
+    // Only a change strictly AFTER the matched approval voids it.
+    seedConfigChange(TENANT, STRATEGY, "-2 hours", "daily_loss_threshold");
+    seed("LivePromotionApproved", TENANT, STRATEGY, BROKER, "-1 hour");
 
     assertThat(read().state()).isEqualTo(State.VALID);
   }

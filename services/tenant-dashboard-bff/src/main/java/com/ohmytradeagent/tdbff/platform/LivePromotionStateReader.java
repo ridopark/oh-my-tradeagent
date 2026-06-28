@@ -4,6 +4,8 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -12,11 +14,14 @@ import org.springframework.stereotype.Component;
 /**
  * Read-only, operator-scoped view of a (tenant, strategy, broker_target)'s live-promotion state
  * from the orchestrator-owned {@code audit_log}. Replicates the classification of {@code
- * AuditQueryActivitiesImpl#checkLivePromotion} (newest {@code LivePromotionApproved}, then a {@code
- * LivePromotionDeactivated} strictly after it, then the staleness floor) so the admin tenant list
- * can render "Live · valid until &lt;expires_at&gt;" / "at risk" / "deactivated" WITHOUT calling
- * the orchestrator. It deliberately depends only on the audit kind strings and subject keys — the
- * stable contract — not on orchestrator Java.
+ * AuditQueryActivitiesImpl#checkLivePromotion} in the SAME order (newest {@code
+ * LivePromotionApproved}, then the staleness floor, then a {@code LivePromotionDeactivated}
+ * strictly after it, then a risk-relevant {@code TenantConfigChanged} strictly after it) so the
+ * admin tenant list renders the SAME disposition the gate computes — "Live · valid until
+ * &lt;expires_at&gt;" / "at risk" / "stale" / "deactivated" / "config changed" — WITHOUT calling
+ * the orchestrator. It deliberately depends only on the audit kind strings + subject keys (the
+ * stable contract), not on orchestrator Java; the ordering and risk-key set are kept in sync with
+ * the gate.
  *
  * <p>This reads NO secret material: only {@code occurred_at} from {@code audit_log}.
  *
@@ -38,6 +43,34 @@ public class LivePromotionStateReader {
   private static final String KIND_APPROVED = "LivePromotionApproved";
   private static final String KIND_DEACTIVATED = "LivePromotionDeactivated";
 
+  // Mirrors AuditQueryActivitiesImpl.RISK_RELEVANT_CONFIG_KEYS — the strategy_config keys whose
+  // post-approval change voids a live promotion (the gate returns CONFIG_CHANGED and refuses live
+  // orders). Kept local so the BFF read does not depend on orchestrator Java; keep in sync.
+  private static final Set<String> RISK_RELEVANT_CONFIG_KEYS =
+      Set.of(
+          "broker_target",
+          "daily_loss_threshold",
+          "notional_cap_pct_of_capital_base",
+          "max_contracts",
+          "min_contracts",
+          "max_positions",
+          "capital_weight",
+          "max_notional_per_signal",
+          "max_daily_notional_deployed",
+          "notional_cap_pct_of_equity",
+          "same_underlying_count",
+          "sector_concentration_cap",
+          "daily_trade_count",
+          "drawdown_velocity_threshold");
+
+  // RISK_RELEVANT_CONFIG_KEYS as a Postgres text[] literal for inlining into the plain-SQL
+  // jsonb_exists_any(target, text[]) call (the `?|` operator can't be used — jOOQ plain SQL treats
+  // every `?` as a JDBC bind). Compile-time constants (never user input) → injection-safe.
+  private static final String RISK_KEYS_SQL_ARRAY_LITERAL =
+      RISK_RELEVANT_CONFIG_KEYS.stream()
+          .map(k -> "'" + k + "'")
+          .collect(Collectors.joining(",", "ARRAY[", "]::text[]"));
+
   private final DSLContext orchestratorDsl;
 
   public LivePromotionStateReader(@Qualifier("orchestratorDsl") DSLContext orchestratorDsl) {
@@ -48,6 +81,7 @@ public class LivePromotionStateReader {
     VALID,
     STALE,
     DEACTIVATED,
+    CONFIG_CHANGED,
     ABSENT
   }
 
@@ -55,8 +89,8 @@ public class LivePromotionStateReader {
    * The live-promotion state for one (tenant, strategy, broker_target).
    *
    * @param state classification
-   * @param expiresAt {@code approved_at + TTL}; present only when an approval exists (VALID, STALE,
-   *     DEACTIVATED), {@code null} for ABSENT
+   * @param expiresAt {@code approved_at + TTL}; present whenever an approval exists (VALID, STALE,
+   *     DEACTIVATED, CONFIG_CHANGED), {@code null} for ABSENT
    * @param atRisk true iff VALID and within {@link #AT_RISK_WINDOW} of {@code expiresAt}
    */
   public record LivePromotionState(State state, OffsetDateTime expiresAt, boolean atRisk) {
@@ -91,9 +125,18 @@ public class LivePromotionStateReader {
     }
     OffsetDateTime approvedAt = OffsetDateTime.ofInstant(ts.toInstant(), ZoneOffset.UTC);
     OffsetDateTime expiresAt = approvedAt.plus(LIVE_PROMOTION_TTL);
+    Timestamp approvedTs = Timestamp.from(approvedAt.toInstant());
 
-    // A deactivation strictly AFTER the matched approval is an explicit operator revocation — wins
-    // over the staleness check (matches checkLivePromotion's ordering: deactivation before stale).
+    // Mirror checkLivePromotion's ordering EXACTLY (the gate is the authority): STALE floor first,
+    // then an explicit deactivation, then a risk-relevant config change — all post-approval
+    // invalidations. (expiresAt < now) ⇔ the gate's (approvedAt < now - TTL).
+    if (expiresAt.isBefore(now)) {
+      return new LivePromotionState(State.STALE, expiresAt, false);
+    }
+
+    // A LivePromotionDeactivated strictly AFTER the matched approval is an explicit operator
+    // revocation. occurred_at > ? is strictly-after, so a fresh re-activation (newer approved_at,
+    // selected above) is NOT voided.
     Record deact =
         orchestratorDsl.fetchOne(
             "SELECT 1 FROM audit_log "
@@ -104,13 +147,27 @@ public class LivePromotionStateReader {
             tenantId,
             strategyId,
             brokerTarget,
-            Timestamp.from(approvedAt.toInstant()));
+            approvedTs);
     if (deact != null) {
       return new LivePromotionState(State.DEACTIVATED, expiresAt, false);
     }
 
-    if (expiresAt.isBefore(now)) {
-      return new LivePromotionState(State.STALE, expiresAt, false);
+    // A risk-relevant TenantConfigChanged strictly AFTER the matched approval voids it (the gate
+    // refuses live orders). TenantConfigChanged is (tenant, strategy)-keyed — NO broker_target
+    // filter, matching the authority. jsonb_exists_any(target, text[]) is the functional equivalent
+    // of `?|` that avoids jOOQ's `?`-as-bind misparse.
+    Record cfg =
+        orchestratorDsl.fetchOne(
+            "SELECT 1 FROM audit_log WHERE tenant_id = ? AND strategy_id = ? "
+                + "AND kind = 'TenantConfigChanged' AND occurred_at > ? "
+                + "AND jsonb_exists_any(subject -> 'changed_keys', "
+                + RISK_KEYS_SQL_ARRAY_LITERAL
+                + ") LIMIT 1",
+            tenantId,
+            strategyId,
+            approvedTs);
+    if (cfg != null) {
+      return new LivePromotionState(State.CONFIG_CHANGED, expiresAt, false);
     }
 
     boolean atRisk = !expiresAt.isAfter(now.plus(AT_RISK_WINDOW));
