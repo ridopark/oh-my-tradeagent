@@ -127,23 +127,24 @@ public class LiveActivationWorkflowImpl
     String tenant = request.getTenantId();
     String strategyId = request.getStrategyId();
 
-    // broker_target is resolved from the STORED config so the LivePromotionDeactivated row matches
-    // the broker_target the gate's deactivation probe looks up (subject->>'broker_target') — the
-    // inbound request's broker_target is only a routing placeholder a placeholder could never void.
+    // Emit the deactivation row ONLY when broker_target resolves from the STORED config, so it
+    // matches the broker_target the gate's deactivation probe looks up (subject->>'broker_target').
+    // The inbound request's broker_target is only a routing placeholder the gate could never match,
+    // so on a config-miss we must NOT write an unmatchable (silently inert) void row that would
+    // still report success — and with no config there is no live order path to void anyway. The
+    // kill-switch trip below is the real stop (it also halts in-flight / open positions, which the
+    // void row — which only brakes new entries — does not).
     StrategyConfig config = strategy.get(tenant, strategyId);
-    LiveDeactivationRequest deactReq = new LiveDeactivationRequest();
-    deactReq.setSchemaVersion(request.getSchemaVersion());
-    deactReq.setTenantId(tenant);
-    deactReq.setStrategyId(strategyId);
-    deactReq.setOperatorId(request.getOperatorId());
-    deactReq.setBrokerTarget(
-        config != null && config.getBrokerTarget() != null
-            ? LiveDeactivationRequest.BrokerTarget.fromValue(config.getBrokerTarget().value())
-            : request.getBrokerTarget());
-
-    // Emit the deactivation row FIRST (the durable gate-invalidating record), then trip the kill
-    // switch as belt-and-suspenders.
-    promotion.deactivate(deactReq);
+    if (config != null && config.getBrokerTarget() != null) {
+      LiveDeactivationRequest deactReq = new LiveDeactivationRequest();
+      deactReq.setSchemaVersion(request.getSchemaVersion());
+      deactReq.setTenantId(tenant);
+      deactReq.setStrategyId(strategyId);
+      deactReq.setOperatorId(request.getOperatorId());
+      deactReq.setBrokerTarget(
+          LiveDeactivationRequest.BrokerTarget.fromValue(config.getBrokerTarget().value()));
+      promotion.deactivate(deactReq);
+    }
     gate.tripKillSwitch(tenant, strategyId, request.getOperatorId(), "live_deactivation:one_click");
 
     return result(LiveActivationResult.Outcome.DEACTIVATED, null, null);

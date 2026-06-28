@@ -66,10 +66,12 @@ public final class WorkflowIds {
    * (operator-account-onboarding) dark-gated one-click live activation / deactivation for {@code
    * (tenant, strategy)}.
    *
-   * <p>Routes through {@link #tenantStrategy} (the activation IS strategy-scoped) and appends the
-   * {@code correlationId} so a retried api-gateway call collides on {@code REJECT_DUPLICATE} rather
-   * than re-running the gate + emitting a duplicate {@code LivePromotionApproved} /{@code
-   * LivePromotionDeactivated} row. Mirrors {@link #strategyConfigUpdate}'s shape.
+   * <p>Routes through {@link #tenantStrategy} (the activation IS strategy-scoped) and appends a
+   * fresh per-call {@code correlationId} so each click is its own run — re-activation (re-arming
+   * after the 30-day window) is intentionally a new workflow, not a {@code REJECT_DUPLICATE}
+   * collision. A double-submit is therefore NOT deduped, but that is harmless: the order-time gate
+   * reads the NEWEST matching {@code LivePromotionApproved} row, so a redundant approval row
+   * changes nothing. Mirrors {@link #strategyConfigUpdate}'s shape.
    */
   public static String liveActivation(String tenantId, String strategyId, String correlationId) {
     return tenantStrategy(tenantId, strategyId) + "/live-activation/" + correlationId;

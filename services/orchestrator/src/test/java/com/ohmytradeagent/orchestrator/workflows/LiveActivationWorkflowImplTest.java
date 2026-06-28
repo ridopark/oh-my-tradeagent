@@ -269,4 +269,20 @@ class LiveActivationWorkflowImplTest {
     verify(gate, times(1))
         .tripKillSwitch(eq(TENANT), eq(STRATEGY), eq(OPERATOR), any(String.class));
   }
+
+  @Test
+  void deactivate_configMiss_skipsUnmatchableRow_butStillTripsKillSwitch() {
+    // A config-read miss must NOT write a LivePromotionDeactivated row with the inbound placeholder
+    // broker_target — it could never match the gate's probe (a silent, success-reporting no-op).
+    // The
+    // kill-switch trip is the real stop and must still fire.
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(null);
+
+    LiveActivationResult result = deactivateStub().deactivateLive(deactivateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.DEACTIVATED);
+    verify(promotion, never()).deactivate(any());
+    verify(gate, times(1))
+        .tripKillSwitch(eq(TENANT), eq(STRATEGY), eq(OPERATOR), any(String.class));
+  }
 }
