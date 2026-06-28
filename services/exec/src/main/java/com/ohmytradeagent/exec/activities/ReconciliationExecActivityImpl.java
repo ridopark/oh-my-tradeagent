@@ -53,8 +53,10 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
   }
 
   @Override
-  public List<BrokerOpenOrder> brokerListOpenOrders() {
-    return broker(BrokerClientRegistry.ACCOUNT_LEVEL).listOpenOrders();
+  public List<BrokerOpenOrder> brokerListOpenOrders(String tenantId, String strategyId) {
+    // Phase B: resolve the request's tenant (mirrors brokerListOpenPositions); strategyId is a
+    // forward-compat hook — the resolved broker is already tenant-scoped.
+    return broker(tenantId).listOpenOrders();
   }
 
   @Override
