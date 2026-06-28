@@ -3,9 +3,9 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import io.temporal.client.schedules.ScheduleClient;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -47,8 +47,16 @@ public class TenantReconcileLoop {
   private final KillSwitchBootstrapper killSwitchBootstrapper;
   private final ReconciliationScheduleBootstrapper reconciliationScheduleBootstrapper;
 
-  /** In-memory set of pairs already ensured this process lifetime. Re-ensure is a benign no-op. */
-  private final Set<TenantStrategy> seen = new LinkedHashSet<>();
+  /**
+   * Pairs already successfully ensured this process lifetime; re-ensuring is a benign idempotent
+   * no-op. Concurrent-safe via {@link ConcurrentHashMap#newKeySet()}: default Spring {@code
+   * fixedDelay} scheduling already serializes ticks on a single thread, but relying on that is an
+   * implicit platform guarantee — if a custom multi-threaded {@code TaskScheduler} ever runs ticks
+   * in parallel, a plain {@code LinkedHashSet} would be a silent data race. With a concurrent set
+   * the worst case is a pair ensured twice (idempotent), never set corruption. We make the
+   * thread-safety invariant explicit rather than implicit.
+   */
+  private final Set<TenantStrategy> seen = ConcurrentHashMap.newKeySet();
 
   public TenantReconcileLoop(
       StrategyRegistry registry,
