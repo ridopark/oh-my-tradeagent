@@ -292,6 +292,14 @@ class DbBrokerCredentialSourceIT {
   }
 
   @Test
+  void liveTenantsReturnsDistinctTenantIdsForProvider() {
+    seed(crypto(), "alice", "alice-key", "alice-secret", PAPER_HOST, "wss://x", "111", 1);
+    seed(crypto(), "bob", "bob-key", "bob-secret", PAPER_HOST, "wss://y", "222", 1);
+
+    assertThat(source(PAPER).liveTenants(PROVIDER)).containsExactlyInAnyOrder("alice", "bob");
+  }
+
+  @Test
   void resolveThrownMessageNeverLeaksSecretMaterial() {
     // MUST-FIX-7: even on a decrypt failure the thrown message names nothing of the key/secret.
     seed(

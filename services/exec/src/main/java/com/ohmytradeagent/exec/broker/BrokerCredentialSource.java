@@ -1,6 +1,7 @@
 package com.ohmytradeagent.exec.broker;
 
 import io.temporal.failure.ApplicationFailure;
+import java.util.Set;
 
 /**
  * Resolves the {@link BrokerCredentials} for a {@code (tenantId, provider)} key. The seam that P4-b
@@ -52,5 +53,30 @@ public interface BrokerCredentialSource {
    */
   default String fingerprint(String tenantId, String provider) {
     return "static";
+  }
+
+  /**
+   * The roster of tenants this source can serve credentials for, for the given provider. Phase G's
+   * per-tenant fill listener enumerates this to open one authenticated trade-updates WebSocket per
+   * live tenant (replacing the single pod-wide socket).
+   *
+   * <p>This roster is per-pod-broker-target-scoped BY CONSTRUCTION: each exec pod is deployed with
+   * exactly one mode's credentials (the {@code env} cred set, OR the {@code file} mount tree, OR
+   * the {@code db} rows for that pod's broker), so no extra {@code broker_target} filter is needed
+   * — whatever this source can resolve is exactly that pod's account(s).
+   *
+   * <p>The default is the EMPTY set: a source that cannot cheaply enumerate its tenants (or has no
+   * meaningful roster) contributes none, and the per-tenant listener simply opens no sockets for
+   * it. The three concrete sources override this:
+   *
+   * <ul>
+   *   <li>env-fallback → the single bootstrap tenant id (its only account)
+   *   <li>file-mounted → the per-tenant {@code <tenant>-<provider>} directories under the mount
+   *       root
+   *   <li>db → {@code SELECT DISTINCT tenant_id WHERE provider = ?}
+   * </ul>
+   */
+  default Set<String> liveTenants(String provider) {
+    return Set.of();
   }
 }

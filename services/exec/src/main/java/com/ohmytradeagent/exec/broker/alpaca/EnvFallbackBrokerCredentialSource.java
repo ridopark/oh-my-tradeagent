@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.broker.alpaca;
 
 import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
 import com.ohmytradeagent.exec.broker.BrokerCredentials;
+import java.util.Set;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -30,14 +31,18 @@ public class EnvFallbackBrokerCredentialSource implements BrokerCredentialSource
   private final AlpacaProperties props;
   private final String wsUrl;
   private final String expectedAccountId;
+  private final String bootstrapTenant;
 
   public EnvFallbackBrokerCredentialSource(
       AlpacaProperties props,
       @Value("${exec.fill-listener.ws-url:}") String wsUrl,
-      @Value("${EXPECTED_ALPACA_ACCOUNT_ID:}") String expectedAccountId) {
+      @Value("${EXPECTED_ALPACA_ACCOUNT_ID:}") String expectedAccountId,
+      @Value("${broker.creds.account-level-tenant:${EXEC_BOOTSTRAP_TENANT_ID:}}")
+          String bootstrapTenant) {
     this.props = props;
     this.wsUrl = wsUrl;
     this.expectedAccountId = expectedAccountId;
+    this.bootstrapTenant = bootstrapTenant;
   }
 
   @Override
@@ -49,5 +54,20 @@ public class EnvFallbackBrokerCredentialSource implements BrokerCredentialSource
     // WS URL + expected account id. P4-b replaces this with the per-tenant source.
     return new BrokerCredentials(
         props.apiKeyId(), props.apiSecretKey(), props.baseUrl(), wsUrl, expectedAccountId);
+  }
+
+  /**
+   * The env-fallback pod serves a single account, so its roster is exactly the single bootstrap
+   * tenant ({@code broker.creds.account-level-tenant} / {@code EXEC_BOOTSTRAP_TENANT_ID} — the same
+   * id the {@code ACCOUNT_LEVEL} sentinel and the account-identity probe map to). A blank bootstrap
+   * tenant yields an EMPTY roster so the per-tenant listener opens no sockets rather than
+   * authenticating under a blank tenant id.
+   */
+  @Override
+  public Set<String> liveTenants(String provider) {
+    if (bootstrapTenant == null || bootstrapTenant.isBlank()) {
+      return Set.of();
+    }
+    return Set.of(bootstrapTenant);
   }
 }

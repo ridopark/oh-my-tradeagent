@@ -211,10 +211,44 @@ class FileMountedBrokerCredentialSourceTest {
     // The live-safety proof: the env source inherits the interface default (a constant), so the
     // registry never rebuilds it — byte-identical order path. Asserts no override leaked in.
     var env =
-        new EnvFallbackBrokerCredentialSource(new AlpacaProperties(PAPER_HOST, "k", "s"), "", "");
+        new EnvFallbackBrokerCredentialSource(
+            new AlpacaProperties(PAPER_HOST, "k", "s"), "", "", "");
     assertThat(env.fingerprint("alice", "alpaca"))
         .isEqualTo(env.fingerprint("bob", "alpaca"))
         .isEqualTo("static");
+  }
+
+  @Test
+  void envFallbackLiveTenantsIsTheBootstrapTenant() {
+    var env =
+        new EnvFallbackBrokerCredentialSource(
+            new AlpacaProperties(PAPER_HOST, "k", "s"), "", "", "prod_real");
+    assertThat(env.liveTenants("alpaca")).containsExactly("prod_real");
+  }
+
+  @Test
+  void envFallbackLiveTenantsIsEmptyWhenBootstrapBlank() {
+    var env =
+        new EnvFallbackBrokerCredentialSource(
+            new AlpacaProperties(PAPER_HOST, "k", "s"), "", "", "");
+    assertThat(env.liveTenants("alpaca")).isEmpty();
+  }
+
+  @Test
+  void fileLiveTenantsListsScopedDirectories() throws IOException {
+    writeFull("alice", "alice-key", "alice-secret", "111");
+    writeFull("bob", "bob-key", "bob-secret", "222");
+    // a non-alpaca dir and a dotfile must be ignored
+    Files.createDirectories(root.resolve("carol-tradier"));
+    Files.createDirectories(root.resolve(".hidden-alpaca"));
+
+    assertThat(source("", PAPER).liveTenants("alpaca")).containsExactlyInAnyOrder("alice", "bob");
+  }
+
+  @Test
+  void fileLiveTenantsIsEmptyForMissingRoot() {
+    var src = new FileMountedBrokerCredentialSource(root.resolve("nope").toString(), "", PAPER);
+    assertThat(src.liveTenants("alpaca")).isEmpty();
   }
 
   @Test

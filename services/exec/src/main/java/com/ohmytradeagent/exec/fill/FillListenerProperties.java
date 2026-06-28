@@ -14,6 +14,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *       org.springframework.boot.autoconfigure.condition.ConditionalOnProperty}-d on this).
  *   <li>{@code wsUrl} — Alpaca trade-updates endpoint (paper: {@code
  *       wss://paper-api.alpaca.markets/stream}, live: {@code wss://api.alpaca.markets/stream}).
+ *       Used by the single pod-wide socket (the {@code perTenantEnabled=false} default); the
+ *       per-tenant path resolves each socket's URL from that tenant's credentials instead.
+ *   <li>{@code perTenantEnabled} — Phase G dark flag (default FALSE). FALSE keeps exactly today's
+ *       single pod-wide socket on {@code wsUrl} using the pod-wide env creds. TRUE opens one
+ *       independently-supervised, per-tenant-authenticated socket per enumerated live tenant.
  *   <li>{@code reconnectBaseMs} / {@code reconnectCapMs} — exponential-backoff bounds.
  *   <li>{@code dedupCacheSize} — bounded LRU keyed on {@code (broker_order_id, filled_qty)} so WS
  *       reconnect-replays don't double-dispatch.
@@ -25,7 +30,12 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  */
 @ConfigurationProperties(prefix = "exec.fill-listener")
 public record FillListenerProperties(
-    boolean enabled, String wsUrl, long reconnectBaseMs, long reconnectCapMs, int dedupCacheSize) {
+    boolean enabled,
+    String wsUrl,
+    boolean perTenantEnabled,
+    long reconnectBaseMs,
+    long reconnectCapMs,
+    int dedupCacheSize) {
 
   private static final Set<String> LOOPBACK_HOSTS = Set.of("localhost", "127.0.0.1", "::1");
 
@@ -50,9 +60,23 @@ public record FillListenerProperties(
       throw new IllegalArgumentException(
           "exec.fill-listener.dedup-cache-size must be > 0, got " + dedupCacheSize);
     }
-    if (enabled) {
+    // The pod-wide wsUrl backs only the single-socket (perTenantEnabled=false) path; the per-tenant
+    // path resolves + validates each socket's URL from that tenant's creds at connect time, so a
+    // per-tenant deployment need not also set a (then-unused) pod-wide wsUrl.
+    if (enabled && !perTenantEnabled) {
       validateWsUrl(wsUrl);
     }
+  }
+
+  /**
+   * Validates a trade-updates WS URL: {@code wss://} for any host, plaintext {@code ws://} only for
+   * a loopback host (the in-process test fixture). The handshake's first frame carries the broker
+   * key + secret, so a non-loopback {@code ws://} would leak credentials in the clear. Shared by
+   * the record's compact-constructor check (pod-wide URL) and the per-tenant path's per-socket
+   * resolved-URL check.
+   */
+  public static void requireSecureWsUrl(String wsUrl) {
+    validateWsUrl(wsUrl);
   }
 
   /**

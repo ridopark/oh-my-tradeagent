@@ -23,11 +23,16 @@ metadata:
   labels:
     app: exec-alpaca-live
 spec:
-  # MUST stay at 1. The fill-listener (AlpacaTradeUpdatesStream + FillPoller in
-  # the exec-svc fill package) is not leader-elected; multi-pod deployments
-  # would multiply broker calls and Temporal signals by N. See
-  # docs/ops/fill-listener.md for the constraint + the multi-pod leader-election
-  # follow-up.
+  # MUST stay at 1 — this is a LOAD-BEARING FILL-CORRECTNESS invariant, not a
+  # cost knob. The fill-listener (AlpacaTradeUpdatesStream + FillPoller in the
+  # exec-svc fill package) is not leader-elected. Under Phase G's per-tenant
+  # mode each pod opens N trade-updates sockets (one per live tenant); M pods ×
+  # N sockets = M duplicate fill signals PER ACCOUNT (the WS dedup map is
+  # per-socket/per-pod, so it cannot suppress a duplicate arriving on another
+  # pod's socket). Single-pod is the SOLE guard against duplicate fills until
+  # the deferred leader-elected fill router lands. Scaling this >1 (HPA, manual
+  # edit, or a rollout that briefly runs 2 pods) double-counts live fills. See
+  # docs/ops/fill-listener.md for the constraint + the leader-election follow-up.
   replicas: 1
   selector:
     matchLabels:
