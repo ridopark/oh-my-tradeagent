@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -45,7 +46,7 @@ public final class LiveRequiredGateValidator {
     if (!Files.exists(tenantsDir)) {
       return;
     }
-    for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+    for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       StrategyConfig cfg = registry.get(ts.tenantId(), ts.strategyId());
       String label = ts.tenantId() + "/" + ts.strategyId();
       StrategyConfigInvariants.validateLiveRequiredGates(cfg, label);

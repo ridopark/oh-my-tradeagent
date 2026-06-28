@@ -3,9 +3,11 @@ package com.ohmytradeagent.orchestrator.platform;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.orchestrator.bootstrap.TenantStrategyScanner;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -32,6 +34,20 @@ public class YamlStrategyRegistry implements StrategyRegistry {
     } catch (IOException e) {
       throw new IllegalStateException("Failed to parse " + file.toAbsolutePath(), e);
     }
+  }
+
+  /**
+   * Enumerates {@code (tenant, strategy)} pairs by scanning the mounted {@code tenants/} ConfigMap
+   * tree — preserving the dev enumeration source as the YAML-source behavior. If the tenants dir is
+   * absent (e.g. a non-mounted environment) returns an empty list rather than throwing, so a
+   * reconcile-loop tick degrades to a no-op instead of failing.
+   */
+  @Override
+  public List<TenantStrategy> list() {
+    if (!Files.exists(tenantsDir)) {
+      return List.of();
+    }
+    return TenantStrategyScanner.scan(tenantsDir);
   }
 
   public static class StrategyNotFoundException extends RuntimeException {

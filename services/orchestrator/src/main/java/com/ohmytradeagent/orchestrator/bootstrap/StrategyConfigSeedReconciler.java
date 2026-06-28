@@ -3,7 +3,7 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.contract.StrategyConfig;
-import com.ohmytradeagent.orchestrator.bootstrap.TenantStrategyScanner.TenantStrategy;
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import com.ohmytradeagent.orchestrator.platform.YamlStrategyRegistry;
 import java.nio.file.Path;
 import java.util.List;

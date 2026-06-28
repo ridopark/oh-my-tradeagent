@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
@@ -87,7 +88,7 @@ public final class CrossTenantBrokerTargetValidator {
     if (!Files.exists(tenantsDir)) {
       return ownerByTarget;
     }
-    for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+    for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       String brokerTarget = brokerTargetOf(registry, ts);
       if (brokerTarget == null) {
         continue;
@@ -122,7 +123,7 @@ public final class CrossTenantBrokerTargetValidator {
     if (!Files.exists(tenantsDir)) {
       return firstTenantByTarget;
     }
-    for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+    for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       StrategyConfig cfg = registry.get(ts.tenantId(), ts.strategyId());
       String brokerTarget = brokerTargetOf(cfg);
       if (brokerTarget == null) {
@@ -189,8 +190,7 @@ public final class CrossTenantBrokerTargetValidator {
     }
   }
 
-  private static String brokerTargetOf(
-      StrategyRegistry registry, TenantStrategyScanner.TenantStrategy ts) {
+  private static String brokerTargetOf(StrategyRegistry registry, TenantStrategy ts) {
     return brokerTargetOf(registry.get(ts.tenantId(), ts.strategyId()));
   }
 

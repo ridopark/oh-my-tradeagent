@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 import com.ohmytradeagent.contract.AccountKillSwitchWorkflowInput;
 import com.ohmytradeagent.contract.KillSwitchWorkflowInput;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflow;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
@@ -54,15 +55,29 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
       return;
     }
     Set<String> tenantIds = new LinkedHashSet<>();
-    for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+    for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       startKillSwitch(ts.tenantId(), ts.strategyId());
       tenantIds.add(ts.tenantId());
     }
     // Phase 6: one account-level kill switch per distinct tenant, alongside the per-strategy loop
-    // above. Inert until the tenant sets account_daily_loss_threshold in tenant.yaml.
+    // above. Inert until the tenant sets account_daily_loss_threshold in tenant.yaml. (Both this
+    // and the per-strategy start are exposed per-pair via ensureForTenantStrategy for the
+    // restart-free reconcile loop.)
     for (String tenantId : tenantIds) {
       startAccountKillSwitch(tenantId);
     }
+  }
+
+  /**
+   * Idempotent per-{@code (tenant, strategy)} ensure: starts the per-strategy {@link
+   * KillSwitchWorkflow} and the per-tenant {@link AccountKillSwitchWorkflow} if they are not
+   * already running (both use {@code REJECT_DUPLICATE}, so a re-assert is a benign no-op). Shared
+   * by the boot {@link #run} path and {@code TenantReconcileLoop}, so a runtime-inserted tenant
+   * gets the same kill-switch coverage as a mounted one without an orchestrator restart.
+   */
+  public void ensureForTenantStrategy(String tenantId, String strategyId) {
+    startKillSwitch(tenantId, strategyId);
+    startAccountKillSwitch(tenantId);
   }
 
   private void startKillSwitch(String tenantId, String strategyId) {

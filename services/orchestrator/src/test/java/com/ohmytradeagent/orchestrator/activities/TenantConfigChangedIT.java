@@ -118,6 +118,11 @@ class TenantConfigChangedIT {
           public StrategyConfig get(String tenantId, String strategyId) {
             return current;
           }
+
+          @Override
+          public java.util.List<com.ohmytradeagent.orchestrator.platform.TenantStrategy> list() {
+            return java.util.List.of();
+          }
         };
 
     TenantConfigChangedEmitter emitter =

@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.metrics;
 
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.bootstrap.TenantStrategyScanner;
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.micrometer.core.instrument.Gauge;
@@ -72,7 +73,7 @@ public class KillSwitchHistoryLengthGauge {
       return;
     }
     String namespace = workflowClient.getOptions().getNamespace();
-    for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+    for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       String wfId = WorkflowIds.killswitch(ts.tenantId(), ts.strategyId());
       long historyLength = describeHistoryLength(namespace, wfId);
       AtomicLong ref =
