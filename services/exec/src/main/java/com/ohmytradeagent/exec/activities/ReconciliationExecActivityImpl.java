@@ -53,8 +53,12 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
   }
 
   @Override
-  public List<BrokerOpenOrder> brokerListOpenOrders() {
-    return broker(BrokerClientRegistry.ACCOUNT_LEVEL).listOpenOrders();
+  public List<BrokerOpenOrder> brokerListOpenOrders(String tenantId, String strategyId) {
+    // Phase B: resolve the request's tenant (matching brokerListOpenPositions) so recon lists the
+    // in-scope tenant's open orders under the shared-account path. strategyId is a forward-compat
+    // hook — the resolved broker is tenant-scoped, so it only documents the call site. Under
+    // env-fallback creds broker(tenantId) resolves the single account, preserving behavior.
+    return broker(tenantId).listOpenOrders();
   }
 
   @Override

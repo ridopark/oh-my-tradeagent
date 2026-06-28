@@ -23,8 +23,15 @@ public interface ReconciliationExecActivity {
    */
   List<JournalEntry> journalDumpOpen(String tenantId, String strategyId);
 
-  /** List currently-open broker orders for the broker env this Activity is hosted in. */
-  List<BrokerOpenOrder> brokerListOpenOrders();
+  /**
+   * List currently-open broker orders for the broker env this Activity is hosted in. The {@code
+   * tenantId} / {@code strategyId} parameters resolve the per-tenant broker under the
+   * shared-account path (multiple live tenants on one broker_target); the env-fallback source
+   * ignores them and resolves the single account, so behavior is preserved. Reconciliation walks
+   * the returned list to detect broker open orders with no matching journal entry and emits {@code
+   * BrokerOrphan} audits.
+   */
+  List<BrokerOpenOrder> brokerListOpenOrders(String tenantId, String strategyId);
 
   /**
    * Issue #165 Phase 3: list currently-held broker positions for the broker env this Activity is

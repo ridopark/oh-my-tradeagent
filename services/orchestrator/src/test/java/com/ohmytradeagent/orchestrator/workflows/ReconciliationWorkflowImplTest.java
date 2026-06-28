@@ -135,7 +135,7 @@ class ReconciliationWorkflowImplTest {
   void happyPath_matchingJournalAndBroker_zeroOrphans() {
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-1", "OCC-1", OffsetDateTime.now(ZoneOffset.UTC))));
-    when(exec.brokerListOpenOrders())
+    when(exec.brokerListOpenOrders(anyString(), anyString()))
         .thenReturn(List.of(broker("brk-1", clientOrderIdFor("intent-1"), "OCC-1")));
 
     ReconciliationSummary summary = runWorkflow();
@@ -150,13 +150,26 @@ class ReconciliationWorkflowImplTest {
     assertThat(((Number) completed.getSubject().get("broker_orphans")).longValue()).isEqualTo(0L);
   }
 
+  // Phase B (operator account onboarding): the open-orders recon read must thread the workflow
+  // input's (tenant, strategy) so the exec impl resolves the in-scope tenant's account under the
+  // shared-account path — mirroring how journalDumpOpen / brokerListOpenPositions already do.
+  @Test
+  void brokerListOpenOrders_receivesWorkflowInputTenantAndStrategy() {
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+
+    runWorkflow();
+
+    verify(exec).brokerListOpenOrders("dev", "copytrade-v1");
+  }
+
   @Test
   void journalOrphan_oldEntryWithNoBrokerMatch_emitsAudit() {
     // 10 minutes ago — older than the 5-minute stale threshold.
     OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
 
     ReconciliationSummary summary = runWorkflow();
     assertThat(summary.getJournalOrphans()).isEqualTo(1L);
@@ -175,7 +188,7 @@ class ReconciliationWorkflowImplTest {
     OffsetDateTime recent = OffsetDateTime.now(ZoneOffset.UTC).minusSeconds(60);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-fresh", "OCC-fresh", recent)));
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
 
     ReconciliationSummary summary = runWorkflow();
     assertThat(summary.getJournalOrphans()).isEqualTo(0L);
@@ -184,7 +197,7 @@ class ReconciliationWorkflowImplTest {
   @Test
   void brokerOrphan_orderWithNoJournalEntry_emitsAudit() {
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders())
+    when(exec.brokerListOpenOrders(anyString(), anyString()))
         .thenReturn(List.of(broker("brk-stranger", "client-stranger", "OCC-stranger")));
 
     ReconciliationSummary summary = runWorkflow();
@@ -229,7 +242,7 @@ class ReconciliationWorkflowImplTest {
   @Test
   void emptyJournalAndBroker_zeroCounts() {
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
 
     ReconciliationSummary summary = runWorkflow();
     assertThat(summary.getJournalEntriesChecked()).isEqualTo(0L);
@@ -247,7 +260,7 @@ class ReconciliationWorkflowImplTest {
     OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     Mockito.doThrow(new RuntimeException("meter registry exploded"))
         .when(metrics)
         .recordCycle(anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong());
@@ -280,7 +293,7 @@ class ReconciliationWorkflowImplTest {
             List.of(
                 journal("intent-1", "OCC-1", OffsetDateTime.now(ZoneOffset.UTC)),
                 journal("intent-orphan", "OCC-orphan", old)));
-    when(exec.brokerListOpenOrders())
+    when(exec.brokerListOpenOrders(anyString(), anyString()))
         .thenReturn(
             List.of(
                 broker("brk-1", clientOrderIdFor("intent-1"), "OCC-1"),
@@ -308,7 +321,7 @@ class ReconciliationWorkflowImplTest {
     // and
     // the journal_entry_signal_id carries the most-recent FILLED entry's signal_id for provenance.
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(PADDED_OCC, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(PADDED_OCC)))
@@ -341,7 +354,7 @@ class ReconciliationWorkflowImplTest {
     String paddedOcc = PADDED_OCC;
     String ownerWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-1506342699765338194:0";
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
@@ -370,7 +383,7 @@ class ReconciliationWorkflowImplTest {
     String paddedOcc = PADDED_OCC;
     String ownerWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-1506342699765338194:0";
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(compactOcc, 5L, new BigDecimal("0.84"))));
     // The journal lookup is format-agnostic (JooqOrderIntentJournal.findLatestFilledByOcc strips
@@ -394,7 +407,7 @@ class ReconciliationWorkflowImplTest {
     // Broker holds a position with no FILLED journal record → strongest orphan signal, emit a
     // PositionOrphan with expected_workflow_id=null + journal_status=missing.
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(PADDED_OCC, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -424,7 +437,7 @@ class ReconciliationWorkflowImplTest {
     // entirely (no PositionOrphan AND no PositionOrphanOngoing yet — escalation only fires at the
     // 3rd detection). Summary still counts the orphan since the broker state is unchanged.
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(PADDED_OCC, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -457,7 +470,7 @@ class ReconciliationWorkflowImplTest {
     OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-debounce", "OCC-debounce", old)));
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     // 1 prior detection in the window → priorCount=1, this tick is the 2nd. Debounce suppresses
     // the per-cycle JournalOrphan audit.
     when(auditQuery.countPriorJournalOrphans(
@@ -484,7 +497,7 @@ class ReconciliationWorkflowImplTest {
     // PositionOrphanOngoing iff the first-seen row is older than ORPHAN_ESCALATION_WINDOW (30m).
     OffsetDateTime firstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(45);
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(PADDED_OCC, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -526,7 +539,7 @@ class ReconciliationWorkflowImplTest {
     OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(auditQuery.countPriorJournalOrphans(
             eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
         .thenReturn(1L);
@@ -561,7 +574,7 @@ class ReconciliationWorkflowImplTest {
     // Tick-4: same priorOrphans=1, same firstSeen=45m ago, priorOngoing=1 → suppress.
     OffsetDateTime firstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(45);
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(PADDED_OCC, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -592,7 +605,7 @@ class ReconciliationWorkflowImplTest {
     OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(auditQuery.countPriorJournalOrphans(
             eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
         .thenReturn(1L);
@@ -630,7 +643,7 @@ class ReconciliationWorkflowImplTest {
     //   tick 4 → suppressed (priorOngoing >= 1)
     OffsetDateTime tick3FirstSeen = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(31);
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(PADDED_OCC, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -682,7 +695,7 @@ class ReconciliationWorkflowImplTest {
     OffsetDateTime old = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
     when(exec.journalDumpOpen(anyString(), anyString()))
         .thenReturn(List.of(journal("intent-orphan", "OCC-orphan", old)));
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(auditQuery.countPriorJournalOrphans(
             eq("dev"), eq("copytrade-v1"), eq("intent-orphan"), any()))
         .thenReturn(0L, 1L, 1L);
@@ -721,7 +734,7 @@ class ReconciliationWorkflowImplTest {
     // PositionOrphanSuppressedSiblingOwner audit instead.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -749,7 +762,7 @@ class ReconciliationWorkflowImplTest {
     // PositionOrphan still pages.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -776,7 +789,7 @@ class ReconciliationWorkflowImplTest {
     // must NOT fire (the uncovered 5 is a genuine orphan), so the PositionOrphan still pages.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 10L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -809,7 +822,7 @@ class ReconciliationWorkflowImplTest {
     // PositionOrphanSuppressedSiblingOwner audit. This closes the cache-miss false page.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -844,7 +857,7 @@ class ReconciliationWorkflowImplTest {
     // just before EntryFilled + the cache seed). priorCount==0 → suppress the initial page.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -871,7 +884,7 @@ class ReconciliationWorkflowImplTest {
     // MUST still page PositionOrphan. The first-page debounce only delays by one sweep.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -901,7 +914,7 @@ class ReconciliationWorkflowImplTest {
     // sumRunningOwnerRemainingQtyForOcc.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
@@ -932,7 +945,7 @@ class ReconciliationWorkflowImplTest {
     // a ReconAutoAdoptionInitiated audit, and bump the `initiated` counter.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
@@ -976,7 +989,7 @@ class ReconciliationWorkflowImplTest {
     String paddedOcc = PADDED_OCC;
     String adoptWfId = WorkflowIds.adoption("dev", "copytrade-v1", paddedOcc);
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
@@ -1008,7 +1021,7 @@ class ReconciliationWorkflowImplTest {
     String paddedOcc = PADDED_OCC;
     String posWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/chat-99:0";
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
@@ -1034,7 +1047,7 @@ class ReconciliationWorkflowImplTest {
     String compactOcc = COMPACT_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
     // An OPEN SELL for the same OCC (compact form, as Alpaca would report it).
-    when(exec.brokerListOpenOrders())
+    when(exec.brokerListOpenOrders(anyString(), anyString()))
         .thenReturn(List.of(sellOrder("brk-sell", "cid-sell", compactOcc)));
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
@@ -1064,7 +1077,7 @@ class ReconciliationWorkflowImplTest {
     // journal_status='missing' (no FILLED anchor) → page only, never auto-adopted.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
@@ -1091,7 +1104,7 @@ class ReconciliationWorkflowImplTest {
     FAIL_ON_ADOPT = true;
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
@@ -1124,7 +1137,7 @@ class ReconciliationWorkflowImplTest {
     String exitSignalId = "chat-exit:0"; // the partial-exit SELL's signal_id (most-recent fill)
     String ownerWfId = "t-dev/s-copytrade-v1/pos/" + paddedOcc + "/" + entrySignalId;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 12L, new BigDecimal("0.84"))));
     // filled.get(0) is the partial-exit SELL, carrying the EXIT signal_id (not the entry's). If the
@@ -1158,7 +1171,7 @@ class ReconciliationWorkflowImplTest {
     // cached, Visibility finds nothing) → PositionOrphan(filled) + auto-adopt.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
@@ -1191,7 +1204,7 @@ class ReconciliationWorkflowImplTest {
     // refuses: emit AutoAdoptRefusedExpired + the refused_expired metric, start NO child.
     String expiredOcc = expiredPaddedOcc();
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
-    when(exec.brokerListOpenOrders()).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(expiredOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), eq(expiredOcc)))

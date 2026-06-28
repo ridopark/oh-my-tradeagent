@@ -185,7 +185,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     auditLog(KIND_RECON_STARTED, subject("broker_target", brokerTarget));
 
     List<JournalEntry> journal = exec.journalDumpOpen(in.getTenantId(), in.getStrategyId());
-    List<BrokerOpenOrder> brokerOpen = exec.brokerListOpenOrders();
+    List<BrokerOpenOrder> brokerOpen =
+        exec.brokerListOpenOrders(in.getTenantId(), in.getStrategyId());
 
     Set<String> brokerClientIds = new LinkedHashSet<>();
     for (BrokerOpenOrder o : brokerOpen) {
