@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.config;
 
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.MarketCalendarActivity;
+import com.ohmytradeagent.contract.activities.PortfolioHistoryActivity;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.exec.activities.ExecActivities;
@@ -54,10 +55,11 @@ public class TemporalWorkerConfig {
       ReconciliationExecActivity recon,
       PreTradeCheckActivity preTradeCheck,
       AccountSnapshotActivity accountSnapshot,
-      MarketCalendarActivity marketCalendar) {
+      MarketCalendarActivity marketCalendar,
+      PortfolioHistoryActivity portfolioHistory) {
     Worker worker = factory.newWorker(taskQueue);
     worker.registerActivitiesImplementations(
-        exec, recon, preTradeCheck, accountSnapshot, marketCalendar);
+        exec, recon, preTradeCheck, accountSnapshot, marketCalendar, portfolioHistory);
     return worker;
   }
 }

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/portfolio-history-result.json",
+  "title": "PortfolioHistoryResult",
+  "description": "Live-account-view output. Returned by exec-svc's portfolio_history Activity from Alpaca /v2/account/portfolio/history. Parallel arrays indexed by timestamps[] (epoch seconds): equity[] (the chart line), profit_loss[] and profit_loss_pct[] (the range-aware headline). Scalars: base_value (the dashed baseline / range start), base_value_asof (epoch seconds of the baseline, optional), timeframe (the resolved Alpaca timeframe). Equity is account-level — SHARED across every tenant routing to a broker_target — NOT this tenant's portfolio value. Optional fields stay out of required (a null/absent value means unavailable); a degraded read yields empty arrays.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.PortfolioHistoryResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "timestamps",
+    "equity"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timestamps": {
+      "type": "array",
+      "description": "Epoch-seconds index shared by equity[], profit_loss[], and profit_loss_pct[].",
+      "items": {
+        "type": "integer"
+      }
+    },
+    "equity": {
+      "type": "array",
+      "description": "Account net-liquidation equity at each timestamp (the chart line).",
+      "items": {
+        "type": "number"
+      }
+    },
+    "profit_loss": {
+      "type": "array",
+      "description": "Range-aware P&L (equity - base_value) at each timestamp.",
+      "items": {
+        "type": "number"
+      }
+    },
+    "profit_loss_pct": {
+      "type": "array",
+      "description": "Range-aware P&L percent at each timestamp.",
+      "items": {
+        "type": "number"
+      }
+    },
+    "base_value": {
+      "type": "number",
+      "description": "The baseline / range-start equity (the dashed baseline). Null/absent means unavailable."
+    },
+    "base_value_asof": {
+      "type": "integer",
+      "description": "Epoch seconds the base_value is as-of. Optional."
+    },
+    "timeframe": {
+      "type": "string",
+      "description": "The resolved Alpaca timeframe (echoes the request)."
+    }
+  }
+}

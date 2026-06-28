@@ -166,4 +166,42 @@ public interface OptionsBroker {
   default List<LocalDate> tradingDays(LocalDate start, LocalDate end) {
     throw new UnsupportedOperationException("tradingDays not supported by this broker");
   }
+
+  /**
+   * Live-account-view: the brokerage account's portfolio-history series (Alpaca {@code GET
+   * /v2/account/portfolio/history}) for the dashboard {@code /live} equity chart. A READ-ONLY GET —
+   * it places no orders and touches no order path.
+   *
+   * <p>{@code period} / {@code timeframe} are already-resolved Alpaca values (the BFF client owns
+   * the dashboard-range mapping); {@code dateEnd} may be null (omit the {@code date_end} query
+   * param when so). Returns parallel arrays indexed by epoch-second {@code timestamps} ({@code
+   * equity} chart line, {@code profitLoss} / {@code profitLossPct} headline) plus the {@code
+   * baseValue} baseline.
+   *
+   * <p>Default throws {@link UnsupportedOperationException} so only brokers that expose the
+   * endpoint (Alpaca) support it; the in-memory {@link
+   * com.ohmytradeagent.exec.broker.stub.StubBroker} and other adapters are unaffected until they
+   * opt in. Because it is {@code default} (not abstract), adding it does not break any existing
+   * adapter's compilation.
+   */
+  default PortfolioHistory getPortfolioHistory(String period, String timeframe, String dateEnd) {
+    throw new UnsupportedOperationException("getPortfolioHistory not supported by this broker");
+  }
+
+  /**
+   * Portfolio-history series from one account read. Parallel arrays are indexed by {@code
+   * timestamps} (epoch seconds): {@code equity} (chart line), {@code profitLoss}, {@code
+   * profitLossPct}. {@code baseValue} is the baseline (dashed line / range start), {@code
+   * baseValueAsof} its epoch-second as-of (nullable), {@code timeframe} the resolved Alpaca
+   * timeframe. Account-level (shared across tenants on a broker_target) and never a risk-gate
+   * input.
+   */
+  record PortfolioHistory(
+      long[] timestamps,
+      BigDecimal[] equity,
+      BigDecimal[] profitLoss,
+      BigDecimal[] profitLossPct,
+      BigDecimal baseValue,
+      Long baseValueAsof,
+      String timeframe) {}
 }

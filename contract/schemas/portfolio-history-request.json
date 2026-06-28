@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/portfolio-history-request.json",
+  "title": "PortfolioHistoryRequest",
+  "description": "Live-account-view input. The tenant-dashboard BFF dispatches this to exec-svc's portfolio_history Activity (via the PortfolioHistoryWorkflow on broker-<broker_target>) to read the brokerage account's Alpaca /v2/account/portfolio/history series for the dashboard /live equity chart. READ-ONLY: a GET of account history places no orders. period/timeframe are ALREADY RESOLVED by the BFF client (the range->period/timeframe mapping, incl. the YTD days-since-Jan-1 calc, happens BEFORE this request is built) so the workflow/activity stay a dumb, replay-stable pass-through (never a clock read, never the word YTD). Equity is account-level — shared by every tenant routing to a given broker_target — so the request is keyed solely on broker_target.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.PortfolioHistoryRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "broker_target"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See AccountSnapshotRequest.schema_version."
+    },
+    "broker_target": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "Routes the portfolio-history Activity to the broker-<value> task queue, mirroring AccountSnapshotRequest.broker_target."
+    },
+    "period": {
+      "type": "string",
+      "description": "ALREADY-RESOLVED Alpaca period, e.g. 1D, 1W, 1M, 3M, 1A, or a YTD-derived <N>D. The BFF client resolves the dashboard range into this; the workflow/activity never interpret it."
+    },
+    "timeframe": {
+      "type": "string",
+      "description": "ALREADY-RESOLVED Alpaca timeframe, e.g. 5Min, 15Min, 1D. Resolved alongside period by the BFF client."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OPTIONAL. When present, exec resolves the broker for this tenant so the chart reads the tenant's OWN brokerage account (per-tenant-credential end-state). When absent (the account-level dashboard caller, or a legacy request), exec falls back to the account-level credential set. Behavior-preserving under the env-fallback source (which ignores tenant → the same single account). Mirrors AccountSnapshotRequest.tenant_id."
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Optional cross-event correlation key."
+    }
+  }
+}

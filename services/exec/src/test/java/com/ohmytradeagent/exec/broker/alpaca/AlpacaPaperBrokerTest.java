@@ -476,6 +476,62 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void getPortfolioHistory_parsesParallelArraysScalarsAndSendsQueryParams() throws Exception {
+    // Live-account-view: /v2/account/portfolio/history returns parallel arrays indexed by
+    // timestamp[] (epoch seconds) plus the base_value baseline + timeframe scalar. Assert every
+    // PortfolioHistory field maps and the period/timeframe query params are sent (date_end
+    // omitted).
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"timestamp\":[1719446400,1719532800],"
+                    + "\"equity\":[10000.00,10120.50],"
+                    + "\"profit_loss\":[0.00,120.50],"
+                    + "\"profit_loss_pct\":[0.0,0.01205],"
+                    + "\"base_value\":10000.00,\"base_value_asof\":1719360000,"
+                    + "\"timeframe\":\"1D\"}"));
+
+    OptionsBroker.PortfolioHistory h = broker.getPortfolioHistory("1M", "1D", null);
+
+    assertThat(h.timestamps()).containsExactly(1719446400L, 1719532800L);
+    assertThat(h.equity()).containsExactly(new BigDecimal("10000.00"), new BigDecimal("10120.50"));
+    assertThat(h.profitLoss()).containsExactly(new BigDecimal("0.00"), new BigDecimal("120.50"));
+    assertThat(h.profitLossPct()).containsExactly(new BigDecimal("0.0"), new BigDecimal("0.01205"));
+    assertThat(h.baseValue()).isEqualByComparingTo(new BigDecimal("10000.00"));
+    assertThat(h.baseValueAsof()).isEqualTo(1719360000L);
+    assertThat(h.timeframe()).isEqualTo("1D");
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getRequestUrl().encodedPath()).isEqualTo("/v2/account/portfolio/history");
+    assertThat(req.getRequestUrl().queryParameter("period")).isEqualTo("1M");
+    assertThat(req.getRequestUrl().queryParameter("timeframe")).isEqualTo("1D");
+    // date_end is null → the param must be omitted entirely.
+    assertThat(req.getRequestUrl().queryParameter("date_end")).isNull();
+    assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
+  }
+
+  @Test
+  void getPortfolioHistory_unauthorized_throwsAuthErrorNonRetryable() {
+    // A 4xx maps through mapError exactly like the account reads (401 → non-retryable AuthError).
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(401)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"access key verification failed\"}"));
+
+    assertThatThrownBy(() -> broker.getPortfolioHistory("1M", "1D", null))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("AuthError");
+              assertThat(f.isNonRetryable()).isTrue();
+            });
+  }
+
+  @Test
   void cancelOrder_422OnFilled_returnsSoftFailureWithReason() {
     server.enqueue(
         new MockResponse()

@@ -15,6 +15,7 @@ import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaCalendarDay;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderRequest;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderResponse;
+import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaPortfolioHistoryResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaPositionResponse;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -612,6 +613,74 @@ public class AlpacaPaperBroker implements OptionsBroker {
       }
     }
     return out;
+  }
+
+  /**
+   * Live-account-view: Alpaca {@code GET
+   * /v2/account/portfolio/history?period=&timeframe=&date_end=} → the account's portfolio-history
+   * series for the dashboard {@code /live} equity chart. READ-ONLY (no order path). {@code
+   * period}/{@code timeframe} are already-resolved Alpaca values (the BFF client owns the
+   * dashboard-range mapping); {@code dateEnd} may be null — the {@code date_end} query param is
+   * omitted when so. Mirrors {@link #tradingDays}'s query-param + {@link #mapError} pattern.
+   * Defensively forwards Alpaca's parallel arrays as-is (null arrays → empty), so a partial payload
+   * degrades the chart rather than crashing the read.
+   */
+  @Override
+  public PortfolioHistory getPortfolioHistory(String period, String timeframe, String dateEnd) {
+    AlpacaPortfolioHistoryResponse resp;
+    try {
+      resp =
+          client
+              .get()
+              .uri(
+                  uriBuilder -> {
+                    uriBuilder
+                        .path("/v2/account/portfolio/history")
+                        .queryParam("period", period)
+                        .queryParam("timeframe", timeframe);
+                    if (dateEnd != null) {
+                      uriBuilder.queryParam("date_end", dateEnd);
+                    }
+                    return uriBuilder.build();
+                  })
+              .retrieve()
+              .body(AlpacaPortfolioHistoryResponse.class);
+    } catch (HttpStatusCodeException e) {
+      throw mapError(e);
+    }
+    if (resp == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca /v2/account/portfolio/history returned null body", "BrokerProtocolError");
+    }
+    return new PortfolioHistory(
+        toLongArray(resp.timestamp()),
+        toDecimalArray(resp.equity()),
+        toDecimalArray(resp.profitLoss()),
+        toDecimalArray(resp.profitLossPct()),
+        resp.baseValue(),
+        resp.baseValueAsof(),
+        resp.timeframe());
+  }
+
+  private static long[] toLongArray(List<Long> values) {
+    if (values == null) {
+      return new long[0];
+    }
+    long[] out = new long[values.size()];
+    for (int i = 0; i < values.size(); i++) {
+      // Alpaca can return sparse arrays with null trailing elements (market-closed slots); a null
+      // unboxing Long → long would NPE. Treat an absent timestamp as 0L.
+      Long v = values.get(i);
+      out[i] = v == null ? 0L : v;
+    }
+    return out;
+  }
+
+  private static BigDecimal[] toDecimalArray(List<BigDecimal> values) {
+    if (values == null) {
+      return new BigDecimal[0];
+    }
+    return values.toArray(new BigDecimal[0]);
   }
 
   /**
