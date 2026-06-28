@@ -486,11 +486,18 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
+                // base_value_asof is a DATE STRING in Alpaca's real response (not an epoch number)
+                // —
+                // binding it to a Long previously threw a Jackson parse error that failed the whole
+                // read (the /live "Account history unavailable" incident). Keep it as a string here
+                // so
+                // this test reproduces + guards that shape; the DTO drops it and baseValueAsof maps
+                // null.
                 "{\"timestamp\":[1719446400,1719532800],"
                     + "\"equity\":[10000.00,10120.50],"
                     + "\"profit_loss\":[0.00,120.50],"
                     + "\"profit_loss_pct\":[0.0,0.01205],"
-                    + "\"base_value\":10000.00,\"base_value_asof\":1719360000,"
+                    + "\"base_value\":10000.00,\"base_value_asof\":\"2026-06-17\","
                     + "\"timeframe\":\"1D\"}"));
 
     OptionsBroker.PortfolioHistory h = broker.getPortfolioHistory("1M", "1D", null);
@@ -500,7 +507,8 @@ class AlpacaPaperBrokerTest {
     assertThat(h.profitLoss()).containsExactly(new BigDecimal("0.00"), new BigDecimal("120.50"));
     assertThat(h.profitLossPct()).containsExactly(new BigDecimal("0.0"), new BigDecimal("0.01205"));
     assertThat(h.baseValue()).isEqualByComparingTo(new BigDecimal("10000.00"));
-    assertThat(h.baseValueAsof()).isEqualTo(1719360000L);
+    // Alpaca's date-string base_value_asof is intentionally dropped (unused by the UI) → null.
+    assertThat(h.baseValueAsof()).isNull();
     assertThat(h.timeframe()).isEqualTo("1D");
 
     RecordedRequest req = server.takeRequest();

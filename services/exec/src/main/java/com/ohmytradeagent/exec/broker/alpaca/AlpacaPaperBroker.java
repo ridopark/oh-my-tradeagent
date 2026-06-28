@@ -658,7 +658,10 @@ public class AlpacaPaperBroker implements OptionsBroker {
         toDecimalArray(resp.profitLoss()),
         toDecimalArray(resp.profitLossPct()),
         resp.baseValue(),
-        resp.baseValueAsof(),
+        // base_value_asof is a date string in Alpaca's response (not an epoch Long) and unused by
+        // the UI — dropped at the DTO; the contract field stays null. See
+        // AlpacaPortfolioHistoryResponse.
+        null,
         resp.timeframe());
   }
 
