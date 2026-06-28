@@ -27,6 +27,7 @@ import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.PortfolioHistoryWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflowImpl;
@@ -121,6 +122,13 @@ public class TemporalWorkerConfig {
         // workflow dispatches AccountSnapshotActivity to broker-<target> (a Temporal client cannot
         // dispatch an Activity directly).
         AccountSnapshotWorkflowImpl.class,
+        // Live-account-view: started synchronously by the tenant-dashboard BFF to read the broker
+        // account's portfolio-history series (the /live equity chart); the workflow dispatches
+        // PortfolioHistoryActivity to broker-<target> (a Temporal client cannot dispatch an
+        // Activity
+        // directly). READ-ONLY (no order path). The activity impl lives on the exec worker — do NOT
+        // register it here.
+        PortfolioHistoryWorkflowImpl.class,
         // Started synchronously by the tenant-dashboard BFF to read broker-held positions WITH live
         // marks (current price + today's/total unrealized P&L); the workflow dispatches
         // ReconciliationExecActivity.brokerListOpenPositions to broker-<target>, same client-can't-
