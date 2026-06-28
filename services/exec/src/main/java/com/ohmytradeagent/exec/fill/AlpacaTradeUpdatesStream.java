@@ -140,32 +140,38 @@ public class AlpacaTradeUpdatesStream {
   private void startPerTenant() {
     // TreeSet → deterministic startup order; the roster is per-pod-broker-target-scoped by
     // construction (the source can only resolve this pod's account(s)).
-    Set<String> tenants = new TreeSet<>(credentialSource.liveTenants(PROVIDER));
+    Set<String> tenants;
+    try {
+      tenants = new TreeSet<>(credentialSource.liveTenants(PROVIDER));
+    } catch (RuntimeException e) {
+      // A transient mount/DB fault while enumerating must not abort start() or leave the listener
+      // in a half-state — open NO sockets and let the 30s FillPoller remain the fill fallback. (No
+      // retry: enumeration is startup-only; a new live tenant implies a manual exec roll anyway.)
+      log.error(
+          "fill-listener per-tenant enabled but tenant enumeration failed; opening NO sockets: {}",
+          e.toString());
+      return;
+    }
     if (tenants.isEmpty()) {
       log.warn("fill-listener per-tenant enabled but credential source enumerated NO live tenants");
       return;
     }
     int started = 0;
     for (String tenant : tenants) {
-      // Fail-closed pre-check: if the tenant's creds can't be resolved (or are blank) at startup,
-      // skip it rather than spinning a runner that would send blank auth forever. The runner
-      // re-resolves on each reconnect, so a transient resolve fault past startup is covered by
-      // backoff; a hard missing-cred is logged and skipped here.
-      Endpoint endpoint;
+      // Fail-closed pre-check: if the tenant's creds can't be resolved (missing OR blank
+      // key/secret)
+      // at startup, skip it rather than spinning a runner that would send blank auth forever.
+      // resolveEndpoint() throws on missing/blank creds and the runner re-resolves through the SAME
+      // check on every reconnect, so a post-startup rotation to blank backs off instead of opening
+      // a
+      // blank-auth socket.
       try {
-        endpoint = resolveEndpoint(tenant);
+        resolveEndpoint(tenant);
       } catch (RuntimeException e) {
         log.error(
             "fill-listener SKIPPING tenant={} — credential resolution failed at startup: {}",
             tenant,
             e.toString());
-        continue;
-      }
-      if (isBlank(endpoint.keyId()) || isBlank(endpoint.secret())) {
-        log.error(
-            "fill-listener SKIPPING tenant={} — resolved credentials have a blank key/secret;"
-                + " refusing to open a socket that would authenticate blank",
-            tenant);
         continue;
       }
       TenantRunner runner =
@@ -193,6 +199,14 @@ public class AlpacaTradeUpdatesStream {
     if (isBlank(wsUrl)) {
       throw new IllegalStateException(
           "resolved credentials for tenant=" + tenant + " have no ws-url");
+    }
+    // Fail closed on BOTH startup and every reconnect: never open a socket that authenticates with
+    // a
+    // blank key/secret (a silent blank-auth reconnect storm). A cred rotated to blank post-startup
+    // throws here → caught in the runner loop → backoff, NOT a storm.
+    if (isBlank(creds.apiKeyId()) || isBlank(creds.apiSecretKey())) {
+      throw new IllegalStateException(
+          "resolved credentials for tenant=" + tenant + " have a blank key/secret");
     }
     FillListenerProperties.requireSecureWsUrl(wsUrl);
     return new Endpoint(wsUrl, creds.apiKeyId(), creds.apiSecretKey());
