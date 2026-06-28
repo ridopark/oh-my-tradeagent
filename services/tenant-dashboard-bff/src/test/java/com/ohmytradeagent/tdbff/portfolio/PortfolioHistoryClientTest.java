@@ -18,10 +18,12 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 
 class PortfolioHistoryClientTest {
 
@@ -106,5 +108,19 @@ class PortfolioHistoryClientTest {
     assertThat(c.resolveRange("YTD")).isEqualTo(new PortfolioHistoryClient.Resolved("60D", "1D"));
     // Unknown / default falls back to 1M.
     assertThat(c.resolveRange("bogus")).isEqualTo(new PortfolioHistoryClient.Resolved("1M", "1D"));
+  }
+
+  @Test
+  void exposesExactlyOneAutowiredConstructorForSpring() {
+    // @Component with TWO constructors (the @Value production one + a package-private Clock one for
+    // tests). Spring cannot choose between multiple constructors unless exactly one is @Autowired —
+    // otherwise it falls back to a no-arg default and the context fails to start (the bff
+    // CrashLoopBackOff on 2026-06-28). The bff has no full-context @SpringBootTest, so pin the
+    // invariant here.
+    long autowired =
+        Arrays.stream(PortfolioHistoryClient.class.getDeclaredConstructors())
+            .filter(ctor -> ctor.isAnnotationPresent(Autowired.class))
+            .count();
+    assertThat(autowired).isEqualTo(1L);
   }
 }

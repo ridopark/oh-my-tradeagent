@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -55,6 +56,7 @@ public class PortfolioHistoryClient {
   private final String orchestratorTaskQueue;
   private final Clock clock;
 
+  @Autowired
   public PortfolioHistoryClient(
       WorkflowClient client,
       @Value("${temporal.orchestrator-task-queue:orchestrator-core}")
