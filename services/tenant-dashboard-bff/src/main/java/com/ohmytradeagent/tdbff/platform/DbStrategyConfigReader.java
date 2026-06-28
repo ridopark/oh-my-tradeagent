@@ -1,5 +1,6 @@
 package com.ohmytradeagent.tdbff.platform;
 
+import java.util.List;
 import org.jooq.DSLContext;
 import org.jooq.Record1;
 import org.jooq.impl.DSL;
@@ -40,4 +41,28 @@ public class DbStrategyConfigReader {
             .fetchOne();
     return row == null ? null : row.value1();
   }
+
+  /**
+   * Every distinct {@code (tenant_id, strategy_id, broker_target)} present in {@code
+   * strategy_config}, ordered for a stable result. Mirrors the orchestrator's {@code
+   * DbStrategyRegistry.list()} enumeration source (no {@code tenants} table) but also carries the
+   * per-row {@code broker_target} so the operator list need not re-query it per strategy. A row
+   * whose config has no {@code broker_target} yields a {@code null} target (fail-soft, never
+   * thrown); the caller decides how to render it.
+   */
+  public List<TenantStrategyBrokerTarget> listAll() {
+    return orchestratorDsl
+        .select(
+            DSL.field("tenant_id", String.class),
+            DSL.field("strategy_id", String.class),
+            DSL.field("config->>'broker_target'", String.class))
+        .from(DSL.table("strategy_config"))
+        .orderBy(DSL.field("tenant_id"), DSL.field("strategy_id"))
+        .fetch()
+        .map(r -> new TenantStrategyBrokerTarget(r.value1(), r.value2(), r.value3()));
+  }
+
+  /** One enumerated strategy and its configured {@code broker_target} (may be {@code null}). */
+  public record TenantStrategyBrokerTarget(
+      String tenantId, String strategyId, String brokerTarget) {}
 }

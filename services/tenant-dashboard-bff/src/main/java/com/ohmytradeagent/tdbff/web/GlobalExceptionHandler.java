@@ -27,6 +27,13 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         .body(Map.of("error", "missing_tenant", "detail", String.valueOf(e.getMessage())));
   }
 
+  @ExceptionHandler(TenantContext.MissingOperatorException.class)
+  public ResponseEntity<Map<String, Object>> missingOperator(
+      TenantContext.MissingOperatorException e) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+        .body(Map.of("error", "missing_operator", "detail", String.valueOf(e.getMessage())));
+  }
+
   @ExceptionHandler(BrokerNotConfiguredException.class)
   public ResponseEntity<Map<String, Object>> brokerNotConfigured(BrokerNotConfiguredException e) {
     return ResponseEntity.status(HttpStatus.NOT_FOUND)

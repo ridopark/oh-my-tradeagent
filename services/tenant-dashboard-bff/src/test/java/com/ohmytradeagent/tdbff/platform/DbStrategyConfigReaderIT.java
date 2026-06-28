@@ -88,6 +88,23 @@ class DbStrategyConfigReaderIT {
   }
 
   @Test
+  void listAllEnumeratesEveryStrategyWithBrokerTargetOrdered() {
+    insert("acme", "beta", "{\"broker_target\":\"alpaca-live\"}");
+    insert("acme", "alpha", "{\"broker_target\":\"alpaca-paper\"}");
+    insert("zeta", "gamma", "{}"); // no broker_target → null, never thrown
+
+    assertThat(reader.listAll())
+        .extracting(
+            DbStrategyConfigReader.TenantStrategyBrokerTarget::tenantId,
+            DbStrategyConfigReader.TenantStrategyBrokerTarget::strategyId,
+            DbStrategyConfigReader.TenantStrategyBrokerTarget::brokerTarget)
+        .containsExactly(
+            org.assertj.core.groups.Tuple.tuple("acme", "alpha", "alpaca-paper"),
+            org.assertj.core.groups.Tuple.tuple("acme", "beta", "alpaca-live"),
+            org.assertj.core.groups.Tuple.tuple("zeta", "gamma", null));
+  }
+
+  @Test
   void resolverReturnsOnlyTheTenantsIdsOrderedAscending() {
     insert("acme", "beta", "{}");
     insert("acme", "alpha", "{}");

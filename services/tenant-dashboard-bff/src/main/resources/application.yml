@@ -35,6 +35,14 @@ spring:
       # dashboard DB (unit tests and the ITs never run this migration).
       dashboard_readonly_password: ${DASHBOARD_READONLY_PASSWORD}
 
+# I-1a (operator-account-onboarding): dark gate for the operator-scoped cross-tenant admin read
+# (GET /api/admin/tenants). Default OFF — the controller bean is absent and the route 404s until an
+# operator deployment sets OPERATOR_ADMIN_READ_ENABLED=true. The endpoint is bearer-gated (every
+# BFF request is) AND requires X-Operator-Id; it is a pure READ with no secret egress.
+operator:
+  admin-read:
+    enabled: ${OPERATOR_ADMIN_READ_ENABLED:false}
+
 # Read-only application datasources. Credentials are the dedicated bff_readonly role per DB (see the
 # operator runbook); SELECT-only grants mean even a query bug cannot mutate trading state.
 bff:
