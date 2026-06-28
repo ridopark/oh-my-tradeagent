@@ -11,6 +11,7 @@ import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.DefaultTriggerFireDecider;
 import com.ohmytradeagent.orchestrator.activities.DefaultWatchlistEntryDecider;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
+import com.ohmytradeagent.orchestrator.activities.LiveActivationGateActivities;
 import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
@@ -27,6 +28,7 @@ import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.LiveActivationWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PortfolioHistoryWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
@@ -98,6 +100,10 @@ public class TemporalWorkerConfig {
       AccountPnlActivities accountPnl,
       AccountKillSwitchCascadeActivities accountCascade,
       LivePromotionActivities livePromotion,
+      // Phase F (operator-account-onboarding): DARK one-click activation gate ops (kill-switch
+      // armable query + trip). Drives the LiveActivationWorkflow; nothing calls it unless the
+      // api-gateway /admin/.../activate-live route is enabled (flag-gated, off by default).
+      LiveActivationGateActivities liveActivationGate,
       ReconciliationMetricsActivities reconciliationMetrics,
       AccountSnapshotMetricsActivities accountSnapshotMetrics,
       WatchlistMirrorActivities watchlistMirror,
@@ -149,6 +155,14 @@ public class TemporalWorkerConfig {
         // orchestrator-core queue and returns the coarse outcome. Started by the api-gateway
         // /strategy-config forward (dark-gated); the activity impl is registered below.
         StrategyConfigUpdateWorkflowImpl.class,
+        // Phase F (operator-account-onboarding) one-click live activation/deactivation carrier.
+        // The single impl class implements BOTH LiveActivationWorkflow (activateLive) and
+        // LiveDeactivationWorkflow (deactivateLive) — two @WorkflowInterfaces, one @WorkflowMethod
+        // each. Started fresh per call by the api-gateway /admin/.../activate-live +
+        // /deactivate-live forwards (dark-gated); its gate activity impl is registered below, the
+        // account probe routes to broker-<target>, and the live-promotion write reuses the shared
+        // LivePromotionActivities impl.
+        LiveActivationWorkflowImpl.class,
         // Watchlist-trigger strategy. The session parent is started by
         // WatchlistMirrorActivitiesImpl
         // on a clean watchlist parse (for the configured trigger strategy, when enabled); it
@@ -181,6 +195,8 @@ public class TemporalWorkerConfig {
         accountPnl,
         accountCascade,
         livePromotion,
+        // Phase F: DARK kill-switch armable/trip ops for the LiveActivationWorkflow.
+        liveActivationGate,
         reconciliationMetrics,
         accountSnapshotMetrics,
         watchlistMirror,

@@ -49,6 +49,36 @@ class ServiceTokenFilterTest {
   }
 
   @Test
+  void missingAuthorizationHeaderOnAdminRoute_is401() throws Exception {
+    // Phase F: the /admin/tenants/ activation route is bearer-gated too.
+    MockHttpServletResponse res =
+        run("/admin/tenants/dev/strategies/copytrade-v1/activate-live", null);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void wrongTokenOnAdminRoute_is401() throws Exception {
+    MockHttpServletResponse res =
+        run("/admin/tenants/dev/strategies/copytrade-v1/deactivate-live", "Bearer not-the-token");
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void correctBearerTokenOnAdminRoute_passesThrough() throws Exception {
+    MockHttpServletRequest req =
+        new MockHttpServletRequest(
+            "POST", "/admin/tenants/dev/strategies/copytrade-v1/activate-live");
+    req.addHeader("Authorization", "Bearer " + TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
+  @Test
   void otherRoutesAreNotFiltered_evenWithNoToken() throws Exception {
     // Route-scoping: /positions, /promotion etc. must pass straight through (they keep their
     // existing header-trust behavior) regardless of the credential-route token.

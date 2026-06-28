@@ -390,6 +390,26 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
       if (approvedAt.isBefore(notStaleSince)) {
         return LivePromotionStatus.STALE;
       }
+      // Phase F (operator-account-onboarding): a LivePromotionDeactivated row for the same
+      // (tenant, strategy, broker_target) emitted strictly AFTER the matched approval is an
+      // explicit operator revocation of the live promotion → fail CLOSED to DEACTIVATED. Checked
+      // BEFORE the P3-b config-change probe (both are post-approval invalidations; an explicit
+      // deactivation is the more specific disposition). occurred_at > ? is strictly-after, matching
+      // the config-change probe so a deactivation followed by a fresh re-activation (newer
+      // approved_at) is NOT voided — the newest LivePromotionApproved selected above wins.
+      Record deact =
+          dsl.fetchOne(
+              "SELECT 1 FROM audit_log "
+                  + "WHERE tenant_id = ? AND strategy_id = ? AND kind = 'LivePromotionDeactivated' "
+                  + "AND subject ->> 'broker_target' = ? AND occurred_at > ? "
+                  + "LIMIT 1",
+              tenantId,
+              strategyId,
+              brokerTarget,
+              Timestamp.from(approvedAt.toInstant()));
+      if (deact != null) {
+        return LivePromotionStatus.DEACTIVATED;
+      }
       // P3-b: a risk-relevant TenantConfigChanged strictly AFTER the matched approval voids it.
       // Use the FUNCTION jsonb_exists_any(target, text[]) — NOT the `?|` operator — because jOOQ
       // plain SQL treats every `?` as a JDBC bind, so `?|` would misparse. jsonb_exists_any is the

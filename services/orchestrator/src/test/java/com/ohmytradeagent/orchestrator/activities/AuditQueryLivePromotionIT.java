@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.LiveActivationRequest;
+import com.ohmytradeagent.contract.LiveDeactivationRequest;
 import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -106,6 +108,39 @@ class AuditQueryLivePromotionIT {
     livePromotion.approve(req);
   }
 
+  /** Phase F: seed a one-click activation via the REAL activate() (gate-readable approval row). */
+  private void seedActivation(String tenant, String strategy, String brokerTarget) {
+    LiveActivationRequest req = new LiveActivationRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId(tenant);
+    req.setStrategyId(strategy);
+    req.setBrokerTarget(LiveActivationRequest.BrokerTarget.fromValue(brokerTarget));
+    req.setOperatorId("ridopark");
+    req.setExpectedAccountId("PA3FKGPFYPLH");
+    livePromotion.activate(req);
+  }
+
+  /** Phase F: seed a one-click deactivation via the REAL deactivate(). Returns the event_id. */
+  private String seedDeactivation(String tenant, String strategy, String brokerTarget) {
+    LiveDeactivationRequest req = new LiveDeactivationRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId(tenant);
+    req.setStrategyId(strategy);
+    req.setBrokerTarget(LiveDeactivationRequest.BrokerTarget.fromValue(brokerTarget));
+    req.setOperatorId("ridopark");
+    livePromotion.deactivate(req);
+    // The newest LivePromotionDeactivated row for this triple — its event_id so the caller can
+    // force occurred_at relative to the approval.
+    org.jooq.Record r =
+        DSL.using(runtimeConn, SQLDialect.POSTGRES)
+            .fetchOne(
+                "SELECT event_id FROM audit_log WHERE tenant_id = ? AND strategy_id = ? "
+                    + "AND kind = 'LivePromotionDeactivated' ORDER BY occurred_at DESC LIMIT 1",
+                tenant,
+                strategy);
+    return r == null ? null : r.get(0, String.class);
+  }
+
   /**
    * Seeds one {@code TenantConfigChanged} audit row whose {@code changed_keys} contains exactly
    * {@code changedKey}, emitted through the SAME {@link AuditActivitiesImpl#log} path the
@@ -191,6 +226,59 @@ class AuditQueryLivePromotionIT {
     OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
     assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
         .isEqualTo(LivePromotionStatus.ABSENT);
+  }
+
+  // --- Phase F: one-click activation / deactivation -------------------------------------------
+
+  @Test
+  void activateThenRead_returnsValid() {
+    // The single-operator activate() emits the SAME gate-readable LivePromotionApproved kind, so a
+    // fresh activation reads VALID exactly like a dual-control approval.
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
+
+    OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
+    assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
+        .isEqualTo(LivePromotionStatus.VALID);
+  }
+
+  @Test
+  void deactivationAfterApproval_returnsDeactivated_failClosed() throws Exception {
+    // A LivePromotionDeactivated row whose occurred_at is strictly AFTER the matched approval is an
+    // explicit operator revocation → fail CLOSED to DEACTIVATED (non-VALID).
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
+    String deactId = seedDeactivation("dev", "copytrade-v1", "alpaca-live");
+    forceOccurredAt(deactId, "1 hour");
+
+    OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
+    assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
+        .isEqualTo(LivePromotionStatus.DEACTIVATED);
+  }
+
+  @Test
+  void deactivationBeforeReactivation_returnsValid() throws Exception {
+    // A deactivation followed by a FRESH re-activation (newer approved_at) must NOT void the newer
+    // approval — the newest LivePromotionApproved is selected first, and only a deactivation AFTER
+    // it counts. Force the deactivation into the past, then re-activate at ~now.
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
+    String deactId = seedDeactivation("dev", "copytrade-v1", "alpaca-live");
+    forceOccurredAt(deactId, "-1 hour");
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
+
+    OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
+    assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
+        .isEqualTo(LivePromotionStatus.VALID);
+  }
+
+  @Test
+  void deactivationOtherBrokerTarget_returnsValid() throws Exception {
+    // A deactivation scoped to a DIFFERENT broker_target must not void this approval.
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
+    String deactId = seedDeactivation("dev", "copytrade-v1", "tradier-live");
+    forceOccurredAt(deactId, "1 hour");
+
+    OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
+    assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
+        .isEqualTo(LivePromotionStatus.VALID);
   }
 
   // --- P3-b: config-change invalidation -------------------------------------------------------

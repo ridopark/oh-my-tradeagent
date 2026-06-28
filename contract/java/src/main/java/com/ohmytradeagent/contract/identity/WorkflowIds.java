@@ -62,6 +62,22 @@ public final class WorkflowIds {
   }
 
   /**
+   * Workflow ID for the short-lived {@code LiveActivationWorkflow} that performs the Phase F
+   * (operator-account-onboarding) dark-gated one-click live activation / deactivation for {@code
+   * (tenant, strategy)}.
+   *
+   * <p>Routes through {@link #tenantStrategy} (the activation IS strategy-scoped) and appends a
+   * fresh per-call {@code correlationId} so each click is its own run — re-activation (re-arming
+   * after the 30-day window) is intentionally a new workflow, not a {@code REJECT_DUPLICATE}
+   * collision. A double-submit is therefore NOT deduped, but that is harmless: the order-time gate
+   * reads the NEWEST matching {@code LivePromotionApproved} row, so a redundant approval row
+   * changes nothing. Mirrors {@link #strategyConfigUpdate}'s shape.
+   */
+  public static String liveActivation(String tenantId, String strategyId, String correlationId) {
+    return tenantStrategy(tenantId, strategyId) + "/live-activation/" + correlationId;
+  }
+
+  /**
    * Workflow ID prefix for a {@code PositionWorkflow}; {@code entrySignalId} disambiguates re-BTOs.
    */
   public static String position(
