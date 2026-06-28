@@ -60,6 +60,15 @@ strategy:
     write:
       enabled: ${STRATEGY_CONFIG_WRITE_ENABLED:false}
 
+# Phase F (operator-account-onboarding) one-click live activation/deactivation. DARK by default:
+# with enabled unset/false the ActivationController bean does not exist and the
+# /admin/tenants/{tenant}/strategies/{strategy}/activate-live + /deactivate-live routes 404. The
+# opt-in is a manual, per-cluster operator action — NO repo manifest sets this true. When enabled,
+# ServiceTokenFilter also bearer-gates /admin/tenants/.
+operator:
+  activation:
+    enabled: ${OPERATOR_ACTIVATION_ENABLED:false}
+
 # Exec internal base URL the credential forward targets (in-cluster service name).
 exec:
   base-url: ${EXEC_BASE_URL:http://exec:8080}

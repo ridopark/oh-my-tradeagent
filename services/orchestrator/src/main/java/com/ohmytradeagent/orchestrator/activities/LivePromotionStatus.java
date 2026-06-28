@@ -16,6 +16,10 @@ package com.ohmytradeagent.orchestrator.activities;
  *   <li>{@link #STALE} — the most-recent matching approval is older than the staleness window.
  *   <li>{@link #CONFIG_CHANGED} — a risk-relevant {@code TenantConfigChanged} occurred AFTER the
  *       approval → re-approval required.
+ *   <li>{@link #DEACTIVATED} — a {@code LivePromotionDeactivated} row (Phase F one-click
+ *       deactivation) landed for the same {@code (tenant, strategy, broker_target)} strictly AFTER
+ *       the matched approval → the operator explicitly revoked the live promotion, re-activation
+ *       required.
  *   <li>{@link #VERIFY_ERROR} — the verify itself could not run (no DB handle, or the read threw).
  *       Fail-closed: a verify failure must refuse a live order, never let an unapproved one
  *       through.
@@ -26,5 +30,6 @@ public enum LivePromotionStatus {
   ABSENT,
   STALE,
   CONFIG_CHANGED,
+  DEACTIVATED,
   VERIFY_ERROR
 }

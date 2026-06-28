@@ -500,7 +500,17 @@ dashboard pages (onboarding form, account list, activate button — UI-P1..P5, n
   `/v2/account` BEFORE persistence → returns the AUTHENTICATED account number. The UI **surfaces that
   number read-only** for visual confirmation; the operator NEVER free-types it; it becomes the immutable
   `expected_account_id`. Reject keys that don't authenticate.
-- **Activate button** → the Phase F one-click endpoint (required-config gate + LivePromotion emit + canary).
+- **Activate button** → the Phase F one-click endpoint (required-config gate + LivePromotion emit). The
+  first-live-exposure throttle is the broker-side 403 block (operator lifts it after watching clean fills),
+  NOT an app canary (operator decision 2026-06-28).
+- **Activation TTL display (R-UI, real-money ONLY):** for each LIVE tenant, the dashboard MUST clearly
+  surface the live-activation state and its expiry — e.g. "Live · activation valid until `<expires_at>`
+  (re-activate by then)" with a countdown/at-risk badge as it nears the `LIVE_PROMOTION_TTL` window (30d).
+  The TTL is a real-money dead-man's-switch ONLY: paper tenants never hit the promotion gate, so they show
+  no activation/TTL — render a plain "Paper" badge with NO expiry. Distinguish the two unmistakably so an
+  operator never mistakes a paper tenant for a live-armed one. Source the expiry from the newest
+  `LivePromotionApproved` `occurred_at` + `LIVE_PROMOTION_TTL`; a STALE/DEACTIVATED/ABSENT live tenant shows
+  "not armed — will not place new live entries" (open positions still managed).
 - **R-1.2 no secret egress:** keys are write-only — never returned by any API, never rendered (mask
   `••••1234`), never logged, never an audit subject. (The shipped write path already enforces this; the UI
   MUST NOT echo them.)

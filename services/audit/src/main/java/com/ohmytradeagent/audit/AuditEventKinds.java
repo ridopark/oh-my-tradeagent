@@ -352,6 +352,13 @@ public final class AuditEventKinds {
           "PositionAdopted",
           // LivePromotionActivitiesImpl
           "LivePromotionApproved",
+          // LivePromotionActivitiesImpl (Phase F, operator-account-onboarding): emitted by the
+          // single-operator one-click deactivate(). A row whose occurred_at is strictly after the
+          // matched LivePromotionApproved voids the live promotion at the order-time gate
+          // (AuditQueryActivitiesImpl.checkLivePromotion → DEACTIVATED, fail-closed). Carries the
+          // authenticated operator + ZERO key material; a neutral event on the same chain — in
+          // ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "LivePromotionDeactivated",
           // CopytradeSignalWorkflowImpl (P3-a): the live-promotion-gate refusal disposition. Also
           // in SOFT_TERMINAL_CLOSE_KINDS (refused before any broker activity, like SignalRejected).
           "LivePromotionMissing",

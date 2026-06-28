@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/live-activation-request.json",
+  "title": "LiveActivationRequest",
+  "description": "Phase F (operator-account-onboarding): input to LiveActivationWorkflow.activateLive. A server-side one-click live-activation request, machine-attributed to the authenticated operator. The workflow runs a fail-closed required-config gate + a fresh account probe and, on pass, emits a fresh LivePromotionApproved row (the gate-readable kind) so the already-wired order-time live-promotion gate keeps firing. Carries ZERO key material — credentials are resolved per-tenant by exec-svc at order time, never threaded through this request.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.LiveActivationRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "broker_target",
+    "operator_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The tenant whose (tenant, strategy) live promotion is being activated."
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The strategy being activated for live trading."
+    },
+    "broker_target": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "The live broker_target being approved. Recorded in the LivePromotionApproved subject (the gate matches subject->>'broker_target') and used to route the fresh account probe to broker-<value>."
+    },
+    "operator_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The authenticated operator (X-Operator-Id) performing the one-click activation. Recorded as the machine-attributed approver in the emitted LivePromotionApproved subject (operator_id) — the single-operator substitute for the legacy dual-control approve()."
+    },
+    "expected_account_id": {
+      "type": "string",
+      "description": "OPTIONAL. NOT supplied by the api-gateway caller — set by LiveActivationWorkflow after the fresh account probe (the probed brokerage account_number) and threaded into LivePromotionActivities.activate so it lands in the LivePromotionApproved subject (expected_account_id). Absent on the inbound request; populated server-side post-probe."
+    }
+  }
+}

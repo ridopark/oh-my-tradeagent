@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/live-deactivation-request.json",
+  "title": "LiveDeactivationRequest",
+  "description": "Phase F (operator-account-onboarding): input to LiveActivationWorkflow.deactivateLive. A server-side one-click live-DEACTIVATION request, machine-attributed to the authenticated operator. The workflow emits a LivePromotionDeactivated row (invalidating the prior approval so the order-time gate fails closed) AND trips the per-(tenant, strategy) kill switch. Carries ZERO key material.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.LiveDeactivationRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "broker_target",
+    "operator_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The tenant whose (tenant, strategy) live promotion is being deactivated."
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The strategy being deactivated."
+    },
+    "broker_target": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live",
+        "alpaca-paper",
+        "alpaca-live",
+        "tradier-paper",
+        "tradier-live",
+        "ibkr-paper",
+        "ibkr-live",
+        "schwab-paper",
+        "schwab-live"
+      ],
+      "description": "The live broker_target being deactivated. Recorded in the LivePromotionDeactivated subject (the gate matches subject->>'broker_target' newest-after-approval)."
+    },
+    "operator_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The authenticated operator (X-Operator-Id) performing the deactivation. Recorded in the emitted LivePromotionDeactivated subject (operator_id)."
+    }
+  }
+}

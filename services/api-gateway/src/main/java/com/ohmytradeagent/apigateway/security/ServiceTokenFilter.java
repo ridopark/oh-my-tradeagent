@@ -7,7 +7,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
 import org.springframework.stereotype.Component;
@@ -21,11 +21,14 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * caller — so the {@code X-Tenant-Id} it asserts can be trusted.
  *
  * <p><b>Route-scoped.</b> {@link #shouldNotFilter} returns true for everything except paths under
- * {@code /broker-credentials}, so the existing operator routes ({@code /positions}, {@code
+ * {@code /broker-credentials} (UI-P2-a) and {@code /admin/tenants/} (Phase F one-click
+ * activation/deactivation), so the existing operator routes ({@code /positions}, {@code
  * /promotion}, …) are untouched — they keep their current header-trust behavior.
  *
- * <p><b>Dark by default.</b> Gated on {@code broker.credentials.write.enabled=true}; with the flag
- * unset the filter bean does not exist (just like the controller and exec client).
+ * <p><b>Dark by default.</b> Active when EITHER {@code broker.credentials.write.enabled=true} OR
+ * {@code operator.activation.enabled=true}; with both unset the filter bean does not exist (just
+ * like the controllers). When present it bearer-gates BOTH route prefixes — gating the admin route
+ * does not require the credential-write route to also be enabled.
  *
  * <p>Mirrors the tenant-dashboard-bff filter: constant-time token compare (no timing side-channel)
  * and a prod fail-fast on the well-known default token (a pod started under the {@code prod}
@@ -33,11 +36,14 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * repo-readable value).
  */
 @Component
-@ConditionalOnProperty(name = "broker.credentials.write.enabled", havingValue = "true")
+@ConditionalOnExpression(
+    "${broker.credentials.write.enabled:false} or ${operator.activation.enabled:false}")
 public class ServiceTokenFilter extends OncePerRequestFilter {
 
   private static final String BEARER_PREFIX = "Bearer ";
   static final String ROUTE_PREFIX = "/broker-credentials";
+  // Phase F: the one-click activation/deactivation admin route is bearer-gated too.
+  static final String ADMIN_ROUTE_PREFIX = "/admin/tenants/";
   // The application.yml fallback used for local dev. Accepting it under prod would silently trust a
   // value anyone can read from this repo.
   private static final String INSECURE_DEFAULT_TOKEN = "dev-shared-token";
@@ -60,8 +66,9 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   @Override
   protected boolean shouldNotFilter(HttpServletRequest request) {
     String path = request.getRequestURI();
-    // Filter ONLY the credential-write route; every other route passes straight through.
-    return path == null || !path.startsWith(ROUTE_PREFIX);
+    // Filter ONLY the credential-write route and the Phase F admin activation route; every other
+    // route passes straight through.
+    return path == null || !(path.startsWith(ROUTE_PREFIX) || path.startsWith(ADMIN_ROUTE_PREFIX));
   }
 
   @Override

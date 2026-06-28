@@ -62,6 +62,20 @@ public final class WorkflowIds {
   }
 
   /**
+   * Workflow ID for the short-lived {@code LiveActivationWorkflow} that performs the Phase F
+   * (operator-account-onboarding) dark-gated one-click live activation / deactivation for {@code
+   * (tenant, strategy)}.
+   *
+   * <p>Routes through {@link #tenantStrategy} (the activation IS strategy-scoped) and appends the
+   * {@code correlationId} so a retried api-gateway call collides on {@code REJECT_DUPLICATE} rather
+   * than re-running the gate + emitting a duplicate {@code LivePromotionApproved} /{@code
+   * LivePromotionDeactivated} row. Mirrors {@link #strategyConfigUpdate}'s shape.
+   */
+  public static String liveActivation(String tenantId, String strategyId, String correlationId) {
+    return tenantStrategy(tenantId, strategyId) + "/live-activation/" + correlationId;
+  }
+
+  /**
    * Workflow ID prefix for a {@code PositionWorkflow}; {@code entrySignalId} disambiguates re-BTOs.
    */
   public static String position(
