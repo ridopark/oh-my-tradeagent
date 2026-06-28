@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 public class TenantContext {
 
   static final String HEADER_TENANT = "X-Tenant-Id";
+  static final String HEADER_OPERATOR = "X-Operator-Id";
 
   // tenant_id is a SQL bind parameter scoping every read; constrain it to a safe charset here —
   // independent of any caller's ordering — as defense-in-depth against a malformed identity.
@@ -32,12 +33,36 @@ public class TenantContext {
   }
 
   /**
+   * The authenticated operator from {@code X-Operator-Id}, for the OPERATOR-scoped (cross-tenant)
+   * admin reads — NOT tenant-scoped. Required: an absent or blank header is a 400 (mirrors the
+   * api-gateway operator pattern). Distinct from {@link #tenantId} which is a 401: an operator
+   * route is not "unauthenticated for a tenant scope", it is a malformed operator request.
+   */
+  public String operatorId(HttpServletRequest req) {
+    String v = req.getHeader(HEADER_OPERATOR);
+    if (v == null || v.isBlank()) {
+      throw new MissingOperatorException();
+    }
+    return v;
+  }
+
+  /**
    * Thrown when {@code X-Tenant-Id} is absent, blank, or malformed; mapped to 401 by {@code
    * GlobalExceptionHandler}.
    */
   public static class MissingTenantException extends RuntimeException {
     MissingTenantException() {
       super("missing required header: " + HEADER_TENANT);
+    }
+  }
+
+  /**
+   * Thrown when {@code X-Operator-Id} is absent or blank on an operator-scoped route; mapped to 400
+   * by {@code GlobalExceptionHandler}.
+   */
+  public static class MissingOperatorException extends RuntimeException {
+    MissingOperatorException() {
+      super("missing required header: " + HEADER_OPERATOR);
     }
   }
 }
