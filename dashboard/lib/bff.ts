@@ -191,6 +191,24 @@ export interface ProximityResponse {
 }
 export const getProximity = () => bffGet<ProximityResponse>("/api/proximity");
 
+// Account portfolio history (/live equity chart). Parallel arrays indexed by `timestamps` (epoch
+// seconds): `equity` is the chart line, `profit_loss`/`profit_loss_pct` the range-aware headline,
+// `base_value` the dashed baseline / range start. Account-level / shared scope (same caveat as
+// account_equity_scope) — `account_scope` carries the label. Empty arrays = unavailable; the chart
+// degrades, never crashes.
+export interface PortfolioHistory {
+  timestamps: number[];
+  equity: number[];
+  profit_loss: number[];
+  profit_loss_pct: number[];
+  base_value: number;
+  base_value_asof: number | null;
+  timeframe: string;
+  account_scope: string;
+}
+export const getPortfolioHistory = (range: string) =>
+  bffGet<PortfolioHistory>(`/api/portfolio-history?range=${range}`);
+
 export const getTrades = (limit = 100) =>
   bffGet<Envelope<Trade>>(`/api/trades?limit=${limit}`);
 export const getOrders = (limit = 100) =>
