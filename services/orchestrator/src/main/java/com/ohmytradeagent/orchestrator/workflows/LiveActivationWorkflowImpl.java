@@ -36,8 +36,7 @@ import java.time.Duration;
  *       REJECTED_KILLSWITCH}.
  *   <li>fresh account probe ({@code AccountSnapshotActivity} on {@code broker-<target>}); blank
  *       account_number or cash &le; 0 → {@code REJECTED_ACCOUNT}. Captures account_number as {@code
- *       expected_account_id} and the {@code trading_blocked} (403) flag — but NEVER refuses on 403
- *       (the broker-side block is the operator's intended throttle).
+ *       expected_account_id}.
  *   <li>all pass → {@code LivePromotionActivities.activate} → {@code ACTIVATED}.
  * </ol>
  *
@@ -72,16 +71,14 @@ public class LiveActivationWorkflowImpl
       return result(LiveActivationResult.Outcome.REJECTED_NOT_LIVE, "strategy is not live", null);
     }
 
-    // (b) required live loss gates (daily_loss_threshold > 0 + notional cap set). The invariant
-    // throws IllegalStateException; coarsen it into a refusal carrying its message.
+    // (b) required live loss gates (daily_loss_threshold > 0 + notional cap set).
     try {
       StrategyConfigInvariants.validateLiveRequiredGates(config, label);
     } catch (IllegalStateException e) {
       return result(LiveActivationResult.Outcome.REJECTED_CONFIG, e.getMessage(), null);
     }
 
-    // (c) capital_source must be account_cash (NOT the static $100k global base). Checked HERE so
-    // StrategyConfigInvariants stays byte-stable.
+    // (c) capital_source must be account_cash.
     if (config.getCapitalSource() != StrategyConfig.CapitalSource.ACCOUNT_CASH) {
       return result(
           LiveActivationResult.Outcome.REJECTED_CAPITAL_SOURCE,
@@ -89,14 +86,13 @@ public class LiveActivationWorkflowImpl
           null);
     }
 
-    // (d) kill switch must be armable (running + queryable). Fail closed on unreachable.
+    // (d) kill switch must be armable.
     if (!gate.killSwitchArmable(tenant, strategyId)) {
       return result(
           LiveActivationResult.Outcome.REJECTED_KILLSWITCH, "kill switch not armable", null);
     }
 
-    // (e) fresh account probe on broker-<target>. Blank account_number or non-positive cash refuses
-    // (REJECTED_ACCOUNT). A 403-blocked account (trading_blocked) is recorded but NEVER refused.
+    // (e) fresh account probe — blank account_number or non-positive cash refuses.
     AccountSnapshotResult snapshot = probeAccount(request, config);
     String accountNumber = snapshot == null ? null : snapshot.getAccountNumber();
     BigDecimal cash = snapshot == null ? null : snapshot.getCash();
@@ -106,10 +102,8 @@ public class LiveActivationWorkflowImpl
           "account probe returned no account or non-positive cash",
           null);
     }
-    boolean broker403Blocked = snapshot.getTradingBlocked() != null && snapshot.getTradingBlocked();
 
-    // (f) all gates passed — emit the fresh LivePromotionApproved row with the real operator + the
-    // probed expected_account_id. The activate Activity stamps the on-chain approved_at.
+    // (f) all gates passed — emit the fresh LivePromotionApproved row.
     //
     // broker_target is taken from the STORED config (the authoritative value the order-time gate
     // looks up: AuditQueryActivitiesImpl.checkLivePromotion matches subject->>'broker_target'
@@ -125,9 +119,7 @@ public class LiveActivationWorkflowImpl
     activateReq.setExpectedAccountId(accountNumber);
     promotion.activate(activateReq);
 
-    LiveActivationResult ok = result(LiveActivationResult.Outcome.ACTIVATED, null, accountNumber);
-    ok.setBroker403Blocked(broker403Blocked);
-    return ok;
+    return result(LiveActivationResult.Outcome.ACTIVATED, null, accountNumber);
   }
 
   @Override
@@ -135,11 +127,9 @@ public class LiveActivationWorkflowImpl
     String tenant = request.getTenantId();
     String strategyId = request.getStrategyId();
 
-    // Resolve the authoritative broker_target from the stored config so the
-    // LivePromotionDeactivated
-    // row carries the SAME broker_target the matched LivePromotionApproved row used — the gate's
-    // deactivation probe matches subject->>'broker_target', so a placeholder would never void the
-    // approval. The inbound request's broker_target is only a routing placeholder.
+    // broker_target is resolved from the STORED config so the LivePromotionDeactivated row matches
+    // the broker_target the gate's deactivation probe looks up (subject->>'broker_target') — the
+    // inbound request's broker_target is only a routing placeholder a placeholder could never void.
     StrategyConfig config = strategy.get(tenant, strategyId);
     LiveDeactivationRequest deactReq = new LiveDeactivationRequest();
     deactReq.setSchemaVersion(request.getSchemaVersion());
@@ -152,7 +142,7 @@ public class LiveActivationWorkflowImpl
             : request.getBrokerTarget());
 
     // Emit the deactivation row FIRST (the durable gate-invalidating record), then trip the kill
-    // switch as belt-and-suspenders so no live order can slip through before the next gate read.
+    // switch as belt-and-suspenders.
     promotion.deactivate(deactReq);
     gate.tripKillSwitch(tenant, strategyId, request.getOperatorId(), "live_deactivation:one_click");
 

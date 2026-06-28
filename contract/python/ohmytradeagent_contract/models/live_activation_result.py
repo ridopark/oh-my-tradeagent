@@ -24,7 +24,7 @@ class Outcome(StrEnum):
 
 class LiveActivationResult(BaseModel):
     """
-    Phase F (operator-account-onboarding): terminal outcome of LiveActivationWorkflow.activateLive / deactivateLive. The workflow returns each fail-closed refusal as a distinct outcome (NOT thrown) so api-gateway maps it to a 422 with the refusal reason; ACTIVATED/DEACTIVATED map to 200. expected_account_id (the probed brokerage account_number) is set on ACTIVATED so the operator can verify the bound account. broker_403_blocked records whether the probed account currently rejects new orders by user request (the operator's intended throttle) — informational, NOT a refusal.
+    Phase F (operator-account-onboarding): terminal outcome of LiveActivationWorkflow.activateLive / deactivateLive. The workflow returns each fail-closed refusal as a distinct outcome (NOT thrown) so api-gateway maps it to a 422 with the refusal reason; ACTIVATED/DEACTIVATED map to 200. expected_account_id (the probed brokerage account_number) is set on ACTIVATED so the operator can verify the bound account.
     """
 
     model_config = ConfigDict(
@@ -45,8 +45,4 @@ class LiveActivationResult(BaseModel):
     expected_account_id: str | None = None
     """
     The probed brokerage account_number bound into the LivePromotionApproved subject (expected_account_id). Set on ACTIVATED; null/omitted otherwise. Phase F only WRITES it into the promotion row — order-time account-binding ENFORCEMENT is Phase E's concern.
-    """
-    broker_403_blocked: bool | None = None
-    """
-    True when the probed account currently rejects NEW ORDERS by user request (the broker-side 403 throttle the operator lifts manually after clean fills). Informational only — the account snapshot itself still succeeds when 403-blocked, and this is NEVER a refusal. Null/omitted when not applicable.
     """

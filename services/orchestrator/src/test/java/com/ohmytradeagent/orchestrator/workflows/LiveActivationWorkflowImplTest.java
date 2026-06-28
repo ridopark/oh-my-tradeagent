@@ -33,8 +33,8 @@ import org.mockito.ArgumentCaptor;
  * workflow. The {@link AccountSnapshotActivity} is registered on a SEPARATE {@code
  * broker-alpaca-live} worker (matching production routing); every other activity is on
  * orchestrator-core. Each refusal path is its own case; the all-pass path asserts a single
- * activate() with the probed expected_account_id, and the 403-blocked-account path still activates
- * with broker_403_blocked=true. deactivateLive asserts deactivate() AND a kill-switch trip.
+ * activate() with the probed expected_account_id. deactivateLive asserts deactivate() AND a
+ * kill-switch trip.
  */
 class LiveActivationWorkflowImplTest {
 
@@ -120,14 +120,12 @@ class LiveActivationWorkflowImplTest {
     return c;
   }
 
-  private AccountSnapshotResult snap(
-      String accountNumber, BigDecimal cash, Boolean tradingBlocked) {
+  private AccountSnapshotResult snap(String accountNumber, BigDecimal cash) {
     AccountSnapshotResult r = new AccountSnapshotResult();
     r.setSchemaVersion(1L);
     r.setEquity(new BigDecimal("5000"));
     r.setCash(cash);
     r.setAccountNumber(accountNumber);
-    r.setTradingBlocked(tradingBlocked);
     return r;
   }
 
@@ -135,7 +133,7 @@ class LiveActivationWorkflowImplTest {
     when(strategy.get(TENANT, STRATEGY)).thenReturn(compliantConfig());
     when(gate.killSwitchArmable(TENANT, STRATEGY)).thenReturn(true);
     when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class)))
-        .thenReturn(snap(ACCOUNT, new BigDecimal("5000"), Boolean.FALSE));
+        .thenReturn(snap(ACCOUNT, new BigDecimal("5000")));
   }
 
   // ---- refusal cases ------------------------------------------------------------------------
@@ -206,7 +204,7 @@ class LiveActivationWorkflowImplTest {
     when(strategy.get(TENANT, STRATEGY)).thenReturn(compliantConfig());
     when(gate.killSwitchArmable(TENANT, STRATEGY)).thenReturn(true);
     when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class)))
-        .thenReturn(snap("", new BigDecimal("5000"), Boolean.FALSE));
+        .thenReturn(snap("", new BigDecimal("5000")));
 
     LiveActivationResult result = activateStub().activateLive(activateReq());
 
@@ -219,7 +217,7 @@ class LiveActivationWorkflowImplTest {
     when(strategy.get(TENANT, STRATEGY)).thenReturn(compliantConfig());
     when(gate.killSwitchArmable(TENANT, STRATEGY)).thenReturn(true);
     when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class)))
-        .thenReturn(snap(ACCOUNT, BigDecimal.ZERO, Boolean.FALSE));
+        .thenReturn(snap(ACCOUNT, BigDecimal.ZERO));
 
     LiveActivationResult result = activateStub().activateLive(activateReq());
 
@@ -237,7 +235,6 @@ class LiveActivationWorkflowImplTest {
 
     assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.ACTIVATED);
     assertThat(result.getExpectedAccountId()).isEqualTo(ACCOUNT);
-    assertThat(result.getBroker403Blocked()).isFalse();
 
     ArgumentCaptor<LiveActivationRequest> captor =
         ArgumentCaptor.forClass(LiveActivationRequest.class);
@@ -250,22 +247,6 @@ class LiveActivationWorkflowImplTest {
     // The activate row carries the STORED config's broker_target, not the request placeholder.
     assertThat(activated.getBrokerTarget())
         .isEqualTo(LiveActivationRequest.BrokerTarget.ALPACA_LIVE);
-  }
-
-  @Test
-  void blocked403Account_stillActivates_withFlag() {
-    when(strategy.get(TENANT, STRATEGY)).thenReturn(compliantConfig());
-    when(gate.killSwitchArmable(TENANT, STRATEGY)).thenReturn(true);
-    when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class)))
-        .thenReturn(snap(ACCOUNT, new BigDecimal("5000"), Boolean.TRUE));
-
-    LiveActivationResult result = activateStub().activateLive(activateReq());
-
-    // A 403-blocked account is the operator's intended throttle — NOT a refusal.
-    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.ACTIVATED);
-    assertThat(result.getExpectedAccountId()).isEqualTo(ACCOUNT);
-    assertThat(result.getBroker403Blocked()).isTrue();
-    verify(promotion, times(1)).activate(any());
   }
 
   // ---- deactivation -------------------------------------------------------------------------

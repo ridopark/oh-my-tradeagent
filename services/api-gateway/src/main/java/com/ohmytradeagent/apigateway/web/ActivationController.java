@@ -83,7 +83,8 @@ public class ActivationController {
     request.setSchemaVersion(1L);
     request.setTenantId(tenant);
     request.setStrategyId(strategy);
-    request.setBrokerTarget(brokerTargetFor(tenant, strategy));
+    // Non-null placeholder only; the workflow overwrites broker_target from the stored config.
+    request.setBrokerTarget(LiveActivationRequest.BrokerTarget.LIVE);
     request.setOperatorId(operator);
 
     WorkflowOptions opts = options(tenant, strategy, correlationId);
@@ -117,7 +118,8 @@ public class ActivationController {
     request.setSchemaVersion(1L);
     request.setTenantId(tenant);
     request.setStrategyId(strategy);
-    request.setBrokerTarget(deactBrokerTargetFor(tenant, strategy));
+    // Non-null placeholder only; the workflow overwrites broker_target from the stored config.
+    request.setBrokerTarget(LiveDeactivationRequest.BrokerTarget.LIVE);
     request.setOperatorId(operator);
 
     WorkflowOptions opts = options(tenant, strategy, correlationId);
@@ -148,26 +150,9 @@ public class ActivationController {
   }
 
   /**
-   * The broker_target is not supplied by the caller — the workflow reads the authoritative value
-   * from the stored strategy_config. The request DTO requires a non-null broker_target enum, so we
-   * pass a placeholder the workflow ignores (it routes the probe and records the row off the stored
-   * config's broker_target). Using {@code live} keeps the wire shape valid without asserting a
-   * specific provider here.
-   */
-  private static LiveActivationRequest.BrokerTarget brokerTargetFor(
-      String tenant, String strategy) {
-    return LiveActivationRequest.BrokerTarget.LIVE;
-  }
-
-  private static LiveDeactivationRequest.BrokerTarget deactBrokerTargetFor(
-      String tenant, String strategy) {
-    return LiveDeactivationRequest.BrokerTarget.LIVE;
-  }
-
-  /**
-   * Coarse outcome → HTTP. ACTIVATED/DEACTIVATED → 200 (+ expected_account_id / broker_403_blocked
-   * when present); any REJECTED_* → 422 with the reason; a null outcome → 503 (disposition unknown,
-   * NEVER reported as success).
+   * Coarse outcome → HTTP. ACTIVATED/DEACTIVATED → 200 (+ expected_account_id when present); any
+   * REJECTED_* → 422 with the reason; a null outcome → 503 (disposition unknown, NEVER reported as
+   * success).
    */
   private static ResponseEntity<Map<String, Object>> mapOutcome(LiveActivationResult result) {
     LiveActivationResult.Outcome outcome = result == null ? null : result.getOutcome();
@@ -180,9 +165,6 @@ public class ActivationController {
       case ACTIVATED, DEACTIVATED -> {
         if (result.getExpectedAccountId() != null) {
           body.put("expected_account_id", result.getExpectedAccountId());
-        }
-        if (result.getBroker403Blocked() != null) {
-          body.put("broker_403_blocked", result.getBroker403Blocked());
         }
         yield ResponseEntity.ok(body);
       }

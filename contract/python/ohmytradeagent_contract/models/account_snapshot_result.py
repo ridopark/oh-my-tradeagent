@@ -27,7 +27,3 @@ class AccountSnapshotResult(BaseModel):
     """
     Informational brokerage account identifier (Alpaca /v2/account 'account_number', e.g. PA3ER05HLHMB). NOT a credential and NOT used by any risk gate — surfaced only for dashboard account verification. Optional/absent for broker adapters or records that predate this field.
     """
-    trading_blocked: bool | None = None
-    """
-    Phase F (operator-account-onboarding): OPTIONAL. True when the brokerage account currently rejects NEW ORDERS (Alpaca /v2/account 'trading_blocked' / 'account_blocked' — the 40310000 'new orders are rejected by user request' halt). The /v2/account snapshot itself still succeeds when blocked (the 403 is on ORDERS only), so this is informational: LiveActivationWorkflow surfaces it as LiveActivationResult.broker_403_blocked and NEVER refuses on it (the broker-side block is the operator's intended throttle). Null/absent for broker adapters or records that do not populate it; consumers treat null as 'not blocked / unknown'.
-    """
