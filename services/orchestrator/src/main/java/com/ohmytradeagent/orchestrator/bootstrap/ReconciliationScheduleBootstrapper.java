@@ -4,6 +4,7 @@ import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import com.ohmytradeagent.orchestrator.workflows.BrokerTargetValidator;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflow;
 import io.temporal.client.WorkflowClient;
@@ -87,13 +88,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
       log.warn("tenants dir {} not found; skipping Reconciliation Schedule bootstrap", tenantsDir);
       return;
     }
-    // ScheduleClient.newInstance(serviceStubs) silently defaults to namespace "default" — a
-    // schedule created with the no-options form ends up in the wrong namespace and its action
-    // workflows can never reach our copytrade-namespace workers. Explicitly bind to the same
-    // namespace as the WorkflowClient. Verified the hard way (commit history).
-    String namespace = workflowClient.getOptions().getNamespace();
-    ScheduleClientOptions opts = ScheduleClientOptions.newBuilder().setNamespace(namespace).build();
-    runWith(ScheduleClient.newInstance(serviceStubs, opts));
+    runWith(newScheduleClient());
   }
 
   /**
@@ -108,32 +103,9 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
    */
   void runWith(ScheduleClient scheduleClient) {
     List<ScheduleListDescription> existingSchedules = null;
-    for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
-      String brokerTarget;
-      try {
-        StrategyConfig cfg = strategyRegistry.get(ts.tenantId(), ts.strategyId());
-        if (cfg.getBrokerTarget() == null) {
-          log.error(
-              "tenant={} strategy={}: broker_target missing in StrategyConfig; skipping schedule",
-              ts.tenantId(),
-              ts.strategyId());
-          continue;
-        }
-        brokerTarget = cfg.getBrokerTarget().value();
-      } catch (RuntimeException e) {
-        log.error(
-            "tenant={} strategy={}: failed to load StrategyConfig; skipping schedule",
-            ts.tenantId(),
-            ts.strategyId(),
-            e);
-        continue;
-      }
-      if (!BrokerTargetValidator.isValid(brokerTarget)) {
-        log.error(
-            "tenant={} strategy={}: broker_target {} rejected by whitelist; skipping schedule",
-            ts.tenantId(),
-            ts.strategyId(),
-            brokerTarget);
+    for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+      String brokerTarget = resolveValidBrokerTarget(ts.tenantId(), ts.strategyId());
+      if (brokerTarget == null) {
         continue;
       }
       String desiredScheduleId =
@@ -149,6 +121,83 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
           scheduleClient, existingSchedules, ts.tenantId(), ts.strategyId(), desiredScheduleId);
       ensureSchedule(scheduleClient, ts.tenantId(), ts.strategyId(), brokerTarget);
     }
+  }
+
+  /**
+   * Builds a {@link ScheduleClient} bound to the {@link WorkflowClient}'s namespace. Extracted from
+   * {@link #run} so {@code TenantReconcileLoop} can ensure a single tenant's schedule on a tick
+   * without re-running the full boot scan. (The no-options {@code ScheduleClient.newInstance} form
+   * silently defaults to namespace "default" — always bind explicitly.)
+   */
+  ScheduleClient newScheduleClient() {
+    String namespace = workflowClient.getOptions().getNamespace();
+    ScheduleClientOptions opts = ScheduleClientOptions.newBuilder().setNamespace(namespace).build();
+    return ScheduleClient.newInstance(serviceStubs, opts);
+  }
+
+  /**
+   * Idempotent per-{@code (tenant, strategy)} ensure: loads the strategy's {@code broker_target}
+   * via the active {@link StrategyRegistry}, validates it against the whitelist, and creates the
+   * reconciliation Schedule if absent ({@link ScheduleAlreadyRunningException} is swallowed as a
+   * benign warm/repeat). Shared by the boot path's per-strategy logic and {@code
+   * TenantReconcileLoop} so a runtime-inserted tenant gets a recon schedule without a restart.
+   *
+   * <p>Unlike the boot {@link #run} pass this does NOT reap stale schedules — a newly enumerated
+   * tenant has no prior {@code broker_target}-renamed schedules to reap; broker-target-rename
+   * cleanup stays a boot-only concern. Returns silently (logs) on a missing/whitelist-invalid
+   * config so a single bad tenant can't wedge the loop.
+   *
+   * <p>Returns {@code true} only when the schedule is confirmed present (freshly created or
+   * already-running); {@code false} if the config is missing/whitelist-invalid or the create hit an
+   * unexpected error. The reconcile loop uses this to retry a pair next tick rather than latch it
+   * as done after a transient failure.
+   */
+  boolean ensureForTenantStrategy(
+      ScheduleClient scheduleClient, String tenantId, String strategyId) {
+    String brokerTarget = resolveValidBrokerTarget(tenantId, strategyId);
+    if (brokerTarget == null) {
+      return false;
+    }
+    return ensureSchedule(scheduleClient, tenantId, strategyId, brokerTarget);
+  }
+
+  /**
+   * Loads the strategy's {@code broker_target} via the active {@link StrategyRegistry} and
+   * validates it against the whitelist. Returns the validated {@code broker_target}, or {@code
+   * null} (after logging the reason) when the config is missing, declares no {@code broker_target},
+   * or is whitelist-invalid. Shared by the boot {@link #runWith} pass and {@link
+   * #ensureForTenantStrategy} so both apply one fail-closed resolution policy — a single bad tenant
+   * logs and is skipped rather than wedging the caller.
+   */
+  private String resolveValidBrokerTarget(String tenantId, String strategyId) {
+    String brokerTarget;
+    try {
+      StrategyConfig cfg = strategyRegistry.get(tenantId, strategyId);
+      if (cfg.getBrokerTarget() == null) {
+        log.error(
+            "tenant={} strategy={}: broker_target missing in StrategyConfig; skipping schedule",
+            tenantId,
+            strategyId);
+        return null;
+      }
+      brokerTarget = cfg.getBrokerTarget().value();
+    } catch (RuntimeException e) {
+      log.error(
+          "tenant={} strategy={}: failed to load StrategyConfig; skipping schedule",
+          tenantId,
+          strategyId,
+          e);
+      return null;
+    }
+    if (!BrokerTargetValidator.isValid(brokerTarget)) {
+      log.error(
+          "tenant={} strategy={}: broker_target {} rejected by whitelist; skipping schedule",
+          tenantId,
+          strategyId,
+          brokerTarget);
+      return null;
+    }
+    return brokerTarget;
   }
 
   /**
@@ -209,7 +258,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
    * registry collision; the old zombie metadata stays in Temporal forever but is inert (doesn't
    * fire, doesn't appear in listings, doesn't consume resources).
    */
-  private void ensureSchedule(
+  private boolean ensureSchedule(
       ScheduleClient scheduleClient, String tenantId, String strategyId, String brokerTarget) {
     String scheduleId = "recon-v2-t-" + tenantId + "-s-" + strategyId + "-" + brokerTarget;
     String wfIdPrefix = WorkflowIds.reconciliationPrefix(tenantId, strategyId, brokerTarget);
@@ -250,10 +299,13 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
           tenantId,
           strategyId,
           brokerTarget);
+      return true;
     } catch (ScheduleAlreadyRunningException already) {
       log.info("Reconciliation Schedule id={} already exists (warm boot)", scheduleId);
+      return true;
     } catch (RuntimeException e) {
       log.error("failed to create Reconciliation Schedule id={}", scheduleId, e);
+      return false;
     }
   }
 }

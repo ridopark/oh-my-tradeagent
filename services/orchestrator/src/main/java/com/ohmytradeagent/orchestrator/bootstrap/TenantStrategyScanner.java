@@ -1,5 +1,6 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -53,6 +54,4 @@ public final class TenantStrategyScanner {
       throw new IllegalStateException("Failed to list " + dir, e);
     }
   }
-
-  public record TenantStrategy(String tenantId, String strategyId) {}
 }

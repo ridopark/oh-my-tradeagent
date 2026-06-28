@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.activities;
 
 import com.ohmytradeagent.orchestrator.bootstrap.TenantStrategyScanner;
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -26,7 +27,7 @@ public final class ScannerTenantStrategies implements TenantStrategies {
   public List<String> strategyIdsForTenant(String tenantId) {
     return TenantStrategyScanner.scan(tenantsDir).stream()
         .filter(ts -> ts.tenantId().equals(tenantId))
-        .map(TenantStrategyScanner.TenantStrategy::strategyId)
+        .map(TenantStrategy::strategyId)
         .toList();
   }
 }

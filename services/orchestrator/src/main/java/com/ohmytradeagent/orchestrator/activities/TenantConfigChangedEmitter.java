@@ -5,6 +5,7 @@ import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.bootstrap.TenantStrategyScanner;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -128,7 +129,7 @@ public class TenantConfigChangedEmitter implements ApplicationRunner {
       log.warn("tenants dir {} not found; skipping TenantConfigChanged emit on boot", tenantsDir);
       return;
     }
-    for (TenantStrategyScanner.TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+    for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       try {
         processOne(ts.tenantId(), ts.strategyId());
       } catch (RuntimeException e) {

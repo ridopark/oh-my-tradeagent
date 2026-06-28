@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.platform;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.contract.StrategyConfig;
+import java.util.List;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -85,5 +86,21 @@ public class DbStrategyRegistry implements StrategyRegistry {
               + strategyId,
           e);
     }
+  }
+
+  /**
+   * Enumerates every distinct {@code (tenant_id, strategy_id)} present in {@code strategy_config} —
+   * the Phase-0 decided enumeration source (no {@code tenants} table). Ordered for a stable,
+   * deterministic result so the reconcile-loop's seen-set behaves predictably.
+   */
+  @Override
+  public List<TenantStrategy> list() {
+    return dsl.fetch(
+            "SELECT DISTINCT tenant_id, strategy_id FROM strategy_config "
+                + "ORDER BY tenant_id, strategy_id")
+        .map(
+            r ->
+                new TenantStrategy(
+                    r.get("tenant_id", String.class), r.get("strategy_id", String.class)));
   }
 }
