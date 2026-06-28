@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -73,7 +74,7 @@ class PortfolioHistoryClientTest {
   }
 
   @Test
-  void runtimeFailureDegradesToEmptyWithoutCancelling() throws Exception {
+  void runtimeFailureAfterStartCancelsOrphanAndDegradesToEmpty() throws Exception {
     WorkflowClient client = mock(WorkflowClient.class);
     WorkflowStub stub = stubReturning(client);
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(PortfolioHistoryResult.class)))
@@ -82,7 +83,10 @@ class PortfolioHistoryClientTest {
     PortfolioHistoryResult out = newClient(client).historyFor("alpaca-paper", "1M");
 
     assertThat(out.getEquity()).isEmpty();
-    verify(stub, never()).cancel(); // cancel is timeout-only; a start/connect failure has no orphan
+    // start() succeeded then getResult() threw → the workflow is still running and must be
+    // cancelled
+    // so it doesn't linger as an orphan until its 60s scheduleToClose.
+    verify(stub, times(1)).cancel();
   }
 
   @Test

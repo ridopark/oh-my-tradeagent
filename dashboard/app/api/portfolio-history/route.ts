@@ -7,8 +7,14 @@ import { getPortfolioHistory, NotAuthenticatedError } from "@/lib/bff";
 // re-derives the tenant via auth() inside getPortfolioHistory() and forwards the request.
 export const dynamic = "force-dynamic";
 
+// Allow-list the range at the boundary (defence-in-depth) — mirrors the client's RANGES type and the
+// BFF's resolveRange fallback. Anything unexpected collapses to the 1M default rather than reaching
+// the BFF as an arbitrary string.
+const VALID_RANGES = new Set(["1D", "1W", "1M", "3M", "YTD", "1Y"]);
+
 export async function GET(request: NextRequest) {
-  const range = request.nextUrl.searchParams.get("range") ?? "1M";
+  const requested = request.nextUrl.searchParams.get("range") ?? "1M";
+  const range = VALID_RANGES.has(requested) ? requested : "1M";
   try {
     return NextResponse.json(await getPortfolioHistory(range));
   } catch (e) {

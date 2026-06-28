@@ -86,7 +86,13 @@ public class PortfolioHistoryClient {
       case "3M" -> new Resolved("3M", "1D");
       case "1Y" -> new Resolved("1A", "1D");
       case "YTD" -> new Resolved(daysSinceJan1() + "D", "1D");
-      default -> new Resolved("1M", "1D"); // 1M and any unknown
+      case "1M" -> new Resolved("1M", "1D");
+      default -> {
+        // An unknown range silently fell back to 1M before — log it so a future RANGES tab value
+        // not wired here is visible rather than masquerading as a 1M request.
+        log.warn("Unknown portfolio-history range={}; falling back to 1M", range);
+        yield new Resolved("1M", "1D");
+      }
     };
   }
 
@@ -131,22 +137,36 @@ public class PortfolioHistoryClient {
           "PortfolioHistoryWorkflow timed out broker_target={} range={}; cancelling orphan",
           brokerTarget,
           range);
-      try {
-        stub.cancel();
-      } catch (RuntimeException cancelErr) {
-        log.warn(
-            "PortfolioHistoryWorkflow cancel failed broker_target={} err={}",
-            brokerTarget,
-            cancelErr.getMessage());
-      }
+      cancelQuietly(stub, brokerTarget);
       return empty();
     } catch (RuntimeException e) {
+      // start() succeeded but getResult() threw (e.g. transient Temporal connectivity) — the
+      // workflow is still running, so cancel it too or it lingers as an orphan re-hitting the
+      // broker
+      // history endpoint until its 60s scheduleToClose. A cancel failure must not mask the
+      // degrade-to-empty, so it is swallowed in cancelQuietly.
       log.warn(
-          "PortfolioHistoryWorkflow failed broker_target={} range={} err={}",
+          "PortfolioHistoryWorkflow failed broker_target={} range={} err={}; cancelling orphan",
           brokerTarget,
           range,
           e.getMessage());
+      cancelQuietly(stub, brokerTarget);
       return empty();
+    }
+  }
+
+  /**
+   * Best-effort cancel of a still-running workflow whose result we stopped waiting for. A cancel
+   * failure is logged and swallowed so it never masks the caller's degrade-to-empty.
+   */
+  private void cancelQuietly(WorkflowStub stub, String brokerTarget) {
+    try {
+      stub.cancel();
+    } catch (RuntimeException cancelErr) {
+      log.warn(
+          "PortfolioHistoryWorkflow cancel failed broker_target={} err={}",
+          brokerTarget,
+          cancelErr.getMessage());
     }
   }
 

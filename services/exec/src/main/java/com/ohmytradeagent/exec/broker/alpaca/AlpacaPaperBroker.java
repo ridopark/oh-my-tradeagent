@@ -668,7 +668,10 @@ public class AlpacaPaperBroker implements OptionsBroker {
     }
     long[] out = new long[values.size()];
     for (int i = 0; i < values.size(); i++) {
-      out[i] = values.get(i);
+      // Alpaca can return sparse arrays with null trailing elements (market-closed slots); a null
+      // unboxing Long → long would NPE. Treat an absent timestamp as 0L.
+      Long v = values.get(i);
+      out[i] = v == null ? 0L : v;
     }
     return out;
   }
