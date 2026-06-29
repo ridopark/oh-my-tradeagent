@@ -65,7 +65,18 @@ export default async function AdminTenantsPage({
 }: {
   searchParams: { done?: string; error?: string };
 }) {
-  const session = await auth();
+  // Independent reads — overlap the page's auth() with the BFF fetch (the config page's pattern).
+  // The BFF fetch degrades to null when the admin-read route is dark (AdminReadDisabledError);
+  // anything else propagates.
+  const [session, adminRes] = await Promise.all([
+    auth(),
+    getAdminTenants().catch((e) => {
+      if (e instanceof AdminReadDisabledError) {
+        return null;
+      }
+      throw e;
+    }),
+  ]);
 
   // Coarse result banner from the activate/deactivate redirect.
   let banner: { tone: "ok" | "err"; msg: string } | null = null;
@@ -108,19 +119,8 @@ export default async function AdminTenantsPage({
     );
   }
 
-  // Fetch the cross-tenant listing; degrade to an explanatory empty state when the BFF route is dark.
-  let items: AdminTenantItem[] = [];
-  let readDisabled = false;
-  try {
-    const res = await getAdminTenants();
-    items = res.items;
-  } catch (e) {
-    if (e instanceof AdminReadDisabledError) {
-      readDisabled = true;
-    } else {
-      throw e;
-    }
-  }
+  const readDisabled = adminRes === null;
+  const items: AdminTenantItem[] = adminRes?.items ?? [];
 
   const columns = [
     { key: "tenant_id", label: "Tenant" },

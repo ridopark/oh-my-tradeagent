@@ -7,11 +7,13 @@ import { auth } from "@/auth";
 // (api_secret_key) flows through this module ONCE, into the outbound fetch body — it is NEVER read
 // back, logged, returned to the caller, or interpolated into an error. The only thing returned is a
 // coarse {ok, status}.
-const API_GATEWAY_BASE_URL =
+// Exported so the operator activation client (lib/adminActivation.ts) shares the SAME base URL,
+// token, and timeout rather than re-declaring them (and risking drift).
+export const API_GATEWAY_BASE_URL =
   process.env.API_GATEWAY_BASE_URL ?? "http://localhost:8082";
-const API_GATEWAY_TOKEN = process.env.API_GATEWAY_SHARED_TOKEN ?? "";
+export const API_GATEWAY_TOKEN = process.env.API_GATEWAY_SHARED_TOKEN ?? "";
 // Upper bound on a single api-gateway call so an unreachable/slow gateway can't hang the action.
-const API_GATEWAY_TIMEOUT_MS = 15_000;
+export const API_GATEWAY_TIMEOUT_MS = 15_000;
 
 if (!API_GATEWAY_TOKEN) {
   // Misconfiguration: without the shared token every api-gateway call gets a 401/403. Surface it

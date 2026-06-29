@@ -1,19 +1,16 @@
 import "server-only";
 import { auth } from "@/auth";
+import { BFF_URL, BFF_TOKEN, BFF_TIMEOUT_MS } from "@/lib/bff";
 
 // Server-ONLY client for the operator-scoped, cross-tenant admin read on the tenant-dashboard-bff
-// (GET /api/admin/tenants, I-1a). Distinct from lib/bff.ts because the header semantics differ: the
-// admin listing is cross-tenant, so it sends X-Operator-Id (the verified operator email from the
-// session) and NO X-Tenant-Id. Same network-isolated BFF behind the same shared service token.
+// (GET /api/admin/tenants, I-1a). Distinct from lib/bff.ts's bffGet because the header semantics
+// differ: the admin listing is cross-tenant, so it sends X-Operator-Id (the verified operator email
+// from the session) and NO X-Tenant-Id. Same network-isolated BFF behind the same shared service
+// token, so it imports bff.ts's URL/token/timeout (and the misconfig guard that lives there).
 //
 // The BFF route is itself dark-gated (operator.admin-read.enabled, default off → 404). When the flag
 // is off this throws AdminReadDisabledError so the page can render an explanatory empty state rather
 // than a hard error.
-const BFF_URL = process.env.BFF_INTERNAL_URL ?? "http://localhost:8083";
-const BFF_TOKEN = process.env.BFF_SHARED_TOKEN ?? "";
-const BFF_TIMEOUT_MS = 12_000;
-
-export class NotOperatorError extends Error {}
 export class AdminReadDisabledError extends Error {}
 
 // One (tenant, strategy) row of the admin listing. Mirrors AdminTenantsController.toItem. Contains NO
@@ -43,13 +40,13 @@ export interface AdminTenantsResponse {
   items: AdminTenantItem[];
 }
 
-// Fetch the cross-tenant admin listing. Throws NotOperatorError when the session is not an operator
-// (the page should never call this otherwise — the layout gates first) and AdminReadDisabledError
-// when the BFF route is dark (404).
+// Fetch the cross-tenant admin listing. Throws when the session is not an operator (a belt-and-
+// suspenders guard — the /admin layout gates first, so this is unreachable in normal flow) and
+// AdminReadDisabledError when the BFF route is dark (404), which the page degrades on.
 export async function getAdminTenants(): Promise<AdminTenantsResponse> {
   const session = await auth();
   if (!session?.isOperator || !session.operatorId) {
-    throw new NotOperatorError("not an operator");
+    throw new Error("not an operator");
   }
   const res = await fetch(`${BFF_URL}/api/admin/tenants`, {
     headers: {
