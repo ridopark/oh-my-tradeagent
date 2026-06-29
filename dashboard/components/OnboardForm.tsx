@@ -51,6 +51,8 @@ function credentialMsg(r: OnboardActionResult): { tone: "ok" | "err"; msg: strin
   switch (r.status) {
     case 422:
       return { tone: "err", msg: "Rejected — the broker did not accept these keys." };
+    case 409:
+      return { tone: "err", msg: "This tenant already has broker keys saved." };
     case 403:
       return { tone: "err", msg: "Tenant mismatch — keys must be for the tenant above." };
     case 429:
