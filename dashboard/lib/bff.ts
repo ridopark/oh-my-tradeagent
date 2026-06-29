@@ -6,14 +6,16 @@ import { auth } from "@/auth";
 // the shared service token — the BFF trusts that header precisely because the only thing that can
 // reach it (network isolation) is this server, which sets the header only after Auth.js verified
 // the identity.
-const BFF_URL = process.env.BFF_INTERNAL_URL ?? "http://localhost:8083";
-const BFF_TOKEN = process.env.BFF_SHARED_TOKEN ?? "";
+// Exported so the operator admin client (lib/adminBff.ts) shares the SAME base URL, token, and the
+// timeout-ordering invariant below rather than re-declaring them (and risking drift).
+export const BFF_URL = process.env.BFF_INTERNAL_URL ?? "http://localhost:8083";
+export const BFF_TOKEN = process.env.BFF_SHARED_TOKEN ?? "";
 // Upper bound on a single BFF call so an unreachable/slow BFF can't hang a page render. Top rung of
 // an ordering invariant that keeps /status degrading (not 500-ing) under an orchestrator stall:
 //   AccountEquityClient.RESULT_TIMEOUT_SECONDS (8s inner worker wait)
 //     <= bff.portfolio.subread-timeout-seconds (9s BFF per-section budget)
 //     <= this (12s). Lowering this below the BFF budget re-introduces the 500 it was meant to kill.
-const BFF_TIMEOUT_MS = 12_000;
+export const BFF_TIMEOUT_MS = 12_000;
 
 if (!BFF_TOKEN) {
   // Misconfiguration: without the shared token every BFF call gets a 401. Surface it loudly rather
