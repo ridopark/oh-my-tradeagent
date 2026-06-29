@@ -3,7 +3,7 @@ package com.ohmytradeagent.apigateway.config;
 import java.time.Clock;
 import java.time.Duration;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.context.annotation.Bean;
@@ -13,11 +13,12 @@ import org.springframework.core.env.Profiles;
 import org.springframework.web.client.RestClient;
 
 /**
- * UI-P2-a exec client wiring. Builds the {@link RestClient} the {@code BrokerCredentialController}
- * uses to forward a tenant-entered broker credential to exec's {@code POST
- * /internal/broker-credentials}. DARK by default: the whole config is gated on {@code
- * broker.credentials.write.enabled=true}, so with the flag unset (homelab / repo default) the bean
- * does not exist.
+ * UI-P2-a exec client wiring. Builds the {@link RestClient} the {@link
+ * BrokerCredentialForwardService} uses to forward a tenant-entered broker credential to exec's
+ * {@code POST /internal/broker-credentials}. DARK by default: the whole config is gated on {@code
+ * broker.credentials.write.enabled=true} OR {@code operator.credential-write.enabled=true} (Phase
+ * I-1c's operator route shares the same forward pipeline, so its flag must also bring these beans
+ * up); with both unset (homelab / repo default) the bean does not exist.
  *
  * <p>The {@code Authorization: Bearer <exec admin token>} is a DEFAULT header (the same shared
  * admin token on every request). {@code X-Tenant-Id} is deliberately NOT a default header — it is
@@ -26,7 +27,8 @@ import org.springframework.web.client.RestClient;
  * exec status exactly once and map it to a coarse result + audit outcome.
  */
 @Configuration
-@ConditionalOnProperty(name = "broker.credentials.write.enabled", havingValue = "true")
+@ConditionalOnExpression(
+    "${broker.credentials.write.enabled:false} or ${operator.credential-write.enabled:false}")
 public class ExecClientConfig {
 
   @Bean
