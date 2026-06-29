@@ -41,6 +41,7 @@ class BrokerCredentialDarkProofTest {
               ExecClientConfig.class,
               ServiceTokenFilter.class,
               CredentialWriteLimiter.class,
+              BrokerCredentialForwardService.class,
               BrokerCredentialController.class)
           .withUserConfiguration(TestSupportConfig.class)
           .withPropertyValues("exec.base-url=http://exec:8080");
@@ -50,6 +51,7 @@ class BrokerCredentialDarkProofTest {
     runner.run(
         ctx -> {
           assertThat(ctx).doesNotHaveBean(BrokerCredentialController.class);
+          assertThat(ctx).doesNotHaveBean(BrokerCredentialForwardService.class);
           assertThat(ctx).doesNotHaveBean(ServiceTokenFilter.class);
           assertThat(ctx).doesNotHaveBean(CredentialWriteLimiter.class);
           assertThat(ctx).doesNotHaveBean("execRestClient");
@@ -64,6 +66,7 @@ class BrokerCredentialDarkProofTest {
         .run(
             ctx -> {
               assertThat(ctx).hasSingleBean(BrokerCredentialController.class);
+              assertThat(ctx).hasSingleBean(BrokerCredentialForwardService.class);
               assertThat(ctx).hasSingleBean(ServiceTokenFilter.class);
               assertThat(ctx).hasSingleBean(CredentialWriteLimiter.class);
               assertThat(ctx).hasBean("execRestClient");

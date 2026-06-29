@@ -6,7 +6,7 @@ import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.stereotype.Component;
 
 /**
@@ -34,11 +34,15 @@ import org.springframework.stereotype.Component;
  *       fault) is ignored so a tenant is never locked out by an outage on our side.
  * </ul>
  *
- * <p>Flag-gated to match {@code BrokerCredentialController}: with {@code
- * broker.credentials.write.enabled} unset the bean does not exist.
+ * <p>Flag-gated to match the credential-write routes: present when {@code
+ * broker.credentials.write.enabled=true} (tenant route) OR {@code
+ * operator.credential-write.enabled=true} (Phase I-1c operator route) — both share {@link
+ * com.ohmytradeagent.apigateway.web.BrokerCredentialForwardService}, which depends on this limiter,
+ * so either flag must bring it up. With both unset the bean does not exist.
  */
 @Component
-@ConditionalOnProperty(name = "broker.credentials.write.enabled", havingValue = "true")
+@ConditionalOnExpression(
+    "${broker.credentials.write.enabled:false} or ${operator.credential-write.enabled:false}")
 public class CredentialWriteLimiter {
 
   private final Clock clock;

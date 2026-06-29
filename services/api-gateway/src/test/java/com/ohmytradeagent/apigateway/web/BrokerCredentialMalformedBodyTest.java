@@ -9,11 +9,6 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.ohmytradeagent.apigateway.security.CredentialWriteLimiter;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import io.temporal.client.WorkflowClient;
-import java.time.Clock;
-import java.time.Duration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,7 +16,6 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
-import org.springframework.web.client.RestClient;
 
 /**
  * UI-P2-a MF-7 regression: a malformed/unparseable request body must yield a DETAIL-FREE 400 and
@@ -43,16 +37,9 @@ class BrokerCredentialMalformedBodyTest {
   @BeforeEach
   void setUp() {
     // The controller deps are inert here: a malformed body never reaches the handler method.
-    Clock clock = Clock.systemUTC();
     BrokerCredentialController controller =
         new BrokerCredentialController(
-            mock(RestClient.class),
-            mock(WorkflowClient.class),
-            new TenantContext("dev", "copytrade-v1"),
-            clock,
-            new CredentialWriteLimiter(
-                clock, 10, 5, Duration.ofMinutes(10), Duration.ofMinutes(15)),
-            new SimpleMeterRegistry());
+            mock(BrokerCredentialForwardService.class), new TenantContext("dev", "copytrade-v1"));
     mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
