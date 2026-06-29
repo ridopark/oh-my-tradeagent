@@ -3,7 +3,7 @@
 # Python). Anything added here should be a thin developer-experience
 # wrapper, not a parallel build system.
 
-.PHONY: hooks help dashboard-dev config-edit-dev config-edit-docker dashboard-seed local-up local-down
+.PHONY: hooks help dashboard-dev config-edit-dev config-edit-docker onboard-dev dashboard-seed local-up local-down
 
 help:
 	@echo "Available targets:"
@@ -17,6 +17,9 @@ help:
 	@echo "                 BFF + api-gateway + Next.js) so /config can save locally. Ctrl-C to stop."
 	@echo "  config-edit-docker  Same stack as config-edit-dev but FULLY in Docker (no host"
 	@echo "                 JDK/Node). Runs detached; tear down with the printed command."
+	@echo "  onboard-dev    config-edit stack + the operator onboarding routes un-darked, to"
+	@echo "                 drive /admin/onboard. Tier 2 (create tenant) works E2E; Step 2"
+	@echo "                 (broker keys) needs 'ONBOARD_CREDS=db make onboard-dev' + paper keys."
 	@echo "  dashboard-seed Insert sample trades/orders into the local Postgres so the"
 	@echo "                 dashboard shows data (run while the infra is up). Idempotent."
 	@echo "  local-up       Build + start the full local pipeline in Docker (infra +"
@@ -49,6 +52,12 @@ dashboard-dev:
 # dashboard/README.md §'Local development' for the wiring and caveats.
 config-edit-dev:
 	@./scripts/dev/config-edit-dev.sh
+
+# Thin wrapper: config-edit-dev + the operator onboarding routes un-darked, to exercise the
+# /admin/onboard form. Tier 2 (create tenant) is fully wired; Tier 3 (credential paste + account
+# read-back) is opt-in via `ONBOARD_CREDS=db` + Alpaca paper keys. See the script header for caveats.
+onboard-dev:
+	@./scripts/dev/onboard-dev.sh
 
 # Fully-containerized sibling of config-edit-dev: the same end-to-end stack, but every
 # process (the three JVMs + the Next.js dev server) runs IN Docker — no host JDK/Node.
