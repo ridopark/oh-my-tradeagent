@@ -89,6 +89,16 @@ class OperatorBrokerCredentialControllerTest {
   }
 
   @Test
+  void malformedOperatorId_is400_noForward() {
+    // A hostile X-Operator-Id (control char / out-of-charset) must be rejected before it reaches
+    // the audit actor field — operatorId() only checks presence, the controller enforces format.
+    assertThatResponseStatus(
+        () -> controller.write(reqWithOperator("bad operator\n"), TENANT, body(TENANT)),
+        HttpStatus.BAD_REQUEST);
+    verify(forwardService, never()).forward(any(), any(), any(), anyBoolean());
+  }
+
+  @Test
   void malformedPathTenant_is400_noForward() {
     assertThatResponseStatus(
         () -> controller.write(reqWithOperator(OPERATOR), "bad/tenant", body("bad/tenant")),
@@ -105,9 +115,9 @@ class OperatorBrokerCredentialControllerTest {
   }
 
   @Test
-  void nullBody_is403_noForward() {
+  void nullBody_is400_noForward() {
     assertThatResponseStatus(
-        () -> controller.write(reqWithOperator(OPERATOR), TENANT, null), HttpStatus.FORBIDDEN);
+        () -> controller.write(reqWithOperator(OPERATOR), TENANT, null), HttpStatus.BAD_REQUEST);
     verify(forwardService, never()).forward(any(), any(), any(), anyBoolean());
   }
 

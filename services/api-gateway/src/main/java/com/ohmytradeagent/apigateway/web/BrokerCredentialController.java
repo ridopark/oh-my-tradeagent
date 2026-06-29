@@ -53,8 +53,13 @@ public class BrokerCredentialController {
     // (a) strict tenant — 400 if absent/blank/malformed (no dev fallback on this route).
     String tenant = ctx.requiredTenantId(req);
 
-    // (b) cross-tenant guard — coarse 403, no detail (no oracle).
-    if (body == null || !tenant.equals(body.tenantId())) {
+    // (b) a missing body is a malformed request (400), distinct from a cross-tenant attempt.
+    if (body == null) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
+    }
+
+    // (c) cross-tenant guard — coarse 403, no detail (no oracle).
+    if (!tenant.equals(body.tenantId())) {
       throw new ResponseStatusException(HttpStatus.FORBIDDEN);
     }
 

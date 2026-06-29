@@ -84,9 +84,9 @@ class BrokerCredentialControllerTest {
   }
 
   @Test
-  void nullBody_is403_noForward() {
+  void nullBody_is400_noForward() {
     assertThatResponseStatus(
-        () -> controller.write(reqWithTenant(TENANT), null), HttpStatus.FORBIDDEN);
+        () -> controller.write(reqWithTenant(TENANT), null), HttpStatus.BAD_REQUEST);
     verifyNoInteractions(forwardService);
   }
 

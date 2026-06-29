@@ -21,7 +21,14 @@ public class TenantContext {
   // The canonical tenant-id charset. A tenant value flows into Temporal workflow ids, Visibility
   // queries, and the exec X-Tenant-Id header, so it must stay restricted — kept here (compiled
   // once) as the single home for the rule, shared by the header guard and any path-tenant guard.
+  // (Validated via Matcher.matches(), which anchors the whole string — no embedded illegal char.)
   private static final Pattern TENANT_ID_PATTERN = Pattern.compile("[A-Za-z0-9_-]+");
+
+  // The canonical operator-id charset (an email from the OPERATOR_EMAILS allowlist). An operator id
+  // flows into the audit `actor` field, so reject control chars / overlong values before they are
+  // recorded. Validated via Matcher.matches() (whole-string anchored). Email max length is 254.
+  private static final int OPERATOR_ID_MAX_LENGTH = 254;
+  private static final Pattern OPERATOR_ID_PATTERN = Pattern.compile("[A-Za-z0-9_@.+-]+");
 
   private final String defaultTenant;
   private final String defaultStrategy;
@@ -62,6 +69,19 @@ public class TenantContext {
    */
   public boolean isValidTenantId(String tenant) {
     return tenant != null && !tenant.isBlank() && TENANT_ID_PATTERN.matcher(tenant).matches();
+  }
+
+  /**
+   * Format check for an operator id (non-null, non-blank, {@code [A-Za-z0-9_@.+-]+}, ≤254 chars)
+   * before it is recorded as the audit {@code actor}. {@link #operatorId} only checks presence; an
+   * operator-scoped route that persists the value should additionally enforce this so a hostile
+   * {@code X-Operator-Id} cannot inject control characters or an overlong string into the audit.
+   */
+  public boolean isValidOperatorId(String operator) {
+    return operator != null
+        && !operator.isBlank()
+        && operator.length() <= OPERATOR_ID_MAX_LENGTH
+        && OPERATOR_ID_PATTERN.matcher(operator).matches();
   }
 
   public String strategyId(HttpServletRequest req) {

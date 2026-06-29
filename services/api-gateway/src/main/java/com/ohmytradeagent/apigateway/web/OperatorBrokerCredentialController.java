@@ -54,15 +54,26 @@ public class OperatorBrokerCredentialController {
 
     String operator = ctx.operatorId(req); // 400 if X-Operator-Id absent
 
+    // The operator id is recorded verbatim as the audit `actor` — reject a malformed value (400)
+    // before it lands there (operatorId() only checks presence, not charset/length).
+    if (!ctx.isValidOperatorId(operator)) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
+    }
+
     // The path tenant flows into the exec X-Tenant-Id header AND the audit workflow id — reject a
     // malformed value (400) before it can corrupt either, using TenantContext's canonical charset.
     if (!ctx.isValidTenantId(tenant)) {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
     }
 
+    // A missing body is a malformed request (400), distinct from a cross-tenant attempt.
+    if (body == null) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
+    }
+
     // Cross-tenant guard — the body's declared tenant must match the path target; coarse 403, no
     // detail (no oracle). Unlike the tenant route the trusted tenant is the PATH, not a header.
-    if (body == null || !tenant.equals(body.tenantId())) {
+    if (!tenant.equals(body.tenantId())) {
       throw new ResponseStatusException(HttpStatus.FORBIDDEN);
     }
 
