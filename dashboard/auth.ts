@@ -1,6 +1,7 @@
 import NextAuth from "next-auth";
 import { authConfig } from "@/auth.config";
 import { findTenantsForIdentity } from "@/lib/db";
+import { isOperatorEmail } from "@/lib/operator";
 
 // Full Node-runtime Auth.js instance. Extends the edge-safe base (auth.config.ts) with the
 // DB-dependent callbacks. Google + Facebook social login. The signIn callback binds the verified
@@ -46,6 +47,13 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
       return true;
     },
     async jwt({ token, account, trigger, session }) {
+      // Operator allowlist is re-derived on EVERY call (a cheap env read, no DB) from the verified
+      // token email, so adding/removing an OPERATOR_EMAILS entry takes effect on the next request
+      // without forcing a re-login. token.email is stamped by Auth.js from the OAuth profile.
+      const operator = isOperatorEmail(token.email as string | null | undefined);
+      token.isOperator = operator;
+      token.operatorId = operator ? (token.email as string) : undefined;
+
       // Active-tenant switch: the switchTenant server action calls unstable_update({ tenantId })
       // which re-runs this callback with trigger="update". Honor it ONLY if the requested tenant is in
       // this identity's signed allowed set — never trust an arbitrary value onto X-Tenant-Id.
@@ -87,6 +95,10 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
       }
       if (token.tenantIds) {
         session.tenantIds = token.tenantIds as string[];
+      }
+      session.isOperator = token.isOperator === true;
+      if (token.operatorId) {
+        session.operatorId = token.operatorId as string;
       }
       return session;
     },

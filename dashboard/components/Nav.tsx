@@ -14,12 +14,17 @@ const LINKS = [
   { href: "/settings", label: "Settings" },
 ];
 
-const PRIMARY = LINKS.slice(0, 4);
-const MORE = LINKS.slice(4);
+// Operator-only entry, appended to the link set when the session is an operator (see auth callbacks
+// + OPERATOR_EMAILS). Non-operators never see it.
+const ADMIN_LINK = { href: "/admin/tenants", label: "Admin" };
 
 export async function Nav({ tenantId }: { tenantId?: string }) {
   const session = await auth();
   const tenantIds = session?.tenantIds ?? [];
+
+  const links = session?.isOperator ? [...LINKS, ADMIN_LINK] : LINKS;
+  const primary = links.slice(0, 4);
+  const more = links.slice(4);
 
   // Built once; rendered both in the desktop account area and passed as the
   // mobile drawer's children. The server-action sign-out form must stay here
@@ -50,7 +55,7 @@ export async function Nav({ tenantId }: { tenantId?: string }) {
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
           <span className="font-semibold text-slate-100">Tenant Dashboard</span>
           <nav className="hidden flex-wrap gap-x-4 gap-y-2 text-sm sm:flex">
-            {LINKS.map((l) => (
+            {links.map((l) => (
               <Link
                 key={l.href}
                 href={l.href}
@@ -66,7 +71,7 @@ export async function Nav({ tenantId }: { tenantId?: string }) {
         </div>
       </div>
 
-      <MobileBottomNav primary={PRIMARY} more={MORE}>
+      <MobileBottomNav primary={primary} more={more}>
         {accountBlock}
       </MobileBottomNav>
     </header>
