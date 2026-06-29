@@ -84,7 +84,6 @@ export interface OperatorBrokerCredentialResult {
   // Set only on a 200 SAVED — the NON-secret authenticated account number exec read back from the
   // broker (/v2/account), for the operator to confirm the keys landed on the intended account.
   brokerAccountId?: string;
-  credentialVersion?: number;
 }
 
 // Paste a tenant's broker api-key/secret. The secret flows through here ONCE into the outbound body
@@ -123,17 +122,15 @@ export async function postOperatorBrokerCredential(
       signal: AbortSignal.timeout(API_GATEWAY_TIMEOUT_MS),
     });
     let brokerAccountId: string | undefined;
-    let credentialVersion: number | undefined;
     if (res.ok) {
       // SAVED body is {version, broker_account_id} — both non-secret. NEVER contains key material.
+      // We read back only broker_account_id (the operator's account-confirmation read-back).
       const body = (await res.json().catch(() => null)) as {
-        version?: number;
         broker_account_id?: string;
       } | null;
       brokerAccountId = body?.broker_account_id;
-      credentialVersion = body?.version;
     }
-    return { ok: res.ok, status: res.status, brokerAccountId, credentialVersion };
+    return { ok: res.ok, status: res.status, brokerAccountId };
   } catch {
     // Transport/abort error — return a coarse failure WITHOUT the thrown value (which could embed
     // the request body / secret in some runtimes).

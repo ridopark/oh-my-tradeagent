@@ -16,6 +16,10 @@ const CREDENTIAL_ENABLED = process.env.OPERATOR_CREDENTIAL_WRITE_ENABLED === "tr
 const DEFAULT_BASE_URL = "https://paper-api.alpaca.markets";
 const DEFAULT_WS_URL = "wss://paper-api.alpaca.markets/stream";
 
+// The tenant/strategy id charset the form advertises and the api-gateway (TenantContext) enforces.
+// Validate here too so a malformed id gets an immediate 400 banner instead of an opaque gateway 400.
+const ID_RE = /^[A-Za-z0-9_-]+$/;
+
 // Minimal paper StrategyConfig template. tenant_id/strategy_id are injected server-side from the
 // form (so they always match the create path); enabled:false creates the tenant dormant.
 const DEFAULT_CONFIG = JSON.stringify(
@@ -48,7 +52,7 @@ export default async function OnboardPage() {
     }
     const tenant = String(formData.get("tenant_id") ?? "").trim();
     const strategy = String(formData.get("strategy_id") ?? "").trim();
-    if (!tenant || !strategy) {
+    if (!ID_RE.test(tenant) || !ID_RE.test(strategy)) {
       return { ok: false, status: 400 };
     }
     let config: Record<string, unknown>;
@@ -79,7 +83,7 @@ export default async function OnboardPage() {
       return { ok: false, status: 0 };
     }
     const tenant = String(formData.get("tenant_id") ?? "").trim();
-    if (!tenant) {
+    if (!ID_RE.test(tenant)) {
       return { ok: false, status: 400 };
     }
     const r = await postOperatorBrokerCredential(tenant, {

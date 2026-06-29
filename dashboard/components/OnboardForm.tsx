@@ -117,7 +117,9 @@ export function OnboardForm({
     startSave(async () => setCredResult(await addCredentialAction(formData)));
   }
 
+  // Step 1 (create) needs both ids; step 2 (keys) binds only the tenant.
   const idsMissing = !tenant.trim() || !strategy.trim();
+  const tenantMissing = !tenant.trim();
 
   return (
     <div className="space-y-6">
@@ -284,7 +286,7 @@ export function OnboardForm({
           </div>
           <button
             type="submit"
-            disabled={!credentialEnabled || saving || idsMissing}
+            disabled={!credentialEnabled || saving || tenantMissing}
             className="mt-3 rounded border border-emerald-500/60 bg-emerald-600/20 px-3 py-1.5 text-sm font-medium text-emerald-300 transition-colors hover:bg-emerald-600/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving ? "Saving…" : "Save & verify keys"}
