@@ -1,4 +1,5 @@
 import { auth } from "@/auth";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
@@ -198,9 +199,17 @@ export default async function AdminTenantsPage({
     <>
       <Nav tenantId={session?.tenantId} />
       <main className="mx-auto max-w-6xl px-4 py-6">
-        <h1 className="mb-1 text-xl font-semibold text-slate-100">
-          Operator · Tenants
-        </h1>
+        <div className="mb-1 flex items-center justify-between">
+          <h1 className="text-xl font-semibold text-slate-100">
+            Operator · Tenants
+          </h1>
+          <Link
+            href="/admin/onboard"
+            className="rounded border border-slate-700 px-2 py-1 text-sm text-slate-300 hover:bg-slate-800 hover:text-white"
+          >
+            + Onboard tenant
+          </Link>
+        </div>
         <p className="mb-4 text-sm text-slate-400">
           Every (tenant, strategy) with its broker account and, for live
           targets, the live-promotion activation state. Live activations carry a

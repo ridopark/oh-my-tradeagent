@@ -1,0 +1,125 @@
+import { auth } from "@/auth";
+import Link from "next/link";
+import { Nav } from "@/components/Nav";
+import { OnboardForm, type OnboardActionResult } from "@/components/OnboardForm";
+import { createTenant, postOperatorBrokerCredential } from "@/lib/adminOnboarding";
+
+export const dynamic = "force-dynamic";
+
+// Dark-by-default UI gates, mirroring the api-gateway route flags. Unset/anything-else => that step
+// renders read-only. Even with these "true" each api-gateway route is itself dark (404s) until its
+// own flag is on, so the action degrades gracefully. Paper-only this phase (exec refuses -live).
+const CREATE_ENABLED = process.env.OPERATOR_TENANT_CREATE_ENABLED === "true";
+const CREDENTIAL_ENABLED = process.env.OPERATOR_CREDENTIAL_WRITE_ENABLED === "true";
+
+// Paper broker endpoints — the only targets accepted this phase (live arming is Phase E).
+const DEFAULT_BASE_URL = "https://paper-api.alpaca.markets";
+const DEFAULT_WS_URL = "wss://paper-api.alpaca.markets/stream";
+
+// Minimal paper StrategyConfig template. tenant_id/strategy_id are injected server-side from the
+// form (so they always match the create path); enabled:false creates the tenant dormant.
+const DEFAULT_CONFIG = JSON.stringify(
+  {
+    schema_version: 1,
+    broker_target: "alpaca-paper",
+    author_whitelist: [],
+    max_signal_age_bto_secs: 300,
+    max_signal_age_stc_secs: 300,
+    max_positions: 5,
+    capital_weight: 1.0,
+    min_contracts: 1,
+    max_contracts: 10,
+    enabled: false,
+  },
+  null,
+  2,
+);
+
+export default async function OnboardPage() {
+  const session = await auth();
+
+  // Server action: create the tenant. Re-verifies operator, parses the config, force-binds the
+  // tenant/strategy ids onto it (so the writer's identity check passes), forwards to the api-gateway.
+  async function createTenantAction(formData: FormData): Promise<OnboardActionResult> {
+    "use server";
+    const s = await auth();
+    if (!s?.isOperator) {
+      return { ok: false, status: 0 };
+    }
+    const tenant = String(formData.get("tenant_id") ?? "").trim();
+    const strategy = String(formData.get("strategy_id") ?? "").trim();
+    if (!tenant || !strategy) {
+      return { ok: false, status: 400 };
+    }
+    let config: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(String(formData.get("config") ?? "")) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return { ok: false, status: 400 };
+      }
+      config = parsed as Record<string, unknown>;
+    } catch {
+      // Malformed JSON is a client error — surface 400 without forwarding.
+      return { ok: false, status: 400 };
+    }
+    // Force identity to match the path; default schema_version if the operator dropped it.
+    config.tenant_id = tenant;
+    config.strategy_id = strategy;
+    config.schema_version ??= 1;
+    const r = await createTenant(tenant, strategy, config);
+    return { ok: r.ok, status: r.status, createdVersion: r.createdVersion };
+  }
+
+  // Server action: paste + verify broker keys for the tenant. The secret rides FormData into the
+  // server action and onward to the api-gateway; it is never returned or logged.
+  async function addCredentialAction(formData: FormData): Promise<OnboardActionResult> {
+    "use server";
+    const s = await auth();
+    if (!s?.isOperator) {
+      return { ok: false, status: 0 };
+    }
+    const tenant = String(formData.get("tenant_id") ?? "").trim();
+    if (!tenant) {
+      return { ok: false, status: 400 };
+    }
+    const r = await postOperatorBrokerCredential(tenant, {
+      provider: String(formData.get("provider") ?? "alpaca"),
+      api_key_id: String(formData.get("api_key_id") ?? ""),
+      api_secret_key: String(formData.get("api_secret_key") ?? ""),
+      base_url: String(formData.get("base_url") ?? ""),
+      ws_url: String(formData.get("ws_url") ?? ""),
+      declared_account_id: String(formData.get("declared_account_id") ?? ""),
+      expected_version: 0, // onboarding = first write
+    });
+    return { ok: r.ok, status: r.status, brokerAccountId: r.brokerAccountId };
+  }
+
+  return (
+    <>
+      <Nav tenantId={session?.tenantId} />
+      <main className="mx-auto max-w-3xl px-4 py-6">
+        <div className="mb-4 flex items-center justify-between">
+          <h1 className="text-xl font-semibold text-slate-100">Operator · Onboard tenant</h1>
+          <Link href="/admin/tenants" className="text-sm text-slate-400 hover:text-white">
+            ← Tenants
+          </Link>
+        </div>
+        <p className="mb-6 text-sm text-slate-400">
+          Data-only onboarding: create a tenant&apos;s first strategy config, then paste and verify
+          its broker keys. Both steps are operator-scoped and dark-gated. This phase targets paper
+          accounts only — arming real money is a separate, gated step.
+        </p>
+
+        <OnboardForm
+          createEnabled={CREATE_ENABLED}
+          credentialEnabled={CREDENTIAL_ENABLED}
+          defaultConfig={DEFAULT_CONFIG}
+          defaultBaseUrl={DEFAULT_BASE_URL}
+          defaultWsUrl={DEFAULT_WS_URL}
+          createAction={createTenantAction}
+          addCredentialAction={addCredentialAction}
+        />
+      </main>
+    </>
+  );
+}
