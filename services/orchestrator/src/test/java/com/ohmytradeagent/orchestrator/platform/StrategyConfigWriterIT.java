@@ -301,6 +301,111 @@ class StrategyConfigWriterIT {
     }
   }
 
+  // --- Phase I-1b: create-tenant INSERT path ---
+
+  /** A create INSERTs the first row at version 1 with updated_by = the operator. */
+  @Test
+  void create_insertsFirstRowAtVersionOne() throws Exception {
+    StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
+
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    long version = writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com");
+
+    assertThat(version).isEqualTo(1L);
+    assertThat(versionOf("acme", "copytrade-v1")).isEqualTo(1L);
+    assertThat(updatedBy("acme", "copytrade-v1")).isEqualTo("ridopark@gmail.com");
+    assertThat(configJson("acme", "copytrade-v1").get("broker_target").textValue())
+        .isEqualTo("alpaca-live");
+  }
+
+  /** A second create for the same (tenant, strategy) is a no-op → RowAlreadyExistsException. */
+  @Test
+  void create_duplicate_throwsRowAlreadyExists_doesNotOverwrite() throws Exception {
+    StrategyConfig first = liveSafeConfig("acme", "copytrade-v1");
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    writer.create("acme", "copytrade-v1", first, "ridopark@gmail.com");
+
+    StrategyConfig second = copy(first);
+    second.setMaxPositions(99L); // would overwrite if create were an upsert
+    assertThatThrownBy(() -> writer.create("acme", "copytrade-v1", second, "someone-else"))
+        .isInstanceOf(RowAlreadyExistsException.class);
+
+    // unchanged: still the first row's value + version + operator
+    assertThat(versionOf("acme", "copytrade-v1")).isEqualTo(1L);
+    assertThat(configJson("acme", "copytrade-v1").get("max_positions").asLong()).isEqualTo(5L);
+    assertThat(updatedBy("acme", "copytrade-v1")).isEqualTo("ridopark@gmail.com");
+  }
+
+  /** A config whose own tenant_id/strategy_id drift from the create target is REJECTED_INVALID. */
+  @Test
+  void create_identityMismatch_throwsInvalidConfig_persistsNothing() {
+    StrategyConfig config = liveSafeConfig("other", "copytrade-v1"); // config says tenant "other"
+
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    assertThatThrownBy(() -> writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com"))
+        .isInstanceOf(InvalidConfigException.class);
+
+    assertThat(dsl.fetchCount(org.jooq.impl.DSL.table("strategy_config"))).isZero();
+  }
+
+  /**
+   * A LIVE create missing the loss gate is rejected (the live-required gate), nothing persisted.
+   */
+  @Test
+  void create_liveMissingLossGate_throwsInvalidConfig() {
+    StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
+    config.setDailyLossThreshold(null); // a live strategy must declare a kill-switch loss threshold
+
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    assertThatThrownBy(() -> writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com"))
+        .isInstanceOf(InvalidConfigException.class);
+
+    assertThat(dsl.fetchCount(org.jooq.impl.DSL.table("strategy_config"))).isZero();
+  }
+
+  /** A PAPER create needs no loss gates (they apply only to live) → CREATED at version 1. */
+  @Test
+  void create_paperConfig_succeeds_withoutLiveGates() throws Exception {
+    StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
+    config.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
+    config.setDailyLossThreshold(null); // not required for paper
+    config.setNotionalCapPctOfCapitalBase(null); // not required for paper
+
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    long version = writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com");
+
+    assertThat(version).isEqualTo(1L);
+    assertThat(configJson("acme", "copytrade-v1").get("broker_target").textValue())
+        .isEqualTo("alpaca-paper");
+  }
+
+  /** A successful create emits exactly one TenantConfigChanged audit row, source=tenant-create. */
+  @Test
+  void create_emitsTenantCreateAuditRow() throws Exception {
+    StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
+
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com");
+
+    try (var ps =
+        adminConn.prepareStatement(
+            "SELECT subject::text AS subject_json, row_hash FROM audit_log "
+                + "WHERE kind = 'TenantConfigChanged' AND tenant_id = 'acme' "
+                + "AND strategy_id = 'copytrade-v1'")) {
+      try (var rs = ps.executeQuery()) {
+        int count = 0;
+        while (rs.next()) {
+          count++;
+          JsonNode subject = om.readTree(rs.getString("subject_json"));
+          assertThat(subject.get("actor").textValue()).isEqualTo("ridopark@gmail.com");
+          assertThat(subject.get("source").textValue()).isEqualTo("tenant-create");
+          assertThat(rs.getBytes("row_hash")).as("row_hash via chain writer").isNotNull();
+        }
+        assertThat(count).isEqualTo(1);
+      }
+    }
+  }
+
   // --- helpers ---
 
   private static StrategyConfig liveSafeConfig(String tenantId, String strategyId) {

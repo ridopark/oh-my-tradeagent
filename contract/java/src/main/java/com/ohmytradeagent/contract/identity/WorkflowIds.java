@@ -62,6 +62,23 @@ public final class WorkflowIds {
   }
 
   /**
+   * Workflow ID for the short-lived {@code StrategyConfigCreateWorkflow} that performs the Phase
+   * I-1b (operator-account-onboarding) dark-gated create-tenant INSERT for {@code (tenant,
+   * strategy)} — the first config row at version 1.
+   *
+   * <p>Routes through {@link #tenantStrategy} (the create IS strategy-scoped) and appends the
+   * {@code correlationId} so a retried api-gateway call collides on {@code REJECT_DUPLICATE} and
+   * returns the original run's result rather than re-running the INSERT. A genuinely new create of
+   * an already-existing tenant uses a fresh {@code correlationId}, runs, and the {@code ON CONFLICT
+   * DO NOTHING} INSERT yields {@code ALREADY_EXISTS}. Mirrors {@link #strategyConfigUpdate}'s
+   * shape.
+   */
+  public static String strategyConfigCreate(
+      String tenantId, String strategyId, String correlationId) {
+    return tenantStrategy(tenantId, strategyId) + "/cfg-create/" + correlationId;
+  }
+
+  /**
    * Workflow ID for the short-lived {@code LiveActivationWorkflow} that performs the Phase F
    * (operator-account-onboarding) dark-gated one-click live activation / deactivation for {@code
    * (tenant, strategy)}.

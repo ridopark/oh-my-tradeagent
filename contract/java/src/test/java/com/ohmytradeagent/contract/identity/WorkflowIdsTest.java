@@ -35,6 +35,17 @@ class WorkflowIdsTest {
   }
 
   /**
+   * Phase I-1b: the create-tenant workflow id is the tenant/strategy shape with a {@code
+   * /cfg-create/} segment + correlation id (REJECT_DUPLICATE dedup). api-gateway's caller and the
+   * orchestrator's {@code StrategyConfigCreateWorkflow} must agree on this literal.
+   */
+  @Test
+  void strategyConfigCreateIsTheTenantStrategyShapeWithCorrelationId() {
+    assertThat(WorkflowIds.strategyConfigCreate("acme", "copytrade-v1", "corr-123"))
+        .isEqualTo("t-acme/s-copytrade-v1/cfg-create/corr-123");
+  }
+
+  /**
    * Phase 6: the account-level kill switch is tenant-scoped (NO {@code s-} segment) — the cap spans
    * every strategy on the tenant's shared broker_target.
    */

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/strategy-config-create-result.json",
+  "title": "StrategyConfigCreateResult",
+  "description": "Phase I-1b (operator-account-onboarding): terminal outcome of StrategyConfigCreateWorkflow. The activity CATCHES each StrategyConfigWriter exception and coarsens it into the `outcome` enum (writer exception messages never surface to the client). api-gateway maps outcome to an HTTP status (CREATED 200, ALREADY_EXISTS 409, REJECTED_INVALID 400). Only genuinely transient/unknown faults (an IllegalStateException, e.g. a serialization fault) are NOT coarsened — they propagate as a retryable activity failure, surfacing as 503 (create disposition unknown, NEVER reported as success).",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.StrategyConfigCreateResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "outcome"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "CREATED",
+        "ALREADY_EXISTS",
+        "REJECTED_INVALID"
+      ],
+      "description": "Controlled disposition of the create. CREATED: the row was inserted at version 1 (created_version set). ALREADY_EXISTS: a row already existed for (tenant, strategy) — the INSERT ... ON CONFLICT DO NOTHING affected zero rows (RowAlreadyExistsException). REJECTED_INVALID: the proposed config is malformed / fails live-required gates / its tenant_id|strategy_id does not match the create target (InvalidConfigException)."
+    },
+    "created_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Set ONLY on CREATED: the persisted version (always 1 for a fresh row). Null/omitted on every other outcome."
+    }
+  }
+}

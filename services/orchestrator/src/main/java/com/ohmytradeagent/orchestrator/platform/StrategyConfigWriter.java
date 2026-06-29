@@ -51,6 +51,9 @@ public class StrategyConfigWriter {
   private static final Logger log = LoggerFactory.getLogger(StrategyConfigWriter.class);
 
   static final String SOURCE = "runtime-write";
+  // Audit `source` for the Phase I-1b create-tenant INSERT (distinguishes a tenant create from a
+  // runtime edit in the audit_log chain — both are TenantConfigChanged, so no new audit kind).
+  static final String CREATE_SOURCE = "tenant-create";
 
   /**
    * Mirrors {@link com.ohmytradeagent.orchestrator.activities.TenantConfigChangedEmitter}'s
@@ -186,6 +189,101 @@ public class StrategyConfigWriter {
               newVersion,
               actor);
           return newVersion;
+        });
+  }
+
+  /**
+   * Phase I-1b create-tenant: INSERT the FIRST {@code strategy_config} row for {@code (tenantId,
+   * strategyId)} at version 1. Unlike {@link #update}, there is no stored row and no field-class
+   * check — the row does not yet exist, so the only safety is standalone {@link #validate} (which
+   * enforces the live-required gates ONLY when {@code broker_target} is live, so a paper create
+   * passes and a live create must declare its loss gates). Returns the created {@code version} (1).
+   *
+   * @throws InvalidConfigException if {@code config} is malformed / fails live gates, or its own
+   *     {@code tenant_id}/{@code strategy_id} do not match the create target
+   * @throws RowAlreadyExistsException if a row already exists for {@code (tenantId, strategyId)}
+   */
+  public long create(String tenantId, String strategyId, StrategyConfig config, String actor) {
+    return dsl.transactionResult(
+        cfg -> {
+          DSLContext tx = cfg.dsl();
+
+          // a. Validate the proposed config standalone (same gate as update's step b).
+          validate(config, tenantId, strategyId);
+
+          // b. Identity consistency: the config's own tenant_id/strategy_id must match the PK being
+          // created (the update path enforces IDENTITY vs the stored row; for a create the target
+          // path is the authority — a mismatch would persist an inconsistent row).
+          if (!tenantId.equals(config.getTenantId())
+              || !strategyId.equals(config.getStrategyId())) {
+            throw new InvalidConfigException(
+                "config tenant_id/strategy_id ("
+                    + config.getTenantId()
+                    + "/"
+                    + config.getStrategyId()
+                    + ") must match the create target ("
+                    + tenantId
+                    + "/"
+                    + strategyId
+                    + ")");
+          }
+
+          // c. INSERT ... ON CONFLICT DO NOTHING (mirrors StrategyConfigSeedReconciler). version is
+          // omitted — the column is NOT NULL DEFAULT 1. Zero affected rows ⇒ the row already
+          // exists.
+          String json;
+          try {
+            json = objectMapper.writeValueAsString(config);
+          } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            // Round-trip guard in validate() already proved this serializes; defensive only.
+            throw new InvalidConfigException(
+                "Failed to serialize config for tenant=" + tenantId + " strategy=" + strategyId, e);
+          }
+          int inserted =
+              tx.execute(
+                  "INSERT INTO strategy_config "
+                      + "(tenant_id, strategy_id, schema_version, config, updated_by) "
+                      + "VALUES (?, ?, ?, ?::jsonb, ?) "
+                      + "ON CONFLICT (tenant_id, strategy_id) DO NOTHING",
+                  tenantId,
+                  strategyId,
+                  config.getSchemaVersion(),
+                  json,
+                  actor);
+          if (inserted == 0) {
+            throw new RowAlreadyExistsException(
+                "strategy_config already exists for tenant="
+                    + tenantId
+                    + " strategy="
+                    + strategyId
+                    + " — create is a no-op (use the update path to change an existing tenant)");
+          }
+          long createdVersion = 1L;
+
+          // d. Audit (last in-txn call) via the hash-chain writer. source=tenant-create
+          // distinguishes
+          // a create from a runtime edit; oldVersion=null + empty prior map = "no prior row".
+          Map<String, Object> currentMap = TenantConfigSnapshot.canonicalize(objectMapper, config);
+          AuditEvent event =
+              TenantConfigChangedEvents.build(
+                  tenantId,
+                  strategyId,
+                  actor,
+                  CREATE_SOURCE,
+                  null,
+                  createdVersion,
+                  Map.of(),
+                  currentMap,
+                  REDACTED_KEYS);
+          audit.log(event);
+
+          log.info(
+              "strategy_config tenant create committed tenant={} strategy={} version={} actor={}",
+              tenantId,
+              strategyId,
+              createdVersion,
+              actor);
+          return createdVersion;
         });
   }
 
