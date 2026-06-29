@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/strategy-config-create-request.json",
+  "title": "StrategyConfigCreateRequest",
+  "description": "Phase I-1b (operator-account-onboarding): input for the dark-gated create-tenant path. 'Create tenant' = INSERT the first strategy_config row for a new (tenant_id, strategy_id) at version 1 (Phase-0 DECISION: NO separate tenants table). The operator-scoped api-gateway POST /admin/tenants/{tenant}/strategies/{strategy} starts a short-lived StrategyConfigCreateWorkflow on orchestrator-core, synchronously reads its StrategyConfigCreateResult, and maps the outcome to an HTTP status. The activity drives StrategyConfigWriter.create(tenant, strategy, config, operator) — an INSERT ... ON CONFLICT DO NOTHING that fails-closed to ALREADY_EXISTS on a duplicate. DARK by default: the route 404s unless operator.tenant-create.enabled=true. Carries NO secret/key material — config is a plain StrategyConfig blob; broker keys flow through the separate credential write path.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.StrategyConfigCreateRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "strategy_id",
+    "config",
+    "operator_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version. See CopytradeSignalPayload.schema_version. Workers reject newer-than-build inputs."
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Tenant being created. Taken from the api-gateway path (operator-scoped, NOT X-Tenant-Id — the operator does not belong to the new tenant). StrategyConfigWriter.create rejects a config whose tenant_id does not match this (REJECTED_INVALID)."
+    },
+    "strategy_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Strategy whose first config row is the INSERT target for (tenant_id, strategy_id). A second create for the same key yields ALREADY_EXISTS, never a second row."
+    },
+    "config": {
+      "type": "object",
+      "existingJavaType": "com.ohmytradeagent.contract.StrategyConfig",
+      "description": "The full StrategyConfig blob to persist at version 1. Reuses the generated StrategyConfig DTO. StrategyConfigWriter validates it standalone (live-required gates apply ONLY when broker_target is live, so a paper create passes); a live create missing a loss gate is REJECTED_INVALID."
+    },
+    "operator_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The authenticated operator (X-Operator-Id). Recorded on the audit event and the strategy_config row's updated_by — operator attribution comes from the audit_log chain, not a created_by column."
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "OPTIONAL cross-event correlation key. Embedded in the workflow id so a retried api-gateway call dedups on REJECT_DUPLICATE rather than re-running the INSERT."
+    }
+  }
+}

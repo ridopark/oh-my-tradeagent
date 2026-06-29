@@ -18,6 +18,7 @@ import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.activities.StrategyConfigCreateActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyConfigUpdateActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
 import com.ohmytradeagent.orchestrator.activities.WatchlistMirrorActivities;
@@ -33,6 +34,7 @@ import com.ohmytradeagent.orchestrator.workflows.PortfolioHistoryWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.StrategyConfigCreateWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.StrategyConfigUpdateWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistMirrorWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistTriggerSessionWorkflowImpl;
@@ -89,6 +91,11 @@ public class TemporalWorkerConfig {
       AuditQueryActivities auditQuery,
       BrokerCredentialAuditActivities brokerCredentialAudit,
       StrategyConfigUpdateActivities strategyConfigUpdate,
+      // Phase I-1b (operator-account-onboarding): DARK create-tenant INSERT capability. Drives the
+      // StrategyConfigCreateWorkflow; nothing calls it unless the api-gateway create-tenant route
+      // is
+      // enabled (flag-gated, off by default).
+      StrategyConfigCreateActivities strategyConfigCreate,
       StrategyActivities strategy,
       RiskActivities risk,
       ContractActivities contract,
@@ -155,6 +162,12 @@ public class TemporalWorkerConfig {
         // orchestrator-core queue and returns the coarse outcome. Started by the api-gateway
         // /strategy-config forward (dark-gated); the activity impl is registered below.
         StrategyConfigUpdateWorkflowImpl.class,
+        // Phase I-1b create-tenant carrier: short-lived workflow that dispatches the
+        // StrategyConfigCreateActivities.create Activity (in-process StrategyConfigWriter INSERT)
+        // on
+        // this orchestrator-core queue and returns the coarse outcome. Started by the api-gateway
+        // create-tenant forward (dark-gated); the activity impl is registered below.
+        StrategyConfigCreateWorkflowImpl.class,
         // Phase F (operator-account-onboarding) one-click live activation/deactivation carrier.
         // The single impl class implements BOTH LiveActivationWorkflow (activateLive) and
         // LiveDeactivationWorkflow (deactivateLive) — two @WorkflowInterfaces, one @WorkflowMethod
@@ -182,6 +195,10 @@ public class TemporalWorkerConfig {
         // calls it unless the api-gateway /strategy-config route is enabled (flag-gated, off by
         // default).
         strategyConfigUpdate,
+        // Phase I-1b: DARK create-tenant capability. Drives the in-process StrategyConfigWriter
+        // INSERT and coarsens its exceptions into the result outcome enum. Nothing calls it unless
+        // the api-gateway create-tenant route is enabled (flag-gated, off by default).
+        strategyConfigCreate,
         strategy,
         risk,
         contract,
