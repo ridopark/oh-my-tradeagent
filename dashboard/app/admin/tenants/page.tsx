@@ -20,9 +20,15 @@ export const dynamic = "force-dynamic";
 const ACTIVATION_ENABLED = process.env.OPERATOR_ACTIVATION_ENABLED === "true";
 
 // Format an ISO timestamp as a UTC date for the "valid until" display. Server-rendered with an
-// explicit UTC zone so it doesn't drift by render host.
-function fmtDate(iso: string): string {
-  return new Date(iso).toISOString().slice(0, 10);
+// explicit UTC zone so it doesn't drift by render host. Fail-safe: a null/blank/unparseable value
+// renders "unknown" rather than throwing a RangeError that would 500 the whole admin page (the BFF
+// guarantees expires_at on VALID rows, so this only guards against a future contract drift).
+function fmtDate(iso: string | null): string {
+  if (!iso) {
+    return "unknown";
+  }
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "unknown" : d.toISOString().slice(0, 10);
 }
 
 // Per-state presentation for a LIVE row's activation badge. The state strings come straight from the
@@ -40,11 +46,11 @@ function activationBadge(item: AdminTenantItem): {
     case "VALID":
       return item.at_risk
         ? {
-            label: `valid until ${fmtDate(item.expires_at!)} · expiring soon`,
+            label: `valid until ${fmtDate(item.expires_at)} · expiring soon`,
             className: amber,
           }
         : {
-            label: `valid until ${fmtDate(item.expires_at!)}`,
+            label: `valid until ${fmtDate(item.expires_at)}`,
             className: emerald,
           };
     case "STALE":
