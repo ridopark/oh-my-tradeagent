@@ -25,10 +25,13 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * activation/deactivation), so the existing operator routes ({@code /positions}, {@code
  * /promotion}, …) are untouched — they keep their current header-trust behavior.
  *
- * <p><b>Dark by default.</b> Active when EITHER {@code broker.credentials.write.enabled=true} OR
- * {@code operator.activation.enabled=true}; with both unset the filter bean does not exist (just
- * like the controllers). When present it bearer-gates BOTH route prefixes — gating the admin route
- * does not require the credential-write route to also be enabled.
+ * <p><b>Dark by default.</b> Active when ANY of {@code broker.credentials.write.enabled=true},
+ * {@code operator.activation.enabled=true}, or {@code operator.tenant-create.enabled=true}; with
+ * all unset the filter bean does not exist (just like the controllers). When present it
+ * bearer-gates BOTH route prefixes. The {@code /admin/tenants/} prefix covers the Phase F
+ * activation routes AND the Phase I-1b create-tenant route — so EVERY flag that activates an {@code
+ * /admin/tenants/} controller MUST also be in this expression, or that route would be reachable
+ * unauthenticated.
  *
  * <p>Mirrors the tenant-dashboard-bff filter: constant-time token compare (no timing side-channel)
  * and a prod fail-fast on the well-known default token (a pod started under the {@code prod}
@@ -37,7 +40,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
  */
 @Component
 @ConditionalOnExpression(
-    "${broker.credentials.write.enabled:false} or ${operator.activation.enabled:false}")
+    "${broker.credentials.write.enabled:false} or ${operator.activation.enabled:false}"
+        + " or ${operator.tenant-create.enabled:false}")
 public class ServiceTokenFilter extends OncePerRequestFilter {
 
   private static final String BEARER_PREFIX = "Bearer ";

@@ -81,6 +81,16 @@ class CreateTenantControllerTest {
   }
 
   @Test
+  void missingConfig_is400_noWorkflowStarted() {
+    assertResponseStatus(
+        () ->
+            controller.create(
+                reqWithOperator(OPERATOR), TENANT, STRATEGY, new TenantCreateRequest(null, "c")),
+        HttpStatus.BAD_REQUEST);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
   void created_returns200_withCreatedVersion() {
     when(stub.create(any(StrategyConfigCreateRequest.class)))
         .thenReturn(result(StrategyConfigCreateResult.Outcome.CREATED, 1L));

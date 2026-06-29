@@ -75,8 +75,16 @@ public class CreateTenantController {
       @RequestBody TenantCreateRequest body) {
 
     String operator = ctx.operatorId(req); // 400 if X-Operator-Id absent
+
+    // A missing/empty config is a permanent client error — reject 400 here rather than starting the
+    // workflow, where a null config would NPE inside the writer (not coarsened → burns the retry
+    // budget → a misleading 503). The create's real validation still happens in the writer.
+    if (body == null || body.config() == null) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
+    }
+
     String correlationId =
-        (body != null && body.correlationId() != null && !body.correlationId().isBlank())
+        (body.correlationId() != null && !body.correlationId().isBlank())
             ? body.correlationId()
             : UUID.randomUUID().toString();
 
@@ -84,7 +92,7 @@ public class CreateTenantController {
     request.setSchemaVersion(1L);
     request.setTenantId(tenant);
     request.setStrategyId(strategy);
-    request.setConfig(body == null ? null : body.config());
+    request.setConfig(body.config());
     request.setOperatorId(operator);
     request.setCorrelationId(correlationId);
 
