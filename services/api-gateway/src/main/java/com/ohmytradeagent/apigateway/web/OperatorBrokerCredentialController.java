@@ -55,8 +55,8 @@ public class OperatorBrokerCredentialController {
     String operator = ctx.operatorId(req); // 400 if X-Operator-Id absent
 
     // The path tenant flows into the exec X-Tenant-Id header AND the audit workflow id — reject a
-    // malformed value (400) before it can corrupt either. Mirrors requiredTenantId's format guard.
-    if (tenant == null || !tenant.matches("[A-Za-z0-9_-]+")) {
+    // malformed value (400) before it can corrupt either, using TenantContext's canonical charset.
+    if (!ctx.isValidTenantId(tenant)) {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
     }
 

@@ -95,12 +95,12 @@ public class BrokerCredentialForwardService {
       BrokerCredentialForwardRequest body,
       boolean includeBrokerAccountId) {
 
-    // (c) rate-limit / lockout — refused → 429, no forward, no audit.
+    // (a) rate-limit / lockout — refused → 429, no forward, no audit.
     if (!limiter.tryAcquire(tenant)) {
       throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS);
     }
 
-    // (d) forward to exec, capturing the status without letting a non-2xx throw before mapping.
+    // (b) forward to exec, capturing the status without letting a non-2xx throw before mapping.
     ExecOutcome exec = forwardToExec(tenant, body);
 
     // Feed the outcome back to the limiter (validation rejects may arm a lockout; a SAVED resets
@@ -108,7 +108,7 @@ public class BrokerCredentialForwardService {
     // start fails. Keyed by tenant only — no key material crosses into the limiter (MF-7).
     limiter.recordOutcome(tenant, exec.outcome());
 
-    // (e) map exec status → caller response + audit outcome.
+    // (c) map exec status → caller response + audit outcome.
     BrokerCredentialAuditRequest.ChangeType changeType =
         body.expectedVersion() == 0
             ? BrokerCredentialAuditRequest.ChangeType.CREATE
@@ -119,7 +119,7 @@ public class BrokerCredentialForwardService {
             ? body.correlationId()
             : UUID.randomUUID().toString();
 
-    // (f) build the metadata-only audit request (ZERO key material).
+    // (d) build the metadata-only audit request (ZERO key material).
     BrokerCredentialAuditRequest auditRequest = new BrokerCredentialAuditRequest();
     auditRequest.setSchemaVersion(1L);
     auditRequest.setTenantId(tenant);
@@ -136,10 +136,10 @@ public class BrokerCredentialForwardService {
       auditRequest.setKekVersion((long) exec.body().kekVersion());
     }
 
-    // (g) start the audit workflow NON-BLOCKING; a failure here must not fail the write result.
+    // (e) start the audit workflow NON-BLOCKING; a failure here must not fail the write result.
     startAuditWorkflow(tenant, correlationId, auditRequest);
 
-    // (h) coarse result only — never echo the key, return only the write outcome.
+    // (f) coarse result only — never echo the key, return only the write outcome.
     if (exec.outcome() == BrokerCredentialAuditRequest.Outcome.SAVED && exec.body() != null) {
       Map<String, Object> ok = new LinkedHashMap<>();
       ok.put("version", exec.body().version());

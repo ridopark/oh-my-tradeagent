@@ -1,6 +1,7 @@
 package com.ohmytradeagent.apigateway.web;
 
 import jakarta.servlet.http.HttpServletRequest;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -16,6 +17,11 @@ public class TenantContext {
   static final String HEADER_STRATEGY = "X-Strategy-Id";
   static final String HEADER_OPERATOR = "X-Operator-Id";
   static final String HEADER_APPROVER_2 = "X-Approver-Id-2";
+
+  // The canonical tenant-id charset. A tenant value flows into Temporal workflow ids, Visibility
+  // queries, and the exec X-Tenant-Id header, so it must stay restricted — kept here (compiled
+  // once) as the single home for the rule, shared by the header guard and any path-tenant guard.
+  private static final Pattern TENANT_ID_PATTERN = Pattern.compile("[A-Za-z0-9_-]+");
 
   private final String defaultTenant;
   private final String defaultStrategy;
@@ -43,10 +49,19 @@ public class TenantContext {
    */
   public String requiredTenantId(HttpServletRequest req) {
     String v = req.getHeader(HEADER_TENANT);
-    if (v == null || v.isBlank() || !v.matches("[A-Za-z0-9_-]+")) {
+    if (!isValidTenantId(v)) {
       throw new MissingHeaderException(HEADER_TENANT);
     }
     return v;
+  }
+
+  /**
+   * The canonical tenant-id format check (non-null, non-blank, {@code [A-Za-z0-9_-]+}). The home of
+   * the rule, so the header guard ({@link #requiredTenantId}) and operator-scoped path-tenant
+   * guards apply exactly the same charset — each caller maps a {@code false} to its own error.
+   */
+  public boolean isValidTenantId(String tenant) {
+    return tenant != null && !tenant.isBlank() && TENANT_ID_PATTERN.matcher(tenant).matches();
   }
 
   public String strategyId(HttpServletRequest req) {

@@ -3,6 +3,7 @@ package com.ohmytradeagent.apigateway.web;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -94,8 +95,7 @@ class BrokerCredentialControllerTest {
     // Strict requiredTenantId throws MissingHeaderException → GlobalExceptionHandler maps to 400.
     assertThatThrownBy(() -> controller.write(reqWithTenant(null), body(TENANT, 0L)))
         .isInstanceOf(TenantContext.MissingHeaderException.class);
-    verify(forwardService, never())
-        .forward(any(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+    verify(forwardService, never()).forward(any(), any(), any(), anyBoolean());
   }
 
   private static void assertThatResponseStatus(Runnable r, HttpStatus expected) {
