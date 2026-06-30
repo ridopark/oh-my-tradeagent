@@ -69,6 +69,15 @@ data:
       third: 0.33
       "two thirds": 0.67
       trim: 0.25
+      # Issue F3: full-close synonyms → 1.0 (keep in sync). Unambiguous phrases only.
+      cutting: 1.0
+      "cut it": 1.0
+      closing: 1.0
+      closed: 1.0
+      "all the way out": 1.0
+      "stopped out": 1.0
+      dumped: 1.0
+      dumping: 1.0
     pending_ttl_paper_secs: 90
     pending_ttl_live_secs: 30
     # Issue #16: governs partial_exit when remaining_qty <= 1; skip = log + no-op.

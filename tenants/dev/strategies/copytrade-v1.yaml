@@ -63,6 +63,20 @@ partial_fractions:
   third: 0.33
   "two thirds": 0.67
   trim: 0.25
+  # Issue F3: full-close synonyms → 1.0. An unqualified full-close STC ("STC ...
+  # cutting") matched no key and fell to default_stc_fraction (0.5), closing only
+  # half. Only unambiguous full-close phrases that don't substring-collide are added
+  # (no bare "cut"/"sold"/"exit"/"gone"/"flat" — they collide with "haircut",
+  # "without", "exit was clean", etc.). default_stc_fraction stays 0.5 (operator
+  # declined the default→1.0 policy change).
+  cutting: 1.0
+  "cut it": 1.0
+  closing: 1.0
+  closed: 1.0
+  "all the way out": 1.0
+  "stopped out": 1.0
+  dumped: 1.0
+  dumping: 1.0
 pending_ttl_paper_secs: 90
 pending_ttl_live_secs: 30
 # Issue #16: governs partial_exit when remaining_qty <= 1 (integer broker
