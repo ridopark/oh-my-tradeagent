@@ -175,20 +175,27 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private BigDecimal sodEquity;
 
   /**
-   * Cap-inactive observability state (all deterministic workflow state, no commands). {@code
+   * Cap-inactive observability state (deterministic workflow state, no commands). {@code
    * consecutiveInactiveTicks} counts heartbeats where a configured pct cap failed to arm (defer OR
    * caught heartbeat error). {@code capInactiveAlerted} is true once we have paged for the current
    * inactive episode (so we page once on entry, not every tick). {@code ticksSinceInactiveAlert}
-   * drives the re-page throttle. {@code pctConfiguredKnown}/{@code pctConfiguredLastSeen} cache the
-   * last successful read of "is pct configured?" so a heartbeat that threw BEFORE reading config
-   * (e.g. a ConfigMap-typo parse error) is still attributed correctly to a configured-cap tenant.
+   * drives the re-page throttle. {@code pctConfiguredLastSeen} caches the last successful read of
+   * "is pct configured?" ({@code null} = never read) so a heartbeat that threw BEFORE reading
+   * config (e.g. a ConfigMap-typo parse error mid-session) is still attributed to a configured-cap
+   * tenant; best-effort attribution — an unknown ({@code null}) config state never counts toward an
+   * alert.
+   *
+   * <p>This state is intentionally NOT carried across continue-as-new ({@code
+   * buildCarryForwardInput} does not thread it): an in-flight inactive episode re-accumulates from
+   * zero after a CAN. Accepted because the cap-inactive signal is observability-only (a re-page
+   * after an infrequent CAN is mild under-paging) and threading it would force another
+   * carry-forward schema bump for no safety gain.
    */
   private int consecutiveInactiveTicks;
 
   private boolean capInactiveAlerted;
   private int ticksSinceInactiveAlert;
-  private boolean pctConfiguredKnown;
-  private boolean pctConfiguredLastSeen;
+  private Boolean pctConfiguredLastSeen;
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
@@ -283,10 +290,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       return;
     }
     // Not armed. Only an UNARMED-WHILE-CONFIGURED tick is an "inactive cap" condition worth paging.
-    // pctConfiguredKnown/LastSeen is the last successful read (updated in heartbeat()); a tick that
-    // threw before reading config falls back to the last-known value — a persistent ConfigMap typo
-    // that throws every tick was, by definition, configured the moment before it broke.
-    if (!(pctConfiguredKnown && pctConfiguredLastSeen)) {
+    // pctConfiguredLastSeen is the last successful read (updated in heartbeat(); null = never
+    // read);
+    // a tick that threw before reading config falls back to the last-known value — a persistent
+    // ConfigMap typo that throws every tick was, by definition, configured the moment before it
+    // broke. A null (never-read) state never counts toward an alert (fails safe: under-page).
+    if (!Boolean.TRUE.equals(pctConfiguredLastSeen)) {
       return;
     }
     consecutiveInactiveTicks++;
@@ -416,7 +425,6 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       pctConfigured = pct != null && pct.signum() > 0;
       // Cache the last successful "is pct configured?" read so run()'s inactivity bookkeeping can
       // attribute a later parse-throwing tick to a configured-cap tenant.
-      this.pctConfiguredKnown = true;
       this.pctConfiguredLastSeen = pctConfigured;
       threshold = resolveEffectiveThreshold(absolute, pct);
     }
