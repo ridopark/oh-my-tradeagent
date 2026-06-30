@@ -39,6 +39,22 @@ public class RealizedPnlCalculator {
 
   /** Realized P&L for one (tenant, strategy) on {@code tradingDay} (America/New_York). */
   public BigDecimal computeRealizedPnl(String tenantId, String strategyId, LocalDate tradingDay) {
+    return realize(tenantId, strategyId, tradingDay);
+  }
+
+  /**
+   * Since-inception (all-time) realized P&L for one (tenant, strategy). IDENTICAL FIFO logic to
+   * {@link #computeRealizedPnl} but fetches EntryFilled/PartialExitFilled lots across ALL history
+   * (no per-day predicate). This is strictly MORE correct than the day-scoped calc: it resolves the
+   * documented #276 §4 cross-day "phantom gain" — an exit on a later day now FIFO-matches its real
+   * prior-day entry cost basis instead of crediting raw proceeds.
+   */
+  public BigDecimal computeRealizedPnlAllTime(String tenantId, String strategyId) {
+    return realize(tenantId, strategyId, null);
+  }
+
+  // Shared FIFO realization. A null {@code tradingDay} omits the per-day predicate (all-time).
+  private BigDecimal realize(String tenantId, String strategyId, LocalDate tradingDay) {
     Map<String, Deque<Lot>> entriesBySymbol =
         fetchLots(tenantId, strategyId, tradingDay, "EntryFilled", "filled_qty");
     Map<String, Deque<Lot>> exitsBySymbol =
@@ -87,6 +103,11 @@ public class RealizedPnlCalculator {
     // above
     // is then a contract check, not the sole barrier against a caller key reaching the query.
     String qtyCol = "filled_qty".equals(qtyKey) ? "filled_qty" : "qty_filled";
+    // A null tradingDay omits the per-day predicate (all-time). The date clause is built only from
+    // the constant literal below; tradingDay is still bound as a parameter when present.
+    boolean dayScoped = tradingDay != null;
+    String dayPredicate =
+        dayScoped ? "AND (occurred_at AT TIME ZONE 'America/New_York')::date = ? " : "";
     String sql =
         "SELECT (subject->>'avg_fill_price')::numeric AS price, "
             + "(subject->>'"
@@ -95,13 +116,16 @@ public class RealizedPnlCalculator {
             + "subject->>'option_symbol' AS option_symbol "
             + "FROM audit_log "
             + "WHERE tenant_id = ? AND strategy_id = ? AND kind = ? "
-            + "AND (occurred_at AT TIME ZONE 'America/New_York')::date = ? "
+            + dayPredicate
             + "AND subject->>'avg_fill_price' IS NOT NULL "
             + "AND subject->>'"
             + qtyCol
             + "' IS NOT NULL "
             + "ORDER BY occurred_at ASC, event_id ASC";
-    Result<Record> rows = orchestratorDsl.fetch(sql, tenantId, strategyId, kind, tradingDay);
+    Result<Record> rows =
+        dayScoped
+            ? orchestratorDsl.fetch(sql, tenantId, strategyId, kind, tradingDay)
+            : orchestratorDsl.fetch(sql, tenantId, strategyId, kind);
     Map<String, Deque<Lot>> lotsBySymbol = new LinkedHashMap<>();
     for (Record r : rows) {
       BigDecimal price = r.get("price", BigDecimal.class);

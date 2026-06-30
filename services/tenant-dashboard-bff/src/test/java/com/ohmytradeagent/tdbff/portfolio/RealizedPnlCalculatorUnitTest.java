@@ -53,4 +53,31 @@ class RealizedPnlCalculatorUnitTest {
     var realized = RealizedPnlCalculator.realizePerSymbol(lots(), lots(lot("2.00", 1)));
     assertThat(realized).isEqualByComparingTo("2.00"); // raw exit credit, no basis subtracted
   }
+
+  @Test
+  void crossDayEntryAndExit_allTimeMatchesRealCostBasis_noPhantomGain() {
+    // ALL-TIME correctness (#276 §4): entry on day 1, partial exit on day 2. Because the all-time
+    // calc fetches BOTH lots (no per-day filter), the day-2 exit FIFO-matches the day-1 entry basis
+    // — so the realized P&L is (exit - entry) * qty, NOT the day-scoped calc's phantom raw
+    // proceeds.
+    // Contrast: the day-scoped day-2 calc sees ONLY the exit (no entry that day) and would credit
+    // the raw 1.50 (see exitWithNoEntry_pinsDocumentedPhantomGain above).
+    var entries = lots(lot("1.00", 2)); // day 1 entry
+    var exits = lots(lot("1.50", 2)); // day 2 exit
+    var realized = RealizedPnlCalculator.realizePerSymbol(entries, exits);
+    assertThat(realized).isEqualByComparingTo("1.00"); // (1.50 - 1.00) * 2, real basis applied
+  }
+
+  @Test
+  void dramLiveCase_partialExitBelowCost_realizesNetLoss() {
+    // Mirrors the live prod_real 2026-06-29 data: bought 3 DRAM @ 2.3533, sold 2 @ 1.84. The 2 sold
+    // contracts FIFO-match the 2.3533 basis -> per-contract (1.84 - 2.3533) * 2 = -1.0266; with the
+    // ×100 multiplier applied in computeRealizedPnl that is -$102.66 (the documented -102.67
+    // figure,
+    // off by a rounding cent because the live cost basis carries more precision than 2.3533).
+    var entries = lots(lot("2.3533", 3));
+    var exits = lots(lot("1.84", 2));
+    var realized = RealizedPnlCalculator.realizePerSymbol(entries, exits);
+    assertThat(realized).isEqualByComparingTo("-1.0266"); // ×100 later -> -102.66
+  }
 }

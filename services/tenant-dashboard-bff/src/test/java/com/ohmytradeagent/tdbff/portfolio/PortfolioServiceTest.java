@@ -30,6 +30,8 @@ class PortfolioServiceTest {
   PortfolioServiceTest() {
     // Default: no live marks (fail-open empty). Tests that exercise the join override this.
     when(brokerPositions.marksFor(any(), any(), any())).thenReturn(Map.of());
+    // Default since-inception realized P&L to zero; the aggregation test overrides per strategy.
+    when(realizedPnl.computeRealizedPnlAllTime(any(), any())).thenReturn(BigDecimal.ZERO);
   }
 
   private PortfolioService newService(boolean exposeAccountNumber, long subreadTimeoutSeconds) {
@@ -60,6 +62,9 @@ class PortfolioServiceTest {
         .thenReturn(new BigDecimal("100.00"));
     when(realizedPnl.computeRealizedPnl(eq("acme"), eq("s2"), any(LocalDate.class)))
         .thenReturn(new BigDecimal("50.00"));
+    // Since-inception realized P&L is summed across strategies the same way as today's.
+    when(realizedPnl.computeRealizedPnlAllTime("acme", "s1")).thenReturn(new BigDecimal("250.00"));
+    when(realizedPnl.computeRealizedPnlAllTime("acme", "s2")).thenReturn(new BigDecimal("-30.00"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(strategyRegistry.brokerTarget("acme", "s2")).thenReturn("alpaca-paper"); // same -> union
     when(accountEquity.snapshotFor("alpaca-paper"))
@@ -71,6 +76,8 @@ class PortfolioServiceTest {
     assertThat(body.get("tenant_id")).isEqualTo("acme");
     // P&L summed across strategies: 100 + 50.
     assertThat(body.get("realized_pnl_today")).isEqualTo(new BigDecimal("150.00"));
+    // Since-inception P&L summed across strategies the same way: 250 + (-30).
+    assertThat(body.get("realized_pnl_all_time")).isEqualTo(new BigDecimal("220.00"));
     // Open notional summed across positions: 300 + 200.
     assertThat(body.get("sum_open_notional")).isEqualTo(new BigDecimal("500.00"));
     assertThat(body.get("open_positions_count")).isEqualTo(2);

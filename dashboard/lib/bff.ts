@@ -103,6 +103,9 @@ export interface Portfolio {
   sum_open_notional: string | number;
   sum_open_notional_basis: string;
   realized_pnl_today: string | number;
+  // Since-inception realized P&L (FIFO cost basis across ALL history). Lets the Status page
+  // reconcile to starting capital (start + realized_all_time + unrealized ≈ equity).
+  realized_pnl_all_time: string | number;
   // account_number is present only when the BFF's dev flag (bff.expose-broker-account-number) is on
   // — never in prod. Used purely to verify which brokerage account a broker_target maps to.
   account_equity: {

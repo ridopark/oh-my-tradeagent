@@ -140,12 +140,19 @@ public class PortfolioService {
           subreadPool.submit(() -> brokerPositions.marksFor(brokerTarget, tenantId, repStrategy)));
     }
 
-    // Realized P&L today, summed across strategies. Audit-backed DB read — not gated on the
-    // orchestrator worker — so it stays inline and cheap.
+    // Realized P&L (today + since-inception), summed across strategies. Audit-backed DB reads — not
+    // gated on the orchestrator worker — so they stay inline and cheap. The all-time figure lets
+    // the
+    // Status page reconcile to starting capital (start + realized_all_time + unrealized ≈ equity);
+    // it is strictly MORE correct than the daily calc (resolves the #276 §4 cross-day phantom
+    // gain).
     BigDecimal realizedToday = BigDecimal.ZERO;
+    BigDecimal realizedAllTime = BigDecimal.ZERO;
     for (String strategyId : strategyIds) {
       realizedToday =
           realizedToday.add(realizedPnl.computeRealizedPnl(tenantId, strategyId, tradingDay));
+      realizedAllTime =
+          realizedAllTime.add(realizedPnl.computeRealizedPnlAllTime(tenantId, strategyId));
     }
 
     // Merge live marks across all broker_targets into one OCC-keyed map (account-level, so an OCC
@@ -205,6 +212,7 @@ public class PortfolioService {
     body.put("sum_open_notional", sumOpenNotional);
     body.put("sum_open_notional_basis", "cost_basis_at_entry"); // NOT live mark
     body.put("realized_pnl_today", realizedToday);
+    body.put("realized_pnl_all_time", realizedAllTime);
     body.put("account_equity", equityByBroker);
     body.put(
         "account_equity_scope",

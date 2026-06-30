@@ -61,6 +61,11 @@ export default async function StatusPage() {
   const unrealizedToday = sumMark("unrealized_intraday_pl");
   const unrealizedTotal = sumMark("unrealized_pl");
 
+  // Since-inception realized P&L (FIFO cost basis). Coerce to a signed number for the color-coded
+  // tile; a null/absent field degrades to "—" (older BFF without the field).
+  const realizedAllTime =
+    p.realized_pnl_all_time == null ? null : Number(p.realized_pnl_all_time);
+
   return (
     <>
       <Nav tenantId={session?.tenantId} />
@@ -101,6 +106,11 @@ export default async function StatusPage() {
             note="Cost basis at entry — not live mark."
           />
           <Stat label="Realized P&L today" value={fmtCurrency(p.realized_pnl_today)} />
+          <PnlStat
+            label="Realized P&L (all-time)"
+            value={Number.isNaN(realizedAllTime as number) ? null : realizedAllTime}
+            note="Since inception · FIFO cost basis."
+          />
           <PnlStat
             label="Unrealized P&L (today)"
             value={unrealizedToday}
