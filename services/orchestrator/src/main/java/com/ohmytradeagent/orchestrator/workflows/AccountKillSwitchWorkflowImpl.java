@@ -190,12 +190,41 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   }
 
   private AccountKillSwitchWorkflowInput buildCarryForwardInput() {
+    return carryForwardInput(
+        input.getTenantId(),
+        tripped,
+        reason,
+        actor,
+        trippedAt,
+        coolingDownUntil,
+        tradingDay,
+        sodEquity);
+  }
+
+  /**
+   * Pure builder for the continue-as-new carry-forward input. Package-private + static so it can be
+   * unit-tested for the rolling-deploy schema_version branching without a Temporal context.
+   *
+   * <p>Rolling-deploy safety: only stamp v3 when we actually carry sod_equity. A pre-v3 worker
+   * validates {@code schema_version <= 2} at {@code @WorkflowInit} and throws on a v3 input — so an
+   * unconditional v3 bump would wedge any execution that continues-as-new on a new pod and is then
+   * picked up by an old pod mid rollout/canary. A carry-forward WITHOUT a captured SOD equity is
+   * byte-identical to the legacy v2 shape, so stamp v2 and stay old-worker-compatible. An execution
+   * that HAS captured sodEquity is already pinned to {@code v>=1} by the getVersion marker (an old
+   * worker cannot replay it anyway), so v3 is correct there.
+   */
+  static AccountKillSwitchWorkflowInput carryForwardInput(
+      String tenantId,
+      boolean tripped,
+      String reason,
+      String actor,
+      OffsetDateTime trippedAt,
+      OffsetDateTime coolingDownUntil,
+      LocalDate tradingDay,
+      BigDecimal sodEquity) {
     AccountKillSwitchWorkflowInput carry = new AccountKillSwitchWorkflowInput();
-    // v3 carries sod_equity. A continue-as-new whose state never captured a SOD equity (legacy
-    // absolute-only tenant, or pct not yet evaluated) leaves it null, which is wire-compatible with
-    // a v2 reader — the field is optional. Setting v3 only matters when sodEquity is populated.
-    carry.setSchemaVersion(3L);
-    carry.setTenantId(input.getTenantId());
+    carry.setSchemaVersion(sodEquity != null ? 3L : 2L);
+    carry.setTenantId(tenantId);
     carry.setTripped(tripped);
     if (reason != null && !reason.isEmpty()) {
       carry.setReason(reason);

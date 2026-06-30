@@ -469,6 +469,63 @@ class AccountKillSwitchWorkflowImplTest {
     verify(accountSnapshot, times(2)).accountSnapshot(any());
   }
 
+  // ---------- continue-as-new sod_equity carry-forward ----------
+
+  // The pure carry-forward builder honors the rolling-deploy schema_version branch: v3 (with
+  // sod_equity populated) ONLY when a SOD equity was captured; otherwise v2 (old-worker-safe) and
+  // sod_equity absent.
+  @Test
+  void carryForwardInput_bumpsSchemaV3OnlyWhenSodEquityCaptured() {
+    LocalDate day = LocalDate.of(2026, 5, 14);
+
+    AccountKillSwitchWorkflowInput withEquity =
+        AccountKillSwitchWorkflowImpl.carryForwardInput(
+            "dev", false, "", "", null, null, day, new BigDecimal("5000"));
+    assertThat(withEquity.getSchemaVersion()).isEqualTo(3L);
+    assertThat(withEquity.getSodEquity()).isEqualByComparingTo(new BigDecimal("5000"));
+
+    AccountKillSwitchWorkflowInput noEquity =
+        AccountKillSwitchWorkflowImpl.carryForwardInput(
+            "dev", false, "", "", null, null, day, null);
+    assertThat(noEquity.getSchemaVersion()).isEqualTo(2L);
+    assertThat(noEquity.getSodEquity()).isNull();
+  }
+
+  // A workflow STARTED FROM a continue-as-new carry-forward input that already carries sod_equity
+  // (v3) restores it at @WorkflowInit and does NOT re-dispatch the broker AccountSnapshot on the
+  // post-CAN run — the same-day equity survives the CAN. The pct cap still works off the carried
+  // value (pct=0.40 x carried 5000 = 2000 -> a -2000 loss trips).
+  @Test
+  void sodEquityCarriedAcrossCan_restoresWithoutRedispatch() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    // If the workflow were to (incorrectly) re-read equity, it would get 9999 — proving any trip is
+    // off the CARRIED 5000 (threshold 2000), not a fresh read (threshold 3999.6).
+    when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("9999")));
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+        .thenReturn(new BigDecimal("-2000"));
+
+    // Carried input as continueAsNew would emit it: v3, sod_equity=5000, same trading day. Built by
+    // hand (NOT via carryForwardInput) so this restore assertion is independent of the builder the
+    // unit test pins — a builder regression cannot mask itself through this fixture.
+    AccountKillSwitchWorkflowInput carried = new AccountKillSwitchWorkflowInput();
+    carried.setSchemaVersion(3L);
+    carried.setTenantId("dev");
+    carried.setTradingDay(LocalDate.of(2026, 5, 14));
+    carried.setSodEquity(new BigDecimal("5000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-can-restore");
+    WorkflowStub.fromTyped(stub).start(carried);
+    env.sleep(Duration.ofSeconds(75));
+
+    // Trips off the CARRIED equity (5000 -> threshold 2000; -2000 <= -2000).
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+    // The carried sodEquity was restored => NO broker snapshot re-dispatch on the post-CAN run.
+    verify(accountSnapshot, never()).accountSnapshot(any());
+  }
+
   // ---------- helpers ----------
 
   private static AccountSnapshotResult snapshot(BigDecimal equity) {
