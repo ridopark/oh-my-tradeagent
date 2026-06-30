@@ -2694,6 +2694,257 @@ class PositionWorkflowImplTest {
         .hasSize(1);
   }
 
+  // ---------- F1: partial-exit-cancel-terminal-state-reconcile ----------
+
+  /**
+   * F1 (the core real-money fix): the original exit limit times out WITHOUT an onFill signal, but
+   * the broker had FILLED it — the {@code exec.cancelOrder} cancel-on-filled race returns {@code
+   * state=FILLED}. Pre-fix the workflow DISCARDED the cancel return, re-sent the full qtyToClose,
+   * over-sold (broker-rejected → PartialExitPlaceFailed), and emitted NO PartialExitFilled for the
+   * fill that actually happened. The fix reconciles the authoritative terminal state from the
+   * cancel return: it must emit EXACTLY ONE PartialExitFilled (qty 2), ZERO PartialExitPlaceFailed,
+   * place NO retry order, and leave remainingQty at the broker truth (3 - 2 = 1). No onFill is ever
+   * sent.
+   */
+  @Test
+  void
+      partialExit_brokerFillsAfterTtl_cancelReturnsFilled_emitsExactlyOnePartialExitFilled_noPlaceFailed_noOverQtyRetry()
+          throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // The cancel surfaces the late broker fill of 2 @ 1.84 (the live-incident shape: STC half of
+    // 3).
+    when(exec.cancelOrder(anyString())).thenReturn(filledCancelResult(2L, new BigDecimal("1.84")));
+
+    PositionWorkflow stub = newStub("pos-cancel-filled");
+    PositionWorkflowInput in = input(3);
+    in.setExitFillTtlSecs(2L); // short TTL so the unfilled await elapses fast under virtual time
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 3L);
+
+    // STC fraction=0.5 on remaining=3 → qtyToClose=ceil(1.5)=2, targetRemaining=1. Never deliver an
+    // onFill — the ONLY evidence of the fill is the cancelOrder return (the defect's exact shape).
+    stub.partialExit(partialExitRequest("sig-cancel-filled", "pos-cancel-filled", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Fire the TTL: timeout → cancel returns FILLED → authoritative reconcile → no retry.
+    env.sleep(Duration.ofSeconds(30));
+
+    // Drain the runner (remaining should be 1) so the workflow terminates cleanly.
+    stub.partialExit(partialExitRequest("sig-cf-drain", "pos-cancel-filled", 1.0));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-cf-drain", 1L, new BigDecimal("1.86")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // EXACTLY ONE PartialExitFilled for the cancel-surfaced fill (qty 2, remaining_after 1).
+    List<AuditEvent> sigFills =
+        captureAll("PartialExitFilled").stream()
+            .filter(e -> "sig-cancel-filled".equals(e.getSubject().get("signal_id")))
+            .toList();
+    assertThat(sigFills).hasSize(1);
+    assertThat(asLong(sigFills.get(0).getSubject().get("qty_filled"))).isEqualTo(2L);
+    assertThat(asLong(sigFills.get(0).getSubject().get("remaining_qty_after"))).isEqualTo(1L);
+    assertThat(sigFills.get(0).getSubject()).containsEntry("broker_order_id", "brk-cancel-filled");
+
+    // ZERO PartialExitPlaceFailed — the over-sell never happened.
+    assertThat(captureAll("PartialExitPlaceFailed")).isEmpty();
+
+    // NO :retry / :reprice retry order was placed for the cancel-filled signal — only the original
+    // place (#1) and the unrelated drain (#2).
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(2)).placeOrder(intentCaptor.capture());
+    assertThat(intentCaptor.getAllValues().stream().map(OrderIntent::getIntentKey))
+        .as("no retry order may be placed once the cancel surfaced the authoritative fill")
+        .noneMatch(
+            k ->
+                k != null
+                    && k.contains("sig-cancel-filled")
+                    && (k.endsWith(":retry") || k.contains(":reprice-")));
+
+    // The skip-satisfied audit fired (retryQty clamped to 0 by the reconciled remaining).
+    List<AuditEvent> skips = captureAll("PartialExitRetrySkippedSatisfied");
+    assertThat(skips).hasSize(1);
+    assertThat(skips.get(0).getSubject()).containsEntry("signal_id", "sig-cancel-filled");
+  }
+
+  /**
+   * F1 defense-in-depth: the cancel did NOT surface the fill (returns CANCELLED), but the order had
+   * actually filled — {@code exec.getOrderStatus} reports the authoritative FILLED terminal state.
+   * The reconcile must fall back to getOrderStatus, book the fill exactly once, and skip the retry.
+   */
+  @Test
+  void partialExit_cancelReturnsCancelled_butGetOrderStatusFilled_reconciles() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+    // The journal/broker authoritative state is FILLED even though cancel did not surface it.
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(filledCancelResult(2L, new BigDecimal("1.84")));
+
+    PositionWorkflow stub = newStub("pos-status-filled");
+    PositionWorkflowInput in = input(3);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 3L);
+
+    stub.partialExit(partialExitRequest("sig-status-filled", "pos-status-filled", 0.5));
+    waitForPlaceOrderCount(1);
+
+    env.sleep(Duration.ofSeconds(30));
+
+    stub.partialExit(partialExitRequest("sig-sf-drain", "pos-status-filled", 1.0));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-sf-drain", 1L, new BigDecimal("1.86")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // getOrderStatus was consulted as the authoritative fallback.
+    verify(exec, atLeastOnce()).getOrderStatus(anyString());
+
+    // EXACTLY ONE PartialExitFilled for the status-surfaced fill (qty 2, remaining_after 1).
+    List<AuditEvent> sigFills =
+        captureAll("PartialExitFilled").stream()
+            .filter(e -> "sig-status-filled".equals(e.getSubject().get("signal_id")))
+            .toList();
+    assertThat(sigFills).hasSize(1);
+    assertThat(asLong(sigFills.get(0).getSubject().get("qty_filled"))).isEqualTo(2L);
+    assertThat(asLong(sigFills.get(0).getSubject().get("remaining_qty_after"))).isEqualTo(1L);
+
+    assertThat(captureAll("PartialExitPlaceFailed")).isEmpty();
+
+    // No retry order placed for the reconciled signal.
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(2)).placeOrder(intentCaptor.capture());
+    assertThat(intentCaptor.getAllValues().stream().map(OrderIntent::getIntentKey))
+        .noneMatch(
+            k ->
+                k != null
+                    && k.contains("sig-status-filled")
+                    && (k.endsWith(":retry") || k.contains(":reprice-")));
+  }
+
+  /**
+   * F1 regression guard: a GENUINE timeout (no fill anywhere) must still retry. cancel returns
+   * CANCELLED with no fill, getOrderStatus also reports not-filled → the retry fires bounded to the
+   * full remaining qtyToClose (nothing was sold). The fix must NOT suppress legitimate retries.
+   */
+  @Test
+  void partialExit_genuineTimeout_noFill_stillRetriesBoundedToRemaining() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+    // getOrderStatus also reports a non-terminal/unfilled state (SUBMITTED, filledQty null).
+    when(exec.getOrderStatus(anyString())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-genuine-timeout");
+    PositionWorkflowInput in = input(4);
+    in.setExitRepriceSteps(1L); // single reprice step → key is :reprice-1
+    in.setExitFloorAbs(new BigDecimal("0.05"));
+    in.setExitFloorPct(new BigDecimal("0.5"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 4L);
+
+    // STC fraction=0.5 on remaining=4 → qtyToClose=2.
+    stub.partialExit(partialExitRequest("sig-genuine", "pos-genuine-timeout", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Original times out, no fill anywhere → retry fires.
+    env.sleep(Duration.ofSeconds(120));
+    waitForPlaceOrderCount(2);
+
+    // Deliver the retry fill so the workflow drains cleanly.
+    stub.onFill(fill("brk-genuine-retry", 2L, new BigDecimal("2.78")));
+    stub.partialExit(partialExitRequest("sig-genuine-drain", "pos-genuine-timeout", 1.0));
+    waitForPlaceOrderCount(3);
+    stub.onFill(fill("brk-genuine-drain", 2L, new BigDecimal("2.80")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // The retry order WAS placed and bounded to the full qtyToClose (2) — nothing was sold, so the
+    // reconcile must not have clamped it down.
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeast(2)).placeOrder(intentCaptor.capture());
+    OrderIntent retryIntent =
+        intentCaptor.getAllValues().stream()
+            .filter(i -> i.getIntentKey() != null && i.getIntentKey().endsWith(":reprice-1"))
+            .reduce((a, b) -> b)
+            .orElseThrow(
+                () -> new AssertionError("genuine timeout must still place a retry order"));
+    assertThat(retryIntent.getQty())
+        .as("genuine-timeout retry qty must equal qtyToClose (2) — nothing was sold")
+        .isEqualTo(2L);
+
+    // No skip-satisfied audit (the retry was genuinely needed).
+    assertThat(captureAll("PartialExitRetrySkippedSatisfied")).isEmpty();
+  }
+
+  /**
+   * F1 review BLOCKER regression: the cancel-on-filled race return AND a buffered onFill can BOTH
+   * describe the SAME broker fill. TTL elapses; while the in-flight cancelOrder runs the broker
+   * fills 2 ct — the onFill signal buffers (lastFillEvent != null) AND the cancel returns
+   * state=FILLED filledQty=2. Without the fix the F1 reconcile books the fill from the cancel
+   * return but does NOT clear lastFillEvent, so the adjacent lateFillReconcile block books it
+   * AGAIN: remainingQty double-decremented (3 → 1 → -1) and TWO PartialExitFilled for one fill. The
+   * fix clears lastFillEvent after the F1 reconcile so the single fill is booked EXACTLY once.
+   */
+  @Test
+  void partialExit_cancelFilledAndBufferedOnFillSameFill_booksExactlyOnceNoDoubleDecrement()
+      throws Exception {
+    PositionWorkflow stub = newStub("pos-double-book");
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // The cancel surfaces the broker fill of 2 AND delivers the buffered onFill for the SAME fill
+    // while the activity runs — exactly the race the BLOCKER describes (both evidences present at
+    // the post-cancel reconcile point).
+    when(exec.cancelOrder(anyString()))
+        .thenAnswer(
+            inv -> {
+              stub.onFill(fill("brk-cancel-filled", 2L, new BigDecimal("1.84")));
+              return filledCancelResult(2L, new BigDecimal("1.84"));
+            });
+
+    PositionWorkflowInput in = input(3);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 3L);
+
+    // STC fraction=0.5 on remaining=3 → qtyToClose=2, targetRemaining=1.
+    stub.partialExit(partialExitRequest("sig-double-book", "pos-double-book", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Fire the TTL: timeout → cancel (delivers buffered onFill + returns FILLED) → reconcile ONCE.
+    env.sleep(Duration.ofSeconds(30));
+
+    // Drain the runner (remaining must be 1, NOT -1) so the workflow terminates cleanly.
+    stub.partialExit(partialExitRequest("sig-db-drain", "pos-double-book", 1.0));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-db-drain", 1L, new BigDecimal("1.86")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // EXACTLY ONE PartialExitFilled for the reconciled signal (not two), remaining_after == 1.
+    List<AuditEvent> sigFills =
+        captureAll("PartialExitFilled").stream()
+            .filter(e -> "sig-double-book".equals(e.getSubject().get("signal_id")))
+            .toList();
+    assertThat(sigFills)
+        .as("the single broker fill must be booked EXACTLY once, not double-booked")
+        .hasSize(1);
+    assertThat(asLong(sigFills.get(0).getSubject().get("qty_filled"))).isEqualTo(2L);
+    assertThat(asLong(sigFills.get(0).getSubject().get("remaining_qty_after")))
+        .as("remainingQty must be 1 (3-2), never -1 (3-2-2 from a double-decrement)")
+        .isEqualTo(1L);
+
+    assertThat(captureAll("PartialExitPlaceFailed")).isEmpty();
+
+    // No over-qty retry for the reconciled signal.
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(2)).placeOrder(intentCaptor.capture());
+    assertThat(intentCaptor.getAllValues().stream().map(OrderIntent::getIntentKey))
+        .noneMatch(
+            k ->
+                k != null
+                    && k.contains("sig-double-book")
+                    && (k.endsWith(":retry") || k.contains(":reprice-")));
+  }
+
   // ---------- Plan-2B R-AB-1: guaranteed multi-day expiry-lead flatten timer ----------
 
   /**
@@ -2991,6 +3242,25 @@ class PositionWorkflowImplTest {
   private OrderIntentResult cancelledResult() {
     OrderIntentResult r = submittedResult();
     r.setState(OrderIntentResult.State.CANCELLED);
+    return r;
+  }
+
+  /**
+   * F1 (partial-exit-cancel-terminal-state-reconcile): the exec cancel-on-filled race result — the
+   * broker reports the order ALREADY_FILLED at cancel time, so the exec Activity pulls the fill
+   * detail, marks the journal FILLED, and returns {@code state=FILLED} with the broker-confirmed
+   * {@code filledQty}/{@code avgFillPrice}/{@code brokerOrderId}. This is the authoritative
+   * terminal state the orchestrator must reconcile rather than discard.
+   */
+  private OrderIntentResult filledCancelResult(long filledQty, BigDecimal avgFillPrice) {
+    OrderIntentResult r = new OrderIntentResult();
+    r.setSchemaVersion(1L);
+    r.setIntentKey("exit-key");
+    r.setBrokerOrderId("brk-cancel-filled");
+    r.setState(OrderIntentResult.State.FILLED);
+    r.setFilledQty(filledQty);
+    r.setAvgFillPrice(avgFillPrice);
+    r.setLastStateAt(OffsetDateTime.now());
     return r;
   }
 

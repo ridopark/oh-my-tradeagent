@@ -116,6 +116,28 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * F1: pins the cancel-terminal-state reconcile gate literal. This getVersion change-point keys
+   * the discard-and-retry-vs-reconcile fork in processOne's timeout branch; a renamed string
+   * re-resolves to DEFAULT_VERSION for legacy histories, silently reverting the authoritative
+   * cancel-fill reconcile on in-flight workflows (back to the over-sell-on-late-fill behavior). The
+   * pre-fix legacy history (recorded with NO {@code
+   * partial-exit-cancel-terminal-state-reconcile-v1} marker) doubles as the v=0 replay regression:
+   * {@link #legacyPre276HistoryReplaysAgainstCurrentImplWithoutNonDeterminism} drives the recorded
+   * {@code processOne} command stream (PartialExitRequested -> placeOrder -> PartialExitFilled)
+   * through the current impl, where this gate resolves to DEFAULT_VERSION so the new getOrderStatus
+   * call + the synthesized PartialExitFilled emit stay OFF and the recorded sequence is reproduced
+   * byte-identically.
+   */
+  @Test
+  void versionExitCancelTerminalReconcileConstantNameIsStable() throws Exception {
+    Field marker =
+        PositionWorkflowImpl.class.getDeclaredField("VERSION_EXIT_CANCEL_TERMINAL_RECONCILE");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null))
+        .isEqualTo("partial-exit-cancel-terminal-state-reconcile-v1");
+  }
+
+  /**
    * Plan-2A R-AA-1: pins the flatten-fill-await gate literal. This getVersion change-point keys the
    * legacy-vs-bounded flatten fork; a renamed string re-resolves to DEFAULT_VERSION for legacy
    * histories, which would silently revert the silent-loss fix on in-flight workflows.
