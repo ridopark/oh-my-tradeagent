@@ -40,8 +40,12 @@ class PositionLookupActivitiesImplTest {
   // resolver (the #323 idiom). The single-tenant fixture returns the two homelab strategies.
   private final TenantStrategies tenantStrategies =
       tenantId -> List.of("copytrade-v1", "watchlist-trigger-v1");
+  // Phase F2b: the account-scoped probe resolves accounts via the StrategyRegistry; these
+  // cacheArmedLeg tests don't exercise it, so an empty mock suffices.
+  private final com.ohmytradeagent.orchestrator.platform.StrategyRegistry strategyRegistry =
+      mock(com.ohmytradeagent.orchestrator.platform.StrategyRegistry.class);
   private final PositionLookupActivitiesImpl svc =
-      new PositionLookupActivitiesImpl(redis, workflowClient, tenantStrategies);
+      new PositionLookupActivitiesImpl(redis, workflowClient, tenantStrategies, strategyRegistry);
 
   @Test
   void cacheArmedLeg_seedsSetAndSetsTwoDayTtl() {

@@ -1,7 +1,10 @@
 package com.ohmytradeagent.orchestrator.activities;
 
+import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.domain.OccSymbol;
+import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import com.ohmytradeagent.orchestrator.workflows.PositionState;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -46,12 +49,17 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
   private final StringRedisTemplate redis;
   private final WorkflowClient workflowClient;
   private final TenantStrategies tenantStrategies;
+  private final StrategyRegistry strategyRegistry;
 
   public PositionLookupActivitiesImpl(
-      StringRedisTemplate redis, WorkflowClient workflowClient, TenantStrategies tenantStrategies) {
+      StringRedisTemplate redis,
+      WorkflowClient workflowClient,
+      TenantStrategies tenantStrategies,
+      StrategyRegistry strategyRegistry) {
     this.redis = redis;
     this.workflowClient = workflowClient;
     this.tenantStrategies = tenantStrategies;
+    this.strategyRegistry = strategyRegistry;
   }
 
   static String key(String tenantId, String strategyId, String occ) {
@@ -226,14 +234,8 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
         if (sid == null || sid.isBlank()) {
           continue;
         }
-        String query = visibilityQuery(tenantId, sid, occPadded);
-        // Close the Visibility stream (gRPC paging iterator) per the #323 idiom
-        // (AccountKillSwitchCascadeActivitiesImpl / AccountPnlActivitiesImpl).
-        try (java.util.stream.Stream<WorkflowExecutionMetadata> stream =
-            workflowClient.listExecutions(query)) {
-          if (stream.findAny().isPresent()) {
-            return true;
-          }
+        if (anyRunningOwner(tenantId, sid, occPadded)) {
+          return true;
         }
       }
       return false;
@@ -241,6 +243,76 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
       log.warn(
           "hasRunningOwnerForOcc best-effort Visibility probe failed tenant={} occ={} err={}",
           tenantId,
+          occPadded,
+          e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * The proven #323 Visibility-equality probe: is any RUNNING PositionWorkflow on {@code (tenantId,
+   * strategyId)} managing {@code occPadded}? Runs ONE {@code TenantStrategy='...' AND
+   * ContractSymbol = occPadded} equality query and closes the gRPC paging stream
+   * (try-with-resources) per the idiom in {@link AccountKillSwitchCascadeActivitiesImpl} / {@link
+   * AccountPnlActivitiesImpl}. Shared by the tenant-scoped {@link #hasRunningOwnerForOcc} and the
+   * account-scoped {@link #hasRunningOwnerForOccOnAccount} so the two never drift. Exceptions
+   * propagate to the caller's best-effort catch.
+   */
+  private boolean anyRunningOwner(String tenantId, String strategyId, String occPadded) {
+    try (Stream<WorkflowExecutionMetadata> stream =
+        workflowClient.listExecutions(visibilityQuery(tenantId, strategyId, occPadded))) {
+      return stream.findAny().isPresent();
+    }
+  }
+
+  @Override
+  public boolean hasRunningOwnerForOccOnAccount(String brokerAccountId, String occPadded) {
+    // Phase F2b: ACCOUNT-scoped (cross-TENANT) sibling-owner probe. BEST-EFFORT / read-only: any
+    // error (or a blank account) returns false (no owner found → recon pages, the safe degrade — a
+    // false page never masks a genuine orphan). Spans every tenant on the SAME broker account so a
+    // sibling-TENANT owner on a shared brokerage account is found (the #477 fix was TENANT-scoped).
+    //
+    // Temporal SQL Visibility supports neither STARTS_WITH nor IN(...), so spanning all accounts
+    // via
+    // one query is impossible. Instead enumerate every (tenant, strategy) the registry knows, keep
+    // only those whose resolved StrategyConfig.broker_account_id equals brokerAccountId, and run
+    // the
+    // proven per-(tenant,strategy) `ContractSymbol = occPadded` EQUALITY query (the #323 idiom
+    // reused
+    // by hasRunningOwnerForOcc). Short-circuit on the first running owner.
+    if (brokerAccountId == null || brokerAccountId.isBlank()) {
+      return false;
+    }
+    try {
+      for (TenantStrategy ts : strategyRegistry.list()) {
+        if (ts == null || ts.tenantId() == null || ts.strategyId() == null) {
+          continue;
+        }
+        String account;
+        try {
+          StrategyConfig cfg = strategyRegistry.get(ts.tenantId(), ts.strategyId());
+          account = cfg == null ? null : cfg.getBrokerAccountId();
+        } catch (RuntimeException e) {
+          // A single unreadable config must not abort the cross-account scan — skip this pair.
+          log.warn(
+              "hasRunningOwnerForOccOnAccount config load failed tenant={} strategy={} err={}",
+              ts.tenantId(),
+              ts.strategyId(),
+              e.getMessage());
+          continue;
+        }
+        if (account == null || account.isBlank() || !account.trim().equals(brokerAccountId)) {
+          continue;
+        }
+        if (anyRunningOwner(ts.tenantId(), ts.strategyId(), occPadded)) {
+          return true;
+        }
+      }
+      return false;
+    } catch (RuntimeException e) {
+      log.warn(
+          "hasRunningOwnerForOccOnAccount best-effort probe failed account={} occ={} err={}",
+          brokerAccountId,
           occPadded,
           e.getMessage());
       return false;

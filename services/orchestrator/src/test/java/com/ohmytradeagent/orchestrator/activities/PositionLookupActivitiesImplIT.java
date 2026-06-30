@@ -64,7 +64,13 @@ class PositionLookupActivitiesImplIT {
     workflowClient = mock(WorkflowClient.class);
     svc =
         new PositionLookupActivitiesImpl(
-            redisTemplate, workflowClient, tenantId -> java.util.List.of());
+            redisTemplate,
+            workflowClient,
+            tenantId -> java.util.List.of(),
+            // Phase F2b: the account-scoped probe needs a StrategyRegistry; these Redis-cache /
+            // Visibility ITs don't exercise it, so an unstubbed mock (list() -> empty) suffices,
+            // matching the sibling PositionLookupActivitiesImplTest's mock(StrategyRegistry.class).
+            mock(com.ohmytradeagent.orchestrator.platform.StrategyRegistry.class));
   }
 
   @AfterEach
