@@ -1240,6 +1240,136 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     verify(strategy, Mockito.times(1)).capitalForStrategy("dev", "copytrade-v1");
   }
 
+  // ---------- notional-cap clamp-to-headroom (Phase F4B) ----------
+
+  /**
+   * Phase F4B lever (B): an over-cap entry is SIZED DOWN to fit the remaining notional-cap headroom
+   * instead of being rejected outright. cash=5000 × weight=0.2 = $1000 / ($2.27 × 100) =
+   * floor(4.40) = 4 cash-sized contracts; the cap headroom (stubbed) is 1; max=5. The clamp is
+   * MIN(4, 1, 5) = 1 → 1 contract placed, and SignalRejected is NOT emitted. Mirrors the live IREN
+   * forensic (cap $1,342, open $1,070, headroom $272, $227/ct → 1).
+   */
+  @Test
+  void notionalCap_overCap_clampsToHeadroom_entersReducedQty() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setPreTradeCheckEnabled(false);
+    cfg.setCapitalSource(StrategyConfig.CapitalSource.ACCOUNT_CASH);
+    cfg.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    // Cap headroom binds at 1 contract.
+    when(risk.notionalCapHeadroomContracts(eq(cfg), any(), any(), anyString(), anyString()))
+        .thenReturn(1L);
+
+    AccountSnapshotActivity accountStub =
+        request -> {
+          AccountSnapshotResult r = new AccountSnapshotResult();
+          r.setSchemaVersion(1L);
+          r.setCash(new BigDecimal("5000"));
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, accountStub);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-K"));
+    env.start();
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setPrice(new BigDecimal("2.27"));
+    runWorkflow(p);
+
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec).placeOrder(intentCaptor.capture());
+    assertThat(intentCaptor.getValue().getQty()).isEqualTo(1L); // clamped to headroom, NOT rejected
+    // The over-cap entry was sized down, not rejected.
+    verify(audit, Mockito.never())
+        .log(Mockito.argThat(e -> e != null && "SignalRejected".equals(e.getKind())));
+  }
+
+  /**
+   * Phase F4B: when the clamp falls BELOW {@code min_contracts} (headroom 0) the entry is STILL
+   * rejected with {@code NOTIONAL_CAP_EXCEEDED} and NO order is placed — a sub-minimum entry is not
+   * worth placing.
+   */
+  @Test
+  void notionalCap_clampBelowMinContracts_stillRejects() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setPreTradeCheckEnabled(false);
+    cfg.setCapitalSource(StrategyConfig.CapitalSource.ACCOUNT_CASH);
+    cfg.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
+    cfg.setMinContracts(1L);
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    // No headroom: clamp yields 0 < min_contracts(1).
+    when(risk.notionalCapHeadroomContracts(eq(cfg), any(), any(), anyString(), anyString()))
+        .thenReturn(0L);
+
+    AccountSnapshotActivity accountStub =
+        request -> {
+          AccountSnapshotResult r = new AccountSnapshotResult();
+          r.setSchemaVersion(1L);
+          r.setCash(new BigDecimal("5000"));
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, accountStub);
+    env.start();
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setPrice(new BigDecimal("2.27"));
+    runWorkflow(p);
+
+    AuditEvent rejected = capture("SignalRejected");
+    assertThat(rejected.getSubject()).containsEntry("reason_code", "NOTIONAL_CAP_EXCEEDED");
+    assertThat(rejected.getSubject()).containsEntry("outcome", "REJECTED");
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+  }
+
+  /**
+   * Phase F4B: the placed qty is exactly MIN(account-cash sizing, cap-headroom, max_contracts),
+   * floored. cash=5000 × 0.2 = $1000 / ($2.27 × 100) = 4 cash-sized; headroom (stubbed) = 3; max=2.
+   * MIN(4, 3, 2) = 2 → 2 contracts placed.
+   */
+  @Test
+  void notionalCap_clampIsMinOfCashAndCapAndMax() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setPreTradeCheckEnabled(false);
+    cfg.setCapitalSource(StrategyConfig.CapitalSource.ACCOUNT_CASH);
+    cfg.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
+    cfg.setMaxContracts(2L);
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(risk.notionalCapHeadroomContracts(eq(cfg), any(), any(), anyString(), anyString()))
+        .thenReturn(3L);
+
+    AccountSnapshotActivity accountStub =
+        request -> {
+          AccountSnapshotResult r = new AccountSnapshotResult();
+          r.setSchemaVersion(1L);
+          r.setCash(new BigDecimal("5000"));
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, accountStub);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-K"));
+    env.start();
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setPrice(new BigDecimal("2.27"));
+    runWorkflow(p);
+
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec).placeOrder(intentCaptor.capture());
+    assertThat(intentCaptor.getValue().getQty()).isEqualTo(2L); // MIN(4 cash, 3 headroom, 2 max)
+  }
+
   private static ContractResolveResult resolved() {
     return new ContractResolveResult(
         "NVDA  260516C00140000",

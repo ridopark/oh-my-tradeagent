@@ -19,6 +19,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.client.WorkflowClient;
 import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDate;
@@ -670,6 +671,54 @@ public class RiskActivitiesImpl implements RiskActivities {
       return strategyScope;
     }
     return checkAccountKillSwitch(tenantId, now);
+  }
+
+  /**
+   * Phase F4B: headroom contract count for the clamp-to-fit policy. Shares the SAME capital-base
+   * math as {@link #checkNotionalCap} — {@code cap = capPct × (cash + sumOpenNotional)} — so the
+   * clamp ceiling and the reject gate agree. The {@code openPositions()} seam fails closed by
+   * propagation (no catch), matching the gate's #325 contract: a Visibility error must not yield a
+   * permissive (large) headroom.
+   */
+  @Override
+  public long notionalCapHeadroomContracts(
+      StrategyConfig config,
+      BigDecimal limit,
+      BigDecimal accountCash,
+      String tenantId,
+      String strategyId) {
+    BigDecimal capPct;
+    try {
+      capPct = resolveNotionalCapPct(config);
+    } catch (AmbiguousCapConfigException e) {
+      // Ambiguous cap → no headroom (fail-closed); the gate independently rejects ambiguous
+      // configs.
+      return 0L;
+    }
+    if (capPct == null) {
+      // Gate disabled → no notional-cap constraint; the workflow's MIN-composition no-ops.
+      return Long.MAX_VALUE;
+    }
+    if (accountCash == null || accountCash.signum() <= 0) {
+      // Fail-closed parity with checkNotionalCap's cash_unavailable reject: zero headroom.
+      return 0L;
+    }
+    BigDecimal price = limit == null ? BigDecimal.ZERO : limit;
+    BigDecimal pricePerContract = price.multiply(Sizing.CONTRACT_MULTIPLIER);
+    if (pricePerContract.signum() <= 0) {
+      return 0L;
+    }
+    PortfolioContext ctx =
+        new PortfolioContext(
+            tenantId, strategyId, null, config, null, entryNotional(price, 1L), accountCash);
+    BigDecimal sumOpenNotional = sumOpenNotional(ctx);
+    BigDecimal capitalBase = accountCash.add(sumOpenNotional);
+    BigDecimal cap = capitalBase.multiply(capPct);
+    BigDecimal remaining = cap.subtract(sumOpenNotional);
+    if (remaining.signum() <= 0) {
+      return 0L;
+    }
+    return remaining.divide(pricePerContract, 0, RoundingMode.FLOOR).longValueExact();
   }
 
   /**
