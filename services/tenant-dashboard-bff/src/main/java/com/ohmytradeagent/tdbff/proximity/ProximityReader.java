@@ -3,6 +3,7 @@ package com.ohmytradeagent.tdbff.proximity;
 // Mirrors PositionsReader's listExecutions + per-workflow query fan-out. Like that reader this is a
 // READ-ONLY display with no cap to protect, so a per-workflow query race (a workflow terminating
 // between the listExecutions and the query) is simply skipped best-effort, never a throw.
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import io.temporal.client.WorkflowClient;
@@ -307,8 +308,12 @@ public class ProximityReader {
   /**
    * Transport mirror of the orchestrator's {@code EntryProximityView} query result (field names
    * must match) so the BFF deserializes the {@code entryProximity} query without a compile
-   * dependency on the orchestrator module.
+   * dependency on the orchestrator module. {@code ignoreUnknown} keeps it forward-compatible: the
+   * orchestrator can add fields to the {@code entryProximity} result without the Temporal data
+   * converter (Jackson, fail-on-unknown) throwing and dropping the leg from the dashboard — the
+   * same drift that broke {@code positionState}.
    */
+  @JsonIgnoreProperties(ignoreUnknown = true)
   public record EntryProximityView(
       String ticker,
       String direction,
@@ -319,7 +324,12 @@ public class ProximityReader {
       String state,
       String optionSymbol) {}
 
-  /** Transport mirror of the orchestrator's {@code ExitProximityView} query result. */
+  /**
+   * Transport mirror of the orchestrator's {@code ExitProximityView} query result. {@code
+   * ignoreUnknown} keeps it forward-compatible against additive field drift, like {@link
+   * EntryProximityView} and {@code PositionStateView}.
+   */
+  @JsonIgnoreProperties(ignoreUnknown = true)
   public record ExitProximityView(
       String contractSymbol,
       BigDecimal entryPremium,

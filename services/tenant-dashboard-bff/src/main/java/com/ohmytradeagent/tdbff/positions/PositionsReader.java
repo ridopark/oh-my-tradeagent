@@ -5,6 +5,7 @@ package com.ohmytradeagent.tdbff.positions;
 // Divergence: that snapshot feeds a risk gate and must fail CLOSED (throw) when too many positions
 // fail to value, because an undercount loosens the notional cap. This is a READ-ONLY display with
 // no cap to protect, so a per-workflow query race is simply skipped (best-effort) — never a throw.
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import io.temporal.client.WorkflowClient;
@@ -171,8 +172,13 @@ public class PositionsReader {
    * Transport mirror of the orchestrator's {@code PositionState} query result so the BFF can
    * deserialize the {@code positionState} query without a compile dependency on the orchestrator
    * module. Field names must match {@code PositionState(contractSymbol, remainingQty,
-   * entryPremium)}.
+   * entryPremium)}. {@code ignoreUnknown} makes it forward-compatible: the orchestrator's {@code
+   * positionState} result grew to add {@code entryAt}/{@code partialExited}, and without this the
+   * Temporal data converter (Jackson, fail-on-unknown) threw on every query, dropping every
+   * position so the dashboard showed 0 open. The BFF intentionally mirrors only the fields it
+   * needs.
    */
+  @JsonIgnoreProperties(ignoreUnknown = true)
   public record PositionStateView(
       String contractSymbol, long remainingQty, BigDecimal entryPremium) {}
 }
