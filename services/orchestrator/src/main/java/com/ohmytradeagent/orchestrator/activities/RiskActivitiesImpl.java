@@ -59,6 +59,12 @@ public class RiskActivitiesImpl implements RiskActivities {
   static final Duration FUTURE_DATE_TOLERANCE = Duration.ofSeconds(5);
 
   /**
+   * Phase F4B: the long ceiling for the headroom-overflow clamp in {@link
+   * #notionalCapHeadroomContracts}.
+   */
+  private static final BigDecimal LONG_MAX_AS_DECIMAL = BigDecimal.valueOf(Long.MAX_VALUE);
+
+  /**
    * Issue #336 deprecation signal. Incremented (and a {@code log.warn} emitted) whenever a strategy
    * config still sets the deprecated {@code notional_cap_pct_of_equity} alias. Follows the
    * #329/#331 risk-counter idiom: {@code Counter.builder(...).register(meterRegistry)}, a {@code
@@ -730,9 +736,7 @@ public class RiskActivitiesImpl implements RiskActivities {
     // (no open positions, large cash, very cheap option) can overflow long; longValueExact() would
     // throw an unexpected activity error instead of yielding the no-constraint sentinel.
     BigDecimal q = remaining.divide(pricePerContract, 0, RoundingMode.FLOOR);
-    return q.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) >= 0
-        ? Long.MAX_VALUE
-        : q.longValueExact();
+    return q.compareTo(LONG_MAX_AS_DECIMAL) >= 0 ? Long.MAX_VALUE : q.longValueExact();
   }
 
   /**
