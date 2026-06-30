@@ -47,7 +47,9 @@ public class RealizedPnlCalculator {
    * {@link #computeRealizedPnl} but fetches EntryFilled/PartialExitFilled lots across ALL history
    * (no per-day predicate). This is strictly MORE correct than the day-scoped calc: it resolves the
    * documented #276 §4 cross-day "phantom gain" — an exit on a later day now FIFO-matches its real
-   * prior-day entry cost basis instead of crediting raw proceeds.
+   * prior-day entry cost basis instead of crediting raw proceeds — FOR exits whose entry leg is
+   * within retained history. An exit with no matching entry anywhere (entry pre-dates audit_log
+   * retention, or its option_symbol bucket never matches) still credits raw proceeds.
    */
   public BigDecimal computeRealizedPnlAllTime(String tenantId, String strategyId) {
     return realize(tenantId, strategyId, null);

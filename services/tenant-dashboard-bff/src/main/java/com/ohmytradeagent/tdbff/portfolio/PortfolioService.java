@@ -140,19 +140,38 @@ public class PortfolioService {
           subreadPool.submit(() -> brokerPositions.marksFor(brokerTarget, tenantId, repStrategy)));
     }
 
-    // Realized P&L (today + since-inception), summed across strategies. Audit-backed DB reads — not
-    // gated on the orchestrator worker — so they stay inline and cheap. The all-time figure lets
-    // the
-    // Status page reconcile to starting capital (start + realized_all_time + unrealized ≈ equity);
-    // it is strictly MORE correct than the daily calc (resolves the #276 §4 cross-day phantom
-    // gain).
+    // Since-inception realized P&L, per strategy. Unlike the day-scoped read below, the all-time
+    // calc drops the date predicate and scans the strategy's ENTIRE audit_log history, so it grows
+    // unbounded over time — dispatch it concurrently and await it under the same sub-read budget as
+    // the other slow reads so a slow scan degrades this figure (to ZERO) rather than stacking past
+    // the page budget. The all-time figure lets the Status page reconcile to starting capital
+    // (start + realized_all_time + unrealized ≈ equity) and is strictly MORE correct than the daily
+    // calc (resolves the #276 §4 cross-day phantom gain).
+    Map<String, Future<BigDecimal>> allTimeFutures = new LinkedHashMap<>();
+    for (String strategyId : strategyIds) {
+      allTimeFutures.put(
+          strategyId,
+          subreadPool.submit(() -> realizedPnl.computeRealizedPnlAllTime(tenantId, strategyId)));
+    }
+
+    // Realized P&L today, summed across strategies. The day-scoped read is date-bounded (small and
+    // fast) and not gated on the orchestrator worker, so it stays inline and cheap.
     BigDecimal realizedToday = BigDecimal.ZERO;
-    BigDecimal realizedAllTime = BigDecimal.ZERO;
     for (String strategyId : strategyIds) {
       realizedToday =
           realizedToday.add(realizedPnl.computeRealizedPnl(tenantId, strategyId, tradingDay));
+    }
+
+    // Sum the since-inception figures under the sub-read budget; a stalled scan degrades that
+    // strategy's contribution to ZERO rather than failing the page.
+    BigDecimal realizedAllTime = BigDecimal.ZERO;
+    for (Map.Entry<String, Future<BigDecimal>> entry : allTimeFutures.entrySet()) {
       realizedAllTime =
-          realizedAllTime.add(realizedPnl.computeRealizedPnlAllTime(tenantId, strategyId));
+          realizedAllTime.add(
+              await(
+                  entry.getValue(),
+                  BigDecimal.ZERO,
+                  "realized_all_time tenant=" + tenantId + " strategy=" + entry.getKey()));
     }
 
     // Merge live marks across all broker_targets into one OCC-keyed map (account-level, so an OCC
