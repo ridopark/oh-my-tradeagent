@@ -2433,7 +2433,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         // the legacy discard-and-retry for byte-identical replay.
         if (cancelTerminalReconcileVersion >= 1) {
           FillSignalPayload terminalFill = terminalFillFrom(cancelled);
-          if (terminalFill == null) {
+          // Defense-in-depth getOrderStatus fallback ONLY when the cancel did not surface the fill
+          // AND no onFill buffered for it. If lastFillEvent != null the late fill is already known
+          // (the lateFillReconcile block below books it), so the extra getOrderStatus round-trip
+          // would be wasted work that could surface the SAME fill a second time — guard it out.
+          if (terminalFill == null && lastFillEvent == null) {
             OrderIntentResult status = null;
             try {
               status = exec.getOrderStatus(intentKey);
@@ -2445,6 +2449,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
           }
           if (terminalFill != null) {
             applyExitFill(req, terminalFill);
+            // Same fill, two evidences: the cancel-on-filled race return AND a buffered onFill can
+            // BOTH describe this one broker fill. We just booked it from the authoritative cancel
+            // return; clear lastFillEvent so the lateFillReconcile block below does NOT book it a
+            // second time (which would double-decrement remainingQty and emit two PartialExitFilled
+            // for one fill). The reconciled remainingQty already reflects broker truth.
+            lastFillEvent = null;
           }
         }
         // VERSION_EXIT_RETRY_LATE_FILL_RECONCILE v>=1: the original exit order can fill LATE — its
