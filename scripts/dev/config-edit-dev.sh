@@ -127,6 +127,19 @@ done
 # CRITICAL: TEMPORAL_NAMESPACE=default and the orchestrator-core task queue MUST match the
 # orchestrator above, else the workflow start has no live worker → 30s timeout → 503.
 # STRATEGY_CONFIG_WRITE_ENABLED=true un-darks the StrategyConfigController (else the route 404s).
+#
+# Operator onboarding routes (I-1b create-tenant, I-1c credential write) are dark by default. When
+# scripts/dev/onboard-dev.sh exports the OPERATOR_* flags we un-dark them HERE — as spring-boot run
+# ARGUMENTS with the exact dotted property names, NOT env vars: Spring's relaxed env binding strips
+# the dash in `tenant-create`/`credential-write` (→ OPERATOR_TENANTCREATE_ENABLED), which would not
+# match and silently leave the routes 404. The args stay empty for a plain config-edit-dev run, so
+# its behavior is unchanged. EXEC_BASE_URL / EXEC_ADMIN_SHARED_TOKEN are inert here (api-gateway only
+# forwards to exec on the credential route) but must point at the local exec for onboarding Tier 3.
+gw_args=()
+if [ "${OPERATOR_TENANT_CREATE_ENABLED:-}" = "true" ] || [ "${OPERATOR_CREDENTIAL_WRITE_ENABLED:-}" = "true" ]; then
+  gw_args+=("-Dspring-boot.run.arguments=--operator.tenant-create.enabled=${OPERATOR_TENANT_CREATE_ENABLED:-false} --operator.credential-write.enabled=${OPERATOR_CREDENTIAL_WRITE_ENABLED:-false}")
+  echo "==> api-gateway: operator onboarding routes ENABLED (tenant-create=${OPERATOR_TENANT_CREATE_ENABLED:-false}, credential-write=${OPERATOR_CREDENTIAL_WRITE_ENABLED:-false})"
+fi
 echo "==> api-gateway :8082 (write forward; STRATEGY_CONFIG_WRITE_ENABLED=true; shares ns=default + orchestrator-core)"
 ( cd services/api-gateway && \
   TEMPORAL_TARGET=localhost:7233 \
@@ -136,7 +149,9 @@ echo "==> api-gateway :8082 (write forward; STRATEGY_CONFIG_WRITE_ENABLED=true; 
   API_GATEWAY_DB_PASS=temporal \
   API_GATEWAY_SHARED_TOKEN="$API_GATEWAY_SHARED_TOKEN" \
   STRATEGY_CONFIG_WRITE_ENABLED=true \
-  mvn -q spring-boot:run ) &
+  EXEC_BASE_URL="${EXEC_BASE_URL:-http://localhost:8080}" \
+  EXEC_ADMIN_SHARED_TOKEN="${EXEC_ADMIN_SHARED_TOKEN:-dev-admin-token}" \
+  mvn -q spring-boot:run "${gw_args[@]}" ) &
 gw_pid=$!
 
 echo "==> waiting for api-gateway health"
@@ -180,6 +195,8 @@ echo "    (exec log: $EXEC_LOG)"
   APCA_API_KEY_ID="$EXEC_APCA_KEY" \
   APCA_API_SECRET_KEY="$EXEC_APCA_SECRET" \
   APCA_API_BASE_URL="${APCA_API_BASE_URL:-https://paper-api.alpaca.markets}" \
+  BROKER_CREDS_SOURCE="${BROKER_CREDS_SOURCE:-env}" \
+  EXEC_ADMIN_SHARED_TOKEN="${EXEC_ADMIN_SHARED_TOKEN:-dev-admin-token}" \
   mvn -q spring-boot:run ) > "$EXEC_LOG" 2>&1 &
 exec_pid=$!
 
@@ -218,6 +235,9 @@ DASHBOARD_READONLY_PASSWORD="$DASHBOARD_READONLY_PASSWORD" \
 API_GATEWAY_BASE_URL="${API_GATEWAY_BASE_URL:-http://localhost:8082}" \
 API_GATEWAY_SHARED_TOKEN="$API_GATEWAY_SHARED_TOKEN" \
 STRATEGY_CONFIG_WRITE_ENABLED=true \
+OPERATOR_EMAILS="${OPERATOR_EMAILS:-}" \
+OPERATOR_TENANT_CREATE_ENABLED="${OPERATOR_TENANT_CREATE_ENABLED:-}" \
+OPERATOR_CREDENTIAL_WRITE_ENABLED="${OPERATOR_CREDENTIAL_WRITE_ENABLED:-}" \
   npm run dev &
 web_pid=$!
 
