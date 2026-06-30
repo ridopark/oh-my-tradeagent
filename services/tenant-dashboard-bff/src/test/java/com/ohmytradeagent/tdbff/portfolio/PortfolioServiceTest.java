@@ -205,6 +205,34 @@ class PortfolioServiceTest {
   }
 
   @Test
+  void allTimeScanTimeoutDegradesToNullNotMisleadingZero() throws Exception {
+    // A stalled full-history all-time scan must publish realized_pnl_all_time as NULL (so the tile
+    // renders "—", unavailable) — NOT BigDecimal.ZERO, which would show a misleading $0.00 and
+    // silently under-count. The day-scoped realized_pnl_today is fast and unaffected.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme")).thenReturn(List.of());
+    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(new BigDecimal("42.00"));
+    when(realizedPnl.computeRealizedPnlAllTime("acme", "s1"))
+        .thenAnswer(
+            inv -> {
+              Thread.sleep(3000);
+              return new BigDecimal("999.00");
+            });
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
+
+    PortfolioService fast = newService(false, 1);
+    Map<String, Object> body = fast.portfolio("acme");
+
+    // Degraded all-time -> null (renders "—"), not a misleading 0.
+    assertThat(body).containsEntry("realized_pnl_all_time", null);
+    // The fast day-scoped figure is unaffected.
+    assertThat(body.get("realized_pnl_today")).isEqualTo(new BigDecimal("42.00"));
+  }
+
+  @Test
   @SuppressWarnings("unchecked")
   void joinsLiveMarksByNormalizedCompactOcc_padInsensitively() {
     // The tracked position carries the PADDED canonical OCC; the broker marks are keyed COMPACT.

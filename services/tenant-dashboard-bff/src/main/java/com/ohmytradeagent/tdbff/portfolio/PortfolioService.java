@@ -143,10 +143,10 @@ public class PortfolioService {
     // Since-inception realized P&L, per strategy. Unlike the day-scoped read below, the all-time
     // calc drops the date predicate and scans the strategy's ENTIRE audit_log history, so it grows
     // unbounded over time — dispatch it concurrently and await it under the same sub-read budget as
-    // the other slow reads so a slow scan degrades this figure (to ZERO) rather than stacking past
-    // the page budget. The all-time figure lets the Status page reconcile to starting capital
-    // (start + realized_all_time + unrealized ≈ equity) and is strictly MORE correct than the daily
-    // calc (resolves the #276 §4 cross-day phantom gain).
+    // the other slow reads so a slow scan can't stack past the page budget. The all-time figure
+    // lets the Status page reconcile to starting capital (start + realized_all_time + unrealized ≈
+    // equity) and is strictly MORE correct than the daily calc (resolves the #276 §4 cross-day
+    // phantom gain).
     Map<String, Future<BigDecimal>> allTimeFutures = new LinkedHashMap<>();
     for (String strategyId : strategyIds) {
       allTimeFutures.put(
@@ -162,16 +162,24 @@ public class PortfolioService {
           realizedToday.add(realizedPnl.computeRealizedPnl(tenantId, strategyId, tradingDay));
     }
 
-    // Sum the since-inception figures under the sub-read budget; a stalled scan degrades that
-    // strategy's contribution to ZERO rather than failing the page.
+    // Sum the since-inception figures under the sub-read budget. A stalled scan degrades to a NULL
+    // contribution (the await fallback is null, not ZERO) — and if ANY strategy degraded, the whole
+    // figure is published as null so the tile renders "—" (unavailable), NOT a misleading $0.00 or
+    // a silently under-counted total. This follows the same null-seeding convention the rest of the
+    // page uses for degraded aggregates (see account equity / unrealized marks).
     BigDecimal realizedAllTime = BigDecimal.ZERO;
+    boolean realizedAllTimeDegraded = false;
     for (Map.Entry<String, Future<BigDecimal>> entry : allTimeFutures.entrySet()) {
-      realizedAllTime =
-          realizedAllTime.add(
-              await(
-                  entry.getValue(),
-                  BigDecimal.ZERO,
-                  "realized_all_time tenant=" + tenantId + " strategy=" + entry.getKey()));
+      BigDecimal contribution =
+          await(
+              entry.getValue(),
+              null,
+              "realized_all_time tenant=" + tenantId + " strategy=" + entry.getKey());
+      if (contribution == null) {
+        realizedAllTimeDegraded = true;
+      } else {
+        realizedAllTime = realizedAllTime.add(contribution);
+      }
     }
 
     // Merge live marks across all broker_targets into one OCC-keyed map (account-level, so an OCC
@@ -231,7 +239,7 @@ public class PortfolioService {
     body.put("sum_open_notional", sumOpenNotional);
     body.put("sum_open_notional_basis", "cost_basis_at_entry"); // NOT live mark
     body.put("realized_pnl_today", realizedToday);
-    body.put("realized_pnl_all_time", realizedAllTime);
+    body.put("realized_pnl_all_time", realizedAllTimeDegraded ? null : realizedAllTime);
     body.put("account_equity", equityByBroker);
     body.put(
         "account_equity_scope",
