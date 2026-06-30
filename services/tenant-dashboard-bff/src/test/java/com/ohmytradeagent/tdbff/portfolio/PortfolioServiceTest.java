@@ -30,6 +30,8 @@ class PortfolioServiceTest {
   PortfolioServiceTest() {
     // Default: no live marks (fail-open empty). Tests that exercise the join override this.
     when(brokerPositions.marksFor(any(), any(), any())).thenReturn(Map.of());
+    // Default since-inception realized P&L to zero; the aggregation test overrides per strategy.
+    when(realizedPnl.computeRealizedPnlAllTime(any(), any())).thenReturn(BigDecimal.ZERO);
   }
 
   private PortfolioService newService(boolean exposeAccountNumber, long subreadTimeoutSeconds) {
@@ -60,6 +62,9 @@ class PortfolioServiceTest {
         .thenReturn(new BigDecimal("100.00"));
     when(realizedPnl.computeRealizedPnl(eq("acme"), eq("s2"), any(LocalDate.class)))
         .thenReturn(new BigDecimal("50.00"));
+    // Since-inception realized P&L is summed across strategies the same way as today's.
+    when(realizedPnl.computeRealizedPnlAllTime("acme", "s1")).thenReturn(new BigDecimal("250.00"));
+    when(realizedPnl.computeRealizedPnlAllTime("acme", "s2")).thenReturn(new BigDecimal("-30.00"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(strategyRegistry.brokerTarget("acme", "s2")).thenReturn("alpaca-paper"); // same -> union
     when(accountEquity.snapshotFor("alpaca-paper"))
@@ -71,6 +76,8 @@ class PortfolioServiceTest {
     assertThat(body.get("tenant_id")).isEqualTo("acme");
     // P&L summed across strategies: 100 + 50.
     assertThat(body.get("realized_pnl_today")).isEqualTo(new BigDecimal("150.00"));
+    // Since-inception P&L summed across strategies the same way: 250 + (-30).
+    assertThat(body.get("realized_pnl_all_time")).isEqualTo(new BigDecimal("220.00"));
     // Open notional summed across positions: 300 + 200.
     assertThat(body.get("sum_open_notional")).isEqualTo(new BigDecimal("500.00"));
     assertThat(body.get("open_positions_count")).isEqualTo(2);
@@ -195,6 +202,34 @@ class PortfolioServiceTest {
     assertThat(equity.get(0)).containsEntry("equity", null);
     // Positions sub-read was fast -> unaffected.
     assertThat(body.get("open_positions_count")).isEqualTo(1);
+  }
+
+  @Test
+  void allTimeScanTimeoutDegradesToNullNotMisleadingZero() throws Exception {
+    // A stalled full-history all-time scan must publish realized_pnl_all_time as NULL (so the tile
+    // renders "—", unavailable) — NOT BigDecimal.ZERO, which would show a misleading $0.00 and
+    // silently under-count. The day-scoped realized_pnl_today is fast and unaffected.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme")).thenReturn(List.of());
+    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(new BigDecimal("42.00"));
+    when(realizedPnl.computeRealizedPnlAllTime("acme", "s1"))
+        .thenAnswer(
+            inv -> {
+              Thread.sleep(3000);
+              return new BigDecimal("999.00");
+            });
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
+
+    PortfolioService fast = newService(false, 1);
+    Map<String, Object> body = fast.portfolio("acme");
+
+    // Degraded all-time -> null (renders "—"), not a misleading 0.
+    assertThat(body).containsEntry("realized_pnl_all_time", null);
+    // The fast day-scoped figure is unaffected.
+    assertThat(body.get("realized_pnl_today")).isEqualTo(new BigDecimal("42.00"));
   }
 
   @Test

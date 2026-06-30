@@ -102,6 +102,11 @@ export default async function StatusPage() {
           />
           <Stat label="Realized P&L today" value={fmtCurrency(p.realized_pnl_today)} />
           <PnlStat
+            label="Realized P&L (all-time)"
+            value={p.realized_pnl_all_time}
+            note="Since inception · FIFO cost basis."
+          />
+          <PnlStat
             label="Unrealized P&L (today)"
             value={unrealizedToday}
             note="Live broker marks summed across open positions."
@@ -200,7 +205,7 @@ function PnlStat({
   note,
 }: {
   label: string;
-  value: number | null;
+  value: string | number | null | undefined;
   note?: string;
 }) {
   return (

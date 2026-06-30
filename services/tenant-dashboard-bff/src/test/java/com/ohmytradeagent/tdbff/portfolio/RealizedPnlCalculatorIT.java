@@ -110,6 +110,42 @@ class RealizedPnlCalculatorIT {
     assertThat(pnl).isEqualByComparingTo("100.00"); // CRWV's own basis, not NVDA's foreign 1.00
   }
 
+  @Test
+  void allTime_matchesCrossDayCostBasis_noPhantomGain_issue276() {
+    // Entry on day 1, partial exit on day 2 (different America/New_York dates). The all-time calc
+    // drops the per-day predicate so the day-2 exit FIFO-matches the day-1 entry's real cost basis.
+    insertAudit(
+        "EntryFilled", "2026-05-14T14:00:00Z", "{\"avg_fill_price\":\"2.30\",\"filled_qty\":2}");
+    insertAudit(
+        "PartialExitFilled",
+        "2026-05-15T17:30:00Z",
+        "{\"avg_fill_price\":\"3.10\",\"qty_filled\":2}");
+
+    // The day-scoped calc on day 2 sees ONLY the exit -> phantom raw proceeds 2 * 3.10 * 100 = 620.
+    BigDecimal dayScoped = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 15));
+    assertThat(dayScoped).isEqualByComparingTo("620.00"); // documented phantom gain (#276 §4)
+
+    // The all-time calc matches the real basis -> 2 * (3.10 - 2.30) * 100 = 160.
+    BigDecimal allTime = svc.computeRealizedPnlAllTime("dev", "copytrade-v1");
+    assertThat(allTime).isEqualByComparingTo("160.00");
+  }
+
+  @Test
+  void allTime_dramLiveLoss_matchesPriorDayBasis() {
+    // Live prod_real 2026-06-29: bought 3 DRAM @ 2.3533 on 6/26, sold 2 @ 1.84 on 6/29.
+    insertAudit(
+        "EntryFilled",
+        "2026-06-26T14:00:00Z",
+        "{\"avg_fill_price\":\"2.3533\",\"filled_qty\":3,\"option_symbol\":\"DRAM  260717C00030000\"}");
+    insertAudit(
+        "PartialExitFilled",
+        "2026-06-29T18:00:00Z",
+        "{\"avg_fill_price\":\"1.84\",\"qty_filled\":2,\"option_symbol\":\"DRAM  260717C00030000\"}");
+
+    BigDecimal allTime = svc.computeRealizedPnlAllTime("dev", "copytrade-v1");
+    assertThat(allTime).isEqualByComparingTo("-102.66"); // 2 * (1.84 - 2.3533) * 100
+  }
+
   private void insertAudit(String kind, String occurredAtIso, String subjectJson) {
     dsl.execute(
         "INSERT INTO audit_log (tenant_id, strategy_id, event_id, occurred_at, kind, subject)"
