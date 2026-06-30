@@ -462,6 +462,11 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       long headroom =
           risk.notionalCapHeadroomContracts(
               config, priced.limit(), accountCash, payload.getTenantId(), payload.getStrategyId());
+      // MIN(cash-weight sizing, cap-headroom, max_contracts). The max_contracts term is
+      // redundant-but-defensive: Sizing.computeContracts already clamped `contracts` to
+      // max_contracts, so it is a no-op today — kept as belt-and-suspenders against a future Sizing
+      // change that stops clamping. The active constraints here are the cash sizing and the
+      // headroom.
       long clamped = Math.min(contracts, Math.min(headroom, config.getMaxContracts()));
       if (clamped < config.getMinContracts()) {
         logAudit(

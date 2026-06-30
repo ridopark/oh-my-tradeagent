@@ -679,6 +679,10 @@ public class RiskActivitiesImpl implements RiskActivities {
    * clamp ceiling and the reject gate agree. The {@code openPositions()} seam fails closed by
    * propagation (no catch), matching the gate's #325 contract: a Visibility error must not yield a
    * permissive (large) headroom.
+   *
+   * <p>NOTE: this headroom read and the {@link #checkNotionalCap} gate make INDEPENDENT Visibility
+   * reads of {@code openPositions()} — a benign TOCTOU window acceptable at this fidelity target.
+   * Do not collapse them into one read without re-examining the gate's fail-closed failure modes.
    */
   @Override
   public long notionalCapHeadroomContracts(
@@ -708,6 +712,8 @@ public class RiskActivitiesImpl implements RiskActivities {
     if (pricePerContract.signum() <= 0) {
       return 0L;
     }
+    // The entryNotional(price, 1L) arg is only here to carry `price` into the context shape;
+    // sumOpenNotional reads only openPositions(), never entryNotional.
     PortfolioContext ctx =
         new PortfolioContext(
             tenantId, strategyId, null, config, null, entryNotional(price, 1L), accountCash);
@@ -718,7 +724,15 @@ public class RiskActivitiesImpl implements RiskActivities {
     if (remaining.signum() <= 0) {
       return 0L;
     }
-    return remaining.divide(pricePerContract, 0, RoundingMode.FLOOR).longValueExact();
+    // Clamp to the unconstrained sentinel (Long.MAX_VALUE — the same value the cap-not-configured
+    // path returns, which the workflow's MIN-composition treats as "no constraint"). A huge
+    // headroom
+    // (no open positions, large cash, very cheap option) can overflow long; longValueExact() would
+    // throw an unexpected activity error instead of yielding the no-constraint sentinel.
+    BigDecimal q = remaining.divide(pricePerContract, 0, RoundingMode.FLOOR);
+    return q.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) >= 0
+        ? Long.MAX_VALUE
+        : q.longValueExact();
   }
 
   /**

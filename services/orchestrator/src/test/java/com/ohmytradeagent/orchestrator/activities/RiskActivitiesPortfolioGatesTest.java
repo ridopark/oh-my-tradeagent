@@ -420,6 +420,31 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(headroom).isEqualTo(0L);
   }
 
+  // Ambiguous cap (#336): both canonical and deprecated fields set to DIFFERENT values →
+  // AmbiguousCapConfigException caught → zero headroom (fail-closed), mirroring the gate's
+  // ambiguous_cap_config reject.
+  @Test
+  void notionalCapHeadroomContracts_ambiguousCap_returnsZero() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
+    c.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // different value → ambiguous
+    long headroom =
+        risk.notionalCapHeadroomContracts(
+            c, new BigDecimal("2.27"), new BigDecimal("100000"), "dev", "copytrade-v1");
+    assertThat(headroom).isEqualTo(0L);
+  }
+
+  // limit == null → pricePerContract.signum() <= 0 → zero headroom (cannot size against a zero
+  // price-per-contract).
+  @Test
+  void notionalCapHeadroomContracts_nullLimit_returnsZero() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
+    long headroom =
+        risk.notionalCapHeadroomContracts(c, null, new BigDecimal("100000"), "dev", "copytrade-v1");
+    assertThat(headroom).isEqualTo(0L);
+  }
+
   // ----- same_underlying_count -----
 
   @Test
