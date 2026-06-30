@@ -24,11 +24,29 @@ public class TenantConfig {
   @JsonProperty("account_daily_loss_threshold")
   private BigDecimal accountDailyLossThreshold;
 
+  @JsonProperty("account_daily_loss_pct")
+  private BigDecimal accountDailyLossPct;
+
   public BigDecimal getAccountDailyLossThreshold() {
     return accountDailyLossThreshold;
   }
 
   public void setAccountDailyLossThreshold(BigDecimal accountDailyLossThreshold) {
     this.accountDailyLossThreshold = accountDailyLossThreshold;
+  }
+
+  /**
+   * The account daily-loss cap expressed as a FRACTION of start-of-day account equity (e.g. {@code
+   * 0.40} for 40%). When set ({@code > 0}) and start-of-day equity is known, the {@code
+   * AccountKillSwitchWorkflow} uses {@code pct x sodEquity} as the effective threshold in
+   * preference to the absolute {@link #accountDailyLossThreshold}. A null/≤0 value leaves the pct
+   * cap disabled (the absolute threshold, if any, still applies).
+   */
+  public BigDecimal getAccountDailyLossPct() {
+    return accountDailyLossPct;
+  }
+
+  public void setAccountDailyLossPct(BigDecimal accountDailyLossPct) {
+    this.accountDailyLossPct = accountDailyLossPct;
   }
 }

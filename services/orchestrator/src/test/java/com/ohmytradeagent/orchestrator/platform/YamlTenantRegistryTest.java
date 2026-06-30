@@ -50,6 +50,44 @@ class YamlTenantRegistryTest {
   }
 
   @Test
+  void loadsAccountDailyLossPct(@TempDir Path tenantsDir) throws Exception {
+    Path file = tenantsDir.resolve("dev/tenant.yaml");
+    Files.createDirectories(file.getParent());
+    Files.writeString(
+        file,
+        """
+        tenant_id: dev
+        display_name: Local development tenant
+        strategies:
+          - copytrade-v1
+        account_daily_loss_pct: 0.40
+        """);
+
+    TenantConfig cfg = new YamlTenantRegistry(tenantsDir).get("dev");
+
+    assertThat(cfg.getAccountDailyLossPct()).isEqualByComparingTo(new BigDecimal("0.40"));
+    // pct-only config => absolute threshold absent (null).
+    assertThat(cfg.getAccountDailyLossThreshold()).isNull();
+  }
+
+  @Test
+  void absentPct_isNull(@TempDir Path tenantsDir) throws Exception {
+    Path file = tenantsDir.resolve("dev/tenant.yaml");
+    Files.createDirectories(file.getParent());
+    Files.writeString(
+        file,
+        """
+        tenant_id: dev
+        account_daily_loss_threshold: 1500
+        """);
+
+    TenantConfig cfg = new YamlTenantRegistry(tenantsDir).get("dev");
+
+    assertThat(cfg.getAccountDailyLossPct()).isNull();
+    assertThat(cfg.getAccountDailyLossThreshold()).isEqualByComparingTo(new BigDecimal("1500"));
+  }
+
+  @Test
   void missingTenantYaml_returnsDefaultWithNullThreshold(@TempDir Path tenantsDir) {
     // No tenant.yaml at all => default config, null threshold => cap disabled (no throw).
     TenantConfig cfg = new YamlTenantRegistry(tenantsDir).get("ghost");

@@ -9,6 +9,7 @@ import com.ohmytradeagent.orchestrator.activities.ScannerTenantStrategies;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivitiesImpl;
 import com.ohmytradeagent.orchestrator.activities.TenantStrategies;
+import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantRegistry;
 import com.ohmytradeagent.orchestrator.platform.YamlTenantRegistry;
 import io.temporal.client.WorkflowClient;
@@ -42,8 +43,11 @@ public class AccountKillSwitchConfig {
   }
 
   @Bean
-  public TenantConfigActivities tenantConfigActivities(TenantRegistry tenantRegistry) {
-    return new TenantConfigActivitiesImpl(tenantRegistry);
+  public TenantConfigActivities tenantConfigActivities(
+      TenantRegistry tenantRegistry,
+      TenantStrategies tenantStrategies,
+      StrategyRegistry strategyRegistry) {
+    return new TenantConfigActivitiesImpl(tenantRegistry, tenantStrategies, strategyRegistry);
   }
 
   @Bean
