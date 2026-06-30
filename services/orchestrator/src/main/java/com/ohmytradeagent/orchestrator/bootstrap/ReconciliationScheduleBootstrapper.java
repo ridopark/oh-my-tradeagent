@@ -104,12 +104,12 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
   void runWith(ScheduleClient scheduleClient) {
     List<ScheduleListDescription> existingSchedules = null;
     for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
-      String brokerTarget = resolveValidBrokerTarget(ts.tenantId(), ts.strategyId());
-      if (brokerTarget == null) {
+      ResolvedBroker resolved = resolveValidBroker(ts.tenantId(), ts.strategyId());
+      if (resolved == null) {
         continue;
       }
       String desiredScheduleId =
-          "recon-v2-t-" + ts.tenantId() + "-s-" + ts.strategyId() + "-" + brokerTarget;
+          "recon-v2-t-" + ts.tenantId() + "-s-" + ts.strategyId() + "-" + resolved.brokerTarget();
       if (existingSchedules == null) {
         // Lazy: only call listSchedules() once the first valid strategy reaches the reap step.
         // try-with-resources closes the SDK Stream exactly once per bootstrap pass.
@@ -119,7 +119,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
       }
       reapStaleSchedules(
           scheduleClient, existingSchedules, ts.tenantId(), ts.strategyId(), desiredScheduleId);
-      ensureSchedule(scheduleClient, ts.tenantId(), ts.strategyId(), brokerTarget);
+      ensureSchedule(scheduleClient, ts.tenantId(), ts.strategyId(), resolved);
     }
   }
 
@@ -154,23 +154,33 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
    */
   boolean ensureForTenantStrategy(
       ScheduleClient scheduleClient, String tenantId, String strategyId) {
-    String brokerTarget = resolveValidBrokerTarget(tenantId, strategyId);
-    if (brokerTarget == null) {
+    ResolvedBroker resolved = resolveValidBroker(tenantId, strategyId);
+    if (resolved == null) {
       return false;
     }
-    return ensureSchedule(scheduleClient, tenantId, strategyId, brokerTarget);
+    return ensureSchedule(scheduleClient, tenantId, strategyId, resolved);
   }
 
   /**
-   * Loads the strategy's {@code broker_target} via the active {@link StrategyRegistry} and
-   * validates it against the whitelist. Returns the validated {@code broker_target}, or {@code
-   * null} (after logging the reason) when the config is missing, declares no {@code broker_target},
-   * or is whitelist-invalid. Shared by the boot {@link #runWith} pass and {@link
-   * #ensureForTenantStrategy} so both apply one fail-closed resolution policy — a single bad tenant
-   * logs and is skipped rather than wedging the caller.
+   * The whitelist-validated {@code broker_target} plus the strategy's {@code broker_account_id},
+   * both read from the SAME loaded {@link StrategyConfig} so {@link #resolveValidBroker} resolves
+   * them in one registry load. Phase F2b: {@code brokerAccountId} is the (trimmed) account that
+   * scopes the recon workflow's cross-tenant sibling-owner suppression; {@code null} when the
+   * config declares none (the tenant-scoped degrade).
    */
-  private String resolveValidBrokerTarget(String tenantId, String strategyId) {
+  record ResolvedBroker(String brokerTarget, String brokerAccountId) {}
+
+  /**
+   * Loads the strategy's {@link StrategyConfig} ONCE via the active {@link StrategyRegistry} and
+   * returns its whitelist-validated {@code broker_target} together with the {@code
+   * broker_account_id} (Phase F2b). Returns {@code null} (after logging the reason) when the config
+   * is missing, declares no {@code broker_target}, or is whitelist-invalid. Shared by the boot
+   * {@link #runWith} pass and {@link #ensureForTenantStrategy} so both apply one fail-closed
+   * resolution policy — a single bad tenant logs and is skipped rather than wedging the caller.
+   */
+  private ResolvedBroker resolveValidBroker(String tenantId, String strategyId) {
     String brokerTarget;
+    String brokerAccountId;
     try {
       StrategyConfig cfg = strategyRegistry.get(tenantId, strategyId);
       if (cfg.getBrokerTarget() == null) {
@@ -181,6 +191,8 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
         return null;
       }
       brokerTarget = cfg.getBrokerTarget().value();
+      String account = cfg.getBrokerAccountId();
+      brokerAccountId = (account == null || account.isBlank()) ? null : account.trim();
     } catch (RuntimeException e) {
       log.error(
           "tenant={} strategy={}: failed to load StrategyConfig; skipping schedule",
@@ -197,33 +209,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
           brokerTarget);
       return null;
     }
-    return brokerTarget;
-  }
-
-  /**
-   * Phase F2b: resolves the strategy's {@code broker_account_id} for the recon input. Returns the
-   * trimmed account id, or {@code null} when the config declares none or cannot be loaded — a null
-   * leaves the recon input's optional account field unset, degrading the account-scoped sibling
-   * suppression to the tenant-scoped behavior. Best-effort by design: a config-load failure here
-   * must NOT block schedule creation (the {@code broker_target} was already validated upstream).
-   */
-  private String resolveBrokerAccountId(String tenantId, String strategyId) {
-    try {
-      StrategyConfig cfg = strategyRegistry.get(tenantId, strategyId);
-      String account = cfg.getBrokerAccountId();
-      if (account == null || account.isBlank()) {
-        return null;
-      }
-      return account.trim();
-    } catch (RuntimeException e) {
-      log.warn(
-          "tenant={} strategy={}: could not resolve broker_account_id for recon input;"
-              + " account-scoped sibling suppression degrades to tenant-scoped",
-          tenantId,
-          strategyId,
-          e);
-      return null;
-    }
+    return new ResolvedBroker(brokerTarget, brokerAccountId);
   }
 
   /**
@@ -285,7 +271,8 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
    * fire, doesn't appear in listings, doesn't consume resources).
    */
   private boolean ensureSchedule(
-      ScheduleClient scheduleClient, String tenantId, String strategyId, String brokerTarget) {
+      ScheduleClient scheduleClient, String tenantId, String strategyId, ResolvedBroker resolved) {
+    String brokerTarget = resolved.brokerTarget();
     String scheduleId = "recon-v2-t-" + tenantId + "-s-" + strategyId + "-" + brokerTarget;
     String wfIdPrefix = WorkflowIds.reconciliationPrefix(tenantId, strategyId, brokerTarget);
 
@@ -294,12 +281,12 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
     input.setTenantId(tenantId);
     input.setStrategyId(strategyId);
     input.setBrokerTarget(ReconciliationWorkflowInput.BrokerTarget.fromValue(brokerTarget));
-    // Phase F2b: thread the strategy's broker_account_id so the recon workflow can scope its
-    // cross-tenant sibling-owner orphan-suppression probe by the precise account. OPTIONAL and
-    // best-effort: a missing/blank account (or a config-load error) leaves the field null and recon
-    // degrades to the tenant-scoped suppression — it never blocks schedule creation (the
-    // broker_target was already whitelist-validated upstream in resolveValidBrokerTarget).
-    input.setBrokerAccountId(resolveBrokerAccountId(tenantId, strategyId));
+    // Phase F2b: thread the strategy's broker_account_id (resolved from the SAME StrategyConfig
+    // load
+    // as broker_target, in resolveValidBroker) so the recon workflow can scope its cross-tenant
+    // sibling-owner orphan-suppression probe by the precise account. OPTIONAL: a missing/blank
+    // account leaves the field null and recon degrades to the tenant-scoped suppression.
+    input.setBrokerAccountId(resolved.brokerAccountId());
 
     Map<String, Object> sa = new HashMap<>();
     sa.put("TenantStrategy", WorkflowIds.tenantStrategy(tenantId, strategyId));

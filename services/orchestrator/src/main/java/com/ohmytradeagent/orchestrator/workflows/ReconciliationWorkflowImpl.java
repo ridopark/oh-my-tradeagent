@@ -366,12 +366,15 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
             && in.getBrokerAccountId() != null
             && positionLookup.hasRunningOwnerForOccOnAccount(in.getBrokerAccountId(), occPadded)) {
           recordSiblingSuppressionMetric(in, brokerTarget);
+          // No covered_qty here: this branch is reached only after the tenant-scoped Redis SCAN
+          // returned 0 coverage (the cross-tenant owner is invisible to this tenant's SCAN), so a
+          // covered_qty=0 entry would misleadingly read as "0 covered yet suppressed". owner_scope
+          // + broker_account_id carry the real reason for the suppression.
           auditLog(
               KIND_POSITION_ORPHAN_SUPPRESSED_SIBLING,
               subject(
                   "option_symbol", occPadded,
                   "broker_qty", brokerQty,
-                  "covered_qty", coveredQty,
                   "broker_target", brokerTarget,
                   "broker_account_id", in.getBrokerAccountId(),
                   "owner_scope", "account"));

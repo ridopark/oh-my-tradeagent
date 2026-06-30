@@ -234,14 +234,8 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
         if (sid == null || sid.isBlank()) {
           continue;
         }
-        String query = visibilityQuery(tenantId, sid, occPadded);
-        // Close the Visibility stream (gRPC paging iterator) per the #323 idiom
-        // (AccountKillSwitchCascadeActivitiesImpl / AccountPnlActivitiesImpl).
-        try (java.util.stream.Stream<WorkflowExecutionMetadata> stream =
-            workflowClient.listExecutions(query)) {
-          if (stream.findAny().isPresent()) {
-            return true;
-          }
+        if (anyRunningOwner(tenantId, sid, occPadded)) {
+          return true;
         }
       }
       return false;
@@ -252,6 +246,22 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
           occPadded,
           e.getMessage());
       return false;
+    }
+  }
+
+  /**
+   * The proven #323 Visibility-equality probe: is any RUNNING PositionWorkflow on {@code (tenantId,
+   * strategyId)} managing {@code occPadded}? Runs ONE {@code TenantStrategy='...' AND
+   * ContractSymbol = occPadded} equality query and closes the gRPC paging stream
+   * (try-with-resources) per the idiom in {@link AccountKillSwitchCascadeActivitiesImpl} / {@link
+   * AccountPnlActivitiesImpl}. Shared by the tenant-scoped {@link #hasRunningOwnerForOcc} and the
+   * account-scoped {@link #hasRunningOwnerForOccOnAccount} so the two never drift. Exceptions
+   * propagate to the caller's best-effort catch.
+   */
+  private boolean anyRunningOwner(String tenantId, String strategyId, String occPadded) {
+    try (Stream<WorkflowExecutionMetadata> stream =
+        workflowClient.listExecutions(visibilityQuery(tenantId, strategyId, occPadded))) {
+      return stream.findAny().isPresent();
     }
   }
 
@@ -294,12 +304,8 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
         if (account == null || account.isBlank() || !account.trim().equals(brokerAccountId)) {
           continue;
         }
-        String query = visibilityQuery(ts.tenantId(), ts.strategyId(), occPadded);
-        // Close the Visibility stream (gRPC paging iterator) per the #323 idiom.
-        try (Stream<WorkflowExecutionMetadata> stream = workflowClient.listExecutions(query)) {
-          if (stream.findAny().isPresent()) {
-            return true;
-          }
+        if (anyRunningOwner(ts.tenantId(), ts.strategyId(), occPadded)) {
+          return true;
         }
       }
       return false;
