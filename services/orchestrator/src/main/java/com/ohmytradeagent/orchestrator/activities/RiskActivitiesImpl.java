@@ -19,6 +19,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.client.WorkflowClient;
 import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDate;
@@ -56,6 +57,12 @@ import org.springframework.stereotype.Component;
 public class RiskActivitiesImpl implements RiskActivities {
 
   static final Duration FUTURE_DATE_TOLERANCE = Duration.ofSeconds(5);
+
+  /**
+   * Phase F4B: the long ceiling for the headroom-overflow clamp in {@link
+   * #notionalCapHeadroomContracts}.
+   */
+  private static final BigDecimal LONG_MAX_AS_DECIMAL = BigDecimal.valueOf(Long.MAX_VALUE);
 
   /**
    * Issue #336 deprecation signal. Incremented (and a {@code log.warn} emitted) whenever a strategy
@@ -670,6 +677,66 @@ public class RiskActivitiesImpl implements RiskActivities {
       return strategyScope;
     }
     return checkAccountKillSwitch(tenantId, now);
+  }
+
+  /**
+   * Phase F4B: headroom contract count for the clamp-to-fit policy. Shares the SAME capital-base
+   * math as {@link #checkNotionalCap} — {@code cap = capPct × (cash + sumOpenNotional)} — so the
+   * clamp ceiling and the reject gate agree. The {@code openPositions()} seam fails closed by
+   * propagation (no catch), matching the gate's #325 contract: a Visibility error must not yield a
+   * permissive (large) headroom.
+   *
+   * <p>NOTE: this headroom read and the {@link #checkNotionalCap} gate make INDEPENDENT Visibility
+   * reads of {@code openPositions()} — a benign TOCTOU window acceptable at this fidelity target.
+   * Do not collapse them into one read without re-examining the gate's fail-closed failure modes.
+   */
+  @Override
+  public long notionalCapHeadroomContracts(
+      StrategyConfig config,
+      BigDecimal limit,
+      BigDecimal accountCash,
+      String tenantId,
+      String strategyId) {
+    BigDecimal capPct;
+    try {
+      capPct = resolveNotionalCapPct(config);
+    } catch (AmbiguousCapConfigException e) {
+      // Ambiguous cap → no headroom (fail-closed); the gate independently rejects ambiguous
+      // configs.
+      return 0L;
+    }
+    if (capPct == null) {
+      // Gate disabled → no notional-cap constraint; the workflow's MIN-composition no-ops.
+      return Long.MAX_VALUE;
+    }
+    if (accountCash == null || accountCash.signum() <= 0) {
+      // Fail-closed parity with checkNotionalCap's cash_unavailable reject: zero headroom.
+      return 0L;
+    }
+    BigDecimal price = limit == null ? BigDecimal.ZERO : limit;
+    BigDecimal pricePerContract = price.multiply(Sizing.CONTRACT_MULTIPLIER);
+    if (pricePerContract.signum() <= 0) {
+      return 0L;
+    }
+    // The entryNotional(price, 1L) arg is only here to carry `price` into the context shape;
+    // sumOpenNotional reads only openPositions(), never entryNotional.
+    PortfolioContext ctx =
+        new PortfolioContext(
+            tenantId, strategyId, null, config, null, entryNotional(price, 1L), accountCash);
+    BigDecimal sumOpenNotional = sumOpenNotional(ctx);
+    BigDecimal capitalBase = accountCash.add(sumOpenNotional);
+    BigDecimal cap = capitalBase.multiply(capPct);
+    BigDecimal remaining = cap.subtract(sumOpenNotional);
+    if (remaining.signum() <= 0) {
+      return 0L;
+    }
+    // Clamp to the unconstrained sentinel (Long.MAX_VALUE — the same value the cap-not-configured
+    // path returns, which the workflow's MIN-composition treats as "no constraint"). A huge
+    // headroom
+    // (no open positions, large cash, very cheap option) can overflow long; longValueExact() would
+    // throw an unexpected activity error instead of yielding the no-constraint sentinel.
+    BigDecimal q = remaining.divide(pricePerContract, 0, RoundingMode.FLOOR);
+    return q.compareTo(LONG_MAX_AS_DECIMAL) >= 0 ? Long.MAX_VALUE : q.longValueExact();
   }
 
   /**

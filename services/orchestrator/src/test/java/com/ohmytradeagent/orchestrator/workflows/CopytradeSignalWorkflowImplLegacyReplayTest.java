@@ -242,6 +242,24 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Phase F4B: the clamp-to-notional-cap-headroom step in the sizing block is fenced behind {@code
+   * Workflow.getVersion(VERSION_NOTIONAL_CAP_CLAMP, DEFAULT, 1)} so v=0 (legacy in-flight)
+   * histories replay byte-identically (no headroom dispatch, the existing checkNotionalCap
+   * reject/place path stands). Pins the constant name so a rename fails this test loudly. The
+   * {@code notionalCapPre427HistoryReplaysAgainstCurrentImplWithoutNonDeterminism} replay above
+   * ALSO exercises the v=0 branch: that cap-configured marker-less history runs the FULL entry
+   * chain through the sizing block, where the current impl now reads this marker — it returns
+   * {@code DEFAULT_VERSION}, skipping the clamp entirely, and the recorded command stream still
+   * matches.
+   */
+  @Test
+  void versionNotionalCapClampConstantNameIsStable() throws Exception {
+    Field marker = CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_NOTIONAL_CAP_CLAMP");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("notional-cap-clamp-to-fit-v1");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#111 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The SDK's deterministic replay engine walks the
    * recorded events, calls into the current workflow code, and compares scheduled activity commands

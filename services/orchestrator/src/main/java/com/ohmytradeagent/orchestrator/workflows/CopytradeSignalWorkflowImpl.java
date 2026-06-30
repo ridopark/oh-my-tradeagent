@@ -199,6 +199,18 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // command, and only freshly-started executions evaluate the gate.
   private static final String VERSION_STRATEGY_ENABLED_GATE = "strategy-enabled-gate-v1";
 
+  // Phase F4B (clamp-to-fit headroom): gate the clamp-to-notional-cap-headroom step added to the
+  // sizing block. Pre-this-change, an over-cap entry was REJECTED by checkNotionalCap (lever B was
+  // not applied here). At v>=1 the workflow dispatches notionalCapHeadroomContracts (a NEW command)
+  // ONLY when a notional cap is configured, then sizes the entry to MIN(cash-weight sizing,
+  // cap-headroom, max_contracts) — flooring to fit, and rejecting NOTIONAL_CAP_EXCEEDED only when
+  // the clamped qty falls below min_contracts. Read UNCONDITIONALLY (before any branch) and branch
+  // only at v>=1: legacy in-flight histories (DEFAULT_VERSION) take the byte-identical pre-change
+  // path — no headroom dispatch, the existing checkNotionalCap reject stands. Mirrors
+  // VERSION_LIVE_PROMOTION_GATE's read-once discipline. The headroom dispatch is gated on the cap
+  // being configured so a no-cap strategy adds NO command at v>=1 either.
+  private static final String VERSION_NOTIONAL_CAP_CLAMP = "notional-cap-clamp-to-fit-v1";
+
   // Edited-signal supersede (F1): gate the corrected-BTO auto-supersede block added in handleBto
   // (after the SignalAccepted audit, BEFORE newIntent/placeOrder). The block dispatches a lookup
   // Activity (findOpenPositionByUnderlyingStrikeRight) and, when ALL guardrails hold, signals the
@@ -433,6 +445,47 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       capital = strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
     }
     long contracts = Sizing.computeContracts(payload, config, capital, priced.limit());
+
+    // Phase F4B (clamp-to-fit headroom): instead of letting checkNotionalCap reject an over-cap
+    // entry, SIZE IT DOWN to the largest qty that fits the remaining notional-cap headroom. The
+    // final qty is MIN(cash-weight sizing above, cap-headroom contracts, max_contracts), floored;
+    // when that clamped qty falls below min_contracts the entry is STILL rejected
+    // (NOTIONAL_CAP_EXCEEDED) — a sub-minimum entry isn't worth placing. The headroom dispatch is a
+    // NEW command, gated behind VERSION_NOTIONAL_CAP_CLAMP (read UNCONDITIONALLY): legacy in-flight
+    // histories (DEFAULT_VERSION) take the byte-identical pre-change path (no dispatch, the
+    // existing
+    // reject stands). The dispatch is further gated on the cap being configured, so a no-cap
+    // strategy adds NO command at v>=1 either. The cap-headroom math reuses the SAME cash already
+    // read for the notional-cap gate (accountCash), so no second account read is incurred.
+    int clampVersion = Workflow.getVersion(VERSION_NOTIONAL_CAP_CLAMP, Workflow.DEFAULT_VERSION, 1);
+    if (clampVersion >= 1 && StrategyConfigs.notionalCapConfigured(config)) {
+      long headroom =
+          risk.notionalCapHeadroomContracts(
+              config, priced.limit(), accountCash, payload.getTenantId(), payload.getStrategyId());
+      // MIN(cash-weight sizing, cap-headroom, max_contracts). The max_contracts term is
+      // redundant-but-defensive: Sizing.computeContracts already clamped `contracts` to
+      // max_contracts, so it is a no-op today — kept as belt-and-suspenders against a future Sizing
+      // change that stops clamping. The active constraints here are the cash sizing and the
+      // headroom.
+      long clamped = Math.min(contracts, Math.min(headroom, config.getMaxContracts()));
+      if (clamped < config.getMinContracts()) {
+        logAudit(
+            payload,
+            KIND_SIGNAL_REJECTED,
+            subject(
+                "signal_id",
+                payload.getSignalId(),
+                "reason_code",
+                "NOTIONAL_CAP_EXCEEDED",
+                "reason_detail",
+                "clamp_below_min headroom=" + headroom + " min=" + config.getMinContracts(),
+                "outcome",
+                "REJECTED"));
+        // Fail-closed: NO placeOrder, NO PositionWorkflow.
+        return payload.getSignalId();
+      }
+      contracts = clamped;
+    }
 
     logAudit(
         payload,

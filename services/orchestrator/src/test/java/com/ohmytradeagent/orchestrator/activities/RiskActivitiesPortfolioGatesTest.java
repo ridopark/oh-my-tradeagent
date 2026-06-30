@@ -357,6 +357,94 @@ class RiskActivitiesPortfolioGatesTest {
     assertThat(d.detail()).contains("notional=30230");
   }
 
+  // ----- notional-cap clamp-to-headroom (Phase F4B) -----
+  // The activity exposes the headroom contract count so the workflow can SIZE DOWN an over-cap
+  // entry
+  // instead of the gate rejecting it. headroomContracts = floor((cap - sumOpenNotional) / (limit *
+  // 100)) where cap = capPct * (cash + sumOpenNotional). The MIN-composition + min_contracts reject
+  // gate lives in the workflow; the activity only owns the headroom math (sumOpenNotional is behind
+  // the Visibility seam it controls).
+
+  // Forensic case: cap $1,342, open $1,070, limit ~$2.27 → $227/ct → headroom $272 → floor(272/227)
+  // = 1 contract. The gate would NOT bust (1-ct notional 227 fits), but the headroom is the
+  // authoritative clamp ceiling the workflow applies.
+  @Test
+  void notionalCapHeadroomContracts_forensicCase_returnsOne() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
+    when(portfolioSnapshot.openPositions(anyString(), anyString()))
+        .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("1070"))));
+    // base = 1070 + cash. cap = 0.80 * base. Solve for cap ≈ 1342 → base ≈ 1677.5 → cash ≈ 607.5.
+    // headroom = floor((1342 - 1070) / (2.27 * 100)) = floor(272 / 227) = 1.
+    long headroom =
+        risk.notionalCapHeadroomContracts(
+            c, new BigDecimal("2.27"), new BigDecimal("607.50"), "dev", "copytrade-v1");
+    assertThat(headroom).isEqualTo(1L);
+  }
+
+  // Headroom of exactly zero contracts (the over-cap-by-fractions case): sub-minimum entry.
+  @Test
+  void notionalCapHeadroomContracts_overCapWithNoFullContract_returnsZero() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
+    when(portfolioSnapshot.openPositions(anyString(), anyString()))
+        .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("49900"))));
+    // base = 49900 + 100 = 50000, cap = 25000. remaining = 25000 - 49900 < 0 → floor clamps to 0.
+    long headroom =
+        risk.notionalCapHeadroomContracts(
+            c, new BigDecimal("2.30"), new BigDecimal("100"), "dev", "copytrade-v1");
+    assertThat(headroom).isEqualTo(0L);
+  }
+
+  // Gate disabled (no cap configured) → no constraint, headroom is unbounded (Long.MAX_VALUE) so
+  // the
+  // MIN-composition in the workflow is a no-op.
+  @Test
+  void notionalCapHeadroomContracts_capDisabled_returnsUnbounded() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfCapitalBase(null);
+    c.setNotionalCapPctOfEquity(null);
+    long headroom =
+        risk.notionalCapHeadroomContracts(
+            c, new BigDecimal("2.30"), new BigDecimal("100000"), "dev", "copytrade-v1");
+    assertThat(headroom).isEqualTo(Long.MAX_VALUE);
+  }
+
+  // Fail-closed: cash unavailable (null) → zero headroom (no order would be sized).
+  @Test
+  void notionalCapHeadroomContracts_cashUnavailable_returnsZero() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
+    long headroom =
+        risk.notionalCapHeadroomContracts(c, new BigDecimal("2.27"), null, "dev", "copytrade-v1");
+    assertThat(headroom).isEqualTo(0L);
+  }
+
+  // Ambiguous cap (#336): both canonical and deprecated fields set to DIFFERENT values →
+  // AmbiguousCapConfigException caught → zero headroom (fail-closed), mirroring the gate's
+  // ambiguous_cap_config reject.
+  @Test
+  void notionalCapHeadroomContracts_ambiguousCap_returnsZero() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
+    c.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // different value → ambiguous
+    long headroom =
+        risk.notionalCapHeadroomContracts(
+            c, new BigDecimal("2.27"), new BigDecimal("100000"), "dev", "copytrade-v1");
+    assertThat(headroom).isEqualTo(0L);
+  }
+
+  // limit == null → pricePerContract.signum() <= 0 → zero headroom (cannot size against a zero
+  // price-per-contract).
+  @Test
+  void notionalCapHeadroomContracts_nullLimit_returnsZero() {
+    StrategyConfig c = config();
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
+    long headroom =
+        risk.notionalCapHeadroomContracts(c, null, new BigDecimal("100000"), "dev", "copytrade-v1");
+    assertThat(headroom).isEqualTo(0L);
+  }
+
   // ----- same_underlying_count -----
 
   @Test

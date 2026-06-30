@@ -84,4 +84,34 @@ public interface RiskActivities {
    * declines the inline adoption and lets recon re-confirm broker truth.
    */
   RiskDecision checkKillSwitchHalt(String tenantId, String strategyId);
+
+  /**
+   * Phase F4B (clamp-to-fit headroom): the largest contract count that fits the remaining
+   * notional-cap headroom for this entry. {@code headroom = floor((cap - sumOpenNotional) / (limit
+   * × 100))} where {@code cap = notional_cap_pct_of_capital_base × (cash + sumOpenNotional)} and
+   * {@code sumOpenNotional} is the tenant-account-wide cost-basis sum from the same Visibility seam
+   * {@link #checkEntryWithLimit}'s notional-cap gate reads.
+   *
+   * <p>The workflow composes this with its cash-weight sizing and {@code max_contracts} as {@code
+   * MIN(cashSizing, headroom, max_contracts)}, then applies the {@code min_contracts} reject gate.
+   * This activity owns ONLY the headroom math (it controls the {@code sumOpenNotional} seam); the
+   * MIN-composition and the sub-minimum reject live in the workflow, gated behind the {@code
+   * notional-cap-clamp-to-fit-v1} version marker.
+   *
+   * <ul>
+   *   <li>cap not configured → {@link Long#MAX_VALUE} (no constraint; the MIN-composition no-ops).
+   *   <li>cash null/zero (fail-closed, unavailable) → {@code 0} (no order would be sized).
+   *   <li>over cap by fractions (remaining &lt; one contract) → {@code 0} (floored, never
+   *       negative).
+   * </ul>
+   *
+   * <p>Fail-closed parity with the gate: a {@link PortfolioSnapshot#openPositions} throw PROPAGATES
+   * (it does not get swallowed into a permissive headroom).
+   */
+  long notionalCapHeadroomContracts(
+      StrategyConfig config,
+      BigDecimal limit,
+      BigDecimal accountCash,
+      String tenantId,
+      String strategyId);
 }
