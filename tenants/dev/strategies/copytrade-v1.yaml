@@ -70,7 +70,6 @@ partial_fractions:
   # "without", "exit was clean", etc.). default_stc_fraction stays 0.5 (operator
   # declined the default→1.0 policy change).
   cutting: 1.0
-  "cut it": 1.0
   closing: 1.0
   closed: 1.0
   "all the way out": 1.0

@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.within;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class KeywordPartialMatcherTest {
 
@@ -100,7 +102,6 @@ class KeywordPartialMatcherTest {
     m.put("trim", 0.25);
     // F3 full-close synonyms → 1.0
     m.put("cutting", 1.0);
-    m.put("cut it", 1.0);
     m.put("closing", 1.0);
     m.put("closed", 1.0);
     m.put("all the way out", 1.0);
@@ -146,20 +147,44 @@ class KeywordPartialMatcherTest {
     assertThat(f).isEqualTo(DEFAULT, within(1e-9));
   }
 
-  @Test
-  void closeVerbPlusQuantity_resolvesFullClose_documentedHazard() {
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "closing half", // "closing"(7) > "half"(4)
+        "closed a third", // "closed"(6) > "third"(5)
+        "cutting half", // "cutting"(7) > "half"(4)
+        "dumped half", // "dumped"(6) > "half"(4)
+        "dumping a third", // "dumping"(7) > "third"(5)
+      })
+  void closeVerbPlusQuantity_resolvesFullClose_documentedHazard(String tail) {
     // DOCUMENTED HAZARD (not a regression of this change — it locks the behavior so a
     // future map edit can't change it silently). Under longest-key-wins substring
     // matching, a close-VERB synonym that is longer than the partial-QUANTITY token beats
-    // it: "closing half" contains "closing"(7) and "half"(4) -> "closing" wins -> 1.0
-    // (full close), even though the author likely meant half. Same for "closed a third"
-    // ("closed"(6) > "third"(5)). This is inherent to substring+longest-wins; resolving
-    // it cleanly needs grammar-aware parsing, out of scope for F3 (config-only). The
-    // operator-approved synonym set keeps "closing"/"closed"; this test makes the
-    // trade-off explicit rather than letting it pass unnoticed.
-    assertThat(KeywordPartialMatcher.match("closing half", DEV_FRACTIONS, DEFAULT))
+    // it: e.g. "closing half" contains "closing"(7) and "half"(4) -> "closing" wins -> 1.0
+    // (full close), even though the author likely meant half. This is inherent to
+    // substring+longest-wins; resolving it cleanly needs grammar-aware parsing, out of
+    // scope for F3 (config-only). The operator keeps these full-close synonyms; this test
+    // makes the accepted trade-off explicit rather than letting it pass unnoticed.
+    assertThat(KeywordPartialMatcher.match(tail, DEV_FRACTIONS, DEFAULT))
         .isEqualTo(1.0, within(1e-9));
-    assertThat(KeywordPartialMatcher.match("closed a third", DEV_FRACTIONS, DEFAULT))
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "cutting",
+        "closing",
+        "closed",
+        "all the way out",
+        "stopped out",
+        "dumped",
+        "dumping"
+      })
+  void fullCloseSynonym_resolvesToFullClose_inIsolation(String synonym) {
+    // Positive smoke test: every surviving F3 full-close synonym resolves to 1.0 in
+    // isolation. Catches a YAML/DEV_FRACTIONS typo (a misspelled key would silently fall
+    // to default 0.5).
+    assertThat(KeywordPartialMatcher.match(synonym, DEV_FRACTIONS, DEFAULT))
         .isEqualTo(1.0, within(1e-9));
   }
 }
