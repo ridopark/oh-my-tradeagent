@@ -379,6 +379,34 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       "exit-retry-late-fill-reconcile";
 
   /**
+   * F1 replay gate: reconcile the AUTHORITATIVE broker terminal state surfaced by the
+   * timeout-branch cancel BEFORE deciding to retry. The {@link
+   * #VERSION_EXIT_RETRY_LATE_FILL_RECONCILE} fix only reconciles a late fill that arrived via the
+   * buffered {@code onFill} signal; it does NOT re-check the broker/journal. But the exec
+   * cancel-on-filled race ({@code ExecActivitiesImpl}) returns {@code state=FILLED} with the
+   * broker-confirmed {@code filledQty}/{@code avgFillPrice} when the order had ALREADY_FILLED at
+   * cancel time — the orchestrator was DISCARDING that return. The live incident: an STC half of 3
+   * ct FILLED 2 @ $1.84 but no onFill arrived before the TTL; the retry over-sold and was
+   * broker-rejected (PartialExitPlaceFailed) with NO PartialExitFilled for the 2 that actually sold
+   * → phantom next-session retry against a lot that no longer held that qty.
+   *
+   * <p>v&gt;=1: capture the cancel return; if it reports FILLED (or a positive {@code filledQty}),
+   * synthesize a {@link FillSignalPayload} from it and route it through the EXISTING {@link
+   * #applyExitFill(PartialExitRequest, FillSignalPayload)} → {@link #emitExitFill(String,
+   * FillSignalPayload)} so EXACTLY ONE PartialExitFilled is emitted and {@code remainingQty}
+   * decrements from broker truth. Defense-in-depth: if the cancel did NOT surface the fill, fall
+   * back to {@code exec.getOrderStatus(intentKey)} for the same recheck. Then the existing {@code
+   * retryQty = max(0, remainingQty - targetRemaining)} clamp drives the satisfied-skip ({@link
+   * #KIND_PARTIAL_EXIT_RETRY_SKIPPED_SATISFIED}) when the reconciled fill satisfied the intent.
+   * v=DEFAULT_VERSION (in-flight pre-F1 workflows) keep the legacy discard-and-retry: the ONLY new
+   * commands ({@code getOrderStatus} call + the synthesized PartialExitFilled emit) are strictly
+   * behind v&gt;=1, and capturing the existing {@code cancelOrder} return adds no command, so
+   * legacy histories replay byte-identically. Rolls independently of the prior session keys.
+   */
+  private static final String VERSION_EXIT_CANCEL_TERMINAL_RECONCILE =
+      "partial-exit-cancel-terminal-state-reconcile-v1";
+
+  /**
    * B2 (PLAN-exit-place-duplicate-422-crash) replay gate. Pre-this-patch the exit {@code
    * exec.placeOrder(intent)} inside {@link #processOne(PartialExitRequest)} was UNCAUGHT: a
    * non-retryable {@code ApplicationFailure} (e.g. the duplicate-client_order_id 422 misclassified
@@ -2102,6 +2130,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // legacy histories). v>=1 reconciles any late fill after the timeout-branch cancel.
     int lateFillReconcileVersion =
         Workflow.getVersion(VERSION_EXIT_RETRY_LATE_FILL_RECONCILE, Workflow.DEFAULT_VERSION, 1);
+    // F1 cancel-terminal-state reconcile gate, read ONCE here (mirrors the lateFillReconcile read)
+    // so the marker resolves at a stable scope. v=DEFAULT_VERSION keeps the legacy
+    // discard-and-retry
+    // — the getOrderStatus call + the synthesized PartialExitFilled emit are strictly behind v>=1.
+    int cancelTerminalReconcileVersion =
+        Workflow.getVersion(VERSION_EXIT_CANCEL_TERMINAL_RECONCILE, Workflow.DEFAULT_VERSION, 1);
     int retryCount = 0;
     long exitFillTtlSecs = 0L;
 
@@ -2372,11 +2406,46 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                 remainingQty,
                 "ttl_secs",
                 exitFillTtlSecs));
+        // F1: capture the cancel return (previously discarded). The exec cancel-on-filled race
+        // ({@code ExecActivitiesImpl}) returns state=FILLED with the broker-confirmed
+        // filledQty/avgFillPrice when the order had ALREADY_FILLED at cancel time — the
+        // authoritative terminal state. Capturing the existing return adds NO command, so v=0
+        // replays byte-identically.
+        OrderIntentResult cancelled = null;
         try {
-          exec.cancelOrder(intentKey);
+          cancelled = exec.cancelOrder(intentKey);
         } catch (RuntimeException ignored) {
           // Cancel is best-effort; the broker may have already filled or rejected the order.
           // Reconciliation closes the loop on the real broker-side state.
+        }
+        // F1 (VERSION_EXIT_CANCEL_TERMINAL_RECONCILE v>=1): reconcile the AUTHORITATIVE broker
+        // terminal state surfaced by the cancel BEFORE deciding to retry. If the cancel reports
+        // FILLED, the order actually sold — synthesize a FillSignalPayload from the broker truth
+        // and
+        // route it through the EXISTING applyExitFill so exactly ONE PartialExitFilled is emitted
+        // and
+        // remainingQty decrements from the broker fill. Defense-in-depth: if the cancel did NOT
+        // surface the fill (returned CANCELLED but the journal is FILLED), fall back to
+        // getOrderStatus for the same recheck. Booking the fill here means the existing
+        // remainingQty-based retryQty clamp below skips the retry (no over-sell). Strictly behind
+        // v>=1: the synthesized emit and the getOrderStatus call are the only new commands; v=0
+        // keeps
+        // the legacy discard-and-retry for byte-identical replay.
+        if (cancelTerminalReconcileVersion >= 1) {
+          FillSignalPayload terminalFill = terminalFillFrom(cancelled);
+          if (terminalFill == null) {
+            OrderIntentResult status = null;
+            try {
+              status = exec.getOrderStatus(intentKey);
+            } catch (RuntimeException ignored) {
+              // Best-effort authoritative recheck; absence of a terminal fill leaves the genuine
+              // retry path to handle a true timeout below.
+            }
+            terminalFill = terminalFillFrom(status);
+          }
+          if (terminalFill != null) {
+            applyExitFill(req, terminalFill);
+          }
         }
         // VERSION_EXIT_RETRY_LATE_FILL_RECONCILE v>=1: the original exit order can fill LATE — its
         // onFill signal buffers during the in-flight cancelOrder activity above and is delivered
@@ -2963,6 +3032,37 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    */
   private void applyExitFill(PartialExitRequest req, FillSignalPayload fillEvent) {
     emitExitFill(req.getSignalId(), fillEvent);
+  }
+
+  /**
+   * F1 (VERSION_EXIT_CANCEL_TERMINAL_RECONCILE): translate an authoritative exec {@link
+   * OrderIntentResult} terminal state into a {@link FillSignalPayload} the existing {@link
+   * #emitExitFill(String, FillSignalPayload)} path can book. Returns the synthesized fill iff the
+   * result reports a real broker fill ({@code state==FILLED} OR a positive {@code filledQty}); else
+   * {@code null} (no fill to reconcile → the genuine-timeout retry path proceeds). Pure
+   * transform/no command: {@code filledAt} uses {@link #workflowNow()} ({@code
+   * Workflow.currentTimeMillis()}) so it is deterministic on replay. The fill price falls back to 0
+   * if the exec result omits {@code avgFillPrice} (FillSignalPayload requires non-null fields); a
+   * zero price never under-counts realized losses (it only realizes less credit, the conservative
+   * direction) and the qty/broker_order_id — the load-bearing fields for the remainingQty decrement
+   * and the audit correlation — always come from broker truth.
+   */
+  private static FillSignalPayload terminalFillFrom(OrderIntentResult result) {
+    if (result == null) {
+      return null;
+    }
+    boolean filled =
+        result.getState() == OrderIntentResult.State.FILLED
+            || (result.getFilledQty() != null && result.getFilledQty() > 0L);
+    if (!filled || result.getFilledQty() == null || result.getFilledQty() <= 0L) {
+      return null;
+    }
+    return new FillSignalPayload()
+        .withBrokerOrderId(result.getBrokerOrderId())
+        .withFilledQty(result.getFilledQty())
+        .withAvgFillPrice(
+            result.getAvgFillPrice() != null ? result.getAvgFillPrice() : BigDecimal.ZERO)
+        .withFilledAt(workflowNow());
   }
 
   /**
