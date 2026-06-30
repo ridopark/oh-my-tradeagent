@@ -1,26 +1,35 @@
 package com.ohmytradeagent.tdbff.portfolio;
 
-// FIFO realized-PnL algorithm COPIED FROM
-// services/orchestrator/.../activities/DailyPnlActivitiesImpl.java (computeRealizedPnl + fetchLots)
-// — keep in sync. Realizes P&L only for contracts actually exited on the trading day: EntryFilled
-// rows establish a per-contract cost basis (avg_fill_price, filled_qty); PartialExitFilled rows
-// (avg_fill_price, qty_filled) FIFO-match against them, grouped by option_symbol; each matched
-// contract realizes (exit_price − entry_basis) × 100. Open (un-exited) entries contribute nothing.
-// Documented limitation (issue #276 §4): a position entered on a prior day and closed today credits
-// raw exit proceeds with no same-day cost basis (phantom gain). Trading day is America/New_York.
+// Realized-PnL source is now the exec broker's order_intent_journal (BROKER TRUTH), selected per
+// strategy via its broker_target -> BrokerDataSourceRouter (alpaca-paper -> execAlpacaPaperDsl,
+// alpaca-live -> execAlpacaLiveDsl), mirroring OrdersReader. RATIONALE: the orchestrator audit_log
+// can MISS a PartialExitFilled event when a PositionWorkflow fills a SELL at the broker but fails
+// to journal the audit event (the F1 fill-race, fixed going forward by #503) — that under-reports
+// realized P&L (a real -$102.66 loss showed as $0). The broker journal always has the fill, so it
+// is authoritative and self-heals historical gaps.
+//
+// FIFO match: FILLED BUY rows establish a per-contract cost basis (avg_fill_price, filled_qty);
+// FILLED SELL rows (avg_fill_price, filled_qty) FIFO-match against them, grouped by option_symbol;
+// each matched contract realizes (exit_price − entry_basis) × 100. Open (un-exited) entries
+// contribute nothing. Trading day is America/New_York.
+//
+// Phantom-proceeds limitation (issue #276 §4) applies ONLY to the DAY-SCOPED figure: a position
+// entered on a prior day and exited today has no same-day BUY to match, so the day-scoped calc
+// falls to the raw-proceeds branch (credits exit proceeds with no basis). The ALL-TIME figure is
+// exact — every BUY is in scope, so each SELL FIFO-matches its real prior-day entry basis.
+import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter;
+import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Set;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Result;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -28,13 +37,15 @@ public class RealizedPnlCalculator {
 
   private static final Logger log = LoggerFactory.getLogger(RealizedPnlCalculator.class);
   static final BigDecimal MULTIPLIER = new BigDecimal("100");
-  private static final Set<String> ALLOWED_QTY_KEYS = Set.of("filled_qty", "qty_filled");
   private static final String NO_SYMBOL_BUCKET = "";
 
-  private final DSLContext orchestratorDsl;
+  private final BrokerDataSourceRouter router;
+  private final DbStrategyConfigReader strategyRegistry;
 
-  public RealizedPnlCalculator(@Qualifier("orchestratorDsl") DSLContext orchestratorDsl) {
-    this.orchestratorDsl = orchestratorDsl;
+  public RealizedPnlCalculator(
+      BrokerDataSourceRouter router, DbStrategyConfigReader strategyRegistry) {
+    this.router = router;
+    this.strategyRegistry = strategyRegistry;
   }
 
   /** Realized P&L for one (tenant, strategy) on {@code tradingDay} (America/New_York). */
@@ -44,26 +55,41 @@ public class RealizedPnlCalculator {
 
   /**
    * Since-inception (all-time) realized P&L for one (tenant, strategy). IDENTICAL FIFO logic to
-   * {@link #computeRealizedPnl} but fetches EntryFilled/PartialExitFilled lots across ALL history
-   * (no per-day predicate). This is strictly MORE correct than the day-scoped calc: it resolves the
-   * documented #276 §4 cross-day "phantom gain" — an exit on a later day now FIFO-matches its real
-   * prior-day entry cost basis instead of crediting raw proceeds — FOR exits whose entry leg is
-   * within retained history. Two limitations remain: (1) an exit with no matching entry anywhere
-   * (entry pre-dates audit_log retention, or its option_symbol bucket never matches) still credits
-   * raw proceeds; (2) lots are pooled per option_symbol with no position-episode/expiry boundary,
-   * so if the SAME option_symbol string is reused across separate closed-and-reopened episodes (or
-   * an OCC is recycled across expiries) a later exit can FIFO-match an unrelated older entry basis.
+   * {@link #computeRealizedPnl} but fetches BUY/SELL fills across ALL history (no per-day
+   * predicate). This is strictly MORE correct than the day-scoped calc: it resolves the documented
+   * #276 §4 cross-day "phantom gain" — an exit on a later day now FIFO-matches its real prior-day
+   * entry cost basis instead of crediting raw proceeds — FOR exits whose entry leg is within
+   * retained history. Two limitations remain: (1) an exit with no matching entry anywhere (entry
+   * pre-dates journal retention, or its option_symbol bucket never matches) still credits raw
+   * proceeds; (2) lots are pooled per option_symbol with no position-episode/expiry boundary, so if
+   * the SAME option_symbol string is reused across separate closed-and-reopened episodes (or an OCC
+   * is recycled across expiries) a later exit can FIFO-match an unrelated older entry basis.
    */
   public BigDecimal computeRealizedPnlAllTime(String tenantId, String strategyId) {
     return realize(tenantId, strategyId, null);
   }
 
   // Shared FIFO realization. A null {@code tradingDay} omits the per-day predicate (all-time).
+  // Resolves the strategy's broker_target -> exec DSLContext; fail-soft to ZERO when unconfigured.
   private BigDecimal realize(String tenantId, String strategyId, LocalDate tradingDay) {
+    String brokerTarget = strategyRegistry.brokerTarget(tenantId, strategyId);
+    // brokerTarget reads fail-soft (null = unconfigured / missing config row). A null target must
+    // NOT flow to router.dslFor — that would throw BrokerNotConfiguredException. Degrade this
+    // strategy's contribution to ZERO instead. A null is anomalous (the orchestrator forbids a null
+    // broker_target), so WARN rather than vanish it silently.
+    if (brokerTarget == null) {
+      log.warn(
+          "realized P&L: no broker_target for {}/{} in strategy_config; contributing 0",
+          tenantId,
+          strategyId);
+      return BigDecimal.ZERO;
+    }
+    DSLContext dsl = router.dslFor(brokerTarget);
+
     Map<String, Deque<Lot>> entriesBySymbol =
-        fetchLots(tenantId, strategyId, tradingDay, "EntryFilled", "filled_qty");
+        fetchLots(dsl, tenantId, strategyId, tradingDay, "BUY");
     Map<String, Deque<Lot>> exitsBySymbol =
-        fetchLots(tenantId, strategyId, tradingDay, "PartialExitFilled", "qty_filled");
+        fetchLots(dsl, tenantId, strategyId, tradingDay, "SELL");
 
     BigDecimal realized = BigDecimal.ZERO;
     for (Map.Entry<String, Deque<Lot>> e : exitsBySymbol.entrySet()) {
@@ -99,38 +125,29 @@ public class RealizedPnlCalculator {
     }
   }
 
+  // Fetches FILLED journal rows for one side (BUY=entries, SELL=exits) bucketed by option_symbol.
+  // The SQL is built ONLY from constants; side/state are constant literals controlled here and
+  // tenant_id/strategy_id/tradingDay are bound parameters. tradingDay is bound only in the
+  // day-scoped branch (so the param count differs between the two fetch calls — see #507).
   private Map<String, Deque<Lot>> fetchLots(
-      String tenantId, String strategyId, LocalDate tradingDay, String kind, String qtyKey) {
-    if (!ALLOWED_QTY_KEYS.contains(qtyKey)) {
-      throw new IllegalArgumentException("unsupported qtyKey: " + qtyKey);
+      DSLContext dsl, String tenantId, String strategyId, LocalDate tradingDay, String side) {
+    if (!"BUY".equals(side) && !"SELL".equals(side)) {
+      throw new IllegalArgumentException("unsupported side: " + side);
     }
-    // Resolve to a compile-time literal so the SQL is built ONLY from constants; the whitelist
-    // above
-    // is then a contract check, not the sole barrier against a caller key reaching the query.
-    String qtyCol = "filled_qty".equals(qtyKey) ? "filled_qty" : "qty_filled";
-    // A null tradingDay omits the per-day predicate (all-time). The date clause is built only from
-    // the constant literal below; tradingDay is still bound as a parameter when present.
     boolean dayScoped = tradingDay != null;
     String dayPredicate =
-        dayScoped ? "AND (occurred_at AT TIME ZONE 'America/New_York')::date = ? " : "";
+        dayScoped ? "AND (filled_at AT TIME ZONE 'America/New_York')::date = ? " : "";
     String sql =
-        "SELECT (subject->>'avg_fill_price')::numeric AS price, "
-            + "(subject->>'"
-            + qtyCol
-            + "')::numeric AS qty, "
-            + "subject->>'option_symbol' AS option_symbol "
-            + "FROM audit_log "
-            + "WHERE tenant_id = ? AND strategy_id = ? AND kind = ? "
+        "SELECT avg_fill_price AS price, filled_qty AS qty, option_symbol "
+            + "FROM order_intent_journal "
+            + "WHERE tenant_id = ? AND strategy_id = ? AND state = 'FILLED' AND side = ? "
+            + "AND filled_qty IS NOT NULL AND avg_fill_price IS NOT NULL "
             + dayPredicate
-            + "AND subject->>'avg_fill_price' IS NOT NULL "
-            + "AND subject->>'"
-            + qtyCol
-            + "' IS NOT NULL "
-            + "ORDER BY occurred_at ASC, event_id ASC";
+            + "ORDER BY filled_at ASC, recorded_at ASC";
     Result<Record> rows =
         dayScoped
-            ? orchestratorDsl.fetch(sql, tenantId, strategyId, kind, tradingDay)
-            : orchestratorDsl.fetch(sql, tenantId, strategyId, kind);
+            ? dsl.fetch(sql, tenantId, strategyId, side, tradingDay)
+            : dsl.fetch(sql, tenantId, strategyId, side);
     Map<String, Deque<Lot>> lotsBySymbol = new LinkedHashMap<>();
     for (Record r : rows) {
       BigDecimal price = r.get("price", BigDecimal.class);
@@ -143,9 +160,9 @@ public class RealizedPnlCalculator {
         qtyLong = qty.longValueExact();
       } catch (ArithmeticException ex) {
         log.warn(
-            "fetchLots: skipping {} row with fractional/oversized {}={} (tenant={} strategy={})",
-            kind,
-            qtyKey,
+            "fetchLots: skipping {} row with fractional/oversized filled_qty={} (tenant={}"
+                + " strategy={})",
+            side,
             qty,
             tenantId,
             strategyId);
