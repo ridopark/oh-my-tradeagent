@@ -3048,13 +3048,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * and the audit correlation — always come from broker truth.
    */
   private static FillSignalPayload terminalFillFrom(OrderIntentResult result) {
-    if (result == null) {
-      return null;
-    }
-    boolean filled =
-        result.getState() == OrderIntentResult.State.FILLED
-            || (result.getFilledQty() != null && result.getFilledQty() > 0L);
-    if (!filled || result.getFilledQty() == null || result.getFilledQty() <= 0L) {
+    // Book a fill only when the broker confirmed a positive filled quantity. A null/zero filledQty
+    // (a SUBMITTED/CANCELLED result, or a FILLED row that has not yet surfaced its fill detail) is
+    // NOT bookable — return null so the genuine-timeout retry path proceeds. The exec
+    // cancel-on-filled race that this reconciles always populates filledQty alongside state=FILLED,
+    // so a positive filledQty is the authoritative signal; gating on state too would be redundant.
+    if (result == null || result.getFilledQty() == null || result.getFilledQty() <= 0L) {
       return null;
     }
     return new FillSignalPayload()
