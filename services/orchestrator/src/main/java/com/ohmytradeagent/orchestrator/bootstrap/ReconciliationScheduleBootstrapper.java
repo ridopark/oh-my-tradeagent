@@ -201,6 +201,32 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
   }
 
   /**
+   * Phase F2b: resolves the strategy's {@code broker_account_id} for the recon input. Returns the
+   * trimmed account id, or {@code null} when the config declares none or cannot be loaded — a null
+   * leaves the recon input's optional account field unset, degrading the account-scoped sibling
+   * suppression to the tenant-scoped behavior. Best-effort by design: a config-load failure here
+   * must NOT block schedule creation (the {@code broker_target} was already validated upstream).
+   */
+  private String resolveBrokerAccountId(String tenantId, String strategyId) {
+    try {
+      StrategyConfig cfg = strategyRegistry.get(tenantId, strategyId);
+      String account = cfg.getBrokerAccountId();
+      if (account == null || account.isBlank()) {
+        return null;
+      }
+      return account.trim();
+    } catch (RuntimeException e) {
+      log.warn(
+          "tenant={} strategy={}: could not resolve broker_account_id for recon input;"
+              + " account-scoped sibling suppression degrades to tenant-scoped",
+          tenantId,
+          strategyId,
+          e);
+      return null;
+    }
+  }
+
+  /**
    * Deletes any existing Temporal schedule for {@code (tenantId, strategyId)} whose ID encodes a
    * different {@code broker_target} than the desired one. Match key is the prefix {@code
    * "recon-v2-t-<tenantId>-s-<strategyId>-"} — the schedule-ID grammar built in {@link
@@ -268,6 +294,12 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
     input.setTenantId(tenantId);
     input.setStrategyId(strategyId);
     input.setBrokerTarget(ReconciliationWorkflowInput.BrokerTarget.fromValue(brokerTarget));
+    // Phase F2b: thread the strategy's broker_account_id so the recon workflow can scope its
+    // cross-tenant sibling-owner orphan-suppression probe by the precise account. OPTIONAL and
+    // best-effort: a missing/blank account (or a config-load error) leaves the field null and recon
+    // degrades to the tenant-scoped suppression — it never blocks schedule creation (the
+    // broker_target was already whitelist-validated upstream in resolveValidBrokerTarget).
+    input.setBrokerAccountId(resolveBrokerAccountId(tenantId, strategyId));
 
     Map<String, Object> sa = new HashMap<>();
     sa.put("TenantStrategy", WorkflowIds.tenantStrategy(tenantId, strategyId));

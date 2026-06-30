@@ -850,6 +850,108 @@ class ReconciliationWorkflowImplTest {
   }
 
   @Test
+  void missingJournalBranch_crossTenantOwnerOnSameAccount_suppressesOrphan() {
+    // Phase F2b: the broker holds the OCC on a SHARED account. The reconciling tenant (dev) has NO
+    // owner — neither the cross-strategy Redis SCAN (0 covered) nor the tenant-scoped Visibility
+    // fallback (false) finds one. But a DIFFERENT tenant (prod_real) running on the SAME
+    // broker_account_id manages the OCC. The new account-scoped probe must find that cross-tenant
+    // owner and SUPPRESS the page → ZERO PositionOrphan, the sibling-suppression audit with
+    // owner_scope:account, and maybeAutoAdopt is never reached.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    // dev (own tenant) has no owner by either tenant-scoped probe.
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(paddedOcc))).thenReturn(0L);
+    when(positionLookup.hasRunningOwnerForOcc(eq("dev"), eq(paddedOcc))).thenReturn(false);
+    // But a running owner exists on the shared broker account (under another tenant).
+    when(positionLookup.hasRunningOwnerForOccOnAccount(eq("ACCT-LIVE-1"), eq(paddedOcc)))
+        .thenReturn(true);
+
+    ReconciliationSummary summary = runWorkflow("ACCT-LIVE-1");
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphanOngoing".equals(e.getKind())));
+
+    AuditEvent suppressed = captureKind("PositionOrphanSuppressedSiblingOwner");
+    assertThat(suppressed.getSubject())
+        .containsEntry("option_symbol", paddedOcc)
+        // owner_scope:account distinguishes the cross-TENANT account-scoped suppression from the
+        // tenant-scoped owner_source:visibility / Redis-SCAN suppressions above.
+        .containsEntry("owner_scope", "account");
+    verify(metrics, times(1))
+        .recordSiblingOwnerSuppression(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"));
+    // maybeAutoAdopt is only reached on the FILLED branch — the missing branch suppression must not
+    // adopt. No FILLED journal anchor here, so journalListFilledByOcc returned empty and the FILLED
+    // path is unreachable; assert no auto-adoption child was started.
+    assertThat(ADOPT_STARTED).isEmpty();
+  }
+
+  @Test
+  void missingJournalBranch_noOwnerAnywhere_stillPages() {
+    // Phase F2b genuine-orphan regression guard: all THREE probes are false — own-tenant Redis SCAN
+    // (0), own-tenant Visibility (false), AND the cross-tenant account-scoped probe (false) → the
+    // PositionOrphan must STILL page. The account-scoped probe must never mask a genuine orphan.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(anyString(), anyString())).thenReturn(0L);
+    when(positionLookup.hasRunningOwnerForOcc(anyString(), anyString())).thenReturn(false);
+    when(positionLookup.hasRunningOwnerForOccOnAccount(anyString(), anyString())).thenReturn(false);
+    // Past the first-page debounce (2nd sweep — prior observation marker exists) so the page fires.
+    when(auditQuery.countPriorPositionOrphanObserved(
+            eq("dev"), eq("copytrade-v1"), eq(paddedOcc), eq("missing"), any()))
+        .thenReturn(1L);
+
+    ReconciliationSummary summary = runWorkflow("ACCT-LIVE-1");
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    AuditEvent orphan = captureKind("PositionOrphan");
+    assertThat(orphan.getSubject())
+        .containsEntry("option_symbol", paddedOcc)
+        .containsEntry("journal_status", "missing");
+    Mockito.verify(audit, never())
+        .log(
+            Mockito.argThat(
+                e -> e != null && "PositionOrphanSuppressedSiblingOwner".equals(e.getKind())));
+    verify(metrics, never()).recordSiblingOwnerSuppression(anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void missingJournalBranch_nullAccount_skipsAccountProbeAndPages() {
+    // Phase F2b degrade: broker_account_id is NULL (pre-F2b serialized input / account-less tenant)
+    // → the account-scoped probe must be SKIPPED entirely (never invoked), and with no
+    // tenant-scoped
+    // owner the PositionOrphan pages exactly as before F2b.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(anyString(), anyString())).thenReturn(0L);
+    when(positionLookup.hasRunningOwnerForOcc(anyString(), anyString())).thenReturn(false);
+    when(auditQuery.countPriorPositionOrphanObserved(
+            eq("dev"), eq("copytrade-v1"), eq(paddedOcc), eq("missing"), any()))
+        .thenReturn(1L);
+
+    ReconciliationSummary summary = runWorkflow(/* brokerAccountId= */ null);
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+    captureKind("PositionOrphan");
+    // The account-scoped probe is gated on a non-null broker_account_id — it must never be called.
+    verify(positionLookup, never()).hasRunningOwnerForOccOnAccount(anyString(), anyString());
+  }
+
+  @Test
   void missingBranch_transientSingleObservation_isDebouncedNoFirstPage() {
     // Phase 3: a single transient `missing` observation with no covering owner (cold SCAN +
     // Visibility finds nothing) must NOT page on the FIRST sweep — the new first-page debounce
@@ -1270,11 +1372,19 @@ class ReconciliationWorkflowImplTest {
   // ---------- helpers ----------
 
   private ReconciliationSummary runWorkflow() {
+    // Phase F2b: the default fixture leaves broker_account_id NULL — this is the pre-F2b degrade
+    // path (the account-scoped probe is skipped), so every existing test exercises the
+    // null-account-unchanged behavior implicitly.
+    return runWorkflow(null);
+  }
+
+  private ReconciliationSummary runWorkflow(String brokerAccountId) {
     ReconciliationWorkflowInput in = new ReconciliationWorkflowInput();
     in.setSchemaVersion(1L);
     in.setTenantId("dev");
     in.setStrategyId("copytrade-v1");
     in.setBrokerTarget(ReconciliationWorkflowInput.BrokerTarget.ALPACA_PAPER);
+    in.setBrokerAccountId(brokerAccountId);
     ReconciliationWorkflow wf =
         env.getWorkflowClient()
             .newWorkflowStub(

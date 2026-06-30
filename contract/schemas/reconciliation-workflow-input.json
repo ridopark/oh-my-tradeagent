@@ -40,6 +40,11 @@
         "schwab-live"
       ],
       "description": "Routes journal_dump_open + broker_list_open_orders Activities to the broker-<value> task queue. Phase 2c.2: <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 records; using them for active reconciliation produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live."
+    },
+    "broker_account_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Phase F2b: the strategy's resolved brokerage account id (StrategyConfig.broker_account_id). OPTIONAL — omitted on pre-F2b serialized inputs and for tenants that declare no account, so it is NOT in required. When present it scopes the account-wide cross-tenant sibling-owner orphan-suppression probe: a broker-held OCC managed by a running PositionWorkflow under a DIFFERENT tenant sharing the SAME broker account is suppressed instead of false-paged. When null/absent the account-scoped probe is skipped and recon degrades to the pre-F2b tenant-scoped behavior."
     }
   }
 }

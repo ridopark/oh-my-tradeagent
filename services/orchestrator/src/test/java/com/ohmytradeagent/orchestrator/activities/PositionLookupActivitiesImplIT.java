@@ -64,7 +64,24 @@ class PositionLookupActivitiesImplIT {
     workflowClient = mock(WorkflowClient.class);
     svc =
         new PositionLookupActivitiesImpl(
-            redisTemplate, workflowClient, tenantId -> java.util.List.of());
+            redisTemplate,
+            workflowClient,
+            tenantId -> java.util.List.of(),
+            // Phase F2b: the account-scoped probe needs a StrategyRegistry; these Redis-cache /
+            // Visibility ITs don't exercise it, so an empty-registry stub suffices.
+            new com.ohmytradeagent.orchestrator.platform.StrategyRegistry() {
+              @Override
+              public com.ohmytradeagent.contract.StrategyConfig get(
+                  String tenantId, String strategyId) {
+                return null;
+              }
+
+              @Override
+              public java.util.List<com.ohmytradeagent.orchestrator.platform.TenantStrategy>
+                  list() {
+                return java.util.List.of();
+              }
+            });
   }
 
   @AfterEach

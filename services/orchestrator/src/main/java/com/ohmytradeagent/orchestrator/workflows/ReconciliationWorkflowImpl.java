@@ -350,6 +350,33 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
                   "owner_source", "visibility"));
           continue;
         }
+        // Phase F2b: the two probes above are TENANT-scoped (own tenant's Redis cache + own
+        // tenant's strategies in Visibility). When a DIFFERENT tenant shares this broker account
+        // (e.g. dev + prod_real both pointed at one live Alpaca account) and that tenant's running
+        // PositionWorkflow manages the OCC, the tenant-scoped probes find nothing and recon
+        // false-pages a PositionOrphan against the sibling tenant's live lot. Scope the final probe
+        // by broker_account_id (the precise account identity, matching CrossTenantBrokerTargetVali-
+        // dator's per-account invariant) so a cross-tenant owner on the SAME account suppresses the
+        // page. Gated on a non-null broker_account_id so a pre-F2b serialized input (the field is
+        // OPTIONAL) degrades to the tenant-scoped behavior above. No recon-side getVersion marker:
+        // recon executions are short-lived per scheduled run (workflowId carries
+        // {{.ScheduledRunID}}), so there is no long-lived in-flight history to replay-protect — see
+        // the maybeAutoAdopt note below (a getVersion marker here would be vacuous).
+        if (brokerQty > 0
+            && in.getBrokerAccountId() != null
+            && positionLookup.hasRunningOwnerForOccOnAccount(in.getBrokerAccountId(), occPadded)) {
+          recordSiblingSuppressionMetric(in, brokerTarget);
+          auditLog(
+              KIND_POSITION_ORPHAN_SUPPRESSED_SIBLING,
+              subject(
+                  "option_symbol", occPadded,
+                  "broker_qty", brokerQty,
+                  "covered_qty", coveredQty,
+                  "broker_target", brokerTarget,
+                  "broker_account_id", in.getBrokerAccountId(),
+                  "owner_scope", "account"));
+          continue;
+        }
         emitPositionOrphanWithDebounce(
             in,
             p,

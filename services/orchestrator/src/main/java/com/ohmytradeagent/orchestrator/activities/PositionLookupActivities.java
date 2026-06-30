@@ -76,6 +76,27 @@ public interface PositionLookupActivities {
   boolean hasRunningOwnerForOcc(String tenantId, String occPadded);
 
   /**
+   * Phase F2b: ACCOUNT-scoped (cross-TENANT) sibling-owner probe. {@link #hasRunningOwnerForOcc}
+   * above is TENANT-scoped, so a broker-held OCC managed by a running {@code PositionWorkflow}
+   * under a DIFFERENT tenant that shares the SAME broker account (e.g. dev + prod_real both pointed
+   * at one live Alpaca account) finds no owner under the reconciling tenant and false-pages a
+   * {@code PositionOrphan}. This probe spans ALL tenants on the given {@code brokerAccountId}: it
+   * enumerates every {@code (tenant, strategy)} the registry knows, keeps only those whose resolved
+   * {@code StrategyConfig.broker_account_id} equals {@code brokerAccountId}, and runs the proven
+   * per-strategy {@code ContractSymbol = occPadded} equality Visibility query (Temporal SQL
+   * Visibility supports neither {@code STARTS_WITH} nor {@code IN}, so a per-(tenant,strategy)
+   * equality loop is the only correct cross-account span). Short-circuits on the first running
+   * owner found.
+   *
+   * <p>Returns {@code true} iff at least one RUNNING PositionWorkflow on {@code brokerAccountId}
+   * manages {@code occPadded}. BEST-EFFORT / read-only: any error (or a blank {@code
+   * brokerAccountId}) returns {@code false} (no owner found → recon proceeds to page → safe
+   * degrade, NEVER masks a genuine orphan). {@code occPadded} must already be in the padded
+   * canonical form (see {@code OccSymbol.padded}).
+   */
+  boolean hasRunningOwnerForOccOnAccount(String brokerAccountId, String occPadded);
+
+  /**
    * Edited-signal supersede (F1): finds an open prior leg whose contract matches the corrected BTO
    * on underlying + strike + right but carries a DIFFERENT expiry — the wrong-expiry leg a
    * corrected signal supersedes. Temporal Visibility's {@code ContractSymbol} is EQUALITY-ONLY (no
