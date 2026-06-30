@@ -1,12 +1,15 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.AccountKillSwitchWorkflowInput;
+import com.ohmytradeagent.contract.AccountSnapshotRequest;
+import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.GetOptionQuoteRequest;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
+import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.orchestrator.activities.AccountKillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
@@ -17,6 +20,8 @@ import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.common.RetryOptions;
+import io.temporal.failure.TemporalFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.Workflow;
 import io.temporal.workflow.WorkflowInit;
@@ -68,6 +73,16 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   /** Audit strategy_id sentinel — the account cap is tenant-scoped, not strategy-scoped. */
   static final String ACCOUNT_SCOPE = "__account__";
 
+  /**
+   * Version gate for the start-of-day-equity pct cap. ALL new commands (the {@code
+   * accountDailyLossPct} read, the {@code tenantBrokerTarget} read, and the {@code
+   * AccountSnapshotActivity} SOD-equity dispatch + the pct threshold resolution) are strictly
+   * behind {@code v >= 1}. At {@link Workflow#DEFAULT_VERSION} the heartbeat replays the pre-change
+   * absolute-threshold command stream BYTE-IDENTICALLY (no SOD-equity read, no new marker). Pinned
+   * by {@code AccountKillSwitchWorkflowImplLegacyReplayTest}.
+   */
+  static final String VERSION_ACCOUNT_DAILY_LOSS_PCT = "account-daily-loss-pct-of-sod-equity-v1";
+
   static final String MARKET_DATA_TASK_QUEUE = "market-data";
 
   static final Duration HEARTBEAT_INTERVAL = Duration.ofSeconds(60);
@@ -116,9 +131,17 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private OffsetDateTime coolingDownUntil;
   private LocalDate tradingDay;
 
+  /**
+   * Start-of-day account equity for {@link #tradingDay}. Captured ONCE per trading day at the
+   * rollover (lazily, on the first heartbeat that needs it) and carried across continue-as-new so
+   * it survives a CAN within the same day. {@code null} = not yet captured (or capture failed / pct
+   * cap not configured), in which case the pct check is DEFERRED.
+   */
+  private BigDecimal sodEquity;
+
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
-    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 2L) {
+    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 3L) {
       throw new IllegalArgumentException(
           "AccountKillSwitchWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
@@ -140,6 +163,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     if (in.getTradingDay() != null) {
       this.tradingDay = in.getTradingDay();
+    }
+    if (in.getSodEquity() != null) {
+      this.sodEquity = in.getSodEquity();
     }
   }
 
@@ -164,9 +190,41 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   }
 
   private AccountKillSwitchWorkflowInput buildCarryForwardInput() {
+    return carryForwardInput(
+        input.getTenantId(),
+        tripped,
+        reason,
+        actor,
+        trippedAt,
+        coolingDownUntil,
+        tradingDay,
+        sodEquity);
+  }
+
+  /**
+   * Pure builder for the continue-as-new carry-forward input. Package-private + static so it can be
+   * unit-tested for the rolling-deploy schema_version branching without a Temporal context.
+   *
+   * <p>Rolling-deploy safety: only stamp v3 when we actually carry sod_equity. A pre-v3 worker
+   * validates {@code schema_version <= 2} at {@code @WorkflowInit} and throws on a v3 input — so an
+   * unconditional v3 bump would wedge any execution that continues-as-new on a new pod and is then
+   * picked up by an old pod mid rollout/canary. A carry-forward WITHOUT a captured SOD equity is
+   * byte-identical to the legacy v2 shape, so stamp v2 and stay old-worker-compatible. An execution
+   * that HAS captured sodEquity is already pinned to {@code v>=1} by the getVersion marker (an old
+   * worker cannot replay it anyway), so v3 is correct there.
+   */
+  static AccountKillSwitchWorkflowInput carryForwardInput(
+      String tenantId,
+      boolean tripped,
+      String reason,
+      String actor,
+      OffsetDateTime trippedAt,
+      OffsetDateTime coolingDownUntil,
+      LocalDate tradingDay,
+      BigDecimal sodEquity) {
     AccountKillSwitchWorkflowInput carry = new AccountKillSwitchWorkflowInput();
-    carry.setSchemaVersion(2L);
-    carry.setTenantId(input.getTenantId());
+    carry.setSchemaVersion(sodEquity != null ? 3L : 2L);
+    carry.setTenantId(tenantId);
     carry.setTripped(tripped);
     if (reason != null && !reason.isEmpty()) {
       carry.setReason(reason);
@@ -177,13 +235,28 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     carry.setTrippedAt(trippedAt);
     carry.setCoolingDownUntil(coolingDownUntil);
     carry.setTradingDay(tradingDay);
+    // Carry SOD equity so a same-day CAN does not re-read it (and a different-day CAN re-snapshots
+    // at the next rollover regardless). Null when not captured.
+    if (sodEquity != null) {
+      carry.setSodEquity(sodEquity);
+    }
     return carry;
   }
 
   private void heartbeat() {
+    // Read the version gate ONCE, at a stable scope, before any branch. At DEFAULT_VERSION every
+    // new command below is skipped, so a pre-change in-flight history replays byte-identically.
+    // TestWorkflowEnvironment always reports v==1 for fresh workflows; the v==DEFAULT_VERSION
+    // branch is exercised only by AccountKillSwitchWorkflowImplLegacyReplayTest against a recorded
+    // pre-marker history.
+    int pctVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_DAILY_LOSS_PCT, Workflow.DEFAULT_VERSION, 1);
+
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
       this.tradingDay = today;
+      // New trading day => the prior SOD-equity snapshot is stale; re-capture lazily below.
+      this.sodEquity = null;
     }
     if (tripped) {
       return;
@@ -197,9 +270,17 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       return;
     }
 
-    // Opt-in / inert: unset threshold => no trip ever. Checked FIRST so an opted-out tenant is
-    // fully inert even during a Visibility/quote outage.
-    BigDecimal threshold = tenantConfig.accountDailyLossThreshold(input.getTenantId());
+    // Effective-threshold resolution (precedence): pct x SOD-equity wins when configured AND
+    // resolvable; otherwise fall back to the absolute account_daily_loss_threshold; if neither
+    // resolves the cap is inert (no trip), exactly as before this change. All pct machinery is
+    // gated behind v>=1 so the legacy absolute-only path is unchanged at DEFAULT_VERSION.
+    BigDecimal absolute = tenantConfig.accountDailyLossThreshold(input.getTenantId());
+    BigDecimal threshold = absolute;
+    if (pctVersion >= 1) {
+      threshold = resolveEffectiveThreshold(absolute);
+    }
+    // Opt-in / inert: no resolvable threshold => no trip ever. Checked FIRST so an opted-out tenant
+    // is fully inert even during a Visibility/quote outage.
     if (threshold == null || threshold.signum() <= 0) {
       return;
     }
@@ -263,6 +344,84 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     boolean exceedsRelative = (long) failures * RELATIVE_FAILURE_THRESHOLD_MULTIPLIER > listed;
     boolean tripsSmallBookFloor = listed <= SMALL_BOOK_MAX_POSITIONS && failures >= 1;
     return exceedsRelative || tripsSmallBookFloor;
+  }
+
+  /**
+   * Resolves the effective account loss cap (v&gt;=1 only).
+   *
+   * <p>Precedence: when {@code account_daily_loss_pct} is set ({@code > 0}) the pct cap is
+   * preferred over the absolute threshold. If start-of-day equity is known we return {@code pct x
+   * sodEquity}; if not, we attempt to capture it ONCE for the day (lazily) and, on success, use it.
+   *
+   * <p><b>SOD-equity-unavailable degrade — fail SAFE, not fail loud.</b> If the pct cap is
+   * configured but start-of-day equity cannot be read (null broker_target, or the equity snapshot
+   * fails/returns ≤0), we do NOT trip on an unknown base and do NOT crash the heartbeat. Instead we
+   * DEFER the pct evaluation this tick and FALL BACK to the absolute threshold only if one is also
+   * configured (else return null => the cap is inert this tick). {@code sodEquity} stays null, so
+   * the next heartbeat retries the capture until it succeeds. Rationale: the pct cap is an ADDITIVE
+   * portfolio safety net — the per-strategy {@code daily_loss_threshold} and the notional cap still
+   * protect — so an equity-read outage must not disable trading via a spurious account trip, nor
+   * trip on a guessed base. (Distinct from {@code auto:account_mtm_unavailable}, which fail-CLOSES
+   * on an OPEN-POSITION quote outage — a different condition; do not conflate.)
+   */
+  private BigDecimal resolveEffectiveThreshold(BigDecimal absolute) {
+    BigDecimal pct = tenantConfig.accountDailyLossPct(input.getTenantId());
+    if (pct == null || pct.signum() <= 0) {
+      return absolute; // pct cap not configured => legacy absolute path.
+    }
+    if (sodEquity == null) {
+      // Capture SOD equity ONCE per day, lazily, on the first heartbeat that needs it.
+      sodEquity = captureSodEquity();
+    }
+    if (sodEquity == null || sodEquity.signum() <= 0) {
+      // DEFER: equity unknown this tick. Fall back to the absolute threshold if one exists.
+      return absolute;
+    }
+    return pct.multiply(sodEquity);
+  }
+
+  /**
+   * Reads the tenant's start-of-day account equity by dispatching the read-only {@link
+   * AccountSnapshotActivity} (Alpaca {@code /v2/account} net-liquidation {@code equity}) to the
+   * tenant's {@code broker-<target>} task queue — the SAME activity the dashboard's {@code
+   * AccountSnapshotWorkflow} and the notional-cap sizing path already use (no exec/broker contract
+   * change). Returns {@code null} when the broker_target cannot be resolved or the read fails — the
+   * caller fails SAFE (defers). Determinism: the request is built from the resolved broker_target +
+   * tenant id only (no clock/random reads).
+   */
+  private BigDecimal captureSodEquity() {
+    String brokerTarget = tenantConfig.tenantBrokerTarget(input.getTenantId());
+    if (brokerTarget == null || brokerTarget.isBlank()) {
+      return null;
+    }
+    AccountSnapshotActivity accountStub =
+        Workflow.newActivityStub(
+            AccountSnapshotActivity.class,
+            ActivityOptions.newBuilder()
+                .setTaskQueue(ExecActivitiesFactory.taskQueueFor(brokerTarget))
+                .setStartToCloseTimeout(Duration.ofSeconds(15))
+                .setScheduleToCloseTimeout(Duration.ofSeconds(60))
+                .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
+                .build());
+    AccountSnapshotRequest request = new AccountSnapshotRequest();
+    request.setSchemaVersion(1L);
+    request.setBrokerTarget(AccountSnapshotRequest.BrokerTarget.fromValue(brokerTarget));
+    request.setTenantId(input.getTenantId());
+    request.setCorrelationId(input.getTenantId() + "/account/sod-equity");
+    try {
+      AccountSnapshotResult result = accountStub.accountSnapshot(request);
+      return result == null ? null : result.getEquity();
+    } catch (TemporalFailure e) {
+      // Fail SAFE: a broker/equity outage (after Temporal's own retries) leaves sodEquity null so
+      // the pct check defers and retries next tick — it does NOT trip on an unknown base.
+      Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
+          .warn(
+              "SOD-equity snapshot failed; deferring pct cap this tick tenant={} broker_target={} err={}",
+              input.getTenantId(),
+              brokerTarget,
+              e.getMessage());
+      return null;
+    }
   }
 
   @Override

@@ -5,20 +5,20 @@ from __future__ import annotations
 
 from datetime import date
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, confloat, conint, constr
 
 
 class AccountKillSwitchWorkflowInput(BaseModel):
     """
-    Phase 6: input for AccountKillSwitchWorkflow. ONE workflow per tenant_id (NO strategy_id segment — the cap spans every strategy on the tenant's shared broker_target), bootstrapped on orchestrator startup with workflow_id t-<tenant>/account/killswitch. Mirrors KillSwitchWorkflowInput's carry-forward shape for continueAsNew. Fresh bootstrap inputs omit the carry-forward fields; replayed continueAsNew inputs populate them.
+    Phase 6: input for AccountKillSwitchWorkflow. ONE workflow per tenant_id (NO strategy_id segment — the cap spans every strategy on the tenant's shared broker_target), bootstrapped on orchestrator startup with workflow_id t-<tenant>/account/killswitch. Mirrors KillSwitchWorkflowInput's carry-forward shape for continueAsNew. Fresh bootstrap inputs omit the carry-forward fields; replayed continueAsNew inputs populate them. v3 adds sod_equity so the start-of-day-equity pct cap's per-day equity snapshot survives a same-day continueAsNew.
     """
 
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1, le=2)
+    schema_version: conint(ge=1, le=3)
     """
-    DTO contract version. v1 = bootstrap-only input; v2 adds optional carry-forward fields produced by continueAsNew. Workers reject newer-than-build inputs.
+    DTO contract version. v1 = bootstrap-only input; v2 adds optional carry-forward fields produced by continueAsNew; v3 adds the sod_equity carry-forward. Workers reject newer-than-build inputs.
     """
     tenant_id: constr(min_length=1)
     tripped: bool | None = None
@@ -44,4 +44,8 @@ class AccountKillSwitchWorkflowInput(BaseModel):
     trading_day: date | None = None
     """
     Carry-forward trading day from a prior run. Absent on fresh bootstrap; next heartbeat refreshes via calendar.todayEt().
+    """
+    sod_equity: confloat(ge=0.0) | None = None
+    """
+    Carry-forward start-of-day account equity for trading_day, captured once per day for the account_daily_loss_pct cap. Absent on fresh bootstrap and re-captured on each day rollover; carried across continueAsNew so a same-day CAN does not re-read it. v3+.
     """

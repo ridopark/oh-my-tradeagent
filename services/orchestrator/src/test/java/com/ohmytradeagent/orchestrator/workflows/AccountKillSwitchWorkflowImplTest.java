@@ -5,19 +5,23 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.AccountKillSwitchWorkflowInput;
+import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.GetOptionQuoteRequest;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
+import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.orchestrator.activities.AccountKillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
@@ -47,6 +51,9 @@ class AccountKillSwitchWorkflowImplTest {
 
   private static final String CORE_QUEUE = "orchestrator-core";
   private static final String MARKET_DATA_QUEUE = "market-data";
+  // The account-snapshot dispatch routes to broker-<target>; tests pin alpaca-paper.
+  private static final String BROKER_TARGET = "alpaca-paper";
+  private static final String BROKER_QUEUE = "broker-" + BROKER_TARGET;
 
   private TestWorkflowEnvironment env;
   private AuditActivities audit;
@@ -55,6 +62,7 @@ class AccountKillSwitchWorkflowImplTest {
   private AccountPnlActivities accountPnl;
   private AccountKillSwitchCascadeActivities cascade;
   private GetOptionQuoteActivity optionQuote;
+  private AccountSnapshotActivity accountSnapshot;
 
   @BeforeEach
   void setUp() {
@@ -68,15 +76,20 @@ class AccountKillSwitchWorkflowImplTest {
     accountPnl = Mockito.mock(AccountPnlActivities.class);
     cascade = Mockito.mock(AccountKillSwitchCascadeActivities.class);
     optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
+    accountSnapshot = Mockito.mock(AccountSnapshotActivity.class);
 
-    // Defaults: market open, today fixed, threshold set, no realized loss, empty book, no quotes.
+    // Defaults: market open, today fixed, ABSOLUTE threshold set (legacy path so the existing
+    // suite is unchanged), no pct, no realized loss, empty book, no quotes.
     when(calendar.isMarketOpen()).thenReturn(true);
     when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 14));
     when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
+    when(tenantConfig.tenantBrokerTarget(anyString())).thenReturn(BROKER_TARGET);
     when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
     when(accountPnl.accountOpenBook(anyString())).thenReturn(new AccountOpenBook(List.of(), 0, 0));
     when(cascade.cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString()))
         .thenReturn(0L);
+    when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("5000")));
 
     coreWorker.registerActivitiesImplementations(
         audit, calendar, tenantConfig, accountPnl, cascade);
@@ -84,6 +97,10 @@ class AccountKillSwitchWorkflowImplTest {
     // GetOptionQuoteActivity is routed to the market-data task queue from the workflow stub.
     Worker mdWorker = env.newWorker(MARKET_DATA_QUEUE);
     mdWorker.registerActivitiesImplementations(optionQuote);
+
+    // AccountSnapshotActivity (SOD equity) is routed to broker-<target> from the workflow stub.
+    Worker brokerWorker = env.newWorker(BROKER_QUEUE);
+    brokerWorker.registerActivitiesImplementations(accountSnapshot);
 
     env.start();
   }
@@ -323,7 +340,200 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(afterCooldown.getReason()).isEqualTo("auto:account_daily_loss");
   }
 
+  // ---------- pct-of-SOD-equity cap (the change) ----------
+
+  // pct=0.40, SOD equity=5000 => effective threshold 2000. A total loss of -2000 trips; -1999
+  // does not. (Drive the loss purely via realized so the book/quote path stays trivial.)
+  @Test
+  void pctConfigured_tripsAtFortyPctOfSodEquity() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("5000")));
+
+    // -1999 > -2000 -> no trip.
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+        .thenReturn(new BigDecimal("-1999"));
+    AccountKillSwitchWorkflow below = newStub("t-dev/account/killswitch-pct-below");
+    WorkflowStub.fromTyped(below).start(input());
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(below.killswitchState().getTripped()).isFalse();
+
+    // -2000 <= -2000 -> trip.
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+        .thenReturn(new BigDecimal("-2000"));
+    AccountKillSwitchWorkflow at = newStub("t-dev/account/killswitch-pct-at");
+    WorkflowStub.fromTyped(at).start(input());
+    env.sleep(Duration.ofSeconds(75));
+    KillSwitchState s = at.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+  }
+
+  // When BOTH pct and absolute are set, the pct x SOD-equity threshold wins. pct=0.40 x 5000 =
+  // 2000 (NOT the absolute 5000), so a -2500 loss trips even though it is under the absolute cap.
+  @Test
+  void pctTakesPrecedenceOverAbsolute() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("5000")));
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+        .thenReturn(new BigDecimal("-2500"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-pct-precedence");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+  }
+
+  // Only the absolute threshold is set (pct unset) => legacy behavior, no SOD-equity read at all.
+  @Test
+  void pctUnset_absoluteStillWorks() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-abs-only");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+    // Pct unset => the SOD-equity dispatch never fires.
+    verify(accountSnapshot, never()).accountSnapshot(any());
+  }
+
+  // Neither pct nor absolute set => inert: never trips, no PnL/equity reads.
+  @Test
+  void bothUnset_inert() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+        .thenReturn(new BigDecimal("-999999"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-both-unset");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    verify(accountSnapshot, never()).accountSnapshot(any());
+    verify(cascade, never())
+        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
+  }
+
+  // SOD equity unavailable + pct configured + NO absolute fallback => fail-SAFE DEFER: the account
+  // cap is skipped this tick (no trip), the heartbeat survives, and the equity read is retried on
+  // the next tick.
+  @Test
+  void sodEquityUnavailable_pctConfigured_defersDoesNotTripOrCrash() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    // Equity read fails (broker outage) -> snapshot throws on every attempt.
+    when(accountSnapshot.accountSnapshot(any()))
+        .thenThrow(new IllegalStateException("equity_unavailable"));
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+        .thenReturn(new BigDecimal("-999999"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-equity-down");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(135));
+
+    // No trip on an unknown base, and the heartbeat keeps ticking (state query still answers).
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    verify(cascade, never())
+        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
+    // Retried across multiple heartbeats (more than one tick attempted the read).
+    verify(accountSnapshot, atLeast(2)).accountSnapshot(any());
+  }
+
+  // The SOD-equity snapshot is taken ONCE per trading day, not every heartbeat. Several heartbeats
+  // within one day => exactly one equity read; a day rollover re-snapshots.
+  @Test
+  void sodEquitySnapshotOncePerDay() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("5000")));
+    // Stay well under the cap so it never trips and the heartbeat keeps looping.
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-snap-once");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Three heartbeats on the same trading day => exactly one equity read.
+    env.sleep(Duration.ofSeconds(190));
+    verify(accountSnapshot, times(1)).accountSnapshot(any());
+
+    // Roll the trading day forward => the next heartbeat re-snapshots SOD equity.
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(70));
+    verify(accountSnapshot, times(2)).accountSnapshot(any());
+  }
+
+  // ---------- continue-as-new sod_equity carry-forward ----------
+
+  // The pure carry-forward builder honors the rolling-deploy schema_version branch: v3 (with
+  // sod_equity populated) ONLY when a SOD equity was captured; otherwise v2 (old-worker-safe) and
+  // sod_equity absent.
+  @Test
+  void carryForwardInput_bumpsSchemaV3OnlyWhenSodEquityCaptured() {
+    LocalDate day = LocalDate.of(2026, 5, 14);
+
+    AccountKillSwitchWorkflowInput withEquity =
+        AccountKillSwitchWorkflowImpl.carryForwardInput(
+            "dev", false, "", "", null, null, day, new BigDecimal("5000"));
+    assertThat(withEquity.getSchemaVersion()).isEqualTo(3L);
+    assertThat(withEquity.getSodEquity()).isEqualByComparingTo(new BigDecimal("5000"));
+
+    AccountKillSwitchWorkflowInput noEquity =
+        AccountKillSwitchWorkflowImpl.carryForwardInput(
+            "dev", false, "", "", null, null, day, null);
+    assertThat(noEquity.getSchemaVersion()).isEqualTo(2L);
+    assertThat(noEquity.getSodEquity()).isNull();
+  }
+
+  // A workflow STARTED FROM a continue-as-new carry-forward input that already carries sod_equity
+  // (v3) restores it at @WorkflowInit and does NOT re-dispatch the broker AccountSnapshot on the
+  // post-CAN run — the same-day equity survives the CAN. The pct cap still works off the carried
+  // value (pct=0.40 x carried 5000 = 2000 -> a -2000 loss trips).
+  @Test
+  void sodEquityCarriedAcrossCan_restoresWithoutRedispatch() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    // If the workflow were to (incorrectly) re-read equity, it would get 9999 — proving any trip is
+    // off the CARRIED 5000 (threshold 2000), not a fresh read (threshold 3999.6).
+    when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("9999")));
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+        .thenReturn(new BigDecimal("-2000"));
+
+    // Carried input as continueAsNew would emit it: v3, sod_equity=5000, same trading day. Built by
+    // hand (NOT via carryForwardInput) so this restore assertion is independent of the builder the
+    // unit test pins — a builder regression cannot mask itself through this fixture.
+    AccountKillSwitchWorkflowInput carried = new AccountKillSwitchWorkflowInput();
+    carried.setSchemaVersion(3L);
+    carried.setTenantId("dev");
+    carried.setTradingDay(LocalDate.of(2026, 5, 14));
+    carried.setSodEquity(new BigDecimal("5000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-can-restore");
+    WorkflowStub.fromTyped(stub).start(carried);
+    env.sleep(Duration.ofSeconds(75));
+
+    // Trips off the CARRIED equity (5000 -> threshold 2000; -2000 <= -2000).
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+    // The carried sodEquity was restored => NO broker snapshot re-dispatch on the post-CAN run.
+    verify(accountSnapshot, never()).accountSnapshot(any());
+  }
+
   // ---------- helpers ----------
+
+  private static AccountSnapshotResult snapshot(BigDecimal equity) {
+    AccountSnapshotResult r = new AccountSnapshotResult();
+    r.setSchemaVersion(1L);
+    r.setEquity(equity);
+    return r;
+  }
 
   private AccountKillSwitchWorkflow newStub(String workflowId) {
     return env.getWorkflowClient()
