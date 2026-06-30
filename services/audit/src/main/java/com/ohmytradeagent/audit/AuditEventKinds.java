@@ -298,6 +298,12 @@ public final class AuditEventKinds {
           "KillSwitchTripped",
           "KillSwitchResetApproved",
           "KillSwitchHeartbeatError",
+          // AccountKillSwitchWorkflowImpl cap-inactive observability (PR #504 follow-up): the
+          // account pct cap is configured but failed to ARM for N consecutive heartbeats (the
+          // portfolio safety net is OFF) / has re-armed. Both page via AccountKillSwitchCapAlerter.
+          // Observability-only — in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "AccountKillSwitchCapInactive",
+          "AccountKillSwitchCapReArmed",
           // ReconciliationWorkflowImpl
           "ReconciliationStarted",
           "ReconciliationCompleted",

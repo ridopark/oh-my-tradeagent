@@ -70,6 +70,17 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private static final String KIND_KILL_SWITCH_RESET_APPROVED = "KillSwitchResetApproved";
   private static final String KIND_KILL_SWITCH_HEARTBEAT_ERROR = "KillSwitchHeartbeatError";
 
+  /**
+   * Audit kind emitted (and Discord-paged via {@code AccountKillSwitchCapAlerter}) when a
+   * configured pct cap has FAILED TO ARM for {@link #INACTIVE_ALERT_TICKS} consecutive heartbeats —
+   * i.e. the portfolio safety net is currently OFF on real money. Observability for the "silently
+   * disabled cap" gap.
+   */
+  private static final String KIND_ACCOUNT_CAP_INACTIVE = "AccountKillSwitchCapInactive";
+
+  /** Audit kind emitted (and paged) when a previously-inactive configured pct cap re-arms. */
+  private static final String KIND_ACCOUNT_CAP_REARMED = "AccountKillSwitchCapReArmed";
+
   /** Audit strategy_id sentinel — the account cap is tenant-scoped, not strategy-scoped. */
   static final String ACCOUNT_SCOPE = "__account__";
 
@@ -83,10 +94,34 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    */
   static final String VERSION_ACCOUNT_DAILY_LOSS_PCT = "account-daily-loss-pct-of-sod-equity-v1";
 
+  /**
+   * Version gate for the cap-inactive observability alert. ALL new commands (the {@code
+   * AccountKillSwitchCapInactive} / {@code AccountKillSwitchCapReArmed} audit emits) are strictly
+   * behind {@code v >= 1}; the consecutive-inactive counter is pure workflow state (no command). At
+   * {@link Workflow#DEFAULT_VERSION} the heartbeat replays byte-identically. Pinned by {@code
+   * AccountKillSwitchWorkflowImplLegacyReplayTest}.
+   */
+  static final String VERSION_CAP_INACTIVE_ALERT = "account-cap-inactive-alert-v1";
+
   static final String MARKET_DATA_TASK_QUEUE = "market-data";
 
   static final Duration HEARTBEAT_INTERVAL = Duration.ofSeconds(60);
   static final long DEFAULT_RESET_COOLDOWN_SECS = 60L;
+
+  /**
+   * Consecutive heartbeats a configured pct cap may fail to arm before we page. 3 ticks at the 60s
+   * {@link #HEARTBEAT_INTERVAL} = ~3 min — fast enough that "the portfolio safety net is OFF"
+   * surfaces well within a session, but past a single transient broker/equity blip (one failed
+   * AccountSnapshot retried-then-deferred tick) so we do not page on noise. Package-private for
+   * test override.
+   */
+  static int INACTIVE_ALERT_TICKS = 3;
+
+  /**
+   * While the cap stays inactive, re-page at most once every this many ticks (30 ticks * 60s = ~30
+   * min) so a persistent outage keeps nagging without spamming a page every minute.
+   */
+  static int INACTIVE_REPAGE_TICKS = 30;
 
   /**
    * See {@link KillSwitchWorkflowImpl#historyLengthWatermark}. Package-private for test override.
@@ -139,6 +174,22 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    */
   private BigDecimal sodEquity;
 
+  /**
+   * Cap-inactive observability state (all deterministic workflow state, no commands). {@code
+   * consecutiveInactiveTicks} counts heartbeats where a configured pct cap failed to arm (defer OR
+   * caught heartbeat error). {@code capInactiveAlerted} is true once we have paged for the current
+   * inactive episode (so we page once on entry, not every tick). {@code ticksSinceInactiveAlert}
+   * drives the re-page throttle. {@code pctConfiguredKnown}/{@code pctConfiguredLastSeen} cache the
+   * last successful read of "is pct configured?" so a heartbeat that threw BEFORE reading config
+   * (e.g. a ConfigMap-typo parse error) is still attributed correctly to a configured-cap tenant.
+   */
+  private int consecutiveInactiveTicks;
+
+  private boolean capInactiveAlerted;
+  private int ticksSinceInactiveAlert;
+  private boolean pctConfiguredKnown;
+  private boolean pctConfiguredLastSeen;
+
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
     if (in.getSchemaVersion() == null || in.getSchemaVersion() > 3L) {
@@ -176,17 +227,94 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     while (true) {
       Workflow.sleep(HEARTBEAT_INTERVAL);
+      // armed == true: the cap evaluated this tick (it resolved a threshold, tripped, was already
+      // tripped/cooling/closed, or the pct cap is intentionally not configured). armed == false: a
+      // configured pct cap failed to arm (defer) — the inactive condition. A thrown heartbeat is
+      // also treated as not-armed below: the cap was not evaluated this tick.
+      boolean armed = true;
       try {
-        heartbeat();
+        armed = heartbeat();
       } catch (RuntimeException e) {
+        armed = false;
         auditLog(
             KIND_KILL_SWITCH_HEARTBEAT_ERROR,
             subject("error", e.getMessage(), "trading_day", tradingDay));
+      }
+      // Cap-inactive observability (v>=1 only): page when a configured pct cap stays unarmed.
+      // Read the gate once per tick at this stable scope; at DEFAULT_VERSION nothing new is
+      // emitted.
+      int alertVersion =
+          Workflow.getVersion(VERSION_CAP_INACTIVE_ALERT, Workflow.DEFAULT_VERSION, 1);
+      if (alertVersion >= 1) {
+        recordInactivityOutcome(armed);
       }
       if (Workflow.getInfo().getHistoryLength() > historyLengthWatermark) {
         Workflow.continueAsNew(buildCarryForwardInput());
       }
     }
+  }
+
+  /**
+   * Cap-inactive observability bookkeeping (v&gt;=1). {@code armed} is the heartbeat outcome (or
+   * {@code false} when the heartbeat threw). The counter advances only when the cap is configured
+   * (so an opt-out tenant never pages); it pages ONCE on crossing {@link #INACTIVE_ALERT_TICKS},
+   * re-pages at most every {@link #INACTIVE_REPAGE_TICKS} while still inactive, and emits a re-arm
+   * audit on recovery. All audit emits are commands gated by the caller's version check; the
+   * counters are pure workflow state.
+   */
+  private void recordInactivityOutcome(boolean armed) {
+    if (armed) {
+      // Cap evaluated (or intentionally off). If we had paged for an inactive episode, announce the
+      // recovery and reset; otherwise just clear the counters.
+      if (capInactiveAlerted) {
+        auditLog(
+            KIND_ACCOUNT_CAP_REARMED,
+            subject(
+                "trading_day",
+                tradingDay,
+                "inactive_ticks",
+                consecutiveInactiveTicks,
+                "scope",
+                "account"));
+      }
+      consecutiveInactiveTicks = 0;
+      capInactiveAlerted = false;
+      ticksSinceInactiveAlert = 0;
+      return;
+    }
+    // Not armed. Only an UNARMED-WHILE-CONFIGURED tick is an "inactive cap" condition worth paging.
+    // pctConfiguredKnown/LastSeen is the last successful read (updated in heartbeat()); a tick that
+    // threw before reading config falls back to the last-known value — a persistent ConfigMap typo
+    // that throws every tick was, by definition, configured the moment before it broke.
+    if (!(pctConfiguredKnown && pctConfiguredLastSeen)) {
+      return;
+    }
+    consecutiveInactiveTicks++;
+    if (capInactiveAlerted) {
+      ticksSinceInactiveAlert++;
+      if (ticksSinceInactiveAlert >= INACTIVE_REPAGE_TICKS) {
+        emitCapInactive();
+        ticksSinceInactiveAlert = 0;
+      }
+      return;
+    }
+    if (consecutiveInactiveTicks >= INACTIVE_ALERT_TICKS) {
+      emitCapInactive();
+      capInactiveAlerted = true;
+      ticksSinceInactiveAlert = 0;
+    }
+  }
+
+  private void emitCapInactive() {
+    auditLog(
+        KIND_ACCOUNT_CAP_INACTIVE,
+        subject(
+            "trading_day",
+            tradingDay,
+            "consecutive_inactive_ticks",
+            consecutiveInactiveTicks,
+            "scope",
+            "account"));
   }
 
   private AccountKillSwitchWorkflowInput buildCarryForwardInput() {
@@ -243,7 +371,13 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     return carry;
   }
 
-  private void heartbeat() {
+  /**
+   * One heartbeat tick. Returns {@code true} when the cap was ARMED or is intentionally off
+   * (already tripped, cooling down, market closed, or no pct cap configured) and {@code false} when
+   * a CONFIGURED pct cap failed to arm (the deferral path) — the cap-inactive condition the
+   * observability alert pages on. A thrown heartbeat is treated as not-armed by {@link #run}.
+   */
+  private boolean heartbeat() {
     // Read the version gate ONCE, at a stable scope, before any branch. At DEFAULT_VERSION every
     // new command below is skipped, so a pre-change in-flight history replays byte-identically.
     // TestWorkflowEnvironment always reports v==1 for fresh workflows; the v==DEFAULT_VERSION
@@ -259,15 +393,15 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       this.sodEquity = null;
     }
     if (tripped) {
-      return;
+      return true; // cap already engaged — not an inactive condition.
     }
     // Post-reset cooldown: after a reset the cap stays inert until coolingDownUntil so a still-down
     // book does not immediately re-trip the just-reset switch within the same window.
     if (coolingDownUntil != null && workflowNow().isBefore(coolingDownUntil)) {
-      return;
+      return true; // intentional inert window — not a cap-inactive condition.
     }
     if (!calendar.isMarketOpen()) {
-      return;
+      return true; // cap does not evaluate off-hours by design — not an inactive condition.
     }
 
     // Effective-threshold resolution (precedence): pct x SOD-equity wins when configured AND
@@ -276,13 +410,21 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // gated behind v>=1 so the legacy absolute-only path is unchanged at DEFAULT_VERSION.
     BigDecimal absolute = tenantConfig.accountDailyLossThreshold(input.getTenantId());
     BigDecimal threshold = absolute;
+    boolean pctConfigured = false;
     if (pctVersion >= 1) {
-      threshold = resolveEffectiveThreshold(absolute);
+      BigDecimal pct = tenantConfig.accountDailyLossPct(input.getTenantId());
+      pctConfigured = pct != null && pct.signum() > 0;
+      // Cache the last successful "is pct configured?" read so run()'s inactivity bookkeeping can
+      // attribute a later parse-throwing tick to a configured-cap tenant.
+      this.pctConfiguredKnown = true;
+      this.pctConfiguredLastSeen = pctConfigured;
+      threshold = resolveEffectiveThreshold(absolute, pct);
     }
     // Opt-in / inert: no resolvable threshold => no trip ever. Checked FIRST so an opted-out tenant
-    // is fully inert even during a Visibility/quote outage.
+    // is fully inert even during a Visibility/quote outage. A pct-configured tenant that lands here
+    // is DEFERRING (SOD equity unavailable) with no absolute fallback => cap NOT armed (inactive).
     if (threshold == null || threshold.signum() <= 0) {
-      return;
+      return !pctConfigured;
     }
 
     BigDecimal realized = accountPnl.computeTenantRealizedPnl(input.getTenantId(), tradingDay);
@@ -312,13 +454,15 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     int combinedFailures = book.valueFailures() + quoteFailures;
     if (book.listed() > 0 && failsClosed(book.listed(), combinedFailures)) {
       doTrip("auto:account_mtm_unavailable", "auto:account_mtm_unavailable", null);
-      return;
+      return true; // cap engaged (fail-closed trip) — armed.
     }
 
     BigDecimal totalPnl = realized.add(openMtm);
     if (totalPnl.compareTo(threshold.negate()) <= 0) {
       doTrip("auto:account_daily_loss", "auto:account_daily_loss", totalPnl);
     }
+    // Threshold resolved and the loss was evaluated against it — the cap is ARMED this tick.
+    return true;
   }
 
   /** Fetches the live bid for one contract; null when the quote is UNAVAILABLE/FAILED/absent. */
@@ -364,8 +508,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * trip on a guessed base. (Distinct from {@code auto:account_mtm_unavailable}, which fail-CLOSES
    * on an OPEN-POSITION quote outage — a different condition; do not conflate.)
    */
-  private BigDecimal resolveEffectiveThreshold(BigDecimal absolute) {
-    BigDecimal pct = tenantConfig.accountDailyLossPct(input.getTenantId());
+  private BigDecimal resolveEffectiveThreshold(BigDecimal absolute, BigDecimal pct) {
     if (pct == null || pct.signum() <= 0) {
       return absolute; // pct cap not configured => legacy absolute path.
     }
@@ -388,32 +531,49 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * change). Returns {@code null} when the broker_target cannot be resolved or the read fails — the
    * caller fails SAFE (defers). Determinism: the request is built from the resolved broker_target +
    * tenant id only (no clock/random reads).
+   *
+   * <p><b>"Start-of-day" = the equity at the FIRST market-open heartbeat that needs it that day</b>
+   * (captured lazily, then frozen for the day and carried across continue-as-new), NOT the prior
+   * session's close. On a mid-session pod restart the first post-restart heartbeat re-captures from
+   * a now-null {@code sodEquity}, so the "SOD" base can drift to the intra-day equity at restart.
+   * Accepted: {@code AccountSnapshotResult} exposes only current {@code equity} (no prior-close /
+   * last_equity field), and the pct cap is an additive net where an approximate base is acceptable;
+   * a drift on restart loosens/tightens the cap slightly rather than disabling it.
+   *
+   * <p><b>Degrade, do not throw.</b> The stub build ({@link ExecActivitiesFactory#taskQueueFor})
+   * and {@link AccountSnapshotRequest.BrokerTarget#fromValue} are INSIDE the try: a legal-but-
+   * unroutable {@code broker_target} (a bare {@code paper}/{@code live} in {@code
+   * ExecActivitiesFactory.LEGACY_BARE_TARGETS}) throws {@code ApplicationFailure}/{@code
+   * IllegalArgumentException} synchronously, and we want that to DEFER (return null) like every
+   * other unavailable-equity path — NOT propagate to {@code run()} as a heartbeat error. This stays
+   * inside the existing {@code v>=1} pct path and adds no command, so it needs no new version gate.
    */
   private BigDecimal captureSodEquity() {
     String brokerTarget = tenantConfig.tenantBrokerTarget(input.getTenantId());
     if (brokerTarget == null || brokerTarget.isBlank()) {
       return null;
     }
-    AccountSnapshotActivity accountStub =
-        Workflow.newActivityStub(
-            AccountSnapshotActivity.class,
-            ActivityOptions.newBuilder()
-                .setTaskQueue(ExecActivitiesFactory.taskQueueFor(brokerTarget))
-                .setStartToCloseTimeout(Duration.ofSeconds(15))
-                .setScheduleToCloseTimeout(Duration.ofSeconds(60))
-                .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
-                .build());
-    AccountSnapshotRequest request = new AccountSnapshotRequest();
-    request.setSchemaVersion(1L);
-    request.setBrokerTarget(AccountSnapshotRequest.BrokerTarget.fromValue(brokerTarget));
-    request.setTenantId(input.getTenantId());
-    request.setCorrelationId(input.getTenantId() + "/account/sod-equity");
     try {
+      AccountSnapshotActivity accountStub =
+          Workflow.newActivityStub(
+              AccountSnapshotActivity.class,
+              ActivityOptions.newBuilder()
+                  .setTaskQueue(ExecActivitiesFactory.taskQueueFor(brokerTarget))
+                  .setStartToCloseTimeout(Duration.ofSeconds(15))
+                  .setScheduleToCloseTimeout(Duration.ofSeconds(60))
+                  .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
+                  .build());
+      AccountSnapshotRequest request = new AccountSnapshotRequest();
+      request.setSchemaVersion(1L);
+      request.setBrokerTarget(AccountSnapshotRequest.BrokerTarget.fromValue(brokerTarget));
+      request.setTenantId(input.getTenantId());
+      request.setCorrelationId(input.getTenantId() + "/account/sod-equity");
       AccountSnapshotResult result = accountStub.accountSnapshot(request);
       return result == null ? null : result.getEquity();
-    } catch (TemporalFailure e) {
-      // Fail SAFE: a broker/equity outage (after Temporal's own retries) leaves sodEquity null so
-      // the pct check defers and retries next tick — it does NOT trip on an unknown base.
+    } catch (TemporalFailure | IllegalArgumentException e) {
+      // Fail SAFE: a broker/equity outage (after Temporal's own retries) OR an unroutable/bare
+      // broker_target leaves sodEquity null so the pct check defers and retries next tick — it does
+      // NOT trip on an unknown base and does NOT surface as a heartbeat error / cap-off audit spam.
       Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
           .warn(
               "SOD-equity snapshot failed; deferring pct cap this tick tenant={} broker_target={} err={}",
