@@ -1,11 +1,11 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.orchestrator.platform.TenantRegistry;
-import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.LinkedHashSet;
-import java.util.Set;
+import java.util.List;
+import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -28,6 +28,12 @@ import org.springframework.stereotype.Component;
  * outside {@code (0,1]} during Jackson parse). This bootstrapper just guarantees that parse runs at
  * startup for every tenant; the throw propagates and boot fails closed — mirroring {@link
  * LiveRequiredGateBootstrapper} for strategy config.
+ *
+ * <p>Enumeration walks the {@code tenants/<tenant>/} subdirectories DIRECTLY rather than via {@code
+ * TenantStrategyScanner} — the scanner only emits tenants that have a {@code strategies/} subdir,
+ * so a tenant whose {@code tenant.yaml} carries the cap but has no strategy files would otherwise
+ * be skipped and its bad value never parsed. The config gate must cover the file it validates for
+ * every tenant.
  *
  * <p>Ordered {@link Ordered#HIGHEST_PRECEDENCE}{@code + 11} so it runs alongside the other
  * live-safety gate and before the default-order {@link KillSwitchBootstrapper} starts any workflow.
@@ -55,16 +61,18 @@ public class TenantConfigBootstrapper implements ApplicationRunner {
       log.warn("tenants dir {} not found; skipping tenant-config validation", tenantsDir);
       return;
     }
-    Set<String> tenantIds = new LinkedHashSet<>();
-    for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
-      tenantIds.add(ts.tenantId());
+    List<Path> tenantDirs;
+    try (Stream<Path> s = Files.list(tenantsDir)) {
+      tenantDirs = s.filter(Files::isDirectory).toList();
+    } catch (IOException e) {
+      throw new IllegalStateException("Failed to list tenants dir " + tenantsDir, e);
     }
-    for (String tenantId : tenantIds) {
+    for (Path tenantDir : tenantDirs) {
       // Load through the registry: a bad account_daily_loss_pct throws here (setter rejects it),
       // and the throw propagates so boot fails closed rather than trading with a neutered cap.
-      tenantRegistry.get(tenantId);
+      tenantRegistry.get(tenantDir.getFileName().toString());
     }
     log.info(
-        "tenant-config invariant validated for {} tenant(s) in {}", tenantIds.size(), tenantsDir);
+        "tenant-config invariant validated for {} tenant(s) in {}", tenantDirs.size(), tenantsDir);
   }
 }
