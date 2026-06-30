@@ -1,8 +1,11 @@
 package com.ohmytradeagent.tdbff.portfolio;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
-import java.math.BigDecimal;
+import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter;
+import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import java.sql.DriverManager;
 import java.time.LocalDate;
 import java.util.UUID;
@@ -19,15 +22,21 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * Parity check for the FIFO realized-PnL algorithm COPIED FROM {@code DailyPnlActivitiesImpl}. Uses
- * the same audit_log JSONB shape and the issue #273/#276 regression fixtures so the BFF's copy and
- * the orchestrator's source stay in lockstep. Gated on {@code RUN_DB_ITS=true} like the other
- * DB-backed ITs. The audit_log DDL is inlined (the BFF does not own that schema) — only the columns
- * the calculator reads are created.
+ * DB-backed coverage of the realized-PnL calc against the exec broker's {@code
+ * order_intent_journal} (the new broker-truth source). Exercises the real Postgres {@code filled_at
+ * AT TIME ZONE 'America/New_York'} date predicate and the FILLED-only / side split. Gated on {@code
+ * RUN_DB_ITS=true} like the other DB-backed ITs. The journal DDL is inlined (the BFF does not own
+ * that schema) — only the columns the calculator reads are created. The calculator is constructed
+ * with a {@link BrokerDataSourceRouter} stub returning this container's DSLContext and a {@link
+ * DbStrategyConfigReader} stub returning a fixed broker_target.
  */
 @Testcontainers
 @EnabledIfEnvironmentVariable(named = "RUN_DB_ITS", matches = "true")
 class RealizedPnlCalculatorIT {
+
+  private static final String TENANT = "prod_real";
+  private static final String STRATEGY = "copytrade-v1";
+  private static final String BROKER_TARGET = "alpaca-live";
 
   @Container
   static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
@@ -43,14 +52,19 @@ class RealizedPnlCalculatorIT {
             postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
     dsl = DSL.using(conn, SQLDialect.POSTGRES);
     dsl.execute(
-        "CREATE TABLE audit_log ("
+        "CREATE TABLE order_intent_journal ("
             + "  id BIGSERIAL PRIMARY KEY,"
             + "  tenant_id VARCHAR(64) NOT NULL,"
             + "  strategy_id VARCHAR(64) NOT NULL,"
-            + "  event_id UUID NOT NULL UNIQUE,"
-            + "  occurred_at TIMESTAMPTZ NOT NULL,"
-            + "  kind VARCHAR(64) NOT NULL,"
-            + "  subject JSONB NOT NULL)");
+            + "  intent_key UUID NOT NULL UNIQUE,"
+            + "  option_symbol VARCHAR(64),"
+            + "  side VARCHAR(8) NOT NULL,"
+            + "  qty INTEGER,"
+            + "  state VARCHAR(16) NOT NULL,"
+            + "  filled_qty INTEGER,"
+            + "  avg_fill_price NUMERIC,"
+            + "  filled_at TIMESTAMPTZ,"
+            + "  recorded_at TIMESTAMPTZ NOT NULL DEFAULT now())");
   }
 
   @AfterAll
@@ -60,101 +74,99 @@ class RealizedPnlCalculatorIT {
 
   @BeforeEach
   void reset() {
-    dsl.execute("DELETE FROM audit_log");
-    svc = new RealizedPnlCalculator(dsl);
+    dsl.execute("DELETE FROM order_intent_journal");
+    BrokerDataSourceRouter router = mock(BrokerDataSourceRouter.class);
+    when(router.dslFor(BROKER_TARGET)).thenReturn(dsl);
+    DbStrategyConfigReader registry = mock(DbStrategyConfigReader.class);
+    when(registry.brokerTarget(TENANT, STRATEGY)).thenReturn(BROKER_TARGET);
+    svc = new RealizedPnlCalculator(router, registry);
   }
 
   @Test
-  void entryAndPartialExit_realizesOnlyExitedCostBasis() {
-    insertAudit(
-        "EntryFilled", "2026-05-14T14:00:00Z", "{\"avg_fill_price\":\"2.30\",\"filled_qty\":2}");
-    insertAudit(
-        "PartialExitFilled",
-        "2026-05-14T17:30:00Z",
-        "{\"avg_fill_price\":\"3.10\",\"qty_filled\":1}");
+  void dramLiveLoss_excludesNonFilledRows_allTimeAndDayScoped() {
+    // Live prod_real 2026-06-29 DRAM: bought 3 @ 2.3533 FILLED, sold 2 @ 1.84 FILLED on 6/29.
+    String dram = "DRAM  260717C00030000";
+    insert("BUY", dram, 3, "FILLED", 3, "2.3533", "2026-06-26T14:00:00Z");
+    insert("SELL", dram, 2, "FILLED", 2, "1.84", "2026-06-29T18:00:00Z");
+    // Noise that must NOT count: a CANCELLED sell (no fill), an ERRORED buy/sell, a RECORDED sell.
+    insert("SELL", dram, 2, "CANCELLED", null, null, null);
+    insert("BUY", dram, 50, "ERRORED", null, null, null);
+    insert("SELL", dram, 2, "ERRORED", null, null, null);
+    insert("SELL", dram, 1, "RECORDED", null, null, null);
 
-    BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
+    // All-time: the 2 sold FIFO-match the 2.3533 basis -> 2 * (1.84 - 2.3533) * 100 = -102.66.
+    assertThat(svc.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("-102.66");
 
-    assertThat(pnl).isEqualByComparingTo("80.00"); // 1 * (3.10 - 2.30) * 100
+    // Day-scoped on the exit day (6/29 America/New_York = 18:00Z). Here the buy was a PRIOR day, so
+    // the day-scoped calc sees ONLY the exit -> documented #276 §4 phantom raw proceeds:
+    // 2 * 1.84 * 100 = 368.
+    assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 6, 29)))
+        .isEqualByComparingTo("368.00");
+
+    // Day-scoped on an unrelated day -> no fills in scope -> 0.
+    assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 6, 30)))
+        .isEqualByComparingTo("0");
   }
 
   @Test
-  void entryWithNoExit_excludesOpenDebit_issue273() {
-    insertAudit(
-        "EntryFilled", "2026-05-28T14:00:00Z", "{\"avg_fill_price\":\"2.86\",\"filled_qty\":12}");
-    insertAudit(
-        "EntryFilled", "2026-05-28T14:05:00Z", "{\"avg_fill_price\":\"0.88\",\"filled_qty\":25}");
+  void sameDayEntryAndExit_realizesNetLoss_dramShape() {
+    // Same-day buy 3 @ 2.3533 then sell 2 @ 1.84 -> day-scoped matches its OWN basis (no phantom).
+    String dram = "DRAM  260717C00030000";
+    insert("BUY", dram, 3, "FILLED", 3, "2.3533", "2026-06-29T14:00:00Z");
+    insert("SELL", dram, 2, "FILLED", 2, "1.84", "2026-06-29T18:00:00Z");
 
-    BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 28));
-
-    assertThat(pnl).isEqualByComparingTo("0"); // zero exits => zero realized
+    assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 6, 29)))
+        .isEqualByComparingTo("-102.66");
+    assertThat(svc.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("-102.66");
   }
 
   @Test
-  void crossSymbol_realizesAgainstOwnBasis_issue276() {
-    insertAudit(
-        "EntryFilled",
-        "2026-05-14T14:00:00Z",
-        "{\"avg_fill_price\":\"1.00\",\"filled_qty\":1,\"option_symbol\":\"NVDA  260516C00140000\"}");
-    insertAudit(
-        "EntryFilled",
-        "2026-05-14T14:05:00Z",
-        "{\"avg_fill_price\":\"5.00\",\"filled_qty\":1,\"option_symbol\":\"CRWV  260516C00040000\"}");
-    insertAudit(
-        "PartialExitFilled",
-        "2026-05-14T16:00:00Z",
-        "{\"avg_fill_price\":\"6.00\",\"qty_filled\":1,\"option_symbol\":\"CRWV  260516C00040000\"}");
+  void crossDay_allTimeMatchesRealBasis_dayScopedIsPhantomProceeds() {
+    // Entry day-1, exit day-2 (both FILLED). All-time matches the real cross-day basis; day-scoped
+    // on day-2 credits raw proceeds (the documented limitation). Lock BOTH.
+    insert("BUY", null, 2, "FILLED", 2, "2.30", "2026-05-14T14:00:00Z");
+    insert("SELL", null, 2, "FILLED", 2, "3.10", "2026-05-15T17:30:00Z");
 
-    BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 14));
-
-    assertThat(pnl).isEqualByComparingTo("100.00"); // CRWV's own basis, not NVDA's foreign 1.00
+    // All-time: 2 * (3.10 - 2.30) * 100 = 160.
+    assertThat(svc.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("160.00");
+    // Day-scoped on day-2: phantom raw proceeds 2 * 3.10 * 100 = 620 (#276 §4).
+    assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 5, 15)))
+        .isEqualByComparingTo("620.00");
   }
 
   @Test
-  void allTime_matchesCrossDayCostBasis_noPhantomGain_issue276() {
-    // Entry on day 1, partial exit on day 2 (different America/New_York dates). The all-time calc
-    // drops the per-day predicate so the day-2 exit FIFO-matches the day-1 entry's real cost basis.
-    insertAudit(
-        "EntryFilled", "2026-05-14T14:00:00Z", "{\"avg_fill_price\":\"2.30\",\"filled_qty\":2}");
-    insertAudit(
-        "PartialExitFilled",
-        "2026-05-15T17:30:00Z",
-        "{\"avg_fill_price\":\"3.10\",\"qty_filled\":2}");
+  void nullBrokerTarget_returnsZero_noThrow() {
+    DbStrategyConfigReader registry = mock(DbStrategyConfigReader.class);
+    when(registry.brokerTarget(TENANT, STRATEGY)).thenReturn(null);
+    RealizedPnlCalculator unconfigured =
+        new RealizedPnlCalculator(mock(BrokerDataSourceRouter.class), registry);
 
-    // The day-scoped calc on day 2 sees ONLY the exit -> phantom raw proceeds 2 * 3.10 * 100 = 620.
-    BigDecimal dayScoped = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 5, 15));
-    assertThat(dayScoped).isEqualByComparingTo("620.00"); // documented phantom gain (#276 §4)
-
-    // The all-time calc matches the real basis -> 2 * (3.10 - 2.30) * 100 = 160.
-    BigDecimal allTime = svc.computeRealizedPnlAllTime("dev", "copytrade-v1");
-    assertThat(allTime).isEqualByComparingTo("160.00");
+    assertThat(unconfigured.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("0");
+    assertThat(unconfigured.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 6, 29)))
+        .isEqualByComparingTo("0");
   }
 
-  @Test
-  void allTime_dramLiveLoss_matchesPriorDayBasis() {
-    // Live prod_real 2026-06-29: bought 3 DRAM @ 2.3533 on 6/26, sold 2 @ 1.84 on 6/29.
-    insertAudit(
-        "EntryFilled",
-        "2026-06-26T14:00:00Z",
-        "{\"avg_fill_price\":\"2.3533\",\"filled_qty\":3,\"option_symbol\":\"DRAM  260717C00030000\"}");
-    insertAudit(
-        "PartialExitFilled",
-        "2026-06-29T18:00:00Z",
-        "{\"avg_fill_price\":\"1.84\",\"qty_filled\":2,\"option_symbol\":\"DRAM  260717C00030000\"}");
-
-    BigDecimal allTime = svc.computeRealizedPnlAllTime("dev", "copytrade-v1");
-    assertThat(allTime).isEqualByComparingTo("-102.66"); // 2 * (1.84 - 2.3533) * 100
-  }
-
-  private void insertAudit(String kind, String occurredAtIso, String subjectJson) {
+  private void insert(
+      String side,
+      String optionSymbol,
+      Integer qty,
+      String state,
+      Integer filledQty,
+      String avgFillPrice,
+      String filledAtIso) {
     dsl.execute(
-        "INSERT INTO audit_log (tenant_id, strategy_id, event_id, occurred_at, kind, subject)"
-            + " VALUES (?, ?, ?, ?::timestamptz, ?, ?::jsonb)",
-        "dev",
-        "copytrade-v1",
+        "INSERT INTO order_intent_journal (tenant_id, strategy_id, intent_key, option_symbol,"
+            + " side, qty, state, filled_qty, avg_fill_price, filled_at) VALUES (?, ?, ?, ?, ?, ?,"
+            + " ?, ?, ?::numeric, ?::timestamptz)",
+        TENANT,
+        STRATEGY,
         UUID.randomUUID(),
-        occurredAtIso,
-        kind,
-        subjectJson);
+        optionSymbol,
+        side,
+        qty,
+        state,
+        filledQty,
+        avgFillPrice,
+        filledAtIso);
   }
 }
