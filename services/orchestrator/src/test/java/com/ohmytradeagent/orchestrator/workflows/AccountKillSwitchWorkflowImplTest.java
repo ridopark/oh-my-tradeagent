@@ -526,6 +526,111 @@ class AccountKillSwitchWorkflowImplTest {
     verify(accountSnapshot, never()).accountSnapshot(any());
   }
 
+  // ---------- cap-inactive observability alert (PR #504 follow-up) ----------
+
+  // pct configured + SOD equity unavailable for >= INACTIVE_ALERT_TICKS consecutive ticks => emit
+  // exactly ONE AccountKillSwitchCapInactive audit (the Discord alert trigger), NOT one per tick.
+  @Test
+  void pctConfigured_sodEquityDownForNTicks_emitsCapInactiveOnce() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    when(accountSnapshot.accountSnapshot(any()))
+        .thenThrow(new IllegalStateException("equity_unavailable"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-cap-inactive");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Run well past INACTIVE_ALERT_TICKS (3) but inside the re-page window (30): exactly one alert.
+    env.sleep(Duration.ofSeconds(8 * 60));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("AccountKillSwitchCapInactive")).isEqualTo(1L);
+    // Recovery not yet reached.
+    assertThat(countKind("AccountKillSwitchCapReArmed")).isEqualTo(0L);
+  }
+
+  // A single transient defer (fewer than INACTIVE_ALERT_TICKS) must NOT alert.
+  @Test
+  void pctConfigured_singleTransientDefer_doesNotAlert() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    // Fail the FIRST snapshot, then succeed: equity becomes available, cap arms — counter never
+    // reaches the alert threshold.
+    when(accountSnapshot.accountSnapshot(any()))
+        .thenThrow(new IllegalStateException("blip"))
+        .thenReturn(snapshot(new BigDecimal("5000")));
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-transient");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(5 * 60));
+
+    assertThat(countKind("AccountKillSwitchCapInactive")).isEqualTo(0L);
+  }
+
+  // Recovery: after alerting inactive, equity comes back => cap arms => emit ONE re-arm audit and
+  // reset, so a subsequent outage can alert inactive again (counter reset proven by re-alert).
+  @Test
+  void capInactiveThenRecovers_emitsReArmAndResetsCounter() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+    // Equity DOWN on every call (defer every tick) — drive by time, not call-count, since the
+    // 3-attempt retry policy inflates per-tick call counts.
+    when(accountSnapshot.accountSnapshot(any())).thenThrow(new IllegalStateException("down"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-recovers");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Past INACTIVE_ALERT_TICKS -> one inactive alert.
+    env.sleep(Duration.ofSeconds(6 * 60));
+    assertThat(countKind("AccountKillSwitchCapInactive")).isEqualTo(1L);
+
+    // Equity recovers -> the next arm tick emits the re-arm audit and resets the counter. Use
+    // doReturn (not when(...).thenReturn) to re-stub a currently-throwing mock without invoking it.
+    Mockito.doReturn(snapshot(new BigDecimal("5000"))).when(accountSnapshot).accountSnapshot(any());
+    env.sleep(Duration.ofSeconds(3 * 60));
+
+    assertThat(countKind("AccountKillSwitchCapReArmed")).isEqualTo(1L);
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+  }
+
+  // pct NOT configured (absolute-only, or nothing) => never alerts, no behavior change. Here the
+  // absolute cap is set and the book is empty: the cap arms every tick, never inactive.
+  @Test
+  void pctNotConfigured_neverAlertsInactive() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-abs-noalert");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(8 * 60));
+
+    assertThat(countKind("AccountKillSwitchCapInactive")).isEqualTo(0L);
+    assertThat(countKind("AccountKillSwitchCapReArmed")).isEqualTo(0L);
+  }
+
+  // (b) An unroutable/bare broker_target must DEGRADE to a defer (no throw, no heartbeat error
+  // spam) and feed the inactive counter — proving the stub-build/fromValue moved inside the try.
+  @Test
+  void bareBrokerTarget_degradesToDeferAndFeedsInactiveCounter() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    // A legacy bare target: ExecActivitiesFactory.taskQueueFor rejects it (no worker polls
+    // broker-paper); pre-fix this threw out of captureSodEquity -> heartbeat error. Now it defers.
+    when(tenantConfig.tenantBrokerTarget(anyString())).thenReturn("paper");
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-bare-target");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(8 * 60));
+
+    // No heartbeat-error spam (the bare target degraded inside captureSodEquity, not at run()).
+    assertThat(countKind("KillSwitchHeartbeatError")).isEqualTo(0L);
+    // The defer fed the inactive counter and crossed the threshold -> exactly one inactive alert.
+    assertThat(countKind("AccountKillSwitchCapInactive")).isEqualTo(1L);
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+  }
+
   // ---------- helpers ----------
 
   private static AccountSnapshotResult snapshot(BigDecimal equity) {
@@ -599,5 +704,12 @@ class AccountKillSwitchWorkflowImplTest {
         .filter(e -> kind.equals(e.getKind()))
         .reduce((a, b) -> b)
         .orElseThrow(() -> new AssertionError("no audit event with kind=" + kind));
+  }
+
+  /** Counts audit events of {@code kind} logged so far (0 if none) — never throws. */
+  private long countKind(String kind) {
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    Mockito.verify(audit, Mockito.atLeast(0)).log(captor.capture());
+    return captor.getAllValues().stream().filter(e -> kind.equals(e.getKind())).count();
   }
 }
