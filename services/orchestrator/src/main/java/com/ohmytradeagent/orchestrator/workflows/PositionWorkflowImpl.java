@@ -407,6 +407,32 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       "partial-exit-cancel-terminal-state-reconcile-v1";
 
   /**
+   * Phase 1 (PLAN-2026-06-30-flatten-fillrace-and-killswitch-realized) replay gate. Generalizes the
+   * proven F1/#503 broker-authoritative-reconcile pattern from {@link
+   * #processOne(PartialExitRequest)}'s timeout branch to the FLATTEN path. Pre-this-patch the
+   * flatten TTL-timeout branch (and the #481 next-session retry loop) awaited ONLY on {@code
+   * lastFillEvent}: on timeout it best-effort {@code exec.cancelOrder(flattenIntentKey)} and
+   * DISCARDED the return, then emitted {@code EodForceFlattenFailed} and stayed alive. If the
+   * broker had actually FILLED the flatten SELL but the async {@code onFill} signal was lost/late,
+   * {@code remainingQty} never zeroed → the PositionWorkflow stayed phantom-alive and the
+   * chandelier re-fired the flatten forever (the 2026-06-30 DRAM/INTC/TSLA incident). v&gt;=1
+   * captures the cancel return and reconciles the AUTHORITATIVE broker terminal state via {@link
+   * #terminalFillFrom(OrderIntentResult)} (defense-in-depth {@code exec.getOrderStatus} fallback
+   * only when the cancel did not surface the fill AND no {@code onFill} buffered), books it through
+   * the existing {@link #emitExitFill(String, FillSignalPayload)} so exactly ONE PartialExitFilled
+   * is emitted and {@code remainingQty} decrements from broker truth, and returns {@code true} when
+   * {@code remainingQty == 0} to break the re-arm loop. v=DEFAULT_VERSION (in-flight pre-this-patch
+   * workflows — including the already-stuck DRAM/INTC/TSLA lots) keep the legacy discard-and-stay-
+   * alive: the ONLY new commands ({@code getOrderStatus} call + the synthesized PartialExitFilled /
+   * {@code kindDone} emits) are strictly behind v&gt;=1, and capturing the existing {@code
+   * cancelOrder} return adds no command, so legacy flatten-timeout histories replay
+   * byte-identically (operator follow-up #1: the deploy does NOT retroactively un-stick them).
+   * Rolls independently of the sibling flatten markers.
+   */
+  private static final String VERSION_FLATTEN_CANCEL_TERMINAL_RECONCILE =
+      "flatten-cancel-terminal-state-reconcile-v1";
+
+  /**
    * B2 (PLAN-exit-place-duplicate-422-crash) replay gate. Pre-this-patch the exit {@code
    * exec.placeOrder(intent)} inside {@link #processOne(PartialExitRequest)} was UNCAUGHT: a
    * non-retryable {@code ApplicationFailure} (e.g. the duplicate-client_order_id 422 misclassified
@@ -748,6 +774,24 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private boolean retryFlattenArmed;
 
   private int flattenRetrySessions;
+
+  /**
+   * Phase 1 (PLAN-2026-06-30) review fix: the SHARED per-flatten-key booked ledger. Both reconcile
+   * sites — {@link #flattenRemaining(String)}'s TTL-timeout branch AND the run()-tail #481
+   * retry-loop reconcile — poll the SAME flatten intent_key via the cancel-return / {@code
+   * getOrderStatus}, which reports the resting order's CUMULATIVE filledQty. Booking the cumulative
+   * qty at each site independently double-counts one broker fill (over-decrements {@code
+   * remainingQty}, emits two PartialExitFilled for one fill, and can drive {@code remainingQty}
+   * NEGATIVE). This (key, qty) pair records how much of the CURRENT key each site has already
+   * booked so the other site books only the un-booked delta. Only one flatten key is active at a
+   * time (a fresh :retry-N key rolls in on {@code flattenRetrySessions++}), so a single pair
+   * suffices. The ledger resets whenever the active key changes (see {@link #bookFlattenDelta}).
+   * Both default null/0 and are written only under {@link
+   * #VERSION_FLATTEN_CANCEL_TERMINAL_RECONCILE} v&gt;=1, so legacy histories replay unchanged.
+   */
+  private String flattenBookedKey;
+
+  private long flattenBookedQty;
 
   /**
    * Phase 1 (PLAN-2026-06-25-trading-remediation): the failed-to-place partial-target exit latched
@@ -1290,6 +1334,22 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         // The gate is read ONCE here, outside the retry loop, so the command count is stable.
         int retryVersion =
             Workflow.getVersion(VERSION_FLATTEN_RETRY_NEXT_SESSION, Workflow.DEFAULT_VERSION, 1);
+        // Phase 1 (PLAN-2026-06-30): read the broker-reconcile gate ONCE here, outside the loop, so
+        // the command count is stable (mirrors retryVersion above and the flattenRemaining read).
+        int flattenReconcileVersion =
+            Workflow.getVersion(
+                VERSION_FLATTEN_CANCEL_TERMINAL_RECONCILE, Workflow.DEFAULT_VERSION, 1);
+        // Guardrail #5 (cumulative-vs-delta): getOrderStatus returns the resting order's CUMULATIVE
+        // filledQty. An onFill drain (below) may ALREADY have booked a partial of THIS key, and —
+        // the review-fix root cause — flattenRemaining's OWN timeout-branch reconcile may have
+        // already booked a partial of this SAME key before the loop was even entered. Booking the
+        // cumulative qty on top would DOUBLE-count → over-decrement remainingQty → over-sell /
+        // naked
+        // short (or drive remainingQty negative → PositionClosed with remaining < 0). Both this
+        // site
+        // and flattenRemaining now share the instance-scoped flattenBookedKey/flattenBookedQty
+        // ledger (via bookFlattenDelta), so each books only the positive un-booked delta of the
+        // CURRENT key; the ledger resets on a key roll (fresh :retry-N placement).
         // Stay ALIVE: block until a late fill (delivered via onFill -> a subsequent flatten cycle)
         // or some other path drains the lot. The bounded limit is resting at the broker; we never
         // emit PositionClosed with remaining > 0. Under v>=1 a next-session timer also wakes the
@@ -1313,17 +1373,82 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                       retryFlattenArmed = true;
                       return null;
                     });
+            // The intent_key of the order currently resting at the broker: <wf>:exit:flatten-
+            // <reason>[:retry-N], N = flattenRetrySessions at placement. Guardrail #1: computed
+            // with
+            // the CURRENT (pre-increment) flattenRetrySessions so it matches the order actually
+            // resting. Used by BOTH the onFill drain and the getOrderStatus reconcile below to key
+            // the shared booked ledger; getting it wrong would reconcile the WRONG key while a live
+            // SELL still rests → double SELL → naked short.
+            String restingKey =
+                Workflow.getInfo().getWorkflowId()
+                    + ":exit:flatten-"
+                    + reason
+                    + (flattenRetrySessions > 0 ? ":retry-" + flattenRetrySessions : "");
             // Wake on either a late fill of the resting order OR the next-session retry timer.
             Workflow.await(() -> lastFillEvent != null || retryFlattenArmed);
             if (lastFillEvent != null) {
               // A late fill drained (some of) the resting order before the next session — apply it
-              // and re-evaluate; no retry needed for what already filled.
+              // and re-evaluate; no retry needed for what already filled. Advance the shared ledger
+              // for THIS key by the incremental onFill qty (resetting on a key roll) so a
+              // subsequent
+              // getOrderStatus reconcile of the SAME key — here OR back in flattenRemaining — books
+              // only the delta, not the cumulative total.
+              if (!restingKey.equals(flattenBookedKey)) {
+                flattenBookedKey = restingKey;
+                flattenBookedQty = 0L;
+              }
+              flattenBookedQty += lastFillEvent.getFilledQty();
               emitExitFill("flatten-" + reason, lastFillEvent);
               lastFillEvent = null;
               continue;
             }
-            // Next-session timer woke us with the lot still unfilled: re-attempt the flatten.
+            // Phase 1 (PLAN-2026-06-30): the next-session timer woke us with lastFillEvent == null.
+            // Before spending a retry (re-placing a NEW live SELL), reconcile broker truth on the
+            // RESTING order — the onFill for its fill may have been lost/late.
+            boolean bookedProgressThisPoll = false;
+            if (flattenReconcileVersion >= 1 && lastFillEvent == null) {
+              OrderIntentResult restingStatus = null;
+              try {
+                restingStatus = exec.getOrderStatus(restingKey);
+              } catch (RuntimeException ignored) {
+                // Best-effort; a failed recheck falls through to the normal retry below.
+              }
+              FillSignalPayload terminalFill = terminalFillFrom(restingStatus);
+              if (terminalFill != null) {
+                // Review fix: book ONLY the un-booked delta of this key's CUMULATIVE fill via the
+                // shared ledger (clamped to remainingQty, lastFillEvent cleared inside). delta may
+                // be 0 when the fill was already fully accounted (booked by an onFill drain or by
+                // flattenRemaining's own reconcile of this SAME key).
+                long booked = bookFlattenDelta(reason, restingKey, terminalFill);
+                bookedProgressThisPoll = booked > 0;
+              }
+            }
+            // Blocker B fix: only skip the retry (continue) when there was REAL progress this poll
+            // (delta > 0 → the resting order advanced) OR the lot is now fully drained
+            // (remainingQty == 0 → the outer while exits and PositionClosed emits). When the
+            // resting
+            // order is TERMINAL (e.g. CANCELLED-with-partial-fill, so its cumulative filledQty
+            // never
+            // changes again) and its fill is fully accounted (delta == 0) but a residual remains,
+            // do
+            // NOT poll it forever — fall through to the genuine retry path below and re-place a
+            // FRESH order for the residual under a NEW key. Otherwise flattenRetrySessions would
+            // never advance and the residual would be stuck (the exact "loops forever, never
+            // closes"
+            // failure this PR eliminates, moved down a level).
+            if (bookedProgressThisPoll || remainingQty == 0) {
+              // Re-evaluate remainingQty at the loop top WITHOUT incrementing flattenRetrySessions
+              // or re-placing a new flatten order — a stuck lot self-heals from broker truth.
+              continue;
+            }
+            // Next-session timer woke us with the lot still genuinely unfilled (or the resting
+            // order
+            // is terminal and cannot fill further): re-attempt the flatten. The key rolls to
+            // :retry-<new N>, so reset the shared per-key booked ledger.
             flattenRetrySessions++;
+            flattenBookedKey = null;
+            flattenBookedQty = 0L;
             retryFlattenArmed = false;
             auditLog(
                 KIND_FLATTEN_RETRY_SCHEDULED,
@@ -2660,6 +2785,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // branch byte-identically (the only new command on v=0 is this appended marker).
     int flattenAwaitVersion =
         Workflow.getVersion(VERSION_FLATTEN_FILL_AWAIT, Workflow.DEFAULT_VERSION, 1);
+    // Phase 1 (PLAN-2026-06-30): read the broker-reconcile gate ONCE here, before any branch, so
+    // the
+    // command count is stable on every flattenRemaining invocation (mirrors how processOne captures
+    // cancelTerminalReconcileVersion once). The reconcile itself lives inside the
+    // flattenAwaitVersion
+    // >= 1 timeout branch below — the only path that can leave a filled-but-signal-lost SELL stuck.
+    int flattenCancelReconcileVersion =
+        Workflow.getVersion(VERSION_FLATTEN_CANCEL_TERMINAL_RECONCILE, Workflow.DEFAULT_VERSION, 1);
     if (flattenAwaitVersion == Workflow.DEFAULT_VERSION) {
       // LEGACY: place a MARKET flatten, zero remainingQty at placement SUCCESS, audit kindDone.
       OrderIntent intent = flattenIntent(flattenIntentKey, reason);
@@ -2766,15 +2899,90 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       return false;
     }
 
-    // TTL timeout — the bounded limit rests UNFILLED. Best-effort cancel, emit a loud failure
-    // audit,
-    // and stay ALIVE (never zero remainingQty, never emit PositionClosed). The caller re-arms / the
-    // main loop applies a late fill of the resting order.
+    // TTL timeout — the bounded limit rests UNFILLED (as far as the onFill signal knows).
+    // Best-effort
+    // cancel. Phase 1 (PLAN-2026-06-30): capture the cancel return (previously DISCARDED). The exec
+    // cancel-on-filled race returns state=FILLED with the broker-confirmed filledQty/avgFillPrice
+    // when the SELL had ALREADY_FILLED at cancel time — the authoritative terminal state that the
+    // lost/late onFill never surfaced. Capturing the existing return adds NO command, so v=0
+    // replays
+    // byte-identically.
+    OrderIntentResult cancelled = null;
     try {
-      exec.cancelOrder(flattenIntentKey);
+      cancelled = exec.cancelOrder(flattenIntentKey);
     } catch (RuntimeException ignored) {
       // Best-effort; reconciliation closes the loop on the real broker-side state.
     }
+    // Phase 1 (VERSION_FLATTEN_CANCEL_TERMINAL_RECONCILE v>=1): reconcile the AUTHORITATIVE broker
+    // terminal state surfaced by the cancel BEFORE emitting the loud failure + staying alive. If
+    // the
+    // cancel reports FILLED, the flatten SELL actually sold — synthesize a FillSignalPayload from
+    // broker truth and route it through the SHARED bookFlattenDelta so exactly ONE
+    // PartialExitFilled
+    // is emitted for the un-booked delta (enters realized P&L) and remainingQty decrements from the
+    // broker fill.
+    // Cumulative-vs-delta (guardrail #5): terminalFillFrom carries the order's CUMULATIVE
+    // filledQty.
+    // Review fix (PLAN-2026-06-30): the #481 retry loop later polls this SAME flattenIntentKey via
+    // getOrderStatus; if this branch booked the raw cumulative qty and then the retry loop
+    // re-polled
+    // and booked it again, one broker fill would be double-counted (and a large enough double-book
+    // drives remainingQty NEGATIVE → PositionClosed with remaining < 0). Route through the shared
+    // flattenBookedKey/flattenBookedQty ledger so BOTH sites book only the un-booked delta of this
+    // key.
+    if (flattenCancelReconcileVersion >= 1) {
+      FillSignalPayload terminalFill = terminalFillFrom(cancelled);
+      // Defense-in-depth getOrderStatus fallback ONLY when the cancel did not surface the fill AND
+      // no
+      // onFill buffered for it (guardrail #4). If lastFillEvent != null we would not be in this
+      // timeout branch at all; the guard is belt-and-suspenders — it also avoids a wasted
+      // round-trip
+      // and prevents surfacing the SAME fill a second time.
+      if (terminalFill == null && lastFillEvent == null) {
+        OrderIntentResult status = null;
+        try {
+          status = exec.getOrderStatus(flattenIntentKey);
+        } catch (RuntimeException ignored) {
+          // Best-effort authoritative recheck; absence of a terminal fill leaves the genuine
+          // stay-alive path below to handle a truly-unfilled rest.
+        }
+        terminalFill = terminalFillFrom(status);
+      }
+      if (terminalFill != null) {
+        // R-AA-6 / review fix: book ONLY the un-booked delta of this key via the shared ledger
+        // (clamped to remainingQty, lastFillEvent cleared inside bookFlattenDelta). bookedThisFill
+        // == 0 means the fill was already fully accounted (e.g. via an onFill drain) — the residual
+        // still stays alive below.
+        long bookedThisFill = bookFlattenDelta(reason, flattenIntentKey, terminalFill);
+        flattenAwaitingLateFill = false;
+        if (remainingQty == 0) {
+          // Guardrail #2: the terminal lifecycle marker is gated on POST-decrement remainingQty ==
+          // 0
+          // ONLY (never on terminalFill != null). Mirror the success block above; run() emits
+          // PositionClosed once flattenRemaining returns true and remainingQty == 0 breaks its
+          // loop.
+          auditLog(
+              kindDone,
+              subject(
+                  "entry_signal_id",
+                  input.getEntrySignalId(),
+                  "contract_symbol",
+                  input.getContractSymbol(),
+                  "qty_flattened",
+                  bookedThisFill,
+                  "reason",
+                  reason));
+          return true;
+        }
+        // Guardrail #2: partial fill — residual remains. Stay alive for it (mirror the success
+        // block's residual branch); do NOT emit the terminal lifecycle marker.
+        flattenAwaitingLateFill = true;
+        return false;
+      }
+    }
+    // Guardrail #7: ONLY a genuine unfilled rest (terminalFill == null) reaches here. Emit the loud
+    // failure audit and stay ALIVE (never zero remainingQty, never emit PositionClosed). The caller
+    // re-arms / the main loop applies a late fill of the resting order.
     auditLog(
         KIND_EOD_FORCE_FLATTEN_FAILED,
         subject(
@@ -3072,6 +3280,55 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         .withAvgFillPrice(
             result.getAvgFillPrice() != null ? result.getAvgFillPrice() : BigDecimal.ZERO)
         .withFilledAt(workflowNow());
+  }
+
+  /**
+   * Phase 1 (PLAN-2026-06-30) review fix: book ONLY the un-booked delta of a flatten intent_key's
+   * CUMULATIVE broker fill into realized P&L, using the shared {@link #flattenBookedKey}/{@link
+   * #flattenBookedQty} ledger so the two reconcile sites (flattenRemaining's TTL-timeout branch and
+   * the #481 retry-loop) never double-book the SAME broker fill.
+   *
+   * <p>{@code terminalFill.getFilledQty()} is CUMULATIVE for {@code intentKey}. We reset the ledger
+   * to 0 whenever the active key changes (a fresh :retry-N placement, or a first sighting), then
+   * compute {@code delta = cumulative - alreadyBookedForThisKey}. Only a positive delta is
+   * bookable. Belt-and-suspenders clamp: never book more than the outstanding {@code remainingQty},
+   * so a stale/duplicate broker report can never drive {@code remainingQty} negative (which would
+   * break R-AA-1 by emitting PositionClosed with remaining &lt; 0). After booking we advance the
+   * ledger by the booked qty and clear {@code lastFillEvent} (guardrail #3) so the onFill drains do
+   * not re-book the same fill.
+   *
+   * @return the qty actually booked (0 when nothing new to book — the caller uses this to decide
+   *     between "real progress this poll" and "fully accounted, residual remains").
+   */
+  private long bookFlattenDelta(String reason, String intentKey, FillSignalPayload terminalFill) {
+    if (!intentKey.equals(flattenBookedKey)) {
+      // Active key rolled (fresh :retry-N) or first sighting: this key's cumulative count starts at
+      // 0.
+      flattenBookedKey = intentKey;
+      flattenBookedQty = 0L;
+    }
+    long delta = terminalFill.getFilledQty() - flattenBookedQty;
+    if (delta <= 0) {
+      return 0L;
+    }
+    // Belt-and-suspenders: a stale/duplicate broker report can report MORE than the lot; never book
+    // past the outstanding remainingQty so remainingQty can never go negative.
+    long bookable = Math.min(delta, remainingQty);
+    if (bookable <= 0) {
+      return 0L;
+    }
+    flattenBookedQty += bookable;
+    emitExitFill(
+        "flatten-" + reason,
+        new FillSignalPayload()
+            .withBrokerOrderId(terminalFill.getBrokerOrderId())
+            .withFilledQty(bookable)
+            .withAvgFillPrice(terminalFill.getAvgFillPrice())
+            .withFilledAt(terminalFill.getFilledAt()));
+    // Guardrail #3: clear lastFillEvent so the L1110/L1318/L1356 onFill drains do NOT re-book this
+    // same broker fill (double-decrement).
+    lastFillEvent = null;
+    return bookable;
   }
 
   /**

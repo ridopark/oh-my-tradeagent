@@ -791,6 +791,385 @@ class PositionWorkflowImplTest {
         .isEqualTo(5L);
   }
 
+  // ---------- Phase 1 (PLAN-2026-06-30): flatten broker-authoritative terminal-state reconcile
+  // ----------
+
+  /**
+   * Phase 1 criterion 2 (the core flatten fill-race fix): the flatten bounded limit rests, its TTL
+   * elapses with NO onFill delivered, but the broker had ALREADY filled the SELL. {@code
+   * exec.cancelOrder} surfaces the authoritative terminal state (state=FILLED, positive filledQty +
+   * avgFillPrice — the exec cancel-on-filled race). The workflow must reconcile it: book exactly
+   * ONE PartialExitFilled (qty = broker qty, avg carried), zero remainingQty, emit the terminal
+   * EodForceFlattened + PositionClosed markers ONCE, emit NO EodForceFlattenFailed, and CLOSE (the
+   * caller does not re-arm the chandelier flatten loop). Pre-Phase-1 the cancel return was
+   * discarded → remainingQty stayed 5 → phantom-stuck → infinite EodForceFlattenFailed
+   * (DRAM/INTC/TSLA).
+   */
+  @Test
+  void flattenTimeout_cancelReturnsFilled_noOnFill_reconcilesAndCloses() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // The bounded flatten rests; on TTL-timeout cancel the broker reports it ALREADY_FILLED (5 @
+    // 2.49) — the authoritative terminal state the lost/late onFill never surfaced.
+    when(exec.cancelOrder(anyString())).thenReturn(filledCancelResult(5L, new BigDecimal("2.49")));
+
+    PositionWorkflow stub = newStub("pos-flatten-cancel-filled");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L); // short TTL so the unfilled-await elapses fast under virtual time
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // EOD fires -> bounded flatten placed -> NO onFill ever delivered -> TTL elapses -> cancel
+    // surfaces the broker fill -> reconcile books it -> remainingQty == 0 -> close.
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    // The workflow closed cleanly from broker truth alone (no onFill signal was sent).
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-flatten-cancel-filled");
+
+    // Exactly ONE PartialExitFilled carrying the broker qty + price (enters realized P&L).
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills).hasSize(1);
+    assertThat(asLong(fills.get(0).getSubject().get("qty_filled"))).isEqualTo(5L);
+    assertThat(((Number) fills.get(0).getSubject().get("avg_fill_price")).doubleValue())
+        .isEqualTo(2.49);
+    // remainingQty zeroed; terminal lifecycle markers emitted once; NO failure audit.
+    assertThat(captureAll("EodForceFlattened")).hasSize(1);
+    assertThat(captureAll("PositionClosed")).hasSize(1);
+    assertThat(captureAll("EodForceFlattenFailed")).isEmpty();
+    // Broker-authoritative close needed no getOrderStatus fallback (cancel surfaced the fill).
+    verify(exec, never()).getOrderStatus(anyString());
+  }
+
+  /**
+   * Phase 1 criterion 3 (defense-in-depth getOrderStatus fallback): {@code cancelOrder} returns
+   * CANCELLED/no-fill (the cancel raced ahead of the journal), but {@code getOrderStatus} reports
+   * the order FILLED. The reconcile falls back to getOrderStatus and closes exactly as criterion 2.
+   */
+  @Test
+  void flattenTimeout_cancelNoFill_getOrderStatusFilled_reconcilesAndCloses() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString()))
+        .thenReturn(cancelledResult()); // cancel did not surface fill
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(filledCancelResult(5L, new BigDecimal("2.47")));
+
+    PositionWorkflow stub = newStub("pos-flatten-status-filled");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-flatten-status-filled");
+
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills).hasSize(1);
+    assertThat(asLong(fills.get(0).getSubject().get("qty_filled"))).isEqualTo(5L);
+    assertThat(((Number) fills.get(0).getSubject().get("avg_fill_price")).doubleValue())
+        .isEqualTo(2.47);
+    assertThat(captureAll("PositionClosed")).hasSize(1);
+    assertThat(captureAll("EodForceFlattenFailed")).isEmpty();
+    // Fallback WAS used (cancel returned no fill).
+    verify(exec, atLeastOnce()).getOrderStatus(anyString());
+  }
+
+  /**
+   * Phase 1 criterion 3 (fallback-skip): when a late onFill IS buffered (lastFillEvent != null) the
+   * existing success block books it and returns BEFORE the timeout branch — so getOrderStatus is
+   * NEVER called and the fill is booked exactly once. Proves the {@code terminalFill == null &&
+   * lastFillEvent == null} guard (guardrail #4) avoids a wasted round-trip / a second surfacing.
+   */
+  @Test
+  void flattenTimeout_onFillBuffered_skipsGetOrderStatusFallback() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-flatten-onfill-skip");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // EOD fires -> bounded flatten placed -> a normal onFill drains it via the success block.
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.50")));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-flatten-onfill-skip");
+
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills).hasSize(1);
+    assertThat(asLong(fills.get(0).getSubject().get("qty_filled"))).isEqualTo(5L);
+    // The success block handled the fill; the timeout branch (and its getOrderStatus fallback) was
+    // never reached.
+    verify(exec, never()).getOrderStatus(anyString());
+    assertThat(captureAll("EodForceFlattenFailed")).isEmpty();
+  }
+
+  /**
+   * Phase 1 criterion 4 (old safety preserved): a GENUINELY unfilled rest — both {@code
+   * cancelOrder} and {@code getOrderStatus} report no fill. The workflow must emit exactly one
+   * EodForceFlattenFailed, set flattenAwaitingLateFill, leave remainingQty unchanged, and stay
+   * ALIVE (flattenRemaining returns false, no PositionClosed) — identical to the pre-Phase-1
+   * behavior.
+   */
+  @Test
+  void flattenTimeout_genuinelyUnfilled_staysAliveNoReconcile() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult()); // no fill
+    when(exec.getOrderStatus(anyString())).thenReturn(submittedResult()); // no fill
+    // Far-out next open so the retry timer cannot fire and re-place during the assertion window.
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofHours(12));
+
+    PositionWorkflow stub = newStub("pos-flatten-genuine-timeout");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(2));
+    waitForPlaceOrderCount(1);
+
+    // Still RUNNING, remainingQty unchanged, exactly one loud failure audit, no PositionClosed and
+    // no fill booked.
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    AuditEvent failed = captureKind("EodForceFlattenFailed");
+    assertThat(failed.getSubject())
+        .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
+    assertThat(captureAll("EodForceFlattenFailed")).hasSize(1);
+    assertThat(captureAll("PositionClosed")).isEmpty();
+    assertThat(captureAll("PartialExitFilled")).isEmpty();
+  }
+
+  /**
+   * Phase 1 criterion 5 (the #481 retry loop reconciles first): the first flatten attempt rests
+   * unfilled (EodForceFlattenFailed), then the next-session timer wakes with lastFillEvent == null
+   * but the RESTING order has ALREADY filled at the broker. The retry loop must reconcile broker
+   * truth via getOrderStatus BEFORE spending a retry: book the fill and CLOSE — WITHOUT emitting
+   * FlattenRetryScheduled and WITHOUT re-placing a new flatten order (no naked-short second SELL).
+   */
+  @Test
+  void retryLoop_nextSessionWakeup_restingOrderFilledAtBroker_reconcilesWithoutRetry()
+      throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofMinutes(5));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // First timeout: cancel reports no fill (genuine unfilled) so the loop stays alive and arms the
+    // next-session retry timer.
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+    // getOrderStatus is called TWICE: (1) the timeout-branch fallback at the FIRST attempt — must
+    // report NO fill so that attempt genuinely fails into the retry loop; (2) the retry-loop
+    // reconcile at the next-session wakeup — reports FILLED (5 @ 2.46), the resting order whose
+    // onFill was lost. Sequence the mock so the first call is unfilled and every later call is
+    // filled.
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(submittedResult())
+        .thenReturn(filledCancelResult(5L, new BigDecimal("2.46")));
+
+    PositionWorkflow stub = newStub("pos-flatten-retry-reconcile");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // EOD fires -> flatten placed (#1) -> TTL elapses; cancel + getOrderStatus both no-fill at
+    // timeout -> loud failure + arm the next-session retry timer.
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    captureKind("EodForceFlattenFailed");
+
+    // Advance past the next-session open. The retry-loop reconcile now finds the resting order
+    // FILLED and books it -> close WITHOUT a retry.
+    env.sleep(Duration.ofMinutes(6));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-flatten-retry-reconcile");
+
+    // Exactly the ORIGINAL placement — no re-placed flatten order (no second live SELL).
+    verify(exec, times(1)).placeOrder(any());
+    assertThat(captureAll("FlattenRetryScheduled")).isEmpty();
+    // The stuck lot self-healed from broker truth.
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills).hasSize(1);
+    assertThat(asLong(fills.get(0).getSubject().get("qty_filled"))).isEqualTo(5L);
+    assertThat(captureAll("PositionClosed")).hasSize(1);
+  }
+
+  /**
+   * Review fix (PLAN-2026-06-30) — PARTIAL reconcile in flattenRemaining's TTL-timeout branch. The
+   * bounded flatten of a 5-lot rests, its TTL elapses with NO onFill, and the cancel surfaces a
+   * PARTIAL broker fill (2 of 5). The timeout branch must book exactly ONE PartialExitFilled (qty
+   * 2), decrement remainingQty 5 -> 3, return false, and stay ALIVE — NO PositionClosed, NO
+   * negative remainingQty. (Pre-fix this branch booked the raw cumulative qty as "first-and-only
+   * booking of this key"; the shared ledger now records it so the retry loop cannot re-book it.)
+   */
+  @Test
+  void flattenTimeout_partialCancelFill_booksDeltaOnce_staysAlive() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // Cancel surfaces a PARTIAL broker fill: 2 of the 5-lot filled before cancel.
+    when(exec.cancelOrder(anyString())).thenReturn(filledCancelResult(2L, new BigDecimal("1.90")));
+    // Keep the next open far out so the retry timer cannot fire during the assertion window — the
+    // workflow rests on the residual 3 alive-await, letting us observe the partial-only state.
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofHours(12));
+
+    PositionWorkflow stub = newStub("pos-flatten-partial-alive");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    // Let the partial reconcile settle, then confirm the residual keeps the workflow alive at 3.
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() == 5L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+    assertThat(stub.positionState().remainingQty()).isGreaterThanOrEqualTo(0L);
+
+    // Exactly ONE PartialExitFilled (qty 2) — no double-book; NO terminal close.
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills).hasSize(1);
+    assertThat(asLong(fills.get(0).getSubject().get("qty_filled"))).isEqualTo(2L);
+    assertThat(captureAll("PositionClosed")).isEmpty();
+    assertThat(captureAll("EodForceFlattened")).isEmpty();
+  }
+
+  /**
+   * Review fix (PLAN-2026-06-30) — the retry loop polls the SAME key flattenRemaining already
+   * booked a partial against; it must NOT double-book, and it must ADVANCE (not stall) when the
+   * resting order is terminal-but-fully-accounted. Sequence: flatten #1 (K0) times out, cancel
+   * surfaces a PARTIAL 2-of-5 (booked once, remaining 5 -> 3). Every next-session wakeup then polls
+   * the resting key via getOrderStatus and sees the SAME cumulative 2 -> delta == 0 -> books
+   * NOTHING (no second PartialExitFilled), but because a residual (3) remains it falls through to a
+   * genuine retry (flattenRetrySessions++, fresh :retry-N placement). Retries never fill here, so
+   * the budget is exhausted deterministically -> FlattenRetryExhausted. Asserts: total booked ==
+   * total broker filled (2, no double-count), remainingQty pinned at 3 (never negative), the loop
+   * advanced (FlattenRetryScheduled + a re-placement), and no PositionClosed with a residual.
+   */
+  @Test
+  void retryLoop_pollsSameKeyAsFlattenPartial_noDoubleBook_advancesToExhaustion() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofMinutes(5));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // First cancel (K0 timeout) surfaces the PARTIAL 2-of-5; every later cancel (the :retry-N
+    // timeouts) surfaces NO fill so those retries genuinely rest unfilled.
+    when(exec.cancelOrder(anyString()))
+        .thenReturn(filledCancelResult(2L, new BigDecimal("1.90")))
+        .thenReturn(cancelledResult());
+    // getOrderStatus: the FIRST call is the retry-loop reconcile of K0 — it reports the SAME
+    // cumulative 2 (delta == 0 -> no re-book). Every later call (retry-timeout fallbacks +
+    // subsequent reconciles) reports NO fill so the residual never resolves and the budget
+    // exhausts.
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(filledCancelResult(2L, new BigDecimal("1.90")))
+        .thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-flatten-partial-retry");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    // Drive well past MAX_FLATTEN_RETRY_SESSIONS worth of next-session wakeups (5-min opens).
+    env.sleep(Duration.ofMinutes(40));
+
+    // Wait for the exhaustion audit to land (budget spent, falls to the alive-await).
+    long deadline = System.currentTimeMillis() + 10_000;
+    while (System.currentTimeMillis() < deadline && captureAll("FlattenRetryExhausted").isEmpty()) {
+      Thread.sleep(50);
+    }
+
+    // No double-book: exactly ONE PartialExitFilled, qty 2 == the total broker fill.
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills).hasSize(1);
+    assertThat(asLong(fills.get(0).getSubject().get("qty_filled"))).isEqualTo(2L);
+    // remainingQty pinned at the residual 3 the whole time — never driven negative by a re-book.
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+    // The loop ADVANCED rather than polling K0 forever: it scheduled retries and re-placed fresh
+    // orders (Blocker B fix), and eventually exhausted the budget.
+    assertThat(captureAll("FlattenRetryScheduled")).isNotEmpty();
+    verify(exec, atLeast(2)).placeOrder(any());
+    assertThat(captureAll("FlattenRetryExhausted")).hasSize(1);
+    // Never closed with a residual outstanding (R-AA-1 invariant preserved).
+    assertThat(captureAll("PositionClosed")).isEmpty();
+  }
+
+  /**
+   * Review fix (PLAN-2026-06-30) — the residual re-placed by the retry loop eventually fills via
+   * broker truth, closing the lot with the CORRECT total booked (no double-count). flatten #1 (K0)
+   * times out with a PARTIAL 2-of-5 (booked once, remaining 3). The next-session reconcile of K0
+   * sees cumulative 2 -> delta 0 -> falls through to a fresh :retry-1 placement (K1). That K1
+   * flatten times out with its cancel surfacing the residual 3 filled -> booked once against the
+   * NEW key (ledger reset on the key roll) -> remaining 3 -> 0 -> exactly ONE PositionClosed. Total
+   * booked == 5 == total broker filled (2 + 3), remainingQty never negative.
+   */
+  @Test
+  void retryLoop_residualReplacedAndFilled_closesWithCorrectTotal() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofMinutes(5));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // Cancel #1 (K0 timeout): PARTIAL 2-of-5. Cancel #2 (K1/:retry-1 timeout): the residual 3
+    // fills.
+    when(exec.cancelOrder(anyString()))
+        .thenReturn(filledCancelResult(2L, new BigDecimal("1.90")))
+        .thenReturn(filledCancelResult(3L, new BigDecimal("1.85")));
+    // Only getOrderStatus call is the retry-loop reconcile of K0 -> same cumulative 2 (delta 0).
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(filledCancelResult(2L, new BigDecimal("1.90")));
+
+    PositionWorkflow stub = newStub("pos-flatten-residual-fill");
+    PositionWorkflowInput in = input(5);
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    // Advance past the next-session open so the retry loop reconciles K0 (delta 0) and re-places
+    // K1.
+    env.sleep(Duration.ofMinutes(6));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-flatten-residual-fill");
+
+    // Two PartialExitFilled rows (2 then 3); total booked == 5 == total broker filled (no
+    // double-count).
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills).hasSize(2);
+    assertThat(fills.stream().mapToLong(e -> asLong(e.getSubject().get("qty_filled"))).sum())
+        .isEqualTo(5L);
+    // Exactly one terminal close, gated on remainingQty == 0.
+    List<AuditEvent> closed = captureAll("PositionClosed");
+    assertThat(closed).hasSize(1);
+    assertThat(asLong(closed.get(0).getSubject().get("remaining_qty"))).isEqualTo(0L);
+    // A fresh retry order was re-placed for the residual (the loop advanced past the delta-0 poll).
+    assertThat(captureAll("FlattenRetryScheduled")).isNotEmpty();
+    verify(exec, atLeast(2)).placeOrder(any());
+  }
+
   /**
    * Plan-2A R-AA-3: a CHANDELIER_TRAIL flatten is BOUNDED — it places a marketable LIMIT
    * (limitPrice != null) anchored at/through the live bid and at/above the resolved exit floor.
