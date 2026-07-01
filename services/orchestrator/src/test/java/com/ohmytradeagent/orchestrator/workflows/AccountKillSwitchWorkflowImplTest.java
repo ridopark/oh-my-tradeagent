@@ -22,6 +22,7 @@ import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
+import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AccountKillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
@@ -30,6 +31,7 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
+import com.ohmytradeagent.orchestrator.activities.TenantStrategyBrokerTarget;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateException;
@@ -60,6 +62,7 @@ class AccountKillSwitchWorkflowImplTest {
   private MarketCalendarActivities calendar;
   private TenantConfigActivities tenantConfig;
   private AccountPnlActivities accountPnl;
+  private DailyPnlExecActivity execPnl;
   private AccountKillSwitchCascadeActivities cascade;
   private GetOptionQuoteActivity optionQuote;
   private AccountSnapshotActivity accountSnapshot;
@@ -74,6 +77,7 @@ class AccountKillSwitchWorkflowImplTest {
     calendar = Mockito.mock(MarketCalendarActivities.class);
     tenantConfig = Mockito.mock(TenantConfigActivities.class);
     accountPnl = Mockito.mock(AccountPnlActivities.class);
+    execPnl = Mockito.mock(DailyPnlExecActivity.class);
     cascade = Mockito.mock(AccountKillSwitchCascadeActivities.class);
     optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
     accountSnapshot = Mockito.mock(AccountSnapshotActivity.class);
@@ -85,7 +89,11 @@ class AccountKillSwitchWorkflowImplTest {
     when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
     when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
     when(tenantConfig.tenantBrokerTarget(anyString())).thenReturn(BROKER_TARGET);
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+    // Phase 2: v>=1 sums a per-strategy realized read routed to each strategy's broker queue. By
+    // default the tenant has ONE strategy on alpaca-paper; the exec realized read returns zero.
+    when(accountPnl.tenantStrategyBrokerTargets(anyString()))
+        .thenReturn(List.of(new TenantStrategyBrokerTarget("s1", BROKER_TARGET)));
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
     when(accountPnl.accountOpenBook(anyString())).thenReturn(new AccountOpenBook(List.of(), 0, 0));
     when(cascade.cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString()))
         .thenReturn(0L);
@@ -98,9 +106,14 @@ class AccountKillSwitchWorkflowImplTest {
     Worker mdWorker = env.newWorker(MARKET_DATA_QUEUE);
     mdWorker.registerActivitiesImplementations(optionQuote);
 
-    // AccountSnapshotActivity (SOD equity) is routed to broker-<target> from the workflow stub.
+    // AccountSnapshotActivity (SOD equity) + the v>=1 realized read (DailyPnlExecActivity) both
+    // route to broker-<target> from the workflow stub. Register the exec realized read on BOTH the
+    // paper and live queues here (workers must be created BEFORE env.start()) so the mixed
+    // broker_target tests can route s2 to broker-alpaca-live without a post-start newWorker.
     Worker brokerWorker = env.newWorker(BROKER_QUEUE);
-    brokerWorker.registerActivitiesImplementations(accountSnapshot);
+    brokerWorker.registerActivitiesImplementations(accountSnapshot, execPnl);
+    Worker brokerLiveWorker = env.newWorker("broker-alpaca-live");
+    brokerLiveWorker.registerActivitiesImplementations(execPnl);
 
     env.start();
   }
@@ -117,10 +130,20 @@ class AccountKillSwitchWorkflowImplTest {
   // riskBreach/MARKET flatten to running PositionWorkflows in BOTH strategies.
   @Test
   void heartbeat_twoStrategies_realizedPlusMtmCrossesThreshold_tripsOnceAndCascadesAccountWide() {
-    // Realized -3000 (summed across both strategies inside the activity). Open MTM: two losing
-    // positions, one per strategy, valued (liveBid - entryPremium) * qty * 100.
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
-        .thenReturn(new BigDecimal("-3000"));
+    // Phase 2 (C4): a tenant with TWO strategies on DIFFERENT broker_targets. The account path
+    // routes each per-strategy realized read to its OWN broker queue and sums them:
+    //   s1 (alpaca-paper) realized -1200 + s2 (alpaca-live) realized -1800 = -3000.
+    // The exec activity is registered on both broker queues in setUp; route s2 to the live one.
+    when(accountPnl.tenantStrategyBrokerTargets(anyString()))
+        .thenReturn(
+            List.of(
+                new TenantStrategyBrokerTarget("s1", "alpaca-paper"),
+                new TenantStrategyBrokerTarget("s2", "alpaca-live")));
+    when(execPnl.computeRealizedPnl(eq("dev"), eq("s1"), any()))
+        .thenReturn(new BigDecimal("-1200"));
+    when(execPnl.computeRealizedPnl(eq("dev"), eq("s2"), any()))
+        .thenReturn(new BigDecimal("-1800"));
+    // Open MTM: two losing positions valued (liveBid - entryPremium) * qty * 100.
     when(accountPnl.accountOpenBook(anyString()))
         .thenReturn(
             new AccountOpenBook(
@@ -161,7 +184,7 @@ class AccountKillSwitchWorkflowImplTest {
   // Below threshold: total loss does not cross the cap -> no trip.
   @Test
   void heartbeat_belowThreshold_doesNotTrip() {
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-1000"));
     when(accountPnl.accountOpenBook(anyString()))
         .thenReturn(
@@ -187,7 +210,7 @@ class AccountKillSwitchWorkflowImplTest {
   @Test
   void heartbeat_unsetThreshold_capInert_noTripOnLargeLoss() {
     when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-999999"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-inert");
@@ -198,7 +221,7 @@ class AccountKillSwitchWorkflowImplTest {
     verify(cascade, never())
         .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
     // Inert path short-circuits before any PnL/book read.
-    verify(accountPnl, never()).computeTenantRealizedPnl(anyString(), any());
+    verify(execPnl, never()).computeRealizedPnl(anyString(), anyString(), any());
     verify(accountPnl, never()).accountOpenBook(anyString());
   }
 
@@ -208,7 +231,7 @@ class AccountKillSwitchWorkflowImplTest {
   void heartbeat_quoteUnavailable_failsClosed_doesNotFailOpen() {
     // Realized 0; two positions but BOTH quotes UNAVAILABLE. Combined failures (2 of 2) trips the
     // small-book fail-closed bound.
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
     when(accountPnl.accountOpenBook(anyString()))
         .thenReturn(
             new AccountOpenBook(
@@ -303,7 +326,7 @@ class AccountKillSwitchWorkflowImplTest {
   @Test
   void heartbeat_afterReset_doesNotReTripDuringCooldown_thenReTripsAfter() {
     // A single down position large enough to cross the 5000 cap: (2.00-12.00)*10*100 = -10000.
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
     when(accountPnl.accountOpenBook(anyString()))
         .thenReturn(
             new AccountOpenBook(
@@ -351,7 +374,7 @@ class AccountKillSwitchWorkflowImplTest {
     when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("5000")));
 
     // -1999 > -2000 -> no trip.
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-1999"));
     AccountKillSwitchWorkflow below = newStub("t-dev/account/killswitch-pct-below");
     WorkflowStub.fromTyped(below).start(input());
@@ -359,7 +382,7 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(below.killswitchState().getTripped()).isFalse();
 
     // -2000 <= -2000 -> trip.
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-2000"));
     AccountKillSwitchWorkflow at = newStub("t-dev/account/killswitch-pct-at");
     WorkflowStub.fromTyped(at).start(input());
@@ -376,7 +399,7 @@ class AccountKillSwitchWorkflowImplTest {
     when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
     when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
     when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("5000")));
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-2500"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-pct-precedence");
@@ -391,7 +414,7 @@ class AccountKillSwitchWorkflowImplTest {
   void pctUnset_absoluteStillWorks() {
     when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
     when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-6000"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-abs-only");
@@ -408,7 +431,7 @@ class AccountKillSwitchWorkflowImplTest {
   void bothUnset_inert() {
     when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
     when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-999999"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-both-unset");
@@ -431,7 +454,7 @@ class AccountKillSwitchWorkflowImplTest {
     // Equity read fails (broker outage) -> snapshot throws on every attempt.
     when(accountSnapshot.accountSnapshot(any()))
         .thenThrow(new IllegalStateException("equity_unavailable"));
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-999999"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-equity-down");
@@ -454,7 +477,7 @@ class AccountKillSwitchWorkflowImplTest {
     when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
     when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("5000")));
     // Stay well under the cap so it never trips and the heartbeat keeps looping.
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-snap-once");
     WorkflowStub.fromTyped(stub).start(input());
@@ -502,7 +525,7 @@ class AccountKillSwitchWorkflowImplTest {
     // If the workflow were to (incorrectly) re-read equity, it would get 9999 — proving any trip is
     // off the CARRIED 5000 (threshold 2000), not a fresh read (threshold 3999.6).
     when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("9999")));
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-2000"));
 
     // Carried input as continueAsNew would emit it: v3, sod_equity=5000, same trading day. Built by
@@ -559,7 +582,7 @@ class AccountKillSwitchWorkflowImplTest {
     when(accountSnapshot.accountSnapshot(any()))
         .thenThrow(new IllegalStateException("blip"))
         .thenReturn(snapshot(new BigDecimal("5000")));
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-transient");
     WorkflowStub.fromTyped(stub).start(input());
@@ -574,7 +597,7 @@ class AccountKillSwitchWorkflowImplTest {
   void capInactiveThenRecovers_emitsReArmAndResetsCounter() {
     when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
     when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
-    when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
     // Equity DOWN on every call (defer every tick) — drive by time, not call-count, since the
     // 3-attempt retry policy inflates per-tick call counts.
     when(accountSnapshot.accountSnapshot(any())).thenThrow(new IllegalStateException("down"));
@@ -629,6 +652,54 @@ class AccountKillSwitchWorkflowImplTest {
     // The defer fed the inactive counter and crossed the threshold -> exactly one inactive alert.
     assertThat(countKind("AccountKillSwitchCapInactive")).isEqualTo(1L);
     assertThat(stub.killswitchState().getTripped()).isFalse();
+  }
+
+  // ---------- Phase 2 (C4/G2): account fail-CLOSED on a per-strategy realized read failure
+  // ----------
+
+  // Two strategies on different broker_targets; the SECOND per-strategy realized read throws. G2
+  // FORBIDS a partial sum — the whole tenant compute defers (no trip on a partial/unknown number),
+  // even though the first strategy alone would already cross the cap.
+  @Test
+  void heartbeat_perStrategyRealizedReadFails_failsClosed_noPartialSumNoTrip() {
+    // The exec activity is registered on both broker queues in setUp.
+    when(accountPnl.tenantStrategyBrokerTargets(anyString()))
+        .thenReturn(
+            List.of(
+                new TenantStrategyBrokerTarget("s1", "alpaca-paper"),
+                new TenantStrategyBrokerTarget("s2", "alpaca-live")));
+    // s1 alone (-6000) would cross the 5000 cap; s2's read is unavailable. Must NOT sum the partial
+    // and trip — a partial under-counts the loss (here it would OVER-count, but the invariant is
+    // "never trip on an incomplete tenant sum"): defer instead.
+    when(execPnl.computeRealizedPnl(eq("dev"), eq("s1"), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(execPnl.computeRealizedPnl(eq("dev"), eq("s2"), any()))
+        .thenThrow(new IllegalStateException("exec live journal unavailable"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-failclosed-realized");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    verify(cascade, never())
+        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
+  }
+
+  // C6/G1: a persistent per-strategy realized-read outage on v>=1 never trips (missing number is
+  // not a loss) and, past REALIZED_READ_FAILURE_ALERT_TICKS, emits ONE distinct bounded alert.
+  @Test
+  void heartbeat_realizedReadOutage_doesNotTrip_thenAlertsAfterThreshold() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenThrow(new IllegalStateException("exec journal unavailable"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-realized-outage");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(4 * 60));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    verify(cascade, never())
+        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
+    assertThat(countKind("KillSwitchRealizedReadUnavailable")).isEqualTo(1L);
   }
 
   // ---------- helpers ----------

@@ -66,6 +66,20 @@ public interface OrderIntentJournal {
   Optional<JournaledOrder> findLatestFilledByOcc(String tenantId, String strategyId, String occ);
 
   /**
+   * Phase 2 (kill-switch realized re-source): all FILLED rows for one {@code side} ({@code BUY} =
+   * entries, {@code SELL} = exits) on {@code tradingDay} (America/New_York) for ({@code tenantId},
+   * {@code strategyId}), ordered {@code filled_at ASC, recorded_at ASC} (FIFO). Rows with a null
+   * {@code filled_qty} / {@code avg_fill_price} are excluded (they carry no realizable fill). Backs
+   * {@code DailyPnlExecActivity.computeRealizedPnl}: the broker-truth realized number the
+   * daily-loss kill switches trip on, so a SELL that filled at the broker but whose {@code
+   * PartialExitFilled} audit was lost is still counted. The trading-day boundary is {@code
+   * (filled_at AT TIME ZONE 'America/New_York')::date = tradingDay} (mirrors the BFF {@code
+   * RealizedPnlCalculator} SQL).
+   */
+  List<JournaledOrder> findFilledBySideOnDay(
+      String tenantId, String strategyId, String side, java.time.LocalDate tradingDay);
+
+  /**
    * Conditional state-machine transition: flips RECORDED → SUBMITTED only if the current state is
    * still RECORDED. Returns true iff the row was updated; a false return means another concurrent
    * attempt already set SUBMITTED (or the row is in a terminal state) — caller short-circuits.

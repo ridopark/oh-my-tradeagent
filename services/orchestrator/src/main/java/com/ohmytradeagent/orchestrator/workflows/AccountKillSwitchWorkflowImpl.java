@@ -10,6 +10,7 @@ import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
+import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AccountKillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
@@ -18,6 +19,7 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
+import com.ohmytradeagent.orchestrator.activities.TenantStrategyBrokerTarget;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
@@ -32,6 +34,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -102,6 +105,32 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * AccountKillSwitchWorkflowImplLegacyReplayTest}.
    */
   static final String VERSION_CAP_INACTIVE_ALERT = "account-cap-inactive-alert-v1";
+
+  /**
+   * Phase 2 (PLAN-2026-06-30) gate for re-sourcing tenant realized P&amp;L from the exec {@code
+   * order_intent_journal} (broker truth) instead of {@code audit_log}. At {@code v>=1} the
+   * heartbeat resolves each strategy's {@code broker_target} and routes a per-strategy realized
+   * read to that strategy's {@code broker-<target>} {@link DailyPnlExecActivity}, summing them
+   * (fail CLOSED if any per-strategy read fails — guardrail G2). At {@link
+   * Workflow#DEFAULT_VERSION} it calls the legacy {@code
+   * AccountPnlActivities.computeTenantRealizedPnl} ({@code audit_log}) — byte-identical to the
+   * legacy replay path. Same string as {@code KillSwitchWorkflowImpl} (independent history).
+   */
+  static final String VERSION_KILLSWITCH_REALIZED_FROM_EXEC =
+      "killswitch-realized-from-exec-journal-v1";
+
+  /**
+   * Audit kind emitted when the exec-realized read has been unavailable for too many ticks (G1).
+   */
+  private static final String KIND_REALIZED_READ_UNAVAILABLE = "KillSwitchRealizedReadUnavailable";
+
+  /**
+   * Consecutive account-realized-read failures the heartbeat tolerates before paging (guardrail
+   * G1). A failed/fail-closed read defers the whole tick (never a spurious trip) and feeds the
+   * inactive counter via {@link #run}'s not-armed path; this dedicated counter drives ONE distinct
+   * bounded alert. Package-private for test override.
+   */
+  static int REALIZED_READ_FAILURE_ALERT_TICKS = 3;
 
   static final String MARKET_DATA_TASK_QUEUE = "market-data";
 
@@ -196,6 +225,17 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private boolean capInactiveAlerted;
   private int ticksSinceInactiveAlert;
   private Boolean pctConfiguredLastSeen;
+
+  /**
+   * Guardrail G1 (Phase 2 exec-realized re-source): consecutive account-realized-read failures on
+   * the {@code v>=1} path (deterministic workflow state, no commands). A failed / fail-closed read
+   * defers the whole tick (never a spurious trip) and increments this; on crossing {@link
+   * #REALIZED_READ_FAILURE_ALERT_TICKS} the heartbeat emits ONE bounded alert (distinct reason). A
+   * good tenant-realized read clears both. Not carried across continue-as-new (observability-only).
+   */
+  private int consecutiveRealizedReadFailures;
+
+  private boolean realizedReadUnavailableAlerted;
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
@@ -394,6 +434,11 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // pre-marker history.
     int pctVersion =
         Workflow.getVersion(VERSION_ACCOUNT_DAILY_LOSS_PCT, Workflow.DEFAULT_VERSION, 1);
+    // Phase 2: read the realized-source gate ONCE, at a stable scope, before any branch. At
+    // DEFAULT_VERSION the legacy audit_log path runs (byte-identical replay); v>=1 routes
+    // per-strategy broker-truth reads.
+    int realizedVersion =
+        Workflow.getVersion(VERSION_KILLSWITCH_REALIZED_FROM_EXEC, Workflow.DEFAULT_VERSION, 1);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -435,7 +480,23 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       return !pctConfigured;
     }
 
-    BigDecimal realized = accountPnl.computeTenantRealizedPnl(input.getTenantId(), tradingDay);
+    BigDecimal realized;
+    if (realizedVersion >= 1) {
+      // Broker truth: sum a per-strategy realized read routed to each strategy's broker-<target>
+      // exec queue. A null return means the tick was DEFERRED (a per-strategy read failed, or a
+      // strategy could not be routed) — fail CLOSED: do not trip on a partial/unknown realized
+      // number (guardrail G2). The deferral feeds the inactive counter (armed=false) and the
+      // dedicated realized-read alert.
+      realized = execTenantRealized();
+      if (realized == null) {
+        return false; // cap NOT armed this tick — never trips on a missing/partial number.
+      }
+      consecutiveRealizedReadFailures = 0;
+      realizedReadUnavailableAlerted = false;
+    } else {
+      // DEFAULT_VERSION: legacy audit_log path — byte-identical to the pre-Phase-2 replay stream.
+      realized = accountPnl.computeTenantRealizedPnl(input.getTenantId(), tradingDay);
+    }
     AccountOpenBook book = accountPnl.accountOpenBook(input.getTenantId());
 
     BigDecimal openMtm = BigDecimal.ZERO;
@@ -471,6 +532,97 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     // Threshold resolved and the loss was evaluated against it — the cap is ARMED this tick.
     return true;
+  }
+
+  /**
+   * Phase 2 (v&gt;=1): tenant-wide realized P&amp;L summed from broker-truth per-strategy reads.
+   * The strategy list + per-strategy {@code broker_target} come from an Activity ({@code
+   * tenantStrategyBrokerTargets}); the routed {@link DailyPnlExecActivity} stub per strategy is
+   * built HERE, in workflow code, because {@code ExecActivitiesFactory.taskQueueFor} is workflow-
+   * bound (the Spring bean has no Workflow context). Supports mixed broker_target tenants.
+   *
+   * <p><b>Guardrail G2 — account partial-sum FORBIDDEN, fail CLOSED.</b> If ANY per-strategy read
+   * fails (exec down / queue backpressure / unroutable-bare broker_target) this returns {@code
+   * null} (deferral) rather than defaulting that strategy to zero and summing a partial — a partial
+   * would UNDER-count the loss and let the account cap under-protect. Also matches the existing
+   * accountOpenBook propagate-don't-swallow discipline. The null deferral routes into G1 (skip-tick
+   * + retry-in-options + bounded alert), never a spurious trip.
+   */
+  private BigDecimal execTenantRealized() {
+    List<TenantStrategyBrokerTarget> strategies;
+    try {
+      strategies = accountPnl.tenantStrategyBrokerTargets(input.getTenantId());
+    } catch (TemporalFailure e) {
+      // The resolver throws fail-closed on an empty strategy set; treat any failure as a deferral.
+      recordRealizedReadFailure(null, e.getMessage());
+      return null;
+    }
+    BigDecimal total = BigDecimal.ZERO;
+    for (TenantStrategyBrokerTarget s : strategies) {
+      try {
+        total =
+            total.add(
+                execRealized(s.brokerTarget())
+                    .computeRealizedPnl(input.getTenantId(), s.strategyId(), tradingDay));
+      } catch (TemporalFailure e) {
+        // FAIL CLOSED (G2): a single unroutable/unavailable strategy defers the WHOLE tenant
+        // compute
+        // — never sum a partial. taskQueueFor(...) throws a non-retryable ApplicationFailure (a
+        // TemporalFailure) synchronously on a null/bare broker_target, so an unroutable strategy is
+        // caught here too.
+        recordRealizedReadFailure(s.brokerTarget(), e.getMessage());
+        return null;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Builds the broker_target-routed {@link DailyPnlExecActivity} stub in WORKFLOW code (guardrail
+   * G1 activity options: 12s start-to-close &lt; the 60s heartbeat cadence, up to 3 bounded retries
+   * under a ~40s schedule-to-close ceiling, so a transient exec blip is absorbed by retry within
+   * the tick; a genuine outage exhausts the budget and surfaces as a {@link TemporalFailure} the
+   * caller turns into a deferred tick + bounded alert — never a trip). {@code taskQueueFor} is
+   * deterministic/replay-safe.
+   */
+  private DailyPnlExecActivity execRealized(String brokerTarget) {
+    return Workflow.newActivityStub(
+        DailyPnlExecActivity.class,
+        ActivityOptions.newBuilder()
+            .setTaskQueue(ExecActivitiesFactory.taskQueueFor(brokerTarget))
+            .setStartToCloseTimeout(Duration.ofSeconds(12))
+            .setScheduleToCloseTimeout(Duration.ofSeconds(40))
+            .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
+            .build());
+  }
+
+  /**
+   * Guardrail G1 bookkeeping for a deferred (failed/fail-closed) account-realized read: increments
+   * the consecutive counter and, on crossing {@link #REALIZED_READ_FAILURE_ALERT_TICKS}, emits ONE
+   * bounded alert with a DISTINCT reason (mirrors the {@code auto:account_mtm_unavailable}
+   * precedent shape). Never calls {@code doTrip} — a missing/partial number is not a loss.
+   */
+  private void recordRealizedReadFailure(String brokerTarget, String err) {
+    consecutiveRealizedReadFailures++;
+    if (!realizedReadUnavailableAlerted
+        && consecutiveRealizedReadFailures >= REALIZED_READ_FAILURE_ALERT_TICKS) {
+      auditLog(
+          KIND_REALIZED_READ_UNAVAILABLE,
+          subject(
+              "reason",
+              "auto:account_realized_read_unavailable",
+              "broker_target",
+              brokerTarget,
+              "consecutive_ticks",
+              consecutiveRealizedReadFailures,
+              "error",
+              err,
+              "trading_day",
+              tradingDay,
+              "scope",
+              "account"));
+      realizedReadUnavailableAlerted = true;
+    }
   }
 
   /** Fetches the live bid for one contract; null when the quote is UNAVAILABLE/FAILED/absent. */

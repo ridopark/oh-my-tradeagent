@@ -163,6 +163,33 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public List<JournaledOrder> findFilledBySideOnDay(
+      String tenantId, String strategyId, String side, java.time.LocalDate tradingDay) {
+    // Phase 2 (kill-switch realized re-source): the broker-truth realized figure the daily-loss
+    // kill switches trip on. FILLED rows for one side on the ET trading day, FIFO-ordered. The
+    // day predicate mirrors the BFF RealizedPnlCalculator SQL:
+    //   (filled_at AT TIME ZONE 'America/New_York')::date = ?
+    // expressed as a raw condition (jOOQ's fluent API has no AT TIME ZONE builder). tradingDay is a
+    // bound parameter; side is validated at the exec impl boundary before this call.
+    Result<?> rows =
+        dsl.selectFrom(TABLE)
+            .where(field("tenant_id", String.class).eq(tenantId))
+            .and(field("strategy_id", String.class).eq(strategyId))
+            .and(field("state", String.class).eq(OrderState.FILLED.name()))
+            .and(field("side", String.class).eq(side))
+            .and(field("filled_qty").isNotNull())
+            .and(field("avg_fill_price").isNotNull())
+            .and(
+                org.jooq.impl.DSL.condition(
+                    "(filled_at AT TIME ZONE 'America/New_York')::date = {0}", tradingDay))
+            .orderBy(
+                field("filled_at", OffsetDateTime.class).asc(),
+                field("recorded_at", OffsetDateTime.class).asc())
+            .fetch();
+    return rows.stream().map(JooqOrderIntentJournal::mapRow).toList();
+  }
+
+  @Override
   public boolean markSubmittedIfRecorded(String intentKey, String brokerOrderId) {
     OffsetDateTime now = OffsetDateTime.now();
     int updated =

@@ -8,7 +8,9 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
+import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.workflows.PositionState;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.WorkflowClient;
@@ -28,16 +30,26 @@ class AccountPnlActivitiesImplTest {
 
   private DailyPnlActivities dailyPnl;
   private WorkflowClient client;
+  private StrategyRegistry strategyRegistry;
   private AccountPnlActivitiesImpl activities;
 
   @BeforeEach
   void setUp() {
     dailyPnl = mock(DailyPnlActivities.class);
     client = mock(WorkflowClient.class);
+    strategyRegistry = mock(StrategyRegistry.class);
   }
 
   private AccountPnlActivitiesImpl forStrategies(List<String> strategyIds) {
-    return new AccountPnlActivitiesImpl(dailyPnl, tenantId -> strategyIds, client);
+    return new AccountPnlActivitiesImpl(
+        dailyPnl, tenantId -> strategyIds, client, strategyRegistry);
+  }
+
+  private static StrategyConfig cfgWithBrokerTarget(StrategyConfig.BrokerTarget bt) {
+    StrategyConfig c = new StrategyConfig();
+    c.setSchemaVersion(1L);
+    c.setBrokerTarget(bt);
+    return c;
   }
 
   // Realized PnL sums the existing per-strategy FIFO composition over every tenant strategy.
@@ -51,6 +63,48 @@ class AccountPnlActivitiesImplTest {
 
     assertThat(activities.computeTenantRealizedPnl("dev", DAY))
         .isEqualByComparingTo(new BigDecimal("-2000"));
+  }
+
+  // Phase 2 (C4): mixed broker_target — each strategy pairs with its OWN broker_target so the
+  // account workflow can route per-strategy realized reads to different broker queues.
+  @Test
+  void tenantStrategyBrokerTargets_resolvesPerStrategyBrokerTarget_mixed() {
+    activities = forStrategies(List.of("s-paper", "s-live"));
+    when(strategyRegistry.get("dev", "s-paper"))
+        .thenReturn(cfgWithBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER));
+    when(strategyRegistry.get("dev", "s-live"))
+        .thenReturn(cfgWithBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_LIVE));
+
+    assertThat(activities.tenantStrategyBrokerTargets("dev"))
+        .containsExactly(
+            new TenantStrategyBrokerTarget("s-paper", "alpaca-paper"),
+            new TenantStrategyBrokerTarget("s-live", "alpaca-live"));
+  }
+
+  // Phase 2 (G2): a strategy whose config read throws is returned with a null broker_target — the
+  // workflow fails CLOSED on it rather than the activity silently dropping it (under-count).
+  @Test
+  void tenantStrategyBrokerTargets_unresolvableStrategy_returnsNullBrokerTarget() {
+    activities = forStrategies(List.of("s-ok", "s-broken"));
+    when(strategyRegistry.get("dev", "s-ok"))
+        .thenReturn(cfgWithBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER));
+    when(strategyRegistry.get("dev", "s-broken"))
+        .thenThrow(new RuntimeException("config unreadable"));
+
+    assertThat(activities.tenantStrategyBrokerTargets("dev"))
+        .containsExactly(
+            new TenantStrategyBrokerTarget("s-ok", "alpaca-paper"),
+            new TenantStrategyBrokerTarget("s-broken", null));
+  }
+
+  // Phase 2 (G2): fail-closed — an empty resolved strategy set throws (never sum nothing).
+  @Test
+  void tenantStrategyBrokerTargets_emptyStrategySet_failClosed() {
+    activities = forStrategies(List.of());
+
+    assertThatThrownBy(() -> activities.tenantStrategyBrokerTargets("dev"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("empty strategy set");
   }
 
   // Open book unions positions across both tenant strategies, one equality query per strategy.

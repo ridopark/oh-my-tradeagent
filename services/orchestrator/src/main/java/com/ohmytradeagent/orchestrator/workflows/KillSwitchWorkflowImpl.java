@@ -7,6 +7,7 @@ import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
+import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
@@ -15,6 +16,8 @@ import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.common.RetryOptions;
+import io.temporal.failure.TemporalFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.Workflow;
 import io.temporal.workflow.WorkflowInit;
@@ -53,6 +56,31 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
    * byte-identical to the legacy path and replay stays deterministic.
    */
   private static final String VERSION_KILLSWITCH_LIVE_FLOOR = "killswitch-live-floor";
+
+  /**
+   * Phase 2 (PLAN-2026-06-30) change-id for re-sourcing the realized-P&amp;L input from the exec
+   * {@code order_intent_journal} (broker truth) instead of {@code audit_log}. At {@code v>=1} the
+   * heartbeat calls the broker_target-routed {@link DailyPnlExecActivity}; at {@link
+   * Workflow#DEFAULT_VERSION} it calls the legacy {@link DailyPnlActivities#computeRealizedPnl}
+   * ({@code audit_log}) — byte-identical to the legacy replay path. Read ONCE early in {@link
+   * #heartbeat()} (mirrors {@link #VERSION_KILLSWITCH_LIVE_FLOOR}). Independent history per
+   * workflow — the same string is reused by {@code AccountKillSwitchWorkflowImpl}.
+   */
+  static final String VERSION_KILLSWITCH_REALIZED_FROM_EXEC =
+      "killswitch-realized-from-exec-journal-v1";
+
+  /**
+   * Consecutive exec-realized-read failures the heartbeat tolerates before paging (guardrail G1). A
+   * failed read is NEVER treated as a loss (never a spurious trip); the counter + bounded alert
+   * make a persistent exec outage visible instead of silently skipping ticks forever. 3 ticks at
+   * the 60s cadence = ~3 min — past a single transient blip (absorbed by the stub's own retry
+   * budget) but fast enough to surface "the daily-loss cap is not reading P&amp;L". Package-private
+   * for test override.
+   */
+  static int REALIZED_READ_FAILURE_ALERT_TICKS = 3;
+
+  /** Audit kind emitted when the exec-realized read has been unavailable for too many ticks. */
+  private static final String KIND_REALIZED_READ_UNAVAILABLE = "KillSwitchRealizedReadUnavailable";
 
   /** Heartbeat cadence — 60s per PLAN.md kill-switch flow. */
   static final Duration HEARTBEAT_INTERVAL = Duration.ofSeconds(60);
@@ -99,6 +127,18 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   private OffsetDateTime trippedAt;
   private OffsetDateTime coolingDownUntil;
   private LocalDate tradingDay;
+
+  /**
+   * Guardrail G1: consecutive exec-realized-read failures on the {@code v>=1} path (deterministic
+   * workflow state, no commands). A failed read defers the trip this tick (never a spurious trip)
+   * and increments this counter; on crossing {@link #REALIZED_READ_FAILURE_ALERT_TICKS} the
+   * heartbeat emits ONE bounded alert (then keeps the alerted flag so it does not page every tick).
+   * A successful read (or a trip) clears both. Not carried across continue-as-new — an in-flight
+   * outage re-accumulates from zero after a ~daily CAN (observability-only, mild under-paging).
+   */
+  private int consecutiveRealizedReadFailures;
+
+  private boolean realizedReadUnavailableAlerted;
 
   // Assigning input via @WorkflowInit (runs before any Signal/Update handler) closes a race where
   // a fast caller could submit `trip`/`reset` before the @WorkflowMethod body executed and reach
@@ -209,6 +249,10 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     StrategyConfig cfg = strategy.get(input.getTenantId(), input.getStrategyId());
     BigDecimal threshold = cfg.getDailyLossThreshold();
     int v = Workflow.getVersion(VERSION_KILLSWITCH_LIVE_FLOOR, Workflow.DEFAULT_VERSION, 1);
+    // Phase 2: read the realized-source gate ONCE, early, at a stable scope (mirrors the live-floor
+    // gate above). v>=1 => broker-truth exec journal; DEFAULT_VERSION => legacy audit_log path.
+    int realizedVersion =
+        Workflow.getVersion(VERSION_KILLSWITCH_REALIZED_FROM_EXEC, Workflow.DEFAULT_VERSION, 1);
     boolean isLive = StrategyConfigInvariants.isLive(cfg);
     if (threshold == null || threshold.signum() <= 0) {
       if (v == Workflow.DEFAULT_VERSION || !isLive) {
@@ -223,10 +267,78 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
       doTrip("auto:missing_loss_threshold", "auto:missing_loss_threshold", null);
       return;
     }
-    BigDecimal pnlValue =
-        pnl.computeRealizedPnl(input.getTenantId(), input.getStrategyId(), tradingDay);
+    BigDecimal pnlValue;
+    if (realizedVersion >= 1) {
+      // Broker truth: route the realized read to the strategy's broker-<target> exec queue. A
+      // failed read (exec pod down / queue backpressure) is a MISSING number, NOT a loss — defer
+      // the trip this tick (guardrail G1) rather than trip spuriously. The stub's own bounded
+      // retry (below) absorbs a transient blip inside the heartbeat window; a persistent outage
+      // trips the consecutive-failure counter and pages a bounded alert.
+      String brokerTarget = cfg.getBrokerTarget() == null ? null : cfg.getBrokerTarget().value();
+      try {
+        pnlValue =
+            execRealized(brokerTarget)
+                .computeRealizedPnl(input.getTenantId(), input.getStrategyId(), tradingDay);
+      } catch (TemporalFailure e) {
+        recordRealizedReadFailure(brokerTarget, e.getMessage());
+        return; // defer — never trip on a missing P&L number.
+      }
+      // A good read clears the outage state (and the recovery is silent — no re-arm audit).
+      consecutiveRealizedReadFailures = 0;
+      realizedReadUnavailableAlerted = false;
+    } else {
+      // DEFAULT_VERSION: legacy audit_log path — byte-identical to the pre-Phase-2 replay stream.
+      pnlValue = pnl.computeRealizedPnl(input.getTenantId(), input.getStrategyId(), tradingDay);
+    }
     if (pnlValue.compareTo(threshold.negate()) <= 0) {
       doTrip("auto:daily_loss", "auto:daily_loss", pnlValue);
+    }
+  }
+
+  /**
+   * Builds the broker_target-routed {@link DailyPnlExecActivity} stub in WORKFLOW code (the routing
+   * decision must live here — a Spring activity bean has no Workflow context). {@code
+   * taskQueueFor(brokerTarget)} is deterministic/replay-safe. Guardrail G1 activity options: a 12s
+   * start-to-close (shorter than the 60s heartbeat cadence) with up to 3 bounded retries under a
+   * ~40s schedule-to-close ceiling, so a transient exec blip is absorbed by retry within the tick
+   * rather than skipping it; a genuine outage exhausts the budget and surfaces as a {@link
+   * TemporalFailure} the caller turns into a deferred tick + bounded alert (never a trip).
+   */
+  private DailyPnlExecActivity execRealized(String brokerTarget) {
+    return Workflow.newActivityStub(
+        DailyPnlExecActivity.class,
+        ActivityOptions.newBuilder()
+            .setTaskQueue(ExecActivitiesFactory.taskQueueFor(brokerTarget))
+            .setStartToCloseTimeout(Duration.ofSeconds(12))
+            .setScheduleToCloseTimeout(Duration.ofSeconds(40))
+            .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
+            .build());
+  }
+
+  /**
+   * Guardrail G1 bookkeeping for a deferred (failed) exec-realized read: increments the consecutive
+   * counter and, on crossing {@link #REALIZED_READ_FAILURE_ALERT_TICKS}, emits ONE bounded alert
+   * with a DISTINCT reason (mirrors the {@code auto:missing_loss_threshold} precedent shape). Never
+   * calls {@code doTrip} — a missing number is not a loss.
+   */
+  private void recordRealizedReadFailure(String brokerTarget, String err) {
+    consecutiveRealizedReadFailures++;
+    if (!realizedReadUnavailableAlerted
+        && consecutiveRealizedReadFailures >= REALIZED_READ_FAILURE_ALERT_TICKS) {
+      auditLog(
+          KIND_REALIZED_READ_UNAVAILABLE,
+          subject(
+              "reason",
+              "auto:realized_read_unavailable",
+              "broker_target",
+              brokerTarget,
+              "consecutive_ticks",
+              consecutiveRealizedReadFailures,
+              "error",
+              err,
+              "trading_day",
+              tradingDay));
+      realizedReadUnavailableAlerted = true;
     }
   }
 
