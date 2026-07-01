@@ -216,6 +216,25 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Phase 1 (PLAN-2026-06-30-flatten-fillrace-and-killswitch-realized): pins the
+   * flatten-cancel-terminal-state-reconcile gate literal. This getVersion change-point keys the
+   * discard-and-stay-alive-vs-reconcile fork in flattenRemaining's timeout branch AND the #481
+   * next-session retry loop; a renamed string re-resolves to DEFAULT_VERSION for legacy histories,
+   * silently reverting the broker-authoritative flatten reconcile on in-flight workflows (back to
+   * the phantom-stuck-forever behaviour — the 2026-06-30 DRAM/INTC/TSLA incident). The pre-fix
+   * legacy flatten-timeout history ({@code position-pre-flatten-reconcile-legacy-history.json})
+   * doubles as the v=0 replay regression in {@link
+   * #legacyFlattenTimeoutHistoryReplaysAgainstCurrentImplWithoutNonDeterminism}.
+   */
+  @Test
+  void versionFlattenCancelTerminalReconcileConstantNameIsStable() throws Exception {
+    Field marker =
+        PositionWorkflowImpl.class.getDeclaredField("VERSION_FLATTEN_CANCEL_TERMINAL_RECONCILE");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("flatten-cancel-terminal-state-reconcile-v1");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#276 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The recorded {@code PartialExitFilled} subject has no
    * {@code option_symbol} key; the current impl's v=DEFAULT_VERSION branch must reproduce that
