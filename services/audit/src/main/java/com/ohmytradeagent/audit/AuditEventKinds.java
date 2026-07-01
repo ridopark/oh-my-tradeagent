@@ -304,6 +304,12 @@ public final class AuditEventKinds {
           // Observability-only — in ALL_KINDS only, not in any *_KINDS lifecycle group.
           "AccountKillSwitchCapInactive",
           "AccountKillSwitchCapReArmed",
+          // Phase 2 (PLAN-2026-06-30 kill-switch realized re-source): emitted by BOTH
+          // KillSwitchWorkflowImpl and AccountKillSwitchWorkflowImpl (guardrail G1) when the
+          // broker-routed exec realized read has been unavailable for N consecutive heartbeats —
+          // the daily-loss cap could not read P&L this tick (it DEFERS, never trips on a missing
+          // number). Observability-only — in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "KillSwitchRealizedReadUnavailable",
           // ReconciliationWorkflowImpl
           "ReconciliationStarted",
           "ReconciliationCompleted",

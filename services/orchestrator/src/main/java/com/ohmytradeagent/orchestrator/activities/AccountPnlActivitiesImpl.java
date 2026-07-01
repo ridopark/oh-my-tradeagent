@@ -1,7 +1,9 @@
 package com.ohmytradeagent.orchestrator.activities;
 
+import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
+import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.workflows.PositionState;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
@@ -45,12 +47,17 @@ public class AccountPnlActivitiesImpl implements AccountPnlActivities {
   private final DailyPnlActivities dailyPnl;
   private final TenantStrategies tenantStrategies;
   private final WorkflowClient client;
+  private final StrategyRegistry strategyRegistry;
 
   public AccountPnlActivitiesImpl(
-      DailyPnlActivities dailyPnl, TenantStrategies tenantStrategies, WorkflowClient client) {
+      DailyPnlActivities dailyPnl,
+      TenantStrategies tenantStrategies,
+      WorkflowClient client,
+      StrategyRegistry strategyRegistry) {
     this.dailyPnl = dailyPnl;
     this.tenantStrategies = tenantStrategies;
     this.client = client;
+    this.strategyRegistry = strategyRegistry;
   }
 
   @Override
@@ -64,6 +71,41 @@ public class AccountPnlActivitiesImpl implements AccountPnlActivities {
       total = total.add(dailyPnl.computeRealizedPnl(tenantId, sid, tradingDay));
     }
     return total;
+  }
+
+  @Override
+  public List<TenantStrategyBrokerTarget> tenantStrategyBrokerTargets(String tenantId) {
+    List<String> strategyIds = tenantStrategies.strategyIdsForTenant(tenantId);
+    List<TenantStrategyBrokerTarget> out = new ArrayList<>();
+    for (String sid : strategyIds) {
+      if (sid == null || sid.isBlank()) {
+        continue;
+      }
+      String brokerTarget = null;
+      try {
+        StrategyConfig cfg = strategyRegistry.get(tenantId, sid);
+        StrategyConfig.BrokerTarget bt = cfg == null ? null : cfg.getBrokerTarget();
+        brokerTarget = bt == null ? null : bt.value();
+      } catch (RuntimeException e) {
+        // Leave brokerTarget null — the workflow fails CLOSED on a strategy it cannot route (G2)
+        // rather than the activity silently dropping it (which would under-count the account loss).
+        log.warn(
+            "tenantStrategyBrokerTargets: strategy config read failed tenant={} strategy={} err={}",
+            tenantId,
+            sid,
+            e.getMessage());
+      }
+      out.add(new TenantStrategyBrokerTarget(sid, brokerTarget));
+    }
+    if (out.isEmpty()) {
+      // Fail CLOSED: an empty strategy set means we cannot know the tenant's realized book. Summing
+      // nothing would zero the realized loss and could let a real drawdown slip under the cap.
+      throw new IllegalStateException(
+          "tenantStrategyBrokerTargets resolved an empty strategy set for tenant="
+              + tenantId
+              + "; failing closed rather than summing nothing and under-counting realized loss");
+    }
+    return out;
   }
 
   @Override

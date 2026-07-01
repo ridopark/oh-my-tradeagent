@@ -6,6 +6,7 @@ import static org.jooq.impl.DSL.table;
 import com.ohmytradeagent.contract.OrderIntent;
 import java.math.BigDecimal;
 import java.sql.DriverManager;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import org.flywaydb.core.Flyway;
 import org.jooq.DSLContext;
@@ -538,6 +539,96 @@ class JooqOrderIntentJournalIT {
     JournaledOrder after = journal.findByIntentKey("intent-A").orElseThrow();
     assertThat(after.state()).isEqualTo(OrderState.FILLED);
     assertThat(after.version()).isEqualTo(before.version());
+  }
+
+  // ---------- Phase 2 (kill-switch realized re-source): findFilledBySideOnDay ----------
+
+  @Test
+  void findFilledBySideOnDay_returnsFilledRowsForSideOnEtDay_fifoOrdered() {
+    // A SELL that FILLED at the broker whose PartialExitFilled audit was NEVER journaled (the F1
+    // race) is still recorded here — broker truth. 18:00Z = 14:00 ET on 2026-06-29.
+    String occ = "DRAM  260703C00016000";
+    OffsetDateTime buyAt = OffsetDateTime.parse("2026-06-29T14:00:00Z");
+    OffsetDateTime sellAt = OffsetDateTime.parse("2026-06-29T18:00:00Z");
+
+    OrderIntent buy = intentWithOcc("buy-1", "sig-buy", occ);
+    buy.setSide(OrderIntent.Side.BUY);
+    journal.upsertIntent(buy);
+    journal.markSubmittedIfRecorded("buy-1", "brk-buy");
+    journal.markFilled("buy-1", 3L, new BigDecimal("2.3533"), buyAt);
+
+    OrderIntent sell = intentWithOcc("sell-1", "sig-sell", occ);
+    sell.setSide(OrderIntent.Side.SELL);
+    journal.upsertIntent(sell);
+    journal.markSubmittedIfRecorded("sell-1", "brk-sell");
+    journal.markFilled("sell-1", 2L, new BigDecimal("1.84"), sellAt);
+
+    var buys =
+        journal.findFilledBySideOnDay("dev", "copytrade-v1", "BUY", LocalDate.of(2026, 6, 29));
+    var sells =
+        journal.findFilledBySideOnDay("dev", "copytrade-v1", "SELL", LocalDate.of(2026, 6, 29));
+
+    assertThat(buys).extracting(JournaledOrder::intentKey).containsExactly("buy-1");
+    assertThat(buys.get(0).filledQty()).isEqualTo(3L);
+    assertThat(buys.get(0).avgFillPrice()).isEqualByComparingTo(new BigDecimal("2.3533"));
+    assertThat(sells).extracting(JournaledOrder::intentKey).containsExactly("sell-1");
+    assertThat(sells.get(0).avgFillPrice()).isEqualByComparingTo(new BigDecimal("1.84"));
+  }
+
+  @Test
+  void findFilledBySideOnDay_excludesNonFilledAndOtherDaysAndOtherSides() {
+    String occ = "DRAM  260703C00016000";
+    LocalDate day = LocalDate.of(2026, 6, 29);
+
+    // FILLED SELL on the target ET day (kept).
+    OrderIntent onDay = intentWithOcc("sell-onday", "sig", occ);
+    onDay.setSide(OrderIntent.Side.SELL);
+    journal.upsertIntent(onDay);
+    journal.markSubmittedIfRecorded("sell-onday", "brk-1");
+    journal.markFilled(
+        "sell-onday", 1L, new BigDecimal("1.00"), OffsetDateTime.parse("2026-06-29T18:00:00Z"));
+
+    // FILLED SELL on a DIFFERENT ET day (excluded): 2026-06-30 18:00Z.
+    OrderIntent otherDay = intentWithOcc("sell-otherday", "sig", occ);
+    otherDay.setSide(OrderIntent.Side.SELL);
+    journal.upsertIntent(otherDay);
+    journal.markSubmittedIfRecorded("sell-otherday", "brk-2");
+    journal.markFilled(
+        "sell-otherday", 1L, new BigDecimal("1.00"), OffsetDateTime.parse("2026-06-30T18:00:00Z"));
+
+    // SUBMITTED (not FILLED) SELL on the target day (excluded — no fill).
+    OrderIntent notFilled = intentWithOcc("sell-notfilled", "sig", occ);
+    notFilled.setSide(OrderIntent.Side.SELL);
+    journal.upsertIntent(notFilled);
+    journal.markSubmittedIfRecorded("sell-notfilled", "brk-3");
+
+    // FILLED BUY on the target day (excluded from the SELL query).
+    OrderIntent buy = intentWithOcc("buy-onday", "sig", occ);
+    buy.setSide(OrderIntent.Side.BUY);
+    journal.upsertIntent(buy);
+    journal.markSubmittedIfRecorded("buy-onday", "brk-4");
+    journal.markFilled(
+        "buy-onday", 1L, new BigDecimal("2.00"), OffsetDateTime.parse("2026-06-29T18:00:00Z"));
+
+    var sells = journal.findFilledBySideOnDay("dev", "copytrade-v1", "SELL", day);
+    assertThat(sells).extracting(JournaledOrder::intentKey).containsExactly("sell-onday");
+  }
+
+  @Test
+  void findFilledBySideOnDay_filtersTenantAndStrategy() {
+    String occ = "DRAM  260703C00016000";
+    LocalDate day = LocalDate.of(2026, 6, 29);
+    OrderIntent foreign = intentWithOcc("sell-foreign", "sig", occ);
+    foreign.setSide(OrderIntent.Side.SELL);
+    foreign.setTenantId("other-tenant");
+    journal.upsertIntent(foreign);
+    journal.markSubmittedIfRecorded("sell-foreign", "brk-f");
+    journal.markFilled(
+        "sell-foreign", 1L, new BigDecimal("1.00"), OffsetDateTime.parse("2026-06-29T18:00:00Z"));
+
+    assertThat(journal.findFilledBySideOnDay("dev", "copytrade-v1", "SELL", day)).isEmpty();
+    assertThat(journal.findFilledBySideOnDay("other-tenant", "copytrade-v1", "SELL", day))
+        .hasSize(1);
   }
 
   private OrderIntent intent(String key) {

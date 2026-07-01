@@ -52,8 +52,11 @@ public class AccountKillSwitchConfig {
 
   @Bean
   public AccountPnlActivities accountPnlActivities(
-      DailyPnlActivities dailyPnl, TenantStrategies tenantStrategies, WorkflowClient client) {
-    return new AccountPnlActivitiesImpl(dailyPnl, tenantStrategies, client);
+      DailyPnlActivities dailyPnl,
+      TenantStrategies tenantStrategies,
+      WorkflowClient client,
+      StrategyRegistry strategyRegistry) {
+    return new AccountPnlActivitiesImpl(dailyPnl, tenantStrategies, client, strategyRegistry);
   }
 
   @Bean

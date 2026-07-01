@@ -20,6 +20,7 @@ import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
+import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
@@ -44,12 +45,16 @@ import org.mockito.Mockito;
 class KillSwitchWorkflowImplTest {
 
   private static final String CORE_QUEUE = "orchestrator-core";
+  // Phase 2: v>=1 (TestWorkflowEnvironment reports v==1 for fresh workflows) routes the realized
+  // read to the strategy's broker-<target> exec queue. strategyConfig() pins alpaca-paper.
+  private static final String BROKER_QUEUE = "broker-alpaca-paper";
 
   private TestWorkflowEnvironment env;
   private AuditActivities audit;
   private MarketCalendarActivities calendar;
   private StrategyActivities strategy;
   private DailyPnlActivities pnl;
+  private DailyPnlExecActivity execPnl;
   private KillSwitchCascadeActivities cascade;
   private LivePromotionActivities livePromotion;
   private long originalHistoryLengthWatermark;
@@ -66,6 +71,7 @@ class KillSwitchWorkflowImplTest {
     calendar = Mockito.mock(MarketCalendarActivities.class);
     strategy = Mockito.mock(StrategyActivities.class);
     pnl = Mockito.mock(DailyPnlActivities.class);
+    execPnl = Mockito.mock(DailyPnlExecActivity.class);
     cascade = Mockito.mock(KillSwitchCascadeActivities.class);
     livePromotion = Mockito.mock(LivePromotionActivities.class);
 
@@ -74,11 +80,19 @@ class KillSwitchWorkflowImplTest {
     when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 14));
     when(strategy.get(anyString(), anyString())).thenReturn(strategyConfig());
     when(pnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    // Phase 2: v>=1 realized read now flows through the broker-routed exec activity by default.
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
     when(cascade.cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString()))
         .thenReturn(0L);
 
     coreWorker.registerActivitiesImplementations(
         audit, calendar, strategy, pnl, cascade, livePromotion);
+    // The realized read (v>=1) routes to broker-<target>; register the exec activity on both the
+    // paper and live queues so the live-threshold config tests (broker_target=alpaca-live) resolve.
+    Worker brokerWorker = env.newWorker(BROKER_QUEUE);
+    brokerWorker.registerActivitiesImplementations(execPnl);
+    Worker brokerLiveWorker = env.newWorker("broker-alpaca-live");
+    brokerLiveWorker.registerActivitiesImplementations(execPnl);
     env.start();
   }
 
@@ -199,10 +213,11 @@ class KillSwitchWorkflowImplTest {
   }
 
   @Test
-  void heartbeat_autoTripsWhenDailyLossExceeded() {
+  void heartbeat_autoTripsWhenDailyLossExceeded_fromExecJournal() {
+    // Phase 2 (C2): v>=1 sources realized P&L from the broker-routed exec journal, NOT audit_log.
     when(calendar.isMarketOpen()).thenReturn(true);
-    // Realized PnL = -3000 dollars; threshold = 2500. -3000 <= -2500 -> auto-trip.
-    when(pnl.computeRealizedPnl(anyString(), anyString(), any()))
+    // Exec-journal realized (broker truth) = -3000; threshold = 2500. -3000 <= -2500 -> auto-trip.
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-3000"));
 
     KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-autotrip");
@@ -223,6 +238,31 @@ class KillSwitchWorkflowImplTest {
             anyString(),
             eq("auto:daily_loss"),
             eq("auto:daily_loss"));
+    // The audit_log path is NOT consulted on v>=1 — broker truth wins.
+    verify(pnl, never()).computeRealizedPnl(anyString(), anyString(), any());
+  }
+
+  @Test
+  void heartbeat_execReadFailure_doesNotTrip_thenAlertsAfterThreshold() {
+    // Phase 2 (C6 / G1): an exec-activity failure on v>=1 must NOT doTrip that tick (a missing P&L
+    // number is not a loss). After REALIZED_READ_FAILURE_ALERT_TICKS consecutive failures the
+    // heartbeat emits ONE bounded alert with the distinct reason — never a spurious trip.
+    when(calendar.isMarketOpen()).thenReturn(true);
+    // The exec activity fails on every attempt (exhausts the stub's bounded retry each tick).
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenThrow(new IllegalStateException("exec journal unavailable"));
+
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-execdown");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Run past REALIZED_READ_FAILURE_ALERT_TICKS (3) heartbeats (60s cadence).
+    env.sleep(Duration.ofSeconds(4 * 60));
+
+    // NEVER tripped on a missing number, and the bounded alert fired exactly once.
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    verify(cascade, never())
+        .cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString());
+    assertThat(countKind("KillSwitchRealizedReadUnavailable")).isEqualTo(1L);
   }
 
   @Test
@@ -327,7 +367,7 @@ class KillSwitchWorkflowImplTest {
     StrategyConfig live = liveNullThresholdConfig();
     live.setDailyLossThreshold(new BigDecimal("2500.00"));
     when(strategy.get(anyString(), anyString())).thenReturn(live);
-    when(pnl.computeRealizedPnl(anyString(), anyString(), any()))
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-100"));
 
     KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-live/killswitch-livevalid");
@@ -450,7 +490,9 @@ class KillSwitchWorkflowImplTest {
     c.setSchemaVersion(1L);
     c.setTenantId("dev");
     c.setStrategyId("copytrade-v1");
-    c.setBrokerTarget(StrategyConfig.BrokerTarget.PAPER);
+    // Phase 2: routable broker_target so the v>=1 realized read reaches broker-alpaca-paper (the
+    // legacy bare "paper" has no worker queue and taskQueueFor rejects it).
+    c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
     c.setAuthorWhitelist(Set.of("acme_trader"));
     // Issue #3: per-side signal-age defaults replace the legacy 1800s default.
     c.setMaxSignalAgeBtoSecs(3600L);
@@ -500,5 +542,12 @@ class KillSwitchWorkflowImplTest {
         .filter(e -> kind.equals(e.getKind()))
         .reduce((a, b) -> b)
         .orElseThrow(() -> new AssertionError("no audit event with kind=" + kind));
+  }
+
+  /** Counts audit events of {@code kind} logged so far (0 if none) — never throws. */
+  private long countKind(String kind) {
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    Mockito.verify(audit, Mockito.atLeast(0)).log(captor.capture());
+    return captor.getAllValues().stream().filter(e -> kind.equals(e.getKind())).count();
   }
 }
