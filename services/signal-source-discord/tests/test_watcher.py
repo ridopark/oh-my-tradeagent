@@ -177,3 +177,48 @@ def test_parse_additional_targets() -> None:
         _parse_additional_targets("noseparator")
     with pytest.raises(SystemExit):
         _parse_additional_targets("tenant:")
+
+
+def test_watchlist_targets_uses_dedicated_var_when_set(monkeypatch) -> None:
+    from ohmytradeagent_sidecar.main import (
+        _parse_additional_targets,
+        _watchlist_targets,
+    )
+
+    signal_targets = _parse_additional_targets(
+        "staging_paper:copytrade-v1,staging_paper:watchlist-trigger-v1"
+    )
+    monkeypatch.setenv(
+        "WATCHLIST_MIRROR_ADDITIONAL_TARGETS", "staging_paper:watchlist-trigger-v1"
+    )
+    assert _watchlist_targets(signal_targets) == [
+        ("staging_paper", "watchlist-trigger-v1")
+    ]
+    # Signal fan-out list is untouched.
+    assert signal_targets == [
+        ("staging_paper", "copytrade-v1"),
+        ("staging_paper", "watchlist-trigger-v1"),
+    ]
+
+
+def test_watchlist_targets_unset_falls_back_to_signal_targets(monkeypatch) -> None:
+    from ohmytradeagent_sidecar.main import _watchlist_targets
+
+    monkeypatch.delenv("WATCHLIST_MIRROR_ADDITIONAL_TARGETS", raising=False)
+    sig = [("staging_paper", "copytrade-v1")]
+    assert _watchlist_targets(sig) == sig
+
+
+def test_watchlist_targets_empty_string_is_empty_list(monkeypatch) -> None:
+    from ohmytradeagent_sidecar.main import _watchlist_targets
+
+    monkeypatch.setenv("WATCHLIST_MIRROR_ADDITIONAL_TARGETS", "")
+    assert _watchlist_targets([("x", "y")]) == []
+
+
+def test_watchlist_targets_malformed_raises(monkeypatch) -> None:
+    from ohmytradeagent_sidecar.main import _watchlist_targets
+
+    monkeypatch.setenv("WATCHLIST_MIRROR_ADDITIONAL_TARGETS", "noseparator")
+    with pytest.raises(SystemExit):
+        _watchlist_targets([("x", "y")])

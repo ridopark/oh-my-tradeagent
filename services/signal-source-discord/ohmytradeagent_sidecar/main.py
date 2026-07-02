@@ -56,6 +56,21 @@ def _parse_additional_targets(raw: str) -> list[tuple[str, str]]:
     return targets
 
 
+def _watchlist_targets(signal_targets: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Fan-out targets for the watchlist mirror.
+
+    Decoupled from the signal fan-out: WATCHLIST_MIRROR_ADDITIONAL_TARGETS lets the
+    per-tenant digest be scoped independently of the per-(tenant,strategy) signal list
+    (where a tenant can legitimately appear twice). Unset (env absent) -> fall back to the
+    signal targets for back-compat (deployments that don't set it are unchanged). Set-but-
+    empty ("") -> empty list (explicit opt-out of any extra digest fan-out).
+    """
+    raw = os.getenv("WATCHLIST_MIRROR_ADDITIONAL_TARGETS")
+    if raw is None:
+        return signal_targets
+    return _parse_additional_targets(raw)
+
+
 def _log_if_failed(log: logging.Logger, name: str):
     """Done-callback that logs a non-cancellation task failure. Used to isolate
     the best-effort watchlist watcher so its crash never propagates."""
@@ -150,9 +165,11 @@ async def _amain() -> None:
             author=watchlist_author,
             log=log,
             poll_interval_secs=watchlist_poll_interval,
-            # Mirror the daily watchlist to the SAME fan-out targets as signals (e.g. a paper
-            # shadow), so each tenant's digest lands in its own channel — not just the primary's.
-            additional_targets=additional_targets,
+            # Mirror the daily watchlist to WATCHLIST_MIRROR_ADDITIONAL_TARGETS (its own
+            # fan-out var, scoped independently of the per-(tenant,strategy) signal list where
+            # a tenant may appear twice), falling back to the signal targets when that var is
+            # unset — so each tenant's digest lands in its own channel, once.
+            additional_targets=_watchlist_targets(additional_targets),
         )
         log.info("watchlist mirror enabled (channel=%s author=%s)",
                  watchlist_channel_url, watchlist_author)
