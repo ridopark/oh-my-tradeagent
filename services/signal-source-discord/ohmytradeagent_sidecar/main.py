@@ -172,9 +172,11 @@ async def _amain() -> None:
 
             watchlist_task: asyncio.Task[None] | None = None
             if watchlist_watcher is not None:
-                watchlist_page = await context.new_page()
+                # The watcher owns its own watchlist tab (creates it from the
+                # shared context) so it can rebuild the tab after a renderer
+                # crash without touching the signal tab.
                 watchlist_task = asyncio.create_task(
-                    watchlist_watcher.run_on_page(watchlist_page), name="watchlist-watcher"
+                    watchlist_watcher.run_on_context(context), name="watchlist-watcher"
                 )
                 # ISOLATION: the watchlist watcher is best-effort. If it dies, log
                 # it — never let it take down the process.
