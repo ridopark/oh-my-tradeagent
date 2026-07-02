@@ -91,12 +91,20 @@ a pod, set (via `kubectl set env` / patched Deployment — Spring relaxed-bindin
   `OPERATOR_CREDENTIAL_WRITE_ENABLED=true`, `OPERATOR_ACTIVATION_ENABLED=true`
   (`dashboard/lib/operator.ts:11`, `dashboard/app/admin/*`).
 - **api-gateway pod:** `OPERATOR_TENANT_CREATE_ENABLED=true`, `OPERATOR_CREDENTIAL_WRITE_ENABLED=true`,
-  `OPERATOR_ACTIVATION_ENABLED=true`, and a strong `API_GATEWAY_SHARED_TOKEN` (the `ServiceTokenFilter`
-  bearer, `application.yml:34-70`; fail-fast on the default token under `prod`).
-- **tenant-dashboard-bff pod:** `OPERATOR_ADMIN_READ_ENABLED=true`, matching `BFF_SHARED_TOKEN`.
+  `OPERATOR_ACTIVATION_ENABLED=true`, `OPERATOR_ALLOWLIST=ridopark@gmail.com` (Phase 2 backend gate —
+  fail-closed: unset = deny-all = every admin route 403s), and a strong `API_GATEWAY_SHARED_TOKEN`
+  (the `ServiceTokenFilter` bearer, `application.yml:34-70`; fail-fast on the default token under `prod`).
+- **tenant-dashboard-bff pod:** `OPERATOR_ADMIN_READ_ENABLED=true`, `OPERATOR_ALLOWLIST=ridopark@gmail.com`
+  (independent config from the gateway — must be set here too or admin-read 403s), matching `BFF_SHARED_TOKEN`.
 - **exec pod:** `broker.creds.source=db` (after A+B).
 - **orchestrator:** `strategy.config.source=db` (after C) and `multitenant.broker-accounts.enabled=true`
   (`CrossTenantBrokerTargetBootstrapper.java:40`) so >1 tenant may share one `broker_target`.
+
+> **Allowlist-sync (risk review C5).** The backend `OPERATOR_ALLOWLIST` (api-gateway + bff, both
+> pods) and the dashboard `OPERATOR_EMAILS` must name the SAME operator(s) — a drift where the
+> dashboard admits an email the backend rejects yields a confusing "UI visible, every action 403s"
+> state. Keep them in lockstep. Note `X-Approver-Id-2` (dual-approval on promotion/killswitch) is
+> deliberately NOT covered by the Phase 2 allowlist and remains header-trusted (out of scope).
 
 **F. `exec-alpaca-live` is a MANUAL roll** — it is not in the deploy matrix; the Phase 1 image +
 its `broker.creds.source=db` + `broker.creds.db.live-enabled=true` flip require an explicit operator
