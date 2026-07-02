@@ -34,6 +34,19 @@ public final class WorkflowIds {
   }
 
   /**
+   * Workflow ID for the {@code WatchlistDigestMarkerWorkflow} — a per-{@code (tenant, etDate)}
+   * dedup token that lets the daily watchlist digest post exactly once per tenant even though the
+   * mirror fans out one {@code WatchlistMirrorWorkflow} per {@code (tenant, strategy)}.
+   * Deliberately does NOT route through {@link #tenantStrategy}: the digest is a per-tenant
+   * concern, so there is no {@code s-} segment (mirrors {@link #accountKillswitch}). Started under
+   * {@code REJECT_DUPLICATE} — the first fan-out entry wins the post; the rest collide and skip.
+   * {@code etDate} is the ISO ET trading date.
+   */
+  public static String watchlistDigest(String tenantId, String etDate) {
+    return "t-" + tenantId + "/wl/" + etDate + "/digest";
+  }
+
+  /**
    * Workflow ID for the short-lived {@code BrokerCredentialAuditWorkflow} that records a metadata-
    * only audit of a tenant broker-credential write/rotation (UI-P2-a).
    *

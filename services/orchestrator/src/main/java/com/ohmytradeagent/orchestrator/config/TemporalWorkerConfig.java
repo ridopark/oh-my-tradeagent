@@ -36,6 +36,7 @@ import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.StrategyConfigCreateWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.StrategyConfigUpdateWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.WatchlistDigestMarkerWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistMirrorWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistTriggerSessionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistTriggerWorkflowImpl;
@@ -151,6 +152,13 @@ public class TemporalWorkerConfig {
         // Discord webhook. The signal-source-discord sidecar starts it by the type name
         // "WatchlistMirrorWorkflow" on this same orchestrator-core queue.
         WatchlistMirrorWorkflowImpl.class,
+        // Per-(tenant, etDate) watchlist-digest dedup token. Started (REJECT_DUPLICATE) by
+        // WatchlistMirrorActivitiesImpl.startDigestMarker so the tenant's digest posts once/day
+        // even
+        // when multiple (tenant, strategy) entries fan out. Empty-body marker — must still be
+        // registered so the start has a runnable type (an unregistered type would create a stuck,
+        // forever-retrying execution). Same orchestrator-core queue; no activity impl.
+        WatchlistDigestMarkerWorkflowImpl.class,
         // UI-P2-a credential-audit carrier: short-lived workflow that hosts the
         // (already-registered)
         // metadata-only BrokerCredentialAuditActivities.record and completes. Started by the
