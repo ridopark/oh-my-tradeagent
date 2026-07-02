@@ -59,8 +59,19 @@ secret out-of-band and mount it (the mount scaffolding already exists, `52-exec-
 served by the pod (paper pod: `dev`, `staging_paper`; live pod: `prod_real`), write an
 envelope-encrypted row into `broker_credentials` via the shipped write path
 (`BrokerCredentialWriter`, `broker_credentials` table `V5__broker_credentials.sql`) with a non-blank
-`expected_account_id` matching the real Alpaca account. Verify identity via the boot log
-(`AlpacaAccountIdentityProbe`) on a canary pod before flipping the live source.
+`expected_account_id` matching the real Alpaca account.
+
+> **Identity-gate caveat (risk review C3).** Under `source=db`, the boot probe
+> (`AlpacaAccountIdentityProbe.java:90-104`) warms only the pod's **bootstrap** tenant and
+> **soft-boots (skips warm-up) if that row isn't written yet** — so "verify identity via the boot log
+> before flipping" is only a real pre-roll assertion when the live pod's `EXEC_BOOTSTRAP_TENANT_ID`
+> equals the live tenant (`prod_real`) AND its row (with `expected_account_id`) is backfilled before
+> the roll (a mismatch then crashloops boot). Otherwise identity is enforced **lazily at the first
+> order** via `registry.build()` → `verify()` — still fail-closed (the broker is published only after
+> `verify()` passes, so no order hits a wrong account), but the boot-log signal is void. **Either**
+> set `EXEC_BOOTSTRAP_TENANT_ID`=the live tenant + backfill its row before the roll, **or** treat the
+> P0/G capped canary's first fill as the identity gate. Do not rely on boot-log verification as the
+> sole pre-roll check.
 
 **C. Backfill strategy_config DB rows (orchestrator).** Before flipping `strategy.config.source=db`,
 every tenant currently resolved from the YAML mount must have a **complete** `strategy_config` row
