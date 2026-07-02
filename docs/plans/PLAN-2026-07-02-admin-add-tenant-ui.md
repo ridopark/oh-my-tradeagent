@@ -115,6 +115,18 @@ scope; >1 replica = double fills).
 broker-side 403 unblock at Alpaca is folded into the canary — never "live + full-size + unblocked"
 in one irreversible action. Deactivate path is the shipped `LiveDeactivationWorkflow`.
 
+**H. Cross-tenant live-account uniqueness (manual gate until the code follow-up ships).** There is
+**no enforcement today** that two tenants can't point at the SAME live Alpaca account — `broker_credentials`
+has `PRIMARY KEY (tenant_id, provider)` and **no unique constraint on `expected_account_id`**
+(`services/exec/.../db/exec/V5__broker_credentials.sql`), and `CrossTenantBrokerTargetValidator` only
+checks `strategy_config.broker_account_id` at boot behind the dark `multitenant.broker-accounts.enabled`
+flag — it never reads `broker_credentials.expected_account_id`. Two live rows on the same account =
+double-trading one account. **Until the follow-up lands, the operator MUST manually verify at backfill
+time that each live tenant's `expected_account_id` is unique.** Code follow-up (separate PR, belongs
+with the `CrossTenantBrokerTargetValidator` lineage / P4-c-b hardening): either a Flyway partial unique
+index on `(provider, expected_account_id) WHERE expected_account_id <> ''`, or a pre-persist
+cross-tenant read in the writer. Do not enable a 2nd live tenant before this gate (manual or coded) holds.
+
 ---
 
 ## Phase 1 — Lift the `-live` DB-creds refusal, behind a new default-off flag (`exec`)
@@ -122,23 +134,32 @@ in one irreversible action. Deactivate path is the shipped `LiveDeactivationWork
 **Goal:** allow a `-live` exec pod to serve DB-sourced credentials (required for real-money tenants
 via the UI), without changing paper behavior and without arming live by default.
 
-**Changes** (anchors):
-- `services/exec/src/main/java/com/ohmytradeagent/exec/broker/alpaca/DbBrokerCredentialSource.java:97-105`
-  — the current unconditional `if (live) throw unavailable(...)`. Replace with: refuse **only when**
-  a new flag `broker.creds.db.live-enabled` is false (default `false`, dark). When true, proceed to
-  resolve, and **additionally fail closed if `expected_account_id` is blank** for the row (mirror the
-  file source's live requirement, `FileMountedBrokerCredentialSource.java:44-48`). Inject the flag via
-  `@Value("${broker.creds.db.live-enabled:false}")`.
-- No Temporal command-shape change → **no `getVersion` marker** needed (this is exec activity-impl
-  code, not workflow history).
+**Changes** (anchors) — the `-live` refusal exists on BOTH the read and write paths (the original
+epic's "Phase E" bundled both); lift both behind the SAME flag `broker.creds.db.live-enabled`
+(`@Value("${broker.creds.db.live-enabled:false}")`, default `false`, dark). Live onboarding needs
+both: the write path to persist the pasted keys, the read path to serve them at order time.
+- **Read source** — `services/exec/.../alpaca/DbBrokerCredentialSource.java:97` — unconditional
+  `if (live) throw unavailable(...)` → `if (live && !liveEnabled)`. When served on a live pod,
+  **fail closed if `expected_account_id` is blank**, placed AFTER `resolveTenant()` so it also covers
+  the `ACCOUNT_LEVEL` path (risk C1). Mirror `FileMountedBrokerCredentialSource.java:110-121`.
+- **Write path** — `services/exec/.../alpaca/BrokerCredentialWriter.java:130` — unconditional
+  `if (live) throw IllegalStateException(...)` → `if (live && !liveEnabled)`. When writing on a live
+  pod, **re-establish the blank-`expected_account_id`-for-live rejection** that the old unconditional
+  refusal subsumed (the writer already validates identity on entry via `BrokerAccountIdentityVerifier`,
+  which no-ops on a blank expected id). Same flag, same fail-closed posture.
+- No Temporal command-shape change → **no `getVersion` marker** needed (exec activity-impl code).
+- **Cross-tenant `expected_account_id` uniqueness** (no two tenants → same live account): investigated
+  as part of the write lift; enforced/deferred per that finding (see the PR).
 
-**Tests (TDD):**
-- `DbBrokerCredentialSourceTest`: `-live` pod + `live-enabled=false` → still throws `unavailable`
-  (byte-identical to today).
-- `-live` pod + `live-enabled=true` + row with non-blank `expected_account_id` → resolves the row.
-- `-live` pod + `live-enabled=true` + **blank** `expected_account_id` → fails closed (throws), never
-  serves a live credential without identity binding.
-- paper pod path unchanged.
+**Tests (TDD):** for BOTH `DbBrokerCredentialSourceTest` (read) and the `BrokerCredentialWriter`
+test (write):
+- `-live` pod + `live-enabled=false`/unset → still refuses (byte-identical to today); read reads no
+  row, write does no probe/persist.
+- `-live` pod + `live-enabled=true` + non-blank `expected_account_id` → read resolves the row / write
+  validates identity + persists.
+- `-live` pod + `live-enabled=true` + **blank/null** `expected_account_id` → fails closed (throws);
+  read also covers the `ACCOUNT_LEVEL` sentinel path (risk C1/C2); write persists nothing.
+- paper path unchanged (both).
 
 **Verify / success criteria:** `mvn -pl services/exec -am spotless:apply && mvn -pl services/exec test`.
 Behavioral assertion: with the repo default (`live-enabled` unset) an `alpaca-live` pod refuses DB
