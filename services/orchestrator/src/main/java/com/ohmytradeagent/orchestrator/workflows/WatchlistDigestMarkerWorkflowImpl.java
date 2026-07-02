@@ -10,7 +10,7 @@ package com.ohmytradeagent.orchestrator.workflows;
 public class WatchlistDigestMarkerWorkflowImpl implements WatchlistDigestMarkerWorkflow {
 
   @Override
-  public void mark(String tenantId, String etDate) {
+  public void mark() {
     // Intentionally empty: this workflow exists only as a per-(tenant, etDate) dedup token.
   }
 }

@@ -147,7 +147,7 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
    *     (another fan-out entry already posted — skip).
    */
   boolean startDigestMarker(String tenantId, String etDate) {
-    String workflowId = "t-" + tenantId + "/wl/" + etDate + "/digest";
+    String workflowId = WorkflowIds.watchlistDigest(tenantId, etDate);
     try {
       WatchlistDigestMarkerWorkflow marker =
           workflowClient.newWorkflowStub(
@@ -158,7 +158,7 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
                   .setWorkflowIdReusePolicy(
                       WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
                   .build());
-      WorkflowClient.start(marker::mark, tenantId, etDate);
+      WorkflowClient.start(marker::mark);
       return true;
     } catch (WorkflowExecutionAlreadyStarted alreadyStarted) {
       // Another (tenant, strategy) fan-out entry already posted this tenant's digest today.

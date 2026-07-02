@@ -19,9 +19,9 @@ import io.temporal.workflow.WorkflowMethod;
 public interface WatchlistDigestMarkerWorkflow {
 
   /**
-   * No-op dedup marker. Arguments are carried for observability only; the dedup key is the workflow
-   * id ({@code t-{tenant}/wl/{etDate}/digest}).
+   * No-op dedup marker. Takes no arguments and does nothing — the dedup key is entirely the
+   * workflow id ({@code t-{tenant}/wl/{etDate}/digest}), which is already visible in Temporal.
    */
   @WorkflowMethod
-  void mark(String tenantId, String etDate);
+  void mark();
 }
