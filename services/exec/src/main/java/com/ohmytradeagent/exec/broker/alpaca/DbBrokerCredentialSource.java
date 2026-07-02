@@ -31,10 +31,13 @@ import org.springframework.stereotype.Component;
  * selector at {@code env} — never construct this bean and resolve credentials byte-identically to
  * P4-a. No cluster sets {@code source=db} in P6-a.
  *
- * <p><b>Refuses live by construction (MUST-FIX-1).</b> On a {@code -live} pod ({@code broker.impl}
- * ends {@code -live}) {@link #resolve} throws UNCONDITIONALLY — DB-sourced creds cannot serve real
- * money in P6-a, a later hardening gate lifts this. This is stronger than the file source's
- * blank-expected seal: it refuses live outright, even for a fully valid row.
+ * <p><b>Refuses live unless explicitly enabled.</b> On a {@code -live} pod ({@code broker.impl}
+ * ends {@code -live}) {@link #resolve} throws UNLESS an operator opts in with {@code
+ * broker.creds.db.live-enabled=true} (default false). With the flag unset a {@code -live} pod
+ * refuses byte-identically to P6-a — DB-sourced creds cannot serve real money. When the flag is
+ * enabled, a live credential is served only if the row declares a non-blank {@code
+ * expected_account_id}; a blank fails closed (mirrors {@link FileMountedBrokerCredentialSource}'s
+ * live seal) so a live credential is never served without a bound account id.
  *
  * <p><b>Fail-closed (MUST-FIX-2/3/4/7).</b> A missing row, any AES-GCM authentication failure, an
  * AAD mismatch (the AAD binds the ciphertext to {@code tenant || provider || expected_account_id ||
@@ -71,6 +74,7 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
   private final DSLContext dsl;
   private final BrokerCredentialCrypto crypto;
   private final boolean live;
+  private final boolean liveEnabled;
   private final String accountLevelTenant;
 
   public DbBrokerCredentialSource(
@@ -78,9 +82,13 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
       BrokerCredentialCrypto crypto,
       @Value("${broker.impl:}") String brokerImpl,
       @Value("${broker.creds.account-level-tenant:${EXEC_BOOTSTRAP_TENANT_ID:}}")
-          String accountLevelTenant) {
+          String accountLevelTenant,
+      @Value("${broker.creds.db.live-enabled:false}") boolean liveEnabled) {
     this.dsl = dsl;
     this.live = brokerImpl != null && brokerImpl.endsWith("-live");
+    // Default-off gate: a -live pod serves DB creds ONLY when an operator explicitly opts in. Unset
+    // → preserve the P6-a refusal exactly.
+    this.liveEnabled = liveEnabled;
     // The crypto bean (KEK loaded + validated once at boot by BrokerCredentialCryptoConfig —
     // MUST-FIX-4) is shared with the P6-b write path so read + write use the IDENTICAL envelope.
     this.crypto = crypto;
@@ -93,8 +101,9 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
 
   @Override
   public BrokerCredentials resolve(String tenantId, String provider) {
-    // MUST-FIX-1: a -live pod refuses DB creds outright in P6-a — no row, however valid, is served.
-    if (live) {
+    // A -live pod refuses DB creds outright UNLESS an operator opted in via
+    // broker.creds.db.live-enabled. Flag unset → byte-identical P6-a refusal (no row is read).
+    if (live && !liveEnabled) {
       throw unavailable(
           "db-sourced broker credentials are refused on a -live pod in P6-a (tenant="
               + tenantId
@@ -132,6 +141,21 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
     String baseUrl = row.get(BASE_URL);
     String wsUrl = row.get(WS_URL);
     String expected = row.get(EXPECTED_ACCOUNT_ID) == null ? "" : row.get(EXPECTED_ACCOUNT_ID);
+
+    // Live seal (mirrors FileMountedBrokerCredentialSource): on a -live pod a blank
+    // expected_account_id would silently disable the P2 account-identity assertion
+    // (BrokerAccountIdentityVerifier.verify() no-ops on blank), so a live tenant MUST declare the
+    // account its keys authenticate. Checked here — after resolveTenant() and the row read — so it
+    // covers the ACCOUNT_LEVEL sentinel path too, and BEFORE any credential is returned.
+    if (live && expected.isEmpty()) {
+      throw unavailable(
+          "missing/blank required 'expected_account_id' for tenant="
+              + tenant
+              + " provider="
+              + provider
+              + " — a -live target must declare its expected account");
+    }
+
     int rowKekVersion = row.get(KEK_VERSION);
 
     byte[] aad = BrokerCredentialCrypto.aad(tenant, provider, expected, rowKekVersion);

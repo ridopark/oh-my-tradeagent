@@ -119,7 +119,7 @@ class BrokerCredentialWriterIT {
 
   private DbBrokerCredentialSource source(BrokerCredentialCrypto crypto) {
     // This IT exercises real tenants directly, so the account-level-tenant mapping is unused here.
-    return new DbBrokerCredentialSource(dsl, crypto, IMPL, "acct-level-tenant");
+    return new DbBrokerCredentialSource(dsl, crypto, IMPL, "acct-level-tenant", false);
   }
 
   private void enqueueAccount(String accountNumber) {
