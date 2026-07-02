@@ -505,6 +505,9 @@ async def test_bounded_crashes_exhaust_and_raise(
 
     # Bounded: it did not open unbounded pages.
     assert ctx.new_page_calls <= n + 1
+    # Close-before-raise: the crashed tab that tripped exhaustion is torn down
+    # (not leaked) even though the loop gives up on that iteration.
+    assert ctx.handed_out[-1].close_calls == 1
 
 
 async def test_rebuild_failure_is_bounded_and_backed_off(

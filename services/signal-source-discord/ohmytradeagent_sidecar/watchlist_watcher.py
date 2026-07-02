@@ -344,14 +344,16 @@ class WatchlistWatcher:
                     "rebuilding watchlist page after renderer crash (attempt %d)",
                     consecutive_crashes,
                 )
-                if consecutive_crashes >= self.MAX_CONSECUTIVE_CRASHES:
-                    # Bounded: give up so the task dies loudly (feeds Phase 2).
-                    raise
+                # Tear down the dead tab BEFORE deciding whether to give up, so
+                # exhaustion doesn't leak the crashed page when the task dies.
                 try:
                     await page.close()
                 except Exception:  # noqa: BLE001 - best-effort; page may be gone
                     self._log.debug("watchlist dead-page close failed (ignored)")
                 page = None
+                if consecutive_crashes >= self.MAX_CONSECUTIVE_CRASHES:
+                    # Bounded: give up so the task dies loudly (feeds Phase 2).
+                    raise
                 await asyncio.sleep(self._rebuild_backoff_secs(consecutive_crashes))
                 continue
 
