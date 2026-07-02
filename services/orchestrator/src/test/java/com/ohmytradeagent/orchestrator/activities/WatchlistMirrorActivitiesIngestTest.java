@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -74,7 +75,9 @@ class WatchlistMirrorActivitiesIngestTest {
     StrategyRegistry registry = mock(StrategyRegistry.class);
     lenient()
         .when(
-            client.newWorkflowStub(any(Class.class), any(io.temporal.client.WorkflowOptions.class)))
+            client.newWorkflowStub(
+                eq(WatchlistTriggerSessionWorkflow.class),
+                any(io.temporal.client.WorkflowOptions.class)))
         .thenReturn(mock(WatchlistTriggerSessionWorkflow.class));
     when(registry.get("dev", TRIGGER_ID)).thenReturn(config(true));
 
@@ -86,9 +89,13 @@ class WatchlistMirrorActivitiesIngestTest {
     assertThat(embed.getValue().description()).contains("📈 **SPY 756C** — breaks above 755.30");
     verify(webhook, never()).postToUrl(anyString(), anyString());
 
-    // The fan-out gate opened: a session stub was created (the start was attempted).
+    // The fan-out gate opened: a SESSION stub was created (the start was attempted). Scoped to the
+    // session type so the per-(tenant, etDate) digest-marker stub (a separate newWorkflowStub call)
+    // is not counted here.
     verify(client, times(1))
-        .newWorkflowStub(any(Class.class), any(io.temporal.client.WorkflowOptions.class));
+        .newWorkflowStub(
+            eq(WatchlistTriggerSessionWorkflow.class),
+            any(io.temporal.client.WorkflowOptions.class));
   }
 
   @Test
@@ -101,7 +108,9 @@ class WatchlistMirrorActivitiesIngestTest {
 
     verify(webhook, times(1)).postEmbedToUrl(anyString(), any());
     verify(client, never())
-        .newWorkflowStub(any(Class.class), any(io.temporal.client.WorkflowOptions.class));
+        .newWorkflowStub(
+            eq(WatchlistTriggerSessionWorkflow.class),
+            any(io.temporal.client.WorkflowOptions.class));
   }
 
   @Test
@@ -115,7 +124,9 @@ class WatchlistMirrorActivitiesIngestTest {
 
     verify(webhook, times(1)).postEmbedToUrl(anyString(), any());
     verify(client, never())
-        .newWorkflowStub(any(Class.class), any(io.temporal.client.WorkflowOptions.class));
+        .newWorkflowStub(
+            eq(WatchlistTriggerSessionWorkflow.class),
+            any(io.temporal.client.WorkflowOptions.class));
   }
 
   @Test
@@ -128,7 +139,9 @@ class WatchlistMirrorActivitiesIngestTest {
 
     verify(webhook, times(1)).postToUrl(anyString(), anyString());
     verify(client, never())
-        .newWorkflowStub(any(Class.class), any(io.temporal.client.WorkflowOptions.class));
+        .newWorkflowStub(
+            eq(WatchlistTriggerSessionWorkflow.class),
+            any(io.temporal.client.WorkflowOptions.class));
   }
 
   @Test
