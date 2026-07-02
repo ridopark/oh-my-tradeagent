@@ -58,8 +58,16 @@ def _posted_et_date(timestamp_iso: str) -> str | None:
 
 
 # Substrings of Playwright error messages that mean the page/renderer is gone
-# for good (not a transient DOM hiccup) — the incident's crash signature.
-_FATAL_ERROR_SUBSTRINGS = ("Target crashed", "Target closed", "has been closed")
+# for good (not a transient DOM hiccup) — the incident's crash signature plus
+# adjacent renderer/connection-death messages.
+# TODO: widen if new crash signatures show up in prod sidecar logs.
+_FATAL_ERROR_SUBSTRINGS = (
+    "Target crashed",
+    "Target closed",
+    "has been closed",
+    "Session closed",
+    "Protocol error",
+)
 
 
 def _is_fatal_page_error(exc: BaseException, page: Page) -> bool:
@@ -250,27 +258,70 @@ class WatchlistWatcher:
         """
         self._log.info("navigating to watchlist channel %s", self._channel_url)
         page = await context.new_page()
-        await page.goto(self._channel_url, wait_until="domcontentloaded")
-        await page.wait_for_selector(
-            MESSAGES_LI_SELECTOR, timeout=self.DOM_READY_TIMEOUT_MS
-        )
+        try:
+            await page.goto(self._channel_url, wait_until="domcontentloaded")
+            await page.wait_for_selector(
+                MESSAGES_LI_SELECTOR, timeout=self.DOM_READY_TIMEOUT_MS
+            )
+        except Exception:
+            # The fresh tab failed to come up (goto/selector timeout, transient
+            # network hiccup right after a crash). Close it so a bounded run of
+            # failed rebuilds doesn't leak tabs into the shared context, then
+            # let the caller count this against the rebuild budget.
+            try:
+                await page.close()
+            except Exception:  # noqa: BLE001 - best-effort; page may be half-built
+                pass
+            raise
         return page
+
+    def _rebuild_backoff_secs(self, attempt: int) -> float:
+        """Capped exponential backoff (secs) for the Nth consecutive crash."""
+        return min(
+            self._REBUILD_BACKOFF_BASE_SECS * 2 ** (attempt - 1),
+            self._REBUILD_BACKOFF_CAP_SECS,
+        )
 
     async def run_on_context(self, context: BrowserContext) -> None:
         """Run the watchlist poll loop on the caller-owned browser context.
 
         Owns its own watchlist tab: builds it via ``_new_ready_page`` and, if
         the renderer crashes / the page closes, rebuilds it (bounded retries +
-        backoff) instead of re-ticking a dead page forever. On a transient tick
-        error, keeps the tolerant swallow-and-continue on the SAME page. On
-        bounded-crash exhaustion, ``raise`` so the task dies loudly (its
-        ``_log_if_failed`` done-callback logs it). Shares one Chromium with the
-        signal watcher (two tabs) — ``main`` owns the context.
+        backoff) instead of re-ticking a dead page forever. A rebuild that
+        itself fails counts against the SAME budget, so a hiccup during recovery
+        can't bypass the bound. On a transient tick error, keeps the tolerant
+        swallow-and-continue on the SAME page. On bounded-crash exhaustion,
+        ``raise`` so the task dies loudly (its ``_log_if_failed`` done-callback
+        logs it). Shares one Chromium with the signal watcher (two tabs) —
+        ``main`` owns the context.
         """
-        page = await self._new_ready_page(context)
+        page: Page | None = None
         consecutive_crashes = 0
 
         while True:
+            # (Re)build the tab whenever we don't hold a live one. The rebuild
+            # can ITSELF fail (goto/wait_for_selector timing out or a transient
+            # network error while re-navigating right after a renderer crash —
+            # the most likely moment), so it counts against the SAME bounded /
+            # backoff budget as a tick-time crash instead of escaping unguarded
+            # on the first attempt.
+            if page is None:
+                try:
+                    page = await self._new_ready_page(context)
+                except Exception:  # noqa: BLE001 - rebuild right after a crash can fail
+                    consecutive_crashes += 1
+                    self._log.exception(
+                        "watchlist page rebuild failed (attempt %d)",
+                        consecutive_crashes,
+                    )
+                    if consecutive_crashes >= self.MAX_CONSECUTIVE_CRASHES:
+                        # Bounded: give up so the task dies loudly (feeds Phase 2).
+                        raise
+                    await asyncio.sleep(
+                        self._rebuild_backoff_secs(consecutive_crashes)
+                    )
+                    continue
+
             try:
                 await self._tick(page)
                 consecutive_crashes = 0
@@ -285,6 +336,9 @@ class WatchlistWatcher:
                     await asyncio.sleep(self._poll_interval)
                     continue
 
+                # Fatal: tear down the dead tab and rebuild on the next
+                # iteration (guarded above), counting this crash toward the
+                # bounded budget with backoff.
                 consecutive_crashes += 1
                 self._log.exception(
                     "rebuilding watchlist page after renderer crash (attempt %d)",
@@ -297,12 +351,8 @@ class WatchlistWatcher:
                     await page.close()
                 except Exception:  # noqa: BLE001 - best-effort; page may be gone
                     self._log.debug("watchlist dead-page close failed (ignored)")
-                backoff = min(
-                    self._REBUILD_BACKOFF_BASE_SECS * 2 ** (consecutive_crashes - 1),
-                    self._REBUILD_BACKOFF_CAP_SECS,
-                )
-                await asyncio.sleep(backoff)
-                page = await self._new_ready_page(context)
+                page = None
+                await asyncio.sleep(self._rebuild_backoff_secs(consecutive_crashes))
                 continue
 
             # Reached only when _tick returned WITHOUT raising (transient/fatal

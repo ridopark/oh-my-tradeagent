@@ -341,10 +341,13 @@ class FakePage:
     calls. Records call counts so tests can assert on rebuild behaviour.
     """
 
-    def __init__(self, tick_results: list) -> None:
+    def __init__(self, tick_results: list, *, goto_error: BaseException | None = None) -> None:
         # Each element is either a list[dict] (rows for extract_recent) or an
         # Exception instance to raise on that tick's page.evaluate.
         self._tick_results = list(tick_results)
+        # If set, goto() raises this every time — simulates a rebuilt tab that
+        # fails to re-navigate right after a renderer crash.
+        self._goto_error = goto_error
         self.evaluate_calls = 0
         self.goto_calls = 0
         self.wait_calls = 0
@@ -353,6 +356,8 @@ class FakePage:
 
     async def goto(self, url: str, *, wait_until: str = "load") -> None:
         self.goto_calls += 1
+        if self._goto_error is not None:
+            raise self._goto_error
 
     async def wait_for_selector(self, selector: str, *, timeout: float = 0) -> None:
         self.wait_calls += 1
@@ -500,6 +505,47 @@ async def test_bounded_crashes_exhaust_and_raise(
 
     # Bounded: it did not open unbounded pages.
     assert ctx.new_page_calls <= n + 1
+
+
+async def test_rebuild_failure_is_bounded_and_backed_off(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A renderer crash triggers a rebuild whose OWN re-navigation keeps failing
+    (goto timing out right after the crash — the likeliest recovery-time
+    failure). That failure must count against the SAME bounded budget and back
+    off, NOT escape unguarded on the first rebuild attempt.
+
+    Regression for the PR-513 review finding: pre-fix, an unguarded
+    ``_new_ready_page`` in the except block killed the task on
+    ``consecutive_crashes == 1`` instead of honoring MAX_CONSECUTIVE_CRASHES.
+    """
+    import ohmytradeagent_sidecar.watchlist_watcher as mod
+
+    monkeypatch.setattr(mod.asyncio, "sleep", _no_sleep)
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(tmp_path, emitter)
+
+    n = WatchlistWatcher.MAX_CONSECUTIVE_CRASHES
+    dead = FakePage([_crash()])  # initial tab: crashes on its first tick
+    # Every rebuilt tab fails to re-navigate (transient goto failure).
+    rebuilds = [
+        FakePage([], goto_error=PlaywrightError("Timeout 30000ms exceeded"))
+        for _ in range(n + 2)
+    ]
+    ctx = FakeContext([dead, *rebuilds])
+
+    # It raises (dies loudly) only after exhausting the budget — the rebuild
+    # failures were counted, not swallowed and not escaped early.
+    with pytest.raises(PlaywrightError):
+        await w.run_on_context(ctx)
+
+    # Retried the rebuild across multiple attempts (initial + dead-tab rebuild +
+    # more) — pre-fix this died at new_page_calls == 2 on the first rebuild.
+    assert ctx.new_page_calls >= 3
+    # Still bounded — did not spin opening tabs forever.
+    assert ctx.new_page_calls <= n + 1
+    # The crashed initial tab was torn down.
+    assert dead.close_calls == 1
 
 
 async def test_crash_counter_resets_on_success(
