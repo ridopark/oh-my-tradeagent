@@ -52,13 +52,10 @@ public class OperatorBrokerCredentialController {
       @PathVariable("tenant") String tenant,
       @RequestBody BrokerCredentialForwardRequest body) {
 
-    String operator = ctx.operatorId(req); // 400 if X-Operator-Id absent
-
-    // The operator id is recorded verbatim as the audit `actor` — reject a malformed value (400)
-    // before it lands there (operatorId() only checks presence, not charset/length).
-    if (!ctx.isValidOperatorId(operator)) {
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
-    }
+    // 400 if X-Operator-Id absent/malformed; 403 if the operator is not in the OPERATOR_ALLOWLIST.
+    // The allowlist gate also enforces the format check (isValidOperatorId) that previously lived
+    // here, so a malformed operator can never reach the audit `actor` field.
+    String operator = ctx.requireAllowlistedOperator(req);
 
     // The path tenant flows into the exec X-Tenant-Id header AND the audit workflow id — reject a
     // malformed value (400) before it can corrupt either, using TenantContext's canonical charset.

@@ -36,7 +36,8 @@ import org.springframework.test.web.servlet.MvcResult;
 @WebMvcTest(AdminTenantsController.class)
 @AutoConfigureMockMvc(addFilters = false)
 @Import(TenantContext.class)
-@TestPropertySource(properties = "operator.admin-read.enabled=true")
+@TestPropertySource(
+    properties = {"operator.admin-read.enabled=true", "operator.allowlist=ridopark"})
 class AdminTenantsControllerWebMvcTest {
 
   @Autowired private MockMvc mvc;
@@ -51,6 +52,17 @@ class AdminTenantsControllerWebMvcTest {
     mvc.perform(get("/api/admin/tenants"))
         .andExpect(status().isBadRequest())
         .andExpect(jsonPath("$.error").value("missing_operator"));
+  }
+
+  @Test
+  void nonAllowlistedOperatorIs403_generic_noTenantDataEchoed() throws Exception {
+    // A well-formed but non-allowlisted operator is rejected 403 BEFORE any tenant data is read or
+    // the operator_id is echoed; the readers must not be touched and the body is generic.
+    mvc.perform(get("/api/admin/tenants").header("X-Operator-Id", "intruder"))
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.error").value("forbidden"))
+        .andExpect(jsonPath("$.operator_id").doesNotExist());
+    org.mockito.Mockito.verifyNoInteractions(strategyConfigReader);
   }
 
   @Test

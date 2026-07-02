@@ -23,6 +23,17 @@ public class GlobalExceptionHandler {
         .body(Map.of("error", "missing_header", "header", e.header()));
   }
 
+  /**
+   * A well-formed but non-allowlisted {@code X-Operator-Id} on an operator-admin route → 403.
+   * Deliberately GENERIC body (no operator echo, no "not_allowlisted" reason): the response must
+   * not be a membership oracle for the allowlist.
+   */
+  @ExceptionHandler(TenantContext.UnauthorizedOperatorException.class)
+  public ResponseEntity<Map<String, Object>> unauthorizedOperator(
+      TenantContext.UnauthorizedOperatorException e) {
+    return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "forbidden"));
+  }
+
   @ExceptionHandler(IllegalArgumentException.class)
   public ResponseEntity<Map<String, Object>> badRequest(IllegalArgumentException e) {
     return ResponseEntity.status(HttpStatus.BAD_REQUEST)

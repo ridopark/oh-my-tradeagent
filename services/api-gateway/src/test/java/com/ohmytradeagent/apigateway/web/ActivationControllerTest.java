@@ -55,7 +55,14 @@ class ActivationControllerTest {
     when(workflowClient.newWorkflowStub(
             eq(LiveDeactivationWorkflow.class), any(WorkflowOptions.class)))
         .thenReturn(deactivateStub);
-    controller = new ActivationController(workflowClient, new TenantContext("dev", STRATEGY));
+    // Allowlist the OPERATOR so the outcome-mapping tests exercise the activate/deactivate paths;
+    // the allowlist gate itself is covered by the dedicated 403 tests below.
+    controller =
+        new ActivationController(workflowClient, new TenantContext("dev", STRATEGY, OPERATOR));
+  }
+
+  private ActivationController controllerWithAllowlist(String allowlist) {
+    return new ActivationController(workflowClient, new TenantContext("dev", STRATEGY, allowlist));
   }
 
   private static HttpServletRequest reqWithOperator(String operator) {
@@ -84,6 +91,28 @@ class ActivationControllerTest {
   void missingOperatorHeader_is400_noWorkflowStarted() {
     assertThatThrownBy(() -> controller.activate(reqWithOperator(null), TENANT, STRATEGY))
         .isInstanceOf(TenantContext.MissingHeaderException.class);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
+  void nonAllowlistedOperator_activate_is403_noWorkflowStarted() {
+    assertThatThrownBy(() -> controller.activate(reqWithOperator("intruder"), TENANT, STRATEGY))
+        .isInstanceOf(TenantContext.UnauthorizedOperatorException.class);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
+  void nonAllowlistedOperator_deactivate_is403_noWorkflowStarted() {
+    assertThatThrownBy(() -> controller.deactivate(reqWithOperator("intruder"), TENANT, STRATEGY))
+        .isInstanceOf(TenantContext.UnauthorizedOperatorException.class);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
+  void emptyAllowlist_deniesAll_activate_is403() {
+    ActivationController denyAll = controllerWithAllowlist(""); // empty = deny-all (fail-closed)
+    assertThatThrownBy(() -> denyAll.activate(reqWithOperator(OPERATOR), TENANT, STRATEGY))
+        .isInstanceOf(TenantContext.UnauthorizedOperatorException.class);
     verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
   }
 

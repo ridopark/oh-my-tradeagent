@@ -6,6 +6,7 @@ import com.ohmytradeagent.apigateway.security.ServiceTokenFilter;
 import io.temporal.client.WorkflowClient;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -50,6 +51,23 @@ class CreateTenantDarkProofTest {
               // route is unauthenticated.
               assertThat(ctx).hasSingleBean(ServiceTokenFilter.class);
             });
+  }
+
+  /**
+   * C7 guard: EVERY flag that activates an {@code /admin/tenants/} controller must appear in {@link
+   * ServiceTokenFilter}'s {@code @ConditionalOnExpression}, or that admin route could be reachable
+   * with the bearer gate absent. Reads the annotation directly so adding a new admin controller
+   * flag without wiring the filter fails this test.
+   */
+  @Test
+  void serviceTokenFilterExpression_listsEveryAdminTenantsFlag() {
+    ConditionalOnExpression ann =
+        ServiceTokenFilter.class.getAnnotation(ConditionalOnExpression.class);
+    assertThat(ann).as("ServiceTokenFilter must be @ConditionalOnExpression-gated").isNotNull();
+    String expr = ann.value();
+    assertThat(expr).contains("operator.tenant-create.enabled"); // CreateTenantController
+    assertThat(expr).contains("operator.activation.enabled"); // ActivationController
+    assertThat(expr).contains("operator.credential-write.enabled"); // OperatorBrokerCredentialCtrl
   }
 
   @Configuration
