@@ -109,7 +109,7 @@ class BrokerCredentialWriterIT {
   }
 
   private BrokerCredentialWriter writer(BrokerCredentialCrypto crypto) {
-    return new BrokerCredentialWriter(dsl, crypto, builder, mapper, meterRegistry, IMPL);
+    return new BrokerCredentialWriter(dsl, crypto, builder, mapper, meterRegistry, IMPL, false);
   }
 
   /** The DB read sibling; shares the crypto so the round-trip proves AAD + envelope agree. */

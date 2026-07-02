@@ -25,9 +25,14 @@ import org.springframework.web.client.RestClient;
  * AND an {@code alpaca-*} impl — so the homelab pods (selector at {@code env}) never construct this
  * bean; the write path simply does not exist there.
  *
- * <p><b>Refuses live by construction (MUST-FIX-1, mirrors the read source).</b> On a {@code -live}
- * pod the writer throws unconditionally — DB-sourced creds stay paper-only until a later hardening
- * gate, subsuming the blank-expected-for-live rejection.
+ * <p><b>Refuses live unless explicitly enabled (mirrors the read source).</b> On a {@code -live}
+ * pod the writer throws UNLESS an operator opts in with {@code broker.creds.db.live-enabled=true}
+ * (default false). With the flag unset a {@code -live} pod refuses byte-identically to P6-b —
+ * DB-sourced creds cannot persist real-money keys. When the flag is enabled, a live write is
+ * accepted only if the request declares a non-blank {@code declaredAccountId}; a blank fails closed
+ * (mirrors {@link DbBrokerCredentialSource} + {@link FileMountedBrokerCredentialSource}'s live
+ * seal) so a live credential is never written without a bound account id — re-establishing the
+ * blank-expected-for-live rejection the old unconditional refusal used to subsume.
  *
  * <p><b>Validate-on-entry (MUST-FIX-6), BEFORE any DB write.</b> A throwaway broker is built from
  * the UNSAVED keys via the exact registry sequence ({@code assertCredentialsPresent} → {@code
@@ -59,6 +64,7 @@ public class BrokerCredentialWriter {
   private final ObjectMapper objectMapper;
   private final MeterRegistry meterRegistry;
   private final boolean live;
+  private final boolean liveEnabled;
   private final String brokerImpl;
 
   public BrokerCredentialWriter(
@@ -67,13 +73,17 @@ public class BrokerCredentialWriter {
       RestClient.Builder restClientBuilder,
       ObjectMapper objectMapper,
       MeterRegistry meterRegistry,
-      @Value("${broker.impl:}") String brokerImpl) {
+      @Value("${broker.impl:}") String brokerImpl,
+      @Value("${broker.creds.db.live-enabled:false}") boolean liveEnabled) {
     this.dsl = dsl;
     this.crypto = crypto;
     this.restClientBuilder = restClientBuilder;
     this.objectMapper = objectMapper;
     this.meterRegistry = meterRegistry;
     this.live = brokerImpl != null && brokerImpl.endsWith("-live");
+    // Default-off gate (symmetric to DbBrokerCredentialSource): a -live pod persists DB creds ONLY
+    // when an operator explicitly opts in. Unset → preserve the P6-b refusal exactly.
+    this.liveEnabled = liveEnabled;
     this.brokerImpl = brokerImpl == null ? "" : brokerImpl;
   }
 
@@ -125,15 +135,30 @@ public class BrokerCredentialWriter {
     // on an already-canonical provider ("alpaca" -> "alpaca").
     provider = BrokerClientRegistry.providerOf(provider);
 
-    // MUST-FIX-1: a -live pod refuses to persist DB creds outright in P6-b. Checked first so no
+    // A -live pod refuses to persist DB creds outright UNLESS an operator opted in via
+    // broker.creds.db.live-enabled. Flag unset → byte-identical P6-b refusal, checked first so no
     // network probe or DB write can happen on a live pod.
-    if (live) {
+    if (live && !liveEnabled) {
       throw new IllegalStateException(
           "db-sourced broker credential writes are refused on a -live pod in P6-b (tenant="
               + tenantId
               + " provider="
               + provider
               + ")");
+    }
+
+    // Live seal (mirrors DbBrokerCredentialSource + FileMountedBrokerCredentialSource): on a -live
+    // pod a blank/null declaredAccountId would silently disable the P2 account-identity probe
+    // (BrokerAccountIdentityVerifier.verify() no-ops on blank), so a live write MUST declare the
+    // account its keys authenticate. Checked before the probe and before any DB write — this is the
+    // rejection the old unconditional live refusal used to subsume.
+    if (live && (declaredAccountId == null || declaredAccountId.isBlank())) {
+      throw new IllegalStateException(
+          "missing/blank required declaredAccountId for tenant="
+              + tenantId
+              + " provider="
+              + provider
+              + " — a -live target must declare its expected account");
     }
 
     // MUST-FIX-6: validate-on-entry BEFORE any DB write. A throw here means the keys are bad
