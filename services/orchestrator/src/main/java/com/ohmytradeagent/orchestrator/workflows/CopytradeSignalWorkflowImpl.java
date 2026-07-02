@@ -891,11 +891,17 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       return payload.getSignalId();
     }
 
-    double fraction =
-        KeywordPartialMatcher.match(
+    // PLAN-2026-07-01-unrecognized-stc-tail-alert: compute the match REPORT (fraction + winning
+    // key) rather than just the fraction. The fraction is unchanged — matchReporting resolves the
+    // identical value as match() — but the winning key (empty when the default was applied) is
+    // carried into the ExitRequested audit subject below so an out-of-workflow alerter can page
+    // when a non-empty tail matched nothing. Observability only: sizing/dispatch are untouched.
+    KeywordPartialMatcher.MatchResult matchResult =
+        KeywordPartialMatcher.matchReporting(
             payload.getTail(),
             toDoubleMap(config.getPartialFractions()),
             defaultStcFraction(config));
+    double fraction = matchResult.fraction();
 
     PartialExitRequest req = new PartialExitRequest();
     req.setSchemaVersion(1L);
@@ -919,7 +925,15 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "signal_id", payload.getSignalId(),
             "option_symbol", occ,
             "position_workflow_id", positionId,
-            "fraction", fraction));
+            "fraction", fraction,
+            // PLAN-2026-07-01-unrecognized-stc-tail-alert: subject-only enrichment (no new command,
+            // no version gate — activity-input payloads are ignored on Temporal 1.27 replay). The
+            // out-of-workflow UnrecognizedStcTailAlerter reads these to page when a non-empty tail
+            // matched no keyword. matched_keyword is null when the default fraction was applied.
+            "matched_keyword", matchResult.matchedKey().orElse(null),
+            "tail", payload.getTail(),
+            "author", payload.getAuthor(),
+            "raw_line", payload.getRawLine()));
 
     ExternalWorkflowStub stub = Workflow.newUntypedExternalWorkflowStub(positionId);
     // Change point B (defense-in-depth): even past the running-guard the target can die between the
