@@ -140,6 +140,15 @@ async def _amain() -> None:
             "— run bootstrap first (see README)"
         )
 
+    # Phase B2: in registry mode, validate the api-gateway config BEFORE dialing
+    # Temporal — a missing var must fail fast without leaving a connected emitter
+    # unclosed (same discipline as the storage_state check above).
+    gw_base_url = None
+    gw_token = None
+    if fanout_source == "registry":
+        gw_base_url = _required("API_GATEWAY_BASE_URL")
+        gw_token = _required("API_GATEWAY_SHARED_TOKEN")
+
     log.info(
         "starting sidecar (tenant=%s strategy=%s additional_targets=%s target=%s task_queue=%s)",
         tenant_id,
@@ -169,8 +178,6 @@ async def _amain() -> None:
     if fanout_source == "registry":
         from .fanout_registry import FanoutRefresher, FanoutRegistryClient
 
-        gw_base_url = _required("API_GATEWAY_BASE_URL")
-        gw_token = _required("API_GATEWAY_SHARED_TOKEN")
         refresh_secs = float(os.getenv("SIGNAL_FANOUT_REFRESH_SECS", "60"))
         fanout_refresher = FanoutRefresher(
             client=FanoutRegistryClient(base_url=gw_base_url, token=gw_token),
