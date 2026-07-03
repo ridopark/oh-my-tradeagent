@@ -1,6 +1,5 @@
 package com.ohmytradeagent.tdbff.web;
 
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -11,7 +10,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.ohmytradeagent.tdbff.invites.InviteWriterRepository;
 import com.ohmytradeagent.tdbff.invites.InviteWriterRepository.DeletedIdentityCounts;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentMatchers;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -56,7 +54,7 @@ class TenantDashboardRowsControllerWebMvcTest {
             delete("/api/admin/tenants/acme/dashboard-rows").header("X-Operator-Id", "intruder"))
         .andExpect(status().isForbidden())
         .andExpect(jsonPath("$.error").value("forbidden"));
-    verify(writer, never()).deleteTenantIdentities(ArgumentMatchers.any());
+    verifyNoInteractions(writer);
   }
 
   @Test
