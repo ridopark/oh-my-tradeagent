@@ -81,7 +81,7 @@ class DbBrokerCredentialSourceIT {
   }
 
   private DbBrokerCredentialSource source(String brokerImpl, String accountLevelTenant) {
-    return new DbBrokerCredentialSource(dsl, crypto(), brokerImpl, accountLevelTenant);
+    return new DbBrokerCredentialSource(dsl, crypto(), brokerImpl, accountLevelTenant, false);
   }
 
   private static byte[] aad(

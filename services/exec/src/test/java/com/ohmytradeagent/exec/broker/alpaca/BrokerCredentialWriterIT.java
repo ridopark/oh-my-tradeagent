@@ -109,7 +109,7 @@ class BrokerCredentialWriterIT {
   }
 
   private BrokerCredentialWriter writer(BrokerCredentialCrypto crypto) {
-    return new BrokerCredentialWriter(dsl, crypto, builder, mapper, meterRegistry, IMPL);
+    return new BrokerCredentialWriter(dsl, crypto, builder, mapper, meterRegistry, IMPL, false);
   }
 
   /** The DB read sibling; shares the crypto so the round-trip proves AAD + envelope agree. */
@@ -119,7 +119,7 @@ class BrokerCredentialWriterIT {
 
   private DbBrokerCredentialSource source(BrokerCredentialCrypto crypto) {
     // This IT exercises real tenants directly, so the account-level-tenant mapping is unused here.
-    return new DbBrokerCredentialSource(dsl, crypto, IMPL, "acct-level-tenant");
+    return new DbBrokerCredentialSource(dsl, crypto, IMPL, "acct-level-tenant", false);
   }
 
   private void enqueueAccount(String accountNumber) {

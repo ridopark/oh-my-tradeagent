@@ -87,7 +87,12 @@ class BrokerCredentialWriterTest {
   }
 
   private BrokerCredentialWriter writer(DSLContext dsl, String brokerImpl) {
-    return new BrokerCredentialWriter(dsl, crypto(), builder, mapper, meterRegistry, brokerImpl);
+    return writer(dsl, brokerImpl, false);
+  }
+
+  private BrokerCredentialWriter writer(DSLContext dsl, String brokerImpl, boolean liveEnabled) {
+    return new BrokerCredentialWriter(
+        dsl, crypto(), builder, mapper, meterRegistry, brokerImpl, liveEnabled);
   }
 
   private void enqueueAccount(String accountNumber) {
@@ -178,8 +183,9 @@ class BrokerCredentialWriterTest {
   }
 
   @Test
-  void refuseLivePod_throwsBeforeAnyValidationOrWrite() {
-    // MUST-FIX-1 mirror: a -live pod refuses to persist DB creds outright in P6-b.
+  void refuseLivePod_flagOff_throwsByteIdenticalBeforeAnyValidationOrWrite() {
+    // Default-off (live-enabled unset): a -live pod refuses to persist DB creds outright, with the
+    // exact P6-b message, before any probe or DB write.
     assertThatThrownBy(
             () ->
                 writer(recordingDsl(1), "alpaca-live")
@@ -193,10 +199,88 @@ class BrokerCredentialWriterTest {
                         "847309116",
                         0L,
                         "tester"))
-        .isInstanceOf(IllegalStateException.class);
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage(
+            "db-sourced broker credential writes are refused on a -live pod in P6-b (tenant=alice"
+                + " provider=alpaca)");
 
     assertThat(executedSql).isEmpty();
     // Refused by construction → no account read, no DB write.
+    assertThat(server.getRequestCount()).isZero();
+  }
+
+  @Test
+  void livePod_flagOn_boundAccountAndValidIdentity_savesRow() {
+    // Opt-in on a -live pod: the keys authenticate the declared account → validate-on-entry passes
+    // and the row is persisted.
+    enqueueAccount("847309116");
+
+    // The mock-server baseUrl carries no "paper" token, so it stays coherent with a -live impl.
+    BrokerCredentialWriter.SaveResult result =
+        writer(recordingDsl(1), "alpaca-live", true)
+            .save(
+                "alice",
+                PROVIDER,
+                "alice-key",
+                "alice-secret",
+                baseUrl,
+                "wss://live",
+                "847309116",
+                0L,
+                "tester");
+
+    assertThat(result.version()).isEqualTo(1L);
+    assertThat(result.brokerAccountId()).isEqualTo("847309116");
+    assertThat(executedSql).hasSize(1);
+    assertThat(executedSql.get(0).toLowerCase()).contains("broker_credentials");
+    assertThat(server.getRequestCount()).isEqualTo(1);
+  }
+
+  @Test
+  void livePod_flagOn_blankDeclaredAccount_rejectsAndWritesNoRow() {
+    // The live seal: on a -live pod a blank declaredAccountId would no-op the identity probe, so it
+    // must fail closed before any probe or DB write — nothing persists.
+    assertThatThrownBy(
+            () ->
+                writer(recordingDsl(1), "alpaca-live", true)
+                    .save(
+                        "alice",
+                        PROVIDER,
+                        "alice-key",
+                        "alice-secret",
+                        "https://api.alpaca.markets",
+                        "wss://live",
+                        "  ",
+                        0L,
+                        "tester"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("declaredAccountId")
+        .hasMessageContaining("a -live target must declare its expected account");
+
+    assertThat(executedSql).isEmpty();
+    assertThat(server.getRequestCount()).isZero();
+  }
+
+  @Test
+  void livePod_flagOn_nullDeclaredAccount_rejectsAndWritesNoRow() {
+    // A null declaredAccountId must also fail closed on a -live pod.
+    assertThatThrownBy(
+            () ->
+                writer(recordingDsl(1), "alpaca-live", true)
+                    .save(
+                        "alice",
+                        PROVIDER,
+                        "alice-key",
+                        "alice-secret",
+                        "https://api.alpaca.markets",
+                        "wss://live",
+                        null,
+                        0L,
+                        "tester"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("declaredAccountId");
+
+    assertThat(executedSql).isEmpty();
     assertThat(server.getRequestCount()).isZero();
   }
 
