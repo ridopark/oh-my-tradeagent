@@ -383,6 +383,11 @@ class PositionWorkflowImplTest {
     stub.partialExit(partialExitRequest("sig-B", "pos-queue", 1.0));
 
     waitForPlaceOrderCount(1);
+    // Deterministic sync: guarantee sig-B is QUEUED (and ExitQueued emitted) while sig-A is still
+    // in-flight, before we drain sig-A with a fill. Without this the fill can drain sig-A first and
+    // sig-B is then processed directly (never queued), so ExitQueued is never emitted -> flaky
+    // captureKind("ExitQueued") below.
+    waitForAuditKind("ExitQueued");
     // First fill closes 2 of 4
     stub.onFill(fill("brk-A", 2L, new BigDecimal("2.85")));
     waitForPlaceOrderCount(2);
@@ -3681,6 +3686,26 @@ class PositionWorkflowImplTest {
         .filter(e -> kind.equals(e.getKind()))
         .reduce((a, b) -> b)
         .orElseThrow(() -> new AssertionError("no audit event with kind=" + kind));
+  }
+
+  /**
+   * Deterministic sync point for async audit emissions. Mirrors {@link #waitForPlaceOrderCount}:
+   * poll (bounded) until at least one {@code audit.log(...)} call with the given kind has been
+   * captured. Use this to serialize against events that are emitted asynchronously by the workflow
+   * (e.g. {@code ExitQueued}) but that are not tied to a placeOrder count — without it a subsequent
+   * signal/fill can race ahead of the emission and make a later {@link #captureKind} flaky.
+   */
+  private void waitForAuditKind(String kind) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 50_000;
+    while (System.currentTimeMillis() < deadline) {
+      if (!captureAll(kind).isEmpty()) {
+        return;
+      }
+      Thread.sleep(50);
+    }
+    if (captureAll(kind).isEmpty()) {
+      throw new AssertionError("timed out waiting for audit event with kind=" + kind);
+    }
   }
 
   private static long asLong(Object o) {
