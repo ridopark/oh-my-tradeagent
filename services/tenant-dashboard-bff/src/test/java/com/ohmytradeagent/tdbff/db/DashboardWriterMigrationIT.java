@@ -155,6 +155,9 @@ class DashboardWriterMigrationIT {
               st.executeUpdate(
                   "INSERT INTO dashboard_user_invite (email, tenant_id, created_by, expires_at) "
                       + "VALUES ('e@x.com', 'acme', 'op', now())"));
+      // V6 grants SELECT only — UPDATE/DELETE on the invite table stay denied (SELECT-only lock).
+      assertDenied(() -> st.executeUpdate("UPDATE dashboard_user_invite SET consumed_at = now()"));
+      assertDenied(() -> st.executeUpdate("DELETE FROM dashboard_user_invite"));
     }
   }
 

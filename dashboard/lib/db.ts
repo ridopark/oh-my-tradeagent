@@ -68,20 +68,35 @@ export async function getTenantEmails(): Promise<Map<string, TenantEmails>> {
     }
     return e;
   };
-  const [members, pending] = await Promise.all([
+  // Decoupled (allSettled, not Promise.all): the dashboard_user read needs no special grant, but
+  // the invite read needs V6. During a split deploy (dashboard rolls before the BFF applies V6) or
+  // if the grant is reverted, the invite query alone rejects — degrade it independently so the
+  // (fully readable) members list is NOT suppressed with it. email is filtered NOT NULL: legacy /
+  // directly-provisioned dashboard_user rows carry a null email (V1 "informational") and would
+  // otherwise render as blank lines.
+  const [membersRes, pendingRes] = await Promise.allSettled([
     pool.query(
-      "SELECT DISTINCT tenant_id, email FROM dashboard_user ORDER BY tenant_id, email",
+      "SELECT DISTINCT tenant_id, email FROM dashboard_user " +
+        "WHERE email IS NOT NULL ORDER BY tenant_id, email",
     ),
     pool.query(
       "SELECT DISTINCT tenant_id, email FROM dashboard_user_invite " +
         "WHERE consumed_at IS NULL AND expires_at > now() ORDER BY tenant_id, email",
     ),
   ]);
-  for (const r of members.rows) {
-    bucket(r.tenant_id as string).members.push(r.email as string);
+  if (membersRes.status === "fulfilled") {
+    for (const r of membersRes.value.rows) {
+      bucket(r.tenant_id as string).members.push(r.email as string);
+    }
+  } else {
+    console.error("getTenantEmails: members query failed", membersRes.reason);
   }
-  for (const r of pending.rows) {
-    bucket(r.tenant_id as string).pending.push(r.email as string);
+  if (pendingRes.status === "fulfilled") {
+    for (const r of pendingRes.value.rows) {
+      bucket(r.tenant_id as string).pending.push(r.email as string);
+    }
+  } else {
+    console.error("getTenantEmails: pending-invites query failed", pendingRes.reason);
   }
   return out;
 }
