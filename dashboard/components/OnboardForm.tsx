@@ -11,6 +11,8 @@ export interface OnboardActionResult {
   createdVersion?: number;
   brokerAccountId?: string;
   newVersion?: number;
+  // Set only on a successful invite (step 4) — the invite's expiry, shown to the operator.
+  expiresAt?: string;
 }
 
 type Action = (formData: FormData) => Promise<OnboardActionResult>;
@@ -89,6 +91,30 @@ function enableMsg(r: OnboardActionResult): { tone: "ok" | "err"; msg: string } 
   }
 }
 
+function inviteMsg(r: OnboardActionResult): { tone: "ok" | "err"; msg: string } {
+  if (r.ok) {
+    const expiry = r.expiresAt
+      ? `the invite expires ${r.expiresAt}`
+      : "the invite is time-boxed";
+    return {
+      tone: "ok",
+      msg: `Invited — they can sign in with this email (${expiry}).`,
+    };
+  }
+  switch (r.status) {
+    case 422:
+      return { tone: "err", msg: "Unknown tenant — create the tenant (step 1) first." };
+    case 400:
+      return { tone: "err", msg: "Rejected — that doesn't look like a valid email." };
+    case 403:
+      return { tone: "err", msg: "Not allowed — operator is not allowlisted for this action." };
+    case 404:
+      return { tone: "err", msg: "User invites not enabled." };
+    default:
+      return { tone: "err", msg: "Could not create the invite. Try again." };
+  }
+}
+
 function Banner({ r }: { r: { tone: "ok" | "err"; msg: string } }) {
   return (
     <div
@@ -114,33 +140,42 @@ export function OnboardForm({
   createEnabled,
   credentialEnabled,
   enableEnabled,
+  inviteEnabled,
   defaultConfig,
   defaultBaseUrl,
   defaultWsUrl,
   createAction,
   addCredentialAction,
   enableAction,
+  inviteAction,
 }: {
   createEnabled: boolean;
   credentialEnabled: boolean;
   enableEnabled: boolean;
+  inviteEnabled: boolean;
   defaultConfig: string;
   defaultBaseUrl: string;
   defaultWsUrl: string;
   createAction: Action;
   addCredentialAction: Action;
   enableAction: Action;
+  inviteAction: Action;
 }) {
   // Shared identity for all steps. Every step uses the SAME tenant/strategy the create step used.
   const [tenant, setTenant] = useState("");
   const [strategy, setStrategy] = useState("copytrade-v1");
 
+  // Step 4 (invite) is independent — it has its own email input, not the shared tenant/strategy pair.
+  const [inviteEmail, setInviteEmail] = useState("");
+
   const [createResult, setCreateResult] = useState<OnboardActionResult | null>(null);
   const [credResult, setCredResult] = useState<OnboardActionResult | null>(null);
   const [enableResult, setEnableResult] = useState<OnboardActionResult | null>(null);
+  const [inviteResult, setInviteResult] = useState<OnboardActionResult | null>(null);
   const [creating, startCreate] = useTransition();
   const [saving, startSave] = useTransition();
   const [enabling, startEnable] = useTransition();
+  const [inviting, startInvite] = useTransition();
 
   function submitCreate(formData: FormData) {
     formData.set("tenant_id", tenant);
@@ -159,12 +194,20 @@ export function OnboardForm({
     startEnable(async () => setEnableResult(await enableAction(formData)));
   }
 
+  function submitInvite(formData: FormData) {
+    formData.set("tenant_id", tenant);
+    formData.set("email", inviteEmail);
+    startInvite(async () => setInviteResult(await inviteAction(formData)));
+  }
+
   // Step 1 (create) needs both ids; step 2 (keys) binds only the tenant.
   const idsMissing = !tenant.trim() || !strategy.trim();
   const tenantMissing = !tenant.trim();
   // Step 3 (enable) unlocks ONLY once step 2's in-session result carries a non-blank verified
   // account. This mirrors the A1 backend guard (no verified account → 422) as a pre-check.
   const accountVerified = Boolean(credResult?.ok && credResult.brokerAccountId?.trim());
+  // Step 4 (invite) needs the tenant id above + a non-blank email.
+  const inviteMissing = tenantMissing || !inviteEmail.trim();
 
   return (
     <div className="space-y-6">
@@ -368,6 +411,42 @@ export function OnboardForm({
           )}
         </form>
         {enableResult && <Banner r={enableMsg(enableResult)} />}
+      </section>
+
+      {/* Step 4 — Invite user (optional, independent) */}
+      <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+        <h2 className="mb-1 text-sm font-semibold text-slate-200">4 · Invite user (email)</h2>
+        <p className="mb-3 text-xs text-slate-500">
+          Optional. Grants a person login access to the tenant above by email. They sign in with
+          Google/Facebook using this email and are bound to the tenant on first sign-in (member only,
+          never operator). No email is sent — tell them to sign in. Independent of steps 1-3.
+        </p>
+        <form action={submitInvite} onSubmit={() => setInviteResult(null)}>
+          <label className={labelCls} htmlFor="ob-invite-email">
+            User email
+          </label>
+          <input
+            id="ob-invite-email"
+            className={inputCls}
+            type="email"
+            value={inviteEmail}
+            onChange={(e) => setInviteEmail(e.target.value)}
+            placeholder="person@example.com"
+            disabled={!inviteEnabled}
+            autoComplete="off"
+          />
+          <button
+            type="submit"
+            disabled={!inviteEnabled || inviting || inviteMissing}
+            className="mt-3 rounded border border-emerald-500/60 bg-emerald-600/20 px-3 py-1.5 text-sm font-medium text-emerald-300 transition-colors hover:bg-emerald-600/30 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {inviting ? "Inviting…" : "Create invite"}
+          </button>
+          {!inviteEnabled && (
+            <p className="mt-2 text-xs text-slate-500">User invites not enabled (read-only).</p>
+          )}
+        </form>
+        {inviteResult && <Banner r={inviteMsg(inviteResult)} />}
       </section>
     </div>
   );

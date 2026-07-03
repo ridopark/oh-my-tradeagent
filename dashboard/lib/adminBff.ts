@@ -65,3 +65,55 @@ export async function getAdminTenants(): Promise<AdminTenantsResponse> {
   }
   return (await res.json()) as AdminTenantsResponse;
 }
+
+// Coarse result of the create-invite call. No secret material — an invite is just (email, tenant,
+// operator); `expiresAt` is the non-secret expiry the operator can relay to the invited person.
+export interface CreateInviteResult {
+  ok: boolean;
+  status: number;
+  // Set only on a 2xx — the invite's expiry (ISO-8601 timestamptz), read back from the BFF response.
+  expiresAt?: string;
+}
+
+// Create a pending tenant-user invite (P4). Operator-scoped, BFF-routed — this mirrors getAdminTenants
+// (Bearer BFF service token + X-Operator-Id, NO X-Tenant-Id) because the create-invite endpoint lives
+// on the tenant-dashboard-bff (POST /api/admin/tenant-invites), NOT the api-gateway. The BFF route is
+// itself dark-gated (operator.tenant-invite.enabled + dashboard.writer.enabled → 404 when off).
+//
+// Body is {email, tenant_id}; the operator id is bound from the verified session, never caller-trusted.
+// We read back ONLY the non-secret {expires_at} on success; the invite id/email are not surfaced.
+export async function createTenantInvite(
+  tenant: string,
+  email: string,
+): Promise<CreateInviteResult> {
+  const session = await auth();
+  if (!session?.isOperator || !session.operatorId) {
+    return { ok: false, status: 0 };
+  }
+  try {
+    const res = await fetch(`${BFF_URL}/api/admin/tenant-invites`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${BFF_TOKEN}`,
+        "X-Operator-Id": session.operatorId,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ email, tenant_id: tenant }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(BFF_TIMEOUT_MS),
+    });
+    let expiresAt: string | undefined;
+    if (res.ok) {
+      // OK body is {invite_id, tenant_id, email, expires_at} — non-secret. Read only expires_at; a
+      // parse failure is non-fatal (the create still succeeded).
+      const body = (await res.json().catch(() => null)) as {
+        expires_at?: string;
+      } | null;
+      expiresAt = body?.expires_at;
+    }
+    return { ok: res.ok, status: res.status, expiresAt };
+  } catch {
+    // Transport/abort error — the invite did not complete.
+    return { ok: false, status: 0 };
+  }
+}

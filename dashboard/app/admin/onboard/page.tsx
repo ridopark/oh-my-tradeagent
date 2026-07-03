@@ -7,6 +7,7 @@ import {
   enableStrategy,
   postOperatorBrokerCredential,
 } from "@/lib/adminOnboarding";
+import { createTenantInvite } from "@/lib/adminBff";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,10 @@ const CREDENTIAL_ENABLED = process.env.OPERATOR_CREDENTIAL_WRITE_ENABLED === "tr
 // Mirrors the A1 backend `operator.strategy-enable.enabled` flag; the enable route itself 404s until
 // its own flag is on, so step 3 degrades gracefully even if this is set ahead of the backend.
 const ENABLE_ENABLED = process.env.OPERATOR_STRATEGY_ENABLE_ENABLED === "true";
+// Mirrors the BFF `operator.tenant-invite.enabled` flag; the create-invite BFF route itself 404s until
+// its own flag (plus dashboard.writer.enabled) is on, so step 4 degrades gracefully even if this is set
+// ahead of the backend.
+const INVITE_ENABLED = process.env.OPERATOR_TENANT_INVITE_ENABLED === "true";
 
 // Paper broker endpoints — the only targets accepted this phase (live arming is Phase E).
 const DEFAULT_BASE_URL = "https://paper-api.alpaca.markets";
@@ -26,6 +31,11 @@ const DEFAULT_WS_URL = "wss://paper-api.alpaca.markets/stream";
 // The tenant/strategy id charset the form advertises and the api-gateway (TenantContext) enforces.
 // Validate here too so a malformed id gets an immediate 400 banner instead of an opaque gateway 400.
 const ID_RE = /^[A-Za-z0-9_-]+$/;
+
+// Conservative "plausible email" pre-check, matching the BFF's own guard (one @, non-empty local +
+// domain, a dot in the domain, no whitespace). Not RFC-complete on purpose — the real proof is the
+// provider-verified email at bind time; this only rejects obvious garbage before a write.
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 // Minimal paper StrategyConfig template. tenant_id/strategy_id are injected server-side from the
 // form (so they always match the create path); enabled:false creates the tenant dormant.
@@ -122,6 +132,24 @@ export default async function OnboardPage() {
     return { ok: r.ok, status: r.status, newVersion: r.newVersion };
   }
 
+  // Server action: create a login invite for the tenant by email (optional, independent of steps
+  // 1-3). Re-verifies operator, validates the tenant id + email, delegates to the BFF-routed
+  // createTenantInvite. No secret — just an email + the tenant id + the verified operator id.
+  async function inviteUserAction(formData: FormData): Promise<OnboardActionResult> {
+    "use server";
+    const s = await auth();
+    if (!s?.isOperator) {
+      return { ok: false, status: 0 };
+    }
+    const tenant = String(formData.get("tenant_id") ?? "").trim();
+    const email = String(formData.get("email") ?? "").trim();
+    if (!ID_RE.test(tenant) || !EMAIL_RE.test(email)) {
+      return { ok: false, status: 400 };
+    }
+    const r = await createTenantInvite(tenant, email);
+    return { ok: r.ok, status: r.status, expiresAt: r.expiresAt };
+  }
+
   return (
     <>
       <Nav tenantId={session?.tenantId} />
@@ -143,12 +171,14 @@ export default async function OnboardPage() {
           createEnabled={CREATE_ENABLED}
           credentialEnabled={CREDENTIAL_ENABLED}
           enableEnabled={ENABLE_ENABLED}
+          inviteEnabled={INVITE_ENABLED}
           defaultConfig={DEFAULT_CONFIG}
           defaultBaseUrl={DEFAULT_BASE_URL}
           defaultWsUrl={DEFAULT_WS_URL}
           createAction={createTenantAction}
           addCredentialAction={addCredentialAction}
           enableAction={enableStrategyAction}
+          inviteAction={inviteUserAction}
         />
       </main>
     </>
