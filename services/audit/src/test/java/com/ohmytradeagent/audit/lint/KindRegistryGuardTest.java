@@ -23,55 +23,51 @@ import org.junit.jupiter.api.Test;
  * the orchestrator source emits a {@code KIND_X = "..."} constant whose literal value is not
  * present in {@link AuditEventKinds#ALL_KINDS}.
  *
- * <p>The check is structured, not heuristic: the regex {@code private static final String
- * KIND_<NAME>\s*=\s*"<VALUE>"} matches exactly the convention used by every orchestrator workflow /
- * activity that emits audit events. A new state-changing Activity that follows the convention will
- * be picked up automatically; a new Activity that invents a different declaration form (e.g. an
- * enum) will need to extend this test alongside the audit-events registry — that's intentional,
- * since the registry is the single source of truth for the verifier's classification logic.
+ * <p>The check is structured, not heuristic: the regex {@code [private] static final String
+ * KIND_<NAME>\s*=\s*"<VALUE>"} matches the convention used by every orchestrator class that emits
+ * audit events. A new state-changing emitter that follows the convention is picked up
+ * automatically; one that invents a different declaration form (e.g. an enum) needs to extend this
+ * test alongside the audit-events registry — that's intentional, since the registry is the single
+ * source of truth for the verifier's classification logic.
  *
- * <p>Two paths are scanned (configurable for tests via {@code AUDIT_LINT_SCAN_ROOTS}):
+ * <p>The ENTIRE orchestrator source tree is scanned ({@code
+ * services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator}), not just {@code
+ * workflows/} and {@code activities/}: emit sites also live in {@code platform/} (e.g. {@code
+ * StrategyConfigWriter}'s {@code TenantDeleted} tombstone) and {@code alert/}, and a per-package
+ * allowlist would silently blind the guard to those. The {@code private} modifier is optional in
+ * the regex so a package-private {@code KIND_} constant (the {@code platform/} convention) is
+ * covered too.
  *
- * <ul>
- *   <li>{@code services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator/workflows}
- *   <li>{@code services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator/activities}
- * </ul>
- *
- * <p>The test locates these directories relative to the audit-svc module by walking up to the
- * monorepo root (parent of {@code services/}). If the orchestrator source isn't present (e.g. a
- * partial checkout), the test is skipped via {@code assumeTrue} so a CI build that only includes
- * audit-svc still passes — the same dual-mode behavior as the rest of the test infrastructure.
+ * <p>The test locates the tree relative to the audit-svc module by walking up to the monorepo root
+ * (parent of {@code services/}). If the orchestrator source isn't present (e.g. a partial
+ * checkout), the test is skipped via {@code assumeTrue} so a CI build that only includes audit-svc
+ * still passes — the same dual-mode behavior as the rest of the test infrastructure.
  */
 class KindRegistryGuardTest {
 
-  // Matches: private static final String KIND_NAME = "Value";
-  // Tolerates whitespace and optional modifiers; rejects multiline (one constant per line is the
-  // established convention in every workflow file).
+  // Matches: [private] static final String KIND_NAME = "Value";
+  // The `private` modifier is OPTIONAL: workflows/activities declare these constants private, but
+  // package-private KIND_ constants exist too (e.g. StrategyConfigWriter in platform/). Tolerates
+  // whitespace; rejects multiline (one constant per line is the established convention).
   private static final Pattern KIND_CONSTANT =
       Pattern.compile(
-          "private\\s+static\\s+final\\s+String\\s+KIND_[A-Z0-9_]+\\s*=\\s*\"([A-Za-z][A-Za-z0-9]+)\"");
+          "(?:private\\s+)?static\\s+final\\s+String\\s+KIND_[A-Z0-9_]+\\s*=\\s*"
+              + "\"([A-Za-z][A-Za-z0-9]+)\"");
 
   @Test
   void everyOrchestratorKindConstantIsRegistered() throws IOException {
     Path monorepoRoot = findMonorepoRoot();
-    Path workflowsDir =
-        monorepoRoot.resolve(
-            "services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator/workflows");
-    Path activitiesDir =
-        monorepoRoot.resolve(
-            "services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator/activities");
+    // Scan the WHOLE orchestrator source tree, not a per-package allowlist: emit sites live in
+    // workflows/, activities/, platform/ (TenantDeleted), and alert/. A dir allowlist would blind
+    // the guard to any of them — the exact gap that let the TenantDeleted emit ship unguarded.
+    Path orchestratorSrc =
+        monorepoRoot.resolve("services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator");
 
     org.junit.jupiter.api.Assumptions.assumeTrue(
-        Files.isDirectory(workflowsDir) || Files.isDirectory(activitiesDir),
+        Files.isDirectory(orchestratorSrc),
         "orchestrator source not present in this checkout — lint check skipped");
 
-    Set<String> literals = new TreeSet<>();
-    if (Files.isDirectory(workflowsDir)) {
-      literals.addAll(extractLiterals(workflowsDir));
-    }
-    if (Files.isDirectory(activitiesDir)) {
-      literals.addAll(extractLiterals(activitiesDir));
-    }
+    Set<String> literals = new TreeSet<>(extractLiterals(orchestratorSrc));
 
     assertThat(literals)
         .as(
@@ -89,7 +85,7 @@ class KindRegistryGuardTest {
 
     assertThat(missing)
         .as(
-            "Every KIND_ constant emitted by an orchestrator workflow or activity must be "
+            "Every KIND_ constant emitted anywhere in the orchestrator source must be "
                 + "registered in AuditEventKinds.ALL_KINDS. Missing entries: %s. "
                 + "Add them to AuditEventKinds (with the correct lifecycle group) before the "
                 + "audit-completeness verifier can score them.",
