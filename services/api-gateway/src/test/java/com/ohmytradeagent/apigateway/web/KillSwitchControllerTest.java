@@ -98,6 +98,24 @@ class KillSwitchControllerTest {
   }
 
   @Test
+  void trip_notGatedByOperatorAllowlist_emptyAllowlistStillTrips() throws Exception {
+    // C3 guard: the ctx here has an EMPTY operator allowlist (deny-all for the operator-ADMIN
+    // routes). The kill-switch trip must NOT be gated by that allowlist — a safety control can
+    // never be blocked by a misconfigured/empty admin allowlist. A non-allowlisted operator still
+    // trips (200).
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/killswitch/trip")
+                .header("X-Operator-Id", "not-in-any-allowlist@example.com")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"reason\":\"manual:safety\"}"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+
+    verify(stub).update(eq("trip_killswitch"), eq(Void.class), any(TripKillSwitchRequest.class));
+  }
+
+  @Test
   void trip_missingOperatorHeader_returns400() throws Exception {
     mvc.perform(
             org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(

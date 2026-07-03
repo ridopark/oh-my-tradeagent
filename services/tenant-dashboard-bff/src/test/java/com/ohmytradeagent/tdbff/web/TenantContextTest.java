@@ -39,4 +39,43 @@ class TenantContextTest {
     assertThatThrownBy(() -> ctx.tenantId(req))
         .isInstanceOf(TenantContext.MissingTenantException.class);
   }
+
+  // ---- operator allowlist (requireAllowlistedOperator) --------------------------------------
+
+  private static MockHttpServletRequest reqWithOperator(String operator) {
+    MockHttpServletRequest req = new MockHttpServletRequest();
+    if (operator != null) {
+      req.addHeader("X-Operator-Id", operator);
+    }
+    return req;
+  }
+
+  @Test
+  void allowlistedOperator_returnsOperator_caseInsensitiveAndTrimmedConfig() {
+    // Config entry has surrounding whitespace + different case; the request matches after
+    // trim + case-insensitive normalization.
+    TenantContext c = new TenantContext("  RIDOPARK , other@x.com ");
+    assertThat(c.requireAllowlistedOperator(reqWithOperator("ridopark"))).isEqualTo("ridopark");
+  }
+
+  @Test
+  void nonAllowlistedOperator_throwsUnauthorized() {
+    TenantContext c = new TenantContext("ridopark");
+    assertThatThrownBy(() -> c.requireAllowlistedOperator(reqWithOperator("intruder")))
+        .isInstanceOf(TenantContext.UnauthorizedOperatorException.class);
+  }
+
+  @Test
+  void emptyAllowlist_deniesAll_throwsUnauthorized() {
+    TenantContext c = new TenantContext(""); // empty = deny-all (fail-closed)
+    assertThatThrownBy(() -> c.requireAllowlistedOperator(reqWithOperator("ridopark")))
+        .isInstanceOf(TenantContext.UnauthorizedOperatorException.class);
+  }
+
+  @Test
+  void requireAllowlistedOperator_missingHeader_stillThrowsMissingOperator_not403() {
+    TenantContext c = new TenantContext("ridopark");
+    assertThatThrownBy(() -> c.requireAllowlistedOperator(reqWithOperator(null)))
+        .isInstanceOf(TenantContext.MissingOperatorException.class);
+  }
 }

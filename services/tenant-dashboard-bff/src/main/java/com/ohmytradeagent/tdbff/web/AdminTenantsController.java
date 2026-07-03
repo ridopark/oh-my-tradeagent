@@ -56,7 +56,9 @@ public class AdminTenantsController {
 
   @GetMapping
   public ResponseEntity<Map<String, Object>> list(HttpServletRequest req) {
-    String operator = ctx.operatorId(req); // 400 if X-Operator-Id absent
+    // 400 if X-Operator-Id absent/malformed; 403 (before any tenant data is read/echoed) if the
+    // operator is not in the OPERATOR_ALLOWLIST.
+    String operator = ctx.requireAllowlistedOperator(req);
     OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
     List<Map<String, Object>> items = new ArrayList<>();

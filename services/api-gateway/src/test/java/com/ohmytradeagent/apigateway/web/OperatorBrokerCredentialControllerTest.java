@@ -41,9 +41,16 @@ class OperatorBrokerCredentialControllerTest {
   @BeforeEach
   void setUp() {
     forwardService = mock(BrokerCredentialForwardService.class);
+    // Allowlist the OPERATOR so the valid-request path is exercised; the allowlist gate itself is
+    // covered by the dedicated 403 tests below.
     controller =
         new OperatorBrokerCredentialController(
-            forwardService, new TenantContext("dev", "copytrade-v1"));
+            forwardService, new TenantContext("dev", "copytrade-v1", OPERATOR));
+  }
+
+  private OperatorBrokerCredentialController controllerWithAllowlist(String allowlist) {
+    return new OperatorBrokerCredentialController(
+        forwardService, new TenantContext("dev", "copytrade-v1", allowlist));
   }
 
   private static HttpServletRequest reqWithOperator(String operator) {
@@ -85,6 +92,22 @@ class OperatorBrokerCredentialControllerTest {
   void missingOperatorHeader_is400_noForward() {
     assertThatThrownBy(() -> controller.write(reqWithOperator(null), TENANT, body(TENANT)))
         .isInstanceOf(TenantContext.MissingHeaderException.class);
+    verifyNoInteractions(forwardService);
+  }
+
+  @Test
+  void nonAllowlistedOperator_is403_noForward() {
+    assertThatThrownBy(
+            () -> controller.write(reqWithOperator("intruder@evil.com"), TENANT, body(TENANT)))
+        .isInstanceOf(TenantContext.UnauthorizedOperatorException.class);
+    verifyNoInteractions(forwardService);
+  }
+
+  @Test
+  void emptyAllowlist_deniesAll_is403_noForward() {
+    OperatorBrokerCredentialController denyAll = controllerWithAllowlist(""); // fail-closed
+    assertThatThrownBy(() -> denyAll.write(reqWithOperator(OPERATOR), TENANT, body(TENANT)))
+        .isInstanceOf(TenantContext.UnauthorizedOperatorException.class);
     verifyNoInteractions(forwardService);
   }
 

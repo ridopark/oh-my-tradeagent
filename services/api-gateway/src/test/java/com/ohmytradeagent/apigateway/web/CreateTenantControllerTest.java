@@ -8,6 +8,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.StrategyConfigCreateRequest;
@@ -21,7 +24,10 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
@@ -48,7 +54,15 @@ class CreateTenantControllerTest {
     when(workflowClient.newWorkflowStub(
             eq(StrategyConfigCreateWorkflow.class), any(WorkflowOptions.class)))
         .thenReturn(stub);
-    controller = new CreateTenantController(workflowClient, new TenantContext("dev", STRATEGY));
+    // Allowlist the OPERATOR so the outcome-mapping tests exercise the create path; the allowlist
+    // gate itself is covered by the dedicated 403 tests below.
+    controller =
+        new CreateTenantController(workflowClient, new TenantContext("dev", STRATEGY, OPERATOR));
+  }
+
+  private CreateTenantController controllerWithAllowlist(String allowlist) {
+    return new CreateTenantController(
+        workflowClient, new TenantContext("dev", STRATEGY, allowlist));
   }
 
   private static HttpServletRequest reqWithOperator(String operator) {
@@ -77,6 +91,53 @@ class CreateTenantControllerTest {
   void missingOperatorHeader_is400_noWorkflowStarted() {
     assertThatThrownBy(() -> controller.create(reqWithOperator(null), TENANT, STRATEGY, body()))
         .isInstanceOf(TenantContext.MissingHeaderException.class);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
+  void nonAllowlistedOperator_is403_noWorkflowStarted() {
+    assertThatThrownBy(
+            () -> controller.create(reqWithOperator("intruder@evil.com"), TENANT, STRATEGY, body()))
+        .isInstanceOf(TenantContext.UnauthorizedOperatorException.class);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
+  void emptyAllowlist_deniesAll_is403_noWorkflowStarted() {
+    CreateTenantController denyAll = controllerWithAllowlist(""); // empty = deny-all (fail-closed)
+    assertThatThrownBy(() -> denyAll.create(reqWithOperator(OPERATOR), TENANT, STRATEGY, body()))
+        .isInstanceOf(TenantContext.UnauthorizedOperatorException.class);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
+  void allowlistIsCaseInsensitiveAndTrimmed_passes() {
+    when(stub.create(any(StrategyConfigCreateRequest.class)))
+        .thenReturn(result(StrategyConfigCreateResult.Outcome.CREATED, 1L));
+    // Config entry has surrounding whitespace + different case; request operator matches after
+    // trim + case-insensitive normalization.
+    CreateTenantController c = controllerWithAllowlist("  RIDOPARK@GMAIL.COM , other@x.com ");
+
+    var resp = c.create(reqWithOperator("ridopark@gmail.com"), TENANT, STRATEGY, body());
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(resp.getBody()).containsEntry("status", "CREATED");
+  }
+
+  @Test
+  void nonAllowlistedOperator_returns403Forbidden_endToEnd() throws Exception {
+    MockMvc mvc =
+        MockMvcBuilders.standaloneSetup(controller)
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+
+    mvc.perform(
+            post("/admin/tenants/" + TENANT + "/strategies/" + STRATEGY)
+                .header("X-Operator-Id", "intruder@evil.com")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"config\":{}}"))
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.error").value("forbidden"));
     verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
   }
 

@@ -76,7 +76,8 @@ public class ActivationController {
       @PathVariable("tenant") String tenant,
       @PathVariable("strategy") String strategy) {
 
-    String operator = ctx.operatorId(req); // 400 if X-Operator-Id absent
+    String operator =
+        ctx.requireAllowlistedOperator(req); // 400 if absent/malformed, 403 if not allowlisted
     String correlationId = UUID.randomUUID().toString();
 
     LiveActivationRequest request = new LiveActivationRequest();
@@ -111,7 +112,8 @@ public class ActivationController {
       @PathVariable("tenant") String tenant,
       @PathVariable("strategy") String strategy) {
 
-    String operator = ctx.operatorId(req); // 400 if X-Operator-Id absent
+    String operator =
+        ctx.requireAllowlistedOperator(req); // 400 if absent/malformed, 403 if not allowlisted
     String correlationId = UUID.randomUUID().toString();
 
     LiveDeactivationRequest request = new LiveDeactivationRequest();

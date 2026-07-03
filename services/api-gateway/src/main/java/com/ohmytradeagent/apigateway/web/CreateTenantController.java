@@ -74,7 +74,8 @@ public class CreateTenantController {
       @PathVariable("strategy") String strategy,
       @RequestBody TenantCreateRequest body) {
 
-    String operator = ctx.operatorId(req); // 400 if X-Operator-Id absent
+    String operator =
+        ctx.requireAllowlistedOperator(req); // 400 if absent/malformed, 403 if not allowlisted
 
     // A missing/empty config is a permanent client error — reject 400 here rather than starting the
     // workflow, where a null config would NPE inside the writer (not coarsened → burns the retry

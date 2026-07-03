@@ -1,9 +1,16 @@
 package com.ohmytradeagent.apigateway.web;
 
 import jakarta.servlet.http.HttpServletRequest;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
  * Phase 5 placeholder auth. Real OAuth/JWT deferred to Phase 6. Headers honored: {@code
@@ -32,12 +39,40 @@ public class TenantContext {
 
   private final String defaultTenant;
   private final String defaultStrategy;
+  // The set of operators authorized to invoke the operator-ADMIN routes (create-tenant,
+  // credential-write, activate/deactivate). Normalized to trimmed-lowercase so membership is
+  // case-insensitive. FAIL-CLOSED: an empty/unset allowlist denies ALL operators — a misconfigured
+  // deploy must 403 on these real-money-adjacent routes, never allow-all. Enforced only via
+  // requireAllowlistedOperator(); the presence-only operatorId() is left untouched so the many
+  // non-admin operator readers (kill-switch approver, promotion approver, positions) are
+  // unaffected.
+  private final Set<String> operatorAllowlist;
 
+  @Autowired
   public TenantContext(
       @Value("${api-gateway.default-tenant:dev}") String defaultTenant,
-      @Value("${api-gateway.default-strategy:copytrade-v1}") String defaultStrategy) {
+      @Value("${api-gateway.default-strategy:copytrade-v1}") String defaultStrategy,
+      @Value("${operator.allowlist:}") String operatorAllowlist) {
     this.defaultTenant = defaultTenant;
     this.defaultStrategy = defaultStrategy;
+    this.operatorAllowlist = parseAllowlist(operatorAllowlist);
+  }
+
+  /** Convenience for tests that do not exercise the operator allowlist gate (empty = deny-all). */
+  public TenantContext(String defaultTenant, String defaultStrategy) {
+    this(defaultTenant, defaultStrategy, "");
+  }
+
+  private static Set<String> parseAllowlist(String csv) {
+    Set<String> out = new HashSet<>();
+    if (csv == null) {
+      return out;
+    }
+    Arrays.stream(csv.split(","))
+        .map(s -> s.trim().toLowerCase(Locale.ROOT))
+        .filter(s -> !s.isEmpty())
+        .forEach(out::add);
+    return out;
   }
 
   public String tenantId(HttpServletRequest req) {
@@ -72,12 +107,12 @@ public class TenantContext {
   }
 
   /**
-   * Format check for an operator id (non-null, non-blank, {@code [A-Za-z0-9_@.+-]+}, ≤254 chars)
-   * before it is recorded as the audit {@code actor}. {@link #operatorId} only checks presence; an
-   * operator-scoped route that persists the value should additionally enforce this so a hostile
-   * {@code X-Operator-Id} cannot inject control characters or an overlong string into the audit.
+   * Format check for an operator id (non-null, non-blank, {@code [A-Za-z0-9_@.+-]+}, ≤254 chars).
+   * Used by {@link #requireAllowlistedOperator} to reject a hostile {@code X-Operator-Id} (control
+   * chars / overlong) BEFORE it is normalized/allowlist-matched or recorded as the audit {@code
+   * actor}. {@link #operatorId} only checks presence.
    */
-  public boolean isValidOperatorId(String operator) {
+  private boolean isValidOperatorId(String operator) {
     return operator != null
         && !operator.isBlank()
         && operator.length() <= OPERATOR_ID_MAX_LENGTH
@@ -94,6 +129,38 @@ public class TenantContext {
       throw new MissingHeaderException(HEADER_OPERATOR);
     }
     return v;
+  }
+
+  /**
+   * Presence + format + allowlist gate for the operator-ADMIN routes (create-tenant,
+   * credential-write, activate/deactivate). Absent/blank {@code X-Operator-Id} is a 400 (via {@link
+   * #operatorId}); a malformed value (control chars / overlong) is a 400; a well-formed but
+   * NON-allowlisted operator is a 403 ({@link UnauthorizedOperatorException}).
+   *
+   * <p>Defense-in-depth: the dashboard already authorizes operators, but these routes can create
+   * tenants and arm real-money trading, so the backend independently rejects a non-allowlisted
+   * operator — a leaked shared bearer token alone cannot onboard/activate. An empty/unset allowlist
+   * denies ALL operators (fail-closed). Distinct from {@link #operatorId} so the non-admin operator
+   * readers (kill-switch trip/reset, promotion approver, positions) keep their presence-only
+   * behavior — an empty allowlist must NEVER block a kill-switch trip.
+   *
+   * <p>Format is validated ({@link #isValidOperatorId}) BEFORE trimming + {@link Locale#ROOT}
+   * lowercasing, so the case-fold runs only on the guaranteed-ASCII charset (no Turkish-İ locale
+   * surprise) and a whitespace/control-char value can never be silently normalized into a match.
+   *
+   * <p>Scope note: {@code X-Approver-Id-2} ({@link #approverId2}) is deliberately NOT covered by
+   * this allowlist — dual-approval (promotion / kill-switch reset) stays header-trusted in Phase 2.
+   */
+  public String requireAllowlistedOperator(HttpServletRequest req) {
+    String operator = operatorId(req); // 400 if X-Operator-Id absent/blank
+    if (!isValidOperatorId(operator)) {
+      // Malformed operator id: a bad request, and unsafe to Locale-fold — reject 400 before match.
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
+    }
+    if (!operatorAllowlist.contains(operator.trim().toLowerCase(Locale.ROOT))) {
+      throw new UnauthorizedOperatorException();
+    }
+    return operator;
   }
 
   public String approverId2(HttpServletRequest req) {
@@ -119,6 +186,17 @@ public class TenantContext {
 
     public String header() {
       return header;
+    }
+  }
+
+  /**
+   * Thrown when a well-formed {@code X-Operator-Id} is NOT in the operator allowlist on an
+   * operator-admin route; mapped to HTTP 403 by {@link GlobalExceptionHandler}. Carries no operator
+   * value — the response stays a coarse 403 with no membership oracle.
+   */
+  public static class UnauthorizedOperatorException extends RuntimeException {
+    UnauthorizedOperatorException() {
+      super("operator not allowlisted");
     }
   }
 }
