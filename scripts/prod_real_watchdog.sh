@@ -61,25 +61,34 @@ tq() {
   $KUBECTL exec -n "$TEMPORAL_NS" "$ADMIN_POD" -- \
     temporal workflow query --namespace "$NS" --workflow-id "$1" --type "$2" 2>/dev/null
 }
+# check_ks <workflow-id> <query-type> — flag a tripped kill switch as an anomaly.
+# Unreadable state is a loud WARN (never a silent pass) so drift/outage is visible.
+check_ks() {
+  local st reason
+  st=$(tq "$1" "$2")
+  if [ -z "$st" ]; then
+    log "WARN: could not read kill-switch state for $1"
+  elif printf '%s' "$st" | grep -q '"tripped":true'; then
+    reason=$(printf '%s' "$st" | grep -o '"reason":"[^"]*"' | head -1)
+    anomalies+=("KILL SWITCH TRIPPED: $1 ${reason:-}")
+  fi
+}
 
 anomalies=()
 
 # ---- (d) kill switches (per-strategy + account) -----------------------------
+# workflow-id shapes mirror the Java WorkflowIds (killswitch / accountKillswitch);
+# no generated bash artifact exists, so the shape is duplicated here (single-site).
 if [ -z "$ADMIN_POD" ]; then
   log "WARN: temporal admintools pod not found in ns=$TEMPORAL_NS — kill-switch + open-position checks skipped"
 else
-  for spec in "t-$TENANT/s-copytrade-v1/killswitch:killswitch_state" \
-              "t-$TENANT/s-watchlist-trigger-v1/killswitch:killswitch_state" \
-              "t-$TENANT/account/killswitch:account_killswitch_state"; do
-    wf=${spec%:*}; qt=${spec##*:}
-    st=$(tq "$wf" "$qt")
-    if [ -z "$st" ]; then
-      log "WARN: could not read kill-switch state for $wf"
-    elif printf '%s' "$st" | grep -q '"tripped":true'; then
-      reason=$(printf '%s' "$st" | grep -o '"reason":"[^"]*"' | head -1)
-      anomalies+=("KILL SWITCH TRIPPED: $wf ${reason:-}")
-    fi
+  # MAINTENANCE: add every ENABLED prod_real strategy here. A strategy omitted from
+  # this list has its kill switch UNMONITORED → a tripped switch would show as a
+  # false ALL CLEAR (the most dangerous miss for a real-money watchdog).
+  for strat in copytrade-v1 watchlist-trigger-v1; do
+    check_ks "t-$TENANT/s-$strat/killswitch" killswitch_state
   done
+  check_ks "t-$TENANT/account/killswitch" account_killswitch_state
 fi
 
 # ---- (e) blocked / stuck live orders (403 40310000 = account re-block) -------
@@ -112,6 +121,11 @@ if [ "${fails:-0}" -gt 0 ] 2>/dev/null; then
 fi
 
 # ---- scorecard context: open positions + today's fills ----------------------
+# open_pos is CONTEXT ONLY, never an anomaly trigger: overnight exposure is
+# by-design here (eod_force_flatten=false), and per-position staleness/red-lot
+# judgment is deliberately left to the agent watchdog this script was extracted
+# from. The deterministic anomalies above (kill switch / 403 / flatten-exit-fail)
+# are what page.
 open_pos=0
 if [ -n "$ADMIN_POD" ]; then
   open_pos=$($KUBECTL exec -n "$TEMPORAL_NS" "$ADMIN_POD" -- \
