@@ -91,8 +91,13 @@ class BrokerCredentialWriterTest {
   }
 
   private BrokerCredentialWriter writer(DSLContext dsl, String brokerImpl, boolean liveEnabled) {
+    return writer(dsl, brokerImpl, liveEnabled, false);
+  }
+
+  private BrokerCredentialWriter writer(
+      DSLContext dsl, String brokerImpl, boolean liveEnabled, boolean deleteLiveEnabled) {
     return new BrokerCredentialWriter(
-        dsl, crypto(), builder, mapper, meterRegistry, brokerImpl, liveEnabled);
+        dsl, crypto(), builder, mapper, meterRegistry, brokerImpl, liveEnabled, deleteLiveEnabled);
   }
 
   private void enqueueAccount(String accountNumber) {
@@ -282,6 +287,53 @@ class BrokerCredentialWriterTest {
 
     assertThat(executedSql).isEmpty();
     assertThat(server.getRequestCount()).isZero();
+  }
+
+  @Test
+  void delete_issuesDeleteSql_andReturnsAffectedCount() {
+    // The delete is a single parameterized DELETE against broker_credentials; the affected-row
+    // count
+    // is returned verbatim. No probe, no key material.
+    int deleted = writer(recordingDsl(1), "alpaca-x").delete("alice", PROVIDER);
+
+    assertThat(deleted).isEqualTo(1);
+    assertThat(executedSql).hasSize(1);
+    assertThat(executedSql.get(0).toLowerCase()).contains("delete from broker_credentials");
+    // Delete never authenticates against the broker — no /v2/account probe.
+    assertThat(server.getRequestCount()).isZero();
+  }
+
+  @Test
+  void delete_absentRow_returnsZero_doesNotThrow() {
+    // Idempotent: deleting a row that is not there returns 0 and does NOT throw.
+    int deleted = writer(recordingDsl(0), "alpaca-x").delete("nobody", PROVIDER);
+
+    assertThat(deleted).isZero();
+    assertThat(executedSql).hasSize(1);
+  }
+
+  @Test
+  void delete_onLivePod_withoutDeleteLiveEnabled_throws_andIssuesNoSql() {
+    // Defense-in-depth -live seal on the destructive path: a -live pod refuses a DB credential
+    // delete unless the dedicated broker.credentials.delete.live-enabled opt-in is set. Default off
+    // → fail closed with NO SQL issued (no DELETE reaches the DB).
+    assertThatThrownBy(() -> writer(recordingDsl(1), "alpaca-live").delete("alice", PROVIDER))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("broker.credentials.delete.live-enabled")
+        .hasMessageContaining("-live");
+
+    assertThat(executedSql).isEmpty();
+  }
+
+  @Test
+  void delete_onLivePod_withDeleteLiveEnabled_issuesDelete() {
+    // Opt-in on a -live pod (the dedicated delete flag on) → the DELETE is issued and the affected
+    // count is returned verbatim.
+    int deleted = writer(recordingDsl(1), "alpaca-live", false, true).delete("alice", PROVIDER);
+
+    assertThat(deleted).isEqualTo(1);
+    assertThat(executedSql).hasSize(1);
+    assertThat(executedSql.get(0).toLowerCase()).contains("delete from broker_credentials");
   }
 
   @Test

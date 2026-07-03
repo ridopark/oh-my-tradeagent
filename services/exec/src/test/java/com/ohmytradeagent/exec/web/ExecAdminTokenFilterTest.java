@@ -81,6 +81,35 @@ class ExecAdminTokenFilterTest {
   }
 
   @Test
+  void deleteMethod_withoutToken_is401() throws Exception {
+    // The teardown route reuses the same base path; the filter is method-agnostic, so a DELETE
+    // without a bearer token is rejected 401 before any handler runs (never exempted).
+    MockHttpServletRequest req =
+        new MockHttpServletRequest("DELETE", "/internal/broker-credentials");
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(401);
+    assertThat(chain.getRequest()).isNull();
+  }
+
+  @Test
+  void deleteMethod_withCorrectToken_passesThroughToHandler() throws Exception {
+    MockHttpServletRequest req =
+        new MockHttpServletRequest("DELETE", "/internal/broker-credentials");
+    req.addHeader("Authorization", "Bearer " + TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
+  @Test
   void nonCredentialRoute_isNotFiltered_evenWithoutToken() throws Exception {
     // Route-scoped: the worker / actuator / any other path must be untouched by this filter.
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/actuator/health/readiness");

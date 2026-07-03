@@ -109,7 +109,8 @@ class BrokerCredentialWriterIT {
   }
 
   private BrokerCredentialWriter writer(BrokerCredentialCrypto crypto) {
-    return new BrokerCredentialWriter(dsl, crypto, builder, mapper, meterRegistry, IMPL, false);
+    return new BrokerCredentialWriter(
+        dsl, crypto, builder, mapper, meterRegistry, IMPL, false, false);
   }
 
   /** The DB read sibling; shares the crypto so the round-trip proves AAD + envelope agree. */
@@ -273,6 +274,60 @@ class BrokerCredentialWriterIT {
     BrokerCredentials c = source().resolve("alice", "alpaca");
     assertThat(c.apiKeyId()).isEqualTo("k1");
     assertThat(c.apiSecretKey()).isEqualTo("s1");
+  }
+
+  @Test
+  void deleteRemovesOnlyMatchingRow() {
+    // Seed two tenants' rows; deleting one leaves the other untouched.
+    enqueueAccount("847309116");
+    writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+    enqueueAccount("847309116");
+    writer().save("bob", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+
+    int deleted = writer().delete("alice", PROVIDER);
+
+    assertThat(deleted).isEqualTo(1);
+    assertThat(rowCount("alice")).isZero();
+    assertThat(rowCount("bob")).isEqualTo(1);
+  }
+
+  @Test
+  void deleteAbsentRow_returnsZero_doesNotThrow() {
+    // Idempotent: a tenant with no stored credential deletes cleanly with 0 rows and no throw.
+    int deleted = writer().delete("nobody", PROVIDER);
+
+    assertThat(deleted).isZero();
+  }
+
+  @Test
+  void deleteIsIdempotent_secondDeleteReturnsZero() {
+    enqueueAccount("847309116");
+    writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+
+    assertThat(writer().delete("alice", PROVIDER)).isEqualTo(1);
+    // Re-running the delete (idempotent teardown) returns 0 rows and does not throw.
+    assertThat(writer().delete("alice", PROVIDER)).isZero();
+    assertThat(rowCount("alice")).isZero();
+  }
+
+  @Test
+  void deleteCanonicalizesBrokerTargetToProvider() {
+    // A row is written under the canonical provider "alpaca"; a delete addressed with a
+    // broker_target-style "alpaca-paper" must resolve to the same canonical row and remove it.
+    enqueueAccount("847309116");
+    writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+
+    int deleted = writer().delete("alice", "alpaca-paper");
+
+    assertThat(deleted).isEqualTo(1);
+    assertThat(rowCount("alice")).isZero();
+  }
+
+  private int rowCount(String tenant) {
+    return dsl.selectCount()
+        .from(table("broker_credentials"))
+        .where(field("tenant_id").eq(tenant))
+        .fetchOne(0, Integer.class);
   }
 
   @Test

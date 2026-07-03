@@ -38,6 +38,18 @@ temporal:
 # ibkr, schwab) land as 2c.x follow-ups.
 broker:
   impl: ${BROKER_IMPL:stub}
+  credentials:
+    # Dark flag for the operator tenant-delete teardown route (DELETE /internal/broker-credentials).
+    # Default OFF: even on a broker.creds.source=db + alpaca-* pod (where the write endpoint exists),
+    # the delete controller bean is absent → the DELETE route 404s until an operator explicitly opts
+    # in. The always-on ExecAdminTokenFilter still service-token-gates the route when enabled.
+    delete:
+      enabled: ${BROKER_CREDENTIALS_DELETE_ENABLED:false}
+      # SEPARATE, more-conservative real-money teardown opt-in for the destructive delete path.
+      # Default OFF and independent of the write path's broker.creds.db.live-enabled: a -live pod
+      # refuses a DB credential delete unless this is explicitly true — so tearing down real-money
+      # creds stays sealed even when live WRITES are enabled.
+      live-enabled: ${BROKER_CREDENTIALS_DELETE_LIVE_ENABLED:false}
 
 alpaca:
   base-url: ${APCA_API_BASE_URL:https://paper-api.alpaca.markets}

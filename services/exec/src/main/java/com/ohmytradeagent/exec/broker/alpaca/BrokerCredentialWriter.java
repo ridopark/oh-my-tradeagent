@@ -65,6 +65,7 @@ public class BrokerCredentialWriter {
   private final MeterRegistry meterRegistry;
   private final boolean live;
   private final boolean liveEnabled;
+  private final boolean deleteLiveEnabled;
   private final String brokerImpl;
 
   public BrokerCredentialWriter(
@@ -74,7 +75,8 @@ public class BrokerCredentialWriter {
       ObjectMapper objectMapper,
       MeterRegistry meterRegistry,
       @Value("${broker.impl:}") String brokerImpl,
-      @Value("${broker.creds.db.live-enabled:false}") boolean liveEnabled) {
+      @Value("${broker.creds.db.live-enabled:false}") boolean liveEnabled,
+      @Value("${broker.credentials.delete.live-enabled:false}") boolean deleteLiveEnabled) {
     this.dsl = dsl;
     this.crypto = crypto;
     this.restClientBuilder = restClientBuilder;
@@ -84,6 +86,11 @@ public class BrokerCredentialWriter {
     // Default-off gate (symmetric to DbBrokerCredentialSource): a -live pod persists DB creds ONLY
     // when an operator explicitly opts in. Unset → preserve the P6-b refusal exactly.
     this.liveEnabled = liveEnabled;
+    // DEDICATED, more-conservative default-off gate for the DESTRUCTIVE delete path. Independent of
+    // liveEnabled by design: tearing down real-money creds must stay refused on a -live pod even
+    // when live WRITES are enabled, unless an operator opts in via
+    // broker.credentials.delete.live-enabled.
+    this.deleteLiveEnabled = deleteLiveEnabled;
     this.brokerImpl = brokerImpl == null ? "" : brokerImpl;
   }
 
@@ -199,6 +206,60 @@ public class BrokerCredentialWriter {
             ? verifiedAccount
             : (declaredAccountId == null ? "" : declaredAccountId);
     return new SaveResult(newVersion, (int) crypto.activeVersion(), brokerAccountId);
+  }
+
+  /**
+   * Deletes a tenant's stored broker credential row (idempotent teardown). Runs a single
+   * parameterized {@code DELETE FROM broker_credentials WHERE tenant_id=? AND provider=?} and
+   * returns the number of rows removed. Deleting an absent row is NOT an error — it returns 0 and
+   * throws nothing, so a re-run of a partial tenant de-provision is safe. No broker probe, no
+   * re-encryption, and no key material is read, returned, or logged.
+   *
+   * <p>The {@code provider} is canonicalized to the read-path authority (a {@code broker_target}
+   * like {@code "alpaca-paper"} → {@code "alpaca"}) so the delete addresses the exact row {@link
+   * #save} wrote.
+   *
+   * <p><b>Defense-in-depth {@code -live} seal (mirrors {@link #save}, dedicated flag).</b> On a
+   * {@code -live} pod the delete is refused UNLESS an operator opts in via {@code
+   * broker.credentials.delete.live-enabled} (default false) — a SEPARATE, more-conservative gate
+   * than the write path's {@code broker.creds.db.live-enabled}, so tearing down real-money creds
+   * stays sealed even when live writes are enabled. The check runs before any SQL, so a sealed
+   * {@code -live} pod issues NO {@code DELETE} (fail closed).
+   *
+   * @param tenantId tenant whose credential row is removed
+   * @param provider broker provider (or broker_target; canonicalized to its provider)
+   * @return the number of rows deleted (0 when none matched)
+   * @throws IllegalStateException on a {@code -live} pod when {@code
+   *     broker.credentials.delete.live-enabled} is unset — no SQL is issued
+   */
+  public int delete(String tenantId, String provider) {
+    provider = BrokerClientRegistry.providerOf(provider);
+
+    // Defense-in-depth: a -live pod refuses a DB credential delete unless the dedicated opt-in is
+    // set. Checked BEFORE any SQL so a sealed -live pod issues no DELETE at all (fail closed). The
+    // dedicated flag is intentionally NOT the write path's live-enabled: the destructive teardown
+    // stays sealed even when live writes are allowed.
+    if (live && !deleteLiveEnabled) {
+      throw new IllegalStateException(
+          "db-sourced broker credential deletes are refused on a -live pod unless"
+              + " broker.credentials.delete.live-enabled=true (tenant="
+              + tenantId
+              + " provider="
+              + provider
+              + ")");
+    }
+
+    int deleted =
+        dsl.execute(
+            "DELETE FROM broker_credentials WHERE tenant_id = ? AND provider = ?",
+            tenantId,
+            provider);
+    log.info(
+        "broker credential delete committed tenant={} provider={} deleted={}",
+        tenantId,
+        provider,
+        deleted);
+    return deleted;
   }
 
   /**
