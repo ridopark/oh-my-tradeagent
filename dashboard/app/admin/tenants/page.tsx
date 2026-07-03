@@ -85,8 +85,13 @@ export default async function AdminTenantsPage({
       throw e;
     }),
     // Member + pending-invite emails (dashboard DB, dashboard_readonly). Fail-safe: any error
-    // (e.g. the V6 invite-grant not yet applied) degrades to no emails — never 500s the page.
-    getTenantEmails().catch(() => new Map<string, TenantEmails>()),
+    // (e.g. the V6 invite-grant not yet applied) degrades to no emails — never 500s the page. Log
+    // it so a PERSISTENT failure (grant reverted, DB unreachable) is observable, not silently
+    // indistinguishable from "no invites".
+    getTenantEmails().catch((e) => {
+      console.error("admin/tenants: getTenantEmails failed, rendering no emails", e);
+      return new Map<string, TenantEmails>();
+    }),
   ]);
 
   // Coarse result banner from the activate/deactivate redirect.
