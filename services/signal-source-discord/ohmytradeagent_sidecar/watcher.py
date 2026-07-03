@@ -103,6 +103,25 @@ class Watcher:
         self._heartbeat_path = state_dir / "heartbeat"
         self._seen = _BoundedSeenLRU(lru_capacity)
 
+    @property
+    def targets(self) -> list[tuple[str, str]]:
+        """Current fan-out targets (the live list reference — do not mutate)."""
+        return self._targets
+
+    def update_targets(self, additional_targets: list[tuple[str, str]]) -> None:
+        """Atomically swap the fan-out target set to union(primary, given),
+        deduped and order-stable (primary first, then given order).
+
+        Used by the registry refresher (Phase B2) to pick up newly-enabled
+        tenants without a restart. The swap is a single reference REBIND — an
+        in-flight ``_emit_signal`` snapshots ``self._targets`` into a local at
+        entry, so a mid-emit refresh can never tear its iteration. The primary
+        is always included, so a poll can never drop the fan-out to empty.
+        """
+        primary = (self._tenant_id, self._strategy_id)
+        # dict.fromkeys is order-stable dedup: primary first, then given order.
+        self._targets = list(dict.fromkeys((primary, *additional_targets)))
+
     async def run_on_page(self, page: Page) -> None:
         """Run the poll loop on a caller-owned page. ``main`` owns the browser
         and context so the signal and watchlist watchers share ONE Chromium
@@ -161,7 +180,11 @@ class Watcher:
         sig: ParsedSignal,
     ) -> None:
         """Fan one parsed signal out to every configured (tenant, strategy) target."""
-        for tenant_id, strategy_id in self._targets:
+        # Snapshot the target list reference once, so a concurrent registry
+        # refresh (which atomically REBINDS self._targets) can't tear this
+        # fan-out's iteration mid-signal.
+        targets = self._targets
+        for tenant_id, strategy_id in targets:
             payload = self._build_payload(
                 message_id=message_id,
                 line_index=line_index,
