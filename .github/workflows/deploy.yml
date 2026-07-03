@@ -265,7 +265,11 @@ jobs:
           #   - signal-source-discord: SIGNAL_EMIT_ADDITIONAL_TARGETS=staging_paper:copytrade-v1,
           #     staging_paper:watchlist-trigger-v1 (repo has no shadow targets → apply drops them →
           #     staging_paper stops receiving the daily watchlist fan-out)
-          RESTART_ONLY="orchestrator exec-alpaca-paper dashboard api-gateway market-data signal-source-discord"
+          #   - tenant-dashboard-bff: OPERATOR_ADMIN_READ_ENABLED=true + OPERATOR_ALLOWLIST=<operator email>
+          #     (operator Add-Tenant admin-read enablement; repo keeps admin-read DARK by default →
+          #     absent in repo → apply re-darks the /api/admin/tenants route and the operator can no
+          #     longer see the tenant list). Same class as api-gateway's operator overrides.
+          RESTART_ONLY="orchestrator exec-alpaca-paper dashboard api-gateway market-data signal-source-discord tenant-dashboard-bff"
           for s in $RESTART_ONLY; do
             if [ "$s" = "${{ matrix.service }}" ]; then
               echo "::notice::${{ matrix.service }} has live-only overrides — skipping apply (rollout restart below still re-pulls :latest)."
@@ -303,3 +307,48 @@ jobs:
           kubectl -n "$NAMESPACE" get pods -l app=${{ matrix.service }} \
             -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[*].imageID}{"\n"}{end}' \
             || true
+
+      - name: Warn loudly if exec-alpaca-live is now behind (real-money pod is NOT auto-rolled)
+        # exec-alpaca-live shares the `oh-my-tradeagent-exec` image with exec-alpaca-paper but is
+        # DELIBERATELY excluded from this workflow (real-money pod = manual roll only, so no merge
+        # can ever auto-restart the live account). Consequence: every paper roll to a NEW image
+        # silently leaves the live pod on an OLDER image. This step surfaces that drift LOUDLY the
+        # moment it happens, so the operator remembers to hand-roll the live pod when it's safe.
+        # Fires only after a successful exec-alpaca-paper roll. Manual `kubectl` rolls of paper are
+        # not covered (they're deliberate); this guards the automatic path.
+        if: ${{ success() && matrix.service == 'exec-alpaca-paper' }}
+        run: |
+          set -uo pipefail
+          NS="$NAMESPACE"
+          digest() { kubectl -n "$NS" get pod -l app="$1" \
+            -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null || echo ""; }
+          paper="$(digest exec-alpaca-paper)"
+          live="$(digest exec-alpaca-live)"
+          echo "paper=$paper"
+          echo "live=$live"
+          if [ -z "$live" ]; then
+            echo "::notice::exec-alpaca-live pod not found — no drift check."
+            exit 0
+          fi
+          if [ "$live" = "$paper" ]; then
+            echo "::notice::exec-alpaca-live is on the same exec image as exec-alpaca-paper — no drift."
+            exit 0
+          fi
+          MSG="exec-alpaca-paper was just rolled to a NEW exec image, but exec-alpaca-live (REAL MONEY) is STILL on an OLDER image and was NOT updated — it is intentionally excluded from CI deploy. Roll it MANUALLY when the live account is flat / market is closed (replicas:1 → the roll briefly drops the live fill listener): kubectl rollout restart deployment/exec-alpaca-live -n copytrade   [paper=$paper live=$live commit=${GITHUB_SHA:0:8}]"
+          # Job log annotation + run summary (always).
+          echo "::warning::$MSG"
+          { echo "## ⚠️ exec-alpaca-live is BEHIND exec-alpaca-paper"; echo ""; echo "$MSG"; } >> "$GITHUB_STEP_SUMMARY"
+          # Loud channel: prefer a dedicated deploy webhook secret; else the cluster's global alert
+          # webhook (zero-setup — the LAN runner already has kubectl). Never fails the deploy.
+          hook="${{ secrets.DISCORD_DEPLOY_WEBHOOK_URL }}"
+          if [ -z "$hook" ]; then
+            hook="$(kubectl -n "$NS" get secret discord-alert-credentials \
+              -o jsonpath='{.data.ALERT_DISCORD_WEBHOOK_URL}' 2>/dev/null | base64 -d 2>/dev/null || echo "")"
+          fi
+          if [ -n "$hook" ]; then
+            DISCORD_WEBHOOK_URL="$hook" ./scripts/discord-notify.sh \
+              "⚠️ exec-alpaca-live is BEHIND — manual roll needed" "$MSG" red \
+              || echo "::warning::discord notify failed (non-fatal)"
+          else
+            echo "::warning::no discord webhook available — warning is in the job log + run summary only."
+          fi
