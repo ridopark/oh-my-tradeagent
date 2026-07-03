@@ -54,12 +54,23 @@ operator:
   # → admin-read 403s. Independent config from the api-gateway; set the SAME operator email(s) here as
   # in the api-gateway OPERATOR_ALLOWLIST and the dashboard OPERATOR_EMAILS.
   allowlist: ${OPERATOR_ALLOWLIST:}
+  # Phase 2 dark gate for the operator create-invite endpoint (POST /api/admin/tenant-invites).
+  # Default OFF: the TenantInvitesController bean is absent (a two-name @ConditionalOnProperty that
+  # requires BOTH this flag AND dashboard.writer.enabled, because the endpoint writes via the
+  # dashboard_writer DSL), so the route 404s until an operator deployment sets BOTH
+  # OPERATOR_TENANT_INVITE_ENABLED=true and DASHBOARD_WRITER_ENABLED=true. The endpoint is
+  # bearer-gated (every BFF request is) AND requires an allowlisted X-Operator-Id.
+  tenant-invite:
+    enabled: ${OPERATOR_TENANT_INVITE_ENABLED:false}
+    # Open invites expire this many days after creation; a re-invite refreshes the window.
+    ttl-days: ${OPERATOR_TENANT_INVITE_TTL_DAYS:7}
 
-# Dark gate for the write path added by the operator tenant-user-invite feature (Phase 1 = DB
-# foundation only). Default OFF: the dashboard_writer DSLContext/HikariDataSource beans are absent
-# (@ConditionalOnProperty), so the module boots identically in tests/CI/local with no writer creds.
-# Flipped true only on a cluster that has run the V5 dashboard_writer role migration and supplies
-# DASHBOARD_WRITER_PASSWORD. Enabling it alone still exposes no endpoints (those land in Phase 2).
+# Dark gate for the write path added by the operator tenant-user-invite feature. Default OFF: the
+# dashboard_writer DSLContext/HikariDataSource beans are absent (@ConditionalOnProperty), so the
+# module boots identically in tests/CI/local with no writer creds. Flipped true only on a cluster
+# that has run the V5 dashboard_writer role migration and supplies DASHBOARD_WRITER_PASSWORD. This
+# flag alone brings up the login-bind endpoint (POST /internal/provisioning/bind), which needs only
+# the writer DSL; the operator create-invite endpoint additionally requires operator.tenant-invite.
 dashboard:
   writer:
     enabled: ${DASHBOARD_WRITER_ENABLED:false}
