@@ -188,10 +188,12 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
 fi
 
 # resolve the prod_real per-tenant webhook from the secret (NEVER printed).
-# Format is the TenantWebhookResolver map "tenant=url,tenant=url" (NOT JSON).
+# Format matches the Java TenantWebhookResolver: ";"-separated "tenant=url" entries
+# (NOT JSON, NOT comma-separated). sed strips only the "prod_real=" prefix, so a URL
+# containing "=" is preserved (mirrors the resolver's split-on-first-"=").
 wh=$($KUBECTL get secret discord-alert-credentials -n "$NS" \
        -o jsonpath='{.data.ALERT_DISCORD_WEBHOOK_URLS}' 2>/dev/null | base64 -d 2>/dev/null \
-     | tr ',' '\n' | tr -d '\r' | sed -n 's/^[[:space:]]*prod_real=//p' | head -1)
+     | tr ';' '\n' | tr -d '\r' | sed -n 's/^[[:space:]]*prod_real=//p' | head -1)
 if [ -z "$wh" ]; then
   log "ERROR: could not resolve prod_real Discord webhook — alert NOT delivered (anomalies logged above)."
   exit 1
