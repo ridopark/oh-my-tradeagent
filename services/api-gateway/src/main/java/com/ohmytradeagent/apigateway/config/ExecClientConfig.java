@@ -18,7 +18,9 @@ import org.springframework.web.client.RestClient;
  * {@code POST /internal/broker-credentials}. DARK by default: the whole config is gated on {@code
  * broker.credentials.write.enabled=true} OR {@code operator.credential-write.enabled=true} (Phase
  * I-1c's operator route shares the same forward pipeline, so its flag must also bring these beans
- * up); with both unset (homelab / repo default) the bean does not exist.
+ * up) OR the A1 arm-guard routes ({@code operator.strategy-enable.enabled=true} / {@code
+ * strategy.config.write.enabled=true}), which reuse the SAME {@code execRestClient} for the
+ * verified-account read; with all unset (homelab / repo default) the bean does not exist.
  *
  * <p>The {@code Authorization: Bearer <exec admin token>} is a DEFAULT header (the same shared
  * admin token on every request). {@code X-Tenant-Id} is deliberately NOT a default header — it is
@@ -28,7 +30,9 @@ import org.springframework.web.client.RestClient;
  */
 @Configuration
 @ConditionalOnExpression(
-    "${broker.credentials.write.enabled:false} or ${operator.credential-write.enabled:false}")
+    "${broker.credentials.write.enabled:false} or ${operator.credential-write.enabled:false}"
+        + " or ${operator.strategy-enable.enabled:false}"
+        + " or ${strategy.config.write.enabled:false}")
 public class ExecClientConfig {
 
   @Bean

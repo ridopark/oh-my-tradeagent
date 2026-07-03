@@ -165,6 +165,25 @@ class CreateTenantControllerTest {
   }
 
   @Test
+  void create_forcesEnabledFalse_soArmingOnlyHappensThroughTheGuardedEnableRoute() {
+    // C2 invariant: a created tenant is ALWAYS disabled. Even if the operator submits enabled=true,
+    // the controller coerces it to false before starting the create workflow — arming can only
+    // happen through the guarded enable route (which requires a verified broker account).
+    when(stub.create(any(StrategyConfigCreateRequest.class)))
+        .thenReturn(result(StrategyConfigCreateResult.Outcome.CREATED, 1L));
+    StrategyConfig armed = new StrategyConfig();
+    armed.setEnabled(true);
+    TenantCreateRequest armedBody = new TenantCreateRequest(armed, "corr-armed");
+
+    controller.create(reqWithOperator(OPERATOR), TENANT, STRATEGY, armedBody);
+
+    org.mockito.ArgumentCaptor<StrategyConfigCreateRequest> captor =
+        org.mockito.ArgumentCaptor.forClass(StrategyConfigCreateRequest.class);
+    verify(stub).create(captor.capture());
+    assertThat(captor.getValue().getConfig().getEnabled()).isFalse();
+  }
+
+  @Test
   void alreadyExists_returns409() {
     when(stub.create(any(StrategyConfigCreateRequest.class)))
         .thenReturn(result(StrategyConfigCreateResult.Outcome.ALREADY_EXISTS, null));

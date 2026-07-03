@@ -2,6 +2,7 @@ package com.ohmytradeagent.apigateway.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -37,15 +38,36 @@ class StrategyConfigControllerTest {
 
   private WorkflowClient workflowClient;
   private StrategyConfigUpdateWorkflow stub;
+  private StrategyConfigReader reader;
+  private VerifiedAccountGuard guard;
   private StrategyConfigController controller;
 
   @BeforeEach
   void setUp() {
     workflowClient = mock(WorkflowClient.class);
     stub = mock(StrategyConfigUpdateWorkflow.class);
+    reader = mock(StrategyConfigReader.class);
+    guard = mock(VerifiedAccountGuard.class);
     when(workflowClient.newWorkflowStub(any(Class.class), any(WorkflowOptions.class)))
         .thenReturn(stub);
-    controller = new StrategyConfigController(workflowClient, new TenantContext("dev", STRATEGY));
+    // Default: no stored row → the arm-guard sees no arming transition and never runs (Mockito
+    // returns Optional.empty() for the Optional-returning reader). Arming tests override this.
+    controller =
+        new StrategyConfigController(
+            workflowClient, new TenantContext("dev", STRATEGY), reader, guard);
+  }
+
+  private StrategyConfig storedDisabled() {
+    StrategyConfig c = new StrategyConfig();
+    c.setEnabled(false);
+    c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
+    return c;
+  }
+
+  private static StrategyConfigWriteRequest armingBody() {
+    StrategyConfig proposed = new StrategyConfig();
+    proposed.setEnabled(true);
+    return new StrategyConfigWriteRequest(TENANT, STRATEGY, proposed, 3L, "corr-arm");
   }
 
   private static HttpServletRequest reqWithTenant(String tenant) {
@@ -135,6 +157,80 @@ class StrategyConfigControllerTest {
 
     assertResponseStatus(() -> controller.write(reqWithTenant(TENANT), body), HttpStatus.FORBIDDEN);
     verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
+  void arming_disabledStored_withoutVerifiedAccount_is422_noWorkflowStarted() {
+    when(reader.read(TENANT, STRATEGY))
+        .thenReturn(java.util.Optional.of(new StrategyConfigReader.Stored(storedDisabled(), 3L)));
+    when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
+        .thenReturn(VerifiedAccountGuard.Decision.REJECT_UNVERIFIED);
+
+    assertResponseStatus(
+        () -> controller.write(reqWithTenant(TENANT), armingBody()),
+        HttpStatus.UNPROCESSABLE_ENTITY);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
+  void arming_disabledStored_withVerifiedAccount_proceeds200() {
+    when(reader.read(TENANT, STRATEGY))
+        .thenReturn(java.util.Optional.of(new StrategyConfigReader.Stored(storedDisabled(), 3L)));
+    when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
+        .thenReturn(VerifiedAccountGuard.Decision.ALLOW);
+    when(stub.update(any(StrategyConfigUpdateRequest.class)))
+        .thenReturn(resultOf(StrategyConfigUpdateResult.Outcome.UPDATED, 4L));
+
+    var resp = controller.write(reqWithTenant(TENANT), armingBody());
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+    verify(stub).update(any(StrategyConfigUpdateRequest.class));
+  }
+
+  @Test
+  void arming_guardFault_is503_noWorkflowStarted() {
+    when(reader.read(TENANT, STRATEGY))
+        .thenReturn(java.util.Optional.of(new StrategyConfigReader.Stored(storedDisabled(), 3L)));
+    when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
+        .thenReturn(VerifiedAccountGuard.Decision.FAULT);
+
+    assertResponseStatus(
+        () -> controller.write(reqWithTenant(TENANT), armingBody()),
+        HttpStatus.SERVICE_UNAVAILABLE);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
+  @Test
+  void editWhileAlreadyArmed_isNotGated_guardNeverCalled() {
+    // Stored is already armed (enabled==true) → an edit while armed is NOT an arming transition, so
+    // the verified-account guard is never consulted (matches "all other SAFE edits unaffected").
+    StrategyConfig storedArmed = new StrategyConfig();
+    storedArmed.setEnabled(true);
+    when(reader.read(TENANT, STRATEGY))
+        .thenReturn(java.util.Optional.of(new StrategyConfigReader.Stored(storedArmed, 3L)));
+    when(stub.update(any(StrategyConfigUpdateRequest.class)))
+        .thenReturn(resultOf(StrategyConfigUpdateResult.Outcome.UPDATED, 4L));
+
+    var resp = controller.write(reqWithTenant(TENANT), armingBody());
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+    org.mockito.Mockito.verifyNoInteractions(guard);
+  }
+
+  @Test
+  void disabling_isNotGated_guardNeverCalled() {
+    // proposed enabled=false → not armed → the guard/reader are never consulted.
+    when(stub.update(any(StrategyConfigUpdateRequest.class)))
+        .thenReturn(resultOf(StrategyConfigUpdateResult.Outcome.UPDATED, 4L));
+    StrategyConfig disabled = new StrategyConfig();
+    disabled.setEnabled(false);
+    StrategyConfigWriteRequest body =
+        new StrategyConfigWriteRequest(TENANT, STRATEGY, disabled, 3L, "corr-off");
+
+    var resp = controller.write(reqWithTenant(TENANT), body);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+    org.mockito.Mockito.verifyNoInteractions(guard);
   }
 
   @Test

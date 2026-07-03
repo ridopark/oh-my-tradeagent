@@ -45,5 +45,15 @@ class StrategyConfigDarkProofTest {
     TenantContext tenantContext() {
       return new TenantContext("dev", "copytrade-v1");
     }
+
+    @Bean
+    StrategyConfigReader strategyConfigReader() {
+      return Mockito.mock(StrategyConfigReader.class);
+    }
+
+    @Bean
+    VerifiedAccountGuard verifiedAccountGuard() {
+      return Mockito.mock(VerifiedAccountGuard.class);
+    }
   }
 }
