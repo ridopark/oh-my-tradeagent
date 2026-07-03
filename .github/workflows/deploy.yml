@@ -265,7 +265,11 @@ jobs:
           #   - signal-source-discord: SIGNAL_EMIT_ADDITIONAL_TARGETS=staging_paper:copytrade-v1,
           #     staging_paper:watchlist-trigger-v1 (repo has no shadow targets → apply drops them →
           #     staging_paper stops receiving the daily watchlist fan-out)
-          RESTART_ONLY="orchestrator exec-alpaca-paper dashboard api-gateway market-data signal-source-discord"
+          #   - tenant-dashboard-bff: OPERATOR_ADMIN_READ_ENABLED=true + OPERATOR_ALLOWLIST=<operator email>
+          #     (operator Add-Tenant admin-read enablement; repo keeps admin-read DARK by default →
+          #     absent in repo → apply re-darks the /api/admin/tenants route and the operator can no
+          #     longer see the tenant list). Same class as api-gateway's operator overrides.
+          RESTART_ONLY="orchestrator exec-alpaca-paper dashboard api-gateway market-data signal-source-discord tenant-dashboard-bff"
           for s in $RESTART_ONLY; do
             if [ "$s" = "${{ matrix.service }}" ]; then
               echo "::notice::${{ matrix.service }} has live-only overrides — skipping apply (rollout restart below still re-pulls :latest)."
