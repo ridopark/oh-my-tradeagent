@@ -2,7 +2,11 @@ import { auth } from "@/auth";
 import Link from "next/link";
 import { Nav } from "@/components/Nav";
 import { OnboardForm, type OnboardActionResult } from "@/components/OnboardForm";
-import { createTenant, postOperatorBrokerCredential } from "@/lib/adminOnboarding";
+import {
+  createTenant,
+  enableStrategy,
+  postOperatorBrokerCredential,
+} from "@/lib/adminOnboarding";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +15,9 @@ export const dynamic = "force-dynamic";
 // own flag is on, so the action degrades gracefully. Paper-only this phase (exec refuses -live).
 const CREATE_ENABLED = process.env.OPERATOR_TENANT_CREATE_ENABLED === "true";
 const CREDENTIAL_ENABLED = process.env.OPERATOR_CREDENTIAL_WRITE_ENABLED === "true";
+// Mirrors the A1 backend `operator.strategy-enable.enabled` flag; the enable route itself 404s until
+// its own flag is on, so step 3 degrades gracefully even if this is set ahead of the backend.
+const ENABLE_ENABLED = process.env.OPERATOR_STRATEGY_ENABLE_ENABLED === "true";
 
 // Paper broker endpoints — the only targets accepted this phase (live arming is Phase E).
 const DEFAULT_BASE_URL = "https://paper-api.alpaca.markets";
@@ -98,6 +105,23 @@ export default async function OnboardPage() {
     return { ok: r.ok, status: r.status, brokerAccountId: r.brokerAccountId };
   }
 
+  // Server action: arm the tenant's strategy (enabled=true) via the A1 operator enable route. No
+  // secret and no config — only the (tenant, strategy) ids; the route re-checks the verified account.
+  async function enableStrategyAction(formData: FormData): Promise<OnboardActionResult> {
+    "use server";
+    const s = await auth();
+    if (!s?.isOperator) {
+      return { ok: false, status: 0 };
+    }
+    const tenant = String(formData.get("tenant_id") ?? "").trim();
+    const strategy = String(formData.get("strategy_id") ?? "").trim();
+    if (!ID_RE.test(tenant) || !ID_RE.test(strategy)) {
+      return { ok: false, status: 400 };
+    }
+    const r = await enableStrategy(tenant, strategy);
+    return { ok: r.ok, status: r.status, newVersion: r.newVersion };
+  }
+
   return (
     <>
       <Nav tenantId={session?.tenantId} />
@@ -109,19 +133,22 @@ export default async function OnboardPage() {
           </Link>
         </div>
         <p className="mb-6 text-sm text-slate-400">
-          Data-only onboarding: create a tenant&apos;s first strategy config, then paste and verify
-          its broker keys. Both steps are operator-scoped and dark-gated. This phase targets paper
-          accounts only — arming real money is a separate, gated step.
+          Data-only onboarding: create a tenant&apos;s first strategy config, paste and verify its
+          broker keys, then enable the strategy (unlocks only after the keys verify). All steps are
+          operator-scoped and dark-gated. This phase targets paper accounts only — arming real money
+          is a separate, gated step.
         </p>
 
         <OnboardForm
           createEnabled={CREATE_ENABLED}
           credentialEnabled={CREDENTIAL_ENABLED}
+          enableEnabled={ENABLE_ENABLED}
           defaultConfig={DEFAULT_CONFIG}
           defaultBaseUrl={DEFAULT_BASE_URL}
           defaultWsUrl={DEFAULT_WS_URL}
           createAction={createTenantAction}
           addCredentialAction={addCredentialAction}
+          enableAction={enableStrategyAction}
         />
       </main>
     </>

@@ -10,6 +10,7 @@ export interface OnboardActionResult {
   status: number;
   createdVersion?: number;
   brokerAccountId?: string;
+  newVersion?: number;
 }
 
 type Action = (formData: FormData) => Promise<OnboardActionResult>;
@@ -64,6 +65,30 @@ function credentialMsg(r: OnboardActionResult): { tone: "ok" | "err"; msg: strin
   }
 }
 
+function enableMsg(r: OnboardActionResult): { tone: "ok" | "err"; msg: string } {
+  if (r.ok) {
+    return {
+      tone: "ok",
+      msg: `Strategy armed (version ${r.newVersion ?? "updated"}). The tenant is now enabled.`,
+    };
+  }
+  switch (r.status) {
+    case 422:
+      return {
+        tone: "err",
+        msg: "Rejected — no verified broker account (or an unsupported live target). Verify the keys above first.",
+      };
+    case 409:
+      return { tone: "err", msg: "Version conflict — reload and retry." };
+    case 404:
+      return { tone: "err", msg: "Strategy enable not enabled, or no such tenant/strategy." };
+    case 403:
+      return { tone: "err", msg: "Not allowed — operator is not allowlisted for this action." };
+    default:
+      return { tone: "err", msg: "Could not arm the strategy. Try again." };
+  }
+}
+
 function Banner({ r }: { r: { tone: "ok" | "err"; msg: string } }) {
   return (
     <div
@@ -78,35 +103,44 @@ function Banner({ r }: { r: { tone: "ok" | "err"; msg: string } }) {
   );
 }
 
-// Operator onboarding form. Two steps share one tenant/strategy pair at the top:
+// Operator onboarding form. Three steps share one tenant/strategy pair at the top:
 //   1) Create tenant (INSERT first strategy_config row)  → createAction
 //   2) Add broker keys (paste + verify, account read-back) → addCredentialAction
+//   3) Enable strategy (arm the tenant)                   → enableAction
 // Each step is independently dark-gated; a disabled step renders read-only with an explanatory note.
+// Step 3 additionally stays inert until step 2 returns a verified brokerAccountId — arming a tenant
+// with no verified account would be rejected 422 by the A1 route, so the UI gates on it up-front.
 export function OnboardForm({
   createEnabled,
   credentialEnabled,
+  enableEnabled,
   defaultConfig,
   defaultBaseUrl,
   defaultWsUrl,
   createAction,
   addCredentialAction,
+  enableAction,
 }: {
   createEnabled: boolean;
   credentialEnabled: boolean;
+  enableEnabled: boolean;
   defaultConfig: string;
   defaultBaseUrl: string;
   defaultWsUrl: string;
   createAction: Action;
   addCredentialAction: Action;
+  enableAction: Action;
 }) {
-  // Shared identity for both steps. The credential step uses the SAME tenant the create step used.
+  // Shared identity for all steps. Every step uses the SAME tenant/strategy the create step used.
   const [tenant, setTenant] = useState("");
   const [strategy, setStrategy] = useState("copytrade-v1");
 
   const [createResult, setCreateResult] = useState<OnboardActionResult | null>(null);
   const [credResult, setCredResult] = useState<OnboardActionResult | null>(null);
+  const [enableResult, setEnableResult] = useState<OnboardActionResult | null>(null);
   const [creating, startCreate] = useTransition();
   const [saving, startSave] = useTransition();
+  const [enabling, startEnable] = useTransition();
 
   function submitCreate(formData: FormData) {
     formData.set("tenant_id", tenant);
@@ -119,9 +153,18 @@ export function OnboardForm({
     startSave(async () => setCredResult(await addCredentialAction(formData)));
   }
 
+  function submitEnable(formData: FormData) {
+    formData.set("tenant_id", tenant);
+    formData.set("strategy_id", strategy);
+    startEnable(async () => setEnableResult(await enableAction(formData)));
+  }
+
   // Step 1 (create) needs both ids; step 2 (keys) binds only the tenant.
   const idsMissing = !tenant.trim() || !strategy.trim();
   const tenantMissing = !tenant.trim();
+  // Step 3 (enable) unlocks ONLY once step 2's in-session result carries a non-blank verified
+  // account. This mirrors the A1 backend guard (no verified account → 422) as a pre-check.
+  const accountVerified = Boolean(credResult?.ok && credResult.brokerAccountId?.trim());
 
   return (
     <div className="space-y-6">
@@ -300,6 +343,31 @@ export function OnboardForm({
           )}
         </form>
         {credResult && <Banner r={credentialMsg(credResult)} />}
+      </section>
+
+      {/* Step 3 — Enable strategy */}
+      <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+        <h2 className="mb-1 text-sm font-semibold text-slate-200">3 · Enable strategy</h2>
+        <p className="mb-3 text-xs text-slate-500">
+          Arms the tenant (<code>enabled=true</code>) via the operator enable route, which itself
+          re-checks that a verified broker account exists. Only unlocks once the keys above verify.
+        </p>
+        <form action={submitEnable} onSubmit={() => setEnableResult(null)}>
+          <button
+            type="submit"
+            disabled={!enableEnabled || enabling || idsMissing || !accountVerified}
+            className="rounded border border-emerald-500/60 bg-emerald-600/20 px-3 py-1.5 text-sm font-medium text-emerald-300 transition-colors hover:bg-emerald-600/30 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {enabling ? "Enabling…" : "Enable strategy"}
+          </button>
+          {!enableEnabled && (
+            <p className="mt-2 text-xs text-slate-500">Strategy enable not enabled (read-only).</p>
+          )}
+          {enableEnabled && !accountVerified && (
+            <p className="mt-2 text-xs text-slate-500">Verify broker keys first (step 2).</p>
+          )}
+        </form>
+        {enableResult && <Banner r={enableMsg(enableResult)} />}
       </section>
     </div>
   );
