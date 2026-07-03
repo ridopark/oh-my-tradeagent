@@ -30,7 +30,15 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 @SpringBootTest(
     classes = TenantDashboardBffApplication.class,
     webEnvironment = SpringBootTest.WebEnvironment.NONE,
-    properties = {"spring.flyway.enabled=false", "DASHBOARD_READONLY_PASSWORD=test-not-used"})
+    properties = {
+      "spring.flyway.enabled=false",
+      "DASHBOARD_READONLY_PASSWORD=test-not-used",
+      // Belt-and-suspenders for the V5 writer-role placeholder, same as the readonly one above:
+      // Flyway is off so it is never resolved, but keep the full context hermetic. The writer
+      // DSLContext/DataSource beans stay ABSENT (dashboard.writer.enabled defaults false), so the
+      // context boots identically to before this feature.
+      "DASHBOARD_WRITER_PASSWORD=test-not-used"
+    })
 class ApplicationContextSmokeTest {
 
   // Mocked so context initialization never dials Temporal — these override TemporalClientConfig's

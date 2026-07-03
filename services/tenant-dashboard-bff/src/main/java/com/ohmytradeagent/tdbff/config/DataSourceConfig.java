@@ -6,6 +6,7 @@ import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -73,5 +74,27 @@ public class DataSourceConfig {
   public DSLContext execAlpacaLiveDsl(
       @Qualifier("execAlpacaLiveDataSource") DataSource execAlpacaLiveDataSource) {
     return DSL.using(execAlpacaLiveDataSource, SQLDialect.POSTGRES);
+  }
+
+  // The ONLY write datasource this BFF has: connects as the least-privilege dashboard_writer role
+  // (V5) for the operator tenant-user-invite feature. DARK by default — @ConditionalOnProperty
+  // means
+  // the bean is absent unless dashboard.writer.enabled=true, so the repo default (no writer creds,
+  // a
+  // blank DASHBOARD_WRITER_PASSWORD) boots identically and never constructs a pool with a null
+  // password. Not @Primary, not marked read-only. Enabling the flag alone exposes no endpoints
+  // (those arrive in Phase 2); this just makes the write path constructable on an enabled cluster.
+  @Bean
+  @ConditionalOnProperty(name = "dashboard.writer.enabled", havingValue = "true")
+  @ConfigurationProperties("bff.datasource.dashboard-writer")
+  public DataSource dashboardWriterDataSource() {
+    return new HikariDataSource();
+  }
+
+  @Bean
+  @ConditionalOnProperty(name = "dashboard.writer.enabled", havingValue = "true")
+  public DSLContext dashboardWriterDsl(
+      @Qualifier("dashboardWriterDataSource") DataSource dashboardWriterDataSource) {
+    return DSL.using(dashboardWriterDataSource, SQLDialect.POSTGRES);
   }
 }
