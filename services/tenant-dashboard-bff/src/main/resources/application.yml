@@ -42,6 +42,11 @@ spring:
 operator:
   admin-read:
     enabled: ${OPERATOR_ADMIN_READ_ENABLED:false}
+  # Config surface for the backend operator allowlist (defense-in-depth). The enforcement
+  # (requireAllowlistedOperator → 403 on admin-read) is in place. FAIL-CLOSED: unset/blank = deny-all
+  # → admin-read 403s. Independent config from the api-gateway; set the SAME operator email(s) here as
+  # in the api-gateway OPERATOR_ALLOWLIST and the dashboard OPERATOR_EMAILS.
+  allowlist: ${OPERATOR_ALLOWLIST:}
 
 # Read-only application datasources. Credentials are the dedicated bff_readonly role per DB (see the
 # operator runbook); SELECT-only grants mean even a query bug cannot mutate trading state.
