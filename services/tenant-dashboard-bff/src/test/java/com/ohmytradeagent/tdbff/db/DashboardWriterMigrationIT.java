@@ -94,18 +94,25 @@ class DashboardWriterMigrationIT {
       st.executeUpdate(
           "INSERT INTO dashboard_user (provider, subject, email, tenant_id) "
               + "VALUES ('google', 'sub-writer-1', 'a@b.com', 'acme')");
+      // A second tenant's row that the tenant-scoped DELETE must NOT touch — it also gives the
+      // post-delete SELECT a surviving row to read (proving the column grant, not an empty table).
+      st.executeUpdate(
+          "INSERT INTO dashboard_user (provider, subject, email, tenant_id) "
+              + "VALUES ('google', 'sub-writer-2', 'b@b.com', 'other-tenant')");
 
       // V7: the tenant-scoped teardown DELETE is granted. Its WHERE reads tenant_id, so in PG it
       // also needs SELECT on that column — V7 grants column-level SELECT (tenant_id), enough to
-      // evaluate the predicate. Removes the row just inserted.
+      // evaluate the predicate. Removes ONLY the 'acme' row (exactly 1), leaving 'other-tenant'.
       assertThat(st.executeUpdate("DELETE FROM dashboard_user WHERE tenant_id = 'acme'"))
           .isEqualTo(1);
 
-      // The SELECT V7 grants is COLUMN-SCOPED to tenant_id only.
+      // The SELECT V7 grants is COLUMN-SCOPED to tenant_id only. The surviving 'other-tenant' row
+      // proves both the column grant works AND the DELETE was tenant-scoped.
       try (var rs = st.executeQuery("SELECT tenant_id FROM dashboard_user")) {
         assertThat(rs.next())
             .as("writer may read tenant_id (needed to evaluate the DELETE WHERE)")
             .isTrue();
+        assertThat(rs.getString(1)).isEqualTo("other-tenant");
       }
 
       // STILL least-privilege / no-PII: no UPDATE, and no SELECT of any PII column — provider,
