@@ -1,5 +1,6 @@
 package com.ohmytradeagent.tdbff.invites;
 
+import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -8,6 +9,7 @@ import java.util.UUID;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Result;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -126,20 +128,48 @@ public class InviteWriterRepository {
               continue;
             }
 
-            // 2. INSERT the grant ONLY on the consume win. Idempotent for a legitimate re-bind of
-            // the SAME identity (ON CONFLICT on the (provider, subject, tenant_id) PK).
-            tx.execute(
-                "INSERT INTO dashboard_user (provider, subject, email, tenant_id) "
-                    + "VALUES (?, ?, ?, ?) "
-                    + "ON CONFLICT (provider, subject, tenant_id) DO NOTHING",
-                provider,
-                subject,
-                normalized,
-                tenantId);
+            // 2. INSERT the grant ONLY on the consume win. Plain INSERT (NOT `ON CONFLICT DO
+            // NOTHING`): on PG16 `ON CONFLICT` requires SELECT on the target table, which the
+            // least-privilege writer deliberately lacks (INSERT-only on dashboard_user, no read-
+            // back). Idempotency for a legitimate re-bind of the SAME identity is preserved by
+            // guarding the INSERT with a SAVEPOINT and swallowing the unique-violation (23505) —
+            // any other SQL error propagates and aborts the whole bind.
+            tx.execute("SAVEPOINT grant_insert");
+            try {
+              tx.execute(
+                  "INSERT INTO dashboard_user (provider, subject, email, tenant_id) "
+                      + "VALUES (?, ?, ?, ?)",
+                  provider,
+                  subject,
+                  normalized,
+                  tenantId);
+              tx.execute("RELEASE SAVEPOINT grant_insert");
+            } catch (DataAccessException e) {
+              if (!isUniqueViolation(e)) {
+                throw e; // real error (e.g. permission) — abort the bind
+              }
+              // The identity already holds this tenant — idempotent no-op. Roll the failed INSERT
+              // back to the savepoint (un-aborts the tx) and release it before the next iteration.
+              tx.execute("ROLLBACK TO SAVEPOINT grant_insert");
+              tx.execute("RELEASE SAVEPOINT grant_insert");
+            }
             granted.add(tenantId);
           }
         });
     return granted;
+  }
+
+  /** True iff the exception (or a cause) is a Postgres unique-violation (SQLState 23505). */
+  private static boolean isUniqueViolation(DataAccessException e) {
+    if ("23505".equals(e.sqlState())) {
+      return true;
+    }
+    for (Throwable c = e.getCause(); c != null; c = c.getCause()) {
+      if (c instanceof SQLException se && "23505".equals(se.getSQLState())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** The open invite row returned by {@link #createInvite} (no secret; safe to echo). */
