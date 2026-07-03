@@ -243,7 +243,8 @@ class KillSwitchWorkflowImplTest {
   }
 
   @Test
-  void heartbeat_execReadFailure_doesNotTrip_thenAlertsAfterThreshold() {
+  void heartbeat_execReadFailure_doesNotTrip_thenAlertsAfterThreshold()
+      throws InterruptedException {
     // Phase 2 (C6 / G1): an exec-activity failure on v>=1 must NOT doTrip that tick (a missing P&L
     // number is not a loss). After REALIZED_READ_FAILURE_ALERT_TICKS consecutive failures the
     // heartbeat emits ONE bounded alert with the distinct reason — never a spurious trip.
@@ -262,6 +263,11 @@ class KillSwitchWorkflowImplTest {
     assertThat(stub.killswitchState().getTripped()).isFalse();
     verify(cascade, never())
         .cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString());
+    // Deterministic sync: the bounded alert is emitted on the activity worker thread; wait for it
+    // to
+    // be visible before asserting the exact count (guards the time-skip/real-thread race under
+    // load).
+    waitForAuditKind("KillSwitchRealizedReadUnavailable");
     assertThat(countKind("KillSwitchRealizedReadUnavailable")).isEqualTo(1L);
   }
 
@@ -317,7 +323,7 @@ class KillSwitchWorkflowImplTest {
   // ---------- B2 (P0c-b1): live kill-switch heartbeat floor ----------
 
   @Test
-  void heartbeat_liveWithNullThreshold_tripsWithDistinctReason() {
+  void heartbeat_liveWithNullThreshold_tripsWithDistinctReason() throws InterruptedException {
     // Market open + a LIVE strategy whose daily_loss_threshold is null (an upstream control was
     // bypassed). The heartbeat must fail closed: trip with the distinct anomaly reason.
     when(calendar.isMarketOpen()).thenReturn(true);
@@ -334,6 +340,10 @@ class KillSwitchWorkflowImplTest {
     assertThat(s.getReason()).isEqualTo("auto:missing_loss_threshold");
     assertThat(s.getActor()).isEqualTo("auto:missing_loss_threshold");
 
+    // Deterministic sync: the trip audit is emitted on the activity worker thread during the
+    // skipped
+    // heartbeat tick; wait for it before the instantaneous captor read below.
+    waitForAuditKind("KillSwitchTripped");
     AuditEvent tripped = captureKind("KillSwitchTripped");
     assertThat(tripped.getSubject()).containsEntry("reason", "auto:missing_loss_threshold");
     // Anomaly trip carries no quantified value (null pnl was never computed).
@@ -549,5 +559,32 @@ class KillSwitchWorkflowImplTest {
     ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
     Mockito.verify(audit, Mockito.atLeast(0)).log(captor.capture());
     return captor.getAllValues().stream().filter(e -> kind.equals(e.getKind())).count();
+  }
+
+  /**
+   * Deterministic sync point for async audit emissions. Heartbeat-driven audit events are emitted
+   * on the activity worker thread while the workflow clock is skipped by {@link
+   * TestWorkflowEnvironment#sleep}; under CI load the skip can return before the last tick's {@code
+   * audit.log} invocation is visible to this (test) thread, making an instantaneous {@link
+   * #captureKind}/{@link #countKind} read flaky. Poll (bounded) until at least {@code atLeast}
+   * events of {@code kind} have been captured before asserting on them.
+   */
+  private void waitForKindCount(String kind, long atLeast) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 10_000;
+    while (System.currentTimeMillis() < deadline) {
+      if (countKind(kind) >= atLeast) {
+        return;
+      }
+      Thread.sleep(25);
+    }
+    if (countKind(kind) < atLeast) {
+      throw new AssertionError(
+          "timed out waiting for >=" + atLeast + " audit event(s) with kind=" + kind);
+    }
+  }
+
+  /** Bounded wait for the first audit event of {@code kind} (see {@link #waitForKindCount}). */
+  private void waitForAuditKind(String kind) throws InterruptedException {
+    waitForKindCount(kind, 1L);
   }
 }
