@@ -39,8 +39,8 @@ exec's creds** (different service/DB), and `enabled` is classified **SAFE** ther
 So the bypass-proof guard lives at the **api-gateway**, which already holds an exec HTTP client +
 `EXEC_ADMIN_SHARED_TOKEN` (the credential-write forward). It pre-checks "verified account exists" against
 exec **before** starting the update workflow. exec exposes that fact via a new **read** endpoint
-(sibling to its write endpoint, same `broker.creds.source=db` + `ExecAdminTokenFilter` gate). The UI gate
-(A1) is convenience on top; the api-gateway guard (A2) is the real enforcement.
+(sibling to its write endpoint, same `broker.creds.source=db` + `ExecAdminTokenFilter` gate). The
+api-gateway guard (Phase A1) is the real enforcement; the UI gate (Phase A2) is convenience on top.
 
 > **Semantic decision for B (CONFIRMED 2026-07-03).** There is ONE `signal-source-discord` (one
 > Discord channel), and all copytrade shadow tenants mirror the same authors from it. So "registry-driven
@@ -62,7 +62,7 @@ exec **before** starting the update workflow. exec exposes that fact via a new *
 - **B cutover is a per-cluster operator flag flip** (Phase B3): set `SIGNAL_FANOUT_SOURCE=registry` on
   `signal-source-discord` and retire `SIGNAL_EMIT_ADDITIONAL_TARGETS`. `signal-source-discord` is in the
   deploy `RESTART_ONLY` list (`deploy.yml:268`), so the live env override persists across deploys.
-- **NetworkPolicy.** A2 adds an api-gateway→exec read call — already covered by the existing
+- **NetworkPolicy.** A1 adds an api-gateway→exec read call — already covered by the existing
   `exec-alpaca-paper-allow-api-gateway-internal` NetworkPolicy (allows `app=api-gateway`). The sidecar→
   api-gateway poll (B2) is a new hop; confirm no NetworkPolicy blocks `signal-source-discord →
   api-gateway:8082` before the B3 cutover.
@@ -76,7 +76,7 @@ exec **before** starting the update workflow. exec exposes that fact via a new *
   (`emitter.py:45-49`; dedupe is per-target, unaffected). The A-guard is api-gateway pre-workflow +
   activity-impl (`StrategyConfigWriter`), neither of which is replay-checked. No `getVersion`.
 - **Spotless per touched Java module** (`api-gateway`, `exec`): `mvn -pl <module> -am spotless:apply` then `:check`.
-- **No contract-schema change.** A2's exec read and B1's fan-out endpoint return plain JSON `Map`s
+- **No contract-schema change.** A1's exec read and B1's fan-out endpoint return plain JSON `Map`s
   (like the BFF admin reads) — no `strategy-config.json` edit, no pydantic regen. Keep them out of the
   codegen path.
 - **Python sidecar:** pytest coverage for new parsing/refresh; the sidecar has a test suite under
@@ -86,59 +86,74 @@ exec **before** starting the update workflow. exec exposes that fact via a new *
 
 ---
 
-## Phase A1 — Onboard wizard "Enable" step, gated on the verified account (`dashboard`)
+> **Phase-A re-scope (execute-plan, 2026-07-03).** The existing `StrategyConfigController`
+> (`services/api-gateway/.../web/StrategyConfigController.java:51,74-79`) is **tenant-scoped**
+> (`ctx.requiredTenantId(req)` = `X-Tenant-Id`, asserts `body.tenant_id` equals it) — so the
+> operator/cross-tenant onboard wizard CANNOT enable a just-created tenant through it. There is no
+> operator-scoped strategy-config update route today (only the operator-scoped *create*,
+> `CreateTenantController`). So the backend must lead: **A1 adds the operator-scoped enable route + the
+> verified-account guard; A2 is the UI on top.** (Original A1↔A2 order swapped.)
 
-**Goal:** the operator can arm the tenant from the wizard, and the control only unlocks after step-2
-verification returns the account.
+## Phase A1 — Operator-scoped enable route + verified-account guard (`exec` + `api-gateway`)
 
-**Changes** (anchors):
-- `dashboard/components/OnboardForm.tsx` (2-step form, `:81-84`; step-2 result carries `brokerAccountId`
-  at `:8`) — add **step 3 "Enable strategy"**: disabled until the in-session step-2 result has a non-blank
-  `brokerAccountId`; on click posts `enabled: true` for the (tenant, strategy).
-- `dashboard/lib/adminOnboarding.ts` (`:32-66` create, `:92-138` credential) — add an `enableStrategy()`
-  server action that POSTs the config-write to the api-gateway strategy-config route (operator-scoped,
-  `X-Operator-Id`), mirroring the existing operator POST helpers.
-- `dashboard/components/StrategySwitch.tsx:11-43` (the standalone on/off toggle, `writeEnabled` gate) —
-  extend so the switch is also disabled when no verified account exists for the tenant (source: the
-  admin-read `account_masked` already surfaced by `AdminTenantsController`), with a "verify broker keys
-  first" affordance. Keeps the settings-page toggle consistent with the wizard.
-
-**Tests:** dashboard verify = `tsc --noEmit` + `next build` (no test harness). Assert step-3 disabled
-with no `brokerAccountId`, enabled once present; StrategySwitch disabled when `account_masked` absent.
-
-**Verify / success criteria:** in the wizard, "Enable" is inert until keys verify, then flips `enabled`
-via the existing write path. UI-only; the write still passes through A2's guard once shipped.
-
----
-
-## Phase A2 — Bypass-proof "arm requires verified account" guard (`exec` + `api-gateway`)
-
-**Goal:** reject `enabled: false→true` at the backend when no verified broker account exists — so it can't
-be bypassed by calling the API directly.
+**Goal:** an operator can arm a specific tenant's strategy, and arming (`enabled: false/absent→true`) is
+**rejected unless a verified broker account exists** — enforced at the backend so it can't be bypassed.
 
 **Changes** (anchors):
 - **exec read endpoint** — new `GET /internal/broker-credentials/{tenant}/account?provider=alpaca` in a
   controller sibling to the write path, gated identically (`broker.creds.source=db` +
   `ExecAdminTokenFilter`). Returns `{verified:true, account:"<expected_account_id>"}` when a row exists,
-  else `{verified:false}` / 404. Reads only the non-secret `expected_account_id` (never ciphertext) —
-  mirror `BrokerCredentialStatusReader.java:35-51`.
-- **api-gateway guard** — `StrategyConfigController.java:74-99`: when the incoming config sets
-  `enabled=true` AND the stored/prior value was not-true, call the exec read endpoint (existing exec
-  client + `EXEC_ADMIN_SHARED_TOKEN`, routed by the config's `broker_target`) BEFORE starting the update
-  workflow; if `verified=false` → reject **422** (new `REJECTED_UNVERIFIED_ACCOUNT` outcome, mapped like
-  the existing `REJECTED_DANGEROUS`→403 at `:139-159`). No verified account ⇒ no arm.
-- Scope note: only the `false/absent → true` transition is gated; disabling (`true→false`) and all other
-  SAFE edits are unaffected.
+  else `{verified:false}`. Reads only the non-secret `expected_account_id` (never ciphertext) — mirror
+  `BrokerCredentialStatusReader.java:35-51`.
+- **api-gateway operator enable route** — new `POST /admin/tenants/{tenant}/strategies/{strategy}/enable`,
+  operator-scoped + allowlisted (`ctx.requireAllowlistedOperator(req)`, `X-Operator-Id`), dark-gated on a
+  new `operator.strategy-enable.enabled` flag added to the `ServiceTokenFilter` `@ConditionalOnExpression`
+  (the /admin/tenants/ auth invariant — every admin controller flag must be there). It: reads the stored
+  config, calls the exec read endpoint (existing exec client + `EXEC_ADMIN_SHARED_TOKEN`, routed by the
+  stored `broker_target`); if `verified=false` → **422**; else starts `StrategyConfigUpdateWorkflow` with
+  `enabled=true` (reusing the update path) and maps the outcome.
+- **shared guard on the tenant-scoped route too** — apply the same verified-account check in
+  `StrategyConfigController.java:74-99` for the `false/absent→true` transition (extract one helper), so
+  the settings-page path can't bypass it either. New `REJECTED_UNVERIFIED_ACCOUNT`→422 outcome.
+- Scope note: only the `false/absent → true` transition is gated; disabling and all other SAFE edits are
+  unaffected. `enabled` stays SAFE in `StrategyConfigWriter` (the guard is a gateway pre-check, not a
+  writer field-class change) — no orchestrator/replay change.
 
 **Tests (TDD):**
-- exec: read endpoint returns `verified:true`+account for an existing row; `verified:false` when absent;
-  401 without the admin token; dark (404) when `broker.creds.source!=db`.
-- api-gateway: `enabled=true` with a verified account → workflow starts (2xx); with none → 422, workflow
-  NOT started; `enabled=false` and non-enable edits → unaffected; the exec-call routes by `broker_target`.
+- exec: read returns `verified:true`+account for an existing row; `verified:false` when absent; 401 without
+  the admin token; dark (404) when `broker.creds.source!=db`.
+- api-gateway: operator enable route with a verified account → update workflow starts (2xx); with none →
+  422, workflow NOT started; non-allowlisted operator → 403; dark flag off → 404 + `ServiceTokenFilter`
+  flag-coverage guard test. Same 422/allow behavior asserted on the tenant-scoped route.
 
 **Verify / success criteria:** `mvn -pl services/exec,services/api-gateway -am spotless:apply` + module
-tests. Behavioral assertion: a direct API call setting `enabled=true` for a tenant with no
-`broker_credentials` row is rejected 422 and no `StrategyConfigUpdateWorkflow` runs. Spotless clean on both.
+tests. Behavioral assertion: enabling a tenant with no `broker_credentials` row is rejected 422 (both
+routes) and no `StrategyConfigUpdateWorkflow` runs; enabling a verified tenant succeeds. Spotless clean.
+
+---
+
+## Phase A2 — Onboard wizard "Enable" step, gated on the verified account (`dashboard`)
+
+**Goal:** the operator arms the tenant from the wizard, and the control only unlocks after step-2
+verification returns the account.
+
+**Changes** (anchors):
+- `dashboard/components/OnboardForm.tsx` (2-step form, `:81-84`; step-2 result carries `brokerAccountId`
+  at `:8`) — add **step 3 "Enable strategy"**: disabled until the in-session step-2 result has a non-blank
+  `brokerAccountId`; on click calls the A1 operator enable route.
+- `dashboard/lib/adminOnboarding.ts` (`:32-66`, `:92-138`) — add an `enableStrategy()` server action that
+  POSTs to `POST /admin/tenants/{tenant}/strategies/{strategy}/enable` (operator-scoped, `X-Operator-Id`),
+  mirroring the existing operator POST helpers.
+- `dashboard/components/StrategySwitch.tsx:11-43` — extend so the standalone settings toggle is disabled
+  when no verified account exists (source: admin-read `account_masked`), with a "verify broker keys first"
+  affordance. If the settings page doesn't already have the account-verified signal in scope, keep this
+  minimal and note the plumbing as a fast-follow — the wizard step-3 is the primary deliverable.
+
+**Tests:** dashboard verify = `tsc --noEmit` + `next build` (no test harness). Step-3 inert with no
+`brokerAccountId`, active once present; on success the tenant's `enabled` flips (A1 guard enforces the rest).
+
+**Verify / success criteria:** in the wizard, "Enable" is inert until keys verify, then arms the tenant via
+the A1 operator route (which itself re-checks the verified account). Depends on A1 being merged/deployed.
 
 ---
 
@@ -204,9 +219,9 @@ within one refresh interval with no restart.
 ## Ship order & gating
 
 ```
-A1 (UI enable-step)          ── self-contained dashboard; immediate UX win
-A2 (backend arm-guard)       ── exec read + api-gateway 422; the bypass-proof enforcement
-   → A1+A2 together = "cannot arm what you haven't verified" (ship A2 before trusting it for live)
+A1 (backend enable route + arm-guard)  ── exec read + operator enable route + 422; bypass-proof enforcement
+A2 (UI enable-step)                    ── onboard step-3 calls A1's route; depends on A1
+   → A1+A2 together = "cannot arm what you haven't verified" (A1 is the load-bearing guard)
 B1 (fan-out endpoint)        ── additive/dark; no consumer
    └─> B2 (sidecar registry mode, flag default=env)   ── dark until flipped
           └─> B3 (operator cutover: flip flag, retire env)
