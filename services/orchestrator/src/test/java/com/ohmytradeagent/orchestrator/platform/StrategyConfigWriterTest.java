@@ -29,6 +29,7 @@ import org.jooq.tools.jdbc.MockDataProvider;
 import org.jooq.tools.jdbc.MockResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
  * P0c-a unit tests for {@link StrategyConfigWriter}: the reduce-or-hold-risk validation +
@@ -308,7 +309,62 @@ class StrategyConfigWriterTest {
     assertThat(changedKeys).contains("max_contracts");
   }
 
+  // --- tenant-delete teardown (PLAN-2026-07-03, Phase 2) ---
+
+  @Test
+  void delete_removesRow_returnsCount_writesTenantDeletedTombstone() {
+    int count = deleteWriterFor(1).delete(TENANT, STRATEGY, "operator:ridopark");
+
+    assertThat(count).isEqualTo(1);
+
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit).log(captor.capture());
+    AuditEvent event = captor.getValue();
+    // The retained tombstone rides the SAME (tenant, strategy) hash chain the create/update events
+    // did — the audit hash-chain writer keys prev_hash/row_hash on correlation_id here.
+    assertThat(event.getKind()).isEqualTo("TenantDeleted");
+    assertThat(event.getCorrelationId()).isEqualTo(TENANT + "/" + STRATEGY);
+    assertThat(event.getTenantId()).isEqualTo(TENANT);
+    assertThat(event.getStrategyId()).isEqualTo(STRATEGY);
+    assertThat(event.getSubject())
+        .containsEntry("source", "tenant-delete")
+        .containsEntry("rows_deleted", 1);
+  }
+
+  @Test
+  void delete_absentRow_returnsZero_noThrow_stillWritesTombstone() {
+    // Idempotency: a delete of an already-absent (tenant, strategy) deletes 0 rows and is a
+    // SUCCESS — a retried teardown workflow must converge, not fault.
+    int count = deleteWriterFor(0).delete(TENANT, STRATEGY, "operator:ridopark");
+
+    assertThat(count).isZero();
+
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit).log(captor.capture());
+    assertThat(captor.getValue().getKind()).isEqualTo("TenantDeleted");
+    assertThat(captor.getValue().getSubject()).containsEntry("rows_deleted", 0);
+  }
+
   // --- helpers ---
+
+  /**
+   * A {@link StrategyConfigWriter} whose {@code DELETE FROM strategy_config} reports {@code
+   * deleteRows} affected rows.
+   */
+  private StrategyConfigWriter deleteWriterFor(int deleteRows) {
+    MockDataProvider provider =
+        ctx -> {
+          String sql = ctx.sql().toLowerCase();
+          if (sql.contains("delete") && sql.contains("from strategy_config")) {
+            return new MockResult[] {new MockResult(deleteRows, null)};
+          }
+          // begin/commit/savepoint and any other no-op statements.
+          return new MockResult[] {new MockResult(0, null)};
+        };
+    MockConnection connection = new MockConnection(provider);
+    DSLContext dsl = DSL.using(connection, SQLDialect.POSTGRES);
+    return new StrategyConfigWriter(dsl, om, audit);
+  }
 
   /**
    * A {@link StrategyConfigWriter} backed by a jOOQ {@link MockDataProvider} whose SELECT returns

@@ -21,6 +21,7 @@ import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyConfigCreateActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyConfigUpdateActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
+import com.ohmytradeagent.orchestrator.activities.TenantDeleteActivities;
 import com.ohmytradeagent.orchestrator.activities.WatchlistMirrorActivities;
 import com.ohmytradeagent.orchestrator.activities.WatchlistTriggerActivities;
 import com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflowImpl;
@@ -36,6 +37,7 @@ import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.StrategyConfigCreateWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.StrategyConfigUpdateWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.TenantDeleteWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistDigestMarkerWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistMirrorWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistTriggerSessionWorkflowImpl;
@@ -112,6 +114,10 @@ public class TemporalWorkerConfig {
       // armable query + trip). Drives the LiveActivationWorkflow; nothing calls it unless the
       // api-gateway /admin/.../activate-live route is enabled (flag-gated, off by default).
       LiveActivationGateActivities liveActivationGate,
+      // Operator tenant-delete epic (PLAN-2026-07-03) Phase 2: DARK durable-teardown primitive
+      // (recon-schedule reap + kill-switch terminate + strategy_config delete). Drives the
+      // TenantDeleteWorkflow; nothing calls it until the Phase 4 api-gateway teardown route ships.
+      TenantDeleteActivities tenantDelete,
       ReconciliationMetricsActivities reconciliationMetrics,
       AccountSnapshotMetricsActivities accountSnapshotMetrics,
       WatchlistMirrorActivities watchlistMirror,
@@ -184,6 +190,13 @@ public class TemporalWorkerConfig {
         // account probe routes to broker-<target>, and the live-promotion write reuses the shared
         // LivePromotionActivities impl.
         LiveActivationWorkflowImpl.class,
+        // Operator tenant-delete epic (PLAN-2026-07-03) Phase 2: DARK per-(tenant,strategy)
+        // teardown
+        // carrier. Runs the ordered a→b→c teardown (resolve broker_target + reap recon schedule →
+        // terminate kill-switch workflow → delete strategy_config + TenantDeleted tombstone). Its
+        // TenantDeleteActivities impl is registered below; started fresh per call by the Phase 4
+        // api-gateway teardown forward (not yet wired).
+        TenantDeleteWorkflowImpl.class,
         // Watchlist-trigger strategy. The session parent is started by
         // WatchlistMirrorActivitiesImpl
         // on a clean watchlist parse (for the configured trigger strategy, when enabled); it
@@ -222,6 +235,8 @@ public class TemporalWorkerConfig {
         livePromotion,
         // Phase F: DARK kill-switch armable/trip ops for the LiveActivationWorkflow.
         liveActivationGate,
+        // Phase 2 (tenant-delete): DARK teardown steps for the TenantDeleteWorkflow.
+        tenantDelete,
         reconciliationMetrics,
         accountSnapshotMetrics,
         watchlistMirror,

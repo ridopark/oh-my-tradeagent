@@ -433,5 +433,18 @@ public final class AuditEventKinds {
           // observability event -- registered in ALL_KINDS only.
           "TriggerSubscriptionDeferred",
           // TenantConfigChangedEmitter (no KIND_ constant; literal string in the emitter)
-          "TenantConfigChanged");
+          "TenantConfigChanged",
+          // Operator tenant-delete epic (PLAN-2026-07-03-operator-tenant-delete). Phase 2 emits the
+          // retained-audit tombstone TenantDeleted from StrategyConfigWriter.delete's in-txn audit
+          // (a neutral, non-position-lifecycle event on the (tenant, strategy) hash chain — the
+          // durable record that a tenant's strategy_config row was torn down). The remaining four
+          // are emitted by the Phase 4 api-gateway teardown carrier (request accepted / all steps
+          // completed / refused by a pre-flight guard / a teardown step failed) and are registered
+          // now so the single audit-kinds registry stays complete before that phase ships. All are
+          // neutral events — in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "TenantDeleted",
+          "TenantDeleteRequested",
+          "TenantDeleteCompleted",
+          "TenantDeleteBlocked",
+          "TenantDeleteStepFailed");
 }

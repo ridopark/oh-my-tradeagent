@@ -109,7 +109,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
         continue;
       }
       String desiredScheduleId =
-          "recon-v2-t-" + ts.tenantId() + "-s-" + ts.strategyId() + "-" + resolved.brokerTarget();
+          reconScheduleId(ts.tenantId(), ts.strategyId(), resolved.brokerTarget());
       if (existingSchedules == null) {
         // Lazy: only call listSchedules() once the first valid strategy reaches the reap step.
         // try-with-resources closes the SDK Stream exactly once per bootstrap pass.
@@ -130,9 +130,40 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
    * silently defaults to namespace "default" — always bind explicitly.)
    */
   ScheduleClient newScheduleClient() {
-    String namespace = workflowClient.getOptions().getNamespace();
+    return scheduleClientForNamespace(serviceStubs, workflowClient.getOptions().getNamespace());
+  }
+
+  /**
+   * Single owner of the schedule-client construction footgun: the no-options {@code
+   * ScheduleClient.newInstance} form silently defaults to namespace "default", so the namespace is
+   * ALWAYS bound explicitly here. Callers outside this package (e.g. the tenant-delete teardown
+   * activity) build their client through this so the binding rule lives in one place.
+   */
+  public static ScheduleClient scheduleClientForNamespace(
+      WorkflowServiceStubs serviceStubs, String namespace) {
     ScheduleClientOptions opts = ScheduleClientOptions.newBuilder().setNamespace(namespace).build();
     return ScheduleClient.newInstance(serviceStubs, opts);
+  }
+
+  /**
+   * Single owner of the reconciliation schedule-ID grammar {@code
+   * recon-v2-t-<tenantId>-s-<strategyId>-<brokerTarget>}. The boot scan ({@link #runWith}), the
+   * per-tenant ensure ({@link #ensureSchedule}), and the tenant-delete teardown all address the
+   * same schedule through this method — a rename here moves every reader in lockstep, so the
+   * grammar can never drift and orphan a live schedule (which {@code listSchedules()} would then
+   * never reap). See {@link #ensureSchedule} for why the prefix is {@code v2}.
+   */
+  public static String reconScheduleId(String tenantId, String strategyId, String brokerTarget) {
+    return reconSchedulePrefix(tenantId, strategyId) + brokerTarget;
+  }
+
+  /**
+   * The broker-agnostic prefix of {@link #reconScheduleId} — the reap match key ({@link
+   * #reapStaleSchedules}). The trailing dash prevents tenant-prefix collisions (e.g. {@code dev} vs
+   * {@code dev-other}).
+   */
+  public static String reconSchedulePrefix(String tenantId, String strategyId) {
+    return "recon-v2-t-" + tenantId + "-s-" + strategyId + "-";
   }
 
   /**
@@ -236,7 +267,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
       String tenantId,
       String strategyId,
       String desiredScheduleId) {
-    String prefix = "recon-v2-t-" + tenantId + "-s-" + strategyId + "-";
+    String prefix = reconSchedulePrefix(tenantId, strategyId);
     for (ScheduleListDescription d : existingSchedules) {
       String staleId = d.getScheduleId();
       if (!staleId.startsWith(prefix) || staleId.equals(desiredScheduleId)) {
@@ -273,7 +304,7 @@ public class ReconciliationScheduleBootstrapper implements ApplicationRunner {
   private boolean ensureSchedule(
       ScheduleClient scheduleClient, String tenantId, String strategyId, ResolvedBroker resolved) {
     String brokerTarget = resolved.brokerTarget();
-    String scheduleId = "recon-v2-t-" + tenantId + "-s-" + strategyId + "-" + brokerTarget;
+    String scheduleId = reconScheduleId(tenantId, strategyId, brokerTarget);
     String wfIdPrefix = WorkflowIds.reconciliationPrefix(tenantId, strategyId, brokerTarget);
 
     ReconciliationWorkflowInput input = new ReconciliationWorkflowInput();

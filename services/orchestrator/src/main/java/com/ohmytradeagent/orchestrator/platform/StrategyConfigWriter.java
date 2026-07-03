@@ -8,9 +8,13 @@ import com.ohmytradeagent.orchestrator.activities.TenantConfigChangedEvents;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigSnapshot;
 import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.slf4j.Logger;
@@ -54,6 +58,10 @@ public class StrategyConfigWriter {
   // Audit `source` for the Phase I-1b create-tenant INSERT (distinguishes a tenant create from a
   // runtime edit in the audit_log chain — both are TenantConfigChanged, so no new audit kind).
   static final String CREATE_SOURCE = "tenant-create";
+  // Audit `source` for the operator tenant-delete teardown (PLAN-2026-07-03). The retained
+  // TenantDeleted tombstone is the durable record that a strategy_config row was torn down.
+  static final String DELETE_SOURCE = "tenant-delete";
+  static final String KIND_TENANT_DELETED = "TenantDeleted";
 
   /**
    * Mirrors {@link com.ohmytradeagent.orchestrator.activities.TenantConfigChangedEmitter}'s
@@ -285,6 +293,76 @@ public class StrategyConfigWriter {
               actor);
           return createdVersion;
         });
+  }
+
+  /**
+   * Operator tenant-delete teardown (PLAN-2026-07-03, Phase 2): DELETE the {@code strategy_config}
+   * row for {@code (tenantId, strategyId)} and, in the SAME transaction, append a retained {@code
+   * TenantDeleted} tombstone via the hash-chain audit writer. Returns the rows-deleted count.
+   *
+   * <p><b>Idempotent</b> — mirrors the recon-schedule / kill-switch teardown steps: a delete of an
+   * already-absent row deletes 0 rows and is a SUCCESS (no throw), so a retried teardown workflow
+   * converges. The tombstone is still written on a 0-row delete: it is the forensic record that a
+   * teardown was applied to {@code (tenant, strategy)} (its {@code rows_deleted} carries whether a
+   * row was actually present), and audit_log is deliberately NOT deleted with the config.
+   *
+   * <p>No key material is logged or placed in the subject — the {@code strategy_config} row carries
+   * none, and the log line stays at coarse identifiers (tenant, strategy, actor, count).
+   */
+  public int delete(String tenantId, String strategyId, String actor) {
+    return dsl.transactionResult(
+        cfg -> {
+          DSLContext tx = cfg.dsl();
+
+          // a. DELETE the config row. 0 affected rows (already absent) is a success, not an error —
+          // the teardown is idempotent.
+          int deleted =
+              tx.execute(
+                  "DELETE FROM strategy_config WHERE tenant_id = ? AND strategy_id = ?",
+                  tenantId,
+                  strategyId);
+
+          // b. Audit (last in-txn call) via the hash-chain writer — never INSERT audit_log
+          // directly. The TenantDeleted tombstone is the retained record of the teardown; it rides
+          // the same (tenant_id, strategy_id) chain the config's create/update events did.
+          audit.log(tombstone(tenantId, strategyId, actor, deleted));
+
+          log.info(
+              "strategy_config tenant delete committed tenant={} strategy={} rows_deleted={} actor={}",
+              tenantId,
+              strategyId,
+              deleted,
+              actor);
+          return deleted;
+        });
+  }
+
+  /**
+   * Builds the retained {@code TenantDeleted} tombstone {@link AuditEvent}. Not workflow code (this
+   * component is driven from an Activity), so {@code OffsetDateTime.now} / {@code UUID.randomUUID}
+   * are permitted here exactly as in {@link TenantConfigChangedEvents}. Carries ZERO key material.
+   */
+  private AuditEvent tombstone(String tenantId, String strategyId, String actor, int rowsDeleted) {
+    OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("tenant_id", tenantId);
+    subject.put("strategy_id", strategyId);
+    subject.put("actor", actor);
+    subject.put("source", DELETE_SOURCE);
+    subject.put("rows_deleted", rowsDeleted);
+    subject.put("loaded_at", now);
+
+    AuditEvent event = new AuditEvent();
+    event.setSchemaVersion(1L);
+    event.setTenantId(tenantId);
+    event.setStrategyId(strategyId);
+    event.setEventId(UUID.randomUUID().toString());
+    event.setOccurredAt(now);
+    event.setKind(KIND_TENANT_DELETED);
+    event.setActor(actor);
+    event.setCorrelationId(tenantId + "/" + strategyId);
+    event.setSubject(subject);
+    return event;
   }
 
   // --- B1: standalone validation ---
