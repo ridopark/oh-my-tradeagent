@@ -95,6 +95,16 @@ async def _amain() -> None:
     additional_targets = _parse_additional_targets(
         os.getenv("SIGNAL_EMIT_ADDITIONAL_TARGETS", "")
     )
+    # Phase B2: source of the signal fan-out targets. Default "env" is
+    # byte-identical to today (parse SIGNAL_EMIT_ADDITIONAL_TARGETS). "registry"
+    # derives them from api-gateway's B1 endpoint on a refresh interval. The
+    # watchlist mirror keeps its own env list either way (out of scope).
+    fanout_source = os.getenv("SIGNAL_FANOUT_SOURCE", "env").strip().lower()
+    if fanout_source not in ("env", "registry"):
+        raise SystemExit("SIGNAL_FANOUT_SOURCE must be 'env' or 'registry'")
+    # In registry mode the watcher starts primary-only (never empty) and the
+    # refresher populates it; in env mode it gets the parsed env list as today.
+    signal_additional_targets = [] if fanout_source == "registry" else additional_targets
     temporal_target = os.getenv("TEMPORAL_TARGET", "localhost:7233")
     temporal_namespace = os.getenv("TEMPORAL_NAMESPACE", "default")
     task_queue = os.getenv("TEMPORAL_TASK_QUEUE", "orchestrator-core")
@@ -147,10 +157,32 @@ async def _amain() -> None:
         emitter=emitter,
         tenant_id=tenant_id,
         strategy_id=strategy_id,
-        additional_targets=additional_targets,
+        additional_targets=signal_additional_targets,
         log=log,
         poll_interval_secs=poll_interval,
     )
+
+    # Phase B2 registry refresher — built only in registry mode, isolated in its
+    # own module, non-fatal to signal emission. Imported lazily so env mode
+    # never touches httpx.
+    fanout_refresher = None
+    if fanout_source == "registry":
+        from .fanout_registry import FanoutRefresher, FanoutRegistryClient
+
+        gw_base_url = _required("API_GATEWAY_BASE_URL")
+        gw_token = _required("API_GATEWAY_SHARED_TOKEN")
+        refresh_secs = float(os.getenv("SIGNAL_FANOUT_REFRESH_SECS", "60"))
+        fanout_refresher = FanoutRefresher(
+            client=FanoutRegistryClient(base_url=gw_base_url, token=gw_token),
+            apply_targets=watcher.update_targets,
+            log=log,
+            refresh_secs=refresh_secs,
+        )
+        log.info(
+            "signal fan-out source=registry (endpoint=%s refresh=%ss)",
+            gw_base_url,
+            refresh_secs,
+        )
 
     watchlist_watcher: WatchlistWatcher | None = None
     if watchlist_enabled:
@@ -187,6 +219,17 @@ async def _amain() -> None:
                 watcher.run_on_page(signal_page), name="signal-watcher"
             )
 
+            fanout_task: asyncio.Task[None] | None = None
+            if fanout_refresher is not None:
+                # ISOLATION: the registry refresher is best-effort and MUST NOT
+                # take down the trading-critical signal watcher. Run it as a
+                # sibling task with a log-only done-callback; a crash here leaves
+                # the last good fan-out set in place.
+                fanout_task = asyncio.create_task(
+                    fanout_refresher.run(), name="fanout-refresher"
+                )
+                fanout_task.add_done_callback(_log_if_failed(log, "fan-out refresher"))
+
             watchlist_task: asyncio.Task[None] | None = None
             if watchlist_watcher is not None:
                 # The watcher owns its own watchlist tab (creates it from the
@@ -207,12 +250,13 @@ async def _amain() -> None:
                 # otherwise mask a signal-watcher crash indefinitely.
                 await signal_task
             finally:
-                if watchlist_task is not None:
-                    watchlist_task.cancel()
-                    try:
-                        await watchlist_task
-                    except asyncio.CancelledError:
-                        pass
+                for task in (watchlist_task, fanout_task):
+                    if task is not None:
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
     finally:
         await emitter.close()
 
