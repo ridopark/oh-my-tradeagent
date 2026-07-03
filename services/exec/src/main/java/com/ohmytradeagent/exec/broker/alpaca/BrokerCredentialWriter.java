@@ -202,6 +202,36 @@ public class BrokerCredentialWriter {
   }
 
   /**
+   * Deletes a tenant's stored broker credential row (idempotent teardown). Runs a single
+   * parameterized {@code DELETE FROM broker_credentials WHERE tenant_id=? AND provider=?} and
+   * returns the number of rows removed. Deleting an absent row is NOT an error — it returns 0 and
+   * throws nothing, so a re-run of a partial tenant de-provision is safe. No broker probe, no
+   * re-encryption, and no key material is read, returned, or logged.
+   *
+   * <p>The {@code provider} is canonicalized to the read-path authority (a {@code broker_target}
+   * like {@code "alpaca-paper"} → {@code "alpaca"}) so the delete addresses the exact row {@link
+   * #save} wrote.
+   *
+   * @param tenantId tenant whose credential row is removed
+   * @param provider broker provider (or broker_target; canonicalized to its provider)
+   * @return the number of rows deleted (0 when none matched)
+   */
+  public int delete(String tenantId, String provider) {
+    provider = BrokerClientRegistry.providerOf(provider);
+    int deleted =
+        dsl.execute(
+            "DELETE FROM broker_credentials WHERE tenant_id = ? AND provider = ?",
+            tenantId,
+            provider);
+    log.info(
+        "broker credential delete committed tenant={} provider={} deleted={}",
+        tenantId,
+        provider,
+        deleted);
+    return deleted;
+  }
+
+  /**
    * Builds a THROWAWAY broker from the UNSAVED keys and runs the identical fail-closed sequence the
    * registry uses on its hot path, so a key that authenticates the wrong account — or a paper/live
    * host mismatch — is rejected before any persistence. Reuses {@link AlpacaModeCoherence}, {@link

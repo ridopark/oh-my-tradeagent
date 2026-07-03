@@ -276,6 +276,60 @@ class BrokerCredentialWriterIT {
   }
 
   @Test
+  void deleteRemovesOnlyMatchingRow() {
+    // Seed two tenants' rows; deleting one leaves the other untouched.
+    enqueueAccount("847309116");
+    writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+    enqueueAccount("847309116");
+    writer().save("bob", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+
+    int deleted = writer().delete("alice", PROVIDER);
+
+    assertThat(deleted).isEqualTo(1);
+    assertThat(rowCount("alice")).isZero();
+    assertThat(rowCount("bob")).isEqualTo(1);
+  }
+
+  @Test
+  void deleteAbsentRow_returnsZero_doesNotThrow() {
+    // Idempotent: a tenant with no stored credential deletes cleanly with 0 rows and no throw.
+    int deleted = writer().delete("nobody", PROVIDER);
+
+    assertThat(deleted).isZero();
+  }
+
+  @Test
+  void deleteIsIdempotent_secondDeleteReturnsZero() {
+    enqueueAccount("847309116");
+    writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+
+    assertThat(writer().delete("alice", PROVIDER)).isEqualTo(1);
+    // Re-running the delete (idempotent teardown) returns 0 rows and does not throw.
+    assertThat(writer().delete("alice", PROVIDER)).isZero();
+    assertThat(rowCount("alice")).isZero();
+  }
+
+  @Test
+  void deleteCanonicalizesBrokerTargetToProvider() {
+    // A row is written under the canonical provider "alpaca"; a delete addressed with a
+    // broker_target-style "alpaca-paper" must resolve to the same canonical row and remove it.
+    enqueueAccount("847309116");
+    writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+
+    int deleted = writer().delete("alice", "alpaca-paper");
+
+    assertThat(deleted).isEqualTo(1);
+    assertThat(rowCount("alice")).isZero();
+  }
+
+  private int rowCount(String tenant) {
+    return dsl.selectCount()
+        .from(table("broker_credentials"))
+        .where(field("tenant_id").eq(tenant))
+        .fetchOne(0, Integer.class);
+  }
+
+  @Test
   void roundTripAtNonDefaultActiveKekVersion() {
     // Regression for the AAD-kek_version divergence bug: the writer must derive the AAD's
     // kek_version from the crypto bean's ACTIVE version (not a hardcoded field), so the stored

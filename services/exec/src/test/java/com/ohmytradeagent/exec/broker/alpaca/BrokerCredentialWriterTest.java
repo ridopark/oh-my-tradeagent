@@ -285,6 +285,29 @@ class BrokerCredentialWriterTest {
   }
 
   @Test
+  void delete_issuesDeleteSql_andReturnsAffectedCount() {
+    // The delete is a single parameterized DELETE against broker_credentials; the affected-row
+    // count
+    // is returned verbatim. No probe, no key material.
+    int deleted = writer(recordingDsl(1), "alpaca-x").delete("alice", PROVIDER);
+
+    assertThat(deleted).isEqualTo(1);
+    assertThat(executedSql).hasSize(1);
+    assertThat(executedSql.get(0).toLowerCase()).contains("delete from broker_credentials");
+    // Delete never authenticates against the broker — no /v2/account probe.
+    assertThat(server.getRequestCount()).isZero();
+  }
+
+  @Test
+  void delete_absentRow_returnsZero_doesNotThrow() {
+    // Idempotent: deleting a row that is not there returns 0 and does NOT throw.
+    int deleted = writer(recordingDsl(0), "alpaca-x").delete("nobody", PROVIDER);
+
+    assertThat(deleted).isZero();
+    assertThat(executedSql).hasSize(1);
+  }
+
+  @Test
   void thrownMessageNeverLeaksKeyMaterial() {
     // MUST-FIX-7: a rejecting save's thrown message names nothing of the key/secret.
     enqueueAccount("999999999");
