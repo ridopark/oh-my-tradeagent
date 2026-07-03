@@ -3698,19 +3698,12 @@ class PositionWorkflowImplTest {
   private void waitForAuditKind(String kind) throws InterruptedException {
     long deadline = System.currentTimeMillis() + 50_000;
     while (System.currentTimeMillis() < deadline) {
-      ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
-      verify(audit, atLeastOnce()).log(captor.capture());
-      boolean present = captor.getAllValues().stream().anyMatch(e -> kind.equals(e.getKind()));
-      if (present) {
+      if (!captureAll(kind).isEmpty()) {
         return;
       }
       Thread.sleep(50);
     }
-    // Final attempt: throw a clear assertion if the kind never showed up.
-    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
-    verify(audit, atLeastOnce()).log(captor.capture());
-    boolean present = captor.getAllValues().stream().anyMatch(e -> kind.equals(e.getKind()));
-    if (!present) {
+    if (captureAll(kind).isEmpty()) {
       throw new AssertionError("timed out waiting for audit event with kind=" + kind);
     }
   }
