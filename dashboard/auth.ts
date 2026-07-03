@@ -1,7 +1,14 @@
 import NextAuth from "next-auth";
 import { authConfig } from "@/auth.config";
 import { findTenantsForIdentity } from "@/lib/db";
+import { bindInvite } from "@/lib/provisioning";
 import { isOperatorEmail } from "@/lib/operator";
+
+// DARK flag (default false). When off, an unprovisioned identity is denied exactly as before. Only
+// when "true" does signIn attempt an invite-bind against the BFF. Read fresh so flipping it takes
+// effect on the next login without a rebuild.
+const INVITE_BIND_ENABLED = () =>
+  process.env.AUTH_INVITE_BIND_ENABLED === "true";
 
 // Full Node-runtime Auth.js instance. Extends the edge-safe base (auth.config.ts) with the
 // DB-dependent callbacks. Google + Facebook social login. The signIn callback binds the verified
@@ -31,6 +38,30 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
         account.providerAccountId,
       );
       if (tenants.length === 0) {
+        // Unprovisioned. Behind the dark flag, try to ADMIT via an invite-bind before falling back
+        // to the deny. Bind ONLY with a provider-VERIFIED email: Google stamps profile.email_verified
+        // === true; Facebook may omit it — an absent/false value is treated as NOT verified, so we
+        // never relay an unverified email (which the BFF would match against an invite). The bind is
+        // server-side only (fail-safe: bindInvite returns [] on any error), and the tenant it grants
+        // comes solely from the matched invite (the BFF enforces member-only scope).
+        if (INVITE_BIND_ENABLED()) {
+          const emailVerified =
+            (profile as { email_verified?: unknown } | undefined)
+              ?.email_verified === true;
+          const verifiedEmail = emailVerified ? profile?.email : undefined;
+          if (verifiedEmail) {
+            const granted = await bindInvite(
+              account.provider,
+              account.providerAccountId,
+              verifiedEmail,
+            );
+            if (granted.length > 0) {
+              // Bound: the dashboard_user row(s) now exist. Admit — the jwt callback (which runs
+              // AFTER signIn) re-queries findTenantsForIdentity and stamps the freshly-bound set.
+              return true;
+            }
+          }
+        }
         // No matching row => deny. Log the verified identity so an operator can provision it with a
         // single dashboard_user INSERT (the chicken-and-egg otherwise: login is denied until the row
         // exists, and the OAuth `sub` is only knowable once the user attempts a login). The `sub` is
