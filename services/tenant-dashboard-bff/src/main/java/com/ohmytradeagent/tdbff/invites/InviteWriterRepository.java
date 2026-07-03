@@ -169,10 +169,15 @@ public class InviteWriterRepository {
    * store in the operator tenant-delete teardown (Phase 3). Returns the rows removed from each
    * table.
    *
-   * <p>Idempotent by construction: a bare {@code DELETE ... WHERE tenant_id = ?} needs only the
-   * DELETE privilege (V7), never SELECT — so no read-back / {@code ON CONFLICT} SELECT-privilege
-   * workaround applies here (contrast {@link #bindMatchingInvites}). A second call, or a tenant
-   * that never had a dashboard identity, deletes 0 rows and succeeds without throwing.
+   * <p>Idempotent by construction: a second call, or a tenant that never had a dashboard identity,
+   * deletes 0 rows and succeeds without throwing.
+   *
+   * <p>Privilege note: a tenant-scoped {@code DELETE ... WHERE tenant_id = ?} reads {@code
+   * tenant_id} to evaluate its predicate, so in PostgreSQL it needs SELECT on that column IN
+   * ADDITION to DELETE — the same rule behind {@link #bindMatchingInvites}'s {@code ON CONFLICT}
+   * SELECT requirement. V7 grants the writer DELETE on both tables plus COLUMN-scoped {@code SELECT
+   * (tenant_id)} on {@code dashboard_user} (invite already had table SELECT from V5), so the WHERE
+   * evaluates while PII (provider/subject/email) stays unreadable to the writer.
    *
    * @param tenantId the tenant whose dashboard identities to remove (a SQL bind param; never
    *     interpolated)

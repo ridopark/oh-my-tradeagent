@@ -4,12 +4,20 @@
 -- the only service that can reach the `dashboard` DB, so the delete runs here as the least-privilege
 -- dashboard_writer role (V5) via a new operator-only endpoint.
 --
--- This is the ONLY migration that grants dashboard_writer DELETE. V5 deliberately withheld it (the
--- invite/bind flow never deletes); this additive grant widens the writer to exactly the two tables
--- it already writes, and nothing else. A bare `DELETE FROM <t> WHERE tenant_id = ?` needs only the
--- DELETE privilege (no SELECT read-back), which the writer still lacks on dashboard_user — so the
--- least-privilege posture (no SELECT/UPDATE on dashboard_user) is preserved.
+-- V5 deliberately withheld DELETE (the invite/bind flow never deletes). This additive migration
+-- widens the writer to exactly what the tenant-scoped teardown DELETE needs, and NOTHING else:
 --
--- Additive and idempotent (GRANT is a no-op if already held). NEVER edit the shipped V5/V6. The
--- dashboard_readonly role (V2/V6) is untouched and stays strictly SELECT-only — it can NOT delete.
+--   1. DELETE on both identity tables.
+--   2. Column-level SELECT (tenant_id) on dashboard_user. A tenant-scoped
+--      `DELETE FROM dashboard_user WHERE tenant_id = ?` must READ tenant_id to evaluate its WHERE
+--      predicate, and in PostgreSQL that requires SELECT on the referenced column — the DELETE
+--      privilege ALONE is insufficient (the same rule that makes INSERT ... ON CONFLICT need
+--      SELECT). We grant SELECT on ONLY the tenant_id column, so the writer can run the teardown
+--      DELETE but STILL cannot read PII (provider/subject/email) — the no-PII, least-privilege
+--      posture is preserved. dashboard_user_invite already has table SELECT from V5, so its WHERE
+--      needs no new grant.
+--
+-- NEVER edit the shipped V5/V6. The dashboard_readonly role (V2/V6) is untouched and stays strictly
+-- SELECT-only — it can NOT delete. Additive and idempotent (GRANT is a no-op if already held).
 GRANT DELETE ON dashboard_user, dashboard_user_invite TO dashboard_writer;
+GRANT SELECT (tenant_id) ON dashboard_user TO dashboard_writer;

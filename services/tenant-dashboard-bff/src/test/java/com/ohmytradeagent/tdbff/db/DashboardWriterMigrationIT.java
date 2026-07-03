@@ -88,21 +88,32 @@ class DashboardWriterMigrationIT {
   }
 
   @Test
-  void writerCanInsertAndDeleteDashboardUser_butStillCannotUpdateOrSelectIt() throws SQLException {
+  void writerCanTenantScopedDeleteDashboardUser_seesOnlyTenantId_notPii() throws SQLException {
     try (Connection w = asRole("dashboard_writer", WRITER_PW);
         var st = w.createStatement()) {
       st.executeUpdate(
           "INSERT INTO dashboard_user (provider, subject, email, tenant_id) "
               + "VALUES ('google', 'sub-writer-1', 'a@b.com', 'acme')");
 
-      // V7: a bare tenant-scoped DELETE is now granted — and it needs NO SELECT read-back (proving
-      // the teardown repo needs no SELECT-privilege workaround). Removes the row just inserted.
+      // V7: the tenant-scoped teardown DELETE is granted. Its WHERE reads tenant_id, so in PG it
+      // also needs SELECT on that column — V7 grants column-level SELECT (tenant_id), enough to
+      // evaluate the predicate. Removes the row just inserted.
       assertThat(st.executeUpdate("DELETE FROM dashboard_user WHERE tenant_id = 'acme'"))
           .isEqualTo(1);
 
-      // STILL least-privilege: no UPDATE, no SELECT on dashboard_user (V7 widened DELETE only).
+      // The SELECT V7 grants is COLUMN-SCOPED to tenant_id only.
+      try (var rs = st.executeQuery("SELECT tenant_id FROM dashboard_user")) {
+        assertThat(rs.next())
+            .as("writer may read tenant_id (needed to evaluate the DELETE WHERE)")
+            .isTrue();
+      }
+
+      // STILL least-privilege / no-PII: no UPDATE, and no SELECT of any PII column — provider,
+      // subject, email stay unreadable to the writer (the column grant is tenant_id ONLY).
       assertDenied(() -> st.executeUpdate("UPDATE dashboard_user SET email = 'x@y.com'"));
       assertDenied(() -> st.executeQuery("SELECT provider FROM dashboard_user"));
+      assertDenied(() -> st.executeQuery("SELECT email FROM dashboard_user"));
+      assertDenied(() -> st.executeQuery("SELECT subject FROM dashboard_user"));
     }
   }
 
