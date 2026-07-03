@@ -40,7 +40,8 @@ import org.springframework.web.server.ResponseStatusException;
 @RestController
 @RequestMapping("/internal/broker-credentials")
 @ConditionalOnExpression(
-    "'${broker.impl:}'.startsWith('alpaca-') and ${broker.credentials.delete.enabled:false}")
+    "'${broker.impl:}'.startsWith('alpaca-') and '${broker.credentials.delete.enabled:false}'"
+        + " == 'true'")
 @ConditionalOnProperty(name = "broker.creds.source", havingValue = "db")
 public class BrokerCredentialDeleteAdminController {
 
