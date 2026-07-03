@@ -10,6 +10,7 @@ import {
   AdminReadDisabledError,
   type AdminTenantItem,
 } from "@/lib/adminBff";
+import { getTenantEmails, type TenantEmails } from "@/lib/db";
 import { postActivation } from "@/lib/adminActivation";
 
 export const dynamic = "force-dynamic";
@@ -75,7 +76,7 @@ export default async function AdminTenantsPage({
   // Independent reads — overlap the page's auth() with the BFF fetch (the config page's pattern).
   // The BFF fetch degrades to null when the admin-read route is dark (AdminReadDisabledError);
   // anything else propagates.
-  const [session, adminRes] = await Promise.all([
+  const [session, adminRes, emailsByTenant] = await Promise.all([
     auth(),
     getAdminTenants().catch((e) => {
       if (e instanceof AdminReadDisabledError) {
@@ -83,6 +84,9 @@ export default async function AdminTenantsPage({
       }
       throw e;
     }),
+    // Member + pending-invite emails (dashboard DB, dashboard_readonly). Fail-safe: any error
+    // (e.g. the V6 invite-grant not yet applied) degrades to no emails — never 500s the page.
+    getTenantEmails().catch(() => new Map<string, TenantEmails>()),
   ]);
 
   // Coarse result banner from the activate/deactivate redirect.
@@ -155,6 +159,30 @@ export default async function AdminTenantsPage({
         ),
     },
     {
+      key: "_members",
+      label: "Members / invites",
+      render: (_v: unknown, row: Record<string, unknown>) => {
+        const e = emailsByTenant.get(String(row.tenant_id));
+        if (!e || (e.members.length === 0 && e.pending.length === 0)) {
+          return <span className="text-slate-500">—</span>;
+        }
+        return (
+          <div className="flex flex-col gap-0.5 text-xs">
+            {e.members.map((m) => (
+              <span key={`m-${m}`} className="text-slate-300">
+                {m}
+              </span>
+            ))}
+            {e.pending.map((p) => (
+              <span key={`p-${p}`} className="text-amber-300/80">
+                {p} <span className="text-amber-500/70">(pending)</span>
+              </span>
+            ))}
+          </div>
+        );
+      },
+    },
+    {
       key: "activation_state",
       label: "Activation",
       render: (_v: unknown, row: Record<string, unknown>) => {
@@ -210,12 +238,27 @@ export default async function AdminTenantsPage({
             + Onboard tenant
           </Link>
         </div>
-        <p className="mb-4 text-sm text-slate-400">
-          Every (tenant, strategy) with its broker account and, for live
-          targets, the live-promotion activation state. Live activations carry a
-          30-day TTL — a stale or config-changed promotion blocks real orders
-          until re-approved.
-        </p>
+        <div className="mb-4 space-y-1 text-sm text-slate-400">
+          <p>
+            Every (tenant, strategy) with its broker account, the people who can
+            sign into the tenant (bound members + still-pending invites), and its
+            trading mode.
+          </p>
+          <p>
+            <span className="font-medium text-slate-300">Activation</span> is a{" "}
+            <span className="font-medium text-amber-300">
+              real-money safety gate for live targets only
+            </span>
+            : an <code className="text-slate-300">alpaca-live</code> account must
+            hold a valid 30-day live-promotion before it can place a real order
+            (a stale or config-changed promotion blocks orders until
+            re-approved). Paper targets show{" "}
+            <span className="text-slate-500">—</span> because activation does not
+            apply to them — whether a paper strategy trades is governed by its{" "}
+            <code className="text-slate-300">enabled</code> flag and signal
+            subscription, not this column.
+          </p>
+        </div>
 
         {banner && (
           <div

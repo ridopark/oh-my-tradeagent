@@ -26,8 +26,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *   <li>LEAST PRIVILEGE (the whole point of V5): {@code dashboard_writer} can INSERT dashboard_user
  *       and SELECT/INSERT/UPDATE dashboard_user_invite, but is DENIED UPDATE/DELETE/SELECT on
  *       dashboard_user, DENIED DELETE on the invite table, and DENIED on any other table;
- *   <li>{@code dashboard_readonly} (V2) is UNTOUCHED — still SELECT-only on dashboard_user and has
- *       NO grant at all on dashboard_user_invite.
+ *   <li>{@code dashboard_readonly} stays SELECT-only: SELECT on dashboard_user (V2) and on
+ *       dashboard_user_invite (V6, for the operator admin listing), but NO write on either.
  * </ul>
  *
  * Gated on {@code RUN_DB_ITS=true} like the module's other DB ITs; runs under {@code verify}
@@ -132,7 +132,7 @@ class DashboardWriterMigrationIT {
   }
 
   @Test
-  void readonlyStaysSelectOnlyOnDashboardUserAndHasNoInviteGrant() throws SQLException {
+  void readonlyIsSelectOnlyOnDashboardUserAndInvite() throws SQLException {
     try (Connection r = asRole("dashboard_readonly", READONLY_PW);
         var st = r.createStatement()) {
       // Still SELECT-able (V2 grant, untouched by V4/V5).
@@ -145,8 +145,11 @@ class DashboardWriterMigrationIT {
               st.executeUpdate(
                   "INSERT INTO dashboard_user (provider, subject, tenant_id) "
                       + "VALUES ('google', 'ro', 'acme')"));
-      // NO grant of any kind on the invite table (C7: readonly never reads/writes invites).
-      assertDenied(() -> st.executeQuery("SELECT * FROM dashboard_user_invite"));
+      // V6: readonly may now SELECT the invite table (the operator admin page reads pending
+      // invites), but STILL cannot write it — least-privilege preserved.
+      try (var rs = st.executeQuery("SELECT count(*) FROM dashboard_user_invite")) {
+        assertThat(rs.next()).isTrue();
+      }
       assertDenied(
           () ->
               st.executeUpdate(

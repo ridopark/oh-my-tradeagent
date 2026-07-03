@@ -44,3 +44,44 @@ export async function findTenantsForIdentity(
   );
   return rows.map((r) => r.tenant_id as string);
 }
+
+/** Member (bound login) + pending-invite (not yet signed in) emails for one tenant. */
+export type TenantEmails = { members: string[]; pending: string[] };
+
+/**
+ * Member + pending-invite emails for EVERY tenant, keyed by tenant_id, for the operator admin
+ * tenants listing. `members` = distinct emails of bound {@code dashboard_user} identities (people
+ * who can log into the tenant); `pending` = emails of open, non-expired {@code dashboard_user_invite}
+ * rows (invited, first sign-in still owed). Operator-only page; these emails are non-secret.
+ *
+ * Reads as the SELECT-only dashboard_readonly role. The invite read needs the V6 grant — until that
+ * migration is applied the query errors; callers wrap this in a fail-safe (an empty map just renders
+ * no emails, never a 500).
+ */
+export async function getTenantEmails(): Promise<Map<string, TenantEmails>> {
+  const out = new Map<string, TenantEmails>();
+  const bucket = (tenantId: string): TenantEmails => {
+    let e = out.get(tenantId);
+    if (!e) {
+      e = { members: [], pending: [] };
+      out.set(tenantId, e);
+    }
+    return e;
+  };
+  const [members, pending] = await Promise.all([
+    pool.query(
+      "SELECT DISTINCT tenant_id, email FROM dashboard_user ORDER BY tenant_id, email",
+    ),
+    pool.query(
+      "SELECT DISTINCT tenant_id, email FROM dashboard_user_invite " +
+        "WHERE consumed_at IS NULL AND expires_at > now() ORDER BY tenant_id, email",
+    ),
+  ]);
+  for (const r of members.rows) {
+    bucket(r.tenant_id as string).members.push(r.email as string);
+  }
+  for (const r of pending.rows) {
+    bucket(r.tenant_id as string).pending.push(r.email as string);
+  }
+  return out;
+}
