@@ -60,14 +60,25 @@ strategy:
     write:
       enabled: ${STRATEGY_CONFIG_WRITE_ENABLED:false}
 
-# Phase F (operator-account-onboarding) one-click live activation/deactivation. DARK by default:
-# with enabled unset/false the ActivationController bean does not exist and the
-# /admin/tenants/{tenant}/strategies/{strategy}/activate-live + /deactivate-live routes 404. The
-# opt-in is a manual, per-cluster operator action — NO repo manifest sets this true. When enabled,
-# ServiceTokenFilter also bearer-gates /admin/tenants/.
+# Operator-account-onboarding admin routes. All DARK by default: with a flag unset/false its
+# controller bean does not exist and the route 404s. Each opt-in is a manual, per-cluster operator
+# action — NO repo manifest sets these true. When any is enabled, ServiceTokenFilter bearer-gates
+# /admin/tenants/ + /broker-credentials.
 operator:
+  # Phase F one-click live activation/deactivation (ActivationController).
   activation:
     enabled: ${OPERATOR_ACTIVATION_ENABLED:false}
+  # Phase I create-tenant (CreateTenantController).
+  tenant-create:
+    enabled: ${OPERATOR_TENANT_CREATE_ENABLED:false}
+  # Phase I operator credential paste/write (OperatorBrokerCredentialController).
+  credential-write:
+    enabled: ${OPERATOR_CREDENTIAL_WRITE_ENABLED:false}
+  # Config surface for the backend operator allowlist (defense-in-depth). The enforcement
+  # (requireAllowlistedOperator → 403 on the admin routes) is in place. FAIL-CLOSED: unset/blank =
+  # deny-all → every admin route 403s. Set to the authorized operator email(s), comma-separated, and
+  # keep in sync with the dashboard OPERATOR_EMAILS and the bff OPERATOR_ALLOWLIST.
+  allowlist: ${OPERATOR_ALLOWLIST:}
 
 # Exec internal base URL the credential forward targets (in-cluster service name).
 exec:
