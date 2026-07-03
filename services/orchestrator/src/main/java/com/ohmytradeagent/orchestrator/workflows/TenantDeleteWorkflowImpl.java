@@ -7,10 +7,10 @@ import io.temporal.workflow.Workflow;
 import java.time.Duration;
 
 /**
- * Operator tenant-delete teardown impl (PLAN-2026-07-03, Phase 2). Runs the three teardown steps in
- * strict order a → b → c; the ordering is load-bearing: step (a) resolves {@code broker_target}
- * from the config row to compute the recon schedule id, so it MUST run BEFORE step (c) deletes that
- * row (otherwise the id is uncomputable and the schedule is orphaned).
+ * Operator tenant-delete teardown impl (PLAN-2026-07-03, Phase 2). Runs the three teardown steps a
+ * → b → c. The order is NOT load-bearing: step (a) reaps recon schedules by the {@code (tenant,
+ * strategy)} prefix and never reads {@code broker_target} from the config row, so it has no
+ * dependency on step (c) still finding that row. (a → c order is kept only for readability.)
  *
  * <p>All Activities run on this workflow's task queue (orchestrator-core) — every teardown target
  * is orchestrator-owned (the recon schedule client, the kill-switch workflow, the in-process {@code
@@ -34,12 +34,11 @@ public class TenantDeleteWorkflowImpl implements TenantDeleteWorkflow {
 
   @Override
   public int deleteTenant(String tenantId, String strategyId, String actor) {
-    // (a) resolve broker_target FIRST, then reap the recon schedule.
-    activities.resolveBrokerTargetAndDeleteReconSchedule(tenantId, strategyId);
+    // (a) reap every recon schedule under the (tenant, strategy) prefix.
+    activities.deleteReconSchedules(tenantId, strategyId);
     // (b) terminate the kill-switch workflow.
     activities.terminateKillSwitchWorkflow(tenantId, strategyId);
-    // (c) delete the config row (+ retained TenantDeleted tombstone). LAST, so (a) could resolve
-    // broker_target from a still-present row.
+    // (c) delete the config row (+ retained TenantDeleted tombstone).
     return activities.deleteStrategyConfig(tenantId, strategyId, actor);
   }
 }

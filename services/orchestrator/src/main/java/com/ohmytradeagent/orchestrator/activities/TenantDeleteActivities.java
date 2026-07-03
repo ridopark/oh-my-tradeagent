@@ -4,7 +4,7 @@ import io.temporal.activity.ActivityInterface;
 
 /**
  * Operator tenant-delete teardown (PLAN-2026-07-03, Phase 2) — DARK durable-teardown primitive for
- * ONE {@code (tenant, strategy)} unit. Drives the {@code TenantDeleteWorkflow}'s three ordered,
+ * ONE {@code (tenant, strategy)} unit. Drives the {@code TenantDeleteWorkflow}'s three
  * individually-idempotent steps. Each is an Activity (not workflow body) because every step is IO
  * against a client boundary a deterministic workflow may not touch directly — the schedule client,
  * another workflow's lifecycle, and the DB.
@@ -17,13 +17,16 @@ import io.temporal.activity.ActivityInterface;
 public interface TenantDeleteActivities {
 
   /**
-   * Step (a): resolve the strategy's {@code broker_target} from {@code strategy_config} FIRST, then
-   * delete the reconciliation Temporal Schedule keyed on it. The broker_target MUST be read BEFORE
-   * step (c) deletes the config row — the schedule id ({@code
-   * recon-v2-t-<tenant>-s-<strategy>-<brokerTarget>}) is otherwise uncomputable, which would leave
-   * a zombie schedule firing forever. An absent schedule (already reaped) is swallowed as success.
+   * Step (a): reap EVERY reconciliation Temporal Schedule whose id starts with the {@code (tenant,
+   * strategy)} prefix ({@code recon-v2-t-<tenant>-s-<strategy>-}) — regardless of its trailing
+   * {@code broker_target} suffix. This needs only {@code (tenant, strategy)}, never {@code
+   * broker_target}, so it does NOT read the {@code strategy_config} row and has no ordering
+   * dependency on step (c). Reaping by prefix (mirroring {@code
+   * ReconciliationScheduleBootstrapper.reapStaleSchedules}) also catches a schedule left under a
+   * stale broker suffix. An absent schedule (already reaped) is swallowed per-id as success; a
+   * genuine (non-not-found) delete error propagates so the bounded activity retry fires.
    */
-  void resolveBrokerTargetAndDeleteReconSchedule(String tenantId, String strategyId);
+  void deleteReconSchedules(String tenantId, String strategyId);
 
   /**
    * Step (b): terminate the per-{@code (tenant, strategy)} {@code KillSwitchWorkflow} ({@code

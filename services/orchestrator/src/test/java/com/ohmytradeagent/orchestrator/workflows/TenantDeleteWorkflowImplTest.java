@@ -12,26 +12,25 @@ import com.ohmytradeagent.orchestrator.activities.TenantDeleteActivities;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
-import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
 /**
  * Phase 2 (PLAN-2026-07-03-operator-tenant-delete) coverage for the per-{@code (tenant, strategy)}
- * teardown carrier. The workflow orchestration is proven here with mock / fake Activities on the
- * orchestrator-core worker; the Activities' own idempotency (NotFound-swallow) is unit-tested in
- * {@code TenantDeleteActivitiesImplTest}.
+ * teardown carrier. The workflow orchestration is proven here with mock Activities on the
+ * orchestrator-core worker; the Activities' own idempotency (prefix-reap + NotFound-swallow) is
+ * unit-tested in {@code TenantDeleteActivitiesImplTest}.
  *
  * <ul>
- *   <li>happy path drives the three steps in a → b → c order and returns step (c)'s count;
- *   <li>when every step yields success (schedule-absent, kill-switch-WF-absent, config-absent — the
- *       mocks' default no-op / 0 return) the workflow completes;
- *   <li>the ORDERING guard proves step (a) (broker_target resolve) runs BEFORE step (c) (config
- *       delete) — a fake that throws if the config row were already gone stays silent.
+ *   <li>happy path drives the three steps a → b → c and returns step (c)'s count;
+ *   <li>when every step yields success (all schedules already reaped, kill-switch-WF-absent,
+ *       config-absent — the mocks' default no-op / 0 return) the workflow completes with 0.
  * </ul>
+ *
+ * <p>There is no ordering constraint to guard: step (a) reaps recon schedules by the {@code
+ * (tenant, strategy)} prefix and never reads {@code broker_target} from the config row, so it no
+ * longer has to run before the config delete.
  */
 class TenantDeleteWorkflowImplTest {
 
@@ -71,7 +70,7 @@ class TenantDeleteWorkflowImplTest {
 
     assertThat(deleted).isEqualTo(1);
     InOrder ordered = inOrder(activities);
-    ordered.verify(activities).resolveBrokerTargetAndDeleteReconSchedule(TENANT, STRATEGY);
+    ordered.verify(activities).deleteReconSchedules(TENANT, STRATEGY);
     ordered.verify(activities).terminateKillSwitchWorkflow(TENANT, STRATEGY);
     ordered.verify(activities).deleteStrategyConfig(TENANT, STRATEGY, ACTOR);
   }
@@ -86,49 +85,8 @@ class TenantDeleteWorkflowImplTest {
     int deleted = startWith(activities).deleteTenant(TENANT, STRATEGY, ACTOR);
 
     assertThat(deleted).isZero();
-    verify(activities, times(1)).resolveBrokerTargetAndDeleteReconSchedule(TENANT, STRATEGY);
+    verify(activities, times(1)).deleteReconSchedules(TENANT, STRATEGY);
     verify(activities, times(1)).terminateKillSwitchWorkflow(TENANT, STRATEGY);
     verify(activities, times(1)).deleteStrategyConfig(eq(TENANT), eq(STRATEGY), eq(ACTOR));
-  }
-
-  @Test
-  void ordering_brokerTargetResolveRunsBeforeConfigDelete() {
-    // Proves the load-bearing order: the resolve step (which reads broker_target off the config row
-    // to compute the recon schedule id) MUST run before the config row is deleted. The fake throws
-    // if resolve is ever invoked after the config delete flag is set; a passing (silent) run proves
-    // a → … → c ordering.
-    OrderingFake fake = new OrderingFake();
-
-    int deleted = startWith(fake).deleteTenant(TENANT, STRATEGY, ACTOR);
-
-    assertThat(deleted).isEqualTo(1);
-    assertThat(fake.calls).containsExactly("resolve", "terminate", "delete");
-  }
-
-  /** Fake that fails the resolve step if the config row has already been deleted. */
-  private static final class OrderingFake implements TenantDeleteActivities {
-    private final AtomicBoolean configDeleted = new AtomicBoolean(false);
-    private final List<String> calls = new CopyOnWriteArrayList<>();
-
-    @Override
-    public void resolveBrokerTargetAndDeleteReconSchedule(String tenantId, String strategyId) {
-      if (configDeleted.get()) {
-        throw new IllegalStateException(
-            "resolve ran AFTER config delete — broker_target would be uncomputable");
-      }
-      calls.add("resolve");
-    }
-
-    @Override
-    public void terminateKillSwitchWorkflow(String tenantId, String strategyId) {
-      calls.add("terminate");
-    }
-
-    @Override
-    public int deleteStrategyConfig(String tenantId, String strategyId, String actor) {
-      configDeleted.set(true);
-      calls.add("delete");
-      return 1;
-    }
   }
 }

@@ -1,103 +1,105 @@
 package com.ohmytradeagent.orchestrator.activities;
 
-import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.bootstrap.ReconciliationScheduleBootstrapper;
 import com.ohmytradeagent.orchestrator.platform.StrategyConfigWriter;
-import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.schedules.ScheduleClient;
+import io.temporal.client.schedules.ScheduleListDescription;
 import io.temporal.serviceclient.WorkflowServiceStubs;
+import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * Operator tenant-delete teardown impl (PLAN-2026-07-03, Phase 2). Each step is idempotent: an
- * absent recon schedule, an absent/already-terminated kill-switch workflow, and an absent {@code
+ * Operator tenant-delete teardown impl (PLAN-2026-07-03, Phase 2). Each step is idempotent: no
+ * matching recon schedules, an absent/already-terminated kill-switch workflow, and an absent {@code
  * strategy_config} row all yield success so a retried {@code TenantDeleteWorkflow} converges.
  *
- * <p>The recon schedule id comes from {@link ReconciliationScheduleBootstrapper#reconScheduleId}
- * (the single owner of that grammar), so this teardown and the bootstrapper can never drift; the
- * kill-switch id comes from {@link WorkflowIds#killswitch}, the single source of truth the
- * bootstrapper starts it under. The not-found-is-benign handling matches the bootstrapper's reap.
+ * <p>Step (a) reaps recon schedules by the {@code (tenant, strategy)} PREFIX ({@link
+ * ReconciliationScheduleBootstrapper#reconSchedulePrefix}) rather than by an exact id computed from
+ * {@code broker_target}. That eliminates two failure modes of the old exact-id approach: (1) it no
+ * longer reads the {@code strategy_config} row, so a transient registry/DB error can never be
+ * mistaken for "already torn down" and leak a zombie schedule that fires forever; and (2) it
+ * catches a schedule left under a DIFFERENT broker suffix (e.g. after a {@code broker_target}
+ * change). The kill-switch id comes from {@link WorkflowIds#killswitch}, the single source of truth
+ * the bootstrapper starts it under. The not-found-is-benign handling matches the bootstrapper's
+ * reap.
  */
 @Component
 public class TenantDeleteActivitiesImpl implements TenantDeleteActivities {
 
   private static final Logger log = LoggerFactory.getLogger(TenantDeleteActivitiesImpl.class);
 
-  private final StrategyRegistry strategyRegistry;
   private final StrategyConfigWriter writer;
   private final WorkflowClient workflowClient;
   private final WorkflowServiceStubs serviceStubs;
 
   public TenantDeleteActivitiesImpl(
-      StrategyRegistry strategyRegistry,
       StrategyConfigWriter writer,
       WorkflowClient workflowClient,
       WorkflowServiceStubs serviceStubs) {
-    this.strategyRegistry = strategyRegistry;
     this.writer = writer;
     this.workflowClient = workflowClient;
     this.serviceStubs = serviceStubs;
   }
 
   @Override
-  public void resolveBrokerTargetAndDeleteReconSchedule(String tenantId, String strategyId) {
-    // ORDERING TRAP: broker_target MUST be resolved from the config row BEFORE step (c) deletes it
-    // —
-    // the schedule id is otherwise uncomputable (zombie schedule). Within one workflow run this
-    // activity precedes deleteStrategyConfig, so the row is present. On a full re-invocation after
-    // a
-    // prior completed teardown the row is gone; we cannot (and need not) compute the id — the
-    // schedule was already reaped by the prior run, so we no-op as success.
-    String brokerTarget;
-    try {
-      StrategyConfig cfg = strategyRegistry.get(tenantId, strategyId);
-      if (cfg == null || cfg.getBrokerTarget() == null) {
+  public void deleteReconSchedules(String tenantId, String strategyId) {
+    // Reap by (tenant, strategy) PREFIX — never by an exact id derived from broker_target. This
+    // needs no strategy_config read (so there is nothing to resolve-before-config-delete, and a
+    // transient DB blip can never be swallowed as false "already torn down") and it reaps EVERY
+    // schedule under the prefix, including one left under a stale broker suffix. Mirrors
+    // ReconciliationScheduleBootstrapper.reapStaleSchedules'
+    // list+prefix-filter+getHandle().delete().
+    String prefix = ReconciliationScheduleBootstrapper.reconSchedulePrefix(tenantId, strategyId);
+    ScheduleClient client = scheduleClient();
+    List<String> matching;
+    try (Stream<ScheduleListDescription> listed = client.listSchedules()) {
+      matching =
+          listed
+              .map(ScheduleListDescription::getScheduleId)
+              .filter(id -> id.startsWith(prefix))
+              .collect(Collectors.toList());
+    }
+    int reaped = 0;
+    for (String id : matching) {
+      try {
+        client.getHandle(id).delete();
+        reaped++;
         log.info(
-            "tenant delete: no config / broker_target for tenant={} strategy={}; recon schedule "
-                + "delete is a no-op (already torn down)",
+            "tenant delete: reaped recon schedule id={} tenant={} strategy={}",
+            id,
             tenantId,
             strategyId);
-        return;
+      } catch (RuntimeException e) {
+        if (isNotFound(e)) {
+          // Already gone (a peer race or a prior partial run) — idempotent; keep reaping the rest.
+          log.info(
+              "tenant delete: recon schedule id={} already absent tenant={} strategy={} — idempotent",
+              id,
+              tenantId,
+              strategyId);
+          continue;
+        }
+        // A GENUINE (non-not-found) delete error MUST propagate so the bounded activity retry fires
+        // — never swallow it as false success (that would leak a zombie schedule).
+        throw e;
       }
-      brokerTarget = cfg.getBrokerTarget().value();
-    } catch (RuntimeException e) {
-      // Config already absent (a prior teardown ran) — the recon schedule was reaped with it.
-      log.info(
-          "tenant delete: config unresolved for tenant={} strategy={}; recon schedule delete is a "
-              + "no-op (already torn down)",
-          tenantId,
-          strategyId);
-      return;
     }
-
-    String scheduleId =
-        ReconciliationScheduleBootstrapper.reconScheduleId(tenantId, strategyId, brokerTarget);
-    try {
-      scheduleClient().getHandle(scheduleId).delete();
-      log.info(
-          "tenant delete: reaped recon schedule id={} tenant={} strategy={}",
-          scheduleId,
-          tenantId,
-          strategyId);
-    } catch (RuntimeException e) {
-      if (isNotFound(e)) {
-        log.info(
-            "tenant delete: recon schedule id={} already absent tenant={} strategy={} — idempotent",
-            scheduleId,
-            tenantId,
-            strategyId);
-        return;
-      }
-      throw e;
-    }
+    log.info(
+        "tenant delete: recon schedule reap complete tenant={} strategy={} matched={} reaped={}",
+        tenantId,
+        strategyId,
+        matching.size(),
+        reaped);
   }
 
   @Override
