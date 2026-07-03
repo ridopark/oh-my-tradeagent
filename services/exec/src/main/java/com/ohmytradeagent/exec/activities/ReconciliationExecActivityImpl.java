@@ -53,6 +53,14 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
   }
 
   @Override
+  public long journalCountByTenant(String tenantId, String strategyId) {
+    // Operator tenant-delete P5 (HAS_TRADE_HISTORY): all-states row count. Read-only; the recon
+    // contract carries no broker_target, so no broker resolution is needed — this is a pure journal
+    // read.
+    return journal.countByTenantStrategy(tenantId, strategyId);
+  }
+
+  @Override
   public List<BrokerOpenOrder> brokerListOpenOrders(String tenantId, String strategyId) {
     // Phase B: resolve the request's tenant (mirrors brokerListOpenPositions); strategyId is a
     // forward-compat hook — the resolved broker is already tenant-scoped.

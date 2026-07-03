@@ -2,6 +2,8 @@ package com.ohmytradeagent.apigateway.web;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.contract.StrategyConfig;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import org.jooq.DSLContext;
 import org.jooq.Record;
@@ -25,7 +27,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 @ConditionalOnExpression(
-    "${operator.strategy-enable.enabled:false} or ${strategy.config.write.enabled:false}")
+    "${operator.strategy-enable.enabled:false} or ${strategy.config.write.enabled:false}"
+        + " or ${operator.tenant-delete.enabled:false}")
 public class StrategyConfigReader {
 
   private final DSLContext dsl;
@@ -66,6 +69,51 @@ public class StrategyConfigReader {
     }
   }
 
+  /**
+   * Operator tenant-delete (PLAN-2026-07-03, Phase 4): ALL {@code (tenant, *)} strategy rows in a
+   * SINGLE query — the one read that feeds P0 (LIVE/NON_PAPER/UNKNOWN broker_target shape) AND P2
+   * (every strategy {@code enabled=false}). Ordered by {@code strategy_id} for a deterministic
+   * scan.
+   *
+   * <p><b>Fail-closed on an unreadable row.</b> A missing {@code strategy_id}/{@code config}/{@code
+   * version}, or a {@code config} that will not parse, throws {@link IllegalStateException} — the
+   * caller (P0) must treat that as NOT deletable, never skip the row. An empty list (no rows) is a
+   * legitimate {@code UNKNOWN_TENANT_SHAPE} the caller distinguishes.
+   */
+  public List<StrategyRow> listByTenant(String tenant) {
+    var rows =
+        dsl.select(
+                DSL.field("strategy_id", String.class),
+                DSL.field("config").cast(String.class).as("config_json"),
+                DSL.field("version", Long.class))
+            .from(DSL.table("strategy_config"))
+            .where(DSL.field("tenant_id").eq(tenant))
+            .orderBy(DSL.field("strategy_id"))
+            .fetch();
+    List<StrategyRow> out = new ArrayList<>();
+    for (Record r : rows) {
+      String strategyId = r.get("strategy_id", String.class);
+      String json = r.get("config_json", String.class);
+      Long version = r.get("version", Long.class);
+      if (strategyId == null || json == null || version == null) {
+        throw new IllegalStateException("corrupt strategy_config row for tenant=" + tenant);
+      }
+      try {
+        StrategyConfig config = mapper.readValue(json, StrategyConfig.class);
+        out.add(new StrategyRow(strategyId, config, version));
+      } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        throw new IllegalStateException(
+            "unparseable strategy_config for tenant=" + tenant + " strategy=" + strategyId, e);
+      }
+    }
+    return out;
+  }
+
   /** The stored strategy config and its optimistic-concurrency version. */
   public record Stored(StrategyConfig config, long version) {}
+
+  /**
+   * One {@code (tenant, strategy)} row: its id, parsed config, and optimistic-concurrency version.
+   */
+  public record StrategyRow(String strategyId, StrategyConfig config, long version) {}
 }

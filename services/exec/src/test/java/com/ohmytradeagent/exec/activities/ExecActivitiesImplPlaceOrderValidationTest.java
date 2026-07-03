@@ -187,6 +187,11 @@ class ExecActivitiesImplPlaceOrderValidationTest {
     }
 
     @Override
+    public long countByTenantStrategy(String tenantId, String strategyId) {
+      throw fail();
+    }
+
+    @Override
     public Optional<JournaledOrder> findLatestFilledByOcc(
         String tenantId, String strategyId, String occ) {
       throw fail();

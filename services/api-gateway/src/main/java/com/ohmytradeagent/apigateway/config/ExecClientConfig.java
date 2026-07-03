@@ -32,7 +32,8 @@ import org.springframework.web.client.RestClient;
 @ConditionalOnExpression(
     "${broker.credentials.write.enabled:false} or ${operator.credential-write.enabled:false}"
         + " or ${operator.strategy-enable.enabled:false}"
-        + " or ${strategy.config.write.enabled:false}")
+        + " or ${strategy.config.write.enabled:false}"
+        + " or ${operator.tenant-delete.enabled:false}")
 public class ExecClientConfig {
 
   @Bean

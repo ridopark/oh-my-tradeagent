@@ -47,6 +47,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
         + " or ${operator.tenant-create.enabled:false}"
         + " or ${operator.credential-write.enabled:false}"
         + " or ${operator.strategy-enable.enabled:false}"
+        + " or ${operator.tenant-delete.enabled:false}"
         + " or ${copytrade.fanout.enabled:false}")
 public class ServiceTokenFilter extends OncePerRequestFilter {
 

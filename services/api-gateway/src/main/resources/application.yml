@@ -79,6 +79,13 @@ operator:
   # (bearer gate) + the exec RestClient (verified-account read).
   strategy-enable:
     enabled: ${OPERATOR_STRATEGY_ENABLE_ENABLED:false}
+  # Operator tenant-delete (PLAN-2026-07-03, Phase 4) — the real-money safety gate. DARK by default:
+  # unset → the TenantDeleteController (and its readers / exec+bff forwarders / audit-emit client)
+  # do not exist and POST /admin/tenants/{tenant}/delete 404s. When true it also brings up
+  # ServiceTokenFilter (bearer gate), the exec RestClient (creds delete), and the bff RestClient
+  # (dashboard-rows delete). No repo manifest sets this true.
+  tenant-delete:
+    enabled: ${OPERATOR_TENANT_DELETE_ENABLED:false}
   # Config surface for the backend operator allowlist (defense-in-depth). The enforcement
   # (requireAllowlistedOperator → 403 on the admin routes) is in place. FAIL-CLOSED: unset/blank =
   # deny-all → every admin route 403s. Set to the authorized operator email(s), comma-separated, and
@@ -101,6 +108,13 @@ exec:
   base-url: ${EXEC_BASE_URL:http://exec:8080}
   admin:
     service-token: ${EXEC_ADMIN_SHARED_TOKEN:}
+
+# tenant-dashboard-bff internal base URL + service token for the operator tenant-delete
+# dashboard-rows hop (Phase 4 → Phase 3 BFF route). Only used when operator.tenant-delete.enabled is
+# true (BffClientConfig is gated on it); a pod under the prod profile with a blank token fails fast.
+bff:
+  base-url: ${BFF_BASE_URL:http://tenant-dashboard-bff:8080}
+  service-token: ${BFF_SHARED_TOKEN:}
 
 management:
   endpoints:

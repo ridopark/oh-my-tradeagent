@@ -55,6 +55,14 @@ public interface OrderIntentJournal {
   List<JournaledOrder> listOpenByTenantStrategy(String tenantId, String strategyId);
 
   /**
+   * Operator tenant-delete (PLAN-2026-07-03) P5: total {@code order_intent_journal} row count for
+   * the {@code (tenant, strategy)} across ALL states (non-terminal AND terminal). {@code 0} iff the
+   * ledger has never recorded an order for the pair — the retention-aware "never traded" signal the
+   * tenant-delete guard fails closed on.
+   */
+  long countByTenantStrategy(String tenantId, String strategyId);
+
+  /**
    * Issue #165 Phase 3: return at most one row for the most recent FILLED entry on this {@code
    * (tenant, strategy, option_symbol)} tuple, ordered by {@code filled_at DESC}. Used by
    * reconciliation to map a broker-held position back to the {@code entry_signal_id} that
