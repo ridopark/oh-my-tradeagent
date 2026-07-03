@@ -66,6 +66,54 @@ export async function createTenant(
   }
 }
 
+export interface EnableStrategyResult {
+  ok: boolean;
+  status: number;
+  // Set only on a 200 UPDATED — the persisted config version after the enabled=true flip.
+  newVersion?: number;
+}
+
+// Arm a just-onboarded tenant's strategy = flip enabled=true via the A1 operator enable route
+// (POST /admin/tenants/{tenant}/strategies/{strategy}/enable). Operator-scoped (X-Operator-Id, NO
+// X-Tenant-Id — cross-tenant, like createTenant). The route's own VerifiedAccountGuard is the
+// load-bearing enforcement: it rejects (422) unless a verified broker account exists, so this call
+// carries NO secret and NO config — only the (tenant, strategy) ids in the path and a correlation_id.
+export async function enableStrategy(
+  tenant: string,
+  strategy: string,
+): Promise<EnableStrategyResult> {
+  const session = await auth();
+  if (!session?.isOperator || !session.operatorId) {
+    return { ok: false, status: 0 };
+  }
+  const path = `/admin/tenants/${encodeURIComponent(tenant)}/strategies/${encodeURIComponent(strategy)}/enable`;
+  try {
+    const res = await fetch(`${API_GATEWAY_BASE_URL}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${API_GATEWAY_TOKEN}`,
+        "X-Operator-Id": session.operatorId,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ correlation_id: crypto.randomUUID() }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(API_GATEWAY_TIMEOUT_MS),
+    });
+    let newVersion: number | undefined;
+    if (res.ok) {
+      // UPDATED body is {status, new_version} — non-secret. A parse failure is non-fatal.
+      const body = (await res.json().catch(() => null)) as {
+        new_version?: number;
+      } | null;
+      newVersion = body?.new_version;
+    }
+    return { ok: res.ok, status: res.status, newVersion };
+  } catch {
+    // Transport/abort error — the arm did not complete.
+    return { ok: false, status: 0 };
+  }
+}
+
 // Operator credential-write input. tenant_id is NOT here — it is the path tenant, set by the caller.
 export interface OperatorBrokerCredentialInput {
   provider: string;
