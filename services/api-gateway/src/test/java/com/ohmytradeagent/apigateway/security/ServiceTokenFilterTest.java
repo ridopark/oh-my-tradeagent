@@ -79,6 +79,33 @@ class ServiceTokenFilterTest {
   }
 
   @Test
+  void missingAuthorizationHeaderOnInternalFanoutRoute_is401() throws Exception {
+    // Phase B1: the sidecar's registry-poll route is a service, bearer-gated too.
+    MockHttpServletResponse res = run("/internal/copytrade-fanout-targets", null);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void wrongTokenOnInternalFanoutRoute_is401() throws Exception {
+    MockHttpServletResponse res = run("/internal/copytrade-fanout-targets", "Bearer not-the-token");
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void correctBearerTokenOnInternalFanoutRoute_passesThrough() throws Exception {
+    MockHttpServletRequest req =
+        new MockHttpServletRequest("GET", "/internal/copytrade-fanout-targets");
+    req.addHeader("Authorization", "Bearer " + TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
+  @Test
   void otherRoutesAreNotFiltered_evenWithNoToken() throws Exception {
     // Route-scoping: /positions, /promotion etc. must pass straight through (they keep their
     // existing header-trust behavior) regardless of the credential-route token.
