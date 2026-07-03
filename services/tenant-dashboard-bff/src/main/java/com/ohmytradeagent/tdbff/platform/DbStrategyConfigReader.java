@@ -62,6 +62,18 @@ public class DbStrategyConfigReader {
         .map(r -> new TenantStrategyBrokerTarget(r.value1(), r.value2(), r.value3()));
   }
 
+  /**
+   * True iff at least one {@code strategy_config} row exists for {@code tenantId} — i.e. the tenant
+   * is real. Used by the operator create-invite endpoint to reject an invite for an unknown tenant
+   * BEFORE any write. Read-only against the orchestrator DSL, like the rest of this reader.
+   */
+  public boolean tenantExists(String tenantId) {
+    return orchestratorDsl.fetchExists(
+        DSL.selectOne()
+            .from(DSL.table("strategy_config"))
+            .where(DSL.field("tenant_id", String.class).eq(tenantId)));
+  }
+
   /** One enumerated strategy and its configured {@code broker_target} (may be {@code null}). */
   public record TenantStrategyBrokerTarget(
       String tenantId, String strategyId, String brokerTarget) {}

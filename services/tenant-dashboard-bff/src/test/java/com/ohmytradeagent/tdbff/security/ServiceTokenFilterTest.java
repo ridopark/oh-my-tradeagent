@@ -75,6 +75,29 @@ class ServiceTokenFilterTest {
         .doesNotThrowAnyException();
   }
 
+  // The operator tenant-user-invite routes (Phase 2) are NOT actuator paths, so the always-on
+  // filter bearer-gates them like every other route. This is the load-bearing auth invariant for a
+  // tenant-access-GRANTING endpoint: it must NEVER be reachable without the shared token. These
+  // tests fail closed if a future change adds either route to shouldNotFilter (which would exempt =
+  // un-authenticate it).
+  @Test
+  void createInviteRoute_withoutBearer_is401() throws Exception {
+    MockHttpServletResponse res = run("/api/admin/tenant-invites", null);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void bindRoute_withoutBearer_is401() throws Exception {
+    MockHttpServletResponse res = run("/internal/provisioning/bind", null);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void bindRoute_wrongBearer_is401() throws Exception {
+    MockHttpServletResponse res = run("/internal/provisioning/bind", "Bearer not-the-token");
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
   @Test
   void actuatorPrometheus_isExemptSoScrapesNeedNoToken() throws Exception {
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/actuator/prometheus");
