@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.activities;
 
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.orchestrator.bootstrap.ReconciliationScheduleBootstrapper;
 import com.ohmytradeagent.orchestrator.platform.StrategyConfigWriter;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import io.grpc.Status;
@@ -10,7 +11,6 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.schedules.ScheduleClient;
-import io.temporal.client.schedules.ScheduleClientOptions;
 import io.temporal.serviceclient.WorkflowServiceStubs;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,11 +21,10 @@ import org.springframework.stereotype.Component;
  * absent recon schedule, an absent/already-terminated kill-switch workflow, and an absent {@code
  * strategy_config} row all yield success so a retried {@code TenantDeleteWorkflow} converges.
  *
- * <p>The recon schedule id grammar ({@code recon-v2-t-<tenant>-s-<strategy>-<brokerTarget>}) and
- * the not-found-is-benign handling mirror {@code ReconciliationScheduleBootstrapper} exactly — the
- * two MUST stay in lockstep or a rename would orphan the schedule this reaps. The kill-switch id
- * comes from {@link WorkflowIds#killswitch}, the single source of truth the bootstrapper starts it
- * under.
+ * <p>The recon schedule id comes from {@link ReconciliationScheduleBootstrapper#reconScheduleId}
+ * (the single owner of that grammar), so this teardown and the bootstrapper can never drift; the
+ * kill-switch id comes from {@link WorkflowIds#killswitch}, the single source of truth the
+ * bootstrapper starts it under. The not-found-is-benign handling matches the bootstrapper's reap.
  */
 @Component
 public class TenantDeleteActivitiesImpl implements TenantDeleteActivities {
@@ -79,7 +78,8 @@ public class TenantDeleteActivitiesImpl implements TenantDeleteActivities {
       return;
     }
 
-    String scheduleId = "recon-v2-t-" + tenantId + "-s-" + strategyId + "-" + brokerTarget;
+    String scheduleId =
+        ReconciliationScheduleBootstrapper.reconScheduleId(tenantId, strategyId, brokerTarget);
     try {
       scheduleClient().getHandle(scheduleId).delete();
       log.info(
@@ -138,15 +138,15 @@ public class TenantDeleteActivitiesImpl implements TenantDeleteActivities {
   }
 
   /**
-   * Builds a {@link ScheduleClient} bound to the {@link WorkflowClient}'s namespace, mirroring
-   * {@code ReconciliationScheduleBootstrapper#newScheduleClient} (the no-options form silently
-   * defaults to namespace "default" — always bind explicitly). Package-private + overridable so a
-   * unit test can substitute a mock without a Temporal server.
+   * Builds a {@link ScheduleClient} bound to the {@link WorkflowClient}'s namespace via {@link
+   * ReconciliationScheduleBootstrapper#scheduleClientForNamespace} — the single owner of the
+   * "no-options newInstance silently defaults to the default namespace" footgun, so the binding
+   * rule lives in one place. Package-private + overridable so a unit test can substitute a mock
+   * without a Temporal server.
    */
   ScheduleClient scheduleClient() {
-    String namespace = workflowClient.getOptions().getNamespace();
-    return ScheduleClient.newInstance(
-        serviceStubs, ScheduleClientOptions.newBuilder().setNamespace(namespace).build());
+    return ReconciliationScheduleBootstrapper.scheduleClientForNamespace(
+        serviceStubs, workflowClient.getOptions().getNamespace());
   }
 
   /** True iff {@code e} (or a cause) is a gRPC {@code NOT_FOUND} — a benign already-gone signal. */
