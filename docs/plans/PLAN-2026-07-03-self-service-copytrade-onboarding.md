@@ -119,6 +119,28 @@ api-gateway guard (Phase A1) is the real enforcement; the UI gate (Phase A2) is 
   unaffected. `enabled` stays SAFE in `StrategyConfigWriter` (the guard is a gateway pre-check, not a
   writer field-class change) — no orchestrator/replay change.
 
+**Hardening (risk review — IMPLEMENTED in A1):**
+- **Fail-CLOSED (C1):** the guard ALLOWS only a well-formed `200 {verified:true, account:<non-blank>}`.
+  `verified:false` → 422; any exec fault (non-2xx / timeout / unreachable / malformed / missing field /
+  blank account) → **503, arming NOT started** (a fail-open on a network error is worse than no guard).
+  Bounded by the exec client's connect/read timeouts.
+- **Create-route bypass (C2):** because the runtime gate rejects only `Boolean.FALSE`
+  (`CopytradeSignalWorkflowImpl.java:321`), `enabled:true` AND absent both = ARMED. So
+  `CreateTenantController` now **forces `enabled=false` at create** (in api-gateway, honoring "no
+  orchestrator change") — arming can happen ONLY through the guarded enable route.
+- **exec filter path (C3):** `ExecAdminTokenFilter.shouldNotFilter` widened from exact-match to
+  `startsWith(route + "/")`, else the `/account` sub-path would be UNAUTHENTICATED.
+- **Live false-pass (C5):** the guard keys off the STORED `broker_target` and REJECTS arming for any
+  non-`<provider>-paper` target with NO exec call — a live tenant can never false-pass on a stray paper
+  creds row. Per-target exec routing (P0) is required before this guard is trusted for live.
+- **Anchor correction:** the exec read is a column-only `SELECT expected_account_id` (the
+  `DbBrokerCredentialSource.java:69` field pattern), never `resolve()`/`decrypt()`; the earlier
+  `BrokerCredentialStatusReader` citation was a BFF class, not applicable in exec.
+- **ExecClientConfig coupling:** the reused `execRestClient` `@ConditionalOnExpression` now also OR-includes
+  `operator.strategy-enable.enabled` + `strategy.config.write.enabled` (the guard runs on the tenant-scoped
+  route too), so a pod with either flag under `prod` must provide `EXEC_ADMIN_SHARED_TOKEN` (already set on
+  homelab).
+
 **Tests (TDD):**
 - exec: read returns `verified:true`+account for an existing row; `verified:false` when absent; 401 without
   the admin token; dark (404) when `broker.creds.source!=db`.
