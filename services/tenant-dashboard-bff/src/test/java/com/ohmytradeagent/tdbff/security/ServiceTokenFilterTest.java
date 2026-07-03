@@ -92,6 +92,16 @@ class ServiceTokenFilterTest {
     assertThat(res.getStatus()).isEqualTo(401);
   }
 
+  // The operator tenant-delete dashboard-rows route (Phase 3) is NOT an actuator path, so the
+  // always-on filter bearer-gates it like every other route — a store-deleting endpoint must NEVER
+  // be reachable without the shared token. Fails closed if a future change adds it to
+  // shouldNotFilter (which would un-authenticate it).
+  @Test
+  void deleteDashboardRowsRoute_withoutBearer_is401() throws Exception {
+    MockHttpServletResponse res = run("/api/admin/tenants/acme/dashboard-rows", null);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
   @Test
   void bindRoute_wrongBearer_is401() throws Exception {
     MockHttpServletResponse res = run("/internal/provisioning/bind", "Bearer not-the-token");

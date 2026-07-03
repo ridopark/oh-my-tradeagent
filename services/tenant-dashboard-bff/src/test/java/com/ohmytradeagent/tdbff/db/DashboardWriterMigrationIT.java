@@ -18,16 +18,19 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * Real-Postgres coverage for the {@code dashboard} DB migrations V4 (dashboard_user_invite) + V5
- * (dashboard_writer role). Drives Flyway directly (the app never runs this migration via Spring)
- * with the two role-password placeholders, then asserts:
+ * (dashboard_writer role) + V7 (grant DELETE to dashboard_writer). Drives Flyway directly (the app
+ * never runs this migration via Spring) with the two role-password placeholders, then asserts:
  *
  * <ul>
  *   <li>the invite table + its two indexes exist; the {@code dashboard_writer} role exists;
- *   <li>LEAST PRIVILEGE (the whole point of V5): {@code dashboard_writer} can INSERT dashboard_user
- *       and SELECT/INSERT/UPDATE dashboard_user_invite, but is DENIED UPDATE/DELETE/SELECT on
- *       dashboard_user, DENIED DELETE on the invite table, and DENIED on any other table;
+ *   <li>LEAST PRIVILEGE (the whole point of V5, as widened minimally by V7): {@code
+ *       dashboard_writer} can INSERT + DELETE dashboard_user and SELECT/INSERT/UPDATE/DELETE
+ *       dashboard_user_invite, but is STILL DENIED UPDATE and SELECT on dashboard_user (a bare
+ *       tenant-scoped DELETE needs neither), and DENIED on any other table. The V7 DELETE grant is
+ *       the ONLY widening.
  *   <li>{@code dashboard_readonly} stays SELECT-only: SELECT on dashboard_user (V2) and on
- *       dashboard_user_invite (V6, for the operator admin listing), but NO write on either.
+ *       dashboard_user_invite (V6, for the operator admin listing), but NO write — and specifically
+ *       NO DELETE — on either (V7 grants DELETE to the WRITER only, never the readonly role).
  * </ul>
  *
  * Gated on {@code RUN_DB_ITS=true} like the module's other DB ITs; runs under {@code verify}
@@ -85,21 +88,26 @@ class DashboardWriterMigrationIT {
   }
 
   @Test
-  void writerCanInsertDashboardUser_butCannotUpdateDeleteOrSelectIt() throws SQLException {
+  void writerCanInsertAndDeleteDashboardUser_butStillCannotUpdateOrSelectIt() throws SQLException {
     try (Connection w = asRole("dashboard_writer", WRITER_PW);
         var st = w.createStatement()) {
       st.executeUpdate(
           "INSERT INTO dashboard_user (provider, subject, email, tenant_id) "
               + "VALUES ('google', 'sub-writer-1', 'a@b.com', 'acme')");
 
+      // V7: a bare tenant-scoped DELETE is now granted — and it needs NO SELECT read-back (proving
+      // the teardown repo needs no SELECT-privilege workaround). Removes the row just inserted.
+      assertThat(st.executeUpdate("DELETE FROM dashboard_user WHERE tenant_id = 'acme'"))
+          .isEqualTo(1);
+
+      // STILL least-privilege: no UPDATE, no SELECT on dashboard_user (V7 widened DELETE only).
       assertDenied(() -> st.executeUpdate("UPDATE dashboard_user SET email = 'x@y.com'"));
-      assertDenied(() -> st.executeUpdate("DELETE FROM dashboard_user"));
       assertDenied(() -> st.executeQuery("SELECT provider FROM dashboard_user"));
     }
   }
 
   @Test
-  void writerCanCrudInvitesExceptDelete() throws SQLException {
+  void writerCanCrudInvitesIncludingDeleteAfterV7() throws SQLException {
     try (Connection w = asRole("dashboard_writer", WRITER_PW);
         var st = w.createStatement()) {
       st.executeUpdate(
@@ -118,7 +126,10 @@ class DashboardWriterMigrationIT {
                       + "WHERE consumed_at IS NULL"))
           .isEqualTo(1);
 
-      assertDenied(() -> st.executeUpdate("DELETE FROM dashboard_user_invite"));
+      // V7: DELETE on the invite table is now granted to the writer (the teardown removes open +
+      // consumed invites for a deleted tenant).
+      assertThat(st.executeUpdate("DELETE FROM dashboard_user_invite WHERE tenant_id = 'acme'"))
+          .isEqualTo(1);
     }
   }
 
@@ -139,12 +150,13 @@ class DashboardWriterMigrationIT {
       try (var rs = st.executeQuery("SELECT count(*) FROM dashboard_user")) {
         assertThat(rs.next()).isTrue();
       }
-      // No write to dashboard_user.
+      // No write to dashboard_user — and V7's writer-only DELETE grant did NOT leak to readonly.
       assertDenied(
           () ->
               st.executeUpdate(
                   "INSERT INTO dashboard_user (provider, subject, tenant_id) "
                       + "VALUES ('google', 'ro', 'acme')"));
+      assertDenied(() -> st.executeUpdate("DELETE FROM dashboard_user"));
       // V6: readonly may now SELECT the invite table (the operator admin page reads pending
       // invites), but STILL cannot write it — least-privilege preserved.
       try (var rs = st.executeQuery("SELECT count(*) FROM dashboard_user_invite")) {

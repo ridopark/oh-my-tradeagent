@@ -171,6 +171,52 @@ class InviteWriterRepositoryIT {
     assertThat(openInviteCount()).isEqualTo(0); // both consumed
   }
 
+  // ---- delete (operator tenant-delete teardown, Phase 3) ----
+
+  @Test
+  void deleteTenantIdentities_removesUsersAndInvites_scopedByTenant_returnsCounts()
+      throws SQLException {
+    // acme: one bound member (via bind) + one consumed invite row.
+    repo.createInvite("ivan@x.com", "acme", "op@x.com", 7);
+    assertThat(repo.bindMatchingInvites("google", "sub-ivan", "ivan@x.com"))
+        .containsExactly("acme");
+    // globex: an unrelated open invite that MUST survive an acme delete.
+    repo.createInvite("judy@x.com", "globex", "op@x.com", 7);
+
+    InviteWriterRepository.DeletedIdentityCounts counts = repo.deleteTenantIdentities("acme");
+
+    assertThat(counts.users()).isEqualTo(1);
+    assertThat(counts.invites()).isEqualTo(1);
+    // acme wiped, globex untouched.
+    assertThat(userCountForTenant("acme")).isZero();
+    assertThat(inviteCountForTenant("acme")).isZero();
+    assertThat(userCountForTenant("globex")).isZero();
+    assertThat(inviteCountForTenant("globex")).isEqualTo(1);
+  }
+
+  @Test
+  void deleteTenantIdentities_isIdempotent_secondCallDeletesZero() {
+    repo.createInvite("ken@x.com", "acme", "op@x.com", 7);
+    repo.bindMatchingInvites("google", "sub-ken", "ken@x.com");
+
+    InviteWriterRepository.DeletedIdentityCounts first = repo.deleteTenantIdentities("acme");
+    assertThat(first.users()).isEqualTo(1);
+    assertThat(first.invites()).isEqualTo(1);
+
+    // Second call (or a tenant that never had identities) deletes nothing and does not throw.
+    InviteWriterRepository.DeletedIdentityCounts second = repo.deleteTenantIdentities("acme");
+    assertThat(second.users()).isZero();
+    assertThat(second.invites()).isZero();
+  }
+
+  @Test
+  void deleteTenantIdentities_unknownTenant_isNoOpSuccess() {
+    InviteWriterRepository.DeletedIdentityCounts counts =
+        repo.deleteTenantIdentities("never-existed");
+    assertThat(counts.users()).isZero();
+    assertThat(counts.invites()).isZero();
+  }
+
   // ---- fixtures / assertions ----
 
   private static Connection asSuperuser() throws SQLException {
@@ -188,6 +234,26 @@ class InviteWriterRepositoryIT {
       return rs.getInt(1);
     } catch (SQLException e) {
       throw new RuntimeException(e);
+    }
+  }
+
+  private int inviteCountForTenant(String tenantId) throws SQLException {
+    return countForTenant("dashboard_user_invite", tenantId);
+  }
+
+  private int userCountForTenant(String tenantId) throws SQLException {
+    return countForTenant("dashboard_user", tenantId);
+  }
+
+  private int countForTenant(String table, String tenantId) throws SQLException {
+    // Table name is a test-controlled constant (never caller input) — safe to inline.
+    try (Connection c = asSuperuser();
+        var ps = c.prepareStatement("SELECT count(*) FROM " + table + " WHERE tenant_id = ?")) {
+      ps.setString(1, tenantId);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt(1);
+      }
     }
   }
 

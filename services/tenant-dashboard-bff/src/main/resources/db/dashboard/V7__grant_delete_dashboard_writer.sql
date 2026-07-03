@@ -1,0 +1,15 @@
+-- Enables the operator tenant-delete teardown (Phase 3) to remove a tenant's dashboard identities.
+-- The last store in the de-provisioning of a dark, never-traded tenant is its dashboard login rows:
+-- the bound members (dashboard_user) and any still-open invites (dashboard_user_invite). The BFF is
+-- the only service that can reach the `dashboard` DB, so the delete runs here as the least-privilege
+-- dashboard_writer role (V5) via a new operator-only endpoint.
+--
+-- This is the ONLY migration that grants dashboard_writer DELETE. V5 deliberately withheld it (the
+-- invite/bind flow never deletes); this additive grant widens the writer to exactly the two tables
+-- it already writes, and nothing else. A bare `DELETE FROM <t> WHERE tenant_id = ?` needs only the
+-- DELETE privilege (no SELECT read-back), which the writer still lacks on dashboard_user — so the
+-- least-privilege posture (no SELECT/UPDATE on dashboard_user) is preserved.
+--
+-- Additive and idempotent (GRANT is a no-op if already held). NEVER edit the shipped V5/V6. The
+-- dashboard_readonly role (V2/V6) is untouched and stays strictly SELECT-only — it can NOT delete.
+GRANT DELETE ON dashboard_user, dashboard_user_invite TO dashboard_writer;

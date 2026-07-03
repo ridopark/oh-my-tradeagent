@@ -64,6 +64,15 @@ operator:
     enabled: ${OPERATOR_TENANT_INVITE_ENABLED:false}
     # Open invites expire this many days after creation; a re-invite refreshes the window.
     ttl-days: ${OPERATOR_TENANT_INVITE_TTL_DAYS:7}
+  # Phase 3 dark gate for the operator tenant-delete teardown, dashboard store (DELETE
+  # /api/admin/tenants/{tenant}/dashboard-rows). Default OFF: the TenantDashboardRowsController bean
+  # is absent (a two-name @ConditionalOnProperty that requires BOTH this flag AND
+  # dashboard.writer.enabled, because the endpoint deletes via the dashboard_writer DSL), so the
+  # route 404s until an operator deployment sets BOTH OPERATOR_TENANT_DELETE_ENABLED=true and
+  # DASHBOARD_WRITER_ENABLED=true (and has run the V7 DELETE grant). Bearer-gated (every BFF request
+  # is) AND requires an allowlisted X-Operator-Id.
+  tenant-delete:
+    enabled: ${OPERATOR_TENANT_DELETE_ENABLED:false}
 
 # Dark gate for the write path added by the operator tenant-user-invite feature. Default OFF: the
 # dashboard_writer DSLContext/HikariDataSource beans are absent (@ConditionalOnProperty), so the

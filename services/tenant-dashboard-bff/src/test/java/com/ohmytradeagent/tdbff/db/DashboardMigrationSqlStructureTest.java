@@ -105,4 +105,29 @@ class DashboardMigrationSqlStructureTest {
         .as("V5 must not widen or even reference dashboard_readonly (C7)")
         .doesNotContain("dashboard_readonly");
   }
+
+  @Test
+  void v7GrantsDeleteToWriterOnBothIdentityTables_andNothingElse() throws IOException {
+    String sql = executableSql("/db/dashboard/V7__grant_delete_dashboard_writer.sql");
+
+    // The Phase 3 teardown grant: DELETE on BOTH identity tables to the writer, in one combined
+    // GRANT naming both tables (order-insensitive) so the operator delete can remove a dark
+    // tenant's
+    // members + open invites.
+    assertThat(sql)
+        .as("V7 grants DELETE on both identity tables to dashboard_writer")
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+DELETE\\s+ON\\s+dashboard_user\\s*,\\s*dashboard_user_invite"
+                    + "\\s+TO\\s+dashboard_writer"));
+    // Additive only: V7 grants DELETE and nothing else, and never touches dashboard_readonly (it
+    // stays strictly SELECT-only — a live-tenant delete has no path through the readonly role).
+    assertThat(sql)
+        .as("V7 grants only DELETE (never widens SELECT/INSERT/UPDATE)")
+        .doesNotContainPattern(
+            Pattern.compile("GRANT\\s+[A-Z, ]*(SELECT|INSERT|UPDATE)", Pattern.CASE_INSENSITIVE));
+    assertThat(sql)
+        .as("V7 must not reference dashboard_readonly")
+        .doesNotContain("dashboard_readonly");
+  }
 }
