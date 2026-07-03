@@ -106,6 +106,20 @@ class DbBrokerCredentialSourceTest {
   }
 
   @Test
+  void livePodWithFlagOnAndWhitespaceOnlyExpectedAccountFailsClosed() {
+    // Whitespace-only expected_account_id must ALSO fail closed: the seal uses isBlank() (not
+    // isEmpty()) to match BrokerAccountIdentityVerifier.verify()'s no-op predicate EXACTLY —
+    // otherwise "  " slips the seal (isEmpty()==false) yet skips identity verification
+    // (isBlank()==true), serving a live credential with no account binding.
+    BrokerCredentialCrypto.Envelope env = envelope("alice", "live-key", "live-secret", "   ");
+    DbBrokerCredentialSource src = source(LIVE, true, rowDsl(env, LIVE_HOST, "wss://live", "   "));
+
+    assertThatThrownBy(() -> src.resolve("alice", PROVIDER))
+        .isInstanceOf(ApplicationFailure.class)
+        .hasMessageContaining("expected_account_id");
+  }
+
+  @Test
   void livePodWithFlagOnAndNullExpectedAccountFailsClosed() {
     // A null column coalesces to "" and must also fail closed.
     BrokerCredentialCrypto.Envelope env = envelope("alice", "live-key", "live-secret", "");

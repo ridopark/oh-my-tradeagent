@@ -146,8 +146,10 @@ public class DbBrokerCredentialSource implements BrokerCredentialSource {
     // expected_account_id would silently disable the P2 account-identity assertion
     // (BrokerAccountIdentityVerifier.verify() no-ops on blank), so a live tenant MUST declare the
     // account its keys authenticate. Checked here — after resolveTenant() and the row read — so it
-    // covers the ACCOUNT_LEVEL sentinel path too, and BEFORE any credential is returned.
-    if (live && expected.isEmpty()) {
+    // covers the ACCOUNT_LEVEL sentinel path too, and BEFORE any credential is returned. Uses
+    // isBlank() (NOT isEmpty()) to match the verifier's no-op predicate EXACTLY — a whitespace-only
+    // value must not slip the seal and then skip verification.
+    if (live && expected.isBlank()) {
       throw unavailable(
           "missing/blank required 'expected_account_id' for tenant="
               + tenant
