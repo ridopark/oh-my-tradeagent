@@ -14,24 +14,27 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * UI-P2-a inbound service-token gate for the {@code /broker-credentials} route ONLY. Every request
- * to that route must carry {@code Authorization: Bearer <API_GATEWAY_SHARED_TOKEN>} or it is
- * rejected 401 before the controller runs. Combined with the route being reachable only from the
+ * UI-P2-a inbound service-token gate. Every request to a gated route must carry {@code
+ * Authorization: Bearer <API_GATEWAY_SHARED_TOKEN>} or it is rejected 401 before the controller
+ * runs. For {@code /broker-credentials}, combined with the route being reachable only from the
  * dashboard server (NetworkPolicy lands in UI-P2-c), this makes the dashboard the sole possible
  * caller — so the {@code X-Tenant-Id} it asserts can be trusted.
  *
  * <p><b>Route-scoped.</b> {@link #shouldNotFilter} returns true for everything except paths under
- * {@code /broker-credentials} (UI-P2-a) and {@code /admin/tenants/} (Phase F one-click
- * activation/deactivation), so the existing operator routes ({@code /positions}, {@code
- * /promotion}, …) are untouched — they keep their current header-trust behavior.
+ * {@code /broker-credentials} (UI-P2-a), {@code /admin/tenants/} (Phase F one-click
+ * activation/deactivation), and {@code /internal/copytrade-fanout-targets} (Phase B1 sidecar
+ * registry poll), so the existing operator routes ({@code /positions}, {@code /promotion}, …) are
+ * untouched — they keep their current header-trust behavior.
  *
  * <p><b>Dark by default.</b> Active when ANY of {@code broker.credentials.write.enabled=true},
- * {@code operator.activation.enabled=true}, {@code operator.tenant-create.enabled=true}, or {@code
- * operator.credential-write.enabled=true}; with all unset the filter bean does not exist (just like
- * the controllers). When present it bearer-gates BOTH route prefixes. The {@code /admin/tenants/}
- * prefix covers the Phase F activation routes, the Phase I-1b create-tenant route, AND the Phase
- * I-1c operator credential-write route — so EVERY flag that activates an {@code /admin/tenants/}
- * controller MUST also be in this expression, or that route would be reachable unauthenticated.
+ * {@code operator.activation.enabled=true}, {@code operator.tenant-create.enabled=true}, {@code
+ * operator.credential-write.enabled=true}, or {@code copytrade.fanout.enabled=true}; with all unset
+ * the filter bean does not exist (just like the controllers). When present it bearer-gates ALL
+ * three route prefixes. The {@code /admin/tenants/} prefix covers the Phase F activation routes,
+ * the Phase I-1b create-tenant route, AND the Phase I-1c operator credential-write route; the
+ * {@code /internal/copytrade-fanout-targets} prefix covers the Phase B1 fan-out registry (a
+ * SERVICE-token route, not operator-scoped) — so EVERY flag that activates ANY of these gated
+ * controllers MUST also be in this expression, or that route would be reachable unauthenticated.
  *
  * <p>Mirrors the tenant-dashboard-bff filter: constant-time token compare (no timing side-channel)
  * and a prod fail-fast on the well-known default token (a pod started under the {@code prod}
@@ -43,13 +46,19 @@ import org.springframework.web.filter.OncePerRequestFilter;
     "${broker.credentials.write.enabled:false} or ${operator.activation.enabled:false}"
         + " or ${operator.tenant-create.enabled:false}"
         + " or ${operator.credential-write.enabled:false}"
-        + " or ${operator.strategy-enable.enabled:false}")
+        + " or ${operator.strategy-enable.enabled:false}"
+        + " or ${copytrade.fanout.enabled:false}")
 public class ServiceTokenFilter extends OncePerRequestFilter {
 
   private static final String BEARER_PREFIX = "Bearer ";
   static final String ROUTE_PREFIX = "/broker-credentials";
   // Phase F: the one-click activation/deactivation admin route is bearer-gated too.
   static final String ADMIN_ROUTE_PREFIX = "/admin/tenants/";
+  // Phase B1: the copytrade fan-out registry route the sidecar polls. The caller is a SERVICE, so a
+  // shared service-token bearer gates it (NOT the X-Operator-Id allowlist). Every flag that
+  // activates this route MUST also be in the @ConditionalOnExpression above, or the route would be
+  // reachable unauthenticated.
+  static final String INTERNAL_FANOUT_ROUTE_PREFIX = "/internal/copytrade-fanout-targets";
   // The application.yml fallback used for local dev. Accepting it under prod would silently trust a
   // value anyone can read from this repo.
   private static final String INSECURE_DEFAULT_TOKEN = "dev-shared-token";
@@ -72,9 +81,12 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   @Override
   protected boolean shouldNotFilter(HttpServletRequest request) {
     String path = request.getRequestURI();
-    // Filter ONLY the credential-write route and the Phase F admin activation route; every other
-    // route passes straight through.
-    return path == null || !(path.startsWith(ROUTE_PREFIX) || path.startsWith(ADMIN_ROUTE_PREFIX));
+    // Filter ONLY the credential-write route, the Phase F admin activation route, and the Phase B1
+    // internal fan-out route; every other route passes straight through.
+    return path == null
+        || !(path.startsWith(ROUTE_PREFIX)
+            || path.startsWith(ADMIN_ROUTE_PREFIX)
+            || path.startsWith(INTERNAL_FANOUT_ROUTE_PREFIX));
   }
 
   @Override
