@@ -1,5 +1,6 @@
 package com.ohmytradeagent.apigateway.web;
 
+import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.StrategyConfigUpdateRequest;
 import com.ohmytradeagent.contract.StrategyConfigUpdateResult;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
@@ -12,6 +13,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,10 +67,18 @@ public class StrategyConfigController {
 
   private final WorkflowClient workflowClient;
   private final TenantContext ctx;
+  private final StrategyConfigReader reader;
+  private final VerifiedAccountGuard guard;
 
-  public StrategyConfigController(WorkflowClient workflowClient, TenantContext ctx) {
+  public StrategyConfigController(
+      WorkflowClient workflowClient,
+      TenantContext ctx,
+      StrategyConfigReader reader,
+      VerifiedAccountGuard guard) {
     this.workflowClient = workflowClient;
     this.ctx = ctx;
+    this.reader = reader;
+    this.guard = guard;
   }
 
   @PostMapping
@@ -81,6 +91,34 @@ public class StrategyConfigController {
     // (b) cross-tenant guard — coarse 403, no detail (no oracle).
     if (body == null || !tenant.equals(body.tenantId())) {
       throw new ResponseStatusException(HttpStatus.FORBIDDEN);
+    }
+
+    // (b2) arm-guard (A1): a false→true (disabled→armed) transition is rejected unless a verified
+    // broker account exists — the same bypass-proof check the operator enable route runs, so the
+    // settings-page path cannot arm an unverified tenant either. ONLY the arming transition is
+    // gated; disabling and every other SAFE edit are untouched.
+    if (proposedArmed(body.config())) {
+      Optional<StrategyConfigReader.Stored> stored = reader.read(tenant, body.strategyId());
+      // A transition only when a stored row exists and is explicitly disabled (enabled==false).
+      // Stored absent-enabled (schema-default true) is already ARMED → an edit-while-armed, not an
+      // arming transition → not re-gated. No stored row → the writer returns NOT_FOUND anyway.
+      if (stored.isPresent() && Boolean.FALSE.equals(stored.get().config().getEnabled())) {
+        StrategyConfig storedConfig = stored.get().config();
+        String storedBrokerTarget =
+            storedConfig.getBrokerTarget() == null ? null : storedConfig.getBrokerTarget().value();
+        switch (guard.evaluate(tenant, storedBrokerTarget)) {
+          case ALLOW -> {
+            /* proceed */
+          }
+          case REJECT_UNVERIFIED ->
+              throw new ResponseStatusException(
+                  HttpStatus.UNPROCESSABLE_ENTITY, "REJECTED_UNVERIFIED_ACCOUNT");
+          case REJECT_UNSUPPORTED_TARGET ->
+              throw new ResponseStatusException(
+                  HttpStatus.UNPROCESSABLE_ENTITY, "REJECTED_UNSUPPORTED_TARGET");
+          case FAULT -> throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
+        }
+      }
     }
 
     String correlationId =
@@ -161,5 +199,15 @@ public class StrategyConfigController {
 
   private static Map<String, Object> statusBody(StrategyConfigUpdateResult.Outcome outcome) {
     return Map.of("status", outcome.value());
+  }
+
+  /**
+   * Whether the proposed config would leave the strategy ARMED. The runtime gate treats a config as
+   * armed unless {@code enabled} is explicitly {@code false} ({@code CopytradeSignalWorkflowImpl}),
+   * so {@code enabled==true} AND {@code enabled} absent (schema-default true) both count as armed.
+   * Only a {@code false} proposal (disabling) is NOT armed → never gated.
+   */
+  private static boolean proposedArmed(StrategyConfig proposed) {
+    return proposed == null || !Boolean.FALSE.equals(proposed.getEnabled());
   }
 }

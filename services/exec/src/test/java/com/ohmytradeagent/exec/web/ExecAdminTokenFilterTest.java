@@ -56,6 +56,31 @@ class ExecAdminTokenFilterTest {
   }
 
   @Test
+  void accountReadSubPath_withoutToken_is401() throws Exception {
+    // C3: the A1 read endpoint lives UNDER the credential route prefix, not at the exact base — it
+    // must still be bearer-gated (an exact-equals gate would skip it → unauthenticated account
+    // read).
+    MockFilterChain chain = new MockFilterChain();
+    MockHttpServletResponse res = run("/internal/broker-credentials/acme/account", null, chain);
+    assertThat(res.getStatus()).isEqualTo(401);
+    assertThat(chain.getRequest()).isNull(); // handler never reached
+  }
+
+  @Test
+  void accountReadSubPath_withCorrectToken_passesThroughToHandler() throws Exception {
+    MockHttpServletRequest req =
+        new MockHttpServletRequest("GET", "/internal/broker-credentials/acme/account");
+    req.addHeader("Authorization", "Bearer " + TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
+  @Test
   void nonCredentialRoute_isNotFiltered_evenWithoutToken() throws Exception {
     // Route-scoped: the worker / actuator / any other path must be untouched by this filter.
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/actuator/health/readiness");

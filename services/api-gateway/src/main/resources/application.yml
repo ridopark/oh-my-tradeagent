@@ -74,6 +74,11 @@ operator:
   # Phase I operator credential paste/write (OperatorBrokerCredentialController).
   credential-write:
     enabled: ${OPERATOR_CREDENTIAL_WRITE_ENABLED:false}
+  # A1 (self-service-copytrade-onboarding) operator enable route (OperatorStrategyEnableController).
+  # DARK by default: unset → the enable route 404s. When true it also brings up ServiceTokenFilter
+  # (bearer gate) + the exec RestClient (verified-account read).
+  strategy-enable:
+    enabled: ${OPERATOR_STRATEGY_ENABLE_ENABLED:false}
   # Config surface for the backend operator allowlist (defense-in-depth). The enforcement
   # (requireAllowlistedOperator → 403 on the admin routes) is in place. FAIL-CLOSED: unset/blank =
   # deny-all → every admin route 403s. Set to the authorized operator email(s), comma-separated, and

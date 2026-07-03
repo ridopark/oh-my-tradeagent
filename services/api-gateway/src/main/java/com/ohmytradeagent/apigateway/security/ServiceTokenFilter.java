@@ -42,7 +42,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @ConditionalOnExpression(
     "${broker.credentials.write.enabled:false} or ${operator.activation.enabled:false}"
         + " or ${operator.tenant-create.enabled:false}"
-        + " or ${operator.credential-write.enabled:false}")
+        + " or ${operator.credential-write.enabled:false}"
+        + " or ${operator.strategy-enable.enabled:false}")
 public class ServiceTokenFilter extends OncePerRequestFilter {
 
   private static final String BEARER_PREFIX = "Bearer ";

@@ -84,6 +84,14 @@ public class CreateTenantController {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
     }
 
+    // A1 invariant (C2): a newly-created tenant is ALWAYS created DISABLED. The runtime gate treats
+    // enabled:true AND enabled:absent (schema-default true) both as ARMED, so persisting the
+    // operator's config verbatim would let create arm a tenant that has no verified broker account
+    // —
+    // bypassing the arm-guard entirely. Force enabled=false here so arming can ONLY happen through
+    // the guarded enable route (POST /admin/tenants/{tenant}/strategies/{strategy}/enable).
+    body.config().setEnabled(false);
+
     String correlationId =
         (body.correlationId() != null && !body.correlationId().isBlank())
             ? body.correlationId()

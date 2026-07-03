@@ -61,10 +61,13 @@ public class ExecAdminTokenFilter extends OncePerRequestFilter {
 
   @Override
   protected boolean shouldNotFilter(HttpServletRequest request) {
-    // Scope the auth to the credential route ONLY. Everything else (actuator, the worker) is
-    // untouched — this filter must not change any existing behavior.
+    // Scope the auth to the credential route and its sub-paths ONLY. Everything else (actuator, the
+    // worker) is untouched. The PREFIX match (not an exact equals) is load-bearing: the A1 read
+    // endpoint lives at /internal/broker-credentials/{tenant}/account — an exact-equals gate would
+    // SKIP it, leaving the account/tenant-enumeration read unauthenticated.
     String path = request.getRequestURI();
-    return path == null || !path.equals(CREDENTIAL_ROUTE);
+    return path == null
+        || !(path.equals(CREDENTIAL_ROUTE) || path.startsWith(CREDENTIAL_ROUTE + "/"));
   }
 
   @Override
