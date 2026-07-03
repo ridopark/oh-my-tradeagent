@@ -8,20 +8,17 @@ import { useState, useTransition } from "react";
 // delete route, and redirects with a coarse result. Mirrors ActivateButton's shape (useTransition +
 // dark-launch gate) with an added type-to-confirm modal — deleting a tenant is irreversible.
 //
-// Two guards, both client-side and both re-enforced server-side:
-//   1. writeEnabled (the OPERATOR_TENANT_DELETE_ENABLED dark gate) — when false the trigger is
-//      disabled/greyed with a hint and can never open the modal. The api-gateway route is itself dark
-//      (404s) until its own flag is on, so this is the UI-side half of the same gate.
-//   2. type-to-confirm — the "Delete tenant" confirm button stays DISABLED until the operator types
-//      the EXACT tenant id (case-sensitive, exact match).
+// Dark gate: the page renders this affordance ONLY inside its OPERATOR_TENANT_DELETE_ENABLED guard
+// (and only for a NOT-live, all-dark tenant), so the button never appears when the feature is off —
+// the api-gateway route is itself dark (404s) until its own flag is on. The remaining client guard,
+// re-enforced server-side, is type-to-confirm: the "Delete tenant" confirm button stays DISABLED
+// until the operator types the EXACT tenant id (case-sensitive, exact match).
 export function DeleteTenantButton({
   tenantId,
   action,
-  writeEnabled,
 }: {
   tenantId: string;
   action: (formData: FormData) => void | Promise<void>;
-  writeEnabled: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
@@ -30,7 +27,7 @@ export function DeleteTenantButton({
   // Case-sensitive, exact match — the whole point of the confirm is that a fat-fingered id does NOT
   // arm the delete.
   const confirmMatches = typed === tenantId;
-  const triggerDisabled = !writeEnabled || pending;
+  const triggerDisabled = pending;
 
   function close() {
     setOpen(false);
@@ -42,7 +39,6 @@ export function DeleteTenantButton({
       <button
         type="button"
         disabled={triggerDisabled}
-        title={writeEnabled ? undefined : "Tenant deletion not enabled"}
         aria-label={`Delete tenant ${tenantId}`}
         onClick={() => {
           if (triggerDisabled) return;

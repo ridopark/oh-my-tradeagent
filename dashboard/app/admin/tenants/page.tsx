@@ -312,7 +312,6 @@ export default async function AdminTenantsPage({
             <DeleteTenantButton
               tenantId={item.tenant_id}
               action={deleteTenantAction}
-              writeEnabled={TENANT_DELETE_ENABLED}
             />
           );
         }
