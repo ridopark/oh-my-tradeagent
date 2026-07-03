@@ -11,6 +11,8 @@ import org.jooq.Record;
 import org.jooq.Result;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Repository;
@@ -41,6 +43,8 @@ import org.springframework.stereotype.Repository;
 @Repository
 @ConditionalOnProperty(name = "dashboard.writer.enabled", havingValue = "true")
 public class InviteWriterRepository {
+
+  private static final Logger log = LoggerFactory.getLogger(InviteWriterRepository.class);
 
   private final DSLContext writerDsl;
 
@@ -158,6 +162,47 @@ public class InviteWriterRepository {
         });
     return granted;
   }
+
+  /**
+   * Delete EVERY dashboard identity for a tenant — its bound members ({@code dashboard_user}) and
+   * any open/consumed invites ({@code dashboard_user_invite}) — in ONE transaction, as the last
+   * store in the operator tenant-delete teardown (Phase 3). Returns the rows removed from each
+   * table.
+   *
+   * <p>Idempotent by construction: a second call, or a tenant that never had a dashboard identity,
+   * deletes 0 rows and succeeds without throwing.
+   *
+   * <p>Privilege note: a tenant-scoped {@code DELETE ... WHERE tenant_id = ?} reads {@code
+   * tenant_id} to evaluate its predicate, so in PostgreSQL it needs SELECT on that column IN
+   * ADDITION to DELETE — the same rule behind {@link #bindMatchingInvites}'s {@code ON CONFLICT}
+   * SELECT requirement. V7 grants the writer DELETE on both tables plus COLUMN-scoped {@code SELECT
+   * (tenant_id)} on {@code dashboard_user} (invite already had table SELECT from V5), so the WHERE
+   * evaluates while PII (provider/subject/email) stays unreadable to the writer.
+   *
+   * @param tenantId the tenant whose dashboard identities to remove (a SQL bind param; never
+   *     interpolated)
+   */
+  public DeletedIdentityCounts deleteTenantIdentities(String tenantId) {
+    DeletedIdentityCounts counts =
+        writerDsl.transactionResult(
+            cfg -> {
+              DSLContext tx = DSL.using(cfg);
+              int users = tx.execute("DELETE FROM dashboard_user WHERE tenant_id = ?", tenantId);
+              int invites =
+                  tx.execute("DELETE FROM dashboard_user_invite WHERE tenant_id = ?", tenantId);
+              return new DeletedIdentityCounts(users, invites);
+            });
+    // Tenant id + counts only — never the deleted members' emails/subjects.
+    log.info(
+        "deleted dashboard identities for tenant {}: users={} invites={}",
+        tenantId,
+        counts.users(),
+        counts.invites());
+    return counts;
+  }
+
+  /** Rows removed by {@link #deleteTenantIdentities} (no PII; safe to echo to the operator). */
+  public record DeletedIdentityCounts(int users, int invites) {}
 
   /** True iff the exception (or a cause) is a Postgres unique-violation (SQLState 23505). */
   private static boolean isUniqueViolation(DataAccessException e) {

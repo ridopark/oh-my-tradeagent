@@ -105,4 +105,40 @@ class DashboardMigrationSqlStructureTest {
         .as("V5 must not widen or even reference dashboard_readonly (C7)")
         .doesNotContain("dashboard_readonly");
   }
+
+  @Test
+  void v7GrantsDeletePlusColumnScopedTenantIdSelect_andNothingElse() throws IOException {
+    String sql = executableSql("/db/dashboard/V7__grant_delete_dashboard_writer.sql");
+
+    // The Phase 3 teardown grant: DELETE on BOTH identity tables to the writer, in one combined
+    // GRANT naming both tables (order-insensitive) so the operator delete can remove a dark
+    // tenant's members + open invites.
+    assertThat(sql)
+        .as("V7 grants DELETE on both identity tables to dashboard_writer")
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+DELETE\\s+ON\\s+dashboard_user\\s*,\\s*dashboard_user_invite"
+                    + "\\s+TO\\s+dashboard_writer"));
+    // The ONLY SELECT V7 grants is COLUMN-SCOPED to tenant_id on dashboard_user — required because
+    // a
+    // tenant-scoped DELETE ... WHERE tenant_id=? must read tenant_id (PG needs SELECT on the column
+    // to evaluate the predicate). This keeps PII (provider/subject/email) unreadable to the writer.
+    assertThat(sql)
+        .as("V7 grants the column-scoped SELECT (tenant_id) the DELETE WHERE requires")
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+SELECT\\s*\\(\\s*tenant_id\\s*\\)\\s+ON\\s+dashboard_user"
+                    + "\\s+TO\\s+dashboard_writer"));
+    // No TABLE-WIDE SELECT (that would expose PII), and no INSERT/UPDATE widening at all. A
+    // table-level SELECT grant is `GRANT SELECT ON ...` (SELECT immediately followed by ON, no
+    // column list); the allowed column form is `GRANT SELECT (tenant_id) ON ...`.
+    assertThat(sql)
+        .as("V7 must not grant table-wide SELECT (would expose PII) nor any INSERT/UPDATE")
+        .doesNotContainPattern(
+            Pattern.compile(
+                "GRANT\\s+[A-Z, ]*(SELECT\\s+ON|INSERT|UPDATE)", Pattern.CASE_INSENSITIVE));
+    assertThat(sql)
+        .as("V7 must not reference dashboard_readonly")
+        .doesNotContain("dashboard_readonly");
+  }
 }
