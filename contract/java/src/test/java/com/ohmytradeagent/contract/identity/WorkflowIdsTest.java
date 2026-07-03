@@ -46,6 +46,29 @@ class WorkflowIdsTest {
   }
 
   /**
+   * PLAN-2026-07-03 Phase 4: the tenant-delete teardown workflow id IS strategy-scoped (routes
+   * through {@link WorkflowIds#tenantStrategy}) with a {@code /tenant-delete/} segment +
+   * correlation id. api-gateway's {@code TenantDeleteWorkflowClient} and the orchestrator {@code
+   * TenantDeleteWorkflow} must agree on this literal.
+   */
+  @Test
+  void tenantDeleteIsTheTenantStrategyShapeWithCorrelationId() {
+    assertThat(WorkflowIds.tenantDelete("acme", "copytrade-v1", "corr-123"))
+        .isEqualTo("t-acme/s-copytrade-v1/tenant-delete/corr-123");
+  }
+
+  /**
+   * PLAN-2026-07-03 Phase 4: the audit-emit workflow id is keyed by {@code correlationId} + event
+   * {@code kind}, with a caller-supplied {@code uuid} for per-event uniqueness (no {@code
+   * tenantStrategy} routing, best-effort audit).
+   */
+  @Test
+  void auditEmitIsCorrelationKindUuidShape() {
+    assertThat(WorkflowIds.auditEmit("corr-123", "TenantDeleteRequested", "uuid-abc"))
+        .isEqualTo("audit-emit/corr-123/TenantDeleteRequested/uuid-abc");
+  }
+
+  /**
    * Phase 6: the account-level kill switch is tenant-scoped (NO {@code s-} segment) — the cap spans
    * every strategy on the tenant's shared broker_target.
    */

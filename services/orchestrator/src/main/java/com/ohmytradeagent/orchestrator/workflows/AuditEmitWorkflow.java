@@ -12,8 +12,7 @@ import io.temporal.workflow.WorkflowMethod;
  * workflow and awaiting its (void) result.
  *
  * <p>Net-new workflow type → no {@code Workflow.getVersion} change-point. Deterministic (the
- * event_id + occurred_at are filled from {@code Workflow.*}) and idempotent (a fixed workflow id +
- * REJECT_DUPLICATE reuse policy on the caller side dedups a retried emit).
+ * event_id + occurred_at are filled from {@code Workflow.*}).
  */
 @WorkflowInterface
 public interface AuditEmitWorkflow {

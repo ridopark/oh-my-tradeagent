@@ -52,9 +52,13 @@ public class BrokerCredentialDeleteForwarder {
                     "exec broker-credentials delete returned " + status.value());
               }
               Map<?, ?> parsed = response.bodyTo(Map.class);
-              Object deleted = parsed == null ? null : parsed.get("deleted");
-              return deleted instanceof Number n ? n.intValue() : 0;
+              return intOf(parsed, "deleted");
             },
             false);
+  }
+
+  private static int intOf(Map<?, ?> body, String key) {
+    Object v = body == null ? null : body.get(key);
+    return v instanceof Number n ? n.intValue() : 0;
   }
 }

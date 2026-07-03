@@ -230,13 +230,12 @@ public class TenantDeleteController {
 
     // ---- All pre-flight passed → orchestrate (idempotent, disarm-first, re-runnable) ----
     long startMillis = System.currentTimeMillis();
-    String primaryStrategy = rows.get(0).strategyId();
 
     // 1. TenantDeleteRequested.
     audit.emit(
         "TenantDeleteRequested",
         tenant,
-        primaryStrategy,
+        primary,
         actor,
         correlationId,
         requestedSubject(tenant, confirm, operator, rows));
@@ -285,8 +284,7 @@ public class TenantDeleteController {
     }
 
     // 4. + 5. Downstream store deletes (the workflow already deleted strategy_config + tombstone).
-    List<String> completedSteps = new ArrayList<>();
-    completedSteps.add("strategy_config");
+    // completedSteps is derived from deletedStores' (insertion-ordered) keys at each use site.
     Map<String, Object> deletedStores = new LinkedHashMap<>();
     deletedStores.put("strategy_config", rows.size());
 
@@ -296,23 +294,32 @@ public class TenantDeleteController {
       for (String provider : distinctPaperProviders(rows)) {
         credsDeleted += execCreds.delete(tenant, provider);
       }
-      completedSteps.add("broker_credentials");
       deletedStores.put("broker_credentials", credsDeleted);
     } catch (RuntimeException e) {
       return stepFailed(
-          tenant, primaryStrategy, actor, correlationId, "broker_credentials", completedSteps, e);
+          tenant,
+          primary,
+          actor,
+          correlationId,
+          "broker_credentials",
+          new ArrayList<>(deletedStores.keySet()),
+          e);
     }
 
     // 5. BFF dashboard_user + dashboard_user_invite delete.
     try {
       DashboardRowsDeleteForwarder.DeletedCounts counts = dashboardRows.delete(tenant, operator);
-      completedSteps.add("dashboard_user");
-      completedSteps.add("dashboard_user_invite");
       deletedStores.put("dashboard_user", counts.users());
       deletedStores.put("dashboard_user_invite", counts.invites());
     } catch (RuntimeException e) {
       return stepFailed(
-          tenant, primaryStrategy, actor, correlationId, "dashboard_user", completedSteps, e);
+          tenant,
+          primary,
+          actor,
+          correlationId,
+          "dashboard_user",
+          new ArrayList<>(deletedStores.keySet()),
+          e);
     }
 
     // 6. TenantDeleteCompleted.
@@ -321,8 +328,7 @@ public class TenantDeleteController {
     completedSubject.put("deleted_stores", deletedStores);
     completedSubject.put("retained_stores", RETAINED_STORES);
     completedSubject.put("duration_ms", durationMs);
-    audit.emit(
-        "TenantDeleteCompleted", tenant, primaryStrategy, actor, correlationId, completedSubject);
+    audit.emit("TenantDeleteCompleted", tenant, primary, actor, correlationId, completedSubject);
 
     Map<String, Object> ok = new LinkedHashMap<>();
     ok.put("status", "DELETED");

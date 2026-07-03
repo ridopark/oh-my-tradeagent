@@ -1,5 +1,6 @@
 package com.ohmytradeagent.apigateway.web;
 
+import java.util.Map;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatusCode;
@@ -39,7 +40,7 @@ public class DashboardRowsDeleteForwarder {
                 throw new IllegalStateException(
                     "bff dashboard-rows delete returned " + status.value());
               }
-              java.util.Map<?, ?> parsed = response.bodyTo(java.util.Map.class);
+              Map<?, ?> parsed = response.bodyTo(Map.class);
               int users = intOf(parsed, "deleted_users");
               int invites = intOf(parsed, "deleted_invites");
               return new DeletedCounts(users, invites);
@@ -47,7 +48,7 @@ public class DashboardRowsDeleteForwarder {
             false);
   }
 
-  private static int intOf(java.util.Map<?, ?> body, String key) {
+  private static int intOf(Map<?, ?> body, String key) {
     Object v = body == null ? null : body.get(key);
     return v instanceof Number n ? n.intValue() : 0;
   }

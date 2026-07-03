@@ -1,5 +1,6 @@
 package com.ohmytradeagent.apigateway.web;
 
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.workflows.AuditEmitRequest;
 import com.ohmytradeagent.orchestrator.workflows.AuditEmitWorkflow;
 import io.temporal.client.WorkflowClient;
@@ -63,7 +64,8 @@ public class TenantDeleteAuditEmitter {
       WorkflowOptions opts =
           WorkflowOptions.newBuilder()
               .setTaskQueue(taskQueue)
-              .setWorkflowId("audit-emit/" + correlationId + "/" + kind + "/" + UUID.randomUUID())
+              .setWorkflowId(
+                  WorkflowIds.auditEmit(correlationId, kind, UUID.randomUUID().toString()))
               .setWorkflowRunTimeout(WORKFLOW_RUN_TIMEOUT)
               .build();
       AuditEmitWorkflow stub = workflowClient.newWorkflowStub(AuditEmitWorkflow.class, opts);

@@ -45,8 +45,7 @@ public class TenantDeleteWorkflowClient {
     WorkflowOptions opts =
         WorkflowOptions.newBuilder()
             .setTaskQueue(taskQueue)
-            .setWorkflowId(
-                WorkflowIds.tenantStrategy(tenant, strategy) + "/tenant-delete/" + correlationId)
+            .setWorkflowId(WorkflowIds.tenantDelete(tenant, strategy, correlationId))
             .setWorkflowRunTimeout(WORKFLOW_RUN_TIMEOUT)
             .build();
     TenantDeleteWorkflow stub = workflowClient.newWorkflowStub(TenantDeleteWorkflow.class, opts);
