@@ -54,6 +54,15 @@ psql_q() {
   $KUBECTL exec -i -n "$NS" postgres-0 -- \
     bash -lc 'psql -U "$POSTGRES_USER" -d "'"$1"'" -tAqX'
 }
+# count_q <db> — SQL on stdin; echoes an integer, or returns 1 (empty) when the
+# query / exec failed or returned non-numeric. Lets callers distinguish a genuine
+# "0" from an UNREADABLE result — an unreadable anomaly query must NOT read as clean.
+count_q() {
+  local out
+  out=$(psql_q "$1") || true
+  [[ "$out" =~ ^[0-9]+$ ]] && { printf '%s' "$out"; return 0; }
+  return 1
+}
 ADMIN_POD=$($KUBECTL get pods -n "$TEMPORAL_NS" -o name 2>/dev/null | grep admintools | head -1 | cut -d/ -f2)
 # tq <workflow-id> <query-type>
 tq() {
@@ -68,6 +77,7 @@ check_ks() {
   st=$(tq "$1" "$2")
   if [ -z "$st" ]; then
     log "WARN: could not read kill-switch state for $1"
+    degraded=1
   elif printf '%s' "$st" | grep -q '"tripped":true'; then
     reason=$(printf '%s' "$st" | grep -o '"reason":"[^"]*"' | head -1)
     anomalies+=("KILL SWITCH TRIPPED: $1 ${reason:-}")
@@ -75,12 +85,14 @@ check_ks() {
 }
 
 anomalies=()
+degraded=0   # set when a check could not run (unreadable) — suppresses a false ALL CLEAR
 
 # ---- (d) kill switches (per-strategy + account) -----------------------------
 # workflow-id shapes mirror the Java WorkflowIds (killswitch / accountKillswitch);
 # no generated bash artifact exists, so the shape is duplicated here (single-site).
 if [ -z "$ADMIN_POD" ]; then
   log "WARN: temporal admintools pod not found in ns=$TEMPORAL_NS — kill-switch + open-position checks skipped"
+  degraded=1
 else
   # MAINTENANCE: add every ENABLED prod_real strategy here. A strategy omitted from
   # this list has its kill switch UNMONITORED → a tripped switch would show as a
@@ -92,22 +104,24 @@ else
 fi
 
 # ---- (e) blocked / stuck live orders (403 40310000 = account re-block) -------
-blocked=$(psql_q "$LIVE_DB" <<'SQL'
+if blocked=$(count_q "$LIVE_DB" <<'SQL'
 SELECT count(*) FROM order_intent_journal
 WHERE recorded_at > now() - interval '2 days'
   AND state = 'RECORDED'
   AND (last_error LIKE '%40310000%' OR last_error LIKE '%403%');
 SQL
-)
-if [ "${blocked:-0}" -gt 0 ] 2>/dev/null; then
-  anomalies+=("$blocked live order(s) stuck RECORDED with 403/40310000 — account re-blocked")
+); then
+  [ "$blocked" -gt 0 ] && anomalies+=("$blocked live order(s) stuck RECORDED with 403/40310000 — account re-blocked")
+else
+  log "WARN: 403-block query failed (exec_alpaca_live unreadable) — cannot confirm account-block state"
+  degraded=1
 fi
 
 # ---- (c) failure / ongoing-orphan lifecycle events today --------------------
 # Deliberately excludes the benign PositionOrphanSuppressedSiblingOwner and the
 # one-shot PositionOrphan (often a recon false-positive); only the *ongoing* /
 # retry-exhausted / flatten-exit-failure kinds are hard anomalies.
-fails=$(psql_q orchestrator <<SQL
+if fails=$(count_q orchestrator <<SQL
 SELECT count(*) FROM audit_log
 WHERE tenant_id = '$TENANT'
   AND occurred_at::date = (now() AT TIME ZONE 'America/New_York')::date
@@ -115,9 +129,11 @@ WHERE tenant_id = '$TENANT'
                'PartialExitPlaceFailed','PartialExitRetryExhausted',
                'PositionOrphanOngoing','JournalOrphanOngoing');
 SQL
-)
-if [ "${fails:-0}" -gt 0 ] 2>/dev/null; then
-  anomalies+=("$fails prod_real flatten/exit-failure or ongoing-orphan event(s) today")
+); then
+  [ "$fails" -gt 0 ] && anomalies+=("$fails prod_real flatten/exit-failure or ongoing-orphan event(s) today")
+else
+  log "WARN: lifecycle-failure query failed (orchestrator audit_log unreadable) — cannot confirm flatten/orphan state"
+  degraded=1
 fi
 
 # ---- scorecard context: open positions + today's fills ----------------------
@@ -133,16 +149,22 @@ if [ -n "$ADMIN_POD" ]; then
     --query 'WorkflowType="PositionWorkflow" AND ExecutionStatus="Running"' 2>/dev/null \
     | grep -c "$TENANT")
 fi
-fills=$(psql_q "$LIVE_DB" <<'SQL'
+fills=$(count_q "$LIVE_DB" <<'SQL'
 SELECT count(*) FROM order_intent_journal
 WHERE state = 'FILLED'
   AND recorded_at::date = (now() AT TIME ZONE 'America/New_York')::date;
 SQL
-)
+) || fills="?"   # context only — show "?" (not a misleading 0) when unreadable
 
 # ---- classify + alert -------------------------------------------------------
 if [ "${#anomalies[@]}" -eq 0 ]; then
-  log "prod_real ALL CLEAR — open=$open_pos fills_today=${fills:-0}; kill switches OK; no 403/flatten/orphan."
+  if [ "$degraded" -eq 1 ]; then
+    # A check could not run — do NOT claim ALL CLEAR. Distinct exit 2 so a wrapper
+    # can page on persistent inability to monitor; no Discord (avoid transient-blip spam).
+    log "prod_real DEGRADED — a check could not run (see WARN above); NOT confirmed clear. open=$open_pos fills_today=$fills"
+    exit 2
+  fi
+  log "prod_real ALL CLEAR — open=$open_pos fills_today=$fills; kill switches OK; no 403/flatten/orphan."
   exit 0
 fi
 
