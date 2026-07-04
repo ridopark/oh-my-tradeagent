@@ -7,6 +7,8 @@ import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCrypto;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import org.jooq.DSLContext;
+import org.jooq.Record;
+import org.jooq.Result;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -187,7 +189,7 @@ public class BrokerCredentialWriter {
     // index remains the race-proof authority; this SELECT turns the common case into a clean 409.
     // Excludes the current tenant so re-saving one's OWN row (key rotation) is never blocked.
     if (declaredAccountId != null && !declaredAccountId.isBlank()) {
-      org.jooq.Result<org.jooq.Record> owners =
+      Result<Record> owners =
           dsl.fetch(
               "SELECT tenant_id FROM broker_credentials"
                   + " WHERE provider = ? AND expected_account_id = ? AND tenant_id <> ?",

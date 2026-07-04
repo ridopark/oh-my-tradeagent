@@ -6,6 +6,11 @@
 -- (paper accounts are unconstrained). This is the race-proof, fail-closed
 -- authority; the BrokerCredentialWriter pre-persist check turns the same
 -- collision into a clean 409 instead of a raw constraint violation.
+--
+-- The predicate uses TRIM(...) <> '' (not <> '') so a whitespace-only value is
+-- treated as blank/unconstrained here EXACTLY as the writer + read-path live
+-- seals treat it (Java String.isBlank()) — keeping the SQL and Java notions of
+-- "blank" consistent across the two enforcement layers.
 CREATE UNIQUE INDEX broker_credentials_provider_account_uk
   ON broker_credentials (provider, expected_account_id)
-  WHERE expected_account_id IS NOT NULL AND expected_account_id <> '';
+  WHERE expected_account_id IS NOT NULL AND TRIM(expected_account_id) <> '';
