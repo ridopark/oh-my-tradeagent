@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -64,7 +65,7 @@ public class BrokerCredentialForwardService {
   private final Counter auditStartFailures;
 
   public BrokerCredentialForwardService(
-      RestClient execRestClient,
+      @Qualifier("execRestClient") RestClient execRestClient,
       WorkflowClient workflowClient,
       Clock clock,
       CredentialWriteLimiter limiter,
