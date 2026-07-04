@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -339,6 +340,27 @@ class TenantDeleteControllerTest {
     assertThat(resp.getBody()).containsEntry("failed_step", "tenant_delete_workflow");
     // The uncaught throw was converted into a clean audited response — never a COMPLETED path.
     verifyNoInteractions(execCreds, dashboardRows);
+    verify(audit).emit(eq("TenantDeleteStepFailed"), eq(TENANT), any(), any(), any(), any());
+    verify(audit, never()).emit(eq("TenantDeleteCompleted"), any(), any(), any(), any(), any());
+  }
+
+  @Test
+  void disableThrows_207_stepFailed_noWorkflowNoExecNoBff() {
+    wireAllPass();
+    // The disarm-first disable step faults mid-flight. It must yield an audited
+    // TenantDeleteStepFailed
+    // + clean response (never a raw 500), and NO teardown (workflow/exec/bff) may run.
+    doThrow(new RuntimeException("disable failed"))
+        .when(disable)
+        .disable(eq(TENANT), any(), any(), any());
+
+    ResponseEntity<Map<String, Object>> resp = call(TENANT);
+
+    assertThat(resp.getStatusCode().is5xxServerError() || resp.getStatusCode().value() == 207)
+        .isTrue();
+    assertThat(resp.getBody()).containsEntry("failed_step", "disable");
+    // Disable is before any teardown — nothing downstream ran.
+    verifyNoInteractions(workflow, execCreds, dashboardRows);
     verify(audit).emit(eq("TenantDeleteStepFailed"), eq(TENANT), any(), any(), any(), any());
     verify(audit, never()).emit(eq("TenantDeleteCompleted"), any(), any(), any(), any(), any());
   }

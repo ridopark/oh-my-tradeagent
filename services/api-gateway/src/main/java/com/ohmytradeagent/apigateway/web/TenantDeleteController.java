@@ -266,10 +266,17 @@ public class TenantDeleteController {
         requestedSubject(tenant, confirm, operator, rows));
 
     // 2. Disable all strategies (disarm-first — P2 already holds, this re-asserts at execution
-    // time).
-    for (StrategyConfigReader.StrategyRow row : rows) {
-      disable.disable(
-          tenant, row.strategyId(), actor, correlationId + "-disable-" + row.strategyId());
+    // time). Wrapped so a disable fault yields an audited TenantDeleteStepFailed + clean response,
+    // never a raw 500. Disable is disarm-first + idempotent, so a partial disable leaves the tenant
+    // MORE dark (safe), and NO store has been torn down yet → completed_steps is empty.
+    // Re-runnable.
+    try {
+      for (StrategyConfigReader.StrategyRow row : rows) {
+        disable.disable(
+            tenant, row.strategyId(), actor, correlationId + "-disable-" + row.strategyId());
+      }
+    } catch (RuntimeException e) {
+      return stepFailed(tenant, primary, actor, correlationId, "disable", new ArrayList<>(), e);
     }
 
     // 3. Start + await the teardown workflow per strategy (it runs the P4/P5 broker/journal gates).
