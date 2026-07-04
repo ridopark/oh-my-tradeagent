@@ -8,6 +8,7 @@ import {
   postOperatorBrokerCredential,
 } from "@/lib/adminOnboarding";
 import { createTenantInvite } from "@/lib/adminBff";
+import { EMAIL_RE, ID_RE } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
 
@@ -27,15 +28,6 @@ const INVITE_ENABLED = process.env.OPERATOR_TENANT_INVITE_ENABLED === "true";
 // Paper broker endpoints — the only targets accepted this phase (live arming is Phase E).
 const DEFAULT_BASE_URL = "https://paper-api.alpaca.markets";
 const DEFAULT_WS_URL = "wss://paper-api.alpaca.markets/stream";
-
-// The tenant/strategy id charset the form advertises and the api-gateway (TenantContext) enforces.
-// Validate here too so a malformed id gets an immediate 400 banner instead of an opaque gateway 400.
-const ID_RE = /^[A-Za-z0-9_-]+$/;
-
-// Conservative "plausible email" pre-check, matching the BFF's own guard (one @, non-empty local +
-// domain, a dot in the domain, no whitespace). Not RFC-complete on purpose — the real proof is the
-// provider-verified email at bind time; this only rejects obvious garbage before a write.
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 // Minimal paper StrategyConfig template. tenant_id/strategy_id are injected server-side from the
 // form (so they always match the create path); enabled:false creates the tenant dormant.

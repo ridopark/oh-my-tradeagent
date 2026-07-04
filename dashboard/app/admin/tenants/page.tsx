@@ -16,6 +16,7 @@ import {
 import { getTenantEmails, type TenantEmails } from "@/lib/db";
 import { postActivation } from "@/lib/adminActivation";
 import { postTenantDelete } from "@/lib/adminTenantDelete";
+import { EMAIL_RE, ID_RE } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
 
@@ -39,15 +40,6 @@ const TENANT_DELETE_ENABLED =
 // dashboard.writer.enabled) is on, so the action degrades gracefully even if this is set ahead of it.
 const TENANT_INVITE_ENABLED =
   process.env.OPERATOR_TENANT_INVITE_ENABLED === "true";
-
-// Conservative "plausible email" pre-check, matching the onboard page + BFF guard (one @, non-empty
-// local + domain, a dot in the domain, no whitespace). Not RFC-complete on purpose — the real proof
-// is the provider-verified email at bind time; this only rejects obvious garbage before a write.
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-
-// The tenant id charset the api-gateway/BFF enforce; validate here too so a malformed id gets an
-// immediate 400 instead of an opaque backend error.
-const ID_RE = /^[A-Za-z0-9_-]+$/;
 
 // Format an ISO timestamp as a UTC date for the "valid until" display. Server-rendered with an
 // explicit UTC zone so it doesn't drift by render host. Fail-safe: a null/blank/unparseable value

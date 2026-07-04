@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { EMAIL_RE } from "@/lib/validation";
 
 // Per-tenant "Invite user" affordance for the operator admin list. It reuses the page's server action
 // (passed as a prop): on submit it posts a FormData carrying the tenant id and the operator-typed
@@ -26,10 +27,9 @@ export function InviteUserButton({
   const [email, setEmail] = useState("");
   const [pending, startTransition] = useTransition();
 
-  // A conservative "plausible email" client pre-check, matching the page's own guard (one @, non-empty
-  // local + domain, a dot in the domain, no whitespace). The real proof is the provider-verified email
-  // at bind time; this only keeps the submit button inert for obvious garbage.
-  const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
+  // Shared plausible-email pre-check (EMAIL_RE); keeps the submit button inert for obvious garbage.
+  // The real proof is the provider-verified email at bind time + the server action's own re-check.
+  const emailValid = EMAIL_RE.test(email.trim());
   const triggerDisabled = !enabled || pending;
 
   function close() {
