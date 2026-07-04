@@ -446,5 +446,13 @@ public final class AuditEventKinds {
           "TenantDeleteRequested",
           "TenantDeleteCompleted",
           "TenantDeleteBlocked",
-          "TenantDeleteStepFailed");
+          "TenantDeleteStepFailed",
+          // Operator tenant-delete residual-cleanup (Phase 2 of the partial-teardown remediation).
+          // The dedicated POST /admin/tenants/{tenant}/cleanup-residual carrier converges a tenant
+          // whose strategy_config is already gone but whose idempotent residual stores
+          // (broker_credentials / dashboard rows) survived a partial delete. Request accepted / all
+          // residual stores cleaned; a step fault reuses the shared TenantDeleteStepFailed kind
+          // above. Neutral events — in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "TenantResidualCleanupRequested",
+          "TenantResidualCleanupCompleted");
 }
