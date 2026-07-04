@@ -37,11 +37,13 @@ import org.springframework.stereotype.Service;
  *       degraded snapshot omits them, the row still renders), and never a risk-gate input.
  *   <li>{@code realized_pnl_today} — FIFO match of today's fills (America/New_York); see {@code
  *       RealizedPnlCalculator} for the documented intraday-match limitation.
- *   <li>{@code account_equity} — broker-account net-liq, SHARED across all tenants on a {@code
- *       broker_target}; {@code account_equity_scope} states it is NOT the tenant's portfolio value.
- *       Each row may also carry an informational {@code account_number} (the brokerage account
- *       identity for dashboard verification) — optional and dev-gated behind {@code
- *       bff.expose-broker-account-number} (default false, so it is never exposed in prod).
+ *   <li>{@code account_equity} — net-liquidation equity of THIS tenant's OWN brokerage account (the
+ *       tenant_id is forwarded so exec resolves the tenant's own broker credentials); account-level
+ *       truth for that account, NOT this tenant's per-strategy portfolio value. {@code
+ *       account_equity_scope} states this. Each row may also carry an informational {@code
+ *       account_number} (the brokerage account identity for dashboard verification) — optional and
+ *       dev-gated behind {@code bff.expose-broker-account-number} (default false, so it is never
+ *       exposed in prod).
  * </ul>
  *
  * <p>The AGGREGATE {@code unrealized_pnl} body field stays null (no portfolio-wide quote source);
@@ -106,12 +108,11 @@ public class PortfolioService {
     Future<List<OpenPosition>> positionsFuture =
         subreadPool.submit(() -> positionsReader.openPositions(tenantId));
 
-    // Account equity per distinct broker_target (account-level, shared across tenants). Each
-    // snapshot
-    // is an independent AccountSnapshotWorkflow round-trip — fetch them concurrently too. We also
-    // remember one representative strategy per broker_target to thread the (account-level)
-    // live-marks
-    // read's forward-compat tenant/strategy hooks.
+    // Account equity per distinct broker_target, read as THIS tenant's OWN account (the tenant_id
+    // is forwarded so exec resolves this tenant's broker credentials). Each snapshot is an
+    // independent AccountSnapshotWorkflow round-trip — fetch them concurrently too. We also
+    // remember one representative strategy per broker_target to thread the live-marks read's
+    // forward-compat tenant/strategy hooks.
     Set<String> brokerTargets = new LinkedHashSet<>();
     Map<String, String> repStrategyByTarget = new LinkedHashMap<>();
     for (String strategyId : strategyIds) {
@@ -124,7 +125,8 @@ public class PortfolioService {
     Map<String, Future<AccountEquityClient.BrokerAccount>> equityFutures = new LinkedHashMap<>();
     for (String brokerTarget : brokerTargets) {
       equityFutures.put(
-          brokerTarget, subreadPool.submit(() -> accountEquity.snapshotFor(brokerTarget)));
+          brokerTarget,
+          subreadPool.submit(() -> accountEquity.snapshotFor(tenantId, brokerTarget)));
     }
 
     // Live marks per distinct broker_target (account-level broker truth — current price + today's /
@@ -243,8 +245,9 @@ public class PortfolioService {
     body.put("account_equity", equityByBroker);
     body.put(
         "account_equity_scope",
-        "Brokerage account net-liquidation equity behind each broker_target, SHARED across all"
-            + " tenants routing to that broker — NOT this tenant's portfolio value.");
+        "Net-liquidation equity of this tenant's OWN brokerage account behind each broker_target"
+            + " (broker-account-level truth for that account) — NOT this tenant's per-strategy"
+            + " portfolio value.");
     body.put("unrealized_pnl", null);
     body.put("unrealized_pnl_note", "Out of scope: no market-data / quote source wired.");
     return body;

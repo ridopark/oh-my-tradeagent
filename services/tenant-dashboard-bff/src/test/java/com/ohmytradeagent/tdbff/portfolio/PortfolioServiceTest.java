@@ -67,7 +67,7 @@ class PortfolioServiceTest {
     when(realizedPnl.computeRealizedPnlAllTime("acme", "s2")).thenReturn(new BigDecimal("-30.00"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(strategyRegistry.brokerTarget("acme", "s2")).thenReturn("alpaca-paper"); // same -> union
-    when(accountEquity.snapshotFor("alpaca-paper"))
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(
             new AccountEquityClient.BrokerAccount(new BigDecimal("10000.00"), "PA3ER05HLHMB"));
 
@@ -102,9 +102,9 @@ class PortfolioServiceTest {
         .thenReturn(BigDecimal.ZERO);
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(strategyRegistry.brokerTarget("acme", "s2")).thenReturn("tradier-paper");
-    when(accountEquity.snapshotFor("alpaca-paper"))
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
-    when(accountEquity.snapshotFor("tradier-paper"))
+    when(accountEquity.snapshotFor("acme", "tradier-paper"))
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("200"), null));
 
     Map<String, Object> body = service.portfolio("acme");
@@ -125,7 +125,7 @@ class PortfolioServiceTest {
     when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
         .thenReturn(BigDecimal.ZERO);
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
-    when(accountEquity.snapshotFor("alpaca-paper"))
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(
             new AccountEquityClient.BrokerAccount(new BigDecimal("10000.00"), "PA3ER05HLHMB"));
 
@@ -156,7 +156,7 @@ class PortfolioServiceTest {
     when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
         .thenReturn(BigDecimal.ZERO);
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
-    when(accountEquity.snapshotFor("alpaca-paper"))
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
 
     // 1s budget so the stalled sub-read degrades quickly under test.
@@ -186,7 +186,7 @@ class PortfolioServiceTest {
     when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
         .thenReturn(BigDecimal.ZERO);
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
-    when(accountEquity.snapshotFor("alpaca-paper"))
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenAnswer(
             inv -> {
               Thread.sleep(3000);
@@ -220,7 +220,7 @@ class PortfolioServiceTest {
               return new BigDecimal("999.00");
             });
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
-    when(accountEquity.snapshotFor("alpaca-paper"))
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
 
     PortfolioService fast = newService(false, 1);
@@ -248,7 +248,7 @@ class PortfolioServiceTest {
     when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
         .thenReturn(BigDecimal.ZERO);
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
-    when(accountEquity.snapshotFor("alpaca-paper"))
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
     when(brokerPositions.marksFor("alpaca-paper", "acme", "s1"))
         .thenReturn(
@@ -289,7 +289,7 @@ class PortfolioServiceTest {
     when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
         .thenReturn(BigDecimal.ZERO);
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
-    when(accountEquity.snapshotFor("alpaca-paper"))
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
     // Broker holds a DIFFERENT contract — no mark for this position's OCC.
     when(brokerPositions.marksFor("alpaca-paper", "acme", "s1"))

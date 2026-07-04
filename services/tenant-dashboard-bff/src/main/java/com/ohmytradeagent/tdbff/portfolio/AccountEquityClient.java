@@ -23,9 +23,12 @@ import org.springframework.stereotype.Component;
  * hosted on the orchestrator worker, dispatches that activity to {@code broker-<target>}. No broker
  * credentials live in the BFF.
  *
- * <p>Equity is account-level — shared by every tenant routing to a given {@code broker_target} —
- * and is NOT the tenant's portfolio value; the {@code account_equity_scope} label on the portfolio
- * response states this explicitly.
+ * <p>The snapshot carries the requesting {@code tenant_id} so exec resolves THAT tenant's broker
+ * credentials — the equity read is the net-liquidation equity of the tenant's OWN brokerage account
+ * (account-level truth for that account, not a shared default). When {@code tenantId} is null/blank
+ * the tenant is left unset and exec falls back to the account-level credential set (behavior-
+ * preserving under the env-fallback credential source, where every tenant resolves the same single
+ * account). The {@code account_equity_scope} label on the portfolio response states this.
  */
 @Component
 public class AccountEquityClient {
@@ -59,16 +62,23 @@ public class AccountEquityClient {
   public record BrokerAccount(BigDecimal equity, String accountNumber) {}
 
   /**
-   * Equity + informational account identity for the account behind {@code brokerTarget}, read from
-   * one {@code AccountSnapshotWorkflow} round-trip. Never {@code null}: on any
+   * Equity + informational account identity for the {@code tenantId}'s OWN account behind {@code
+   * brokerTarget}, read from one {@code AccountSnapshotWorkflow} round-trip. The {@code tenant_id}
+   * is forwarded so exec resolves that tenant's broker credentials; when null/blank it is left
+   * unset and exec falls back to the account-level credential set. Never {@code null}: on any
    * timeout/error/degrade it returns {@code new BrokerAccount(null, null)} (a read-only view
-   * degrades gracefully rather than failing the whole portfolio page). The broker adapter returns
-   * the sentinel {@code equity=0} when it has no real account endpoint — surfaced as-is.
+   * degrades gracefully rather than failing the whole portfolio page) — including the case where a
+   * tenant has no resolvable broker credentials, which degrades to unavailable equity rather than
+   * surfacing a shared default account. The broker adapter returns the sentinel {@code equity=0}
+   * when it has no real account endpoint — surfaced as-is.
    */
-  public BrokerAccount snapshotFor(String brokerTarget) {
+  public BrokerAccount snapshotFor(String tenantId, String brokerTarget) {
     AccountSnapshotRequest request = new AccountSnapshotRequest();
     request.setSchemaVersion(1L);
     request.setBrokerTarget(AccountSnapshotRequest.BrokerTarget.fromValue(brokerTarget));
+    if (tenantId != null && !tenantId.isBlank()) {
+      request.setTenantId(tenantId);
+    }
     request.setCorrelationId("dashboard-" + UUID.randomUUID());
 
     WorkflowOptions opts =
