@@ -108,14 +108,12 @@ public class PortfolioHistoryClient {
   }
 
   /**
-   * Portfolio-history series for the {@code tenantId}'s OWN account behind {@code brokerTarget},
-   * read from one {@code PortfolioHistoryWorkflow} round-trip, for the dashboard {@code range}. The
-   * {@code tenant_id} is forwarded so exec resolves that tenant's broker credentials; when
-   * null/blank it is left unset and exec falls back to the account-level credential set. Never
-   * {@code null}: on any timeout/error/degrade it returns an empty result (a read-only view
-   * degrades gracefully rather than failing the whole page) — including the case where a tenant has
-   * no resolvable broker credentials, which degrades to an empty chart rather than a shared default
-   * account.
+   * Portfolio-history series for the {@code tenantId}'s OWN account behind {@code brokerTarget}
+   * (see class javadoc for the tenant → credential resolution), read from one {@code
+   * PortfolioHistoryWorkflow} round-trip, for the dashboard {@code range}. Never {@code null}: on
+   * any timeout/error/degrade — including a tenant with no resolvable broker credentials — it
+   * returns an empty result so a read-only view degrades gracefully rather than failing the whole
+   * page.
    */
   public PortfolioHistoryResult historyFor(String tenantId, String brokerTarget, String range) {
     Resolved resolved = resolveRange(range);

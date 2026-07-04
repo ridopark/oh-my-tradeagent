@@ -108,11 +108,11 @@ public class PortfolioService {
     Future<List<OpenPosition>> positionsFuture =
         subreadPool.submit(() -> positionsReader.openPositions(tenantId));
 
-    // Account equity per distinct broker_target, read as THIS tenant's OWN account (the tenant_id
-    // is forwarded so exec resolves this tenant's broker credentials). Each snapshot is an
-    // independent AccountSnapshotWorkflow round-trip — fetch them concurrently too. We also
-    // remember one representative strategy per broker_target to thread the live-marks read's
-    // forward-compat tenant/strategy hooks.
+    // Account equity per distinct broker_target, read as THIS tenant's OWN account (see
+    // AccountEquityClient for the tenant → credential resolution). Each snapshot is an independent
+    // AccountSnapshotWorkflow round-trip — fetch them concurrently too. We also remember one
+    // representative strategy per broker_target to thread the live-marks read's forward-compat
+    // tenant/strategy hooks.
     Set<String> brokerTargets = new LinkedHashSet<>();
     Map<String, String> repStrategyByTarget = new LinkedHashMap<>();
     for (String strategyId : strategyIds) {
