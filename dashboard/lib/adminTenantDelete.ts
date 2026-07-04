@@ -16,6 +16,9 @@ import {
 // blocker in its banner.
 
 export interface TenantDeleteResult {
+  // TRUE only on a fully-completed teardown (HTTP 200). A 207 (partial / a step failed after some
+  // stores were deleted) is NOT ok — the caller must surface "partially deleted, retry", never
+  // "deleted". `res.ok` would wrongly include 207, so this is status===200, not the 2xx class.
   ok: boolean;
   status: number;
   // Present only on a 409 (blocked) response that carries a { blocked_by } body — the reason the
@@ -61,7 +64,8 @@ export async function postTenantDelete(
         // No/invalid JSON body — leave blockedBy undefined.
       }
     }
-    return { ok: res.ok, status: res.status, blockedBy };
+    // ok ONLY on a full 200 COMPLETED — a 207 partial falls through to the "partially deleted" banner.
+    return { ok: res.status === 200, status: res.status, blockedBy };
   } catch {
     // Transport/abort error — the call did not complete.
     return { ok: false, status: 0 };
