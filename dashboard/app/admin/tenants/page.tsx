@@ -14,6 +14,7 @@ import {
   type AdminTenantItem,
 } from "@/lib/adminBff";
 import { getTenantEmails, type TenantEmails } from "@/lib/db";
+import { mergeResidualTenants, type TenantGroup } from "@/lib/adminTenants";
 import { postActivation } from "@/lib/adminActivation";
 import { postTenantDelete } from "@/lib/adminTenantDelete";
 import { EMAIL_RE, ID_RE } from "@/lib/validation";
@@ -231,17 +232,23 @@ export default async function AdminTenantsPage({
   // Group the flat per-(tenant, strategy) items by tenant_id, preserving first-seen order. The header
   // row carries the per-TENANT concerns (members/invites, invite/delete actions); the indented rows
   // beneath carry the per-STRATEGY data.
-  const groups: { tenantId: string; rows: AdminTenantItem[] }[] = [];
+  const realGroups: TenantGroup[] = [];
   const groupIndex = new Map<string, number>();
   for (const it of items) {
     let idx = groupIndex.get(it.tenant_id);
     if (idx === undefined) {
-      idx = groups.length;
+      idx = realGroups.length;
       groupIndex.set(it.tenant_id, idx);
-      groups.push({ tenantId: it.tenant_id, rows: [] });
+      realGroups.push({ tenantId: it.tenant_id, rows: [] });
     }
-    groups[idx].rows.push(it);
+    realGroups[idx].rows.push(it);
   }
+
+  // Phase 1 (partial-teardown visibility): append any tenant that has residual dashboard_user /
+  // non-expired invite rows (the getTenantEmails key set) but NO strategy_config rows as a synthetic
+  // `partial` group, so a tenant stranded mid-delete reappears in the list. See mergeResidualTenants
+  // for the honesty note: this covers the dashboard-row residual class, NOT broker_credentials-only.
+  const groups = mergeResidualTenants(realGroups, emailsByTenant.keys());
 
   // Per-tenant delete deletability + reason. Delete is PER-TENANT but the api-gateway delete route is
   // single-strategy-only and re-enforces the live / all-dark preconditions (P0/P2) server-side; this
@@ -251,10 +258,7 @@ export default async function AdminTenantsPage({
   //   • strategy active → belt-and-suspenders (only a live row can be VALID, already caught by "live").
   // AdminTenantItem exposes no `enabled` field, so the "strategy enabled" reason is omitted here (the
   // server still enforces the all-dark P2 check). Returns undefined when deletable.
-  const deleteDisabledReason = (group: {
-    tenantId: string;
-    rows: AdminTenantItem[];
-  }): string | undefined => {
+  const deleteDisabledReason = (group: TenantGroup): string | undefined => {
     if (group.rows.some((r) => r.mode === "live")) {
       return "live tenant";
     }
@@ -363,8 +367,18 @@ export default async function AdminTenantsPage({
                       {/* Per-tenant group header: tenant id + members/invites + per-tenant actions. */}
                       <tr className="bg-slate-800/30">
                         <td className="px-3 py-2 align-top" colSpan={4}>
-                          <div className="font-semibold text-slate-100">
-                            {group.tenantId}
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-slate-100">
+                              {group.tenantId}
+                            </span>
+                            {group.partial && (
+                              // Residual (partial-teardown) tenant: strategy_config was deleted but
+                              // dashboard_user/invite rows remain. Phase 2 will wire a cleanup retry;
+                              // the badge only marks it for now.
+                              <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-300">
+                                Partial — retry cleanup
+                              </span>
+                            )}
                           </div>
                           {hasEmails ? (
                             <div className="mt-1 flex flex-col gap-0.5 text-xs">
@@ -396,17 +410,35 @@ export default async function AdminTenantsPage({
                           colSpan={2}
                         >
                           <div className="flex flex-wrap items-center justify-end gap-2">
-                            <InviteUserButton
-                              tenantId={group.tenantId}
-                              enabled={TENANT_INVITE_ENABLED}
-                              action={inviteUserAction}
-                            />
-                            {TENANT_DELETE_ENABLED && (
-                              <DeleteTenantButton
-                                tenantId={group.tenantId}
-                                disabledReason={disabledReason}
-                                action={deleteTenantAction}
-                              />
+                            {group.partial ? (
+                              // Phase 1: residual tenant has no strategy_config rows, so the normal
+                              // per-tenant Delete would P0-409 on zero rows. Render a disabled
+                              // "Retry cleanup" placeholder instead — the LIVE cleanup action is
+                              // Phase 2 work (gated behind the tenant-delete flag) and inert here, so
+                              // Phase 1 never exposes a dead/exploding control.
+                              <button
+                                type="button"
+                                disabled
+                                title="Cleanup retry coming in a later phase"
+                                className="cursor-not-allowed rounded border border-slate-700 px-2 py-1 text-sm text-slate-500"
+                              >
+                                Retry cleanup
+                              </button>
+                            ) : (
+                              <>
+                                <InviteUserButton
+                                  tenantId={group.tenantId}
+                                  enabled={TENANT_INVITE_ENABLED}
+                                  action={inviteUserAction}
+                                />
+                                {TENANT_DELETE_ENABLED && (
+                                  <DeleteTenantButton
+                                    tenantId={group.tenantId}
+                                    disabledReason={disabledReason}
+                                    action={deleteTenantAction}
+                                  />
+                                )}
+                              </>
                             )}
                           </div>
                         </td>
