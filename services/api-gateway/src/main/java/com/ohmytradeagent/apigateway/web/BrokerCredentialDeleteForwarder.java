@@ -4,6 +4,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatusCode;
@@ -28,7 +29,7 @@ public class BrokerCredentialDeleteForwarder {
 
   private final RestClient execRestClient;
 
-  public BrokerCredentialDeleteForwarder(RestClient execRestClient) {
+  public BrokerCredentialDeleteForwarder(@Qualifier("execRestClient") RestClient execRestClient) {
     this.execRestClient = execRestClient;
   }
 

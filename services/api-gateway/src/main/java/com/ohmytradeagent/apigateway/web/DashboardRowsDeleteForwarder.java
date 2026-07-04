@@ -1,6 +1,7 @@
 package com.ohmytradeagent.apigateway.web;
 
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatusCode;
@@ -23,7 +24,7 @@ public class DashboardRowsDeleteForwarder {
 
   private final RestClient bffRestClient;
 
-  public DashboardRowsDeleteForwarder(RestClient bffRestClient) {
+  public DashboardRowsDeleteForwarder(@Qualifier("bffRestClient") RestClient bffRestClient) {
     this.bffRestClient = bffRestClient;
   }
 

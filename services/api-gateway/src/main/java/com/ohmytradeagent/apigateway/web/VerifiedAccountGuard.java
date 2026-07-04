@@ -3,6 +3,7 @@ package com.ohmytradeagent.apigateway.web;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Component;
@@ -54,7 +55,7 @@ public class VerifiedAccountGuard {
 
   private final RestClient execRestClient;
 
-  public VerifiedAccountGuard(RestClient execRestClient) {
+  public VerifiedAccountGuard(@Qualifier("execRestClient") RestClient execRestClient) {
     this.execRestClient = execRestClient;
   }
 
