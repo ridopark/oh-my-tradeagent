@@ -18,6 +18,7 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.ohmytradeagent.exec.broker.alpaca.BrokerCredentialWriter;
+import com.ohmytradeagent.exec.broker.alpaca.DuplicateBrokerAccountException;
 import com.ohmytradeagent.exec.broker.alpaca.OptimisticLockException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -127,6 +128,31 @@ class BrokerCredentialAdminControllerTest {
   @Test
   void optimisticLock_is409_andResponseHasNoSecret() throws Exception {
     stubSaveThrows(new OptimisticLockException("stale expectedVersion=0 for tenant=acme"));
+
+    String response =
+        mvc.perform(
+                post("/internal/broker-credentials")
+                    .header("X-Tenant-Id", "acme")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(BODY))
+            .andExpect(status().isConflict())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+
+    assertResponseHasNoSecret(response);
+    assertNoSecretInLogs();
+  }
+
+  @Test
+  void duplicateBrokerAccount_is409_andResponseHasNoSecret() throws Exception {
+    // R-6.5 cross-tenant account collision maps to a clean 409 (distinct from the writer-rejection
+    // 422 path); the writer message may name the conflicting tenant/account but never a key, and we
+    // do not propagate it to the body regardless.
+    stubSaveThrows(
+        new DuplicateBrokerAccountException(
+            "broker account acct-1 (provider alpaca) is already bound to tenant other "
+                + API_SECRET));
 
     String response =
         mvc.perform(

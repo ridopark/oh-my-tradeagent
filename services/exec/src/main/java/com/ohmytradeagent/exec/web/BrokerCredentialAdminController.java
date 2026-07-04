@@ -1,6 +1,7 @@
 package com.ohmytradeagent.exec.web;
 
 import com.ohmytradeagent.exec.broker.alpaca.BrokerCredentialWriter;
+import com.ohmytradeagent.exec.broker.alpaca.DuplicateBrokerAccountException;
 import com.ohmytradeagent.exec.broker.alpaca.OptimisticLockException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -90,6 +91,11 @@ public class BrokerCredentialAdminController {
       // Stale version → 409. The writer message may name tenant/provider/version (no key); we do
       // NOT propagate it to the body to keep the response free of any detail.
       throw new ResponseStatusException(HttpStatus.CONFLICT);
+    } catch (DuplicateBrokerAccountException e) {
+      // R-6.5 cross-tenant account collision → 409 with a coarse, non-secret reason (distinct from
+      // the stale-version 409). The writer message names only tenant/account (no key), but we still
+      // do NOT propagate it to the body — a static reason is enough to disambiguate for operators.
+      throw new ResponseStatusException(HttpStatus.CONFLICT, "duplicate_broker_account");
     } catch (IllegalStateException e) {
       // Any writer rejection (refuse-live / missing creds / paper-live host mismatch / account
       // mismatch) → 422 with a coarse reason. We deliberately do NOT reveal which specific check

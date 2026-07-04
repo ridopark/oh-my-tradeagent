@@ -122,6 +122,9 @@ public class BrokerCredentialWriter {
    *     {@code brokerAccountId})
    * @throws IllegalStateException on a {@code -live} pod (refuse-by-construction), missing creds, a
    *     paper/live host mismatch, or an account mismatch — in every case NO row is written
+   * @throws DuplicateBrokerAccountException if a DIFFERENT tenant already binds this {@code
+   *     (provider, expected_account_id)} (R-6.5 cross-tenant account uniqueness) — NO row is
+   *     written
    * @throws OptimisticLockException if {@code expectedVersion} does not match the stored version
    */
   public SaveResult save(
@@ -174,6 +177,37 @@ public class BrokerCredentialWriter {
     // account) — a NON-SECRET identifier the SAVED audit reports.
     String verifiedAccount =
         validateOnEntry(tenantId, apiKeyId, apiSecretKey, baseUrl, wsUrl, declaredAccountId);
+
+    // R-6.5 cross-tenant account-uniqueness pre-persist check (defense-in-depth with the partial
+    // unique index broker_credentials_provider_account_uk). Only live-bound rows (non-blank
+    // expected_account_id) are constrained; a blank/null account is a paper row and is left
+    // unconstrained so multiple paper rows coexist. If a DIFFERENT tenant already binds this
+    // (provider, expected_account_id), reject with a typed, non-secret error (names only the
+    // conflicting tenant + account) rather than surfacing a raw index violation on the UPSERT. The
+    // index remains the race-proof authority; this SELECT turns the common case into a clean 409.
+    // Excludes the current tenant so re-saving one's OWN row (key rotation) is never blocked.
+    if (declaredAccountId != null && !declaredAccountId.isBlank()) {
+      org.jooq.Result<org.jooq.Record> owners =
+          dsl.fetch(
+              "SELECT tenant_id FROM broker_credentials"
+                  + " WHERE provider = ? AND expected_account_id = ? AND tenant_id <> ?",
+              provider,
+              declaredAccountId,
+              tenantId);
+      if (owners.isNotEmpty()) {
+        String conflictingTenant = owners.get(0).get("tenant_id", String.class);
+        throw new DuplicateBrokerAccountException(
+            "broker account "
+                + declaredAccountId
+                + " (provider "
+                + provider
+                + ") is already bound to tenant "
+                + conflictingTenant
+                + " — a brokerage account may bind to only one tenant (requested tenant="
+                + tenantId
+                + ")");
+      }
+    }
 
     // Always re-encrypt fresh: new DEK + nonces, AAD bound to the row identity (shared formatter so
     // the read path decrypts byte-identically). The writer is the only writer and replaces all

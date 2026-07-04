@@ -14,6 +14,9 @@ import java.util.Map;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Record1;
+import org.jooq.Result;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.jooq.tools.jdbc.MockConnection;
@@ -41,8 +44,14 @@ class BrokerCredentialWriterTest {
   private MockWebServer server;
   private String baseUrl;
 
-  /** Every SQL string the writer issues to the DB, in order. Empty ⇒ no DB write happened. */
+  /** Every WRITE SQL string the writer issues to the DB, in order. Empty ⇒ no DB write happened. */
   private final List<String> executedSql = new ArrayList<>();
+
+  /**
+   * Tenants the mocked R-6.5 pre-persist {@code SELECT tenant_id ...} returns as already owning the
+   * requested {@code (provider, expected_account_id)}. Empty (default) ⇒ no cross-tenant conflict.
+   */
+  private final List<String> conflictTenants = new ArrayList<>();
 
   private final ObjectMapper mapper = new ObjectMapper();
   private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
@@ -67,16 +76,29 @@ class BrokerCredentialWriterTest {
   }
 
   /**
-   * A jOOQ-backed {@link DSLContext} that records each issued SQL string and returns {@code
+   * A jOOQ-backed {@link DSLContext} that records each issued WRITE SQL string and returns {@code
    * affectedRows} for any write — no real database. A non-empty {@link #executedSql} after a save
-   * means the writer reached the DB; empty means it rejected before any write.
+   * means the writer reached the DB; empty means it rejected before any write. The R-6.5
+   * pre-persist {@code SELECT tenant_id ...} is served from {@link #conflictTenants} (default empty
+   * ⇒ no conflict) and is intentionally NOT recorded in {@link #executedSql}, which tracks writes
+   * only.
    */
   private DSLContext recordingDsl(int affectedRows) {
     MockDataProvider provider =
         ctx -> {
+          if (ctx.sql().trim().toLowerCase().startsWith("select")) {
+            DSLContext create = DSL.using(SQLDialect.POSTGRES);
+            Field<String> tenantId = DSL.field("tenant_id", String.class);
+            Result<Record1<String>> selected = create.newResult(tenantId);
+            for (String owner : conflictTenants) {
+              Record1<String> record = create.newRecord(tenantId);
+              record.value1(owner);
+              selected.add(record);
+            }
+            return new MockResult[] {new MockResult(selected.size(), selected)};
+          }
           executedSql.add(ctx.sql());
-          MockResult result = new MockResult(affectedRows, null);
-          return new MockResult[] {result};
+          return new MockResult[] {new MockResult(affectedRows, null)};
         };
     MockConnection connection = new MockConnection(provider);
     return DSL.using(connection, SQLDialect.POSTGRES);
@@ -334,6 +356,125 @@ class BrokerCredentialWriterTest {
     assertThat(deleted).isEqualTo(1);
     assertThat(executedSql).hasSize(1);
     assertThat(executedSql.get(0).toLowerCase()).contains("delete from broker_credentials");
+  }
+
+  @Test
+  void duplicateAccount_heldByAnotherTenant_rejectedAndWritesNoRow() {
+    // R-6.5: the declared account is already bound to a DIFFERENT tenant → reject with the typed
+    // DuplicateBrokerAccountException BEFORE any DB write. The probe passed (keys authenticate the
+    // declared account), so the collision is caught by the pre-persist SELECT, not the probe.
+    enqueueAccount("847309116");
+    conflictTenants.add("bob");
+
+    assertThatThrownBy(
+            () ->
+                writer(recordingDsl(1), "alpaca-x")
+                    .save(
+                        "alice",
+                        PROVIDER,
+                        "alice-key",
+                        "alice-secret",
+                        baseUrl,
+                        "wss://x",
+                        "847309116",
+                        0L,
+                        "tester"))
+        .isInstanceOf(DuplicateBrokerAccountException.class)
+        .hasMessageContaining("847309116")
+        .hasMessageContaining("bob");
+
+    // Fail-closed: the collision is rejected before the UPSERT — nothing persisted.
+    assertThat(executedSql).isEmpty();
+  }
+
+  @Test
+  void duplicateAccountMessage_neverLeaksKeyMaterial() {
+    // The typed rejection names only the conflicting tenant + account (both non-secret) — never the
+    // api-key/secret (MUST-FIX-7).
+    enqueueAccount("847309116");
+    conflictTenants.add("bob");
+
+    assertThatThrownBy(
+            () ->
+                writer(recordingDsl(1), "alpaca-x")
+                    .save(
+                        "alice",
+                        PROVIDER,
+                        "SUPER-SECRET-KEY-ID",
+                        "SUPER-SECRET-VALUE",
+                        baseUrl,
+                        "wss://x",
+                        "847309116",
+                        0L,
+                        "tester"))
+        .isInstanceOf(DuplicateBrokerAccountException.class)
+        .hasMessageNotContaining("SUPER-SECRET-KEY-ID")
+        .hasMessageNotContaining("SUPER-SECRET-VALUE");
+  }
+
+  @Test
+  void sameTenantRotation_ownRowNotBlocked_savesRow() {
+    // Rotation: re-saving the SAME tenant's own account must NOT be blocked. The pre-persist SELECT
+    // excludes the current tenant (tenant_id <> ?), so it returns no conflict → the write proceeds.
+    enqueueAccount("847309116");
+
+    BrokerCredentialWriter.SaveResult result =
+        writer(recordingDsl(1), "alpaca-x")
+            .save(
+                "alice",
+                PROVIDER,
+                "alice-key-rotated",
+                "alice-secret-rotated",
+                baseUrl,
+                "wss://x",
+                "847309116",
+                1L,
+                "tester");
+
+    assertThat(result.brokerAccountId()).isEqualTo("847309116");
+    assertThat(executedSql).hasSize(1);
+    assertThat(executedSql.get(0).toLowerCase()).contains("broker_credentials");
+  }
+
+  @Test
+  void distinctAccount_newTenant_savesRow() {
+    // A distinct account for a new tenant has no cross-tenant owner → the write proceeds.
+    enqueueAccount("111222333");
+
+    BrokerCredentialWriter.SaveResult result =
+        writer(recordingDsl(1), "alpaca-x")
+            .save(
+                "carol",
+                PROVIDER,
+                "carol-key",
+                "carol-secret",
+                baseUrl,
+                "wss://x",
+                "111222333",
+                0L,
+                "tester");
+
+    assertThat(result.brokerAccountId()).isEqualTo("111222333");
+    assertThat(executedSql).hasSize(1);
+  }
+
+  @Test
+  void paperBlankAccount_skipsUniquenessCheck_savesRow() {
+    // A blank/paper account is unconstrained (mirrors the partial index WHERE clause): the
+    // pre-persist SELECT is skipped entirely, so even a would-be conflict is ignored and the write
+    // proceeds. A blank account also disables the /v2/account probe → no broker call.
+    conflictTenants.add("someone-else");
+
+    BrokerCredentialWriter.SaveResult result =
+        writer(recordingDsl(1), "alpaca-x")
+            .save(
+                "dave", PROVIDER, "dave-key", "dave-secret", baseUrl, "wss://x", "", 0L, "tester");
+
+    assertThat(result.version()).isEqualTo(1L);
+    assertThat(executedSql).hasSize(1);
+    assertThat(executedSql.get(0).toLowerCase()).contains("broker_credentials");
+    // Blank account → probe disabled → no /v2/account read.
+    assertThat(server.getRequestCount()).isZero();
   }
 
   @Test

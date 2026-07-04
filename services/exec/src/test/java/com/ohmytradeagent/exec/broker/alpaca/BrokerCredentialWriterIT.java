@@ -367,4 +367,64 @@ class BrokerCredentialWriterIT {
     assertThat(c.apiKeyId()).isEqualTo("alice-key");
     assertThat(c.apiSecretKey()).isEqualTo("alice-secret");
   }
+
+  @Test
+  void crossTenantSameAccount_rejectedByWriterCheck_writesNoRow() {
+    // R-6.5 defense-in-depth (writer side) against real Postgres: alice binds an account; a
+    // DIFFERENT
+    // tenant declaring the SAME account is rejected by the pre-persist SELECT (which runs under the
+    // real DB role — proves no PG16 column-SELECT permission gap on expected_account_id), and
+    // NOTHING
+    // is written for bob.
+    enqueueAccount("847309116");
+    writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+
+    enqueueAccount("847309116");
+    assertThatThrownBy(
+            () ->
+                writer()
+                    .save("bob", PROVIDER, "k2", "s2", baseUrl, "wss://x", "847309116", 0L, "x"))
+        .isInstanceOf(DuplicateBrokerAccountException.class)
+        .hasMessageContaining("847309116")
+        .hasMessageContaining("alice");
+
+    assertThat(rowCount("bob")).isZero();
+    assertThat(rowCount("alice")).isEqualTo(1);
+  }
+
+  @Test
+  void sameTenantRotation_sameAccount_succeeds() {
+    // Rotation must NOT be blocked: re-saving alice's OWN row with the same account bumps the
+    // version.
+    // The pre-persist check excludes the current tenant, and the ON CONFLICT UPSERT replaces the
+    // existing (alice) row rather than inserting a duplicate, so the partial index permits it.
+    enqueueAccount("847309116");
+    long v1 =
+        writer()
+            .save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester")
+            .version();
+
+    enqueueAccount("847309116");
+    long v2 =
+        writer()
+            .save("alice", PROVIDER, "k2", "s2", baseUrl, "wss://x", "847309116", v1, "tester")
+            .version();
+
+    assertThat(v1).isEqualTo(1L);
+    assertThat(v2).isEqualTo(2L);
+    assertThat(versionOf("alice")).isEqualTo(2L);
+  }
+
+  @Test
+  void distinctAccountPerTenant_bothSucceed() {
+    // Two live tenants with DISTINCT accounts both persist — the constraint is per-account, not
+    // per-provider.
+    enqueueAccount("111111111");
+    writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "111111111", 0L, "tester");
+    enqueueAccount("222222222");
+    writer().save("bob", PROVIDER, "k2", "s2", baseUrl, "wss://x", "222222222", 0L, "tester");
+
+    assertThat(rowCount("alice")).isEqualTo(1);
+    assertThat(rowCount("bob")).isEqualTo(1);
+  }
 }
