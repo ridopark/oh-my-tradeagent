@@ -8,16 +8,23 @@ import { useState, useTransition } from "react";
 // delete route, and redirects with a coarse result. Mirrors ActivateButton's shape (useTransition +
 // dark-launch gate) with an added type-to-confirm modal — deleting a tenant is irreversible.
 //
-// Dark gate: the page renders this affordance ONLY inside its OPERATOR_TENANT_DELETE_ENABLED guard
-// (and only for a NOT-live, all-dark tenant), so the button never appears when the feature is off —
-// the api-gateway route is itself dark (404s) until its own flag is on. The remaining client guard,
-// re-enforced server-side, is type-to-confirm: the "Delete tenant" confirm button stays DISABLED
-// until the operator types the EXACT tenant id (case-sensitive, exact match).
+// Dark gate: the page renders this affordance ONLY inside its OPERATOR_TENANT_DELETE_ENABLED guard,
+// so the button never appears when the feature is off — the api-gateway route is itself dark (404s)
+// until its own flag is on. The remaining client guard, re-enforced server-side, is type-to-confirm:
+// the "Delete tenant" confirm button stays DISABLED until the operator types the EXACT tenant id
+// (case-sensitive, exact match).
+//
+// Honest-disabled: when a tenant is NOT deletable (live / multi-strategy / active), the page passes a
+// `disabledReason` and the trigger renders DISABLED with that reason as its tooltip — instead of
+// silently offering an action that would 409 server-side. The type-to-confirm modal opens only when
+// the tenant is deletable (no reason supplied).
 export function DeleteTenantButton({
   tenantId,
+  disabledReason,
   action,
 }: {
   tenantId: string;
+  disabledReason?: string;
   action: (formData: FormData) => void | Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -27,7 +34,7 @@ export function DeleteTenantButton({
   // Case-sensitive, exact match — the whole point of the confirm is that a fat-fingered id does NOT
   // arm the delete.
   const confirmMatches = typed === tenantId;
-  const triggerDisabled = pending;
+  const triggerDisabled = pending || Boolean(disabledReason);
 
   function close() {
     setOpen(false);
@@ -40,6 +47,7 @@ export function DeleteTenantButton({
         type="button"
         disabled={triggerDisabled}
         aria-label={`Delete tenant ${tenantId}`}
+        title={disabledReason ? `Cannot delete — ${disabledReason}` : undefined}
         onClick={() => {
           if (triggerDisabled) return;
           setTyped("");
@@ -47,7 +55,7 @@ export function DeleteTenantButton({
         }}
         className="rounded border border-red-500/60 bg-red-600/20 px-2 py-1 text-xs font-medium text-red-300 transition-colors hover:bg-red-600/30 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        Delete
+        Delete tenant
       </button>
 
       {open && (

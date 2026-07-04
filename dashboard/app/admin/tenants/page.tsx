@@ -1,14 +1,16 @@
+import { Fragment } from "react";
 import { auth } from "@/auth";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
-import { DataTable } from "@/components/DataTable";
 import { ActivateButton } from "@/components/ActivateButton";
 import { DeleteTenantButton } from "@/components/DeleteTenantButton";
+import { InviteUserButton } from "@/components/InviteUserButton";
 import {
   getAdminTenants,
   AdminReadDisabledError,
+  createTenantInvite,
   type AdminTenantItem,
 } from "@/lib/adminBff";
 import { getTenantEmails, type TenantEmails } from "@/lib/db";
@@ -30,6 +32,22 @@ const ACTIVATION_ENABLED = process.env.OPERATOR_ACTIVATION_ENABLED === "true";
 // is irreversible — keep it off until the operator cutover.
 const TENANT_DELETE_ENABLED =
   process.env.OPERATOR_TENANT_DELETE_ENABLED === "true";
+
+// Dark-by-default: the per-tenant "Invite user" affordance is only live when this flag is explicitly
+// "true" (same flag the onboard page gates its invite step on). Unset/anything-else => the button
+// renders disabled. The BFF create-invite route is itself dark (404s) until its own flag (plus
+// dashboard.writer.enabled) is on, so the action degrades gracefully even if this is set ahead of it.
+const TENANT_INVITE_ENABLED =
+  process.env.OPERATOR_TENANT_INVITE_ENABLED === "true";
+
+// Conservative "plausible email" pre-check, matching the onboard page + BFF guard (one @, non-empty
+// local + domain, a dot in the domain, no whitespace). Not RFC-complete on purpose — the real proof
+// is the provider-verified email at bind time; this only rejects obvious garbage before a write.
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+// The tenant id charset the api-gateway/BFF enforce; validate here too so a malformed id gets an
+// immediate 400 instead of an opaque backend error.
+const ID_RE = /^[A-Za-z0-9_-]+$/;
 
 // Format an ISO timestamp as a UTC date for the "valid until" display. Server-rendered with an
 // explicit UTC zone so it doesn't drift by render host. Fail-safe: a null/blank/unparseable value
@@ -108,6 +126,8 @@ export default async function AdminTenantsPage({
   let banner: { tone: "ok" | "err"; msg: string } | null = null;
   if (searchParams.done === "deleted") {
     banner = { tone: "ok", msg: "Tenant deleted." };
+  } else if (searchParams.done === "invited") {
+    banner = { tone: "ok", msg: "Invite created." };
   } else if (searchParams.done) {
     banner = { tone: "ok", msg: `Live ${searchParams.done}.` };
   } else if (searchParams.error) {
@@ -189,136 +209,71 @@ export default async function AdminTenantsPage({
     redirect(`/admin/tenants?error=${result.status}`);
   }
 
+  // Server action: create a per-tenant login invite by email. Re-verifies operator, validates the
+  // tenant id + email, delegates to the BFF-routed createTenantInvite, redirects with a coarse result.
+  // Mirrors the onboard page's inviteUserAction (same validation + createTenantInvite call); here the
+  // result is surfaced via the shared redirect banner rather than an in-form banner.
+  async function inviteUserAction(formData: FormData) {
+    "use server";
+    const s = await auth();
+    if (!s?.isOperator) {
+      redirect("/admin/tenants?error=403");
+    }
+    const tenant = String(formData.get("tenant_id") ?? "").trim();
+    const email = String(formData.get("email") ?? "").trim();
+    if (!ID_RE.test(tenant) || !EMAIL_RE.test(email)) {
+      redirect("/admin/tenants?error=400");
+    }
+    const result = await createTenantInvite(tenant, email);
+    revalidatePath("/admin/tenants");
+    redirect(
+      result.ok
+        ? "/admin/tenants?done=invited"
+        : `/admin/tenants?error=${result.status}`,
+    );
+  }
+
   const readDisabled = adminRes === null;
   const items: AdminTenantItem[] = adminRes?.items ?? [];
 
-  // The DataTable renders per-(tenant, strategy) rows, but delete is PER-TENANT. Pre-compute, across
-  // all of a tenant's rows: (a) whether ANY row is live, (b) whether ANY strategy looks active
-  // (activation_state VALID — belt-and-suspenders; only a live row can be VALID), and (c) the tenant's
-  // FIRST strategy id (so the delete button renders once, on the first row). A tenant is "deletable"
-  // from the UI iff it has NO live row AND nothing looks active — the authoritative all-dark check
-  // lives server-side (P0/P2); this is only a UI guard so a live tenant shows NO delete affordance.
-  const liveTenants = new Set<string>();
-  const activeTenants = new Set<string>();
-  const firstStrategyByTenant = new Map<string, string>();
+  // Group the flat per-(tenant, strategy) items by tenant_id, preserving first-seen order. The header
+  // row carries the per-TENANT concerns (members/invites, invite/delete actions); the indented rows
+  // beneath carry the per-STRATEGY data.
+  const groups: { tenantId: string; rows: AdminTenantItem[] }[] = [];
+  const groupIndex = new Map<string, number>();
   for (const it of items) {
-    if (it.mode === "live") {
-      liveTenants.add(it.tenant_id);
+    let idx = groupIndex.get(it.tenant_id);
+    if (idx === undefined) {
+      idx = groups.length;
+      groupIndex.set(it.tenant_id, idx);
+      groups.push({ tenantId: it.tenant_id, rows: [] });
     }
-    if (it.activation_state === "VALID") {
-      activeTenants.add(it.tenant_id);
-    }
-    if (!firstStrategyByTenant.has(it.tenant_id)) {
-      firstStrategyByTenant.set(it.tenant_id, it.strategy_id);
-    }
+    groups[idx].rows.push(it);
   }
-  const isDeletableTenant = (tenantId: string): boolean =>
-    !liveTenants.has(tenantId) && !activeTenants.has(tenantId);
 
-  const columns = [
-    { key: "tenant_id", label: "Tenant" },
-    { key: "strategy_id", label: "Strategy" },
-    { key: "broker_target", label: "Broker target" },
-    {
-      key: "account_masked",
-      label: "Account",
-      render: (v: unknown) => (
-        <span className="font-mono text-slate-300">{String(v)}</span>
-      ),
-    },
-    {
-      key: "mode",
-      label: "Mode",
-      render: (v: unknown) =>
-        v === "live" ? (
-          <span className="rounded border border-amber-600/60 bg-amber-950/40 px-1.5 py-0.5 text-xs text-amber-300">
-            ● live
-          </span>
-        ) : (
-          <span className="rounded border border-slate-600 bg-slate-800 px-1.5 py-0.5 text-xs text-slate-300">
-            paper
-          </span>
-        ),
-    },
-    {
-      key: "_members",
-      label: "Members / invites",
-      render: (_v: unknown, row: Record<string, unknown>) => {
-        const e = emailsByTenant.get(String(row.tenant_id));
-        if (!e || (e.members.length === 0 && e.pending.length === 0)) {
-          return <span className="text-slate-500">—</span>;
-        }
-        return (
-          <div className="flex flex-col gap-0.5 text-xs">
-            {e.members.map((m) => (
-              <span key={`m-${m}`} className="text-slate-300">
-                {m}
-              </span>
-            ))}
-            {e.pending.map((p) => (
-              <span key={`p-${p}`} className="text-amber-300/80">
-                {p} <span className="text-amber-500/70">(pending)</span>
-              </span>
-            ))}
-          </div>
-        );
-      },
-    },
-    {
-      key: "activation_state",
-      label: "Activation",
-      render: (_v: unknown, row: Record<string, unknown>) => {
-        const item = row as unknown as AdminTenantItem;
-        if (item.mode !== "live") {
-          return <span className="text-slate-500">—</span>;
-        }
-        const b = activationBadge(item);
-        return (
-          <span
-            className={`rounded border px-1.5 py-0.5 text-xs ${b.className}`}
-          >
-            {b.label}
-          </span>
-        );
-      },
-    },
-    {
-      key: "_actions",
-      label: "",
-      render: (_v: unknown, row: Record<string, unknown>) => {
-        const item = row as unknown as AdminTenantItem;
-        if (item.mode === "live") {
-          const intent =
-            item.activation_state === "VALID" ? "deactivate" : "activate";
-          return (
-            <ActivateButton
-              tenantId={item.tenant_id}
-              strategyId={item.strategy_id}
-              intent={intent}
-              action={activationAction}
-              writeEnabled={ACTIVATION_ENABLED}
-            />
-          );
-        }
-        // Paper row. The per-tenant delete affordance renders once (on the tenant's first row) and
-        // only for a NOT-live, all-dark tenant when the dark flag is on. A live tenant never reaches
-        // here (handled above) and so shows NO delete affordance at all.
-        if (
-          TENANT_DELETE_ENABLED &&
-          isDeletableTenant(item.tenant_id) &&
-          firstStrategyByTenant.get(item.tenant_id) === item.strategy_id
-        ) {
-          return (
-            <DeleteTenantButton
-              tenantId={item.tenant_id}
-              action={deleteTenantAction}
-            />
-          );
-        }
-        return null;
-      },
-    },
-  ];
+  // Per-tenant delete deletability + reason. Delete is PER-TENANT but the api-gateway delete route is
+  // single-strategy-only and re-enforces the live / all-dark preconditions (P0/P2) server-side; this
+  // computes an HONEST UI reason so the button is disabled-with-why instead of silently 409ing:
+  //   • live            → a tenant with ANY live row is not deletable.
+  //   • multiple strategies → the single-strategy delete route can't remove a multi-strategy tenant.
+  //   • strategy active → belt-and-suspenders (only a live row can be VALID, already caught by "live").
+  // AdminTenantItem exposes no `enabled` field, so the "strategy enabled" reason is omitted here (the
+  // server still enforces the all-dark P2 check). Returns undefined when deletable.
+  const deleteDisabledReason = (group: {
+    tenantId: string;
+    rows: AdminTenantItem[];
+  }): string | undefined => {
+    if (group.rows.some((r) => r.mode === "live")) {
+      return "live tenant";
+    }
+    if (group.rows.length > 1) {
+      return "multiple strategies";
+    }
+    if (group.rows.some((r) => r.activation_state === "VALID")) {
+      return "strategy active";
+    }
+    return undefined;
+  };
 
   return (
     <>
@@ -379,12 +334,158 @@ export default async function AdminTenantsPage({
           <p className="text-sm text-slate-400">
             Operator admin read not enabled.
           </p>
+        ) : groups.length === 0 ? (
+          <p className="text-sm text-slate-400">No tenants.</p>
         ) : (
-          <DataTable
-            empty="No tenants."
-            columns={columns}
-            rows={items}
-          />
+          <div className="overflow-x-auto rounded border border-slate-800 bg-slate-900">
+            <table className="min-w-full divide-y divide-slate-800 text-sm">
+              <thead className="bg-slate-800/50">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium text-slate-400">
+                    Strategy
+                  </th>
+                  <th className="px-3 py-2 text-left font-medium text-slate-400">
+                    Broker target
+                  </th>
+                  <th className="px-3 py-2 text-left font-medium text-slate-400">
+                    Account
+                  </th>
+                  <th className="px-3 py-2 text-left font-medium text-slate-400">
+                    Mode
+                  </th>
+                  <th className="px-3 py-2 text-left font-medium text-slate-400">
+                    Activation
+                  </th>
+                  <th className="px-3 py-2 text-left font-medium text-slate-400" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {groups.map((group) => {
+                  const emails = emailsByTenant.get(group.tenantId);
+                  const hasEmails =
+                    emails &&
+                    (emails.members.length > 0 || emails.pending.length > 0);
+                  const disabledReason = deleteDisabledReason(group);
+                  return (
+                    <Fragment key={group.tenantId}>
+                      {/* Per-tenant group header: tenant id + members/invites + per-tenant actions. */}
+                      <tr className="bg-slate-800/30">
+                        <td className="px-3 py-2 align-top" colSpan={4}>
+                          <div className="font-semibold text-slate-100">
+                            {group.tenantId}
+                          </div>
+                          {hasEmails ? (
+                            <div className="mt-1 flex flex-col gap-0.5 text-xs">
+                              {emails!.members.map((m) => (
+                                <span key={`m-${m}`} className="text-slate-300">
+                                  {m}
+                                </span>
+                              ))}
+                              {emails!.pending.map((p) => (
+                                <span
+                                  key={`p-${p}`}
+                                  className="text-amber-300/80"
+                                >
+                                  {p}{" "}
+                                  <span className="text-amber-500/70">
+                                    (pending)
+                                  </span>
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="mt-1 text-xs text-slate-500">
+                              No members or invites
+                            </div>
+                          )}
+                        </td>
+                        <td
+                          className="px-3 py-2 text-right align-top"
+                          colSpan={2}
+                        >
+                          <div className="flex flex-wrap items-center justify-end gap-2">
+                            <InviteUserButton
+                              tenantId={group.tenantId}
+                              enabled={TENANT_INVITE_ENABLED}
+                              action={inviteUserAction}
+                            />
+                            {TENANT_DELETE_ENABLED && (
+                              <DeleteTenantButton
+                                tenantId={group.tenantId}
+                                disabledReason={disabledReason}
+                                action={deleteTenantAction}
+                              />
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+
+                      {/* Per-strategy rows: indented beneath the header. */}
+                      {group.rows.map((item) => {
+                        const b =
+                          item.mode === "live" ? activationBadge(item) : null;
+                        const intent =
+                          item.activation_state === "VALID"
+                            ? "deactivate"
+                            : "activate";
+                        return (
+                          <tr
+                            key={`${item.tenant_id}:${item.strategy_id}`}
+                            className="hover:bg-slate-800/50"
+                          >
+                            <td className="py-2 pl-8 pr-3 text-slate-200">
+                              {item.strategy_id}
+                            </td>
+                            <td className="px-3 py-2 text-slate-200">
+                              {item.broker_target ?? "—"}
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className="font-mono text-slate-300">
+                                {item.account_masked}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2">
+                              {item.mode === "live" ? (
+                                <span className="rounded border border-amber-600/60 bg-amber-950/40 px-1.5 py-0.5 text-xs text-amber-300">
+                                  ● live
+                                </span>
+                              ) : (
+                                <span className="rounded border border-slate-600 bg-slate-800 px-1.5 py-0.5 text-xs text-slate-300">
+                                  paper
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2">
+                              {b ? (
+                                <span
+                                  className={`rounded border px-1.5 py-0.5 text-xs ${b.className}`}
+                                >
+                                  {b.label}
+                                </span>
+                              ) : (
+                                <span className="text-slate-500">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              {item.mode === "live" && (
+                                <ActivateButton
+                                  tenantId={item.tenant_id}
+                                  strategyId={item.strategy_id}
+                                  intent={intent}
+                                  action={activationAction}
+                                  writeEnabled={ACTIVATION_ENABLED}
+                                />
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </main>
     </>
