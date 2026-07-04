@@ -37,45 +37,50 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
         account.provider,
         account.providerAccountId,
       );
-      if (tenants.length === 0) {
-        // Unprovisioned. Behind the dark flag, try to ADMIT via an invite-bind before falling back
-        // to the deny. Bind ONLY with a provider-VERIFIED email: Google stamps profile.email_verified
-        // === true; Facebook may omit it — an absent/false value is treated as NOT verified, so we
-        // never relay an unverified email (which the BFF would match against an invite). The bind is
-        // server-side only (fail-safe: bindInvite returns [] on any error), and the tenant it grants
-        // comes solely from the matched invite (the BFF enforces member-only scope).
-        if (INVITE_BIND_ENABLED()) {
-          const emailVerified =
-            (profile as { email_verified?: unknown } | undefined)
-              ?.email_verified === true;
-          const verifiedEmail = emailVerified ? profile?.email : undefined;
-          if (verifiedEmail) {
-            const granted = await bindInvite(
-              account.provider,
-              account.providerAccountId,
-              verifiedEmail,
-            );
-            if (granted.length > 0) {
-              // Bound: the dashboard_user row(s) now exist. Admit — the jwt callback (which runs
-              // AFTER signIn) re-queries findTenantsForIdentity and stamps the freshly-bound set.
-              return true;
-            }
-          }
+      // Consume any pending invites for the provider-VERIFIED email. This ADMITS an unprovisioned
+      // identity AND binds an already-provisioned member into any ADDITIONAL tenant they've since been
+      // invited to — binding only on the FIRST login would strand that second-tenant invite unconsumed
+      // forever (the member stays single-tenant and the switcher never appears). Bind ONLY with a
+      // verified email: Google stamps profile.email_verified === true; Facebook may omit it — an
+      // absent/false value is treated as NOT verified, so we never relay an unverified email (which the
+      // BFF would match against an invite). Server-side only + fail-safe (bindInvite returns [] on any
+      // error), and the granted tenants come solely from matched invites (the BFF enforces member-only
+      // scope). The jwt callback (runs AFTER signIn) re-queries findTenantsForIdentity and stamps the
+      // full freshly-bound set, so a newly-bound tenant appears in the switcher on this same login.
+      let granted: string[] = [];
+      if (INVITE_BIND_ENABLED()) {
+        const emailVerified =
+          (profile as { email_verified?: unknown } | undefined)
+            ?.email_verified === true;
+        const verifiedEmail = emailVerified ? profile?.email : undefined;
+        if (verifiedEmail) {
+          granted = await bindInvite(
+            account.provider,
+            account.providerAccountId,
+            verifiedEmail,
+          );
         }
-        // No matching row => deny. Log the verified identity so an operator can provision it with a
-        // single dashboard_user INSERT (the chicken-and-egg otherwise: login is denied until the row
-        // exists, and the OAuth `sub` is only knowable once the user attempts a login). The `sub` is
-        // a pseudonymous id and email is informational — operator-only, in-cluster logs.
-        //
-        // Write STRAIGHT to the stderr stream, not console.warn: the Next.js standalone server
-        // patches `console.*` and swallows app-level console output in production, so the warning
-        // never reaches `kubectl logs`. process.stderr.write bypasses that patch (fd 2 is captured).
-        process.stderr.write(
-          `DENIED_LOGIN unprovisioned identity: provider=${account.provider} subject=${account.providerAccountId} email=${profile?.email ?? "?"}\n`,
-        );
-        return false;
       }
-      return true;
+
+      // Admit an existing member (bind failure never locks them out — tenants already grants access) or
+      // a freshly-bound identity.
+      if (tenants.length > 0 || granted.length > 0) {
+        return true;
+      }
+
+      // No existing membership and no invite matched => deny. Log the verified identity so an operator
+      // can provision it with a single dashboard_user INSERT (the chicken-and-egg otherwise: login is
+      // denied until the row exists, and the OAuth `sub` is only knowable once the user attempts a
+      // login). The `sub` is a pseudonymous id and email is informational — operator-only, in-cluster
+      // logs.
+      //
+      // Write STRAIGHT to the stderr stream, not console.warn: the Next.js standalone server patches
+      // `console.*` and swallows app-level console output in production, so the warning never reaches
+      // `kubectl logs`. process.stderr.write bypasses that patch (fd 2 is captured).
+      process.stderr.write(
+        `DENIED_LOGIN unprovisioned identity: provider=${account.provider} subject=${account.providerAccountId} email=${profile?.email ?? "?"}\n`,
+      );
+      return false;
     },
     async jwt({ token, account, trigger, session }) {
       // Operator allowlist is re-derived on EVERY call (a cheap env read, no DB) from the verified
