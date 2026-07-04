@@ -1,7 +1,9 @@
 package com.ohmytradeagent.exec.activities;
 
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -54,5 +56,31 @@ class ReconciliationExecActivityImplTest {
     exec.brokerListOpenOrders(null, "copytrade-v1");
 
     verify(registry).brokerFor(BrokerClientRegistry.ACCOUNT_LEVEL, "alpaca");
+  }
+
+  // Fleet enablement Phase 2: under the shared -live exec pod TWO distinct live tenants each recon
+  // their OWN broker (keyed on the request tenant), never the ACCOUNT_LEVEL sentinel — so a recon
+  // tick for tenant B lists B's open orders, not a pod-wide account view. Locks Phase B under
+  // multi-account.
+  @Test
+  void brokerListOpenOrders_twoDistinctLiveTenantsEachResolveOwnBroker() {
+    OptionsBroker brokerA = mock(OptionsBroker.class);
+    OptionsBroker brokerB = mock(OptionsBroker.class);
+    when(brokerA.listOpenOrders()).thenReturn(List.of());
+    when(brokerB.listOpenOrders()).thenReturn(List.of());
+    BrokerClientRegistry registry = mock(BrokerClientRegistry.class);
+    when(registry.brokerFor(eq("prod_real"), eq("alpaca"))).thenReturn(brokerA);
+    when(registry.brokerFor(eq("live_tenant_2"), eq("alpaca"))).thenReturn(brokerB);
+    ReconciliationExecActivityImpl exec =
+        new ReconciliationExecActivityImpl(mock(OrderIntentJournal.class), registry, "alpaca-live");
+
+    exec.brokerListOpenOrders("prod_real", "copytrade-v1");
+    exec.brokerListOpenOrders("live_tenant_2", "copytrade-v1");
+
+    verify(registry).brokerFor("prod_real", "alpaca");
+    verify(registry).brokerFor("live_tenant_2", "alpaca");
+    verify(registry, never()).brokerFor(eq(BrokerClientRegistry.ACCOUNT_LEVEL), anyString());
+    verify(brokerA).listOpenOrders();
+    verify(brokerB).listOpenOrders();
   }
 }
