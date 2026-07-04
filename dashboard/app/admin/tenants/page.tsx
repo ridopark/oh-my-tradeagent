@@ -361,7 +361,6 @@ export default async function AdminTenantsPage({
                   const hasEmails =
                     emails &&
                     (emails.members.length > 0 || emails.pending.length > 0);
-                  const disabledReason = deleteDisabledReason(group);
                   return (
                     <Fragment key={group.tenantId}>
                       {/* Per-tenant group header: tenant id + members/invites + per-tenant actions. */}
@@ -434,7 +433,7 @@ export default async function AdminTenantsPage({
                                 {TENANT_DELETE_ENABLED && (
                                   <DeleteTenantButton
                                     tenantId={group.tenantId}
-                                    disabledReason={disabledReason}
+                                    disabledReason={deleteDisabledReason(group)}
                                     action={deleteTenantAction}
                                   />
                                 )}
