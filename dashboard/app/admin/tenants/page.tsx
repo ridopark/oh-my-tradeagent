@@ -419,6 +419,7 @@ export default async function AdminTenantsPage({
                                 type="button"
                                 disabled
                                 title="Cleanup retry coming in a later phase"
+                                aria-label="Cleanup retry coming in a later phase"
                                 className="cursor-not-allowed rounded border border-slate-700 px-2 py-1 text-sm text-slate-500"
                               >
                                 Retry cleanup
