@@ -111,8 +111,8 @@ public class PortfolioService {
     // Account equity per distinct broker_target, read as THIS tenant's OWN account (see
     // AccountEquityClient for the tenant → credential resolution). Each snapshot is an independent
     // AccountSnapshotWorkflow round-trip — fetch them concurrently too. We also remember one
-    // representative strategy per broker_target to thread the live-marks read's forward-compat
-    // tenant/strategy hooks.
+    // representative strategy per broker_target to thread the (account-level) live-marks read's
+    // forward-compat tenant/strategy hooks.
     Set<String> brokerTargets = new LinkedHashSet<>();
     Map<String, String> repStrategyByTarget = new LinkedHashMap<>();
     for (String strategyId : strategyIds) {
