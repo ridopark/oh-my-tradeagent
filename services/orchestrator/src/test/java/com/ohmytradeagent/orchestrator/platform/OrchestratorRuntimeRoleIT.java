@@ -120,6 +120,34 @@ class OrchestratorRuntimeRoleIT {
   }
 
   @Test
+  void runtimeRole_canDeleteStrategyConfig() throws Exception {
+    // V7__strategy_config_delete_grant.sql grants DELETE on strategy_config to orchestrator_runtime
+    // for the operator tenant-delete teardown (dual-control-gated). Seed a row as admin, then prove
+    // the constrained runtime role can DELETE it — the boundary that shipped denied before V7 and
+    // caused the live "permission denied for table strategy_config" cutover failure.
+    seedOneStrategyConfigRowAsAdmin("acme", "copytrade-v1");
+
+    try (Statement st = runtimeConn.createStatement()) {
+      int deleted =
+          st.executeUpdate(
+              "DELETE FROM strategy_config "
+                  + "WHERE tenant_id = 'acme' AND strategy_id = 'copytrade-v1'");
+      assertThat(deleted)
+          .as("V7 must grant DELETE on strategy_config to orchestrator_runtime")
+          .isEqualTo(1);
+    }
+
+    try (Statement st = adminConn.createStatement();
+        var rs =
+            st.executeQuery(
+                "SELECT count(*) FROM strategy_config "
+                    + "WHERE tenant_id = 'acme' AND strategy_id = 'copytrade-v1'")) {
+      rs.next();
+      assertThat(rs.getInt(1)).isZero();
+    }
+  }
+
+  @Test
   void runtimeRole_cannotTruncateAuditLog() {
     // No insert needed: TRUNCATE is REVOKE'd unconditionally; the V3 grant posture refuses it
     // even on an empty table.
@@ -131,6 +159,23 @@ class OrchestratorRuntimeRoleIT {
             })
         .isInstanceOf(PSQLException.class)
         .satisfies(e -> assertThat(((PSQLException) e).getSQLState()).isEqualTo("42501"));
+  }
+
+  /** Seeds one minimal strategy_config row as the admin (superuser) role. */
+  private static void seedOneStrategyConfigRowAsAdmin(String tenantId, String strategyId)
+      throws Exception {
+    try (var ps =
+        adminConn.prepareStatement(
+            "INSERT INTO strategy_config "
+                + "(tenant_id, strategy_id, schema_version, config, updated_by) "
+                + "VALUES (?, ?, ?, ?::jsonb, ?)")) {
+      ps.setString(1, tenantId);
+      ps.setString(2, strategyId);
+      ps.setInt(3, 1);
+      ps.setString(4, "{}");
+      ps.setString(5, "seed");
+      ps.executeUpdate();
+    }
   }
 
   /** Inserts one minimal audit row as the runtime role and returns the generated id. */

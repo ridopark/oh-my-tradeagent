@@ -24,7 +24,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
-import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -34,10 +33,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * V6 UPDATE grant. Mirrors {@link StrategyConfigStoreIT} exactly: postgres:16, Flyway {@code
  * classpath:db/migration} (now including V6), {@code RUN_DB_ITS=true} gate, truncate per-test.
  *
- * <p>Exercises the production {@code orchestrator_runtime} role for the V6 grant assertion (UPDATE
- * permitted, DELETE still denied) and drives the writer through the production {@link
- * AuditActivitiesImpl} with the chain writer enabled, so the {@code row_hash} assertion proves the
- * audit row is written via the hash-chain path and not a direct INSERT.
+ * <p>Exercises the production {@code orchestrator_runtime} role for the runtime grant assertions
+ * (UPDATE permitted by V6, DELETE permitted by V7) and drives the writer through the production
+ * {@link AuditActivitiesImpl} with the chain writer enabled, so the {@code row_hash} assertion
+ * proves the audit row is written via the hash-chain path and not a direct INSERT.
  */
 @Testcontainers
 @EnabledIfEnvironmentVariable(named = "RUN_DB_ITS", matches = "true")
@@ -94,9 +93,13 @@ class StrategyConfigWriterIT {
     }
   }
 
-  /** V6 grants UPDATE on strategy_config to orchestrator_runtime; DELETE remains denied. */
+  /**
+   * V6 grants UPDATE and V7 grants DELETE on strategy_config to orchestrator_runtime. Both verbs
+   * must succeed as the constrained runtime role — DELETE was withheld until V7 (the tenant-delete
+   * teardown is the dual-control-gated destructive path V6 anticipated).
+   */
   @Test
-  void v6GrantsUpdate() throws Exception {
+  void v6GrantsUpdate_v7GrantsDelete() throws Exception {
     seedRow("dev", "copytrade-v1", liveSafeConfig("dev", "copytrade-v1"), 1L);
 
     try (Statement st = runtimeConn.createStatement()) {
@@ -107,16 +110,13 @@ class StrategyConfigWriterIT {
       assertThat(updated).as("V6 must grant UPDATE to orchestrator_runtime").isEqualTo(1);
     }
 
-    assertThatThrownBy(
-            () -> {
-              try (Statement st = runtimeConn.createStatement()) {
-                st.executeUpdate(
-                    "DELETE FROM strategy_config "
-                        + "WHERE tenant_id = 'dev' AND strategy_id = 'copytrade-v1'");
-              }
-            })
-        .isInstanceOf(PSQLException.class)
-        .satisfies(e -> assertThat(((PSQLException) e).getSQLState()).isEqualTo("42501"));
+    try (Statement st = runtimeConn.createStatement()) {
+      int deleted =
+          st.executeUpdate(
+              "DELETE FROM strategy_config "
+                  + "WHERE tenant_id = 'dev' AND strategy_id = 'copytrade-v1'");
+      assertThat(deleted).as("V7 must grant DELETE to orchestrator_runtime").isEqualTo(1);
+    }
   }
 
   /** A SAFE-only (here, tighten-allowed) change persists and bumps version 1 → 2. */
@@ -298,6 +298,54 @@ class StrategyConfigWriterIT {
                     + "AND tenant_id = 'dev' AND strategy_id = 'copytrade-v1'")) {
       rs.next();
       assertThat(rs.getInt(1)).isZero();
+    }
+  }
+
+  // --- tenant-delete teardown path (V7 DELETE grant) ---
+
+  /**
+   * The regression guard the mock-DSL unit test missed: {@link StrategyConfigWriter#delete} runs
+   * the real {@code DELETE FROM strategy_config} as the constrained {@code orchestrator_runtime}
+   * role (not the superuser), so the V7 grant binds end-to-end exactly as it does in production.
+   * Asserts the row is gone and the retained {@code TenantDeleted} tombstone is written in the same
+   * transaction.
+   */
+  @Test
+  void delete_asRuntimeRole_removesRowAndWritesTombstone() throws Exception {
+    seedRow("dev", "copytrade-v1", liveSafeConfig("dev", "copytrade-v1"), 1L);
+
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    int deleted = writer.delete("dev", "copytrade-v1", "ridopark@gmail.com");
+
+    assertThat(deleted).as("V7 DELETE grant must let the runtime role remove the row").isEqualTo(1);
+
+    // Row gone (read back via admin to avoid any SELECT-regression ambiguity).
+    try (Statement st = adminConn.createStatement();
+        var rs =
+            st.executeQuery(
+                "SELECT count(*) FROM strategy_config "
+                    + "WHERE tenant_id = 'dev' AND strategy_id = 'copytrade-v1'")) {
+      rs.next();
+      assertThat(rs.getInt(1)).isZero();
+    }
+
+    // Retained TenantDeleted tombstone written via the hash-chain path.
+    try (var ps =
+        adminConn.prepareStatement(
+            "SELECT subject::text AS subject_json FROM audit_log "
+                + "WHERE kind = 'TenantDeleted' AND tenant_id = 'dev' "
+                + "AND strategy_id = 'copytrade-v1'")) {
+      try (var rs = ps.executeQuery()) {
+        int count = 0;
+        while (rs.next()) {
+          count++;
+          JsonNode subject = om.readTree(rs.getString("subject_json"));
+          assertThat(subject.get("actor").textValue()).isEqualTo("ridopark@gmail.com");
+          assertThat(subject.get("source").textValue()).isEqualTo("tenant-delete");
+          assertThat(subject.get("rows_deleted").asInt()).isEqualTo(1);
+        }
+        assertThat(count).isEqualTo(1);
+      }
     }
   }
 

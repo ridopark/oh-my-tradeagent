@@ -1,0 +1,14 @@
+-- Operator tenant-delete teardown (PLAN-2026-07-03): the destructive path V6 anticipated.
+-- StrategyConfigWriter.delete() removes a dark, never-traded tenant's strategy_config row. It is
+-- called ONLY by the TenantDeleteWorkflow, which runs ONLY after the api-gateway's P0-P5
+-- allowlist/confirm pre-flight guards AND the workflow's own P4/P5 broker-flat + journal-empty
+-- gates pass — i.e. the dual-control gate V6 said a strategy_config DELETE would itself need before
+-- the grant could land. That gate now exists, so grant DELETE here.
+--
+-- V5 withheld UPDATE/DELETE (no mutation path in P0a); V6 added UPDATE for the runtime write path
+-- and explicitly kept DELETE withheld ("deactivation is a future concern and would itself need a
+-- dual-control gate"). This migration is that future concern, gated. Least-privilege per-table
+-- grant (mirrors V5/V6 style — not GRANT ALL). orchestrator_runtime already holds SELECT (V5), so
+-- the DELETE's WHERE tenant_id=? AND strategy_id=? predicate is already satisfied; this opens only
+-- the DELETE verb.
+GRANT DELETE ON strategy_config TO orchestrator_runtime;
