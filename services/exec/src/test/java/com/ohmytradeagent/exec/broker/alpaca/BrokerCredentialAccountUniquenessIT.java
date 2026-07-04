@@ -104,6 +104,19 @@ class BrokerCredentialAccountUniquenessIT {
   }
 
   @Test
+  void multipleWhitespaceOnlyAccountRows_coexist() {
+    // Fix-2 alignment lock: the V6 predicate (~ '[^[:space:]]') treats a whitespace-only value as
+    // blank/unconstrained EXACTLY as the writer's Java String.isBlank() guard does (tab/newline
+    // included, not just ASCII space). So two tenants with a tab-only expected_account_id must NOT
+    // collide at the index — proving the SQL and Java notions of "blank" agree across both layers.
+    insertRow("alice", "alpaca", "\t");
+    insertRow("bob", "alpaca", "\t");
+
+    assertThat(rowCount("alice")).isEqualTo(1);
+    assertThat(rowCount("bob")).isEqualTo(1);
+  }
+
+  @Test
   void multipleNullAccountRows_coexist() {
     // NULL accounts are likewise excluded from the index → multiple coexist.
     insertRow("alice", "alpaca", null);

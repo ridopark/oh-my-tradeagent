@@ -18,6 +18,7 @@ import org.jooq.Field;
 import org.jooq.Record1;
 import org.jooq.Result;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.tools.jdbc.MockConnection;
 import org.jooq.tools.jdbc.MockDataProvider;
@@ -52,6 +53,15 @@ class BrokerCredentialWriterTest {
    * requested {@code (provider, expected_account_id)}. Empty (default) ⇒ no cross-tenant conflict.
    */
   private final List<String> conflictTenants = new ArrayList<>();
+
+  /**
+   * When non-null, the recording DSL throws this on the WRITE (UPSERT) instead of succeeding —
+   * simulating a raw JDBC failure (e.g. the R-6.5 partial-unique-index violation) so Fix-1's
+   * DataAccessException classification can be pinned WITHOUT a real DB. jOOQ wraps the thrown
+   * {@link SQLException} into a {@code DataAccessException} whose {@code sqlState()} and message
+   * carry the SQLState + constraint name.
+   */
+  private SQLException writeFailure;
 
   private final ObjectMapper mapper = new ObjectMapper();
   private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
@@ -96,6 +106,9 @@ class BrokerCredentialWriterTest {
               selected.add(record);
             }
             return new MockResult[] {new MockResult(selected.size(), selected)};
+          }
+          if (writeFailure != null) {
+            throw writeFailure;
           }
           executedSql.add(ctx.sql());
           return new MockResult[] {new MockResult(affectedRows, null)};
@@ -385,6 +398,73 @@ class BrokerCredentialWriterTest {
 
     // Fail-closed: the collision is rejected before the UPSERT — nothing persisted.
     assertThat(executedSql).isEmpty();
+  }
+
+  @Test
+  void concurrentRace_upsertIndexViolation_mappedToDuplicateBrokerAccount() {
+    // Fix-1: the pre-persist SELECT is non-transactional, so two concurrent cross-tenant binds of
+    // the SAME account can both read empty (conflictTenants stays empty here) and both proceed; the
+    // loser's UPSERT trips the partial unique index broker_credentials_provider_account_uk
+    // (SQLState 23505). The writer must translate that raw jOOQ DataAccessException into the typed
+    // DuplicateBrokerAccountException so the controller returns a clean 409 (not a 500). The
+    // message
+    // names the account + provider + requesting tenant and NO key material.
+    enqueueAccount("847309116");
+    writeFailure =
+        new SQLException(
+            "ERROR: duplicate key value violates unique constraint"
+                + " \"broker_credentials_provider_account_uk\"",
+            "23505");
+
+    assertThatThrownBy(
+            () ->
+                writer(recordingDsl(1), "alpaca-x")
+                    .save(
+                        "alice",
+                        PROVIDER,
+                        "SUPER-SECRET-KEY-ID",
+                        "SUPER-SECRET-VALUE",
+                        baseUrl,
+                        "wss://x",
+                        "847309116",
+                        0L,
+                        "tester"))
+        .isInstanceOf(DuplicateBrokerAccountException.class)
+        .hasMessageContaining("847309116")
+        .hasMessageContaining("alpaca")
+        .hasMessageContaining("alice")
+        .hasMessageContaining("broker_credentials_provider_account_uk")
+        .hasMessageNotContaining("SUPER-SECRET-KEY-ID")
+        .hasMessageNotContaining("SUPER-SECRET-VALUE");
+  }
+
+  @Test
+  void upsertDataAccessException_notAccountIndex_rethrowsUnchanged() {
+    // Fix-1 is narrowly scoped: a DataAccessException that is NOT the account-uniqueness index
+    // violation must propagate UNCHANGED. A 23505 on a DIFFERENT constraint (the PK) proves the
+    // classifier gates on the index NAME as well as the SQLState, so it does NOT masquerade as a
+    // cross-tenant account collision — existing DB-error behavior stays intact.
+    enqueueAccount("847309116");
+    writeFailure =
+        new SQLException(
+            "ERROR: duplicate key value violates unique constraint \"broker_credentials_pkey\"",
+            "23505");
+
+    assertThatThrownBy(
+            () ->
+                writer(recordingDsl(1), "alpaca-x")
+                    .save(
+                        "alice",
+                        PROVIDER,
+                        "alice-key",
+                        "alice-secret",
+                        baseUrl,
+                        "wss://x",
+                        "847309116",
+                        0L,
+                        "tester"))
+        .isInstanceOf(DataAccessException.class)
+        .isNotInstanceOf(DuplicateBrokerAccountException.class);
   }
 
   @Test

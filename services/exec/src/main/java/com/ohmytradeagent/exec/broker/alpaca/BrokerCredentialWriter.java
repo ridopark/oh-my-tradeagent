@@ -6,9 +6,11 @@ import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.crypto.BrokerCredentialCrypto;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Result;
+import org.jooq.exception.DataAccessException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -180,11 +182,14 @@ public class BrokerCredentialWriter {
     String verifiedAccount =
         validateOnEntry(tenantId, apiKeyId, apiSecretKey, baseUrl, wsUrl, declaredAccountId);
 
-    // R-6.5 cross-tenant account-uniqueness pre-persist check (defense-in-depth with the partial
-    // unique index broker_credentials_provider_account_uk). Only live-bound rows (non-blank
-    // expected_account_id) are constrained; a blank/null account is a paper row and is left
-    // unconstrained so multiple paper rows coexist. If a DIFFERENT tenant already binds this
-    // (provider, expected_account_id), reject with a typed, non-secret error (names only the
+    // R-6.5 per-broker-target account-uniqueness pre-persist check (defense-in-depth with the
+    // partial unique index broker_credentials_provider_account_uk). The guard keys on the account
+    // being NON-BLANK (a real brokerage account), NOT on the pod being live: every non-blank
+    // expected_account_id is constrained, a blank/null account is unconstrained so multiple such
+    // rows coexist. On the exec-alpaca-live DB this IS the live double-bind guard; it also holds on
+    // the paper DB (where tenants have distinct accounts today). If a DIFFERENT tenant already
+    // binds
+    // this (provider, expected_account_id), reject with a typed, non-secret error (names only the
     // conflicting tenant + account) rather than surfacing a raw index violation on the UPSERT. The
     // index remains the race-proof authority; this SELECT turns the common case into a clean 409.
     // Excludes the current tenant so re-saving one's OWN row (key rotation) is never blocked.
@@ -348,32 +353,59 @@ public class BrokerCredentialWriter {
       String declaredAccountId,
       long expectedVersion,
       String actor) {
-    int updated =
-        dsl.execute(
-            "INSERT INTO broker_credentials ("
-                + "tenant_id, provider, ciphertext, iv, wrapped_dek, dek_iv, kek_version, "
-                + "base_url, ws_url, expected_account_id, version, updated_at, updated_by) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, now(), ?) "
-                + "ON CONFLICT (tenant_id, provider) DO UPDATE SET "
-                + "ciphertext = excluded.ciphertext, iv = excluded.iv, "
-                + "wrapped_dek = excluded.wrapped_dek, dek_iv = excluded.dek_iv, "
-                + "kek_version = excluded.kek_version, base_url = excluded.base_url, "
-                + "ws_url = excluded.ws_url, expected_account_id = excluded.expected_account_id, "
-                + "version = broker_credentials.version + 1, updated_at = now(), "
-                + "updated_by = excluded.updated_by "
-                + "WHERE broker_credentials.version = ?",
-            tenantId,
-            provider,
-            env.ciphertext(),
-            env.iv(),
-            env.wrappedDek(),
-            env.dekIv(),
-            env.kekVersion(),
-            baseUrl,
-            wsUrl,
-            declaredAccountId,
-            actor,
-            expectedVersion);
+    int updated;
+    try {
+      updated =
+          dsl.execute(
+              "INSERT INTO broker_credentials ("
+                  + "tenant_id, provider, ciphertext, iv, wrapped_dek, dek_iv, kek_version, "
+                  + "base_url, ws_url, expected_account_id, version, updated_at, updated_by) "
+                  + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, now(), ?) "
+                  + "ON CONFLICT (tenant_id, provider) DO UPDATE SET "
+                  + "ciphertext = excluded.ciphertext, iv = excluded.iv, "
+                  + "wrapped_dek = excluded.wrapped_dek, dek_iv = excluded.dek_iv, "
+                  + "kek_version = excluded.kek_version, base_url = excluded.base_url, "
+                  + "ws_url = excluded.ws_url, expected_account_id = excluded.expected_account_id, "
+                  + "version = broker_credentials.version + 1, updated_at = now(), "
+                  + "updated_by = excluded.updated_by "
+                  + "WHERE broker_credentials.version = ?",
+              tenantId,
+              provider,
+              env.ciphertext(),
+              env.iv(),
+              env.wrappedDek(),
+              env.dekIv(),
+              env.kekVersion(),
+              baseUrl,
+              wsUrl,
+              declaredAccountId,
+              actor,
+              expectedVersion);
+    } catch (DataAccessException e) {
+      // R-6.5 concurrent-race close-out. The pre-persist SELECT is non-transactional, so two
+      // concurrent cross-tenant binds of the SAME account can both read empty and both proceed; the
+      // loser's UPSERT then trips the partial unique index broker_credentials_provider_account_uk.
+      // Translate ONLY that violation (SQLState 23505 naming that index) into the typed
+      // DuplicateBrokerAccountException so the controller returns the same clean 409 the
+      // pre-persist
+      // check promises. Every OTHER DataAccessException rethrows UNCHANGED (the PK conflict is
+      // absorbed by ON CONFLICT and never reaches here, and OptimisticLock is a zero-row update,
+      // not
+      // an exception), so existing behavior is untouched. No key material is in the message.
+      if (isAccountUniquenessViolation(e)) {
+        throw new DuplicateBrokerAccountException(
+            "broker account "
+                + declaredAccountId
+                + " (provider "
+                + provider
+                + ") is already bound to another tenant — a brokerage account may bind to only one"
+                + " tenant (requested tenant="
+                + tenantId
+                + "; concurrent bind lost the race to the unique index"
+                + " broker_credentials_provider_account_uk)");
+      }
+      throw e;
+    }
 
     if (updated == 0) {
       // INSERT path always affects 1; zero rows ⇒ a conflict whose DO UPDATE WHERE-version did not
@@ -390,5 +422,44 @@ public class BrokerCredentialWriter {
               + " retry");
     }
     return expectedVersion + 1;
+  }
+
+  /**
+   * Classifies a jOOQ {@link DataAccessException} as the R-6.5 account-uniqueness index violation:
+   * SQLState {@code 23505} (unique_violation) whose error names the partial unique index {@code
+   * broker_credentials_provider_account_uk}. This is the ONLY {@link DataAccessException} the
+   * UPSERT translates to a {@link DuplicateBrokerAccountException} (the concurrent cross-tenant
+   * race the pre-persist SELECT cannot close). A {@code 23505} on a DIFFERENT constraint (e.g. the
+   * PK) or any other SQLState returns {@code false} so it rethrows unchanged.
+   */
+  private static boolean isAccountUniquenessViolation(DataAccessException e) {
+    if (!"23505".equals(sqlStateOf(e))) {
+      return false;
+    }
+    for (Throwable t = e; t != null; t = t.getCause()) {
+      String message = t.getMessage();
+      if (message != null && message.contains("broker_credentials_provider_account_uk")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The SQLState of a jOOQ {@link DataAccessException}: prefers jOOQ's own {@link
+   * DataAccessException#sqlState()} and falls back to the first {@link SQLException} in the cause
+   * chain when jOOQ reports none ({@code null}/empty/{@code "00000"}).
+   */
+  private static String sqlStateOf(DataAccessException e) {
+    String sqlState = e.sqlState();
+    if (sqlState != null && !sqlState.isEmpty() && !"00000".equals(sqlState)) {
+      return sqlState;
+    }
+    for (Throwable t = e.getCause(); t != null; t = t.getCause()) {
+      if (t instanceof SQLException sqlException) {
+        return sqlException.getSQLState();
+      }
+    }
+    return sqlState;
   }
 }
