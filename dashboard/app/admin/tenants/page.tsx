@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
 import { ActivateButton } from "@/components/ActivateButton";
+import { DeleteTenantButton } from "@/components/DeleteTenantButton";
 import {
   getAdminTenants,
   AdminReadDisabledError,
@@ -12,6 +13,7 @@ import {
 } from "@/lib/adminBff";
 import { getTenantEmails, type TenantEmails } from "@/lib/db";
 import { postActivation } from "@/lib/adminActivation";
+import { postTenantDelete } from "@/lib/adminTenantDelete";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +22,14 @@ export const dynamic = "force-dynamic";
 // activation route is itself dark (404s) until operator.activation.enabled is on, so even with this
 // true the action degrades gracefully. Activation arms REAL money — keep it off until Phase E.
 const ACTIVATION_ENABLED = process.env.OPERATOR_ACTIVATION_ENABLED === "true";
+
+// Dark-by-default: the per-tenant "Delete" affordance is only rendered when this flag is explicitly
+// "true" (and only for a NOT-live, all-dark tenant). Unset/anything-else => no delete affordance at
+// all. The api-gateway delete route is itself dark (404s) and re-enforces the live/all-dark
+// preconditions server-side (P0/P2), so this is the UI-side half of the same gate. Deleting a tenant
+// is irreversible — keep it off until the operator cutover.
+const TENANT_DELETE_ENABLED =
+  process.env.OPERATOR_TENANT_DELETE_ENABLED === "true";
 
 // Format an ISO timestamp as a UTC date for the "valid until" display. Server-rendered with an
 // explicit UTC zone so it doesn't drift by render host. Fail-safe: a null/blank/unparseable value
@@ -71,7 +81,7 @@ function activationBadge(item: AdminTenantItem): {
 export default async function AdminTenantsPage({
   searchParams,
 }: {
-  searchParams: { done?: string; error?: string };
+  searchParams: { done?: string; error?: string; blocked_by?: string };
 }) {
   // Independent reads — overlap the page's auth() with the BFF fetch (the config page's pattern).
   // The BFF fetch degrades to null when the admin-read route is dark (AdminReadDisabledError);
@@ -94,15 +104,31 @@ export default async function AdminTenantsPage({
     }),
   ]);
 
-  // Coarse result banner from the activate/deactivate redirect.
+  // Coarse result banner from the activate/deactivate/delete redirect.
   let banner: { tone: "ok" | "err"; msg: string } | null = null;
-  if (searchParams.done) {
+  if (searchParams.done === "deleted") {
+    banner = { tone: "ok", msg: "Tenant deleted." };
+  } else if (searchParams.done) {
     banner = { tone: "ok", msg: `Live ${searchParams.done}.` };
   } else if (searchParams.error) {
     const e = searchParams.error;
-    if (e === "422") {
+    if (e === "409") {
+      // Delete blocked by a server-side precondition (live target / non-dark strategy). blocked_by
+      // names the reason when the gateway supplied one.
+      banner = {
+        tone: "err",
+        msg: searchParams.blocked_by
+          ? `Blocked — ${searchParams.blocked_by}.`
+          : "Blocked.",
+      };
+    } else if (e === "207") {
+      // Partial teardown — some stores cleaned, one step failed. Safe to retry (idempotent).
+      banner = { tone: "err", msg: "Partially deleted — retry." };
+    } else if (e === "422") {
       banner = { tone: "err", msg: "Rejected — see the row's state." };
     } else if (e === "404") {
+      // Activation not enabled. (A delete 404 = dark/flag off, but the delete button only renders
+      // when the flag is on, so that path is unreachable from the UI.)
       banner = { tone: "err", msg: "Activation not enabled." };
     } else {
       banner = { tone: "err", msg: "Could not complete. Try again." };
@@ -135,8 +161,59 @@ export default async function AdminTenantsPage({
     );
   }
 
+  // Server action: re-verify operator, enforce the type-to-confirm match, forward to the api-gateway
+  // delete route, redirect with a coarse result. Belt-and-suspenders with the client modal and the
+  // server-side P0/P2 preconditions — none of confirm/operator/live checks trust the browser alone.
+  async function deleteTenantAction(formData: FormData) {
+    "use server";
+    const s = await auth();
+    if (!s?.isOperator) {
+      redirect("/admin/tenants?error=403");
+    }
+    const tenantId = String(formData.get("tenant_id") ?? "");
+    const confirmTenantId = String(formData.get("confirm_tenant_id") ?? "");
+    // Exact, case-sensitive match — reject a mismatch (or empty) before touching the gateway.
+    if (!tenantId || confirmTenantId !== tenantId) {
+      redirect("/admin/tenants?error=400");
+    }
+    const result = await postTenantDelete(tenantId, confirmTenantId);
+    revalidatePath("/admin/tenants");
+    if (result.ok) {
+      redirect("/admin/tenants?done=deleted");
+    }
+    if (result.status === 409 && result.blockedBy) {
+      redirect(
+        `/admin/tenants?error=409&blocked_by=${encodeURIComponent(result.blockedBy)}`,
+      );
+    }
+    redirect(`/admin/tenants?error=${result.status}`);
+  }
+
   const readDisabled = adminRes === null;
   const items: AdminTenantItem[] = adminRes?.items ?? [];
+
+  // The DataTable renders per-(tenant, strategy) rows, but delete is PER-TENANT. Pre-compute, across
+  // all of a tenant's rows: (a) whether ANY row is live, (b) whether ANY strategy looks active
+  // (activation_state VALID — belt-and-suspenders; only a live row can be VALID), and (c) the tenant's
+  // FIRST strategy id (so the delete button renders once, on the first row). A tenant is "deletable"
+  // from the UI iff it has NO live row AND nothing looks active — the authoritative all-dark check
+  // lives server-side (P0/P2); this is only a UI guard so a live tenant shows NO delete affordance.
+  const liveTenants = new Set<string>();
+  const activeTenants = new Set<string>();
+  const firstStrategyByTenant = new Map<string, string>();
+  for (const it of items) {
+    if (it.mode === "live") {
+      liveTenants.add(it.tenant_id);
+    }
+    if (it.activation_state === "VALID") {
+      activeTenants.add(it.tenant_id);
+    }
+    if (!firstStrategyByTenant.has(it.tenant_id)) {
+      firstStrategyByTenant.set(it.tenant_id, it.strategy_id);
+    }
+  }
+  const isDeletableTenant = (tenantId: string): boolean =>
+    !liveTenants.has(tenantId) && !activeTenants.has(tenantId);
 
   const columns = [
     { key: "tenant_id", label: "Tenant" },
@@ -210,20 +287,35 @@ export default async function AdminTenantsPage({
       label: "",
       render: (_v: unknown, row: Record<string, unknown>) => {
         const item = row as unknown as AdminTenantItem;
-        if (item.mode !== "live") {
-          return null;
+        if (item.mode === "live") {
+          const intent =
+            item.activation_state === "VALID" ? "deactivate" : "activate";
+          return (
+            <ActivateButton
+              tenantId={item.tenant_id}
+              strategyId={item.strategy_id}
+              intent={intent}
+              action={activationAction}
+              writeEnabled={ACTIVATION_ENABLED}
+            />
+          );
         }
-        const intent =
-          item.activation_state === "VALID" ? "deactivate" : "activate";
-        return (
-          <ActivateButton
-            tenantId={item.tenant_id}
-            strategyId={item.strategy_id}
-            intent={intent}
-            action={activationAction}
-            writeEnabled={ACTIVATION_ENABLED}
-          />
-        );
+        // Paper row. The per-tenant delete affordance renders once (on the tenant's first row) and
+        // only for a NOT-live, all-dark tenant when the dark flag is on. A live tenant never reaches
+        // here (handled above) and so shows NO delete affordance at all.
+        if (
+          TENANT_DELETE_ENABLED &&
+          isDeletableTenant(item.tenant_id) &&
+          firstStrategyByTenant.get(item.tenant_id) === item.strategy_id
+        ) {
+          return (
+            <DeleteTenantButton
+              tenantId={item.tenant_id}
+              action={deleteTenantAction}
+            />
+          );
+        }
+        return null;
       },
     },
   ];
