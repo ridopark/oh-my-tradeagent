@@ -27,6 +27,7 @@ import com.ohmytradeagent.orchestrator.activities.WatchlistTriggerActivities;
 import com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AccountSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.AuditEmitWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
@@ -197,6 +198,12 @@ public class TemporalWorkerConfig {
         // TenantDeleteActivities impl is registered below; started fresh per call by the Phase 4
         // api-gateway teardown forward (not yet wired).
         TenantDeleteWorkflowImpl.class,
+        // Operator tenant-delete epic (PLAN-2026-07-03) Phase 4: DARK generic audit-emit carrier.
+        // Writes ONE hash-chained audit_log row via AuditActivities.log so the api-gateway (which
+        // has no direct audit writer) can record TenantDeleteRequested / TenantDeleteBlocked(P0-P3)
+        // / TenantDeleteCompleted / TenantDeleteStepFailed by starting this workflow. Its only
+        // activity (audit) is already registered below.
+        AuditEmitWorkflowImpl.class,
         // Watchlist-trigger strategy. The session parent is started by
         // WatchlistMirrorActivitiesImpl
         // on a clean watchlist parse (for the configured trigger strategy, when enabled); it

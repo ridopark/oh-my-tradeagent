@@ -24,6 +24,18 @@ public interface ReconciliationExecActivity {
   List<JournalEntry> journalDumpOpen(String tenantId, String strategyId);
 
   /**
+   * Operator tenant-delete (PLAN-2026-07-03) P5 HAS_TRADE_HISTORY gate: total count of {@code
+   * order_intent_journal} rows for the {@code (tenant, strategy)} across ALL states (RECORDED,
+   * SUBMITTED, and every terminal state — FILLED, CANCELLED, EXPIRED, ERRORED, …). Unlike {@link
+   * #journalDumpOpen} (which returns only non-terminal rows), this counts a tenant that traded and
+   * then fully closed, so the tenant-delete guard can refuse a tenant that EVER placed an order
+   * (retention-aware — a traded tenant is deliberately not one-click-deletable). {@code 0} means
+   * the ledger has never recorded an order for this {@code (tenant, strategy)} — the only deletable
+   * shape.
+   */
+  long journalCountByTenant(String tenantId, String strategyId);
+
+  /**
    * List currently-open broker orders for the broker env this Activity is hosted in. The {@code
    * tenantId} / {@code strategyId} parameters resolve the per-tenant broker under the
    * shared-account path (multiple live tenants on one broker_target); the env-fallback source

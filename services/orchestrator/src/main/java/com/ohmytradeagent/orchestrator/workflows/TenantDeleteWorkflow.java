@@ -20,15 +20,26 @@ import io.temporal.workflow.WorkflowMethod;
  * strategy_config} primary key is {@code (tenant_id, strategy_id)} — so one delete unit is one
  * {@code (tenant, strategy)}. A tenant with multiple strategies is torn down by the api-gateway
  * invoking this workflow once per strategy.
+ *
+ * <p><b>Phase 4: the P4/P5 live-safety gates run FIRST, inside this workflow.</b> The coordinator
+ * moved P4 ({@code BROKER_NOT_FLAT}) and P5 ({@code HAS_TRADE_HISTORY}) here from the api-gateway
+ * because only orchestrator-core can reach the broker / exec journal (via the {@code
+ * ReconciliationExecActivity} on the {@code broker-<broker_target>} queue). Either gate failing —
+ * or any read faulting (fail-closed) — returns a {@link TenantDeleteResult.Status#BLOCKED} result
+ * and runs ZERO teardown. Only when BOTH pass does the teardown a → b → c run.
  */
 @WorkflowInterface
 public interface TenantDeleteWorkflow {
 
   /**
-   * Run the teardown steps a → b → c. {@code actor} is threaded to the config-delete audit
-   * tombstone ({@code operator:<id>}). Returns the rows-deleted count from step (c) (0 when already
-   * absent).
+   * Evaluate the P4/P5 live-safety gates then (only if both pass) run the teardown steps a → b → c.
+   * {@code brokerTarget} is the stored {@code strategy_config.broker_target} (resolved by the
+   * api-gateway from the config it already read for P0) — it pins the {@code broker-<target>} task
+   * queue the P4/P5 gate activities route to. {@code actor} is threaded to the config-delete audit
+   * tombstone ({@code operator:<id>}). Returns a {@link TenantDeleteResult}: BLOCKED (naming the
+   * gate) with zero teardown, or COMPLETED with the step-(c) rows-deleted count.
    */
   @WorkflowMethod
-  int deleteTenant(String tenantId, String strategyId, String actor);
+  TenantDeleteResult deleteTenant(
+      String tenantId, String strategyId, String brokerTarget, String actor);
 }

@@ -108,6 +108,27 @@ public final class WorkflowIds {
   }
 
   /**
+   * Workflow ID for the operator {@code TenantDeleteWorkflow} teardown of one {@code (tenant,
+   * strategy)} (PLAN-2026-07-03, Phase 4). Routes through {@link #tenantStrategy} (the teardown IS
+   * strategy-scoped) and appends a fresh per-request {@code correlationId} so re-runs get a
+   * distinct id rather than colliding.
+   */
+  public static String tenantDelete(String tenantId, String strategyId, String correlationId) {
+    return tenantStrategy(tenantId, strategyId) + "/tenant-delete/" + correlationId;
+  }
+
+  /**
+   * Workflow ID for the short-lived {@code AuditEmitWorkflow} that records ONE tenant-delete
+   * lifecycle event (PLAN-2026-07-03, Phase 4). Deliberately does NOT route through {@link
+   * #tenantStrategy}: the emit is keyed by {@code correlationId} + event {@code kind}, and
+   * per-event uniqueness comes from the caller-supplied {@code uuid} (best-effort audit, no dedup
+   * reuse policy). The random {@code uuid} stays at the caller so this stays a pure function.
+   */
+  public static String auditEmit(String correlationId, String kind, String uuid) {
+    return "audit-emit/" + correlationId + "/" + kind + "/" + uuid;
+  }
+
+  /**
    * Workflow ID prefix for a {@code PositionWorkflow}; {@code entrySignalId} disambiguates re-BTOs.
    */
   public static String position(

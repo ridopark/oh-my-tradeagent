@@ -111,6 +111,16 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public long countByTenantStrategy(String tenantId, String strategyId) {
+    // Operator tenant-delete P5: count rows in ANY state (no state filter), so a tenant that traded
+    // and closed still counts as "has history". fetchCount issues a SELECT count(*).
+    return dsl.fetchCount(
+        dsl.selectFrom(TABLE)
+            .where(field("tenant_id", String.class).eq(tenantId))
+            .and(field("strategy_id", String.class).eq(strategyId)));
+  }
+
+  @Override
   public List<JournaledOrder> listOpenByTenantStrategy(String tenantId, String strategyId) {
     Result<?> rows =
         dsl.selectFrom(TABLE)

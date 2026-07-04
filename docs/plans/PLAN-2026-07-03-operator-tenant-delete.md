@@ -136,8 +136,14 @@ for the route (200, dark 404, 401 no-bearer, 403 non-allowlisted).
 (`RUN_DB_ITS`). Behavioral: seeded member+invite rows for a tenant are gone after the call; second call
 succeeds with 0 rows.
 
-## Phase 4 — api-gateway: TenantDeleteController + guards + orchestration + audit (api-gateway)
+## Phase 4 — api-gateway: TenantDeleteController + guards + orchestration + audit (api-gateway + orchestrator + exec + contract)
 **Goal:** the operator entrypoint that enforces P0–P5 + confirm, then orchestrates steps 2–8.
+
+> **SHIPPED with two corrections from the risk review (spans 4 modules, not just api-gateway):**
+> 1. **P0 is an ALLOWLIST, not a `-live` blocklist.** Deletable ONLY if ≥1 `strategy_config` row AND every strategy is `isDefinitelyPaper` (`!StrategyConfigInvariants.isLive` AND `VerifiedAccountGuard.paperProvider != null`). Distinct fail-closed blocks: `LIVE_BROKER_TARGET`, `NON_PAPER_BROKER_TARGET` (null/blank/bare/unknown), `UNKNOWN_TENANT_SHAPE` (zero rows). Single `listByTenant` read; any read/parse fault → block (no per-row skip). The old "no `-live` target" blocklist was fail-OPEN on zero-rows / null / legacy targets.
+> 2. **P4/P5 live INSIDE `TenantDeleteWorkflow`, not api-gateway** — api-gateway cannot reach the broker (no positions endpoint) or the exec journal DB. The workflow (orchestrator-core) reads broker-flat + an ALL-STATES `order_intent_journal` count via `ReconciliationExecActivity` on the broker task queue, FIRST, before any teardown; either failing or any read-fault → BLOCKED, zero teardown. This added `journalCountByTenant` to `contract/java` + `services/exec` (P5 correctness — open-rows-only would wrongly pass a traded-then-closed tenant). api-gateway emits lifecycle audit via a new generic `AuditEmitWorkflow`.
+>
+> **⚠ H1 — the gate trusts `strategy_config.broker_target` from the api-gateway DB.** Safe iff that DB reflects real routing. See the cutover section for the mandatory pre-enable check.
 **Changes** (anchors):
 - New `TenantDeleteController` (mirror
   `services/api-gateway/.../web/CreateTenantController.java:50` gating + `:77`
@@ -191,9 +197,16 @@ Delete affordance gated behind an exact-id-typed confirm; live row shows none.
    operator merge gate.
 
 ## P0 / operator follow-ups (no code)
+- **⚠ H1 — MANDATORY pre-enable check (real money).** BEFORE flipping `OPERATOR_TENANT_DELETE_ENABLED`,
+  confirm `StrategyConfigReader.listByTenant('prod_real')` (the exact api-gateway orchestrator-DB read)
+  returns EITHER an `alpaca-live` row (→ P0 `LIVE_BROKER_TARGET` block) OR zero rows (→
+  `UNKNOWN_TENANT_SHAPE` block). A stale **paper** row for prod_real is the ONLY unsafe shape — it would
+  let P0 pass while the live trades sit in `exec_alpaca_live`. Optional structural hardening: cross-check
+  the live exec pod (zero live creds + zero live journal rows for the tenant), independent of broker_target.
 - Flip flags on homelab: `BROKER_CREDENTIALS_DELETE_ENABLED` (exec), `OPERATOR_TENANT_DELETE_ENABLED`
-  (api-gateway + dashboard + bff), `dashboard.writer.enabled` already on. Apply the `V7` migration
-  (BFF Flyway on deploy). Roll exec/api-gateway/bff/dashboard.
+  (api-gateway + dashboard + bff), `dashboard.writer.enabled` already on. **Apply `V7` — the live dashboard
+  DB is at V6; a bff roll runs Flyway to V7, else the dashboard-rows DELETE errors.** Roll
+  exec/api-gateway/bff/dashboard.
 - Then **delete `staging-paper-2`** via the button; verify all stores clean + `TenantDeleted`
   tombstone in audit_log + the recon loop no longer references it.
 - Deploy notes: `deploy.yml` applies per-service manifests only; the flag env are live `kubectl set
