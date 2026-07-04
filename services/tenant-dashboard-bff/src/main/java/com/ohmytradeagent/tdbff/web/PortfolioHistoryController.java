@@ -24,17 +24,19 @@ import org.springframework.web.bind.annotation.RestController;
  * targets); for a multi-target tenant it returns the PRIMARY (first) target, since the {@code
  * /live} total header is single-account (Robinhood) semantics. The {@code range} → Alpaca {@code
  * period}/{@code timeframe} resolution lives in {@link PortfolioHistoryClient} (keeping the
- * workflow a dumb pass-through). The {@code account_scope} label states the account-level (shared)
- * caveat.
+ * workflow a dumb pass-through). The tenant's {@code tenant_id} is forwarded so exec resolves the
+ * tenant's OWN broker credentials; the {@code account_scope} label states the (per-tenant own
+ * account) scope.
  */
 @RestController
 @RequestMapping("/api/portfolio-history")
 public class PortfolioHistoryController {
 
-  // Same wording as PortfolioService.account_equity_scope — the chart is account-level, SHARED.
+  // Same wording as PortfolioService.account_equity_scope — the chart is this tenant's OWN account.
   static final String ACCOUNT_SCOPE =
-      "Brokerage account net-liquidation equity behind the broker_target, SHARED across all tenants"
-          + " routing to that broker — NOT this tenant's portfolio value.";
+      "Net-liquidation equity of this tenant's OWN brokerage account behind the broker_target"
+          + " (broker-account-level truth for that account) — NOT this tenant's per-strategy"
+          + " portfolio value.";
 
   private final PortfolioHistoryClient client;
   private final TenantStrategyResolver strategyResolver;
@@ -59,7 +61,7 @@ public class PortfolioHistoryController {
 
     String brokerTarget = primaryBrokerTarget(tenant);
     PortfolioHistoryResult history =
-        brokerTarget == null ? null : client.historyFor(brokerTarget, range);
+        brokerTarget == null ? null : client.historyFor(tenant, brokerTarget, range);
 
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("timestamps", history == null ? List.of() : nullToEmpty(history.getTimestamps()));

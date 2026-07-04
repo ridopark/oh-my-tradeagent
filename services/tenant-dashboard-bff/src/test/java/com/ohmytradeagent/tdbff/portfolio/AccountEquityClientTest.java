@@ -9,6 +9,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.AccountSnapshotRequest;
 import com.ohmytradeagent.contract.AccountSnapshotResult;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
@@ -17,6 +18,7 @@ import java.math.BigDecimal;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class AccountEquityClientTest {
 
@@ -38,11 +40,43 @@ class AccountEquityClientTest {
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
         .thenReturn(result);
 
-    var acct = new AccountEquityClient(client, "orchestrator-core").snapshotFor("alpaca-paper");
+    var acct =
+        new AccountEquityClient(client, "orchestrator-core").snapshotFor("acme", "alpaca-paper");
 
     assertThat(acct.equity()).isEqualByComparingTo(new BigDecimal("10000.00"));
     assertThat(acct.accountNumber()).isEqualTo("PA3ER05HLHMB");
     verify(stub, never()).cancel();
+  }
+
+  @Test
+  void forwardsTenantIdOnTheRequestSoExecReadsTheTenantsOwnAccount() throws Exception {
+    WorkflowClient client = mock(WorkflowClient.class);
+    WorkflowStub stub = stubReturning(client);
+    when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
+        .thenReturn(new AccountSnapshotResult());
+
+    new AccountEquityClient(client, "orchestrator-core").snapshotFor("acme", "alpaca-paper");
+
+    ArgumentCaptor<Object> req = ArgumentCaptor.forClass(Object.class);
+    verify(stub).start(req.capture());
+    AccountSnapshotRequest sent = (AccountSnapshotRequest) req.getValue();
+    assertThat(sent.getTenantId()).isEqualTo("acme");
+    assertThat(sent.getBrokerTarget())
+        .isEqualTo(AccountSnapshotRequest.BrokerTarget.fromValue("alpaca-paper"));
+  }
+
+  @Test
+  void blankTenantLeavesTenantIdUnsetSoExecFallsBackToAccountLevel() throws Exception {
+    WorkflowClient client = mock(WorkflowClient.class);
+    WorkflowStub stub = stubReturning(client);
+    when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
+        .thenReturn(new AccountSnapshotResult());
+
+    new AccountEquityClient(client, "orchestrator-core").snapshotFor("  ", "alpaca-paper");
+
+    ArgumentCaptor<Object> req = ArgumentCaptor.forClass(Object.class);
+    verify(stub).start(req.capture());
+    assertThat(((AccountSnapshotRequest) req.getValue()).getTenantId()).isNull();
   }
 
   @Test
@@ -52,7 +86,8 @@ class AccountEquityClientTest {
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
         .thenThrow(new TimeoutException("waited past the bound"));
 
-    var acct = new AccountEquityClient(client, "orchestrator-core").snapshotFor("alpaca-paper");
+    var acct =
+        new AccountEquityClient(client, "orchestrator-core").snapshotFor("acme", "alpaca-paper");
 
     assertThat(acct.equity()).isNull();
     assertThat(acct.accountNumber()).isNull();
@@ -66,7 +101,8 @@ class AccountEquityClientTest {
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
         .thenThrow(new IllegalStateException("temporal unreachable"));
 
-    var acct = new AccountEquityClient(client, "orchestrator-core").snapshotFor("alpaca-paper");
+    var acct =
+        new AccountEquityClient(client, "orchestrator-core").snapshotFor("acme", "alpaca-paper");
 
     assertThat(acct.equity()).isNull();
     assertThat(acct.accountNumber()).isNull();

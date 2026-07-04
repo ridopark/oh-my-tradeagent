@@ -55,7 +55,7 @@ class PortfolioHistoryControllerWebMvcTest {
     result.setBaseValue(new BigDecimal("10000.00"));
     result.setBaseValueAsof(1719360000L);
     result.setTimeframe("5Min");
-    when(client.historyFor(eq("alpaca-paper"), eq("1D"))).thenReturn(result);
+    when(client.historyFor(eq("acme"), eq("alpaca-paper"), eq("1D"))).thenReturn(result);
 
     mvc.perform(get("/api/portfolio-history?range=1D").header("X-Tenant-Id", "acme"))
         .andExpect(status().isOk())

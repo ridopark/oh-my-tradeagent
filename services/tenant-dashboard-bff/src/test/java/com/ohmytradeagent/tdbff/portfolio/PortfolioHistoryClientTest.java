@@ -10,6 +10,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.PortfolioHistoryRequest;
 import com.ohmytradeagent.contract.PortfolioHistoryResult;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
@@ -23,6 +24,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 
 class PortfolioHistoryClientTest {
@@ -52,12 +54,40 @@ class PortfolioHistoryClientTest {
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(PortfolioHistoryResult.class)))
         .thenReturn(result);
 
-    PortfolioHistoryResult out = newClient(client).historyFor("alpaca-paper", "1M");
+    PortfolioHistoryResult out = newClient(client).historyFor("acme", "alpaca-paper", "1M");
 
     assertThat(out.getEquity()).hasSize(2);
     assertThat(out.getBaseValue()).isEqualByComparingTo(new BigDecimal("10000.00"));
     assertThat(out.getTimeframe()).isEqualTo("1D");
     verify(stub, never()).cancel();
+  }
+
+  @Test
+  void forwardsTenantIdOnTheRequestSoExecReadsTheTenantsOwnAccount() throws Exception {
+    WorkflowClient client = mock(WorkflowClient.class);
+    WorkflowStub stub = stubReturning(client);
+    when(stub.getResult(anyLong(), any(TimeUnit.class), eq(PortfolioHistoryResult.class)))
+        .thenReturn(new PortfolioHistoryResult());
+
+    newClient(client).historyFor("acme", "alpaca-paper", "1M");
+
+    ArgumentCaptor<Object> req = ArgumentCaptor.forClass(Object.class);
+    verify(stub).start(req.capture());
+    assertThat(((PortfolioHistoryRequest) req.getValue()).getTenantId()).isEqualTo("acme");
+  }
+
+  @Test
+  void blankTenantLeavesTenantIdUnsetSoExecFallsBackToAccountLevel() throws Exception {
+    WorkflowClient client = mock(WorkflowClient.class);
+    WorkflowStub stub = stubReturning(client);
+    when(stub.getResult(anyLong(), any(TimeUnit.class), eq(PortfolioHistoryResult.class)))
+        .thenReturn(new PortfolioHistoryResult());
+
+    newClient(client).historyFor("  ", "alpaca-paper", "1M");
+
+    ArgumentCaptor<Object> req = ArgumentCaptor.forClass(Object.class);
+    verify(stub).start(req.capture());
+    assertThat(((PortfolioHistoryRequest) req.getValue()).getTenantId()).isNull();
   }
 
   @Test
@@ -67,7 +97,7 @@ class PortfolioHistoryClientTest {
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(PortfolioHistoryResult.class)))
         .thenThrow(new TimeoutException("waited past the bound"));
 
-    PortfolioHistoryResult out = newClient(client).historyFor("alpaca-paper", "1M");
+    PortfolioHistoryResult out = newClient(client).historyFor("acme", "alpaca-paper", "1M");
 
     assertThat(out.getTimestamps()).isEmpty();
     assertThat(out.getEquity()).isEmpty();
@@ -82,7 +112,7 @@ class PortfolioHistoryClientTest {
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(PortfolioHistoryResult.class)))
         .thenThrow(new IllegalStateException("temporal unreachable"));
 
-    PortfolioHistoryResult out = newClient(client).historyFor("alpaca-paper", "1M");
+    PortfolioHistoryResult out = newClient(client).historyFor("acme", "alpaca-paper", "1M");
 
     assertThat(out.getEquity()).isEmpty();
     // start() succeeded then getResult() threw → the workflow is still running and must be

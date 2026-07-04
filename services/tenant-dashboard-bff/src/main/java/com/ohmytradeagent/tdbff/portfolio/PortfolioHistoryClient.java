@@ -34,9 +34,11 @@ import org.springframework.stereotype.Component;
  * deterministic, replay-stable pass-through. The clock is injectable so the YTD calc is
  * unit-testable with a fixed clock.
  *
- * <p>The history is account-level — shared by every tenant routing to a given {@code broker_target}
- * — and is NOT the tenant's portfolio value; the {@code account_scope} label on the response states
- * this explicitly.
+ * <p>The request carries the requesting {@code tenant_id} so exec resolves THAT tenant's broker
+ * credentials — the history is the tenant's OWN brokerage account (account-level truth for that
+ * account, not a shared default). When {@code tenantId} is null/blank the tenant is left unset and
+ * exec falls back to the account-level credential set. The {@code account_scope} label on the
+ * response states this.
  */
 @Component
 public class PortfolioHistoryClient {
@@ -106,17 +108,22 @@ public class PortfolioHistoryClient {
   }
 
   /**
-   * Portfolio-history series for the account behind {@code brokerTarget}, read from one {@code
+   * Portfolio-history series for the {@code tenantId}'s OWN account behind {@code brokerTarget}
+   * (see class javadoc for the tenant → credential resolution), read from one {@code
    * PortfolioHistoryWorkflow} round-trip, for the dashboard {@code range}. Never {@code null}: on
-   * any timeout/error/degrade it returns an empty result (a read-only view degrades gracefully
-   * rather than failing the whole page).
+   * any timeout/error/degrade — including a tenant with no resolvable broker credentials — it
+   * returns an empty result so a read-only view degrades gracefully rather than failing the whole
+   * page.
    */
-  public PortfolioHistoryResult historyFor(String brokerTarget, String range) {
+  public PortfolioHistoryResult historyFor(String tenantId, String brokerTarget, String range) {
     Resolved resolved = resolveRange(range);
 
     PortfolioHistoryRequest request = new PortfolioHistoryRequest();
     request.setSchemaVersion(1L);
     request.setBrokerTarget(PortfolioHistoryRequest.BrokerTarget.fromValue(brokerTarget));
+    if (tenantId != null && !tenantId.isBlank()) {
+      request.setTenantId(tenantId);
+    }
     request.setPeriod(resolved.period());
     request.setTimeframe(resolved.timeframe());
     request.setCorrelationId("dashboard-" + UUID.randomUUID());
