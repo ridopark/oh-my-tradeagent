@@ -36,6 +36,12 @@ import org.springframework.web.bind.annotation.RestController;
  *       ({@link #isDefinitelyPaper}); a {@code -live} target → {@code LIVE_BROKER_TARGET}, a
  *       null/blank/bare/unknown target → {@code NON_PAPER_BROKER_TARGET}, zero rows → {@code
  *       UNKNOWN_TENANT_SHAPE}, an unparseable row → block (never skip).
+ *   <li><b>MULTI_STRATEGY_UNSUPPORTED</b> — a tenant with &gt;1 strategy is out of scope (409),
+ *       checked AFTER P0 (so a {@code -live} row still reports {@code LIVE_BROKER_TARGET} first)
+ *       and before any side effect. This route is single-strategy only: the teardown loops a
+ *       per-strategy workflow with P4/P5 checked inside each, so strategy A could irreversibly
+ *       complete before strategy B blocks. Correct multi-strategy teardown needs a future two-pass
+ *       gate (check P4/P5 for ALL strategies before tearing down ANY).
  *   <li><b>P1 ACTIVE_LIVE_ACTIVATION</b> — no strategy has an active live promotion.
  *   <li><b>P2 STRATEGY_ENABLED</b> — every strategy {@code enabled=false} (dark).
  *   <li><b>P3 OPEN_WORKFLOWS</b> — zero RUNNING PositionWorkflow executions.
@@ -167,6 +173,25 @@ public class TenantDeleteController {
           correlationId,
           "NON_PAPER_BROKER_TARGET",
           "a strategy has a non-paper broker_target");
+    }
+
+    // ---- MULTI_STRATEGY_UNSUPPORTED (single-strategy scope only). Evaluated AFTER P0 (so a
+    // multi-strategy tenant with ANY -live row still reports LIVE_BROKER_TARGET first) and BEFORE
+    // P1/P2/P3 and any side effect. Multi-strategy teardown loops a TenantDeleteWorkflow per
+    // strategy with P4/P5 checked INSIDE each, so strategy A could COMPLETE its irreversible
+    // teardown before strategy B evaluates P4/P5 and returns BLOCKED. Correct multi-strategy
+    // teardown needs a two-pass gate (check P4/P5 for ALL strategies before tearing down ANY);
+    // until then, reject here so the partial-teardown path is unreachable. ----
+    if (rows.size() > 1) {
+      return preflightBlock(
+          tenant,
+          "*",
+          actor,
+          correlationId,
+          "MULTI_STRATEGY_UNSUPPORTED",
+          "tenant has "
+              + rows.size()
+              + " strategies; multi-strategy delete is not yet supported (single-strategy only)");
     }
 
     // ---- P1 ACTIVE_LIVE_ACTIVATION (fail-closed) ----

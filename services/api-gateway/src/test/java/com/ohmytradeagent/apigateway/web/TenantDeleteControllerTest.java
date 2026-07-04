@@ -141,6 +141,47 @@ class TenantDeleteControllerTest {
     verifyNoInteractions(disable, workflow, execCreds, dashboardRows);
   }
 
+  // ---- MULTI_STRATEGY_UNSUPPORTED pre-flight (single-strategy scope only) ----
+
+  @Test
+  void multiStrategyTenant_409_unsupported_zeroSideEffects() {
+    // Two all-paper strategy rows → rejected at pre-flight BEFORE any teardown, so the
+    // partial-teardown path (strategy A torn down while strategy B evaluates P4/P5) is unreachable.
+    when(reader.listByTenant(TENANT))
+        .thenReturn(
+            List.of(
+                row("copytrade-v1", "alpaca-paper", false),
+                row("copytrade-v2", "alpaca-paper", false)));
+
+    ResponseEntity<Map<String, Object>> resp = call(TENANT);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+    assertThat(resp.getBody()).containsEntry("blocked_by", "MULTI_STRATEGY_UNSUPPORTED");
+    // ZERO teardown side effects — no disable, no workflow, no exec hop, no bff hop.
+    verifyNoInteractions(disable, workflow, execCreds, dashboardRows);
+    // Only the Blocked audit — NOT Requested, NOT Completed (the delete never began).
+    verify(audit).emit(eq("TenantDeleteBlocked"), eq(TENANT), any(), any(), any(), any());
+    verify(audit, never()).emit(eq("TenantDeleteRequested"), any(), any(), any(), any(), any());
+    verify(audit, never()).emit(eq("TenantDeleteCompleted"), any(), any(), any(), any(), any());
+  }
+
+  @Test
+  void multiStrategyTenant_withLiveRow_409_liveWins() {
+    // A 2-row tenant where one routes -live must report LIVE_BROKER_TARGET (P0), NOT
+    // MULTI_STRATEGY_UNSUPPORTED — proves P0 is still evaluated before the multi-strategy guard.
+    when(reader.listByTenant(TENANT))
+        .thenReturn(
+            List.of(
+                row("copytrade-v1", "alpaca-paper", false),
+                row("copytrade-v2", "alpaca-live", false)));
+
+    ResponseEntity<Map<String, Object>> resp = call(TENANT);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+    assertThat(resp.getBody()).containsEntry("blocked_by", "LIVE_BROKER_TARGET");
+    verifyNoInteractions(disable, workflow, execCreds, dashboardRows);
+  }
+
   // ---- P0 shape variants ----
 
   @Test
