@@ -103,6 +103,8 @@ class TenantDeleteWorkflowImplTest {
     InOrder ordered = inOrder(activities);
     ordered.verify(activities).deleteReconSchedules(TENANT, STRATEGY);
     ordered.verify(activities).terminateKillSwitchWorkflow(TENANT, STRATEGY);
+    // The tenant-level account kill-switch is reaped too (FIX 1: staging-paper-2 left it orphaned).
+    ordered.verify(activities).terminateAccountKillSwitchWorkflow(TENANT);
     ordered.verify(activities).deleteStrategyConfig(TENANT, STRATEGY, ACTOR);
     // A COMPLETED delete emits no TenantDeleteBlocked (the TenantDeleted tombstone is written
     // inside
@@ -269,6 +271,7 @@ class TenantDeleteWorkflowImplTest {
     assertThat(result.getDeletedConfigRows()).isZero();
     verify(activities, times(1)).deleteReconSchedules(TENANT, STRATEGY);
     verify(activities, times(1)).terminateKillSwitchWorkflow(TENANT, STRATEGY);
+    verify(activities, times(1)).terminateAccountKillSwitchWorkflow(TENANT);
     verify(activities, times(1)).deleteStrategyConfig(eq(TENANT), eq(STRATEGY), eq(ACTOR));
   }
 }

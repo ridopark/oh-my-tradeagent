@@ -104,30 +104,37 @@ public class TenantDeleteActivitiesImpl implements TenantDeleteActivities {
 
   @Override
   public void terminateKillSwitchWorkflow(String tenantId, String strategyId) {
-    String wfId = WorkflowIds.killswitch(tenantId, strategyId);
+    terminateWorkflowIdempotent(WorkflowIds.killswitch(tenantId, strategyId), "kill-switch");
+  }
+
+  @Override
+  public void terminateAccountKillSwitchWorkflow(String tenantId) {
+    // Tenant-scoped account loss-cap switch (WorkflowIds.accountKillswitch). Reaped
+    // UNCONDITIONALLY:
+    // the api-gateway MULTI_STRATEGY_UNSUPPORTED guard makes deleting the (only) strategy
+    // equivalent
+    // to deleting the whole tenant, so the account switch must go too. Same idempotent shape as the
+    // per-(tenant,strategy) terminate: absent/already-terminated = success.
+    terminateWorkflowIdempotent(WorkflowIds.accountKillswitch(tenantId), "account-kill-switch");
+  }
+
+  /**
+   * Terminates {@code wfId} with the {@code tenant_delete_teardown} reason, swallowing an
+   * absent/already-terminated workflow (a {@link WorkflowNotFoundException} or a gRPC {@code
+   * NOT_FOUND}) as idempotent success and propagating any other error so the bounded activity retry
+   * fires. Shared by the per-(tenant,strategy) and account-level kill-switch reaps.
+   */
+  private void terminateWorkflowIdempotent(String wfId, String kind) {
     try {
       WorkflowStub stub = workflowClient.newUntypedWorkflowStub(wfId);
       stub.terminate("tenant_delete_teardown");
-      log.info(
-          "tenant delete: terminated kill-switch workflow id={} tenant={} strategy={}",
-          wfId,
-          tenantId,
-          strategyId);
+      log.info("tenant delete: terminated {} workflow id={}", kind, wfId);
     } catch (WorkflowNotFoundException e) {
       // Absent or already terminated/completed — the desired end-state. Idempotent success.
-      log.info(
-          "tenant delete: kill-switch workflow id={} absent/terminated tenant={} strategy={} — "
-              + "idempotent",
-          wfId,
-          tenantId,
-          strategyId);
+      log.info("tenant delete: {} workflow id={} absent/terminated — idempotent", kind, wfId);
     } catch (RuntimeException e) {
       if (isNotFound(e)) {
-        log.info(
-            "tenant delete: kill-switch workflow id={} not found tenant={} strategy={} — idempotent",
-            wfId,
-            tenantId,
-            strategyId);
+        log.info("tenant delete: {} workflow id={} not found — idempotent", kind, wfId);
         return;
       }
       throw e;

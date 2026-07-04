@@ -326,10 +326,12 @@ class TenantDeleteControllerTest {
   // ---- L3: teardown-workflow fault → clean audited response, downstream NEVER called ----
 
   @Test
-  void workflowThrows_207_stepFailed_execAndBffNeverCalled() {
+  void workflowThrows_207_stepFailed_execNeverCalled() {
     wireAllPass();
     // The teardown workflow faults (activity permanently failing / run timeout / WorkflowFailed).
-    // A throw means NO COMPLETED result, so the exec/bff store deletes must never run.
+    // A throw means NO COMPLETED result, so the exec broker_credentials delete must never run.
+    // dashboard_user was already torn down FIRST (idempotent re-delete on a re-run), so it appears
+    // in completed_steps.
     when(workflow.deleteTenant(eq(TENANT), any(), any(), any(), any()))
         .thenThrow(new RuntimeException("activity permanently failing"));
 
@@ -338,8 +340,10 @@ class TenantDeleteControllerTest {
     assertThat(resp.getStatusCode().is5xxServerError() || resp.getStatusCode().value() == 207)
         .isTrue();
     assertThat(resp.getBody()).containsEntry("failed_step", "tenant_delete_workflow");
-    // The uncaught throw was converted into a clean audited response — never a COMPLETED path.
-    verifyNoInteractions(execCreds, dashboardRows);
+    assertThat(resp.getBody().get("completed_steps").toString()).contains("dashboard_user");
+    // The uncaught throw was converted into a clean audited response — never a COMPLETED path. The
+    // exec broker_credentials delete (which runs AFTER the workflow) never ran.
+    verifyNoInteractions(execCreds);
     verify(audit).emit(eq("TenantDeleteStepFailed"), eq(TENANT), any(), any(), any(), any());
     verify(audit, never()).emit(eq("TenantDeleteCompleted"), any(), any(), any(), any(), any());
   }
@@ -375,23 +379,27 @@ class TenantDeleteControllerTest {
 
     assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
     assertThat(resp.getBody()).containsEntry("status", "DELETED");
-    InOrder ordered = inOrder(audit, disable, workflow, execCreds, dashboardRows);
+    // FIX 2 order: Requested → disable → dashboard_user (reversible, over-the-network, torn down
+    // FIRST) → teardown workflow (strategy_config, first irreversible) → broker_credentials.
+    InOrder ordered = inOrder(audit, disable, dashboardRows, workflow, execCreds);
     ordered.verify(audit).emit(eq("TenantDeleteRequested"), eq(TENANT), any(), any(), any(), any());
     ordered.verify(disable).disable(eq(TENANT), eq("copytrade-v1"), any(), any());
+    ordered.verify(dashboardRows).delete(TENANT, OPERATOR);
     ordered
         .verify(workflow)
         .deleteTenant(eq(TENANT), eq("copytrade-v1"), eq("alpaca-paper"), any(), any());
     ordered.verify(execCreds).delete(TENANT, "alpaca");
-    ordered.verify(dashboardRows).delete(TENANT, OPERATOR);
     ordered.verify(audit).emit(eq("TenantDeleteCompleted"), eq(TENANT), any(), any(), any(), any());
   }
 
   @Test
-  void workflowReturnsBlocked_409_execAndBffNotCalled() {
+  void workflowReturnsBlocked_409_execNotCalled() {
     when(reader.listByTenant(TENANT))
         .thenReturn(List.of(row("copytrade-v1", "alpaca-paper", false)));
     when(liveActivation.isActive(eq(TENANT), any(), any())).thenReturn(false);
     when(openPositions.hasOpen(eq(TENANT), any())).thenReturn(false);
+    when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
+        .thenReturn(new DashboardRowsDeleteForwarder.DeletedCounts(0, 0));
     when(workflow.deleteTenant(eq(TENANT), any(), any(), any(), any()))
         .thenReturn(TenantDeleteResult.blocked(TenantDeleteResult.BlockReason.BROKER_NOT_FLAT));
 
@@ -399,22 +407,36 @@ class TenantDeleteControllerTest {
 
     assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
     assertThat(resp.getBody()).containsEntry("blocked_by", "BROKER_NOT_FLAT");
-    // The downstream store deletes must NOT run once the teardown workflow refused.
-    verifyNoInteractions(execCreds, dashboardRows);
+    // The exec broker_credentials delete (which runs AFTER the workflow) must NOT run once the
+    // teardown workflow refused. dashboard_user ran first but is reversible/idempotent — a blocked
+    // teardown means strategy_config is intact, so a dashboard-less tenant re-arms cleanly.
+    verifyNoInteractions(execCreds);
     verify(audit).emit(eq("TenantDeleteBlocked"), eq(TENANT), any(), any(), any(), any());
   }
 
   @Test
-  void bffHopThrows_207_stepFailed() {
+  void bffHopThrows_207_stepFailed_noIrreversibleStoreTouched() {
+    // FIX 2 robustness regression guard. The staging-paper-2 delete failed the bff hop with a
+    // ResourceAccessException (wrong base-url port). With dashboard_user torn down FIRST, a
+    // bff-unreachable fault must fail BEFORE the irreversible teardown workflow (strategy_config +
+    // kill switches) and the broker_credentials delete — so NO orphaned dashboard members are left
+    // bound to a config-less tenant, and the delete is cleanly re-runnable once the bff recovers.
     wireAllPass();
-    when(dashboardRows.delete(eq(TENANT), eq(OPERATOR))).thenThrow(new RuntimeException("bff 502"));
+    when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
+        .thenThrow(new RuntimeException("ResourceAccessException: connection refused"));
 
     ResponseEntity<Map<String, Object>> resp = call(TENANT);
 
     assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.MULTI_STATUS);
     assertThat(resp.getBody()).containsEntry("failed_step", "dashboard_user");
-    assertThat(resp.getBody().get("completed_steps").toString()).contains("broker_credentials");
+    // completed_steps is EMPTY — the bff hop is first, so nothing was torn down before it faulted.
+    assertThat(resp.getBody().get("completed_steps").toString())
+        .doesNotContain("strategy_config")
+        .doesNotContain("broker_credentials");
+    // The irreversible stores were NEVER touched (no partial teardown).
+    verifyNoInteractions(workflow, execCreds);
     verify(audit).emit(eq("TenantDeleteStepFailed"), eq(TENANT), any(), any(), any(), any());
+    verify(audit, never()).emit(eq("TenantDeleteCompleted"), any(), any(), any(), any(), any());
   }
 
   // ---- auth ----

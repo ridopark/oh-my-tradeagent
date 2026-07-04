@@ -113,7 +113,7 @@ exec:
 # dashboard-rows hop (Phase 4 → Phase 3 BFF route). Only used when operator.tenant-delete.enabled is
 # true (BffClientConfig is gated on it); a pod under the prod profile with a blank token fails fast.
 bff:
-  base-url: ${BFF_BASE_URL:http://tenant-dashboard-bff:8080}
+  base-url: ${BFF_BASE_URL:http://tenant-dashboard-bff:8083}
   service-token: ${BFF_SHARED_TOKEN:}
 
 management:

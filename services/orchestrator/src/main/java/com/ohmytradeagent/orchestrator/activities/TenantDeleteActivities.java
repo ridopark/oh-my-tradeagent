@@ -36,6 +36,17 @@ public interface TenantDeleteActivities {
   void terminateKillSwitchWorkflow(String tenantId, String strategyId);
 
   /**
+   * Step (b'): terminate the tenant-level {@code AccountKillSwitchWorkflow} ({@code
+   * WorkflowIds.accountKillswitch}). The account switch is tenant-scoped (spans EVERY strategy on
+   * the tenant's shared {@code broker_target}), so reaping it is UNCONDITIONAL here: the
+   * api-gateway {@code MULTI_STRATEGY_UNSUPPORTED} guard enforces single-strategy, so deleting the
+   * strategy == deleting the whole tenant. Same idempotent pattern as {@link
+   * #terminateKillSwitchWorkflow}: an absent or already-terminated/completed workflow is swallowed
+   * as success.
+   */
+  void terminateAccountKillSwitchWorkflow(String tenantId);
+
+  /**
    * Step (c): delete the {@code strategy_config} row and write the retained {@code TenantDeleted}
    * tombstone (via {@code StrategyConfigWriter#delete}). Returns the rows-deleted count; 0 (already
    * absent) is a success.
