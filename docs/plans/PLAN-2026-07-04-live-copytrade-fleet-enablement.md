@@ -63,6 +63,18 @@ Gates/follows the code phases. Repo defaults MUST stay dark (R-X.1).
    first clean fills, then lift the block. Never "live + full-size + unblocked" in one irreversible action.
 8. **`exec-alpaca-live` MUST stay `replicas:1`** (load-bearing invariant — the fill listener is not
    leader-elected; 2 pods → 2×N sockets → double fill signals). Do not scale it.
+9. **Before applying V6 (the account-uniqueness index): confirm no pre-existing cross-tenant duplicate
+   accounts** (code-review finding). V6 is a plain `CREATE UNIQUE INDEX`; if `broker_credentials` already
+   held two rows for different tenants sharing one non-blank `(provider, expected_account_id)`, the Flyway
+   apply would abort and the exec pod would crashloop. This is trivially safe today — the table is DARK
+   (`broker.creds.source=env` on every cluster), so it is empty. Run
+   `SELECT provider, expected_account_id, count(*) FROM broker_credentials WHERE expected_account_id ~ '[^[:space:]]' GROUP BY 1,2 HAVING count(*) > 1;`
+   and confirm zero rows before applying V6 on `exec_alpaca_live` (and `exec_alpaca_paper`).
+10. **Paper accounts are ALSO constrained** by V6 (uniqueness keys on the account being non-blank, not on
+    the pod being live — it is a per-broker-target invariant). This is fine today (paper tenants have
+    distinct accounts). If a future **shared-paper-demo** model (self-registration epic) needs two tenants
+    on ONE paper account, that epic must use a distinct approach — it cannot bind the same paper account to
+    two tenant rows on the paper exec DB.
 
 ---
 
