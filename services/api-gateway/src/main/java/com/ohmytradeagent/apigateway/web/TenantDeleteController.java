@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.LongConsumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -49,15 +50,17 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>Then {@code confirm_tenant_id} must string-equal the path {@code {tenant}} (case-sensitive) or
  * 400 {@code CONFIRM_MISMATCH} — checked BEFORE the guards so a typo never triggers reads. On
- * all-pass: emit {@code TenantDeleteRequested} → disable all strategies (disarm-first) → BFF
- * dashboard-rows delete FIRST (the only over-the-network store, and reversible — so a
- * bff-unreachable fault fails BEFORE any irreversible store touch, never leaving orphaned dashboard
- * members on a config-less tenant) → start+await the orchestrator {@link
+ * all-pass: emit {@code TenantDeleteRequested} → disable all strategies (disarm-first) →
+ * start+await the orchestrator {@link
  * com.ohmytradeagent.orchestrator.workflows.TenantDeleteWorkflow} per strategy (which runs the
  * P4/P5 broker/journal gates then does the FIRST IRREVERSIBLE delete: {@code strategy_config} + the
- * kill switches) → exec creds delete → emit {@code TenantDeleteCompleted}. A workflow BLOCKED
- * (P4/P5) → 409 (no further downstream call); a step fault → 207 + {@code TenantDeleteStepFailed}.
- * Every step is idempotent, so a fail-then-retry converges.
+ * kill switches) → on COMPLETED call exec creds delete → BFF dashboard-rows delete LAST (the only
+ * over-the-network store, and reversible/idempotent — torn down last with a bounded retry so a
+ * P4/P5-BLOCKED or workflow-faulted delete never reaches it, leaving a SURVIVING tenant's dashboard
+ * members untouched) → emit {@code TenantDeleteCompleted}. A workflow BLOCKED (P4/P5) → 409 (no
+ * further downstream call, dashboard members never touched); a step fault → 207 + {@code
+ * TenantDeleteStepFailed} with {@code deleted_stores}/{@code completed_steps} so the operator can
+ * re-run the idempotent tail to converge. Every step is idempotent.
  *
  * <p><b>Dark by construction.</b> Gated on {@code operator.tenant-delete.enabled=true}; unset → the
  * bean does not exist → 404. {@link com.ohmytradeagent.apigateway.security.ServiceTokenFilter}
@@ -72,6 +75,15 @@ public class TenantDeleteController {
   private static final Logger log = LoggerFactory.getLogger(TenantDeleteController.class);
   private static final List<String> RETAINED_STORES = List.of("audit_log", "order_intent_journal");
 
+  /**
+   * Bounded retry for the LAST-step bff dashboard-rows delete — the only over-the-network store,
+   * whose DELETE is idempotent so retry is safe. Rides out a transient blip; exhaustion → a loud
+   * 207 so the operator re-runs the idempotent tail. Small backoff keeps the request bounded.
+   */
+  static final int DASHBOARD_DELETE_MAX_ATTEMPTS = 3;
+
+  private static final long DASHBOARD_DELETE_BACKOFF_MS = 250L;
+
   private final TenantContext ctx;
   private final StrategyConfigReader reader;
   private final LiveActivationStateReader liveActivation;
@@ -81,6 +93,18 @@ public class TenantDeleteController {
   private final BrokerCredentialDeleteForwarder execCreds;
   private final DashboardRowsDeleteForwarder dashboardRows;
   private final TenantDeleteAuditEmitter audit;
+
+  /**
+   * Backoff sleeper for the dashboard-rows retry; overridable in tests so they never truly sleep.
+   */
+  private LongConsumer dashboardRetrySleeper =
+      millis -> {
+        try {
+          Thread.sleep(millis);
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+        }
+      };
 
   public TenantDeleteController(
       TenantContext ctx,
@@ -101,6 +125,39 @@ public class TenantDeleteController {
     this.execCreds = execCreds;
     this.dashboardRows = dashboardRows;
     this.audit = audit;
+  }
+
+  /** Test seam: replace the backoff sleeper so unit tests exhaust retries without real sleeps. */
+  void setDashboardRetrySleeper(LongConsumer sleeper) {
+    this.dashboardRetrySleeper = sleeper;
+  }
+
+  /**
+   * Bounded retry around the idempotent bff dashboard-rows DELETE. Retries a transient transport
+   * fault (the observed failure mode is a {@code ResourceAccessException}) up to {@link
+   * #DASHBOARD_DELETE_MAX_ATTEMPTS} attempts with a short fixed backoff; rethrows the last fault so
+   * the caller reports a loud 207. Safe because the bff DELETE is idempotent (0 rows = success).
+   */
+  private DashboardRowsDeleteForwarder.DeletedCounts deleteDashboardRowsWithRetry(
+      String tenant, String operator) {
+    RuntimeException last = null;
+    for (int attempt = 1; attempt <= DASHBOARD_DELETE_MAX_ATTEMPTS; attempt++) {
+      try {
+        return dashboardRows.delete(tenant, operator);
+      } catch (RuntimeException e) {
+        last = e;
+        log.warn(
+            "tenant-delete dashboard-rows delete attempt {}/{} failed tenant={} cause={}",
+            attempt,
+            DASHBOARD_DELETE_MAX_ATTEMPTS,
+            tenant,
+            e.getClass().getName());
+        if (attempt < DASHBOARD_DELETE_MAX_ATTEMPTS) {
+          dashboardRetrySleeper.accept(DASHBOARD_DELETE_BACKOFF_MS);
+        }
+      }
+    }
+    throw last;
   }
 
   @PostMapping("/{tenant}/delete")
@@ -282,27 +339,11 @@ public class TenantDeleteController {
       return stepFailed(tenant, primary, actor, correlationId, "disable", new ArrayList<>(), e);
     }
 
-    // completedSteps is derived from deletedStores' (insertion-ordered) keys at each use site.
-    Map<String, Object> deletedStores = new LinkedHashMap<>();
-
-    // 3. BFF dashboard_user + dashboard_user_invite delete — torn down FIRST, BEFORE any
-    // irreversible store touch. FIX 2 (robustness): the bff is the ONLY store api-gateway reaches
-    // over the network, so it is the one most likely to be transiently unreachable. If it faults
-    // (e.g. a ResourceAccessException from a wrong base-url or a bff outage) we fail here while
-    // strategy_config, the kill switches, and broker_credentials are all still intact — no orphaned
-    // dashboard members bound to a config-less tenant. completed_steps is empty (nothing torn down
-    // yet). The bff DELETE is idempotent, so a re-run after the bff recovers converges.
-    try {
-      DashboardRowsDeleteForwarder.DeletedCounts counts = dashboardRows.delete(tenant, operator);
-      deletedStores.put("dashboard_user", counts.users());
-      deletedStores.put("dashboard_user_invite", counts.invites());
-    } catch (RuntimeException e) {
-      return stepFailed(
-          tenant, primary, actor, correlationId, "dashboard_user", new ArrayList<>(), e);
-    }
-
-    // 4. Start + await the teardown workflow per strategy (it runs the P4/P5 broker/journal gates
-    // then deletes strategy_config + the kill switches — the FIRST IRREVERSIBLE step).
+    // 3. Start + await the teardown workflow per strategy (it runs the P4/P5 broker/journal gates
+    // then deletes strategy_config + the kill switches — the FIRST IRREVERSIBLE step). A workflow
+    // BLOCKED (P4/P5) or fault returns HERE, so the downstream store deletes — including the bff
+    // dashboard-rows delete — are NEVER reached: a SURVIVING (blocked) tenant keeps its dashboard
+    // members and its config intact.
     for (StrategyConfigReader.StrategyRow row : rows) {
       TenantDeleteResult result;
       try {
@@ -311,17 +352,17 @@ public class TenantDeleteController {
                 tenant, row.strategyId(), brokerTargetOf(row.config()), actor, correlationId);
       } catch (RuntimeException e) {
         // A teardown-workflow fault (activity permanently failing, run timeout,
-        // WorkflowFailedException) yields NO COMPLETED result, so the exec store delete below is
-        // never reached (fail-closed). Convert the uncaught throw into a clean, audited response
-        // instead of a raw 500. dashboard_user was already torn down (idempotent re-delete on a
-        // re-run), so completed_steps carries it.
+        // WorkflowFailedException) yields NO COMPLETED result, so the exec/bff store deletes below
+        // are never reached (fail-closed). Convert the uncaught throw into a clean, audited
+        // response instead of a raw 500 — no store delete completed before the workflow, so
+        // completed_steps is empty.
         return stepFailed(
             tenant,
             row.strategyId(),
             actor,
             correlationId,
             "tenant_delete_workflow",
-            new ArrayList<>(deletedStores.keySet()),
+            new ArrayList<>(),
             e);
       }
       if (result.getStatus() == TenantDeleteResult.Status.BLOCKED) {
@@ -337,10 +378,13 @@ public class TenantDeleteController {
             HttpStatus.CONFLICT, blockedBy, "teardown blocked for strategy " + row.strategyId());
       }
     }
-    // The workflow deleted strategy_config + the retained TenantDeleted tombstone.
+
+    // 4. + 5. Downstream store deletes (the workflow already deleted strategy_config + tombstone).
+    // completedSteps is derived from deletedStores' (insertion-ordered) keys at each use site.
+    Map<String, Object> deletedStores = new LinkedHashMap<>();
     deletedStores.put("strategy_config", rows.size());
 
-    // 5. exec broker_credentials delete, one call per distinct paper provider.
+    // 4. exec broker_credentials delete, one call per distinct paper provider.
     try {
       int credsDeleted = 0;
       for (String provider : distinctPaperProviders(rows)) {
@@ -354,6 +398,31 @@ public class TenantDeleteController {
           actor,
           correlationId,
           "broker_credentials",
+          new ArrayList<>(deletedStores.keySet()),
+          e);
+    }
+
+    // 5. BFF dashboard_user + dashboard_user_invite delete — LAST, only after the irreversible
+    // stores are gone. The bff is the ONLY store api-gateway reaches over the network, so it is the
+    // one most likely to be transiently unreachable; the DELETE is idempotent, so wrap it in a
+    // BOUNDED retry to ride out a transient blip. If it still faults after all attempts (a genuine
+    // bff OUTAGE) we fail LOUD with a 207 + TenantDeleteStepFailed carrying the already-deleted
+    // stores in completed_steps so the operator can re-run the (idempotent) dashboard-rows delete
+    // to
+    // converge — the dashboard members are the only residual, bound to an already-config-deleted
+    // tenant.
+    try {
+      DashboardRowsDeleteForwarder.DeletedCounts counts =
+          deleteDashboardRowsWithRetry(tenant, operator);
+      deletedStores.put("dashboard_user", counts.users());
+      deletedStores.put("dashboard_user_invite", counts.invites());
+    } catch (RuntimeException e) {
+      return stepFailed(
+          tenant,
+          primary,
+          actor,
+          correlationId,
+          "dashboard_user",
           new ArrayList<>(deletedStores.keySet()),
           e);
     }

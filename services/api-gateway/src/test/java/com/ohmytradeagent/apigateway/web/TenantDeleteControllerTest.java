@@ -8,6 +8,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -105,6 +106,7 @@ class TenantDeleteControllerTest {
     when(execCreds.delete(eq(TENANT), any())).thenReturn(1);
     when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
         .thenReturn(new DashboardRowsDeleteForwarder.DeletedCounts(0, 0));
+    controller.setDashboardRetrySleeper(millis -> {}); // no real sleep in tests
   }
 
   private ResponseEntity<Map<String, Object>> call(String confirmValue) {
@@ -326,12 +328,12 @@ class TenantDeleteControllerTest {
   // ---- L3: teardown-workflow fault → clean audited response, downstream NEVER called ----
 
   @Test
-  void workflowThrows_207_stepFailed_execNeverCalled() {
+  void workflowThrows_207_stepFailed_execAndDashboardNeverCalled() {
     wireAllPass();
     // The teardown workflow faults (activity permanently failing / run timeout / WorkflowFailed).
-    // A throw means NO COMPLETED result, so the exec broker_credentials delete must never run.
-    // dashboard_user was already torn down FIRST (idempotent re-delete on a re-run), so it appears
-    // in completed_steps.
+    // A throw means NO COMPLETED result, so NEITHER the exec broker_credentials delete NOR the
+    // (dashboard-LAST) bff hop must run. completed_steps carries only strategy_config? No — the
+    // workflow never COMPLETED, so nothing downstream ran and completed_steps is EMPTY.
     when(workflow.deleteTenant(eq(TENANT), any(), any(), any(), any()))
         .thenThrow(new RuntimeException("activity permanently failing"));
 
@@ -340,10 +342,12 @@ class TenantDeleteControllerTest {
     assertThat(resp.getStatusCode().is5xxServerError() || resp.getStatusCode().value() == 207)
         .isTrue();
     assertThat(resp.getBody()).containsEntry("failed_step", "tenant_delete_workflow");
-    assertThat(resp.getBody().get("completed_steps").toString()).contains("dashboard_user");
+    assertThat(resp.getBody().get("completed_steps").toString())
+        .doesNotContain("broker_credentials")
+        .doesNotContain("dashboard_user");
     // The uncaught throw was converted into a clean audited response — never a COMPLETED path. The
-    // exec broker_credentials delete (which runs AFTER the workflow) never ran.
-    verifyNoInteractions(execCreds);
+    // exec broker_credentials delete AND the dashboard bff hop (both AFTER the workflow) never ran.
+    verifyNoInteractions(execCreds, dashboardRows);
     verify(audit).emit(eq("TenantDeleteStepFailed"), eq(TENANT), any(), any(), any(), any());
     verify(audit, never()).emit(eq("TenantDeleteCompleted"), any(), any(), any(), any(), any());
   }
@@ -379,27 +383,33 @@ class TenantDeleteControllerTest {
 
     assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
     assertThat(resp.getBody()).containsEntry("status", "DELETED");
-    // FIX 2 order: Requested → disable → dashboard_user (reversible, over-the-network, torn down
-    // FIRST) → teardown workflow (strategy_config, first irreversible) → broker_credentials.
-    InOrder ordered = inOrder(audit, disable, dashboardRows, workflow, execCreds);
+    // Order: Requested → disable → teardown workflow (strategy_config, first irreversible, runs the
+    // P4/P5 gates) → broker_credentials → dashboard_user (over-the-network, reversible, torn down
+    // LAST so a P4/P5-BLOCKED or workflow-faulted delete never touches dashboard members).
+    InOrder ordered = inOrder(audit, disable, workflow, execCreds, dashboardRows);
     ordered.verify(audit).emit(eq("TenantDeleteRequested"), eq(TENANT), any(), any(), any(), any());
     ordered.verify(disable).disable(eq(TENANT), eq("copytrade-v1"), any(), any());
-    ordered.verify(dashboardRows).delete(TENANT, OPERATOR);
     ordered
         .verify(workflow)
         .deleteTenant(eq(TENANT), eq("copytrade-v1"), eq("alpaca-paper"), any(), any());
     ordered.verify(execCreds).delete(TENANT, "alpaca");
+    ordered.verify(dashboardRows).delete(TENANT, OPERATOR);
     ordered.verify(audit).emit(eq("TenantDeleteCompleted"), eq(TENANT), any(), any(), any(), any());
   }
 
   @Test
-  void workflowReturnsBlocked_409_execNotCalled() {
+  void workflowReturnsBlocked_409_execAndDashboardNotCalled() {
+    // LOAD-BEARING REGRESSION TEST (locks the fix). A tenant that legitimately BLOCKS on P4
+    // (BROKER_NOT_FLAT) or P5 (HAS_TRADE_HISTORY) — checked ONLY inside the teardown workflow —
+    // must return 409 WITHOUT any downstream side effect. Critically, the bff dashboard_user /
+    // dashboard_user_invite delete must NOT run: the tenant SURVIVES the blocked delete (its
+    // strategy_config and kill switches are intact), so hard-deleting its dashboard members would
+    // irreversibly strip dashboard access from a fully-alive tenant. dashboard-first (commit
+    // 2ad1380) had this bug; dashboard-LAST makes it structurally impossible.
     when(reader.listByTenant(TENANT))
         .thenReturn(List.of(row("copytrade-v1", "alpaca-paper", false)));
     when(liveActivation.isActive(eq(TENANT), any(), any())).thenReturn(false);
     when(openPositions.hasOpen(eq(TENANT), any())).thenReturn(false);
-    when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
-        .thenReturn(new DashboardRowsDeleteForwarder.DeletedCounts(0, 0));
     when(workflow.deleteTenant(eq(TENANT), any(), any(), any(), any()))
         .thenReturn(TenantDeleteResult.blocked(TenantDeleteResult.BlockReason.BROKER_NOT_FLAT));
 
@@ -407,20 +417,22 @@ class TenantDeleteControllerTest {
 
     assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
     assertThat(resp.getBody()).containsEntry("blocked_by", "BROKER_NOT_FLAT");
-    // The exec broker_credentials delete (which runs AFTER the workflow) must NOT run once the
-    // teardown workflow refused. dashboard_user ran first but is reversible/idempotent — a blocked
-    // teardown means strategy_config is intact, so a dashboard-less tenant re-arms cleanly.
-    verifyNoInteractions(execCreds);
+    // Neither the exec broker_credentials delete NOR the bff dashboard-rows delete may run once the
+    // teardown workflow refused — the tenant survives fully intact, dashboard members untouched.
+    verifyNoInteractions(execCreds, dashboardRows);
     verify(audit).emit(eq("TenantDeleteBlocked"), eq(TENANT), any(), any(), any(), any());
+    verify(audit, never()).emit(eq("TenantDeleteCompleted"), any(), any(), any(), any(), any());
   }
 
   @Test
-  void bffHopThrows_207_stepFailed_noIrreversibleStoreTouched() {
-    // FIX 2 robustness regression guard. The staging-paper-2 delete failed the bff hop with a
-    // ResourceAccessException (wrong base-url port). With dashboard_user torn down FIRST, a
-    // bff-unreachable fault must fail BEFORE the irreversible teardown workflow (strategy_config +
-    // kill switches) and the broker_credentials delete — so NO orphaned dashboard members are left
-    // bound to a config-less tenant, and the delete is cleanly re-runnable once the bff recovers.
+  void bffHopExhaustsRetries_207_stepFailed_deletedStoresPopulated() {
+    // Dashboard-LAST resilience guard (the now-rare residual). The bff is the only over-the-network
+    // store; if it is genuinely OUTAGE-down through all retry attempts, the delete fails LOUD with
+    // a
+    // 207 + TenantDeleteStepFailed carrying the ALREADY-COMPLETED irreversible stores
+    // (strategy_config, broker_credentials) so the operator can re-run the idempotent
+    // dashboard-rows
+    // delete to converge. Every attempt throws → retries exhausted.
     wireAllPass();
     when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
         .thenThrow(new RuntimeException("ResourceAccessException: connection refused"));
@@ -429,14 +441,33 @@ class TenantDeleteControllerTest {
 
     assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.MULTI_STATUS);
     assertThat(resp.getBody()).containsEntry("failed_step", "dashboard_user");
-    // completed_steps is EMPTY — the bff hop is first, so nothing was torn down before it faulted.
+    // The irreversible stores DID complete before the (last) store faulted — completed_steps
+    // carries them so a re-run knows exactly what remains (the idempotent dashboard-rows delete).
     assertThat(resp.getBody().get("completed_steps").toString())
-        .doesNotContain("strategy_config")
-        .doesNotContain("broker_credentials");
-    // The irreversible stores were NEVER touched (no partial teardown).
-    verifyNoInteractions(workflow, execCreds);
+        .contains("strategy_config")
+        .contains("broker_credentials");
+    // Bounded retry was actually attempted (default 3 attempts) before giving up.
+    verify(dashboardRows, times(TenantDeleteController.DASHBOARD_DELETE_MAX_ATTEMPTS))
+        .delete(TENANT, OPERATOR);
     verify(audit).emit(eq("TenantDeleteStepFailed"), eq(TENANT), any(), any(), any(), any());
     verify(audit, never()).emit(eq("TenantDeleteCompleted"), any(), any(), any(), any(), any());
+  }
+
+  @Test
+  void bffHopTransientThenSuccess_retriesAndConverges_200() {
+    // A transient bff fault (idempotent DELETE) recovers within the bounded retry → the delete
+    // converges to 200 DELETED, dashboard rows torn down. Proves retry is safe + effective.
+    wireAllPass();
+    when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
+        .thenThrow(new RuntimeException("ResourceAccessException: connection refused"))
+        .thenReturn(new DashboardRowsDeleteForwarder.DeletedCounts(1, 0));
+
+    ResponseEntity<Map<String, Object>> resp = call(TENANT);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(resp.getBody()).containsEntry("status", "DELETED");
+    verify(dashboardRows, times(2)).delete(TENANT, OPERATOR); // one fault + one success
+    verify(audit).emit(eq("TenantDeleteCompleted"), eq(TENANT), any(), any(), any(), any());
   }
 
   // ---- auth ----
