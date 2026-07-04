@@ -32,7 +32,7 @@ public class BffClientConfig {
   public RestClient bffRestClient(
       RestClient.Builder builder,
       Environment environment,
-      @Value("${bff.base-url:http://tenant-dashboard-bff:8080}") String bffBaseUrl,
+      @Value("${bff.base-url:http://tenant-dashboard-bff:8083}") String bffBaseUrl,
       @Value("${bff.service-token:${BFF_SHARED_TOKEN:}}") String bffToken) {
     if ((bffToken == null || bffToken.isBlank())
         && environment.acceptsProfiles(Profiles.of("prod"))) {

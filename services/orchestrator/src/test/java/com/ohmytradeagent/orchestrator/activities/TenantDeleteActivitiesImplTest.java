@@ -45,6 +45,7 @@ class TenantDeleteActivitiesImplTest {
   // Same tenant, DIFFERENT strategy — a different prefix, must NOT be reaped.
   private static final String UNRELATED_ID = "recon-v2-t-dev-s-other-v1-alpaca-paper";
   private static final String KILLSWITCH_ID = "t-dev/s-copytrade-v1/killswitch";
+  private static final String ACCOUNT_KILLSWITCH_ID = "t-dev/account/killswitch";
 
   private StrategyConfigWriter writer;
   private WorkflowClient workflowClient;
@@ -191,6 +192,61 @@ class TenantDeleteActivitiesImplTest {
     doThrow(new RuntimeException("temporal frontend down")).when(stub).terminate(anyString());
 
     assertThatThrownBy(() -> impl.terminateKillSwitchWorkflow(TENANT, STRATEGY))
+        .isInstanceOf(RuntimeException.class)
+        .hasMessageContaining("temporal frontend down");
+  }
+
+  // ---- step (b'): terminate account-level kill-switch workflow ------------------------------
+
+  @Test
+  void terminateAccount_terminatesAccountKillswitchWorkflowById() {
+    WorkflowStub stub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(ACCOUNT_KILLSWITCH_ID)).thenReturn(stub);
+
+    impl.terminateAccountKillSwitchWorkflow(TENANT);
+
+    // Id grammar must match WorkflowIds.accountKillswitch (the single source of truth the
+    // KillSwitchBootstrapper starts the account switch under) — no s- segment (tenant-scoped).
+    assertThat(ACCOUNT_KILLSWITCH_ID).isEqualTo(WorkflowIds.accountKillswitch(TENANT));
+    verify(workflowClient).newUntypedWorkflowStub(ACCOUNT_KILLSWITCH_ID);
+    verify(stub).terminate(anyString());
+  }
+
+  @Test
+  void terminateAccount_workflowNotFound_swallows() {
+    // The staging-paper-2 orphan scenario in reverse: an absent account switch (already
+    // terminated/never started) must be idempotent success, not a fault.
+    WorkflowStub stub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(ACCOUNT_KILLSWITCH_ID)).thenReturn(stub);
+    doThrow(
+            new WorkflowNotFoundException(
+                WorkflowExecution.newBuilder().setWorkflowId(ACCOUNT_KILLSWITCH_ID).build(),
+                "AccountKillSwitchWorkflow",
+                new RuntimeException("execution not found")))
+        .when(stub)
+        .terminate(anyString());
+
+    assertThatCode(() -> impl.terminateAccountKillSwitchWorkflow(TENANT))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void terminateAccount_notFoundStatus_swallows() {
+    WorkflowStub stub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(ACCOUNT_KILLSWITCH_ID)).thenReturn(stub);
+    doThrow(new StatusRuntimeException(Status.NOT_FOUND)).when(stub).terminate(anyString());
+
+    assertThatCode(() -> impl.terminateAccountKillSwitchWorkflow(TENANT))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void terminateAccount_otherError_rethrows() {
+    WorkflowStub stub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(ACCOUNT_KILLSWITCH_ID)).thenReturn(stub);
+    doThrow(new RuntimeException("temporal frontend down")).when(stub).terminate(anyString());
+
+    assertThatThrownBy(() -> impl.terminateAccountKillSwitchWorkflow(TENANT))
         .isInstanceOf(RuntimeException.class)
         .hasMessageContaining("temporal frontend down");
   }

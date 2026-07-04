@@ -36,9 +36,13 @@ import java.util.Map;
  *       (all-states count). A non-zero count, or a read fault, → BLOCKED.
  * </ul>
  *
- * <p>Only when BOTH gates pass does the teardown a → b → c run (reap recon schedules by prefix →
- * terminate kill-switch workflow → delete {@code strategy_config} + retained {@code TenantDeleted}
- * tombstone). Order within the teardown is not load-bearing (step (a) reaps by {@code (tenant,
+ * <p>Only when BOTH gates pass does the teardown a → b → b' → c run (reap recon schedules by prefix
+ * → terminate the per-(tenant,strategy) kill-switch workflow → terminate the tenant-level account
+ * kill-switch workflow → delete {@code strategy_config} + retained {@code TenantDeleted}
+ * tombstone). The account switch reap (b') is unconditional: because the route is
+ * single-strategy-only (api-gateway {@code MULTI_STRATEGY_UNSUPPORTED} guard), deleting the
+ * strategy == deleting the tenant, so the tenant-scoped account switch is an orphan and must be
+ * reaped too. Order within the teardown is not load-bearing (step (a) reaps by {@code (tenant,
  * strategy)} prefix, never reading {@code broker_target} from the config row).
  *
  * <p>Determinism: no {@code Instant.now}/{@code UUID}/non-deterministic iteration in the body —
@@ -154,11 +158,16 @@ public class TenantDeleteWorkflowImpl implements TenantDeleteWorkflow {
           "trade-history read faulted (fail-closed): " + e.getClass().getSimpleName());
     }
 
-    // ---- Both gates passed → teardown a → b → c ----
+    // ---- Both gates passed → teardown a → b → b' → c ----
     // (a) reap every recon schedule under the (tenant, strategy) prefix.
     activities.deleteReconSchedules(tenantId, strategyId);
-    // (b) terminate the kill-switch workflow.
+    // (b) terminate the per-(tenant, strategy) kill-switch workflow.
     activities.terminateKillSwitchWorkflow(tenantId, strategyId);
+    // (b') terminate the tenant-level account kill-switch workflow. UNCONDITIONAL: the api-gateway
+    // MULTI_STRATEGY_UNSUPPORTED guard means deleting this (only) strategy == deleting the whole
+    // tenant, so its account-level switch is now an orphan and must be reaped too. Idempotent
+    // (absent/already-terminated = success). Order within the teardown is not load-bearing.
+    activities.terminateAccountKillSwitchWorkflow(tenantId);
     // (c) delete the config row (+ retained TenantDeleted tombstone).
     int deleted = activities.deleteStrategyConfig(tenantId, strategyId, actor);
     return TenantDeleteResult.completed(deleted);
