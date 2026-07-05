@@ -111,6 +111,15 @@ spec:
               value: dev
             - name: API_GATEWAY_DEFAULT_STRATEGY
               value: copytrade-v1
+            # Per-broker_target exec base URLs for the credential-WRITE forward
+            # (exec.targets.*). Without these, a -live tenant's credential write
+            # fails closed rather than being misrouted to the paper pod. Only used
+            # when the credential-write flags are enabled (the feature is dark by
+            # default); harmless otherwise.
+            - name: EXEC_ALPACA_LIVE_BASE_URL
+              value: http://exec-alpaca-live:8080
+            - name: EXEC_ALPACA_PAPER_BASE_URL
+              value: http://exec-alpaca-paper:8080
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness

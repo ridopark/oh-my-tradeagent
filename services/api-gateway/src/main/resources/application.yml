@@ -106,6 +106,14 @@ copytrade:
 # Exec internal base URL the credential forward targets (in-cluster service name).
 exec:
   base-url: ${EXEC_BASE_URL:http://exec:8080}
+  # Per-broker_target exec base URLs the credential-WRITE forward routes on (BrokerCredentialForward
+  # Service resolves the tenant's broker_target → this map → an ABSOLUTE POST). Keyed by the exact
+  # stored broker_target value. NO fallback to exec.base-url: a broker_target absent here fails
+  # closed (no forward) — so a -live credential can NEVER be misrouted to the paper pod. exec.base-url
+  # stays for the legacy shared client (arm-guard verified-account read, tenant-delete creds delete).
+  targets:
+    alpaca-live: ${EXEC_ALPACA_LIVE_BASE_URL:http://exec-alpaca-live:8080}
+    alpaca-paper: ${EXEC_ALPACA_PAPER_BASE_URL:http://exec-alpaca-paper:8080}
   admin:
     service-token: ${EXEC_ADMIN_SHARED_TOKEN:}
 

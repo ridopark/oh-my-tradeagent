@@ -41,6 +41,7 @@ class BrokerCredentialDarkProofTest {
               ExecClientConfig.class,
               ServiceTokenFilter.class,
               CredentialWriteLimiter.class,
+              TenantBrokerTargetResolver.class,
               BrokerCredentialForwardService.class,
               BrokerCredentialController.class)
           .withUserConfiguration(TestSupportConfig.class)
@@ -54,7 +55,9 @@ class BrokerCredentialDarkProofTest {
           assertThat(ctx).doesNotHaveBean(BrokerCredentialForwardService.class);
           assertThat(ctx).doesNotHaveBean(ServiceTokenFilter.class);
           assertThat(ctx).doesNotHaveBean(CredentialWriteLimiter.class);
+          assertThat(ctx).doesNotHaveBean(TenantBrokerTargetResolver.class);
           assertThat(ctx).doesNotHaveBean("execRestClient");
+          assertThat(ctx).doesNotHaveBean("execTargetProperties");
           assertThat(ctx).doesNotHaveBean("brokerCredentialClock");
         });
   }
@@ -69,7 +72,9 @@ class BrokerCredentialDarkProofTest {
               assertThat(ctx).hasSingleBean(BrokerCredentialForwardService.class);
               assertThat(ctx).hasSingleBean(ServiceTokenFilter.class);
               assertThat(ctx).hasSingleBean(CredentialWriteLimiter.class);
+              assertThat(ctx).hasSingleBean(TenantBrokerTargetResolver.class);
               assertThat(ctx).hasBean("execRestClient");
+              assertThat(ctx).hasBean("execTargetProperties");
               assertThat(ctx).hasBean("brokerCredentialClock");
             });
   }
@@ -82,6 +87,11 @@ class BrokerCredentialDarkProofTest {
     @Bean
     WorkflowClient workflowClient() {
       return Mockito.mock(WorkflowClient.class);
+    }
+
+    @Bean
+    org.jooq.DSLContext dslContext() {
+      return Mockito.mock(org.jooq.DSLContext.class);
     }
 
     @Bean

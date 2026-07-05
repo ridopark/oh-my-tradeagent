@@ -1,5 +1,6 @@
 package com.ohmytradeagent.apigateway.web;
 
+import com.ohmytradeagent.apigateway.config.ExecTargetProperties;
 import com.ohmytradeagent.apigateway.security.CredentialWriteLimiter;
 import com.ohmytradeagent.contract.BrokerCredentialAuditRequest;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
@@ -13,6 +14,7 @@ import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,7 +60,11 @@ public class BrokerCredentialForwardService {
   private static final Logger log = LoggerFactory.getLogger(BrokerCredentialForwardService.class);
   private static final String AUDIT_TASK_QUEUE = "orchestrator-core";
 
+  private static final String CREDENTIALS_PATH = "/internal/broker-credentials";
+
   private final RestClient execRestClient;
+  private final TenantBrokerTargetResolver brokerTargetResolver;
+  private final ExecTargetProperties execTargets;
   private final WorkflowClient workflowClient;
   private final Clock clock;
   private final CredentialWriteLimiter limiter;
@@ -66,11 +72,15 @@ public class BrokerCredentialForwardService {
 
   public BrokerCredentialForwardService(
       @Qualifier("execRestClient") RestClient execRestClient,
+      TenantBrokerTargetResolver brokerTargetResolver,
+      ExecTargetProperties execTargets,
       WorkflowClient workflowClient,
       Clock clock,
       CredentialWriteLimiter limiter,
       MeterRegistry meterRegistry) {
     this.execRestClient = execRestClient;
+    this.brokerTargetResolver = brokerTargetResolver;
+    this.execTargets = execTargets;
     this.workflowClient = workflowClient;
     this.clock = clock;
     this.limiter = limiter;
@@ -155,20 +165,39 @@ public class BrokerCredentialForwardService {
   }
 
   /**
-   * Forwards the credential to exec. The inbound {@link BrokerCredentialForwardRequest} is sent
-   * straight through: its {@code correlation_id} is {@code WRITE_ONLY} so Jackson omits it on the
-   * wire (an api-gateway-only concern), and its {@code toString} is redacted so Spring's outbound
-   * message-converter TRACE log can never render the api-key/secret (MF-7) — a raw {@code Map}
-   * whose {@code toString} echoes the secret would leak it. Status is captured via {@code exchange}
-   * so a non-2xx response does not throw before we can map it to the matching audit outcome. A
-   * transport-level failure (exec unreachable) maps to the same coarse persist-error outcome as a
-   * 5xx.
+   * Forwards the credential to the exec pod that owns this tenant's {@code broker_target}. The
+   * inbound {@link BrokerCredentialForwardRequest} is sent straight through: its {@code
+   * correlation_id} is {@code WRITE_ONLY} so Jackson omits it on the wire (an api-gateway-only
+   * concern), and its {@code toString} is redacted so Spring's outbound message-converter TRACE log
+   * can never render the api-key/secret (MF-7) — a raw {@code Map} whose {@code toString} echoes
+   * the secret would leak it. Status is captured via {@code exchange} so a non-2xx response does
+   * not throw before we can map it to the matching audit outcome. A transport-level failure (exec
+   * unreachable) maps to the same coarse persist-error outcome as a 5xx.
+   *
+   * <p><b>Per-target routing / FAIL CLOSED.</b> The POST goes to an ABSOLUTE URI built from the
+   * {@code exec.targets} entry for the tenant's resolved {@code broker_target} — NOT the shared
+   * {@code execRestClient} base URL (the paper pod). If the broker_target can't be resolved (no /
+   * ambiguous strategy_config) OR is not present in {@code exec.targets}, NO forward is made and
+   * the coarse persist-error outcome is returned. A {@code -live} target that is unmapped therefore
+   * can NEVER fall back to the paper pod — the real-money credential is refused, not misrouted.
    */
   private ExecOutcome forwardToExec(String tenant, BrokerCredentialForwardRequest body) {
+    String targetUri = resolveTargetUri(tenant);
+    if (targetUri == null) {
+      // Routing/precondition failure: nothing reached exec (unresolved/unmapped broker_target).
+      // This is NOT a transient upstream fault — 502 would tell the operator "exec is down, retry"
+      // and provoke a retry storm that can never succeed until strategy_config/exec.targets is
+      // fixed (burning the rate-limit budget). Map to 422 REJECTED_VALIDATION: "precondition not
+      // met, do not blindly retry", consistent with the existing REJECTED_VALIDATION→422 mapping.
+      return new ExecOutcome(
+          BrokerCredentialAuditRequest.Outcome.REJECTED_VALIDATION,
+          HttpStatus.UNPROCESSABLE_ENTITY,
+          null);
+    }
     try {
       return execRestClient
           .post()
-          .uri("/internal/broker-credentials")
+          .uri(targetUri)
           .header("X-Tenant-Id", tenant)
           .body(body)
           .exchange(
@@ -203,6 +232,35 @@ public class BrokerCredentialForwardService {
           HttpStatus.BAD_GATEWAY,
           null);
     }
+  }
+
+  /**
+   * Resolves the ABSOLUTE exec URI a tenant's credential write must be forwarded to, or {@code
+   * null} to FAIL CLOSED (no forward). Null when the tenant's {@code broker_target} is unresolved
+   * (missing/ambiguous strategy_config) OR is not explicitly mapped in {@code exec.targets}. There
+   * is deliberately NO fallback to {@code exec.base-url}: an unmapped {@code -live} target must
+   * never be routed to the shared paper pod. Logs only the (non-secret) tenant and broker_target.
+   */
+  private String resolveTargetUri(String tenant) {
+    Optional<String> brokerTarget = brokerTargetResolver.resolve(tenant);
+    if (brokerTarget.isEmpty()) {
+      log.error(
+          "broker credential forward: unresolved broker_target for tenant={} — failing closed"
+              + " (no forward)",
+          tenant);
+      return null;
+    }
+    String target = brokerTarget.get();
+    String baseUrl = execTargets.getTargets().get(target);
+    if (baseUrl == null || baseUrl.isBlank()) {
+      log.error(
+          "broker credential forward: broker_target={} for tenant={} not mapped in exec.targets —"
+              + " failing closed (no forward, no paper fallback)",
+          target,
+          tenant);
+      return null;
+    }
+    return baseUrl + CREDENTIALS_PATH;
   }
 
   /**

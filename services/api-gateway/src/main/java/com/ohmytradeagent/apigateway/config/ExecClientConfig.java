@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Duration;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
+import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.context.annotation.Bean;
@@ -61,6 +62,17 @@ public class ExecClientConfig {
         .defaultHeader("Authorization", "Bearer " + execAdminToken)
         .requestFactory(ClientHttpRequestFactoryBuilder.detect().build(settings))
         .build();
+  }
+
+  /**
+   * Per-broker_target exec base URLs ({@code exec.targets.*}) the credential-WRITE forward routes
+   * on. Bound here (inside the flag-gated config) so — like every other credential-write bean — it
+   * does not exist when the write flags are unset. See {@link ExecTargetProperties}.
+   */
+  @Bean
+  @ConfigurationProperties("exec")
+  public ExecTargetProperties execTargetProperties() {
+    return new ExecTargetProperties();
   }
 
   /**
