@@ -314,11 +314,12 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
    * produced. The {@code scheduleToCloseTimeout=60s} on the production stub is the absolute
    * backstop (a hard cap if jitter overruns), but in practice the test never reaches it.
    *
-   * <p>The assertion uses Temporal's {@link TestWorkflowEnvironment#currentTimeMillis()} virtual
-   * clock — wall-clock sleeps would make this non-deterministic. We capture the virtual time before
-   * {@code start()} and after {@code wf.process()} returns; the elapsed virtual time must stay
-   * within the maxAttempts retry budget plus a small head-room for audit + workflow-cleanup virtual
-   * time, proving the activity is not retrying past the budget.
+   * <p>The invariant asserted is the {@code PreTradeCheckActivity} attempt count: Temporal enforces
+   * exactly {@code maxAttempts=3} invocations of the always-throwing stub before the workflow fails
+   * closed to the {@code dispatch_failed} sentinel — proving the retry is bounded, not forever. The
+   * attempt count is unaffected by {@link TestWorkflowEnvironment} auto-time-skip, so it cannot
+   * exhibit the virtual-clock over-read that made the prior wall-clock latency assertion flaky
+   * under CI load (the skip could advance to the 10-year workflow-execution-timeout).
    */
   @Test
   void handleBto_failsClosed_withinMaxAttemptsRetryBudget_whenPreTradeCheckActivityAlwaysThrows() {
@@ -331,17 +332,17 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
                 RejectionReason.PRE_TRADE_CHECK_FAILED,
                 "allowed=false reason=dispatch_failed:ActivityFailure"));
 
+    AtomicInteger preTradeAttempts = new AtomicInteger();
     PreTradeCheckActivity alwaysThrowingStub =
         request -> {
+          preTradeAttempts.incrementAndGet();
           throw new RuntimeException("svc timeout");
         };
     Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
     brokerWorker.registerActivitiesImplementations(exec, alwaysThrowingStub);
     env.start();
 
-    long startVirtualMs = env.currentTimeMillis();
     runWorkflow(btoPayload());
-    long elapsedVirtualMs = env.currentTimeMillis() - startVirtualMs;
 
     ArgumentCaptor<PreTradeCheckResult> resultCaptor =
         ArgumentCaptor.forClass(PreTradeCheckResult.class);
@@ -356,9 +357,15 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
         .containsEntry("reason_code", "PRE_TRADE_CHECK_FAILED")
         .containsEntry("outcome", "REJECTED");
 
-    assertThat(elapsedVirtualMs)
-        .as("dispatch_failed sentinel must surface within the maxAttempts retry budget")
-        .isLessThanOrEqualTo(Duration.ofSeconds(55).toMillis());
+    // The stub is invoked exactly maxAttempts (3) times, then the workflow fails closed to the
+    // dispatch_failed sentinel. The attempt count is the real invariant and Temporal enforces it
+    // regardless of TestWorkflowEnvironment time-skip, so it does not depend on the skippable
+    // virtual clock — which under CI load could over-advance to the 10-year workflow-execution
+    // timeout and spuriously fail the old wall-clock budget assertion.
+    assertThat(preTradeAttempts.get())
+        .as(
+            "PreTradeCheck must retry exactly maxAttempts (3) then fail closed — bounded, not forever")
+        .isEqualTo(3);
   }
 
   @Test
