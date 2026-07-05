@@ -159,6 +159,20 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-failsafe-plugin</artifactId>
+        <configuration>
+          <!--
+            Run the Testcontainers-backed ITs (10 Postgres + 1 Redis) in 2 forked JVMs to
+            roughly halve the IT phase wall-clock. Each fork is a separate PROCESS, and every
+            IT still uses its own @Container (random host port, own DB/role state), so test
+            isolation is fully preserved — this parallelizes container startup WITHOUT the
+            cross-test data-bleed risk of a shared/singleton container. Caps at 2 concurrent
+            Postgres containers, comfortable on a CI runner. Validated by CI (this repo's ITs
+            require a real Docker daemon, which the Docker-Desktop-on-WSL2 dev socket can't
+            provide, so local `mvn verify` skips them).
+          -->
+          <forkCount>2</forkCount>
+          <reuseForks>true</reuseForks>
+        </configuration>
         <executions>
           <execution>
             <goals>
