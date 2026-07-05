@@ -278,11 +278,13 @@ class BrokerCredentialWriterIT {
 
   @Test
   void deleteRemovesOnlyMatchingRow() {
-    // Seed two tenants' rows; deleting one leaves the other untouched.
+    // Seed two tenants' rows; deleting one leaves the other untouched. Distinct accounts per tenant
+    // (R-6.5: a real account binds to at most one tenant), matching
+    // distinctAccountPerTenant_bothSucceed.
     enqueueAccount("847309116");
     writer().save("alice", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
-    enqueueAccount("847309116");
-    writer().save("bob", PROVIDER, "k1", "s1", baseUrl, "wss://x", "847309116", 0L, "tester");
+    enqueueAccount("222222222");
+    writer().save("bob", PROVIDER, "k1", "s1", baseUrl, "wss://x", "222222222", 0L, "tester");
 
     int deleted = writer().delete("alice", PROVIDER);
 
