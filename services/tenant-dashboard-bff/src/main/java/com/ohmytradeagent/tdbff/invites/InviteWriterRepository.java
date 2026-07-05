@@ -204,6 +204,32 @@ public class InviteWriterRepository {
   /** Rows removed by {@link #deleteTenantIdentities} (no PII; safe to echo to the operator). */
   public record DeletedIdentityCounts(int users, int invites) {}
 
+  /**
+   * The NEWEST {@code created_at} across a tenant's dashboard identities ({@code dashboard_user} +
+   * {@code dashboard_user_invite}), or {@code null} when the tenant has no dashboard rows at all.
+   * Read-only; used by the operator residual-cleanup incarnation guard: a genuine residual row
+   * PREDATES the last tenant-delete, while a reused tenant_id's re-onboarding invite POSTDATES it.
+   *
+   * <p>Runs as the least-privilege {@code dashboard_writer} role (the only dashboard-DB DSL the BFF
+   * has). V8 grants COLUMN-scoped {@code SELECT (created_at)} on {@code dashboard_user}; the invite
+   * table already has table SELECT from V5. Reads only the timestamp — no PII.
+   *
+   * @param tenantId the tenant whose newest dashboard-row instant to read (a SQL bind param)
+   */
+  public OffsetDateTime newestDashboardRowCreatedAt(String tenantId) {
+    Record r =
+        writerDsl.fetchOne(
+            "SELECT max(created_at) AS newest FROM ("
+                + "SELECT created_at FROM dashboard_user WHERE tenant_id = ? "
+                + "UNION ALL "
+                + "SELECT created_at FROM dashboard_user_invite WHERE tenant_id = ?) t",
+            tenantId,
+            tenantId);
+    // A pure aggregate (max) always returns exactly one row; its value is NULL when no rows
+    // matched.
+    return r == null ? null : r.get("newest", OffsetDateTime.class);
+  }
+
   /** True iff the exception (or a cause) is a Postgres unique-violation (SQLState 23505). */
   private static boolean isUniqueViolation(DataAccessException e) {
     if ("23505".equals(e.sqlState())) {

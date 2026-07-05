@@ -3,11 +3,13 @@ package com.ohmytradeagent.tdbff.web;
 import com.ohmytradeagent.tdbff.invites.InviteWriterRepository;
 import com.ohmytradeagent.tdbff.invites.InviteWriterRepository.DeletedIdentityCounts;
 import jakarta.servlet.http.HttpServletRequest;
+import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -61,6 +63,30 @@ public class TenantDashboardRowsController {
     resp.put("tenant_id", tenant);
     resp.put("deleted_users", counts.users());
     resp.put("deleted_invites", counts.invites());
+    return ResponseEntity.ok(resp);
+  }
+
+  /**
+   * Operator residual-cleanup incarnation guard (Phase 2, partial-teardown remediation): the NEWEST
+   * {@code created_at} across the tenant's {@code dashboard_user} + {@code dashboard_user_invite}
+   * rows, or {@code null} when the tenant has none. Read-only, idempotent. The api-gateway cleanup
+   * route compares this against the last tenant-delete timestamp: a genuine residual row PREDATES
+   * the delete, while a REUSED tenant_id's re-onboarding invite POSTDATES it (so cleanup must
+   * refuse). No PII in the response — only the timestamp. Same dark-gate + service-token +
+   * allowlisted-operator gate as the sibling DELETE.
+   */
+  @GetMapping("/{tenant}/dashboard-rows/newest")
+  public ResponseEntity<Map<String, Object>> newestDashboardRow(
+      HttpServletRequest req, @PathVariable("tenant") String tenant) {
+    // 400 if X-Operator-Id absent/malformed; 403 (before any read) if not allowlisted.
+    ctx.requireAllowlistedOperator(req);
+
+    OffsetDateTime newest = writer.newestDashboardRowCreatedAt(tenant);
+
+    Map<String, Object> resp = new LinkedHashMap<>();
+    resp.put("tenant_id", tenant);
+    // ISO-8601 string, or null when the tenant has no dashboard rows.
+    resp.put("newest_created_at", newest == null ? null : newest.toString());
     return ResponseEntity.ok(resp);
   }
 }

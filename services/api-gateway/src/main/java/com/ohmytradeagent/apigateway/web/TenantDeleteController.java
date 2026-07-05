@@ -4,11 +4,13 @@ import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
 import com.ohmytradeagent.orchestrator.workflows.TenantDeleteResult;
 import jakarta.servlet.http.HttpServletRequest;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.LongConsumer;
@@ -473,13 +475,19 @@ public class TenantDeleteController {
    * workflow-deleted, so it touches ONLY the two idempotent residual stores and can NEVER reach a
    * workflow, a kill switch, or a {@code -live} broker path. Zero rows ALONE is NOT proof of that:
    * a tenant that was NEVER created also has zero rows (the onboard invite step is independent of
-   * tenant creation, so an operator can invite a user for a tenant_id before its config exists). So
-   * this route enforces the invariant with TWO gates: (a) strategy_config rows == 0, AND (b) audit
-   * evidence — via {@link TenantDeleteHistoryReader} — that a delete was actually attempted ({@code
-   * TenantDeleteRequested}, emitted only after P0–P3 pass, or {@code TenantDeleteStepFailed}). If
-   * strategy_config still has ≥1 row, OR no prior delete was attempted, the tenant is NOT residual
-   * → this route REFUSES 409 {@code NOT_RESIDUAL} with zero side effects; the operator must use
-   * {@link #delete}, which runs the full P0 live/paper gate.
+   * tenant creation, so an operator can invite a user for a tenant_id before its config exists).
+   * And because {@code tenant_id} is reusable free-text while {@code audit_log} is retained
+   * forever, mere "was it ever deleted?" evidence is also insufficient — a REUSED id (delete {@code
+   * acme} → re-onboard {@code acme} invite-first) would carry stale delete-evidence for a NEW, live
+   * incarnation. So this route is INCARNATION-CORRECT and enforces the invariant with THREE gates:
+   * (a) strategy_config rows == 0; (b) audit evidence — via {@link TenantDeleteHistoryReader} —
+   * that a delete was actually attempted ({@code TenantDeleteRequested}, emitted only after P0–P3
+   * pass, or {@code TenantDeleteStepFailed}), i.e. a non-empty {@code latestDeleteAt}; AND (c) NO
+   * residual dashboard row NEWER than that delete instant (a genuine residual PREDATES the delete;
+   * a reused id's re-onboarding invite POSTDATES it). If strategy_config still has ≥1 row → 409
+   * {@code NOT_RESIDUAL}; if no prior delete → 409 {@code NEVER_DELETED}; if a dashboard row is
+   * newer than the last delete → 409 {@code REUSED_TENANT}. All refusals have zero side effects;
+   * the operator must use {@link #delete}, which runs the full P0 live/paper gate.
    *
    * <p>Auth + confirm are IDENTICAL to {@link #delete} (allowlisted operator, valid tenant id,
    * confirm-body match — none touch a store). On success: {@code TenantResidualCleanupRequested} →
@@ -540,16 +548,26 @@ public class TenantDeleteController {
               + " strategy_config row(s); use the delete route (runs the P0 gate)");
     }
 
-    // ---- STRUCTURAL residual-only guard (fail-closed). Zero strategy_config rows is NOT proof the
-    // tenant was created → P0-gated → torn down: a NEVER-created tenant also has zero rows (the
-    // onboard invite step is independent of tenant creation, so an operator can invite a user for a
-    // tenant_id before its config exists → dashboard rows + zero config → Phase 1 badges it
-    // `partial`). Deleting that would strip a legitimate pending onboarding. So ALSO require audit
-    // evidence that a delete was actually attempted: TenantDeleteRequested (emitted only after
-    // P0–P3 pass) or TenantDeleteStepFailed. No evidence → refuse (a never-created tenant). A read
-    // fault fails closed, same as the strategy_config read-fault path. ZERO side effects. ----
+    // ---- STRUCTURAL, INCARNATION-CORRECT residual-only guard (fail-closed). Zero strategy_config
+    // rows is NOT proof the tenant was created → P0-gated → torn down: a NEVER-created tenant also
+    // has zero rows (the onboard invite step is independent of tenant creation, so an operator can
+    // invite a user for a tenant_id before its config exists → dashboard rows + zero config → Phase
+    // 1 badges it `partial`). Worse, tenant_id is REUSABLE free-text and audit_log is retained
+    // forever, so a boolean "was it ever deleted?" is defeated by a REUSED id: delete `acme` →
+    // later
+    // re-onboard `acme` invite-first → stale delete-evidence would greenlight deleting the NEW
+    // incarnation's invite. The only correct signal is TIME. So require BOTH:
+    //   (a) audit evidence a delete was attempted (latestDeleteAt present), else NEVER_DELETED;
+    //   (b) NO residual dashboard row newer than that delete — a genuine residual PREDATES the
+    //       delete; a reused id's new invite POSTDATES it → REUSED_TENANT.
+    // Both reads fail closed (a fault → refuse). This dashboard-row-recency gate blocks the WHOLE
+    // cleanup on reuse, so it ALSO protects the broker_credentials step — broker_credentials are
+    // created no earlier than the strategy_config / invite, so the invite is the earliest reuse
+    // signal; no separate creds-timestamp check is needed. ZERO side effects on any refusal. ----
+    Instant deletedAt;
     try {
-      if (!deleteHistory.deleteWasRequested(tenant)) {
+      Optional<Instant> latest = deleteHistory.latestDeleteAt(tenant);
+      if (latest.isEmpty()) {
         return residualBlock(
             tenant,
             actor,
@@ -558,6 +576,7 @@ public class TenantDeleteController {
             "no prior tenant-delete attempt for this tenant — refusing to touch data for a tenant"
                 + " that was never deleted");
       }
+      deletedAt = latest.get();
     } catch (RuntimeException e) {
       return residualBlock(
           tenant,
@@ -566,9 +585,30 @@ public class TenantDeleteController {
           "NOT_RESIDUAL",
           "delete-history read faulted (fail-closed)");
     }
+    try {
+      Optional<Instant> newestRow = dashboardRows.newestCreatedAt(tenant, operator);
+      if (newestRow.isPresent() && newestRow.get().isAfter(deletedAt)) {
+        return residualBlock(
+            tenant,
+            actor,
+            correlationId,
+            "REUSED_TENANT",
+            "a dashboard row is newer than the last tenant-delete — this tenant_id appears"
+                + " re-onboarded; refusing to touch a live incarnation");
+      }
+    } catch (RuntimeException e) {
+      return residualBlock(
+          tenant,
+          actor,
+          correlationId,
+          "NOT_RESIDUAL",
+          "dashboard-row recency read faulted (fail-closed)");
+    }
 
-    // ---- Residual (rows == 0, prior delete attempted): delete ONLY the two idempotent residual
-    // stores, same safe order as the delete route's tail (broker_credentials, then dashboard LAST).
+    // ---- Residual (rows == 0, prior delete attempted, no newer dashboard row): delete ONLY the
+    // two
+    // idempotent residual stores, same safe order as the delete route's tail (broker_credentials,
+    // then dashboard LAST).
     long startMillis = System.currentTimeMillis();
 
     audit.emit(

@@ -16,8 +16,10 @@ import static org.mockito.Mockito.when;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.workflows.TenantDeleteResult;
 import jakarta.servlet.http.HttpServletRequest;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -35,6 +37,10 @@ class TenantDeleteControllerTest {
 
   private static final String TENANT = "staging-paper-2";
   private static final String OPERATOR = "ridopark@gmail.com";
+  // The last tenant-delete instant; a genuine residual dashboard row PREDATES it.
+  private static final Instant DELETED_AT = Instant.parse("2026-07-01T00:00:00Z");
+  private static final Instant BEFORE_DELETE = Instant.parse("2026-06-30T00:00:00Z");
+  private static final Instant AFTER_DELETE = Instant.parse("2026-07-02T00:00:00Z");
 
   private StrategyConfigReader reader;
   private LiveActivationStateReader liveActivation;
@@ -506,10 +512,12 @@ class TenantDeleteControllerTest {
 
   @Test
   void cleanupResidual_zeroStrategyConfig_deletesResiduals_200() {
-    // strategy_config already gone (residual) AND a prior delete was attempted (audit evidence);
+    // strategy_config already gone (residual) AND a prior delete was attempted (audit evidence) AND
+    // every residual dashboard row PREDATES that delete (a genuine leftover, not a re-onboarding);
     // broker_credentials + dashboard rows remain.
     when(reader.listByTenant(TENANT)).thenReturn(List.of());
-    when(deleteHistory.deleteWasRequested(TENANT)).thenReturn(true);
+    when(deleteHistory.latestDeleteAt(TENANT)).thenReturn(Optional.of(DELETED_AT));
+    when(dashboardRows.newestCreatedAt(TENANT, OPERATOR)).thenReturn(Optional.of(BEFORE_DELETE));
     when(execCreds.delete(eq(TENANT), any())).thenReturn(1);
     when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
         .thenReturn(new DashboardRowsDeleteForwarder.DeletedCounts(2, 1));
@@ -538,10 +546,12 @@ class TenantDeleteControllerTest {
 
   @Test
   void cleanupResidual_idempotent_allZero_200() {
-    // A fully-clean residual tenant (delete was attempted): both stores already empty → 200
-    // CLEANED.
+    // A fully-clean residual tenant (delete was attempted, no dashboard rows at all → newest
+    // empty):
+    // both stores already empty → 200 CLEANED.
     when(reader.listByTenant(TENANT)).thenReturn(List.of());
-    when(deleteHistory.deleteWasRequested(TENANT)).thenReturn(true);
+    when(deleteHistory.latestDeleteAt(TENANT)).thenReturn(Optional.of(DELETED_AT));
+    when(dashboardRows.newestCreatedAt(TENANT, OPERATOR)).thenReturn(Optional.empty());
     when(execCreds.delete(eq(TENANT), any())).thenReturn(0);
     when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
         .thenReturn(new DashboardRowsDeleteForwarder.DeletedCounts(0, 0));
@@ -587,7 +597,7 @@ class TenantDeleteControllerTest {
     // rows alone is not proof of a residual delete. 409 NEVER_DELETED (distinct from the
     // still-configured NOT_RESIDUAL so the operator banner tells them apart), ZERO side effects.
     when(reader.listByTenant(TENANT)).thenReturn(List.of());
-    when(deleteHistory.deleteWasRequested(TENANT)).thenReturn(false);
+    when(deleteHistory.latestDeleteAt(TENANT)).thenReturn(Optional.empty());
 
     ResponseEntity<Map<String, Object>> resp = cleanup(TENANT);
 
@@ -605,7 +615,7 @@ class TenantDeleteControllerTest {
     // The delete-history read faults → fail closed (refuse), same as the strategy_config read-fault
     // path. Never proceed to touch a store on an unreadable evidence store.
     when(reader.listByTenant(TENANT)).thenReturn(List.of());
-    when(deleteHistory.deleteWasRequested(TENANT))
+    when(deleteHistory.latestDeleteAt(TENANT))
         .thenThrow(new RuntimeException("audit_log unreachable"));
 
     ResponseEntity<Map<String, Object>> resp = cleanup(TENANT);
@@ -616,6 +626,46 @@ class TenantDeleteControllerTest {
   }
 
   @Test
+  void cleanupResidual_rowNewerThanDelete_409_reusedTenant() {
+    // Zero strategy_config rows AND a prior delete exists, BUT a dashboard row is NEWER than that
+    // delete → the tenant_id was re-onboarded (a reused id). Refuse 409 REUSED_TENANT, ZERO side
+    // effects — deleting the new incarnation's invite would strip a live re-onboarding.
+    when(reader.listByTenant(TENANT)).thenReturn(List.of());
+    when(deleteHistory.latestDeleteAt(TENANT)).thenReturn(Optional.of(DELETED_AT));
+    when(dashboardRows.newestCreatedAt(TENANT, OPERATOR)).thenReturn(Optional.of(AFTER_DELETE));
+
+    ResponseEntity<Map<String, Object>> resp = cleanup(TENANT);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+    assertThat(resp.getBody()).containsEntry("blocked_by", "REUSED_TENANT");
+    // The recency read ran, but NEITHER destructive store was touched.
+    verify(dashboardRows).newestCreatedAt(TENANT, OPERATOR);
+    verify(dashboardRows, never()).delete(any(), any());
+    verifyNoInteractions(execCreds, workflow, disable);
+    verify(audit).emit(eq("TenantDeleteBlocked"), eq(TENANT), any(), any(), any(), any());
+    verify(audit, never())
+        .emit(eq("TenantResidualCleanupCompleted"), any(), any(), any(), any(), any());
+  }
+
+  @Test
+  void cleanupResidual_dashboardNewestReadFault_409_failClosed() {
+    // The bff dashboard-row recency read faults → fail closed (refuse). Never touch a store when
+    // the
+    // incarnation signal is unreadable.
+    when(reader.listByTenant(TENANT)).thenReturn(List.of());
+    when(deleteHistory.latestDeleteAt(TENANT)).thenReturn(Optional.of(DELETED_AT));
+    when(dashboardRows.newestCreatedAt(TENANT, OPERATOR))
+        .thenThrow(new RuntimeException("bff newest read faulted"));
+
+    ResponseEntity<Map<String, Object>> resp = cleanup(TENANT);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+    assertThat(resp.getBody()).containsEntry("blocked_by", "NOT_RESIDUAL");
+    verify(dashboardRows, never()).delete(any(), any());
+    verifyNoInteractions(execCreds, workflow, disable);
+  }
+
+  @Test
   void cleanupResidual_bffHopExhaustsRetries_207_stepFailed() {
     // broker_credentials cleaned, but the bff dashboard-rows delete is OUTAGE-down through all
     // retry
@@ -623,7 +673,8 @@ class TenantDeleteControllerTest {
     // operator can re-run the idempotent dashboard-rows delete. Reuses the delete route's retry
     // seam.
     when(reader.listByTenant(TENANT)).thenReturn(List.of());
-    when(deleteHistory.deleteWasRequested(TENANT)).thenReturn(true);
+    when(deleteHistory.latestDeleteAt(TENANT)).thenReturn(Optional.of(DELETED_AT));
+    when(dashboardRows.newestCreatedAt(TENANT, OPERATOR)).thenReturn(Optional.of(BEFORE_DELETE));
     when(execCreds.delete(eq(TENANT), any())).thenReturn(1);
     when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
         .thenThrow(new RuntimeException("ResourceAccessException: connection refused"));
