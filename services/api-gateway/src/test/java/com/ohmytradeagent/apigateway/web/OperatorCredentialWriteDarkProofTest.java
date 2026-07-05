@@ -118,6 +118,16 @@ class OperatorCredentialWriteDarkProofTest {
     }
 
     @Bean
+    TenantBrokerTargetResolver tenantBrokerTargetResolver() {
+      return mock(TenantBrokerTargetResolver.class);
+    }
+
+    @Bean
+    com.ohmytradeagent.apigateway.config.ExecTargetProperties execTargetProperties() {
+      return new com.ohmytradeagent.apigateway.config.ExecTargetProperties();
+    }
+
+    @Bean
     WorkflowClient workflowClient() {
       return mock(WorkflowClient.class);
     }
