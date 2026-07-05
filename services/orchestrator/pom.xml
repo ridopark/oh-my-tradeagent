@@ -125,6 +125,23 @@
   <build>
     <plugins>
       <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <!--
+            Orchestrator is the long-pole test module (100 test classes, Temporal-heavy).
+            Run surefire in 2 forked JVMs to roughly halve its wall-clock. forkCount uses
+            separate PROCESSES, not shared threads: each fork has its own JVM statics and each
+            test creates its own TestWorkflowEnvironment, so this does NOT reintroduce the
+            in-JVM virtual-clock time-skip contention that flaked the retry-budget test
+            (threadCount / junit-parallel WOULD — deliberately not used here). reuseForks keeps
+            each JVM alive across its slice of classes to amortize startup.
+          -->
+          <forkCount>2</forkCount>
+          <reuseForks>true</reuseForks>
+        </configuration>
+      </plugin>
+      <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
         <version>${spring-boot.version}</version>

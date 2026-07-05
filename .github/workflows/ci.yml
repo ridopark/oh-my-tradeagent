@@ -75,8 +75,29 @@ jobs:
           python3 scripts/check-tenants-configmap-drift.py
 
   java:
-    name: Java (mvn verify + spotless)
+    # Per-module matrix: each Maven module verifies on its own runner, in parallel.
+    # Wall-clock is bounded by the slowest single module (orchestrator) instead of the
+    # serial sum of all seven — the old single `mvn verify` job was the whole ~8-10min CI.
+    # Isolating each module on its own runner also gives each its own Docker daemon, which
+    # removes the cross-suite thread contention that flaked Temporal TestWorkflowEnvironment
+    # time-skip tests in the aggregate job (see PLAN-2026-07-05-ci-java-test-parallelism.md).
+    #
+    # NOTE: the required status-check name changed from `Java (mvn verify + spotless)` to the
+    # per-matrix contexts `Java (<module>)`. Branch-protection required checks must be updated
+    # to match, or the merge gate silently stops enforcing.
+    name: Java (${{ matrix.module }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - contract/java
+          - services/orchestrator
+          - services/exec
+          - services/market-data
+          - services/api-gateway
+          - services/audit
+          - services/tenant-dashboard-bff
     steps:
       - uses: actions/checkout@v4
 
@@ -87,12 +108,20 @@ jobs:
           java-version: "21"
           cache: maven
 
-      - name: mvn verify
+      # Build upstream reactor deps (e.g. orchestrator needs exec-svc + contract-java) without
+      # running their tests or spotless — otherwise `-am verify` on api-gateway would re-run
+      # orchestrator's whole suite and recreate the bottleneck. Step 2 then tests only this module.
+      - name: Build upstream deps (${{ matrix.module }})
+        run: >-
+          mvn -B -ntp -pl ${{ matrix.module }} -am install
+          -DskipTests -Dspotless.check.skip=true
+
+      - name: mvn verify (${{ matrix.module }})
         env:
           # Enables ContractActivitiesImplIT (Testcontainers Postgres). The IT is gated so a
           # local `mvn verify` on a Docker-Desktop-on-WSL2 workstation can skip it cleanly.
           RUN_DB_ITS: "true"
-        run: mvn -B -ntp verify
+        run: mvn -B -ntp -pl ${{ matrix.module }} verify
 
   python:
     name: Python (pydantic round-trip + regen drift)
