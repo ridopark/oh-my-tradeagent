@@ -4,11 +4,13 @@ import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
 import com.ohmytradeagent.orchestrator.workflows.TenantDeleteResult;
 import jakarta.servlet.http.HttpServletRequest;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.LongConsumer;
@@ -92,6 +94,7 @@ public class TenantDeleteController {
   private final TenantDeleteWorkflowClient workflow;
   private final BrokerCredentialDeleteForwarder execCreds;
   private final DashboardRowsDeleteForwarder dashboardRows;
+  private final TenantDeleteHistoryReader deleteHistory;
   private final TenantDeleteAuditEmitter audit;
 
   /**
@@ -115,6 +118,7 @@ public class TenantDeleteController {
       TenantDeleteWorkflowClient workflow,
       BrokerCredentialDeleteForwarder execCreds,
       DashboardRowsDeleteForwarder dashboardRows,
+      TenantDeleteHistoryReader deleteHistory,
       TenantDeleteAuditEmitter audit) {
     this.ctx = ctx;
     this.reader = reader;
@@ -124,6 +128,7 @@ public class TenantDeleteController {
     this.workflow = workflow;
     this.execCreds = execCreds;
     this.dashboardRows = dashboardRows;
+    this.deleteHistory = deleteHistory;
     this.audit = audit;
   }
 
@@ -441,6 +446,264 @@ public class TenantDeleteController {
     ok.put("retained_stores", RETAINED_STORES);
     ok.put("duration_ms", durationMs);
     return ResponseEntity.ok(ok);
+  }
+
+  /**
+   * The closed set of known paper credential providers. Today effectively {@code {alpaca}} (the
+   * only broker), enumerated from the ONE paper-provider home {@link
+   * VerifiedAccountGuard#paperProvider}: {@code alpaca-paper} → {@code alpaca}. Used ONLY by the
+   * residual-cleanup route (option b): with zero strategy_config rows we cannot derive the provider
+   * from {@link #distinctPaperProviders}, so we iterate the known paper providers instead. The exec
+   * delete is idempotent (0 rows = success), so a provider the tenant never used is a harmless
+   * no-op.
+   */
+  static final List<String> KNOWN_PAPER_PROVIDERS =
+      List.of(VerifiedAccountGuard.paperProvider("alpaca-paper"));
+
+  /**
+   * Residual-cleanup carrier for a PARTIALLY-deleted tenant: {@code POST
+   * /admin/tenants/{tenant}/cleanup-residual}. Converges a tenant whose {@code strategy_config} was
+   * ALREADY workflow-deleted (zero rows) but whose idempotent residual stores ({@code
+   * broker_credentials} / dashboard rows) survived a step fault on the original {@link #delete}, so
+   * the operator no longer hits the P0 {@code UNKNOWN_TENANT_SHAPE} 409 the normal delete route
+   * returns on zero rows.
+   *
+   * <p><b>Residual-only paper-safety invariant (STRUCTURALLY ENFORCED).</b> A genuinely residual
+   * tenant reached zero {@code strategy_config} rows ONLY by having ALREADY passed the full P0
+   * paper-allowlist on the original {@link #delete} (a {@code -live} / non-paper / multi-strategy
+   * tenant is refused BEFORE any teardown) and having had its config + kill switches
+   * workflow-deleted, so it touches ONLY the two idempotent residual stores and can NEVER reach a
+   * workflow, a kill switch, or a {@code -live} broker path. Zero rows ALONE is NOT proof of that:
+   * a tenant that was NEVER created also has zero rows (the onboard invite step is independent of
+   * tenant creation, so an operator can invite a user for a tenant_id before its config exists).
+   * And because {@code tenant_id} is reusable free-text while {@code audit_log} is retained
+   * forever, mere "was it ever deleted?" evidence is also insufficient — a REUSED id (delete {@code
+   * acme} → re-onboard {@code acme} invite-first) would carry stale delete-evidence for a NEW, live
+   * incarnation. So this route is INCARNATION-CORRECT and enforces the invariant with THREE gates:
+   * (a) strategy_config rows == 0; (b) audit evidence — via {@link TenantDeleteHistoryReader} —
+   * that a delete was actually attempted ({@code TenantDeleteRequested}, emitted only after P0–P3
+   * pass, or {@code TenantDeleteStepFailed}), i.e. a non-empty {@code latestDeleteAt}; AND (c) NO
+   * residual dashboard row NEWER than that delete instant (a genuine residual PREDATES the delete;
+   * a reused id's re-onboarding invite POSTDATES it). If strategy_config still has ≥1 row → 409
+   * {@code NOT_RESIDUAL}; if no prior delete → 409 {@code NEVER_DELETED}; if a dashboard row is
+   * newer than the last delete → 409 {@code REUSED_TENANT}. All refusals have zero side effects;
+   * the operator must use {@link #delete}, which runs the full P0 live/paper gate.
+   *
+   * <p>Auth + confirm are IDENTICAL to {@link #delete} (allowlisted operator, valid tenant id,
+   * confirm-body match — none touch a store). On success: {@code TenantResidualCleanupRequested} →
+   * exec broker_credentials delete (one call per known paper provider, idempotent) → bff
+   * dashboard-rows delete LAST (bounded-retry, idempotent) → {@code
+   * TenantResidualCleanupCompleted}, returning 200 {@code {status: CLEANED, deleted_stores}}. A
+   * fully-clean tenant returns all-zero CLEANED (idempotent). A bff/exec fault after retries
+   * returns the SAME 207 {@code stepFailed} shape as {@link #delete} so the operator can re-run the
+   * idempotent tail.
+   */
+  @PostMapping("/{tenant}/cleanup-residual")
+  public ResponseEntity<Map<String, Object>> cleanupResidual(
+      HttpServletRequest req,
+      @PathVariable("tenant") String tenant,
+      @RequestBody(required = false) TenantDeleteRequestBody body) {
+
+    String operator =
+        ctx.requireAllowlistedOperator(req); // 400 if absent/malformed, 403 if not allowlisted
+    String actor = "operator:" + operator;
+    String correlationId = UUID.randomUUID().toString();
+
+    if (!ctx.isValidTenantId(tenant)) {
+      return blocked(HttpStatus.BAD_REQUEST, "INVALID_TENANT_ID", "malformed tenant path variable");
+    }
+
+    // Confirm match FIRST (cheap, no reads) — a typo never triggers a read or a side effect.
+    String confirm = body == null ? null : body.confirmTenantId();
+    if (confirm == null || !confirm.equals(tenant)) {
+      return blocked(
+          HttpStatus.BAD_REQUEST, "CONFIRM_MISMATCH", "confirm_tenant_id must equal path");
+    }
+
+    // ---- Residual precondition + paper-only guard (fail-closed). ONLY a tenant with ZERO
+    // strategy_config rows is residual. A read fault fails closed (NOT_RESIDUAL) so an unreadable
+    // store never lets cleanup proceed against a tenant that may still have live config. ----
+    List<StrategyConfigReader.StrategyRow> rows;
+    try {
+      rows = reader.listByTenant(tenant);
+    } catch (RuntimeException e) {
+      return residualBlock(
+          tenant,
+          actor,
+          correlationId,
+          "NOT_RESIDUAL",
+          "strategy_config read faulted (fail-closed)");
+    }
+    if (!rows.isEmpty()) {
+      // The tenant still has config → not residual. It may be live/active/multi-strategy, so refuse
+      // here and send the operator to the normal delete route which runs the full P0 live/paper
+      // gate. ZERO side effects (no exec hop, no bff hop, no workflow, no disable).
+      return residualBlock(
+          tenant,
+          actor,
+          correlationId,
+          "NOT_RESIDUAL",
+          "tenant has "
+              + rows.size()
+              + " strategy_config row(s); use the delete route (runs the P0 gate)");
+    }
+
+    // ---- STRUCTURAL, INCARNATION-CORRECT residual-only guard (fail-closed). Zero strategy_config
+    // rows is NOT proof the tenant was created → P0-gated → torn down: a NEVER-created tenant also
+    // has zero rows (the onboard invite step is independent of tenant creation, so an operator can
+    // invite a user for a tenant_id before its config exists → dashboard rows + zero config → Phase
+    // 1 badges it `partial`). Worse, tenant_id is REUSABLE free-text and audit_log is retained
+    // forever, so a boolean "was it ever deleted?" is defeated by a REUSED id: delete `acme` →
+    // later
+    // re-onboard `acme` invite-first → stale delete-evidence would greenlight deleting the NEW
+    // incarnation's invite. The only correct signal is TIME. So require BOTH:
+    //   (a) audit evidence a delete was attempted (latestDeleteAt present), else NEVER_DELETED;
+    //   (b) NO residual dashboard row newer than that delete — a genuine residual PREDATES the
+    //       delete; a reused id's new invite POSTDATES it → REUSED_TENANT.
+    // Both reads fail closed (a fault → refuse). This dashboard-row-recency gate blocks the WHOLE
+    // cleanup on reuse, so it ALSO protects the broker_credentials step — broker_credentials are
+    // created no earlier than the strategy_config / invite, so the invite is the earliest reuse
+    // signal; no separate creds-timestamp check is needed. ZERO side effects on any refusal. ----
+    Instant deletedAt;
+    try {
+      Optional<Instant> latest = deleteHistory.latestDeleteAt(tenant);
+      if (latest.isEmpty()) {
+        return residualBlock(
+            tenant,
+            actor,
+            correlationId,
+            "NEVER_DELETED",
+            "no prior tenant-delete attempt for this tenant — refusing to touch data for a tenant"
+                + " that was never deleted");
+      }
+      deletedAt = latest.get();
+    } catch (RuntimeException e) {
+      return residualBlock(
+          tenant,
+          actor,
+          correlationId,
+          "NOT_RESIDUAL",
+          "delete-history read faulted (fail-closed)");
+    }
+    try {
+      Optional<Instant> newestRow = dashboardRows.newestCreatedAt(tenant, operator);
+      if (newestRow.isPresent() && newestRow.get().isAfter(deletedAt)) {
+        return residualBlock(
+            tenant,
+            actor,
+            correlationId,
+            "REUSED_TENANT",
+            "a dashboard row is newer than the last tenant-delete — this tenant_id appears"
+                + " re-onboarded; refusing to touch a live incarnation");
+      }
+    } catch (RuntimeException e) {
+      return residualBlock(
+          tenant,
+          actor,
+          correlationId,
+          "NOT_RESIDUAL",
+          "dashboard-row recency read faulted (fail-closed)");
+    }
+
+    // ---- Residual (rows == 0, prior delete attempted, no newer dashboard row): delete ONLY the
+    // two
+    // idempotent residual stores, same safe order as the delete route's tail (broker_credentials,
+    // then dashboard LAST).
+    long startMillis = System.currentTimeMillis();
+
+    audit.emit(
+        "TenantResidualCleanupRequested",
+        tenant,
+        "*",
+        actor,
+        correlationId,
+        residualRequestedSubject(tenant, confirm, operator));
+
+    Map<String, Object> deletedStores = new LinkedHashMap<>();
+
+    // 1. exec broker_credentials delete, one idempotent call per KNOWN paper provider (option b:
+    // with
+    // zero strategy rows the provider cannot be derived from the config, so iterate the closed
+    // set).
+    try {
+      int credsDeleted = 0;
+      for (String provider : KNOWN_PAPER_PROVIDERS) {
+        credsDeleted += execCreds.delete(tenant, provider);
+      }
+      deletedStores.put("broker_credentials", credsDeleted);
+    } catch (RuntimeException e) {
+      return stepFailed(
+          tenant,
+          "*",
+          actor,
+          correlationId,
+          "broker_credentials",
+          new ArrayList<>(deletedStores.keySet()),
+          e);
+    }
+
+    // 2. bff dashboard_user + dashboard_user_invite delete — LAST, bounded-retry, idempotent.
+    try {
+      DashboardRowsDeleteForwarder.DeletedCounts counts =
+          deleteDashboardRowsWithRetry(tenant, operator);
+      deletedStores.put("dashboard_user", counts.users());
+      deletedStores.put("dashboard_user_invite", counts.invites());
+    } catch (RuntimeException e) {
+      return stepFailed(
+          tenant,
+          "*",
+          actor,
+          correlationId,
+          "dashboard_user",
+          new ArrayList<>(deletedStores.keySet()),
+          e);
+    }
+
+    long durationMs = System.currentTimeMillis() - startMillis;
+    Map<String, Object> completedSubject = new LinkedHashMap<>();
+    completedSubject.put("deleted_stores", deletedStores);
+    completedSubject.put("retained_stores", RETAINED_STORES);
+    completedSubject.put("duration_ms", durationMs);
+    audit.emit(
+        "TenantResidualCleanupCompleted", tenant, "*", actor, correlationId, completedSubject);
+
+    Map<String, Object> ok = new LinkedHashMap<>();
+    ok.put("status", "CLEANED");
+    ok.put("deleted_stores", deletedStores);
+    ok.put("retained_stores", RETAINED_STORES);
+    ok.put("duration_ms", durationMs);
+    return ResponseEntity.ok(ok);
+  }
+
+  private static Map<String, Object> residualRequestedSubject(
+      String tenant, String confirm, String operator) {
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("tenant_id", tenant);
+    subject.put("confirm_tenant_id", confirm);
+    subject.put("operator_id", operator);
+    subject.put("strategy_count", 0);
+    subject.put("flag_state", "operator.tenant-delete.enabled=true");
+    return subject;
+  }
+
+  /**
+   * A residual-cleanup pre-flight refusal: records a {@code TenantDeleteBlocked} audit event then
+   * returns 409. NO store was touched — the strategy_config / delete-history reads are read-only.
+   * Deliberately REUSES the existing {@code TenantDeleteBlocked} audit kind (a refusal is a
+   * refusal, same as a P0–P3 pre-flight block) rather than minting a new kind — only {@code
+   * TenantResidualCleanup{Requested,Completed}} are new for this route. {@code blockedBy} is {@code
+   * NEVER_DELETED} when the tenant has no prior-delete audit evidence (a never-created tenant that
+   * only ever had an invite) so the operator banner distinguishes it from a still-configured tenant
+   * ({@code NOT_RESIDUAL}); the more-specific reason still rides in {@code detail}.
+   */
+  private ResponseEntity<Map<String, Object>> residualBlock(
+      String tenant, String actor, String correlationId, String blockedBy, String detail) {
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("blocked_by", blockedBy);
+    subject.put("detail", detail);
+    subject.put("phase", "residual_precondition");
+    audit.emit("TenantDeleteBlocked", tenant, "*", actor, correlationId, subject);
+    return blocked(HttpStatus.CONFLICT, blockedBy, detail);
   }
 
   /**

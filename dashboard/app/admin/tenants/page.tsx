@@ -6,6 +6,7 @@ import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
 import { ActivateButton } from "@/components/ActivateButton";
 import { DeleteTenantButton } from "@/components/DeleteTenantButton";
+import { RetryCleanupButton } from "@/components/RetryCleanupButton";
 import { InviteUserButton } from "@/components/InviteUserButton";
 import {
   getAdminTenants,
@@ -17,6 +18,7 @@ import { getTenantEmails, type TenantEmails } from "@/lib/db";
 import { mergeResidualTenants, type TenantGroup } from "@/lib/adminTenants";
 import { postActivation } from "@/lib/adminActivation";
 import { postTenantDelete } from "@/lib/adminTenantDelete";
+import { postTenantResidualCleanup } from "@/lib/adminTenantResidualCleanup";
 import { EMAIL_RE, ID_RE } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
@@ -119,6 +121,8 @@ export default async function AdminTenantsPage({
   let banner: { tone: "ok" | "err"; msg: string } | null = null;
   if (searchParams.done === "deleted") {
     banner = { tone: "ok", msg: "Tenant deleted." };
+  } else if (searchParams.done === "cleaned") {
+    banner = { tone: "ok", msg: "Residual data cleaned." };
   } else if (searchParams.done === "invited") {
     banner = { tone: "ok", msg: "Invite created." };
   } else if (searchParams.done) {
@@ -193,6 +197,36 @@ export default async function AdminTenantsPage({
     revalidatePath("/admin/tenants");
     if (result.ok) {
       redirect("/admin/tenants?done=deleted");
+    }
+    if (result.status === 409 && result.blockedBy) {
+      redirect(
+        `/admin/tenants?error=409&blocked_by=${encodeURIComponent(result.blockedBy)}`,
+      );
+    }
+    redirect(`/admin/tenants?error=${result.status}`);
+  }
+
+  // Server action: re-verify operator, enforce the type-to-confirm match, forward to the api-gateway
+  // residual-cleanup route, redirect with a coarse result. Converges a partially-deleted tenant
+  // (strategy_config already gone, residual broker_credentials / dashboard rows remain). Mirrors
+  // deleteTenantAction's auth/confirm/forward/redirect; the server re-enforces the rows==0 residual
+  // precondition (409 NOT_RESIDUAL otherwise), so this UI gate is belt-and-suspenders.
+  async function cleanupResidualAction(formData: FormData) {
+    "use server";
+    const s = await auth();
+    if (!s?.isOperator) {
+      redirect("/admin/tenants?error=403");
+    }
+    const tenantId = String(formData.get("tenant_id") ?? "");
+    const confirmTenantId = String(formData.get("confirm_tenant_id") ?? "");
+    // Exact, case-sensitive match — reject a mismatch (or empty) before touching the gateway.
+    if (!tenantId || confirmTenantId !== tenantId) {
+      redirect("/admin/tenants?error=400");
+    }
+    const result = await postTenantResidualCleanup(tenantId, confirmTenantId);
+    revalidatePath("/admin/tenants");
+    if (result.ok) {
+      redirect("/admin/tenants?done=cleaned");
     }
     if (result.status === 409 && result.blockedBy) {
       redirect(
@@ -410,20 +444,28 @@ export default async function AdminTenantsPage({
                         >
                           <div className="flex flex-wrap items-center justify-end gap-2">
                             {group.partial ? (
-                              // Phase 1: residual tenant has no strategy_config rows, so the normal
-                              // per-tenant Delete would P0-409 on zero rows. Render a disabled
-                              // "Retry cleanup" placeholder instead — the LIVE cleanup action is
-                              // Phase 2 work (gated behind the tenant-delete flag) and inert here, so
-                              // Phase 1 never exposes a dead/exploding control.
-                              <button
-                                type="button"
-                                disabled
-                                title="Cleanup retry coming in a later phase"
-                                aria-label="Cleanup retry coming in a later phase"
-                                className="cursor-not-allowed rounded border border-slate-700 px-2 py-1 text-sm text-slate-500"
-                              >
-                                Retry cleanup
-                              </button>
+                              // Residual tenant has no strategy_config rows, so the normal per-tenant
+                              // Delete would P0-409 on zero rows. Phase 2: render a LIVE "Retry
+                              // cleanup" control (type-to-confirm) that forwards to the api-gateway
+                              // residual-cleanup route — gated on the SAME tenant-delete flag so it
+                              // stays dark until cutover. When the flag is off, keep the disabled
+                              // placeholder so the row never exposes a dead/exploding control.
+                              TENANT_DELETE_ENABLED ? (
+                                <RetryCleanupButton
+                                  tenantId={group.tenantId}
+                                  action={cleanupResidualAction}
+                                />
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled
+                                  title="Cleanup retry not enabled"
+                                  aria-label="Cleanup retry not enabled"
+                                  className="cursor-not-allowed rounded border border-slate-700 px-2 py-1 text-sm text-slate-500"
+                                >
+                                  Retry cleanup
+                                </button>
+                              )
                             ) : (
                               <>
                                 <InviteUserButton

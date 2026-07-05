@@ -99,6 +99,11 @@ class TenantDeleteDarkProofTest {
     }
 
     @Bean
+    TenantDeleteHistoryReader tenantDeleteHistoryReader() {
+      return mock(TenantDeleteHistoryReader.class);
+    }
+
+    @Bean
     TenantDeleteAuditEmitter tenantDeleteAuditEmitter() {
       return mock(TenantDeleteAuditEmitter.class);
     }

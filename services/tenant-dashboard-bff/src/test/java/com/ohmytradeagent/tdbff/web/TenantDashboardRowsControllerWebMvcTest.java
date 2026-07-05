@@ -4,11 +4,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.ohmytradeagent.tdbff.invites.InviteWriterRepository;
 import com.ohmytradeagent.tdbff.invites.InviteWriterRepository.DeletedIdentityCounts;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -71,5 +74,54 @@ class TenantDashboardRowsControllerWebMvcTest {
         .andExpect(jsonPath("$.deleted_invites").value(1));
 
     verify(writer).deleteTenantIdentities("staging-paper-2");
+  }
+
+  // ---- GET .../dashboard-rows/newest (Phase 2 incarnation-guard read) ----
+
+  @Test
+  void newest_missingOperatorHeaderIs400_beforeAnyRead() throws Exception {
+    mvc.perform(get("/api/admin/tenants/acme/dashboard-rows/newest"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.error").value("missing_operator"));
+    verifyNoInteractions(writer);
+  }
+
+  @Test
+  void newest_nonAllowlistedOperatorIs403_beforeAnyRead() throws Exception {
+    mvc.perform(
+            get("/api/admin/tenants/acme/dashboard-rows/newest")
+                .header("X-Operator-Id", "intruder"))
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.error").value("forbidden"));
+    verifyNoInteractions(writer);
+  }
+
+  @Test
+  void newest_allowlistedOperator_echoesNewestInstant() throws Exception {
+    when(writer.newestDashboardRowCreatedAt("staging-paper-2"))
+        .thenReturn(OffsetDateTime.of(2026, 7, 2, 12, 0, 0, 0, ZoneOffset.UTC));
+
+    mvc.perform(
+            get("/api/admin/tenants/staging-paper-2/dashboard-rows/newest")
+                .header("X-Operator-Id", "ridopark"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.tenant_id").value("staging-paper-2"))
+        .andExpect(jsonPath("$.newest_created_at").value("2026-07-02T12:00Z"));
+
+    verify(writer).newestDashboardRowCreatedAt("staging-paper-2");
+  }
+
+  @Test
+  void newest_noRows_returnsNull() throws Exception {
+    when(writer.newestDashboardRowCreatedAt("staging-paper-2")).thenReturn(null);
+
+    mvc.perform(
+            get("/api/admin/tenants/staging-paper-2/dashboard-rows/newest")
+                .header("X-Operator-Id", "ridopark"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.tenant_id").value("staging-paper-2"))
+        .andExpect(jsonPath("$.newest_created_at").value(org.hamcrest.Matchers.nullValue()));
+
+    verify(writer).newestDashboardRowCreatedAt("staging-paper-2");
   }
 }

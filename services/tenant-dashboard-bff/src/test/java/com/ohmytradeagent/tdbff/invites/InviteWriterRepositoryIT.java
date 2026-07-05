@@ -217,6 +217,36 @@ class InviteWriterRepositoryIT {
     assertThat(counts.invites()).isZero();
   }
 
+  // ---- newest-created-at (residual-cleanup incarnation guard, Phase 2) ----
+
+  @Test
+  void newestDashboardRowCreatedAt_noRows_returnsNull() {
+    assertThat(repo.newestDashboardRowCreatedAt("never-existed")).isNull();
+  }
+
+  @Test
+  void newestDashboardRowCreatedAt_returnsMaxAcrossBothTables_scopedByTenant() throws SQLException {
+    // acme: an OLD invite (2026-06-01) + a NEWER bound member (2026-07-02). globex: a row that must
+    // not leak into acme's max. Proves the dashboard_writer role can READ created_at (V8 grant) and
+    // that the UNION-max is tenant-scoped and spans BOTH tables.
+    insertRawUserAt("google", "sub-old", "acme", "2026-06-01T00:00:00Z");
+    insertRawInviteAt("new@x.com", "acme", "2026-07-02T00:00:00Z");
+    insertRawInviteAt("other@x.com", "globex", "2026-08-01T00:00:00Z");
+
+    java.time.OffsetDateTime newest = repo.newestDashboardRowCreatedAt("acme");
+
+    assertThat(newest).isNotNull();
+    assertThat(newest.toInstant())
+        .isEqualTo(java.time.Instant.parse("2026-07-02T00:00:00Z")); // the member, not globex
+  }
+
+  @Test
+  void newestDashboardRowCreatedAt_onlyInvite_readsInviteCreatedAt() throws SQLException {
+    insertRawInviteAt("solo@x.com", "acme", "2026-07-05T00:00:00Z");
+    assertThat(repo.newestDashboardRowCreatedAt("acme").toInstant())
+        .isEqualTo(java.time.Instant.parse("2026-07-05T00:00:00Z"));
+  }
+
   // ---- fixtures / assertions ----
 
   private static Connection asSuperuser() throws SQLException {
@@ -287,6 +317,36 @@ class InviteWriterRepositoryIT {
         assertThat(rs.getString("consumed_provider")).isEqualTo(provider);
         assertThat(rs.getString("consumed_subject")).isEqualTo(subject);
       }
+    }
+  }
+
+  private void insertRawUserAt(
+      String provider, String subject, String tenantId, String createdAtIso) throws SQLException {
+    try (Connection c = asSuperuser();
+        var ps =
+            c.prepareStatement(
+                "INSERT INTO dashboard_user (provider, subject, tenant_id, created_at) "
+                    + "VALUES (?, ?, ?, ?::timestamptz)")) {
+      ps.setString(1, provider);
+      ps.setString(2, subject);
+      ps.setString(3, tenantId);
+      ps.setString(4, createdAtIso);
+      ps.executeUpdate();
+    }
+  }
+
+  private void insertRawInviteAt(String email, String tenantId, String createdAtIso)
+      throws SQLException {
+    try (Connection c = asSuperuser();
+        var ps =
+            c.prepareStatement(
+                "INSERT INTO dashboard_user_invite (email, tenant_id, created_by, created_at,"
+                    + " expires_at) VALUES (?, ?, 'op@x.com', ?::timestamptz, now() + interval '7"
+                    + " days')")) {
+      ps.setString(1, email);
+      ps.setString(2, tenantId);
+      ps.setString(3, createdAtIso);
+      ps.executeUpdate();
     }
   }
 

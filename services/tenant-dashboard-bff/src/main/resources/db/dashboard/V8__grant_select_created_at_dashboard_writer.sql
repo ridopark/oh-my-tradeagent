@@ -1,0 +1,17 @@
+-- Enables the operator residual-cleanup incarnation guard (Phase 2 of the partial-teardown
+-- remediation) to read the NEWEST dashboard-row creation instant for a tenant. The api-gateway
+-- cleanup route refuses to touch a re-onboarded tenant (a reused tenant_id whose new invite POSTDATES
+-- the last tenant-delete), so the BFF exposes an operator-only read that returns
+--   max(created_at) across dashboard_user + dashboard_user_invite for the tenant.
+-- That read runs as the least-privilege dashboard_writer role (V5) — the ONLY dashboard-DB role the
+-- BFF has a DSL for — so it needs column-level SELECT on the two created_at columns.
+--
+-- dashboard_user_invite already has table-level SELECT from V5, so its created_at is already readable
+-- and needs NO new grant. dashboard_user only has SELECT (tenant_id) from V7 (the no-PII posture), so
+-- reading its created_at requires an ADDITIONAL column grant. We grant SELECT on ONLY the created_at
+-- column, so the writer gains the recency signal but STILL cannot read PII (provider/subject/email) —
+-- the no-PII, least-privilege posture is preserved.
+--
+-- NEVER edit the shipped V5/V6/V7. The dashboard_readonly role (V2/V6) is untouched. Additive and
+-- idempotent (GRANT is a no-op if already held).
+GRANT SELECT (created_at) ON dashboard_user TO dashboard_writer;
