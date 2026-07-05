@@ -520,7 +520,11 @@ public class TenantDeleteController {
       rows = reader.listByTenant(tenant);
     } catch (RuntimeException e) {
       return residualBlock(
-          tenant, actor, correlationId, "strategy_config read faulted (fail-closed)");
+          tenant,
+          actor,
+          correlationId,
+          "NOT_RESIDUAL",
+          "strategy_config read faulted (fail-closed)");
     }
     if (!rows.isEmpty()) {
       // The tenant still has config → not residual. It may be live/active/multi-strategy, so refuse
@@ -530,6 +534,7 @@ public class TenantDeleteController {
           tenant,
           actor,
           correlationId,
+          "NOT_RESIDUAL",
           "tenant has "
               + rows.size()
               + " strategy_config row(s); use the delete route (runs the P0 gate)");
@@ -549,12 +554,17 @@ public class TenantDeleteController {
             tenant,
             actor,
             correlationId,
+            "NEVER_DELETED",
             "no prior tenant-delete attempt for this tenant — refusing to touch data for a tenant"
                 + " that was never deleted");
       }
     } catch (RuntimeException e) {
       return residualBlock(
-          tenant, actor, correlationId, "delete-history read faulted (fail-closed)");
+          tenant,
+          actor,
+          correlationId,
+          "NOT_RESIDUAL",
+          "delete-history read faulted (fail-closed)");
     }
 
     // ---- Residual (rows == 0, prior delete attempted): delete ONLY the two idempotent residual
@@ -637,20 +647,23 @@ public class TenantDeleteController {
   }
 
   /**
-   * A residual-cleanup pre-flight refusal (NOT_RESIDUAL): records a {@code TenantDeleteBlocked}
-   * audit event then returns 409. NO store was touched — the strategy_config / delete-history reads
-   * are read-only. Deliberately REUSES the existing {@code TenantDeleteBlocked} audit kind (a
-   * refusal is a refusal, same as a P0–P3 pre-flight block) rather than minting a new kind — only
-   * {@code TenantResidualCleanup{Requested,Completed}} are new for this route.
+   * A residual-cleanup pre-flight refusal: records a {@code TenantDeleteBlocked} audit event then
+   * returns 409. NO store was touched — the strategy_config / delete-history reads are read-only.
+   * Deliberately REUSES the existing {@code TenantDeleteBlocked} audit kind (a refusal is a
+   * refusal, same as a P0–P3 pre-flight block) rather than minting a new kind — only {@code
+   * TenantResidualCleanup{Requested,Completed}} are new for this route. {@code blockedBy} is {@code
+   * NEVER_DELETED} when the tenant has no prior-delete audit evidence (a never-created tenant that
+   * only ever had an invite) so the operator banner distinguishes it from a still-configured tenant
+   * ({@code NOT_RESIDUAL}); the more-specific reason still rides in {@code detail}.
    */
   private ResponseEntity<Map<String, Object>> residualBlock(
-      String tenant, String actor, String correlationId, String detail) {
+      String tenant, String actor, String correlationId, String blockedBy, String detail) {
     Map<String, Object> subject = new LinkedHashMap<>();
-    subject.put("blocked_by", "NOT_RESIDUAL");
+    subject.put("blocked_by", blockedBy);
     subject.put("detail", detail);
     subject.put("phase", "residual_precondition");
     audit.emit("TenantDeleteBlocked", tenant, "*", actor, correlationId, subject);
-    return blocked(HttpStatus.CONFLICT, "NOT_RESIDUAL", detail);
+    return blocked(HttpStatus.CONFLICT, blockedBy, detail);
   }
 
   /**

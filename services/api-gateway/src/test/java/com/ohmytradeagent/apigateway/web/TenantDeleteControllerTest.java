@@ -584,14 +584,15 @@ class TenantDeleteControllerTest {
   void cleanupResidual_zeroRowsButNeverDeleted_409_notResidual() {
     // Zero strategy_config rows BUT no prior tenant-delete was attempted (a NEVER-created tenant
     // that only has dashboard rows from a pre-creation invite). The STRUCTURAL guard refuses: zero
-    // rows alone is not proof of a residual delete. 409 NOT_RESIDUAL, ZERO side effects.
+    // rows alone is not proof of a residual delete. 409 NEVER_DELETED (distinct from the
+    // still-configured NOT_RESIDUAL so the operator banner tells them apart), ZERO side effects.
     when(reader.listByTenant(TENANT)).thenReturn(List.of());
     when(deleteHistory.deleteWasRequested(TENANT)).thenReturn(false);
 
     ResponseEntity<Map<String, Object>> resp = cleanup(TENANT);
 
     assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
-    assertThat(resp.getBody()).containsEntry("blocked_by", "NOT_RESIDUAL");
+    assertThat(resp.getBody()).containsEntry("blocked_by", "NEVER_DELETED");
     // Never touch the residual stores for a tenant that was never deleted.
     verifyNoInteractions(execCreds, dashboardRows, workflow, disable);
     verify(audit).emit(eq("TenantDeleteBlocked"), eq(TENANT), any(), any(), any(), any());
