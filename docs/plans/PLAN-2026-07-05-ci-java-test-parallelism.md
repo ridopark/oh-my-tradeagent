@@ -138,12 +138,24 @@ in `services/orchestrator/pom.xml`:
 - Runner sizing: GitHub `ubuntu-latest` is 4 vCPU; `forkCount=2` fits. Higher forks + 35 Postgres
   containers can exhaust memory — measure, don't assume.
 
-### Phase 3 — Testcontainers reuse *(optional, if IT startup dominates)*
+### Phase 3 — Parallelize the orchestrator IT phase (failsafe forks) — IMPLEMENTED
 
-35 IT classes each start a fresh Postgres. A shared/singleton container (or
-`testcontainers.reuse.enable=true` in CI) cuts N cold-starts to ~1. Higher risk (cross-test state
-bleed), so only pursue if Phases 1–2 leave IT container startup as the measured tail. Out of scope
-unless data justifies it.
+> **Status (2026-07-05):** shipped as `forkCount=2`/`reuseForks=true` on the **failsafe** plugin in
+> `services/orchestrator/pom.xml` (mirrors Phase 2, applied to ITs).
+
+Orchestrator's IT phase runs 10 Postgres + 1 Redis Testcontainers ITs **serially** in one failsafe
+fork. Original Phase-3 idea was a shared/singleton Postgres to cut N cold-starts to ~1, but that was
+**rejected**: it is a ~10-file refactor with real cross-test data-bleed risk (e.g.
+`OrchestratorRuntimeRoleIT` asserts REVOKE/grant role posture — highly sensitive to a shared DB), and
+**these ITs cannot be run locally** (the Docker-Desktop-on-WSL2 dev socket is a CLI proxy that returns
+HTTP 400 to Testcontainers' daemon API — only CI can exercise them), so the reuse refactor could not be
+validated before merge.
+
+Instead, run the existing ITs in **2 failsafe forks**. Each IT keeps its own `@Container` (random host
+port, isolated DB/role state), so isolation is fully preserved — this parallelizes container startup
+**without** the shared-state risk. Caps at 2 concurrent Postgres containers, fine on a CI runner. Same
+process-level (not thread-level) reasoning as Phase 2. Validated by CI (the IT wall-clock on the
+`Java (services/orchestrator)` leg before vs. after).
 
 ## Rejected / not now
 
