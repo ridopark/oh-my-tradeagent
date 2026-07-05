@@ -235,6 +235,39 @@ class VerifiedAccountGuardTest {
   }
 
   @Test
+  void blankMappedBase_rejectsUnsupported_withoutAnyExecCall() {
+    // An exec.targets entry present but BLANK for the tenant's broker_target → fail closed (the
+    // execBase.isBlank() branch), NO http call, NEVER a fallback to the shared paper base.
+    live.respond(200, "{\"verified\":true,\"account\":\"847309116\"}");
+    assertThat(guard(targets(Map.of(LIVE_TARGET, ""))).evaluate("acme", LIVE_TARGET))
+        .isEqualTo(VerifiedAccountGuard.Decision.REJECT_UNSUPPORTED_TARGET);
+    assertThat(paper.hits.get()).isEqualTo(0);
+    assertThat(live.hits.get()).isEqualTo(0);
+  }
+
+  @Test
+  void caseVariantTarget_rejectsUnsupported_withoutAnyExecCall() {
+    // Stored broker_target "Alpaca-Live" (mixed case) with only a lowercase alpaca-live key → the
+    // match is case-SENSITIVE, so it must fail closed (no http call), NEVER fall back to paper.
+    live.respond(200, "{\"verified\":true,\"account\":\"847309116\"}");
+    assertThat(guard().evaluate("acme", "Alpaca-Live"))
+        .isEqualTo(VerifiedAccountGuard.Decision.REJECT_UNSUPPORTED_TARGET);
+    assertThat(paper.hits.get()).isEqualTo(0);
+    assertThat(live.hits.get()).isEqualTo(0);
+  }
+
+  @Test
+  void trailingSpaceTarget_isTrimmed_routedToLivePod_allows() {
+    // Stored broker_target "alpaca-live " (trailing space) with the map keyed on "alpaca-live" →
+    // the .trim() on the lookup routes to the LIVE pod (ALLOW), never the shared paper base.
+    live.respond(200, "{\"verified\":true,\"account\":\"847309116\"}");
+    assertThat(guard().evaluate("acme", "alpaca-live "))
+        .isEqualTo(VerifiedAccountGuard.Decision.ALLOW);
+    assertThat(live.hits.get()).isEqualTo(1);
+    assertThat(paper.hits.get()).isEqualTo(0);
+  }
+
+  @Test
   void providerOf_derivesProviderFromPaperAndLive_nullForBareOrUnknown() {
     assertThat(VerifiedAccountGuard.providerOf(null)).isNull();
     assertThat(VerifiedAccountGuard.providerOf("paper")).isNull();
