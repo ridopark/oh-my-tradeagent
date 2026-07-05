@@ -1,5 +1,6 @@
 package com.ohmytradeagent.apigateway.web;
 
+import com.ohmytradeagent.apigateway.config.ExecTargetProperties;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,11 +23,15 @@ import org.springframework.web.client.RestClient;
  * silent pass — a fail-OPEN on a network error would be worse than no guard at all. The exec call
  * is bounded by {@code execRestClient}'s connect/read timeouts (see {@code ExecClientConfig}).
  *
- * <p><b>Paper-only (C5).</b> {@code EXEC_BASE_URL} is single-valued (the paper pod), so a {@code
- * -live} target's {@code verified:true} cannot be trusted (a live tenant with a stray paper creds
- * row would false-pass = fail-open for real money). The guard keys off the STORED {@code
- * broker_target} and REFUSES arming ({@link Decision#REJECT_UNSUPPORTED_TARGET}) for anything that
- * is not a {@code <provider>-paper} target, until per-target exec routing exists.
+ * <p><b>Per-target routing (#548, C5).</b> The verify GET is routed to the exec pod that OWNS the
+ * stored {@code broker_target} — its absolute base is looked up in the {@code exec.targets} map
+ * (the same map the credential-write forward routes on, see {@link
+ * BrokerCredentialForwardService}), so a {@code <provider>-live} target is verified against the
+ * LIVE pod's DB. A live {@code verified:true} is therefore trustworthy: it is read from the live
+ * pod, not the shared paper base, so a stray paper creds row can never false-pass a live tenant. A
+ * {@code broker_target} that is bare/unknown, or absent from {@code exec.targets}, is refused
+ * ({@link Decision#REJECT_UNSUPPORTED_TARGET}) WITHOUT any HTTP call and NEVER falls back to the
+ * shared paper base — an unmapped real-money target is refused, not misrouted.
  *
  * <p><b>Dark by construction.</b> Gated on {@code operator.strategy-enable.enabled=true} OR {@code
  * strategy.config.write.enabled=true} — the two routes that arm a strategy — so with both unset the
@@ -41,12 +46,12 @@ public class VerifiedAccountGuard {
 
   /** The arming decision for a (tenant, broker_target). */
   public enum Decision {
-    /** A verified paper account exists — arming may proceed. */
+    /** A verified account exists on the resolved exec pod — arming may proceed. */
     ALLOW,
     /** exec answered {@code verified:false} — no verified account. Caller → 422. */
     REJECT_UNVERIFIED,
     /**
-     * The stored broker_target is not a supported {@code <provider>-paper} target. Caller → 422.
+     * The stored broker_target is bare/unknown or not mapped in {@code exec.targets}. Caller → 422.
      */
     REJECT_UNSUPPORTED_TARGET,
     /** exec was unreachable / faulted / answered malformed — disposition unknown. Caller → 503. */
@@ -54,9 +59,12 @@ public class VerifiedAccountGuard {
   }
 
   private final RestClient execRestClient;
+  private final ExecTargetProperties execTargets;
 
-  public VerifiedAccountGuard(@Qualifier("execRestClient") RestClient execRestClient) {
+  public VerifiedAccountGuard(
+      @Qualifier("execRestClient") RestClient execRestClient, ExecTargetProperties execTargets) {
     this.execRestClient = execRestClient;
+    this.execTargets = execTargets;
   }
 
   /**
@@ -65,23 +73,34 @@ public class VerifiedAccountGuard {
    * drift it) — never a caller-supplied one for the operator route.
    */
   public Decision evaluate(String tenant, String brokerTarget) {
-    String provider = paperProvider(brokerTarget);
+    String provider = providerOf(brokerTarget);
     if (provider == null) {
-      // Live / bare / unknown target: cannot be verified against the single paper exec pod (C5).
+      // Bare / unknown target (not a <provider>-{paper,live}) — cannot be verified. Fail closed.
       log.info(
           "arm-guard: refusing unsupported broker_target for tenant={} broker_target={}",
           tenant,
           brokerTarget);
       return Decision.REJECT_UNSUPPORTED_TARGET;
     }
+    // Route to the exec pod that OWNS this broker_target. FAIL CLOSED (no HTTP call, NO fallback to
+    // the shared paper base) when the broker_target is absent from exec.targets — a -live target
+    // must never be verified against the paper pod.
+    String execBase = execTargets.getTargets().get(brokerTarget.trim());
+    if (execBase == null || execBase.isBlank()) {
+      log.info(
+          "arm-guard: broker_target={} not mapped in exec.targets for tenant={} — failing closed"
+              + " (no verify call, no paper fallback)",
+          brokerTarget,
+          tenant);
+      return Decision.REJECT_UNSUPPORTED_TARGET;
+    }
     try {
       return execRestClient
           .get()
           .uri(
-              b ->
-                  b.path("/internal/broker-credentials/{tenant}/account")
-                      .queryParam("provider", provider)
-                      .build(tenant))
+              execBase + "/internal/broker-credentials/{tenant}/account?provider={provider}",
+              tenant,
+              provider)
           .exchange(
               (request, response) -> {
                 HttpStatusCode status = response.getStatusCode();
@@ -121,10 +140,36 @@ public class VerifiedAccountGuard {
   }
 
   /**
+   * The provider prefix of a supported {@code <provider>-{paper,live}} broker_target (e.g. {@code
+   * alpaca-paper} / {@code alpaca-live} → {@code alpaca}), or {@code null} for a target that
+   * carries no {@code -paper}/{@code -live} suffix — the bare legacy {@code paper}/{@code live}, an
+   * unknown suffix ({@code alpaca-foo}), or a blank/null value. The suffix gate only recognizes a
+   * well-formed target shape; whether that target is actually SERVED is decided by the {@code
+   * exec.targets} lookup in {@link #evaluate}. Package-private for the unit test.
+   *
+   * <p>DISTINCT from {@link #paperProvider}, which is a paper-ONLY SAFETY predicate (it must stay
+   * {@code null} for {@code -live}) — do not collapse the two.
+   */
+  static String providerOf(String brokerTarget) {
+    if (brokerTarget == null) {
+      return null;
+    }
+    String t = brokerTarget.trim();
+    int dash = t.indexOf('-');
+    if (dash <= 0 || !(t.endsWith("-paper") || t.endsWith("-live"))) {
+      return null;
+    }
+    return t.substring(0, dash);
+  }
+
+  /**
    * The provider prefix of a supported {@code <provider>-paper} broker_target (e.g. {@code
    * alpaca-paper} → {@code alpaca}), or {@code null} for any target that is not paper-suffixed —
    * live targets ({@code alpaca-live}), the bare legacy {@code paper}/{@code live}, an unknown, or
-   * a blank/null value. Package-private for the unit test.
+   * a blank/null value. This is a paper-ONLY safety predicate reused by {@link
+   * TenantDeleteController} to gate the delete paper-allowlist, so it MUST keep returning {@code
+   * null} for {@code -live} — routing uses {@link #providerOf} instead. Package-private for the
+   * callers / unit test.
    */
   static String paperProvider(String brokerTarget) {
     if (brokerTarget == null) {
