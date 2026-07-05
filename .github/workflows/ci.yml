@@ -123,6 +123,14 @@ jobs:
           RUN_DB_ITS: "true"
         run: mvn -B -ntp -pl ${{ matrix.module }} verify
 
+      # The per-module `verify` above only spotless-checks its own module. The root aggregator
+      # pom.xml is in no leg's reactor (step 1 skips spotless via -am; step 2 drops -am), so its
+      # sortPom formatting would go unchecked. Run the root check exactly once, on the cheapest
+      # leg, with -N (non-recursive) so it validates only the root pom.
+      - name: Root pom spotless (once)
+        if: matrix.module == 'contract/java'
+        run: mvn -B -ntp -N spotless:check
+
   python:
     name: Python (pydantic round-trip + regen drift)
     runs-on: ubuntu-latest

@@ -74,10 +74,20 @@ Replace the single `java` job with a `strategy.matrix` over modules, each on its
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "21", cache: maven }
+      # Step 1: build upstream reactor deps only — NOT `-am verify`, which would re-run
+      # orchestrator's whole suite when building api-gateway (api-gateway -> orchestrator -> exec)
+      # and recreate the bottleneck. skip tests + spotless here.
+      - name: Build upstream deps (${{ matrix.module }})
+        run: mvn -B -ntp -pl ${{ matrix.module }} -am install -DskipTests -Dspotless.check.skip=true
+      # Step 2: test + spotless + ITs for THIS module only (no -am).
       - name: mvn verify (${{ matrix.module }})
         env:
           RUN_DB_ITS: "true"
-        run: mvn -B -ntp -pl ${{ matrix.module }} -am verify
+        run: mvn -B -ntp -pl ${{ matrix.module }} verify
+      # The root aggregator pom.xml is in no leg's reactor, so run its spotless check once.
+      - name: Root pom spotless (once)
+        if: matrix.module == 'contract/java'
+        run: mvn -B -ntp -N spotless:check
 ```
 
 - **Wall-clock → slowest single module (orchestrator), not the sum.** GitHub schedules the 7 matrix
