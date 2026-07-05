@@ -20,6 +20,10 @@ export interface TenantResidualCleanupResult {
   // were cleaned) is NOT ok — the caller must surface "partially cleaned, retry", never "cleaned".
   ok: boolean;
   status: number;
+  // Present only on a 409 (blocked) response that carries a { blocked_by } body — the reason the
+  // cleanup was refused (e.g. NOT_RESIDUAL: config still present, or no prior delete attempt).
+  // Undefined otherwise.
+  blockedBy?: string;
 }
 
 // Fire a residual cleanup for one tenant. tenant comes from the operator's selection in the admin list
@@ -46,8 +50,21 @@ export async function postTenantResidualCleanup(
       cache: "no-store",
       signal: AbortSignal.timeout(API_GATEWAY_TIMEOUT_MS),
     });
+    let blockedBy: string | undefined;
+    if (res.status === 409) {
+      // Only a blocked response carries a reason worth surfacing; any other status maps to a coarse
+      // banner. Fail-safe: a missing/invalid body leaves blockedBy undefined (generic "Blocked.").
+      try {
+        const body = (await res.json()) as { blocked_by?: unknown };
+        if (typeof body?.blocked_by === "string") {
+          blockedBy = body.blocked_by;
+        }
+      } catch {
+        // No/invalid JSON body — leave blockedBy undefined.
+      }
+    }
     // ok ONLY on a full 200 CLEANED — a 207 partial falls through to the "partially cleaned" banner.
-    return { ok: res.status === 200, status: res.status };
+    return { ok: res.status === 200, status: res.status, blockedBy };
   } catch {
     // Transport/abort error — the call did not complete.
     return { ok: false, status: 0 };

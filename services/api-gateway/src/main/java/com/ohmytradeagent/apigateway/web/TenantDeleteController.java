@@ -92,6 +92,7 @@ public class TenantDeleteController {
   private final TenantDeleteWorkflowClient workflow;
   private final BrokerCredentialDeleteForwarder execCreds;
   private final DashboardRowsDeleteForwarder dashboardRows;
+  private final TenantDeleteHistoryReader deleteHistory;
   private final TenantDeleteAuditEmitter audit;
 
   /**
@@ -115,6 +116,7 @@ public class TenantDeleteController {
       TenantDeleteWorkflowClient workflow,
       BrokerCredentialDeleteForwarder execCreds,
       DashboardRowsDeleteForwarder dashboardRows,
+      TenantDeleteHistoryReader deleteHistory,
       TenantDeleteAuditEmitter audit) {
     this.ctx = ctx;
     this.reader = reader;
@@ -124,6 +126,7 @@ public class TenantDeleteController {
     this.workflow = workflow;
     this.execCreds = execCreds;
     this.dashboardRows = dashboardRows;
+    this.deleteHistory = deleteHistory;
     this.audit = audit;
   }
 
@@ -463,14 +466,20 @@ public class TenantDeleteController {
    * the operator no longer hits the P0 {@code UNKNOWN_TENANT_SHAPE} 409 the normal delete route
    * returns on zero rows.
    *
-   * <p><b>Residual-only paper-safety invariant.</b> A tenant reaches zero {@code strategy_config}
-   * rows ONLY by having ALREADY passed the full P0 paper-allowlist on the original {@link #delete}
-   * (a {@code -live} / non-paper / multi-strategy tenant is refused BEFORE any teardown) and having
-   * had its config + kill switches workflow-deleted. So this route, entered only when rows == 0,
-   * touches ONLY the two idempotent residual stores and can NEVER reach a workflow, a kill switch,
-   * or a {@code -live} broker path. If strategy_config still has ≥1 row the tenant is NOT residual
-   * (it may be live/active/multi-strategy) → this route REFUSES 409 {@code NOT_RESIDUAL} with zero
-   * side effects; the operator must use {@link #delete}, which runs the full P0 live/paper gate.
+   * <p><b>Residual-only paper-safety invariant (STRUCTURALLY ENFORCED).</b> A genuinely residual
+   * tenant reached zero {@code strategy_config} rows ONLY by having ALREADY passed the full P0
+   * paper-allowlist on the original {@link #delete} (a {@code -live} / non-paper / multi-strategy
+   * tenant is refused BEFORE any teardown) and having had its config + kill switches
+   * workflow-deleted, so it touches ONLY the two idempotent residual stores and can NEVER reach a
+   * workflow, a kill switch, or a {@code -live} broker path. Zero rows ALONE is NOT proof of that:
+   * a tenant that was NEVER created also has zero rows (the onboard invite step is independent of
+   * tenant creation, so an operator can invite a user for a tenant_id before its config exists). So
+   * this route enforces the invariant with TWO gates: (a) strategy_config rows == 0, AND (b) audit
+   * evidence — via {@link TenantDeleteHistoryReader} — that a delete was actually attempted ({@code
+   * TenantDeleteRequested}, emitted only after P0–P3 pass, or {@code TenantDeleteStepFailed}). If
+   * strategy_config still has ≥1 row, OR no prior delete was attempted, the tenant is NOT residual
+   * → this route REFUSES 409 {@code NOT_RESIDUAL} with zero side effects; the operator must use
+   * {@link #delete}, which runs the full P0 live/paper gate.
    *
    * <p>Auth + confirm are IDENTICAL to {@link #delete} (allowlisted operator, valid tenant id,
    * confirm-body match — none touch a store). On success: {@code TenantResidualCleanupRequested} →
@@ -526,8 +535,30 @@ public class TenantDeleteController {
               + " strategy_config row(s); use the delete route (runs the P0 gate)");
     }
 
-    // ---- Residual (rows == 0): delete ONLY the two idempotent residual stores, same safe order as
-    // the delete route's tail (broker_credentials, then dashboard rows LAST). ----
+    // ---- STRUCTURAL residual-only guard (fail-closed). Zero strategy_config rows is NOT proof the
+    // tenant was created → P0-gated → torn down: a NEVER-created tenant also has zero rows (the
+    // onboard invite step is independent of tenant creation, so an operator can invite a user for a
+    // tenant_id before its config exists → dashboard rows + zero config → Phase 1 badges it
+    // `partial`). Deleting that would strip a legitimate pending onboarding. So ALSO require audit
+    // evidence that a delete was actually attempted: TenantDeleteRequested (emitted only after
+    // P0–P3 pass) or TenantDeleteStepFailed. No evidence → refuse (a never-created tenant). A read
+    // fault fails closed, same as the strategy_config read-fault path. ZERO side effects. ----
+    try {
+      if (!deleteHistory.deleteWasRequested(tenant)) {
+        return residualBlock(
+            tenant,
+            actor,
+            correlationId,
+            "no prior tenant-delete attempt for this tenant — refusing to touch data for a tenant"
+                + " that was never deleted");
+      }
+    } catch (RuntimeException e) {
+      return residualBlock(
+          tenant, actor, correlationId, "delete-history read faulted (fail-closed)");
+    }
+
+    // ---- Residual (rows == 0, prior delete attempted): delete ONLY the two idempotent residual
+    // stores, same safe order as the delete route's tail (broker_credentials, then dashboard LAST).
     long startMillis = System.currentTimeMillis();
 
     audit.emit(
@@ -607,7 +638,10 @@ public class TenantDeleteController {
 
   /**
    * A residual-cleanup pre-flight refusal (NOT_RESIDUAL): records a {@code TenantDeleteBlocked}
-   * audit event then returns 409. NO store was touched — the strategy_config read is read-only.
+   * audit event then returns 409. NO store was touched — the strategy_config / delete-history reads
+   * are read-only. Deliberately REUSES the existing {@code TenantDeleteBlocked} audit kind (a
+   * refusal is a refusal, same as a P0–P3 pre-flight block) rather than minting a new kind — only
+   * {@code TenantResidualCleanup{Requested,Completed}} are new for this route.
    */
   private ResponseEntity<Map<String, Object>> residualBlock(
       String tenant, String actor, String correlationId, String detail) {

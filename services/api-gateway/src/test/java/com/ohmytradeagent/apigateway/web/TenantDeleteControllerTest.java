@@ -43,6 +43,7 @@ class TenantDeleteControllerTest {
   private TenantDeleteWorkflowClient workflow;
   private BrokerCredentialDeleteForwarder execCreds;
   private DashboardRowsDeleteForwarder dashboardRows;
+  private TenantDeleteHistoryReader deleteHistory;
   private TenantDeleteAuditEmitter audit;
   private TenantDeleteController controller;
 
@@ -55,6 +56,7 @@ class TenantDeleteControllerTest {
     workflow = mock(TenantDeleteWorkflowClient.class);
     execCreds = mock(BrokerCredentialDeleteForwarder.class);
     dashboardRows = mock(DashboardRowsDeleteForwarder.class);
+    deleteHistory = mock(TenantDeleteHistoryReader.class);
     audit = mock(TenantDeleteAuditEmitter.class);
     controller = controllerWithAllowlist(OPERATOR);
   }
@@ -69,6 +71,7 @@ class TenantDeleteControllerTest {
         workflow,
         execCreds,
         dashboardRows,
+        deleteHistory,
         audit);
   }
 
@@ -503,8 +506,10 @@ class TenantDeleteControllerTest {
 
   @Test
   void cleanupResidual_zeroStrategyConfig_deletesResiduals_200() {
-    // strategy_config already gone (residual) but broker_credentials + dashboard rows remain.
+    // strategy_config already gone (residual) AND a prior delete was attempted (audit evidence);
+    // broker_credentials + dashboard rows remain.
     when(reader.listByTenant(TENANT)).thenReturn(List.of());
+    when(deleteHistory.deleteWasRequested(TENANT)).thenReturn(true);
     when(execCreds.delete(eq(TENANT), any())).thenReturn(1);
     when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
         .thenReturn(new DashboardRowsDeleteForwarder.DeletedCounts(2, 1));
@@ -533,8 +538,10 @@ class TenantDeleteControllerTest {
 
   @Test
   void cleanupResidual_idempotent_allZero_200() {
-    // A fully-clean residual tenant: both stores already empty → 200 CLEANED, all-zero.
+    // A fully-clean residual tenant (delete was attempted): both stores already empty → 200
+    // CLEANED.
     when(reader.listByTenant(TENANT)).thenReturn(List.of());
+    when(deleteHistory.deleteWasRequested(TENANT)).thenReturn(true);
     when(execCreds.delete(eq(TENANT), any())).thenReturn(0);
     when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
         .thenReturn(new DashboardRowsDeleteForwarder.DeletedCounts(0, 0));
@@ -566,9 +573,45 @@ class TenantDeleteControllerTest {
     assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
     assertThat(resp.getBody()).containsEntry("blocked_by", "NOT_RESIDUAL");
     verifyNoInteractions(execCreds, dashboardRows, workflow, disable);
+    // Short-circuits at the strategy_config check — the delete-history read is never reached.
+    verifyNoInteractions(deleteHistory);
     verify(audit).emit(eq("TenantDeleteBlocked"), eq(TENANT), any(), any(), any(), any());
     verify(audit, never())
         .emit(eq("TenantResidualCleanupCompleted"), any(), any(), any(), any(), any());
+  }
+
+  @Test
+  void cleanupResidual_zeroRowsButNeverDeleted_409_notResidual() {
+    // Zero strategy_config rows BUT no prior tenant-delete was attempted (a NEVER-created tenant
+    // that only has dashboard rows from a pre-creation invite). The STRUCTURAL guard refuses: zero
+    // rows alone is not proof of a residual delete. 409 NOT_RESIDUAL, ZERO side effects.
+    when(reader.listByTenant(TENANT)).thenReturn(List.of());
+    when(deleteHistory.deleteWasRequested(TENANT)).thenReturn(false);
+
+    ResponseEntity<Map<String, Object>> resp = cleanup(TENANT);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+    assertThat(resp.getBody()).containsEntry("blocked_by", "NOT_RESIDUAL");
+    // Never touch the residual stores for a tenant that was never deleted.
+    verifyNoInteractions(execCreds, dashboardRows, workflow, disable);
+    verify(audit).emit(eq("TenantDeleteBlocked"), eq(TENANT), any(), any(), any(), any());
+    verify(audit, never())
+        .emit(eq("TenantResidualCleanupCompleted"), any(), any(), any(), any(), any());
+  }
+
+  @Test
+  void cleanupResidual_deleteHistoryReadFault_409_failClosed() {
+    // The delete-history read faults → fail closed (refuse), same as the strategy_config read-fault
+    // path. Never proceed to touch a store on an unreadable evidence store.
+    when(reader.listByTenant(TENANT)).thenReturn(List.of());
+    when(deleteHistory.deleteWasRequested(TENANT))
+        .thenThrow(new RuntimeException("audit_log unreachable"));
+
+    ResponseEntity<Map<String, Object>> resp = cleanup(TENANT);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+    assertThat(resp.getBody()).containsEntry("blocked_by", "NOT_RESIDUAL");
+    verifyNoInteractions(execCreds, dashboardRows, workflow, disable);
   }
 
   @Test
@@ -579,6 +622,7 @@ class TenantDeleteControllerTest {
     // operator can re-run the idempotent dashboard-rows delete. Reuses the delete route's retry
     // seam.
     when(reader.listByTenant(TENANT)).thenReturn(List.of());
+    when(deleteHistory.deleteWasRequested(TENANT)).thenReturn(true);
     when(execCreds.delete(eq(TENANT), any())).thenReturn(1);
     when(dashboardRows.delete(eq(TENANT), eq(OPERATOR)))
         .thenThrow(new RuntimeException("ResourceAccessException: connection refused"));
@@ -603,7 +647,15 @@ class TenantDeleteControllerTest {
     assertThat(resp.getBody()).containsEntry("blocked_by", "CONFIRM_MISMATCH");
     // Confirm is checked before any read or side effect.
     verifyNoInteractions(
-        reader, liveActivation, openPositions, disable, workflow, execCreds, dashboardRows, audit);
+        reader,
+        liveActivation,
+        openPositions,
+        disable,
+        workflow,
+        execCreds,
+        dashboardRows,
+        deleteHistory,
+        audit);
   }
 
   @Test
@@ -611,7 +663,7 @@ class TenantDeleteControllerTest {
     assertThatThrownBy(
             () -> controller.cleanupResidual(reqWithOperator(null), TENANT, confirm(TENANT)))
         .isInstanceOf(TenantContext.MissingHeaderException.class);
-    verifyNoInteractions(reader, disable, workflow, execCreds, dashboardRows, audit);
+    verifyNoInteractions(reader, disable, workflow, execCreds, dashboardRows, deleteHistory, audit);
   }
 
   @Test
@@ -621,6 +673,6 @@ class TenantDeleteControllerTest {
                 controller.cleanupResidual(
                     reqWithOperator("intruder@evil.com"), TENANT, confirm(TENANT)))
         .isInstanceOf(TenantContext.UnauthorizedOperatorException.class);
-    verifyNoInteractions(reader, disable, workflow, execCreds, dashboardRows, audit);
+    verifyNoInteractions(reader, disable, workflow, execCreds, dashboardRows, deleteHistory, audit);
   }
 }

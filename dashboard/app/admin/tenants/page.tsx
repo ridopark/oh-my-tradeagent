@@ -225,11 +225,15 @@ export default async function AdminTenantsPage({
     }
     const result = await postTenantResidualCleanup(tenantId, confirmTenantId);
     revalidatePath("/admin/tenants");
-    redirect(
-      result.ok
-        ? "/admin/tenants?done=cleaned"
-        : `/admin/tenants?error=${result.status}`,
-    );
+    if (result.ok) {
+      redirect("/admin/tenants?done=cleaned");
+    }
+    if (result.status === 409 && result.blockedBy) {
+      redirect(
+        `/admin/tenants?error=409&blocked_by=${encodeURIComponent(result.blockedBy)}`,
+      );
+    }
+    redirect(`/admin/tenants?error=${result.status}`);
   }
 
   // Server action: create a per-tenant login invite by email. Re-verifies operator, validates the
