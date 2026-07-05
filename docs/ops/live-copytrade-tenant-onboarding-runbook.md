@@ -21,23 +21,48 @@ this runbook is flag-flips + data-writes, done off-hours.
 
 ---
 
-## Current state (verified 2026-07-05 — re-verify before running)
+## Current state
+
+> **✅ Part A executed + verified LIVE on homelab 2026-07-05.** `prod_real` is armed on the per-tenant
+> DB-creds path: `exec-alpaca-live` runs `BROKER_CREDS_SOURCE=db` + `BROKER_CREDS_DB_LIVE_ENABLED=true`,
+> the `broker-kek` volume is mounted, and `prod_real`'s `broker_credentials` row (`847309116`, v1) is
+> written and boot-verified (identity + fill-listener, zero errors; only that row in the live DB; paper
+> untouched; 0 order side-effects). **The steps below are the AS-RUN record.** Onboarding a *new* live
+> tenant now starts at **Part B**. Re-verify each precondition before any further change.
 
 Already in place (do NOT redo):
-- **KEK loaded** — secret `broker-kek` present in `copytrade` ns (crypto precondition met).
+- **KEK** — secret `broker-kek` present in `copytrade` ns **AND** mounted at `/etc/broker-kek` on BOTH
+  `exec-alpaca-paper` and (as of 2026-07-05) `exec-alpaca-live`. ⚠️ The secret existing is NOT enough — the
+  DB-crypto bean reads the *file*, so the target exec pod needs the **volume + mount** (see Part A step 0b).
 - **Paper runs the full DB-creds path** — `exec-alpaca-paper` has `BROKER_CREDS_SOURCE=db`; `staging_paper`
   has a `broker_credentials` row (`PA3FKGPFYPLH`). Paper is the working reference for this whole flow.
 - **Operator endpoints live on api-gateway** — `OPERATOR_CREDENTIAL_WRITE_ENABLED=true` (credential write)
   and `OPERATOR_ACTIVATION_ENABLED=true` (activation).
+- **api-gateway per-target routing (PR #548, merged 2026-07-05)** — credential writes route to the exec pod
+  by the tenant's `strategy_config` `broker_target` (`alpaca-live`→`exec-alpaca-live`, `alpaca-paper`→
+  `exec-alpaca-paper`), fail-closed (422) if unresolvable. Requires env `EXEC_ALPACA_LIVE_BASE_URL` +
+  `EXEC_ALPACA_PAPER_BASE_URL` on api-gateway (set 2026-07-05 — see Part A step 0a). **api-gateway listens on
+  `8082`**, not 8080.
 - **R-6.5 `V6` index live on BOTH exec DBs** (`broker_credentials_provider_account_uk`).
 - **`exec-alpaca-live`**: `BROKER_IMPL=alpaca-live`, `EXEC_FILL_LISTENER_ENABLED=true`,
-  `EXEC_FILL_LISTENER_POLL_ENABLED=true`, account pin `EXPECTED_ALPACA_ACCOUNT_ID=847309116`.
+  `EXEC_FILL_LISTENER_POLL_ENABLED=true`, `EXEC_BOOTSTRAP_TENANT_ID=prod_real` (single-account resolution),
+  `EXEC_ADMIN_SHARED_TOKEN` (from secret `exec-admin-credentials`), account pin `847309116`.
 
-Still DARK on the **live** side (this runbook flips them):
-- `exec-alpaca-live`: `BROKER_CREDS_SOURCE` unset → defaults `env` (single-account, ignores per-tenant rows).
-- `exec-alpaca-live`: `BROKER_CREDS_DB_LIVE_ENABLED` unset → `false` (a `-live` pod refuses DB creds).
+Now SET on the **live** side (Part A, 2026-07-05):
+- `exec-alpaca-live`: `BROKER_CREDS_SOURCE=db` (per-tenant rows), `BROKER_CREDS_DB_LIVE_ENABLED=true`
+  (a `-live` pod now accepts DB creds), `broker-kek` volume mounted, `EXEC_ADMIN_SHARED_TOKEN` injected.
+
+Still DARK — **only needed for a 2ND live tenant** (prod_real resolves via `EXEC_BOOTSTRAP_TENANT_ID`, single
+pod-wide socket, so these stayed off for the minimal arming):
 - `exec-alpaca-live`: `EXEC_FILL_LISTENER_PER_TENANT_ENABLED` unset → `false` (one pod-wide socket).
 - `orchestrator`: `MULTITENANT_BROKER_ACCOUNTS_ENABLED` unset → `false` (shared-account validator off).
+
+> ⚠️ **These live-pod settings are LIVE-ONLY overrides, NOT in any repo manifest** (`broker-kek` volume,
+> `BROKER_CREDS_SOURCE=db`, `BROKER_CREDS_DB_LIVE_ENABLED`, `EXEC_ADMIN_SHARED_TOKEN`; and on api-gateway the
+> two `EXEC_ALPACA_*_BASE_URL` vars were `set env`, not `apply`'d). `exec-alpaca-live` is excluded from the CI
+> deploy matrix, so CI won't revert them — but a **manual `kubectl apply` of an exec-live/api-gateway
+> manifest would wipe them and break DB-creds resolution**. Same footgun class as the alpaca-live env
+> override. Re-apply by hand if the pod spec is ever reset.
 
 Env-var → Spring property (relaxed binding): `BROKER_CREDS_SOURCE`→`broker.creds.source`,
 `BROKER_CREDS_DB_LIVE_ENABLED`→`broker.creds.db.live-enabled`,
@@ -50,59 +75,111 @@ manifests before flipping.
 ## Preconditions (one-time, before the FIRST live tenant)
 
 1. **Market closed / no open live positions** — `prod_real` will briefly be unable to trade during Part A.
-2. **KEK present** — `kubectl get secret broker-kek -n copytrade` (already ✅).
-3. **TLS + NetworkPolicy on the secret hop** — confirm `api-gateway → exec /internal/broker-credentials`
-   is TLS and a `NetworkPolicy` restricts that path to the api-gateway pod only. The api key/secret travels
-   only on that direct HTTP body; it must never be reachable elsewhere. **Verify before enabling DB creds.**
-4. **`V6` index present on `exec_alpaca_live`** — verify (see Verification §). Already ✅.
-5. **No pre-existing cross-tenant duplicate accounts** in `broker_credentials` (else a write is rejected;
+2. **KEK present AND mounted on the target pod** — `kubectl get secret broker-kek -n copytrade` (secret ✅),
+   **and** the `broker-kek` volume mounted at `/etc/broker-kek` on `exec-alpaca-live` (Part A step 0b —
+   done 2026-07-05; the secret alone is not enough, the crypto bean reads the file).
+3. **api-gateway per-target routing in place** — `EXEC_ALPACA_{LIVE,PAPER}_BASE_URL` set on api-gateway
+   (Part A step 0a); without it a live-tenant write fails closed (422). Done 2026-07-05.
+4. **TLS + NetworkPolicy on the secret hop** — confirm `api-gateway → exec /internal/broker-credentials`
+   is restricted by `NetworkPolicy` to the api-gateway pod only (`exec-alpaca-live-allow-api-gateway-internal`
+   ✅). The api key/secret travels only on that direct HTTP body; it must never be reachable elsewhere.
+5. **`V6` index present on `exec_alpaca_live`** — verify (see Verification §). Already ✅.
+6. **No pre-existing cross-tenant duplicate accounts** in `broker_credentials` (else a write is rejected;
    the table is currently near-empty). Verify (see Verification §).
-6. **`prod_real`'s API key + secret in hand** — Part A migrates `prod_real` from env creds to a DB row, so
-   you need its live keys to write that row.
+7. **`prod_real`'s API key + secret in hand** — Part A migrates `prod_real` from env creds to a DB row, so
+   you need its live keys to write that row. (Reusable from secret `alpaca-credentials-live`.)
 
 ---
 
 ## Part A — one-time: move the live pod to per-tenant DB creds (incl. `prod_real`)
 
-`BROKER_CREDS_SOURCE` is a **single pod-wide selector** — it's `env` (one account) or `db` (per-tenant
-rows), not both. So enabling additional live tenants *requires* migrating `prod_real` onto a DB row too.
-The credential-write endpoint on the live exec pod only exists once `source=db`, so the order is:
-**flip → roll → write `prod_real`'s row immediately → verify** (off-hours closes the trade-less gap).
+> **AS-RUN 2026-07-05** — this is the exact sequence executed. `BROKER_CREDS_SOURCE` is a **single pod-wide
+> selector** (`env` = one account, `db` = per-tenant rows, never both), so arming any live tenant *requires*
+> migrating `prod_real` onto a DB row too. Two ordering facts that bit us: **(i)** the exec write endpoint
+> `POST /internal/broker-credentials` is `@ConditionalOnProperty(broker.creds.source=db)` — it **404s until
+> `source=db`**, so "write-first" is impossible; you must flip source FIRST. **(ii)** the DB-crypto bean
+> reads the KEK *file*, so the live pod needs the `broker-kek` **volume mounted** or the write 502s. Net
+> order: **route → mount KEK → flip → roll → write `prod_real` immediately → clean roll → verify**. Off-hours
+> closes the brief trade-less gap (unresolved creds fail closed; safe).
 
-1. **Flip the live-path flags on `exec-alpaca-live`:**
+**Step 0a — api-gateway per-target routing (once, PR #548).** deploy.yml's `RESTART_ONLY` list SKIPS
+`kubectl apply` for api-gateway (it carries operator overrides), so the merged manifest env does NOT land on
+its own. Add the two target URLs **additively** (a full `apply -f 54-api-gateway.yaml` would WIPE the 5
+operator overrides — `STRATEGY_CONFIG_WRITE_ENABLED`, `OPERATOR_CREDENTIAL_WRITE_ENABLED`,
+`OPERATOR_ACTIVATION_ENABLED`, `OPERATOR_ALLOWLIST`, `EXEC_ADMIN_SHARED_TOKEN`):
+```
+kubectl set env deploy/api-gateway -n copytrade \
+  EXEC_ALPACA_LIVE_BASE_URL=http://exec-alpaca-live:8080 \
+  EXEC_ALPACA_PAPER_BASE_URL=http://exec-alpaca-paper:8080
+kubectl -n copytrade rollout status deploy/api-gateway
+```
+Verify both vars present AND the 5 operator overrides survived. Confirm the resolver: `prod_real`'s
+`strategy_config.config->>'broker_target'` is a single distinct `alpaca-live`.
+
+**Step 0b — mount the `broker-kek` secret on `exec-alpaca-live`** (paper already has it; live ran env-creds
+so it was never added — without it the DB-crypto bean throws `broker KEK file not found at /etc/broker-kek/kek`
+and the write 502s). Mirror paper's volume exactly:
+```
+kubectl patch deploy exec-alpaca-live -n copytrade --type=strategic -p '{"spec":{"template":{"spec":{
+  "volumes":[{"name":"broker-kek","secret":{"secretName":"broker-kek","defaultMode":420,"optional":true,
+    "items":[{"key":"kek","path":"kek"}]}}],
+  "containers":[{"name":"exec-alpaca-live","volumeMounts":[{"name":"broker-kek","mountPath":"/etc/broker-kek",
+    "readOnly":true}]}]}}}}'
+kubectl -n copytrade rollout status deploy/exec-alpaca-live
+# confirm: kubectl exec deploy/exec-alpaca-live -c exec-alpaca-live -- test -f /etc/broker-kek/kek
+```
+
+1. **Flip the live-path creds flags on `exec-alpaca-live`** (inject the admin token from the SAME secret
+   api-gateway uses, so the tokens match; keep per-tenant sockets OFF for the single-tenant arming):
    ```
    kubectl set env deploy/exec-alpaca-live -n copytrade \
-     BROKER_CREDS_SOURCE=db \
-     BROKER_CREDS_DB_LIVE_ENABLED=true \
-     EXEC_FILL_LISTENER_PER_TENANT_ENABLED=true \
-     EXEC_ADMIN_SHARED_TOKEN- ... (from secret exec-admin-credentials; mirror how paper injects it)
+     --from=secret/exec-admin-credentials --keys=EXEC_ADMIN_SHARED_TOKEN
+   kubectl set env deploy/exec-alpaca-live -n copytrade BROKER_CREDS_DB_LIVE_ENABLED=true
+   kubectl set env deploy/exec-alpaca-live -n copytrade BROKER_CREDS_SOURCE=db
    ```
-   `EXEC_ADMIN_SHARED_TOKEN` must be injected from the `exec-admin-credentials` secret (as on paper) — the
-   write endpoint's `ExecAdminTokenFilter` fail-fasts on the insecure default under the `prod` profile.
-   (`kubectl set env` triggers a rollout; `exec-alpaca-live` is out of the deploy matrix, so this manual
-   flip is expected.)
+   `ExecAdminTokenFilter` fail-fasts on the insecure default under the `prod` profile, so the token is
+   required. (`exec-alpaca-live` is out of the deploy matrix — this manual flip is expected and durable.)
 2. **Wait for rollout + verify boot:** `kubectl -n copytrade rollout status deploy/exec-alpaca-live`.
-   Confirm the log shows Flyway at v6, KEK loaded, and `ExecApplication` started. With `source=db` and an
-   empty table, the per-tenant fill listener will log **0 sockets** and `prod_real` order resolution will
-   fail closed until step 3 — this is why it's off-hours.
-3. **Write `prod_real`'s live credential row IMMEDIATELY** via the api-gateway credential-write path
-   (dashboard onboard form, or a direct authenticated `POST` to the `BrokerCredentialController` write
-   endpoint — `OPERATOR_CREDENTIAL_WRITE_ENABLED=true`). `validateOnEntry` probes `/v2/account` and pins
-   the authenticated account as `expected_account_id`. It **MUST** come back `847309116` — reject otherwise.
-4. **Roll `exec-alpaca-live` again** (or wait for its supervisor) so `prod_real`'s per-tenant `trade_updates`
-   socket opens. Verify the log now shows `fill-listener started (per-tenant) ... sockets_started=1`.
-5. **Verify `prod_real` resolves + trades** — a canary order or the next real signal fills on its own socket
-   and reconciles cleanly. `prod_real` is now on the DB path, behavior-equal to before.
-6. **(Only when a 2nd live tenant will share `alpaca-live`) enable the shared-account validator** on the
-   orchestrator, then roll it:
+   With `source=db` and no row yet, `prod_real` resolution logs `BrokerCredentialsUnavailable` and fails
+   closed until step 3 — expected, this is why it's off-hours.
+3. **Write `prod_real`'s live credential row IMMEDIATELY** via the api-gateway **operator** endpoint
+   `POST /admin/tenants/prod_real/broker-credentials` (routed to `exec-alpaca-live` by step 0a). Auth +
+   body (secrets from the `alpaca-credentials-live` secret — NEVER echo them; e.g. pipe the body via stdin
+   and reference `$API_GATEWAY_SHARED_TOKEN` from the pod env):
+   - Headers: `Authorization: Bearer <API_GATEWAY_SHARED_TOKEN>`, `X-Operator-Id: ridopark@gmail.com`
+     (must be in `OPERATOR_ALLOWLIST`), `Content-Type: application/json`.
+   - Body: `{tenant_id: prod_real, provider: alpaca, api_key_id, api_secret_key,
+     base_url: https://api.alpaca.markets, ws_url: wss://api.alpaca.markets/stream,
+     declared_account_id: 847309116, expected_version: 0}` (`expected_version=0` for a fresh insert;
+     `correlation_id` optional).
+   - The writer probes `/v2/account`, pins `expected_account_id`, and returns the read-back. It **MUST**
+     come back `{"version":1,"broker_account_id":"847309116"}` — reject/investigate any other account.
+     (A `502 credential_write_failed` here means it reached exec but the writer threw — check exec-live logs
+     for the cause, e.g. the KEK-not-found from skipping step 0b.)
+4. **Clean-roll `exec-alpaca-live`** so the fill socket authenticates with the now-present DB creds:
+   `kubectl -n copytrade rollout restart deploy/exec-alpaca-live`. (It auto-recovers via registry warm-up
+   without a roll, but a clean roll makes the boot deterministic.) Verify the boot log shows
+   `broker account identity verified ... account=847309116 ... registry warm-up (tenant=prod_real)` and
+   `fill-listener started (single-socket) ws_url=wss://api.alpaca.markets/stream`, with **no**
+   `BrokerCredentialsUnavailable` / `ERROR` after boot.
+5. **Verify `prod_real` resolves + trades** — only the `prod_real/847309116` row exists in `exec_alpaca_live`
+   (no leak), paper untouched, `replicas: 1`, and no order intents fired during the window. `prod_real` is
+   now on the DB path, **behavior-equal to before** (this swapped the creds *source* env→db for the SAME
+   account; positions/recon unchanged).
+6. **(Only when a 2nd live tenant will share `alpaca-live`) enable per-tenant sockets + the shared-account
+   validator**, then roll each pod:
    ```
-   kubectl set env deploy/orchestrator -n copytrade MULTITENANT_BROKER_ACCOUNTS_ENABLED=true
+   kubectl set env deploy/exec-alpaca-live -n copytrade EXEC_FILL_LISTENER_PER_TENANT_ENABLED=true
+   kubectl set env deploy/orchestrator     -n copytrade MULTITENANT_BROKER_ACCOUNTS_ENABLED=true
+   kubectl -n copytrade rollout status deploy/exec-alpaca-live
    kubectl -n copytrade rollout status deploy/orchestrator
    ```
-   With it on, the validator accepts many live tenants iff each declares a distinct non-blank
-   `broker_account_id` (and a single tenant's strategies share one account).
+   With per-tenant sockets on, the live pod opens one `trade_updates` socket per live tenant
+   (`sockets_started` increments); the validator accepts many live tenants iff each declares a distinct
+   non-blank `broker_account_id` (a single tenant's strategies share one account). Not needed for
+   `prod_real` alone — it resolves via `EXEC_BOOTSTRAP_TENANT_ID` on the single pod-wide socket.
 
-Part A is done once; every subsequent live tenant is just Part B.
+Part A is done once (✅ 2026-07-05); every subsequent live tenant is just Part B.
 
 ---
 
