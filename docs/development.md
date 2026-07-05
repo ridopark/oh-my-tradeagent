@@ -16,7 +16,7 @@ as a "make sure I have the latest" idempotent step.
 | Hook | Guards | Issue |
 | --- | --- | --- |
 | `pre-commit` | Regenerated pydantic models stay in sync with edited `contract/schemas/` JSON schemas (runs `contract/python/regen.sh` and fails on drift). | [#68](https://github.com/ridopark/oh-my-tradeagent/issues/68) |
-| `pre-push` | Every orchestrator `KIND_X` audit-event constant is registered in `services/audit` `AuditEventKinds.ALL_KINDS` (runs `mvn -q -pl services/audit -am test -Dtest=KindRegistryGuardTest`, the same guard CI runs under `Java (mvn verify + spotless)`). | [#213](https://github.com/ridopark/oh-my-tradeagent/issues/213) |
+| `pre-push` | Every orchestrator `KIND_X` audit-event constant is registered in `services/audit` `AuditEventKinds.ALL_KINDS` (runs `mvn -q -pl services/audit -am test -Dtest=KindRegistryGuardTest`, the same guard CI runs under `Java (services/audit)`). | [#213](https://github.com/ridopark/oh-my-tradeagent/issues/213) |
 
 Both hooks are local DX shortcuts — CI remains the source of truth. If
 a hook gets in your way, use git's standard escape hatch:
