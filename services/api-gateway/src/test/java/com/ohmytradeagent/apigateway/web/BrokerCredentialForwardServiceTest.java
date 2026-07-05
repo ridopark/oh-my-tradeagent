@@ -467,20 +467,21 @@ class BrokerCredentialForwardServiceTest {
   }
 
   @Test
-  void unresolvableBrokerTarget_failsClosed_noForward_persistError() {
+  void unresolvableBrokerTarget_failsClosed_noForward_validationError() {
     // No (ambiguous) strategy_config row → the resolver returns empty → the write is refused BEFORE
-    // any forward, mapped to the coarse persist-error outcome. No response enqueued: a stray
-    // forward
-    // would surface as a hang/failure, not a silent pass.
+    // any forward. This is a routing/precondition failure (nothing reached exec), so it maps to 422
+    // REJECTED_VALIDATION ("precondition not met, do not blindly retry") — NOT 502, which would
+    // provoke a retry storm against an exec that was never even called. No response enqueued: a
+    // stray forward would surface as a hang/failure, not a silent pass.
     when(brokerTargetResolver.resolve(TENANT)).thenReturn(Optional.empty());
     try (MockedStatic<WorkflowClient> mocked = Mockito.mockStatic(WorkflowClient.class)) {
       var resp = service.forward(TENANT, ACTOR, body(0L), false);
-      assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY);
+      assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
       assertThat(resp.getBody()).doesNotContainKey("version");
       assertThat(exec.getRequestCount()).isEqualTo(0);
       BrokerCredentialAuditRequest audit = captureAuditRequest(mocked);
       assertThat(audit.getOutcome())
-          .isEqualTo(BrokerCredentialAuditRequest.Outcome.REJECTED_PERSIST_ERROR);
+          .isEqualTo(BrokerCredentialAuditRequest.Outcome.REJECTED_VALIDATION);
     }
     assertNoSecretInLogs();
   }
@@ -490,16 +491,17 @@ class BrokerCredentialForwardServiceTest {
     // HARD SAFETY: a -live broker_target absent from exec.targets MUST fail closed — it must NEVER
     // fall back to exec.base-url (the paper pod). The setUp map has ONLY alpaca-paper, so
     // alpaca-live
-    // is unmapped; assert the paper stand-in receives nothing.
+    // is unmapped; assert the paper stand-in receives nothing. Routing/precondition failure →
+    // 422 REJECTED_VALIDATION (do not blindly retry), not a transient 502.
     when(brokerTargetResolver.resolve(TENANT)).thenReturn(Optional.of(LIVE_TARGET));
     try (MockedStatic<WorkflowClient> mocked = Mockito.mockStatic(WorkflowClient.class)) {
       var resp = service.forward(TENANT, ACTOR, body(0L), false);
-      assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY);
+      assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
       // The (paper) exec stand-in — the only mapped pod — was NOT hit.
       assertThat(exec.getRequestCount()).isEqualTo(0);
       BrokerCredentialAuditRequest audit = captureAuditRequest(mocked);
       assertThat(audit.getOutcome())
-          .isEqualTo(BrokerCredentialAuditRequest.Outcome.REJECTED_PERSIST_ERROR);
+          .isEqualTo(BrokerCredentialAuditRequest.Outcome.REJECTED_VALIDATION);
     }
     assertNoSecretInLogs();
   }

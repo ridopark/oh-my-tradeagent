@@ -184,9 +184,14 @@ public class BrokerCredentialForwardService {
   private ExecOutcome forwardToExec(String tenant, BrokerCredentialForwardRequest body) {
     String targetUri = resolveTargetUri(tenant);
     if (targetUri == null) {
+      // Routing/precondition failure: nothing reached exec (unresolved/unmapped broker_target).
+      // This is NOT a transient upstream fault — 502 would tell the operator "exec is down, retry"
+      // and provoke a retry storm that can never succeed until strategy_config/exec.targets is
+      // fixed (burning the rate-limit budget). Map to 422 REJECTED_VALIDATION: "precondition not
+      // met, do not blindly retry", consistent with the existing REJECTED_VALIDATION→422 mapping.
       return new ExecOutcome(
-          BrokerCredentialAuditRequest.Outcome.REJECTED_PERSIST_ERROR,
-          HttpStatus.BAD_GATEWAY,
+          BrokerCredentialAuditRequest.Outcome.REJECTED_VALIDATION,
+          HttpStatus.UNPROCESSABLE_ENTITY,
           null);
     }
     try {

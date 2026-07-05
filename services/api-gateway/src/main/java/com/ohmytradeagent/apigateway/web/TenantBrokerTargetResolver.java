@@ -14,8 +14,13 @@ import org.springframework.stereotype.Component;
  *
  * <p><b>Fail closed.</b> Returns empty (the caller then refuses to forward, never guessing a
  * target) when the tenant has NO strategy_config row, or when its strategies disagree on
- * broker_target (more than one distinct non-null value) — an ambiguous tenant must not have a
- * credential silently routed to one of several pods. A blank stored value is likewise unresolved.
+ * broker_target (more than one distinct value) — an ambiguous tenant must not have a credential
+ * silently routed to one of several pods. A blank/absent broker_target on ANY of the tenant's
+ * strategies is DISQUALIFYING: a blank/null value is never silently dropped before counting, so a
+ * tenant with one strategy on the pod default (blank broker_target) PLUS another on {@code
+ * alpaca-live} is ambiguous (two distinct values incl. the blank) and fails closed rather than
+ * misrouting the credential to the lone non-blank pod. A lone blank/null value is likewise
+ * unresolved.
  *
  * <p>Read-only, no secret material. Dark by construction — gated on the same flags as {@link
  * BrokerCredentialForwardService}.
@@ -33,7 +38,10 @@ public class TenantBrokerTargetResolver {
 
   /**
    * The tenant's single distinct {@code broker_target}, or empty when absent, ambiguous (&gt;1
-   * distinct), or blank — every non-single case fails closed so the caller refuses to forward.
+   * distinct), or a lone blank/null — every non-single case fails closed so the caller refuses to
+   * forward. Blanks/nulls are NOT filtered before counting: SQL {@code DISTINCT} keeps null as its
+   * own row, so "one real target + one blank/absent target" is correctly ambiguous (size 2) and
+   * fails closed instead of collapsing to the lone real target.
    */
   public Optional<String> resolve(String tenant) {
     var values =
@@ -44,11 +52,14 @@ public class TenantBrokerTargetResolver {
                 tenant)
             .stream()
             .map(r -> r.get("broker_target", String.class))
-            .filter(v -> v != null && !v.isBlank())
             .toList();
     if (values.size() != 1) {
-      return Optional.empty(); // absent, ambiguous (>1 distinct), or all-blank → fail closed.
+      return Optional.empty(); // absent (0) or ambiguous (>1 distinct, incl. real+blank) → closed.
     }
-    return Optional.of(values.get(0));
+    String only = values.get(0);
+    if (only == null || only.isBlank()) {
+      return Optional.empty(); // lone blank/null broker_target → fail closed.
+    }
+    return Optional.of(only);
   }
 }
