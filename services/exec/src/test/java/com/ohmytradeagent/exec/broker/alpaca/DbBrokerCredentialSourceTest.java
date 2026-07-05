@@ -92,6 +92,28 @@ class DbBrokerCredentialSourceTest {
   }
 
   @Test
+  void twoLiveTenantsEachResolveTheirOwnDistinctRow() {
+    // Multi-live-account guard (fleet enablement Phase 2): two live tenants with DISTINCT non-blank
+    // expected_account_id each resolve THEIR OWN row (keyed on tenant_id in the WHERE + the AAD).
+    // A cross-wire — alice's key served for bob — would double-size one account under the shared
+    // exec pod, so this pins that resolve is strictly per-tenant.
+    Row alice = new Row(envelope("alice", "alice-key", "alice-secret", "111"), LIVE_HOST, "111");
+    Row bob = new Row(envelope("bob", "bob-key", "bob-secret", "222"), LIVE_HOST, "222");
+    DbBrokerCredentialSource src =
+        source(LIVE, true, multiTenantDsl(Map.of("alice", alice, "bob", bob)));
+
+    BrokerCredentials a = src.resolve("alice", PROVIDER);
+    assertThat(a.apiKeyId()).isEqualTo("alice-key");
+    assertThat(a.apiSecretKey()).isEqualTo("alice-secret");
+    assertThat(a.expectedAccountId()).isEqualTo("111");
+
+    BrokerCredentials b = src.resolve("bob", PROVIDER);
+    assertThat(b.apiKeyId()).isEqualTo("bob-key");
+    assertThat(b.apiSecretKey()).isEqualTo("bob-secret");
+    assertThat(b.expectedAccountId()).isEqualTo("222");
+  }
+
+  @Test
   void livePodWithFlagOnAndBlankExpectedAccountFailsClosed() {
     // The row decrypts fine, but a blank expected_account_id must never serve a live credential.
     BrokerCredentialCrypto.Envelope env = envelope("alice", "live-key", "live-secret", "");
@@ -202,6 +224,46 @@ class DbBrokerCredentialSourceTest {
     result.add(r);
     MockResult[] canned = {new MockResult(1, result)};
     return DSL.using(new MockConnection(ctx -> canned), SQLDialect.POSTGRES);
+  }
+
+  /** A single credential row keyed by tenant in {@link #multiTenantDsl}. */
+  private record Row(BrokerCredentialCrypto.Envelope env, String baseUrl, String expected) {}
+
+  /**
+   * A DSLContext that returns a DIFFERENT credential row per tenant_id — routed by the {@code WHERE
+   * tenant_id = ?} bind value. Proves the source resolves strictly per-tenant when several live
+   * tenants share the pod's exec DB.
+   */
+  private static DSLContext multiTenantDsl(Map<String, Row> byTenant) {
+    DSLContext render = DSL.using(SQLDialect.POSTGRES);
+    Field<?>[] cols = {
+      CIPHERTEXT, IV, WRAPPED_DEK, DEK_IV, KEK_VERSION_F, BASE_URL, WS_URL, EXPECTED_ACCOUNT_ID
+    };
+    MockDataProvider provider =
+        ctx -> {
+          Row row = null;
+          for (Object bind : ctx.bindings()) {
+            if (bind instanceof String s && byTenant.containsKey(s)) {
+              row = byTenant.get(s);
+              break;
+            }
+          }
+          Result<Record> result = render.newResult(cols);
+          if (row != null) {
+            Record r = render.newRecord(cols);
+            r.set(CIPHERTEXT, row.env().ciphertext());
+            r.set(IV, row.env().iv());
+            r.set(WRAPPED_DEK, row.env().wrappedDek());
+            r.set(DEK_IV, row.env().dekIv());
+            r.set(KEK_VERSION_F, row.env().kekVersion());
+            r.set(BASE_URL, row.baseUrl());
+            r.set(WS_URL, "wss://" + row.expected());
+            r.set(EXPECTED_ACCOUNT_ID, row.expected());
+            result.add(r);
+          }
+          return new MockResult[] {new MockResult(row == null ? 0 : 1, result)};
+        };
+    return DSL.using(new MockConnection(provider), SQLDialect.POSTGRES);
   }
 
   /** A DSLContext that records whether any query ran (used to prove the flag-off short-circuit). */

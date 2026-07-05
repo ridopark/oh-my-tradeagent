@@ -249,6 +249,48 @@ class LiveActivationWorkflowImplTest {
         .isEqualTo(LiveActivationRequest.BrokerTarget.ALPACA_LIVE);
   }
 
+  @Test
+  void secondTenant_allGatesPass_activatesWithItsOwnProbedAccount() {
+    // Fleet enablement Phase 2: a SECOND distinct live tenant activates independently, emitting
+    // LivePromotionApproved with ITS OWN probed account — proving the gate is tenant-parameterized,
+    // not pinned to the first tenant/account. Also Verify-C evidence: the account probe threads
+    // this
+    // tenant's NON-BLANK tenant_id into the AccountSnapshotRequest so exec resolves the right
+    // broker.
+    String tenant2 = "prod_real";
+    String account2 = "847309116";
+    when(strategy.get(tenant2, STRATEGY)).thenReturn(compliantConfig());
+    when(gate.killSwitchArmable(tenant2, STRATEGY)).thenReturn(true);
+    when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class)))
+        .thenReturn(snap(account2, new BigDecimal("12000")));
+
+    LiveActivationRequest req = new LiveActivationRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId(tenant2);
+    req.setStrategyId(STRATEGY);
+    req.setBrokerTarget(LiveActivationRequest.BrokerTarget.LIVE);
+    req.setOperatorId(OPERATOR);
+
+    LiveActivationResult result = activateStub().activateLive(req);
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.ACTIVATED);
+    assertThat(result.getExpectedAccountId()).isEqualTo(account2);
+
+    ArgumentCaptor<LiveActivationRequest> captor =
+        ArgumentCaptor.forClass(LiveActivationRequest.class);
+    verify(promotion, times(1)).activate(captor.capture());
+    assertThat(captor.getValue().getTenantId()).isEqualTo(tenant2);
+    assertThat(captor.getValue().getExpectedAccountId()).isEqualTo(account2);
+    assertThat(captor.getValue().getBrokerTarget())
+        .isEqualTo(LiveActivationRequest.BrokerTarget.ALPACA_LIVE);
+
+    // Verify-C: the AccountSnapshotRequest carries this tenant's non-blank tenant_id.
+    ArgumentCaptor<AccountSnapshotRequest> snapCaptor =
+        ArgumentCaptor.forClass(AccountSnapshotRequest.class);
+    verify(snapshot).accountSnapshot(snapCaptor.capture());
+    assertThat(snapCaptor.getValue().getTenantId()).isEqualTo(tenant2);
+  }
+
   // ---- deactivation -------------------------------------------------------------------------
 
   @Test

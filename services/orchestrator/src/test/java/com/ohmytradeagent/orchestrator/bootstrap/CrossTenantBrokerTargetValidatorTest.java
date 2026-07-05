@@ -212,6 +212,25 @@ class CrossTenantBrokerTargetValidatorTest {
   }
 
   @Test
+  void sharedModeRejectsLiveTenantWithBlankAccount(@TempDir Path tenantsDir) throws Exception {
+    // Fleet enablement Phase 2: a PRESENT-but-blank broker_account_id (whitespace-only) on a live
+    // tenant sharing a broker_target must fail closed, exactly like an absent one — trimToNull
+    // strips it to null so it cannot prove account isolation. Distinct from
+    // sharedModeRejectsDistinctTenantsWhenOneAccountAbsent (field omitted); this pins the
+    // whitespace-strip path on the -live target.
+    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live", "847309116");
+    writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-live", "\"   \"");
+
+    assertThatThrownBy(
+            () ->
+                CrossTenantBrokerTargetValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), true))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("alpaca-live")
+        .hasMessageContaining("globex");
+  }
+
+  @Test
   void sharedModeRejectsOneTenantWithInconsistentAccountAcrossStrategies(@TempDir Path tenantsDir)
       throws Exception {
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper", "111");

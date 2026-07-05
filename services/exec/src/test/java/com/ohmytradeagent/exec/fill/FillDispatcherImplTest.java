@@ -219,6 +219,53 @@ class FillDispatcherImplTest {
   }
 
   @Test
+  void dispatch_routesFillToOriginatingTenantsWorkflow_notAnotherTenants() {
+    // Fleet enablement Phase 2 (per-tenant fill sockets): a fill arriving on tenant B's socket must
+    // route to B's CopytradeSignalWorkflow — resolveWorkflowId is tenant-scoped
+    // (WorkflowIds.copytradeSignal(order.tenantId(), ...)), so B's fill never signals A's workflow
+    // id. Under the shared -live exec pod a cross-wire here would deliver B's fill to A's position.
+    JournaledOrder bobRow =
+        new JournaledOrder(
+            "ck-bob",
+            "sig-bob",
+            "bob",
+            "copytrade-v1",
+            "alpaca-live",
+            "ck-bob",
+            "SPY   260519C00737000",
+            "BUY",
+            5L,
+            new BigDecimal("0.84"),
+            OrderState.SUBMITTED,
+            "brk-bob",
+            OffsetDateTime.parse("2026-05-19T17:08:00Z"),
+            OffsetDateTime.parse("2026-05-19T17:08:01Z"),
+            OffsetDateTime.parse("2026-05-19T17:08:01Z"),
+            null,
+            null,
+            null,
+            null,
+            null,
+            1L);
+    BrokerFillEvent bobFill =
+        new BrokerFillEvent(
+            "brk-bob",
+            "ck-bob",
+            5L,
+            new BigDecimal("0.84"),
+            OffsetDateTime.parse("2026-05-19T17:08:11Z"),
+            BrokerFillEvent.Source.WS);
+    when(journal.findByBrokerOrderId("brk-bob")).thenReturn(Optional.of(bobRow));
+    when(journal.markFilled(eq("ck-bob"), anyLong(), any(), any())).thenReturn(true);
+
+    dispatcher.dispatch(bobFill);
+
+    verify(workflowClient).newUntypedWorkflowStub("t-bob/s-copytrade-v1/sig/sig-bob");
+    verify(workflowClient, never()).newUntypedWorkflowStub("t-dev/s-copytrade-v1/sig/sig-42");
+    verify(workflowStub).signal(eq("onFill"), any());
+  }
+
+  @Test
   void dispatch_unknownBrokerOrder_andUnknownClientOrder_dropsEvent() {
     // #244: a truly unknown fill resolves NEITHER by broker_order_id NOR by the
     // client_order_id fallback — only then is it counted unknown and dropped.
