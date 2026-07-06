@@ -258,11 +258,11 @@ const CONFIG_FIELDS: ConfigField[] = [
   },
   {
     field: "alert_webhook_url",
-    what: "The tenant's own Discord webhook URL for alerts and the daily digest.",
+    what: "The tenant's own Discord webhook URL for alerts and the daily digest. This is the ONE listed field you do NOT type into the JSON above — set it in the dedicated “Alert webhook URL” field in this form (Step 1). It is not a strategy-config JSON key, so adding it to the JSON is rejected on create.",
     effect:
-      "Order-execution / fill / broker-rejection alerts and the daily digest post to this channel. Blank falls back to the global default channel.",
+      "Set it in the “Alert webhook URL” form field (Step 1), which injects it on create. Order-execution / fill / broker-rejection alerts and the daily digest then post to that Discord channel. Left blank, they fall back to the global default channel.",
     example:
-      "https://discord.com/api/webhooks/… — this tenant's fills and rejections route to its own channel instead of the shared default.",
+      "Paste the tenant's webhook in the “Alert webhook URL” field → its fills and rejections post to that Discord channel; leave it blank → the global default channel. (No JSON snippet — this field is not typed into the config.)",
   },
   {
     field: "enabled",
