@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 
 // Coarse result both onboarding server actions return. No secret, no detail — just whether the call
 // succeeded, the raw HTTP status, and (for the credential save) the NON-secret authenticated account
@@ -226,6 +226,19 @@ export function OnboardForm({
   const [activating, startActivate] = useTransition();
   const [inviting, startInvite] = useTransition();
 
+  // Any change of target identity or mode invalidates the in-session step pre-checks — never let a
+  // prior tenant/strategy/mode's success gate a real-money action (Activate live) for a different
+  // target. Resetting the step results re-locks the derived accountVerified/strategyArmed gates until
+  // the NEW identity actually completes create → creds → enable in-session. declaredAccount is
+  // tenant-specific, so it clears too. (Invite step 4 is independent and keeps its own email state.)
+  useEffect(() => {
+    setCreateResult(null);
+    setCredResult(null);
+    setEnableResult(null);
+    setActivateResult(null);
+    setDeclaredAccount("");
+  }, [tenant, strategy, mode]);
+
   function submitCreate(formData: FormData) {
     formData.set("tenant_id", tenant);
     formData.set("strategy_id", strategy);
@@ -343,6 +356,10 @@ export function OnboardForm({
                 the account number is required, and a final activate-live step arms real trading.
               </p>
             )}
+            <p className="mt-1 text-xs text-slate-500">
+              Switching mode resets the config template, base/WebSocket URLs and account number to that
+              mode&apos;s defaults — any edits below are discarded.
+            </p>
           </div>
         )}
       </section>
