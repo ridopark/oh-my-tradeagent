@@ -119,7 +119,13 @@ alert:
     # informational per-attempt marker and intentionally absent so a retry-in-progress does not page.
     # F1: BtoCorrectionSuperseded pages — an AUTO cancel of a REAL trade (a corrected BTO superseded
     # a prior wrong-expiry leg) must never be silent. Mirrors OrderFailureAlerter.DEFAULT_FAILURE_KINDS.
-    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,BtoCorrectionSuperseded}
+    # Phase 2 (PLAN-2026-07-06-pretrade-check-orchestrator-wiring): EntryWorkflowFailed pages — the
+    # top-level failure-audit emitted when the entry workflow fails non-retryably (the
+    # PreTradeCheckMisconfigured guard, the 2026-07-06 incident where 3 real prod_real BTOs
+    # black-holed with only "Signal received" on Discord and NO failure alert). Shipped in the IMAGE
+    # default (not env, which deploy.yml never applies) so the no-alert gap this closes cannot
+    # silently reopen. Mirrors OrderFailureAlerter.DEFAULT_FAILURE_KINDS.
+    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,BtoCorrectionSuperseded,EntryWorkflowFailed}
     signal-feed:
       # Issue #308: mirror every BTO/STC/AVG signal (received + outcome) to the same webhook.
       # Off by default — opt in via ALERT_SIGNAL_FEED_ENABLED=true. Independent of failure alerts.
