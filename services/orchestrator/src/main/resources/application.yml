@@ -47,6 +47,15 @@ orchestrator:
   tenants-dir: ${ORCHESTRATOR_TENANTS_DIR:tenants}
   capital:
     per-strategy: ${ORCHESTRATOR_CAPITAL_PER_STRATEGY:100000}
+  pre-trade-check:
+    # When true, wire the non-permissive RoutablePreTradeCheckActivity marker bean so
+    # RiskActivitiesImpl.assertPreTradeCheckRoutable passes and an enabled `pre_trade_check_enabled`
+    # strategy routes the check to exec's broker-<broker_target> queue. IMAGE default is false: a
+    # false value keeps the permissive default wired, so a strategy with the DB flag on still
+    # fail-closes (PreTradeCheckMisconfigured) — enabling the gate is a deliberate two-key action.
+    # Env/ConfigMap override (ORCHESTRATOR_PRE_TRADE_CHECK_ROUTING_ENABLED) flips it live; only set
+    # true once exec services the broker-<broker_target> pre-trade check.
+    routing-enabled: ${ORCHESTRATOR_PRE_TRADE_CHECK_ROUTING_ENABLED:false}
 
 # Watchlist-trigger ingest discriminator. WatchlistMirrorActivitiesImpl fans a clean watchlist parse
 # out to a WatchlistTriggerSessionWorkflow ONLY for the strategy_id named here. Setting it makes the
