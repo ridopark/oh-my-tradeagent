@@ -553,6 +553,36 @@ class AlpacaTradeUpdatesStreamTest {
   }
 
   @Test
+  void reenumerateRetriesTenantOnceItsCredsLand() throws Exception {
+    // The liveness half of the docstring: a tenant skipped for blank creds is NOT recorded, so a
+    // later tick — once its creds resolve — starts exactly one runner for it.
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of("alice", new BrokerCredentials("alice-key", "alice-secret", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+    awaitHandshake();
+    assertThat(stream.runnerCount()).isEqualTo(1);
+
+    // Tick 1: "late" appears with blank creds → skipped, NOT recorded (no runner opens).
+    creds.put("late", new BrokerCredentials("", "", "", url, ""));
+    stream.reenumerateOnce();
+    assertThat(stream.runnerCount()).isEqualTo(1);
+
+    // Its creds land; a later tick starts EXACTLY ONE runner for it.
+    creds.put("late", new BrokerCredentials("late-key", "late-secret", "", url, ""));
+    stream.reenumerateOnce();
+    assertThat(stream.runnerCount()).isEqualTo(2);
+    List<String> frames = drainFrames(600);
+    long lateAuths =
+        frames.stream()
+            .filter(f -> f.contains("\"authenticate\"") && f.contains("\"key_id\":\"late-key\""))
+            .count();
+    assertThat(lateAuths).isEqualTo(1L);
+  }
+
+  @Test
   void reenumerateTickIsInertInSingleSocketMode() throws Exception {
     // Single-socket mode: the scheduled tick must NOT enumerate or add any runner.
     EnumTrackingSource cs = new EnumTrackingSource();

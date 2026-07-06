@@ -169,11 +169,9 @@ public class AlpacaTradeUpdatesStream {
       return;
     }
     int started = 0;
-    synchronized (runnersLock) {
-      for (String tenant : tenants) {
-        if (startRunnerLocked(tenant)) {
-          started++;
-        }
+    for (String tenant : tenants) {
+      if (resolveAndStart(tenant)) {
+        started++;
       }
     }
     log.info(
@@ -210,6 +208,12 @@ public class AlpacaTradeUpdatesStream {
    * must never crash the scheduler thread. Per-tenant credential/endpoint faults fail closed on
    * that tenant's own runner (it is simply not started this tick and retried next tick) without
    * aborting the loop for the other newly-appeared tenants.
+   *
+   * <p>Lock discipline: the roster is enumerated off-lock, the candidate set (roster −
+   * already-running) is snapshotted under the lock and the lock RELEASED, then each candidate's
+   * (blocking) credential resolution runs OFF the lock — {@link #resolveAndStart} re-acquires the
+   * lock only for the atomic membership re-check + add + start, so the critical section never spans
+   * blocking DB/decrypt I/O.
    */
   void reenumerateOnce() {
     if (stopped) {
@@ -222,44 +226,47 @@ public class AlpacaTradeUpdatesStream {
       log.warn("fill-listener re-enumeration failed; skipping this tick: {}", e.toString());
       return;
     }
-    int newTenants = 0;
-    int started = 0;
+    // Snapshot candidates (newly-appeared tenants) under the lock, then release it so the blocking
+    // per-candidate resolution below happens OFF the lock.
+    List<String> candidates = new ArrayList<>();
     synchronized (runnersLock) {
       for (String tenant : tenants) {
-        if (runningTenants.contains(tenant)) {
-          continue; // already has a runner — NEVER open a second socket for it
+        if (!runningTenants.contains(tenant)) {
+          candidates.add(tenant);
         }
-        newTenants++;
-        if (startRunnerLocked(tenant)) {
-          started++;
-        }
+      }
+    }
+    int started = 0;
+    for (String tenant : candidates) {
+      if (resolveAndStart(tenant)) {
+        started++;
       }
     }
     if (started > 0) {
       log.info(
-          "fill-listener re-enumerated new_tenants={} sockets_started={}", newTenants, started);
+          "fill-listener re-enumerated new_tenants={} sockets_started={}",
+          candidates.size(),
+          started);
     }
   }
 
   /**
-   * Starts one per-tenant runner if the tenant does not already have one and its credentials
-   * resolve (fail-closed pre-check). The caller MUST hold {@link #runnersLock}; the {@code
-   * runningTenants} membership check + insert is the single idempotency guard shared by startup and
-   * re-enumeration, so a race between the two can never double-start a tenant. Returns true iff a
-   * runner was started.
+   * Resolves a candidate tenant's endpoint OFF the lock (a blocking DB SELECT + envelope-decrypt
+   * for the DB source), then commits ONE runner under {@link #runnersLock} with a fresh {@code
+   * stopped} + membership re-check — the single idempotency guard shared by startup and
+   * re-enumeration. Returns true iff a runner was started.
    *
-   * <p>The fail-closed pre-check: if the tenant's creds can't be resolved (missing OR blank
-   * key/secret), skip it rather than spinning a runner that would send blank auth forever. The
-   * runner re-resolves through the SAME check on every reconnect, so a post-startup rotation to
-   * blank backs off instead of opening a blank-auth socket. A skipped tenant is NOT recorded in
-   * {@code runningTenants}, so a later tick retries it once its creds land.
+   * <p>The eager pre-check resolve is deliberately OFF the lock so blocking I/O never widens the
+   * critical section: a credential resolution failure (missing OR blank key/secret) skips the
+   * tenant and, crucially, does NOT record it, so a later tick retries it once its creds land. A
+   * tenant that resolves fine is committed under the lock; the membership re-check there closes the
+   * TOCTOU window against a concurrent path (or a racing startup tick) that resolved the same
+   * tenant off-lock — whichever commits first wins, the other sees {@code runningTenants.contains}
+   * and backs out, so a tenant can NEVER get two runners.
    */
-  private boolean startRunnerLocked(String tenant) {
-    if (runningTenants.contains(tenant)) {
-      return false;
-    }
+  private boolean resolveAndStart(String tenant) {
     try {
-      resolveEndpoint(tenant);
+      resolveEndpoint(tenant); // eager pre-check, OFF the lock
     } catch (RuntimeException e) {
       log.error(
           "fill-listener SKIPPING tenant={} — credential resolution failed: {}",
@@ -267,12 +274,26 @@ public class AlpacaTradeUpdatesStream {
           e.toString());
       return false;
     }
-    TenantRunner runner =
-        new TenantRunner(tenant, "fill-listener-ws-" + tenant, () -> resolveEndpoint(tenant));
-    runners.add(runner);
-    runningTenants.add(tenant);
-    runner.start();
-    return true;
+    synchronized (runnersLock) {
+      if (stopped) {
+        // Raced stop(): shutdown already snapshotted runners; never add a runner after teardown.
+        return false;
+      }
+      if (runningTenants.contains(tenant)) {
+        // A concurrent path already started it — NEVER open a second socket (no TOCTOU).
+        return false;
+      }
+      TenantRunner runner =
+          new TenantRunner(tenant, "fill-listener-ws-" + tenant, () -> resolveEndpoint(tenant));
+      runners.add(runner);
+      runningTenants.add(tenant);
+      // If runner.start() throws (e.g. OOM creating the native thread), the tenant STAYS marked
+      // running here: retry is blocked, which is the DELIBERATE safe direction for the
+      // no-duplicate-socket invariant. That tenant simply falls back to the 30s FillPoller until an
+      // exec roll, rather than risking a second socket on a later tick.
+      runner.start();
+      return true;
+    }
   }
 
   /** Visible for testing: current live runner count (both single-socket and per-tenant modes). */
