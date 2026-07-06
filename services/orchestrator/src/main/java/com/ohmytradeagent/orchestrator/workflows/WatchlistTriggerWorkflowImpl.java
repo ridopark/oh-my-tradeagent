@@ -104,6 +104,26 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   // cancelOrder result does NOT add a command (cancelOrder is already on this path); only the
   // adoption branch's audit + child start are new and thus gated.
   private static final String VERSION_TTL_FILLED_ADOPTION = "watchlist-ttl-filled-adoption-v1";
+  // getVersion change id for the defense-in-depth getOrderStatus re-check on the entry TTL-expiry
+  // branch (PLAN-2026-07-06 Phase 1). VERSION_TTL_FILLED_ADOPTION above only adopts when the single
+  // cancelOrder call surfaces state=FILLED; the 2026-07-06 SPY incident showed the journal
+  // terminalized FILLED (WS listener) at 14:39:55.992 while cancelOrder returned non-FILLED, so the
+  // lot orphaned until the 5-min recon sweep adopted it ~5s later. At v>=1, when inline
+  // cancel-on-filled adoption did NOT fire, the timeout branch re-reads broker truth via
+  // exec.getOrderStatus(intentKey) and adopts the lot inline. A NEW change id (NOT
+  // VERSION_TTL_FILLED_ADOPTION): the getOrderStatus activity call + any resulting adoption
+  // commands
+  // are new on the timeout path, so a pre-fix history (DEFAULT_VERSION) must replay WITHOUT them
+  // via
+  // the legacy TriggerEntryUnfilled path. Package-private so WatchlistTriggerWorkflowImplTest can
+  // pin
+  // the literal (the gate is load-bearing for in-flight-leg determinism).
+  static final String VERSION_ENTRY_GETORDERSTATUS_RECONCILE =
+      "watchlist-entry-getorderstatus-reconcile-v1";
+  // Distinct `recovery` subject labels so the adoption evidence distinguishes the cancel-on-filled
+  // path from the getOrderStatus defense-in-depth re-check (both reuse the EntryFilled audit kind).
+  private static final String RECOVERY_CANCEL_ON_FILLED = "cancel_on_filled";
+  private static final String RECOVERY_GETORDERSTATUS_RECONCILE = "getorderstatus_reconcile";
   // getVersion change id for seeding the Redis position-cache (OCC -> PositionWorkflow id) when a
   // child PositionWorkflow starts. Closes the recon false-orphan gap: the other two entry paths
   // (CopytradeSignalWorkflowImpl, AdoptionWorkflowImpl) already seed the cache, so recon's
@@ -636,13 +656,59 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
 
       int adoptionVersion =
           Workflow.getVersion(VERSION_TTL_FILLED_ADOPTION, Workflow.DEFAULT_VERSION, 1);
-      if (adoptionVersion >= 1
-          && cancelResult != null
-          && cancelResult.getState() == OrderIntentResult.State.FILLED) {
+      boolean inlineAdoptionAttempted =
+          adoptionVersion >= 1
+              && cancelResult != null
+              && cancelResult.getState() == OrderIntentResult.State.FILLED;
+      if (inlineAdoptionAttempted) {
         String adopted =
-            handleTtlFilledAdoption(payload, config, resolved, cancelResult, contracts, premium);
+            handleTtlFilledAdoption(
+                payload,
+                config,
+                resolved,
+                cancelResult,
+                contracts,
+                premium,
+                RECOVERY_CANCEL_ON_FILLED);
         if (adopted != null) {
           return adopted;
+        }
+      }
+
+      // Phase 1 (PLAN-2026-07-06): defense-in-depth getOrderStatus re-check. The cancel-on-filled
+      // inline check above adopts only when THIS single cancelOrder call surfaces state=FILLED. The
+      // real SPY incident had the journal terminalized FILLED (WS listener) at 14:39:55.992 while
+      // cancelOrder returned non-FILLED, so the lot orphaned to recon. Re-read broker truth from
+      // the
+      // reconciled journal row and adopt inline if it is terminal FILLED. Read the version marker
+      // unconditionally at branch entry (not inside a conditional that could skip on replay): the
+      // getOrderStatus activity call + any resulting adoption commands are a command-shape change
+      // on
+      // the timeout path, so a pre-fix history (DEFAULT_VERSION) must replay byte-identically via
+      // the
+      // legacy TriggerEntryUnfilled path below.
+      int reconcileVersion =
+          Workflow.getVersion(VERSION_ENTRY_GETORDERSTATUS_RECONCILE, Workflow.DEFAULT_VERSION, 1);
+      if (reconcileVersion >= 1 && !inlineAdoptionAttempted) {
+        OrderIntentResult statusResult = null;
+        try {
+          statusResult = exec.getOrderStatus(intentKey);
+        } catch (RuntimeException ignored) {
+          // Best-effort: a failed re-check falls through to the legacy path (recon settles it).
+        }
+        if (statusResult != null && statusResult.getState() == OrderIntentResult.State.FILLED) {
+          String adopted =
+              handleTtlFilledAdoption(
+                  payload,
+                  config,
+                  resolved,
+                  statusResult,
+                  contracts,
+                  premium,
+                  RECOVERY_GETORDERSTATUS_RECONCILE);
+          if (adopted != null) {
+            return adopted;
+          }
         }
       }
 
@@ -691,6 +757,10 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
    * legacy {@code TriggerEntryUnfilled} path when adoption is declined: a FILLED-with-zero-qty
    * result, an active kill-switch/halt (strategy OR account scope), or a precheck that the owner
    * PositionWorkflow is already running (recon won the race).
+   *
+   * <p>{@code recovery} labels the adoption evidence in the {@code EntryFilled} subject so the
+   * cancel-on-filled path ({@code cancel_on_filled}) is distinguishable from the getOrderStatus
+   * defense-in-depth re-check ({@code getorderstatus_reconcile}).
    */
   private String handleTtlFilledAdoption(
       WatchlistTriggerPayload payload,
@@ -698,7 +768,8 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
       ContractResolveResult resolved,
       OrderIntentResult cancelResult,
       long placedQty,
-      BigDecimal premium) {
+      BigDecimal premium,
+      String recovery) {
     long filledQty = cancelResult.getFilledQty() != null ? cancelResult.getFilledQty() : 0L;
     if (filledQty <= 0L) {
       // FILLED state but no broker-confirmed quantity: no real lot to adopt.
@@ -736,7 +807,7 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
               "broker_order_id",
               cancelResult.getBrokerOrderId(),
               "recovery",
-              "cancel_on_filled",
+              recovery,
               "note",
               "owner_already_running"));
       return null;
@@ -760,7 +831,7 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
             "filled_qty", synth.getFilledQty(),
             "avg_fill_price", synth.getAvgFillPrice(),
             "outcome", "FILLED",
-            "recovery", "cancel_on_filled"));
+            "recovery", recovery));
 
     startPositionWorkflow(payload, config, resolved, synth, placedQty, premium, true);
     return outcome(payload, "fired");
