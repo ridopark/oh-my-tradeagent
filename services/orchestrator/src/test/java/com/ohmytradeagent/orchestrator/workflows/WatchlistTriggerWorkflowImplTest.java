@@ -687,6 +687,162 @@ class WatchlistTriggerWorkflowImplTest {
     assertThat(unfilled.getSubject()).containsEntry("outcome", "UNFILLED");
   }
 
+  // ---- Phase 1 (PLAN-2026-07-06): getOrderStatus defense-in-depth on the entry TTL branch ----
+
+  // Incident reproduction (SPY 2026-07-06): the journal was terminalized FILLED (WS listener) at
+  // 14:39:55.992, but cancelOrder returned a NON-FILLED state so the cancel-on-filled inline check
+  // didn't surface it -> the workflow logged TriggerEntryUnfilled at 14:39:56.205 and the lot
+  // orphaned until recon adopted it ~5s later. The new getOrderStatus re-check re-reads broker
+  // truth (FILLED qty 5) and adopts the lot inline: EntryFilled(recovery=getorderstatus_reconcile),
+  // child PositionWorkflow started, and NO TriggerEntryUnfilled / no orphan-to-recon.
+  @Test
+  void ttlExpired_cancelNonFilled_getOrderStatusFilled_adoptsPosition() throws Exception {
+    when(exec.cancelOrder(any())).thenReturn(cancelledResult());
+    when(exec.getOrderStatus(any())).thenReturn(cancelFilledResult(5L, new BigDecimal("3.20")));
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L);
+    WatchlistTriggerWorkflow wf = newStub("wl-no-fill");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+    // never send onFill; let the TTL elapse.
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+    verify(exec, times(1)).cancelOrder(any());
+    verify(exec, times(1)).getOrderStatus(any());
+
+    AuditEvent filled = captureKind("EntryFilled");
+    assertThat(filled.getSubject()).containsEntry("recovery", "getorderstatus_reconcile");
+    assertThat(filled.getSubject()).containsEntry("option_symbol", OCC);
+    assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(5L);
+    assertNoAuditKind("TriggerEntryUnfilled");
+  }
+
+  // cancelOrder throws (cancelResult == null, the existing try/catch fails closed) but the fill is
+  // observable in the journal -> getOrderStatus returns FILLED -> adopt inline, no orphan.
+  @Test
+  void ttlExpired_cancelThrows_getOrderStatusFilled_adoptsPosition() throws Exception {
+    when(exec.cancelOrder(any())).thenThrow(new RuntimeException("broker down"));
+    when(exec.getOrderStatus(any())).thenReturn(cancelFilledResult(5L, new BigDecimal("3.20")));
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L);
+    WatchlistTriggerWorkflow wf = newStub("wl-no-fill");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+    verify(exec, times(1)).getOrderStatus(any());
+    AuditEvent filled = captureKind("EntryFilled");
+    assertThat(filled.getSubject()).containsEntry("recovery", "getorderstatus_reconcile");
+    assertNoAuditKind("TriggerEntryUnfilled");
+  }
+
+  // Legacy preserved: both cancelOrder AND getOrderStatus report non-FILLED (the order really did
+  // not fill) -> fall through to the legacy TriggerEntryUnfilled path, no child.
+  @Test
+  void ttlExpired_cancelAndGetOrderStatusNonFilled_staysUnfilled() throws Exception {
+    when(exec.cancelOrder(any())).thenReturn(cancelledResult());
+    when(exec.getOrderStatus(any())).thenReturn(cancelledResult());
+    StrategyConfig c = config();
+    c.setPendingTtlPaperSecs(1L);
+    WatchlistTriggerWorkflow wf = newStub("wl-no-fill");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+    waitForPlaceOrderCount(1);
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":entry_unfilled");
+    verify(exec, times(1)).getOrderStatus(any());
+    AuditEvent unfilled = captureKind("TriggerEntryUnfilled");
+    assertThat(unfilled.getSubject()).containsEntry("outcome", "UNFILLED");
+  }
+
+  // Partial fill via getOrderStatus: the broker filled fewer contracts (3) than placed. For an
+  // ENTRY we already HOLD the filled contracts at the broker, so adopting the FILLED qty (not
+  // deferring) is the safe choice — the adopted PositionWorkflow must carry the broker-confirmed
+  // filled qty (3), mirroring how handleTtlFilledAdoption sizes from getFilledQty().
+  @Test
+  void ttlExpired_getOrderStatusPartialFill_adoptsBrokerFilledQty() throws Exception {
+    RecordingPositionWorkflowImpl.STARTED.clear();
+    RecordingPositionWorkflowImpl.FILLS.clear();
+
+    TestWorkflowEnvironment localEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      localEnv.registerSearchAttribute(
+          "TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      localEnv.registerSearchAttribute(
+          "ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      Worker core = localEnv.newWorker(CORE_QUEUE);
+      core.registerWorkflowImplementationTypes(
+          WatchlistTriggerWorkflowImpl.class, RecordingPositionWorkflowImpl.class);
+      core.registerActivitiesImplementations(
+          audit, calendar, risk, contract, fireDecider, positionLookup);
+      Worker md = localEnv.newWorker(WatchlistTriggerWorkflowImpl.MARKET_DATA_TASK_QUEUE);
+      md.registerActivitiesImplementations(subscribeEquity, optionQuote);
+      Worker broker = localEnv.newWorker(BROKER_QUEUE);
+      broker.registerActivitiesImplementations(exec, accountSnapshot, tradingCalendar);
+      localEnv.start();
+
+      // cancelOrder non-FILLED; getOrderStatus reports a PARTIAL fill of 3 (placed 50 flat clamp).
+      when(exec.cancelOrder(any())).thenReturn(cancelledResult());
+      when(exec.getOrderStatus(any())).thenReturn(cancelFilledResult(3L, new BigDecimal("3.20")));
+      StrategyConfig c = config();
+      c.setPendingTtlPaperSecs(1L);
+
+      WatchlistTriggerWorkflow wf =
+          localEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  WatchlistTriggerWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setTaskQueue(CORE_QUEUE)
+                      .setWorkflowId("wl-no-fill")
+                      .build());
+      WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+      wf.equityTick(tick(new BigDecimal("760.80"), false));
+      wf.equityTick(tick(new BigDecimal("761.40"), false)); // FIRE
+      String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+      assertThat(result).endsWith(":fired");
+
+      long deadline = System.currentTimeMillis() + 10_000;
+      while (RecordingPositionWorkflowImpl.STARTED.isEmpty()
+          && System.currentTimeMillis() < deadline) {
+        sleep();
+      }
+      assertThat(RecordingPositionWorkflowImpl.STARTED).hasSize(1);
+      PositionWorkflowInput child =
+          RecordingPositionWorkflowImpl.STARTED.values().iterator().next();
+      assertThat(child.getQty()).isEqualTo(3L); // broker-filled qty, NOT the placed 50
+      assertThat(child.getEntryPremium()).isEqualByComparingTo("3.20");
+    } finally {
+      localEnv.close();
+    }
+  }
+
+  // Version-gate stability: the getOrderStatus-reconcile change id is a load-bearing constant. A
+  // pre-fix history replays on DEFAULT_VERSION and must NOT call getOrderStatus / adopt inline; the
+  // getVersion marker is read unconditionally at branch entry so old histories take the legacy
+  // path.
+  // TestWorkflowEnvironment always returns maxSupported (1) for a fresh execution, so the
+  // DEFAULT_VERSION replay path is not exercisable here without a recorded history fixture; pinning
+  // the literal (mirroring armedCacheVersionIdIsStable) guards against a silent rename that would
+  // break in-flight-leg determinism.
+  @Test
+  void entryGetOrderStatusReconcileVersionIdIsStable() {
+    assertThat(WatchlistTriggerWorkflowImpl.VERSION_ENTRY_GETORDERSTATUS_RECONCILE)
+        .isEqualTo("watchlist-entry-getorderstatus-reconcile-v1");
+  }
+
   // Recon false-orphan fix: a normal watchlist fire must seed the OCC -> PositionWorkflow-id
   // mapping
   // in the position cache (exactly as Copytrade/Adoption do), so recon's owner-lookup hits Redis
@@ -1453,5 +1609,13 @@ class WatchlistTriggerWorkflowImplTest {
         .filter(e -> kind.equals(e.getKind()))
         .reduce((a, b) -> b)
         .orElseThrow(() -> new AssertionError("no audit event with kind=" + kind));
+  }
+
+  private void assertNoAuditKind(String kind) {
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(captor.capture());
+    assertThat(captor.getAllValues().stream().anyMatch(e -> kind.equals(e.getKind())))
+        .as("no audit event with kind=" + kind)
+        .isFalse();
   }
 }
