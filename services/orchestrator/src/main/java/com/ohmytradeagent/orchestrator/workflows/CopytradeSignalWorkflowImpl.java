@@ -1506,8 +1506,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    * ApplicationFailure} (the guard's {@code PreTradeCheckMisconfigured} throw, the
    * ExecActivitiesFactory invalid-target throw) the {@code reason_code} is the failure type and
    * {@code reason_detail} the original message; any other {@link TemporalFailure} falls back to the
-   * class simple-name + message. Every value is rendered deterministically (this runs only on the
-   * terminal failure path, so it commits once with the workflow's FAILED completion).
+   * class simple-name + message. Also carries {@code op} — the operation label ({@code BTO (entry)}
+   * / {@code STC (exit)} / {@code AVG (add)}) derived from the action so the page's title is
+   * correct on the STC/AVG path (the catch wraps all three), omitted for an absent action — and
+   * {@code ticker} (the underlying) as the best available symbol identifier: this failure can fire
+   * BEFORE contract resolution, so no OCC exists to render. Every value is rendered
+   * deterministically (this runs only on the terminal failure path, so it commits once with the
+   * workflow's FAILED completion).
    */
   private static Map<String, Object> entryFailureSubject(
       CopytradeSignalPayload payload, TemporalFailure t) {
@@ -1526,17 +1531,50 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       reasonCode = t.getClass().getSimpleName();
       reasonDetail = t.getMessage();
     }
-    return subject(
-        "signal_id",
-        payload.getSignalId(),
-        "reason_code",
-        reasonCode == null || reasonCode.isBlank() ? t.getClass().getSimpleName() : reasonCode,
-        "reason_detail",
-        reasonDetail == null ? "" : reasonDetail,
-        "failure_type",
-        t.getClass().getName(),
-        "outcome",
-        "FAILED");
+    Map<String, Object> s =
+        subject(
+            "signal_id",
+            payload.getSignalId(),
+            "ticker",
+            str(payload.getTicker()),
+            "reason_code",
+            reasonCode == null || reasonCode.isBlank() ? t.getClass().getSimpleName() : reasonCode,
+            "reason_detail",
+            reasonDetail == null ? "" : reasonDetail,
+            "failure_type",
+            t.getClass().getName(),
+            "outcome",
+            "FAILED");
+    // op is omitted for an absent action; OrderFailureAlerter then falls back to its default label.
+    String op = opLabel(payload.getAction());
+    if (op != null) {
+      s.put("op", op);
+    }
+    return s;
+  }
+
+  /**
+   * Maps the signal action to the human operation label the failure page's title carries: {@code
+   * BTO} -> {@code "BTO (entry)"}, {@code STC} -> {@code "STC (exit)"}, {@code AVG} -> {@code "AVG
+   * (add)"}; {@code null} for an absent action (defensive — the {@code op} subject field is then
+   * omitted and {@link com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter} falls back to its
+   * {@code STC_KINDS} default label). Pure switch, no clock/random — deterministic / replay-safe.
+   * Visible for testing.
+   */
+  static String opLabel(CopytradeSignalPayload.Action action) {
+    if (action == null) {
+      return null;
+    }
+    switch (action) {
+      case BTO:
+        return "BTO (entry)";
+      case STC:
+        return "STC (exit)";
+      case AVG:
+        return "AVG (add)";
+      default:
+        return null;
+    }
   }
 
   /** Walks up to five cause levels looking for the underlying {@link ApplicationFailure}. */

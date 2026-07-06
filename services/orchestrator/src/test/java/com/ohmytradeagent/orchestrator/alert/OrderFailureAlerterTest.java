@@ -537,6 +537,10 @@ class OrderFailureAlerterTest {
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("signal_id", "111:0");
+    // Phase 2 refinement: the subject now carries op (from the action) + ticker (no OCC exists yet,
+    // the guard fails before contract resolution) so the title/symbol render correctly.
+    subject.put("op", "BTO (entry)");
+    subject.put("ticker", "NVDA");
     subject.put("reason_code", "PreTradeCheckMisconfigured");
     subject.put(
         "reason_detail",
@@ -555,7 +559,79 @@ class OrderFailureAlerterTest {
     assertThat(field(embed, "reason"))
         .contains("PreTradeCheckMisconfigured", "only the permissive default");
     assertThat(field(embed, "signal_id")).isEqualTo("111:0");
+    // No option_symbol on the pre-resolution failure → symbol falls back to the underlying ticker
+    // (plain text: a bare underlying is not a valid OCC).
+    assertThat(field(embed, "symbol")).isEqualTo("NVDA");
     assertThat(embed.footer()).contains("wf-entry-fail-1");
+  }
+
+  @Test
+  void entryWorkflowFailed_stcPath_rendersStcTitleFromSubjectOp_phase2() {
+    // Finding #1 regression: the top-level catch spans BTO/STC/AVG. A non-retryable failure on the
+    // STC/AVG path must NOT mislabel as "BTO (entry)". EntryWorkflowFailed is not in STC_KINDS, so
+    // the label MUST come from the subject-provided op.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, "EntryWorkflowFailed", true);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("signal_id", "222:1");
+    subject.put("op", "STC (exit)");
+    subject.put("ticker", "TSLA");
+    subject.put("reason_code", "InvalidBrokerTarget");
+    subject.put("reason_detail", "unroutable broker_target");
+    subject.put("outcome", "FAILED");
+    AuditEvent event = event("EntryWorkflowFailed", "wf-entry-fail-stc", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("STC (exit)");
+    assertThat(embed.title()).doesNotContain("BTO");
+    assertThat(field(embed, "symbol")).isEqualTo("TSLA");
+  }
+
+  @Test
+  void entryWorkflowFailed_noOptionSymbol_symbolFallsBackToTicker_phase2() {
+    // Finding #2: with no option_symbol the symbol field must show the underlying (not "n/a").
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, "EntryWorkflowFailed", true);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("signal_id", "333:0");
+    subject.put("op", "AVG (add)");
+    subject.put("ticker", "SPY");
+    subject.put("outcome", "FAILED");
+    AuditEvent event = event("EntryWorkflowFailed", "wf-entry-fail-avg", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("AVG (add)");
+    assertThat(field(embed, "symbol")).isEqualTo("SPY");
+  }
+
+  @Test
+  void entryExpired_withoutOp_rendersBtoAndOptionSymbol_backwardCompat_phase2() {
+    // Backward-compat: an existing failure kind that carries option_symbol and NO op must render
+    // exactly as before — BTO (entry) title from STC_KINDS default, symbol from the resolved OCC.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, DEFAULT_ALLOWLIST, true);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("signal_id", "444:0");
+    subject.put("option_symbol", "SPY260116C00500000");
+    AuditEvent event = event("EntryExpired", "wf-expired-bc", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("BTO (entry)");
+    assertThat(field(embed, "symbol"))
+        .isEqualTo("[SPY 260116C00500000](https://finance.yahoo.com/quote/SPY260116C00500000/)");
+    assertThat(field(embed, "signal_id")).isEqualTo("444:0");
   }
 
   @Test

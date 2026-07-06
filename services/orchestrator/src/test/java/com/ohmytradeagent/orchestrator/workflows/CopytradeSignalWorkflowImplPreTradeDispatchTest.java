@@ -1093,6 +1093,11 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
       assertThat(failed.getSubject()).containsEntry("signal_id", "111:0");
       assertThat(failed.getSubject()).containsEntry("reason_code", "PreTradeCheckMisconfigured");
       assertThat(failed.getSubject()).containsEntry("outcome", "FAILED");
+      // Refinement: subject now carries the operation label (this is the BTO path) + the underlying
+      // ticker so OrderFailureAlerter renders the correct title/symbol (no OCC exists here — the
+      // guard fails before contract resolution).
+      assertThat(failed.getSubject()).containsEntry("op", "BTO (entry)");
+      assertThat(failed.getSubject()).containsEntry("ticker", "NVDA");
       assertThat((String) failed.getSubject().get("reason_detail"))
           .contains("dev")
           .contains("copytrade-v1");
@@ -1226,6 +1231,23 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
         CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_ENTRY_FAILURE_AUDIT");
     marker.setAccessible(true);
     assertThat((String) marker.get(null)).isEqualTo("entry-workflow-failure-audit-v1");
+  }
+
+  /**
+   * Refinement finding #1: the EntryWorkflowFailed op label must be derived from the action so an
+   * STC/AVG entry-workflow failure does not page as "BTO (entry)". Wiring a live STC-path failure
+   * is heavy, so the deterministic op-label mapping is unit-tested directly (pure switch, no
+   * clock).
+   */
+  @Test
+  void opLabel_mapsActionToOperationLabel_phase2() {
+    assertThat(CopytradeSignalWorkflowImpl.opLabel(CopytradeSignalPayload.Action.BTO))
+        .isEqualTo("BTO (entry)");
+    assertThat(CopytradeSignalWorkflowImpl.opLabel(CopytradeSignalPayload.Action.STC))
+        .isEqualTo("STC (exit)");
+    assertThat(CopytradeSignalWorkflowImpl.opLabel(CopytradeSignalPayload.Action.AVG))
+        .isEqualTo("AVG (add)");
+    assertThat(CopytradeSignalWorkflowImpl.opLabel(null)).isNull();
   }
 
   // ----- helpers -----

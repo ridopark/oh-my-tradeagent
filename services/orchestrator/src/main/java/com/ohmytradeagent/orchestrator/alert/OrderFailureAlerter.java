@@ -223,12 +223,28 @@ public class OrderFailureAlerter {
    * Yahoo-linked OCC (plain text on a malformed/absent symbol — never throws), {@code kind} /
    * {@code reason} / {@code signal_id} are operator-actionable stacked fields, and the low-signal
    * trace ({@code workflow_id}, tenant/strategy) is demoted to the footer.
+   *
+   * <p>Two subject-keyed overrides serve the {@code EntryWorkflowFailed} shape (whose top-level
+   * catch spans BTO/STC/AVG and can fire BEFORE contract resolution): a subject-provided {@code op}
+   * operation label takes precedence over the {@code STC_KINDS} default (else an STC/AVG
+   * entry-workflow failure mislabels as "BTO (entry)"), and when no OCC was resolved (no {@code
+   * option_symbol}) the symbol field falls back to the underlying {@code ticker}. Other failure
+   * kinds never set {@code op} and always carry {@code option_symbol}, so both are inert for them.
    */
   private WebhookEmbed buildEmbed(AuditEvent event) {
     Map<String, Object> subject = event.getSubject();
-    String action = STC_KINDS.contains(event.getKind()) ? "STC (exit)" : "BTO (entry)";
+    String op = rawSubject(subject, "op");
+    String action =
+        (op != null && !op.isBlank())
+            ? op
+            : (STC_KINDS.contains(event.getKind()) ? "STC (exit)" : "BTO (entry)");
     String reason = reasonOf(event.getKind(), subject);
     String symbolRaw = rawSubject(subject, "option_symbol");
+    if (symbolRaw == null || symbolRaw.isBlank()) {
+      // A bare underlying is not a valid OCC → YahooOptionLink.markdown renders it as plain text
+      // (never a broken link, never throws).
+      symbolRaw = rawSubject(subject, "ticker");
+    }
 
     String title = ":rotating_light: Copytrade order FAILED — " + action;
 
