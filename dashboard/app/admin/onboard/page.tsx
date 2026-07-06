@@ -80,6 +80,10 @@ const prodConfig = (brokerTarget: string) =>
       min_partial_qty_behavior: "skip",
       bto_price_move_reject_pct: 0.1,
       notional_cap_pct_of_capital_base: 0.8,
+      // Arm the pre-trade affordability gate for new tenants (deliberately ON, unlike prod_real's
+      // current config which leaves it off). The gate verifies the account can afford the entry
+      // against AVAILABLE CASH (not margin buying power) before submitting. Opt-in: null/false disables.
+      pre_trade_check_enabled: true,
       partial_fractions: {
         out: 1.0,
         half: 0.5,
