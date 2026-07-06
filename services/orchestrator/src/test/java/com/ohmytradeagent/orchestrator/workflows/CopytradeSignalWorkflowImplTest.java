@@ -679,11 +679,12 @@ class CopytradeSignalWorkflowImplTest {
 
     runWorkflow(btoPayload());
 
-    // EntryFilled present with the recovery marker and broker-confirmed numbers.
+    // EntryFilled present with the getOrderStatus-reconcile recovery marker (distinct from the
+    // inline cancel_on_filled path) and broker-confirmed numbers.
     AuditEvent filled = capture("EntryFilled");
     assertThat(filled.getSubject())
         .containsEntry("outcome", "FILLED")
-        .containsEntry("recovery", "cancel_on_filled")
+        .containsEntry("recovery", "getorderstatus_reconcile")
         .containsEntry("broker_order_id", "brk-1")
         .containsEntry("option_symbol", "NVDA  260516C00140000");
     assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(5L);
