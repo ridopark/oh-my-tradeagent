@@ -25,7 +25,7 @@
     "buying_power": {
       "type": "number",
       "minimum": 0,
-      "description": "Account buying power in dollars at the moment of the check. risk-svc rejects when buying_power < estimated_notional."
+      "description": "The broker's cash-affordability basis in dollars at the moment of the check: the funds actually available to fund the order, NOT margin/options buying power. For Alpaca this is the account's available cash, so a margin account (whose options_buying_power is 2-4x cash) cannot lever past its cash. risk-svc rejects when buying_power < estimated_notional."
     },
     "pdt_status": {
       "type": "string",

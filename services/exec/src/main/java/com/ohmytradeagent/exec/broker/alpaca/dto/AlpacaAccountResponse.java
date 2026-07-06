@@ -16,18 +16,22 @@ import java.math.BigDecimal;
  * notional_cap_pct_of_equity} gate's MTM-stable denominator is the cost-basis capital base {@code
  * cash + sum_open_notional}, so the gate reads {@code cash} (not net-liq {@code equity}) for its
  * denominator — keeping numerator and denominator on the same cost basis. Like {@code equity},
- * {@code cash} is distinct from {@code buyingPower}.
+ * {@code cash} is distinct from {@code buyingPower}. {@code cash} is ALSO the affordability basis
+ * for the {@code pre_trade_check} gate (see below), so a margin account cannot lever past its cash.
  *
  * <p>The remaining fields back the issue #320 {@code pre_trade_check} gate:
  *
  * <ul>
- *   <li>{@code optionsBuyingPower} — options-specific buying power; the pre-trade gate prefers this
- *       and falls back to {@code buyingPower} when absent.
- *   <li>{@code buyingPower} — general buying power; fallback for the options field.
+ *   <li>{@code cash} — available cash; the pre-trade gate's affordability basis ({@code
+ *       margin_sufficient} and the reported {@code buying_power} field derive from this). A 200
+ *       that omits it fails the gate closed.
+ *   <li>{@code optionsBuyingPower} / {@code buyingPower} — margin/options buying power; on a Reg-T
+ *       account these are 2-4x cash. Logged for observability ONLY — they do NOT drive the gate
+ *       (gating on them would lever the account past its cash).
  *   <li>{@code patternDayTrader} / {@code daytradeCount} — derive {@code pdt_status}.
  *   <li>{@code multiplier} — margin multiplier; retained for observability / potential future use.
- *       It is NOT used in the current {@code margin_sufficient} computation, which derives from
- *       {@code options_buying_power} — a figure that already reflects the account multiplier.
+ *       It is NOT used in the {@code margin_sufficient} computation, which derives from {@code
+ *       cash}.
  * </ul>
  */
 @JsonIgnoreProperties(ignoreUnknown = true)

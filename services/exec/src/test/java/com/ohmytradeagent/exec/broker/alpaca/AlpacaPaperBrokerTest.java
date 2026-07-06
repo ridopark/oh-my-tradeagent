@@ -930,9 +930,64 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
-  void preTradeCheck_readsOptionsBuyingPower_whenPresent() throws Exception {
-    // Issue #320: the pre-trade gate prefers options_buying_power. Here it is present and distinct
-    // from the general buying_power so a regression that reads the wrong field is caught.
+  void preTradeCheck_marginAccount_gatesOnCash_notOptionsBuyingPower() throws Exception {
+    // The point of this change: the affordability gate reads AVAILABLE CASH, not margin/options
+    // buying power. On a Reg-T margin account options_buying_power (4000) is 2-4x the account's
+    // actual cash (1000). Gating on the 4000 figure (the OLD behavior) would ADMIT a 2000-notional
+    // order the account cannot fund with cash. The new gate reports buyingPower==cash==1000 and
+    // margin_sufficient==false (1000 < 2000) → RiskActivitiesImpl REJECTS. This is the exact case
+    // the old options-buying-power gate would have wrongly allowed.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"5000.00\",\"cash\":\"1000.00\","
+                    + "\"buying_power\":\"8000.00\",\"options_buying_power\":\"4000.00\","
+                    + "\"pattern_day_trader\":false,\"daytrade_count\":0,\"multiplier\":\"4\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("2000")));
+
+    assertThat(r.getAllowed()).isTrue();
+    // The buying_power field now carries CASH (1000), NOT options_buying_power (4000).
+    assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("1000.00"));
+    // 1000 cash < 2000 notional → insufficient. Under the OLD options-buying-power gate (4000 >=
+    // 2000) this would have been sufficient → the behavior differs, which is the whole point.
+    assertThat(r.getMarginSufficient()).isFalse();
+    assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.OK);
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getPath()).isEqualTo("/v2/account");
+    assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
+  }
+
+  @Test
+  void preTradeCheck_sufficientCash_reportsCashAndMarginSufficient() {
+    // Sufficient-cash happy path: cash (5000) covers the 2000 notional → buyingPower==cash==5000
+    // and margin_sufficient==true. options_buying_power is present but does NOT drive the result.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"10000.00\",\"cash\":\"5000.00\","
+                    + "\"buying_power\":\"20000.00\",\"options_buying_power\":\"10000.00\","
+                    + "\"pattern_day_trader\":false,\"daytrade_count\":0,\"multiplier\":\"4\"}"));
+
+    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("2000")));
+
+    assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("5000.00"));
+    assertThat(r.getMarginSufficient()).isTrue();
+    assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.OK);
+  }
+
+  @Test
+  void preTradeCheck_nullCash_failsClosedWithProtocolError() {
+    // Fail-closed: a 200 that omits `cash` cannot establish the cash-affordability basis. The gate
+    // must fail CLOSED with a non-retryable BrokerProtocolError rather than admitting an unchecked
+    // order — mirroring the null-equity / missing-field protocol breaches elsewhere. options and
+    // raw buying_power are present but MUST NOT be used as a fallback.
     server.enqueue(
         new MockResponse()
             .setResponseCode(200)
@@ -942,53 +997,13 @@ class AlpacaPaperBrokerTest {
                     + "\"options_buying_power\":\"40000.00\",\"pattern_day_trader\":false,"
                     + "\"daytrade_count\":0,\"multiplier\":\"2\"}"));
 
-    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
-
-    assertThat(r.getAllowed()).isTrue();
-    assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("40000.00"));
-    assertThat(r.getPdtStatus()).isEqualTo(PreTradeCheckResult.PdtStatus.OK);
-    assertThat(r.getMarginSufficient()).isTrue();
-    // The fallback counter must NOT fire on the happy path (options_buying_power present), so it
-    // stays at zero.
-    assertThat(
-            meterRegistry
-                .get(AlpacaPaperBroker.BUYING_POWER_FALLBACK_COUNTER_NAME)
-                .counter()
-                .count())
-        .isEqualTo(0.0);
-
-    RecordedRequest req = server.takeRequest();
-    assertThat(req.getMethod()).isEqualTo("GET");
-    assertThat(req.getPath()).isEqualTo("/v2/account");
-    assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
-  }
-
-  @Test
-  void preTradeCheck_fallsBackToBuyingPower_whenOptionsFieldAbsent() {
-    // Issue #320 criterion 2: when options_buying_power is absent, fall back to buying_power. Issue
-    // #327 task 3: this fallback branch also logs a WARN (raw buying_power on a Reg-T margin
-    // account
-    // can be 2-4x the correct options figure → looser gate). Asserting getBuyingPower() equals the
-    // raw buying_power value confirms the fallback (WARN) branch ran.
-    server.enqueue(
-        new MockResponse()
-            .setResponseCode(200)
-            .setHeader("Content-Type", "application/json")
-            .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"buying_power\":\"75000.00\","
-                    + "\"pattern_day_trader\":false,\"daytrade_count\":0,\"multiplier\":\"2\"}"));
-
-    PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
-
-    assertThat(r.getBuyingPower()).isEqualByComparingTo(new BigDecimal("75000.00"));
-    // The fallback also bumps a Micrometer counter so a persistently-looser funding gate is
-    // observable (not just a buried WARN). Asserting count == 1.0 proves the fallback ran.
-    assertThat(
-            meterRegistry
-                .get(AlpacaPaperBroker.BUYING_POWER_FALLBACK_COUNTER_NAME)
-                .counter()
-                .count())
-        .isEqualTo(1.0);
+    assertThatThrownBy(() -> broker.preTradeCheck(preTradeRequest(new BigDecimal("1000"))))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("BrokerProtocolError");
+              assertThat(f.isNonRetryable()).isTrue();
+            });
   }
 
   @Test
@@ -1003,9 +1018,9 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"buying_power\":\"30000.00\","
-                    + "\"options_buying_power\":\"30000.00\",\"pattern_day_trader\":true,"
-                    + "\"multiplier\":\"2\"}"));
+                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"cash\":\"15000.00\","
+                    + "\"buying_power\":\"30000.00\",\"options_buying_power\":\"30000.00\","
+                    + "\"pattern_day_trader\":true,\"multiplier\":\"2\"}"));
 
     assertThatThrownBy(() -> broker.preTradeCheck(preTradeRequest(new BigDecimal("1000"))))
         .isInstanceOfSatisfying(
@@ -1041,9 +1056,9 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"buying_power\":\"30000.00\","
-                    + "\"options_buying_power\":\"30000.00\",\"pattern_day_trader\":true,"
-                    + "\"daytrade_count\":4,\"multiplier\":\"2\"}"));
+                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"cash\":\"15000.00\","
+                    + "\"buying_power\":\"30000.00\",\"options_buying_power\":\"30000.00\","
+                    + "\"pattern_day_trader\":true,\"daytrade_count\":4,\"multiplier\":\"2\"}"));
 
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
@@ -1059,9 +1074,9 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"buying_power\":\"30000.00\","
-                    + "\"options_buying_power\":\"30000.00\",\"pattern_day_trader\":true,"
-                    + "\"daytrade_count\":3,\"multiplier\":\"2\"}"));
+                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"cash\":\"15000.00\","
+                    + "\"buying_power\":\"30000.00\",\"options_buying_power\":\"30000.00\","
+                    + "\"pattern_day_trader\":true,\"daytrade_count\":3,\"multiplier\":\"2\"}"));
 
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
@@ -1077,9 +1092,9 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"buying_power\":\"30000.00\","
-                    + "\"options_buying_power\":\"30000.00\",\"pattern_day_trader\":true,"
-                    + "\"daytrade_count\":2,\"multiplier\":\"2\"}"));
+                "{\"id\":\"acct-1\",\"equity\":\"15000.00\",\"cash\":\"15000.00\","
+                    + "\"buying_power\":\"30000.00\",\"options_buying_power\":\"30000.00\","
+                    + "\"pattern_day_trader\":true,\"daytrade_count\":2,\"multiplier\":\"2\"}"));
 
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
@@ -1096,9 +1111,9 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"25000\",\"buying_power\":\"50000.00\","
-                    + "\"options_buying_power\":\"50000.00\",\"pattern_day_trader\":true,"
-                    + "\"daytrade_count\":9,\"multiplier\":\"2\"}"));
+                "{\"id\":\"acct-1\",\"equity\":\"25000\",\"cash\":\"25000\","
+                    + "\"buying_power\":\"50000.00\",\"options_buying_power\":\"50000.00\","
+                    + "\"pattern_day_trader\":true,\"daytrade_count\":9,\"multiplier\":\"2\"}"));
 
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
@@ -1108,15 +1123,15 @@ class AlpacaPaperBrokerTest {
   @Test
   void preTradeCheck_marginSufficient_whenNotionalNull() {
     // Null estimated_notional exercises the `notional == null ||` fast path: with no notional to
-    // compare, margin_sufficient is true regardless of buying power.
+    // compare, margin_sufficient is true regardless of available cash.
     server.enqueue(
         new MockResponse()
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"buying_power\":\"100.00\","
-                    + "\"options_buying_power\":\"100.00\",\"pattern_day_trader\":false,"
-                    + "\"daytrade_count\":0,\"multiplier\":\"2\"}"));
+                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"cash\":\"100.00\","
+                    + "\"buying_power\":\"100.00\",\"options_buying_power\":\"100.00\","
+                    + "\"pattern_day_trader\":false,\"daytrade_count\":0,\"multiplier\":\"2\"}"));
 
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(null));
 
@@ -1134,7 +1149,7 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"buying_power\":\"30000.00\","
+                "{\"id\":\"acct-1\",\"cash\":\"15000.00\",\"buying_power\":\"30000.00\","
                     + "\"options_buying_power\":\"30000.00\",\"pattern_day_trader\":true,"
                     + "\"daytrade_count\":4,\"multiplier\":\"2\"}"));
 
@@ -1156,9 +1171,9 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"30000.00\",\"buying_power\":\"60000.00\","
-                    + "\"options_buying_power\":\"60000.00\",\"pattern_day_trader\":true,"
-                    + "\"daytrade_count\":9,\"multiplier\":\"4\"}"));
+                "{\"id\":\"acct-1\",\"equity\":\"30000.00\",\"cash\":\"30000.00\","
+                    + "\"buying_power\":\"60000.00\",\"options_buying_power\":\"60000.00\","
+                    + "\"pattern_day_trader\":true,\"daytrade_count\":9,\"multiplier\":\"4\"}"));
 
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
@@ -1166,17 +1181,17 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
-  void preTradeCheck_marginInsufficient_whenNotionalExceedsBuyingPower() {
-    // Issue #320 criterion 4: margin_sufficient is false when the requested notional exceeds the
-    // available buying power.
+  void preTradeCheck_marginInsufficient_whenNotionalExceedsCash() {
+    // margin_sufficient is false when the requested notional exceeds available CASH — even though
+    // options_buying_power (5000) would cover the 1000 notional, only the 500 cash counts.
     server.enqueue(
         new MockResponse()
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"5000.00\",\"buying_power\":\"5000.00\","
-                    + "\"options_buying_power\":\"500.00\",\"pattern_day_trader\":false,"
-                    + "\"daytrade_count\":0,\"multiplier\":\"1\"}"));
+                "{\"id\":\"acct-1\",\"equity\":\"5000.00\",\"cash\":\"500.00\","
+                    + "\"buying_power\":\"5000.00\",\"options_buying_power\":\"5000.00\","
+                    + "\"pattern_day_trader\":false,\"daytrade_count\":0,\"multiplier\":\"1\"}"));
 
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
@@ -1184,15 +1199,15 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
-  void preTradeCheck_marginSufficient_whenBuyingPowerCoversNotional() {
+  void preTradeCheck_marginSufficient_whenCashCoversNotional() {
     server.enqueue(
         new MockResponse()
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"buying_power\":\"100000.00\","
-                    + "\"options_buying_power\":\"100000.00\",\"pattern_day_trader\":false,"
-                    + "\"daytrade_count\":0,\"multiplier\":\"2\"}"));
+                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"cash\":\"100000.00\","
+                    + "\"buying_power\":\"100000.00\",\"options_buying_power\":\"100000.00\","
+                    + "\"pattern_day_trader\":false,\"daytrade_count\":0,\"multiplier\":\"2\"}"));
 
     PreTradeCheckResult r = broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
@@ -1220,22 +1235,6 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
-  void preTradeCheck_missingBuyingPowerFields_failsClosedWithProtocolError() {
-    // A 200 with neither options_buying_power nor buying_power is a protocol breach: the gate must
-    // fail closed rather than silently passing a null buying power.
-    server.enqueue(
-        new MockResponse()
-            .setResponseCode(200)
-            .setHeader("Content-Type", "application/json")
-            .setBody("{\"id\":\"acct-1\",\"equity\":\"50000.00\"}"));
-
-    assertThatThrownBy(() -> broker.preTradeCheck(preTradeRequest(new BigDecimal("1000"))))
-        .isInstanceOfSatisfying(
-            ApplicationFailure.class,
-            f -> assertThat(f.getType()).isEqualTo("BrokerProtocolError"));
-  }
-
-  @Test
   void preTradeCheck_issuesExactlyOneAccountRequest() throws Exception {
     // Issue #320 criterion 8: a single preTradeCheck invocation issues exactly one /v2/account
     // request — no second round-trip per signal.
@@ -1244,9 +1243,9 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"buying_power\":\"100000.00\","
-                    + "\"options_buying_power\":\"100000.00\",\"pattern_day_trader\":false,"
-                    + "\"daytrade_count\":0,\"multiplier\":\"2\"}"));
+                "{\"id\":\"acct-1\",\"equity\":\"50000.00\",\"cash\":\"100000.00\","
+                    + "\"buying_power\":\"100000.00\",\"options_buying_power\":\"100000.00\","
+                    + "\"pattern_day_trader\":false,\"daytrade_count\":0,\"multiplier\":\"2\"}"));
 
     broker.preTradeCheck(preTradeRequest(new BigDecimal("1000")));
 
