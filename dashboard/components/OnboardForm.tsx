@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
+import { ConfigFieldReference } from "@/components/ConfigFieldReference";
 
 // Coarse result both onboarding server actions return. No secret, no detail — just whether the call
 // succeeded, the raw HTTP status, and (for the credential save) the NON-secret authenticated account
@@ -404,6 +405,7 @@ export function OnboardForm({
           )}
         </form>
         {createResult && <Banner r={createMsg(createResult)} />}
+        <ConfigFieldReference />
       </section>
 
       {/* Step 2 — Broker credentials */}
