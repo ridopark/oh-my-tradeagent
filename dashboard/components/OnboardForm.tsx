@@ -163,15 +163,15 @@ function Banner({ r }: { r: { tone: "ok" | "err"; msg: string } }) {
 // Step 3 additionally stays inert until step 2 returns a verified brokerAccountId — arming a tenant
 // with no verified account would be rejected 422 by the A1 route, so the UI gates on it up-front.
 //
-// The paper/live selector is only rendered when liveOnboardEnabled; otherwise the form is paper-only,
-// unchanged. In LIVE mode the config/base/ws templates switch to the alpaca-live variants, the account
-// number is REQUIRED (it becomes the pinned expected_account_id), and step 3b (activate-live) appears.
+// The paper/live selector is always shown, so any operator can pick paper vs live. In LIVE mode the
+// config/base/ws templates switch to the alpaca-live variants, the account number is REQUIRED (it
+// becomes the pinned expected_account_id), and step 3b (activate-live) appears. Real money is still
+// gated at the backend and behind step 3b's activateEnabled flag — the toggle only picks the target.
 export function OnboardForm({
   createEnabled,
   credentialEnabled,
   enableEnabled,
   inviteEnabled,
-  liveOnboardEnabled,
   activateEnabled,
   defaultConfig,
   defaultBaseUrl,
@@ -189,7 +189,6 @@ export function OnboardForm({
   credentialEnabled: boolean;
   enableEnabled: boolean;
   inviteEnabled: boolean;
-  liveOnboardEnabled: boolean;
   activateEnabled: boolean;
   defaultConfig: string;
   defaultBaseUrl: string;
@@ -207,13 +206,17 @@ export function OnboardForm({
   const [tenant, setTenant] = useState("");
   const [strategy, setStrategy] = useState("copytrade-v1");
 
-  // Onboarding mode. "paper" (default) is the prior flow; "live" is only reachable when the operator
-  // flips liveOnboardEnabled. `live` drives the config/base/ws templates and reveals the activate step.
+  // Onboarding mode. "paper" (default) is the prior flow; "live" retargets the alpaca-live templates
+  // and reveals the activate step. The selector is always shown; `live` drives the config/base/ws
+  // templates and reveals the activate step.
   const [mode, setMode] = useState<"paper" | "live">("paper");
-  const live = liveOnboardEnabled && mode === "live";
+  const live = mode === "live";
   // Non-secret account number (the pinned expected_account_id). Tracked in state ONLY to gate the
   // save button in live mode where it is required — it is NOT key material (MF-7 is about the secret).
   const [declaredAccount, setDeclaredAccount] = useState("");
+  // Per-tenant Discord alert webhook (optional). Starts EMPTY and is never pre-filled — a blank value
+  // means the tenant falls back to the global/default alert channel. Injected into the config on create.
+  const [alertWebhook, setAlertWebhook] = useState("");
 
   // Step 4 (invite) is independent — it has its own email input, not the shared tenant/strategy pair.
   const [inviteEmail, setInviteEmail] = useState("");
@@ -232,19 +235,22 @@ export function OnboardForm({
   // Any change of target identity or mode invalidates the in-session step pre-checks — never let a
   // prior tenant/strategy/mode's success gate a real-money action (Activate live) for a different
   // target. Resetting the step results re-locks the derived accountVerified/strategyArmed gates until
-  // the NEW identity actually completes create → creds → enable in-session. declaredAccount is
-  // tenant-specific, so it clears too. (Invite step 4 is independent and keeps its own email state.)
+  // the NEW identity actually completes create → creds → enable in-session. declaredAccount and
+  // alertWebhook are tenant-specific, so they clear too. (Invite step 4 is independent and keeps its
+  // own email state.)
   useEffect(() => {
     setCreateResult(null);
     setCredResult(null);
     setEnableResult(null);
     setActivateResult(null);
     setDeclaredAccount("");
+    setAlertWebhook("");
   }, [tenant, strategy, mode]);
 
   function submitCreate(formData: FormData) {
     formData.set("tenant_id", tenant);
     formData.set("strategy_id", strategy);
+    formData.set("alert_webhook_url", alertWebhook);
     startCreate(async () => setCreateResult(await createAction(formData)));
   }
 
@@ -323,48 +329,46 @@ export function OnboardForm({
           into the config and bind the keys below — both steps use this pair.
         </p>
 
-        {/* Paper/live selector — only rendered when the live-onboard flag is on. When absent the form
-            is paper-only, unchanged. Switching to live retargets the templates below and reveals the
-            activate-live step (real money). */}
-        {liveOnboardEnabled && (
-          <div className="mt-4">
-            <label className={labelCls}>Mode</label>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setMode("paper")}
-                className={`rounded border px-3 py-1.5 text-sm font-medium transition-colors ${
-                  mode === "paper"
-                    ? "border-slate-400 bg-slate-700 text-slate-100"
-                    : "border-slate-700 bg-slate-900 text-slate-400 hover:bg-slate-800"
-                }`}
-              >
-                Paper
-              </button>
-              <button
-                type="button"
-                onClick={() => setMode("live")}
-                className={`rounded border px-3 py-1.5 text-sm font-medium transition-colors ${
-                  mode === "live"
-                    ? "border-amber-500/60 bg-amber-600/20 text-amber-300"
-                    : "border-slate-700 bg-slate-900 text-slate-400 hover:bg-slate-800"
-                }`}
-              >
-                ● Live (real money)
-              </button>
-            </div>
-            {live && (
-              <p className="mt-2 text-xs text-amber-300/80">
-                Live mode: the config, base and WebSocket URLs below target the real Alpaca account,
-                the account number is required, and a final activate-live step arms real trading.
-              </p>
-            )}
-            <p className="mt-1 text-xs text-slate-500">
-              Switching mode resets the config template, base/WebSocket URLs and account number to that
-              mode&apos;s defaults — any edits below are discarded.
-            </p>
+        {/* Paper/live selector — always shown. Switching to live retargets the templates below and
+            reveals the activate-live step (real money). Real money stays gated at the backend and
+            behind step 3b's activate flag; this toggle only picks the target. */}
+        <div className="mt-4">
+          <label className={labelCls}>Mode</label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setMode("paper")}
+              className={`rounded border px-3 py-1.5 text-sm font-medium transition-colors ${
+                mode === "paper"
+                  ? "border-slate-400 bg-slate-700 text-slate-100"
+                  : "border-slate-700 bg-slate-900 text-slate-400 hover:bg-slate-800"
+              }`}
+            >
+              Paper
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("live")}
+              className={`rounded border px-3 py-1.5 text-sm font-medium transition-colors ${
+                mode === "live"
+                  ? "border-amber-500/60 bg-amber-600/20 text-amber-300"
+                  : "border-slate-700 bg-slate-900 text-slate-400 hover:bg-slate-800"
+              }`}
+            >
+              ● Live (real money)
+            </button>
           </div>
-        )}
+          {live && (
+            <p className="mt-2 text-xs text-amber-300/80">
+              Live mode: the config, base and WebSocket URLs below target the real Alpaca account, the
+              account number is required, and a final activate-live step arms real trading.
+            </p>
+          )}
+          <p className="mt-1 text-xs text-slate-500">
+            Switching mode resets the config template, base/WebSocket URLs and account number to that
+            mode&apos;s defaults — any edits below are discarded.
+          </p>
+        </div>
       </section>
 
       {/* Step 1 — Create tenant */}
@@ -393,6 +397,25 @@ export function OnboardForm({
             disabled={!createEnabled}
             spellCheck={false}
           />
+          <div className="mt-3">
+            <label className={labelCls} htmlFor="ob-alert-webhook">
+              Alert webhook URL (Discord)
+            </label>
+            <input
+              id="ob-alert-webhook"
+              className={inputCls}
+              type="url"
+              value={alertWebhook}
+              onChange={(e) => setAlertWebhook(e.target.value)}
+              placeholder="https://discord.com/api/webhooks/… (optional)"
+              disabled={!createEnabled}
+              autoComplete="off"
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Where THIS tenant&apos;s trade/order-execution alerts, broker rejections, and the daily
+              digest post. Leave blank to fall back to the global/default alert channel. Optional.
+            </p>
+          </div>
           <button
             type="submit"
             disabled={!createEnabled || creating || idsMissing}

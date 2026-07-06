@@ -95,11 +95,6 @@ public class AlpacaPaperBroker implements OptionsBroker {
   private static final BigDecimal PDT_EQUITY_THRESHOLD = new BigDecimal("25000");
 
   /**
-   * Counter name for the {@code options_buying_power}-absent fallback to raw {@code buying_power}.
-   */
-  static final String BUYING_POWER_FALLBACK_COUNTER_NAME = "alpaca.pretrade.buying_power.fallback";
-
-  /**
    * Counter name for a duplicate {@code client_order_id} 422 (no {@code existing_order_id}) that
    * was resolved to a LIVE order via the by-client-order-id lookup → {@code alreadyExisted=true}.
    */
@@ -115,7 +110,6 @@ public class AlpacaPaperBroker implements OptionsBroker {
 
   private final RestClient client;
   private final ObjectMapper mapper;
-  private final Counter buyingPowerFallbackCounter;
   private final Counter duplicateCidResolvedCounter;
   private final Counter duplicateCidRethrowCounter;
 
@@ -123,12 +117,6 @@ public class AlpacaPaperBroker implements OptionsBroker {
       RestClient alpacaRestClient, ObjectMapper objectMapper, MeterRegistry meterRegistry) {
     this.client = alpacaRestClient;
     this.mapper = objectMapper;
-    this.buyingPowerFallbackCounter =
-        Counter.builder(BUYING_POWER_FALLBACK_COUNTER_NAME)
-            .description(
-                "Number of pre-trade checks that fell back to raw buying_power because Alpaca "
-                    + "omitted options_buying_power (looser-than-intended funding gate).")
-            .register(meterRegistry);
     this.duplicateCidResolvedCounter =
         Counter.builder(DUPLICATE_CID_RESOLVED_COUNTER_NAME)
             .description(
@@ -693,17 +681,21 @@ public class AlpacaPaperBroker implements OptionsBroker {
    * margin_sufficient} for the orchestrator's opt-in risk gate.
    *
    * <ul>
-   *   <li>{@code buying_power} ← {@code options_buying_power}, falling back to {@code buying_power}
-   *       when the options field is absent. A 200 carrying neither is a protocol breach → fail
-   *       closed with {@code BrokerProtocolError}.
+   *   <li>{@code buying_power} ← the account's available {@code cash} (the cash-affordability
+   *       basis), NOT margin/options buying power. On a Reg-T margin account {@code
+   *       options_buying_power} is 2-4x the account's actual cash, so gating on it would admit an
+   *       order the account cannot fund with cash and lever it past its settled balance. A 200 that
+   *       omits {@code cash} is a protocol breach → fail closed with {@code BrokerProtocolError}
+   *       (never a fallback to buying_power). {@code options_buying_power} / {@code buying_power}
+   *       are logged for observability only and do not drive the decision.
    *   <li>{@code pdt_status} ← {@code BLOCKED} only when the account is flagged {@code
    *       pattern_day_trader}, has used {@code daytrade_count >= 3} day trades (the regulatory
    *       sub-$25k limit), AND equity is below $25,000; otherwise {@code OK}. {@code FLAGGED} is
    *       intentionally not emitted — the risk gate treats it as a non-gating warning, and an
    *       under-limit flagged account is allowed to keep trading.
    *   <li>{@code margin_sufficient} ← false when the requested {@code estimated_notional} exceeds
-   *       the available buying power (options buying power already reflects the account {@code
-   *       multiplier}); true otherwise.
+   *       the available {@code cash}; true otherwise. Gating on cash (not the multiplier-inflated
+   *       buying power) prevents a margin account from levering past its cash.
    * </ul>
    *
    * <p>{@code allowed} is always true on a successful read — the field-level signals (buying power,
@@ -716,28 +708,32 @@ public class AlpacaPaperBroker implements OptionsBroker {
   public PreTradeCheckResult preTradeCheck(PreTradeCheckRequest request) {
     AlpacaAccountResponse acct = fetchAccount();
 
-    BigDecimal buyingPower;
-    if (acct.optionsBuyingPower() != null) {
-      buyingPower = acct.optionsBuyingPower();
-    } else {
-      // Fallback: Alpaca normally always returns options_buying_power once options are enabled.
-      // Raw buying_power on a Reg-T margin account can be 2-4x the correct options figure, so this
-      // path yields a looser-than-intended gate. Log a WARN for observability.
-      log.warn(
-          "Alpaca /v2/account omitted options_buying_power; falling back to raw buying_power for "
-              + "the pre-trade gate. On a Reg-T margin account this can be 2-4x the correct options "
-              + "buying power → a looser-than-intended margin check.");
-      buyingPowerFallbackCounter.increment();
-      buyingPower = acct.buyingPower();
-    }
-    if (buyingPower == null) {
+    // The affordability basis is AVAILABLE CASH, not margin/options buying power. On a Reg-T margin
+    // account options_buying_power (and raw buying_power) can be 2-4x the account's actual cash;
+    // gating on those would admit an order the account cannot fund with cash and lever the account
+    // past its settled balance. Cash also keeps the CHECK consistent with how we SIZE (the position
+    // sizer uses capital_source=account_cash).
+    BigDecimal cash = acct.cash();
+    if (cash == null) {
+      // Fail closed: a 200 that omits `cash` cannot establish the affordability basis. Never fall
+      // back to buying_power — that reintroduces the margin-lever the gate exists to prevent.
       throw ApplicationFailure.newNonRetryableFailure(
-          "Alpaca /v2/account returned neither options_buying_power nor buying_power",
-          "BrokerProtocolError");
+          "Alpaca /v2/account returned null/missing cash", "BrokerProtocolError");
+    }
+
+    // Observability only: log the margin-vs-cash gap the gate is intentionally ignoring
+    // (options_buying_power / buying_power can be 2-4x cash on a Reg-T account). These figures do
+    // NOT drive the decision.
+    if (log.isDebugEnabled()) {
+      log.debug(
+          "pre-trade gate basis=cash cash={} options_buying_power={} buying_power={}",
+          cash,
+          acct.optionsBuyingPower(),
+          acct.buyingPower());
     }
 
     BigDecimal notional = request.getEstimatedNotional();
-    boolean marginSufficient = notional == null || buyingPower.compareTo(notional) >= 0;
+    boolean marginSufficient = notional == null || cash.compareTo(notional) >= 0;
 
     PreTradeCheckResult.PdtStatus pdtStatus =
         isPdtBlocked(acct)
@@ -747,7 +743,8 @@ public class AlpacaPaperBroker implements OptionsBroker {
     PreTradeCheckResult r = new PreTradeCheckResult();
     r.setSchemaVersion(1L);
     r.setAllowed(true);
-    r.setBuyingPower(buyingPower);
+    // The buying_power contract field now carries the cash-affordability basis (available cash).
+    r.setBuyingPower(cash);
     r.setPdtStatus(pdtStatus);
     r.setMarginSufficient(marginSufficient);
     return r;
