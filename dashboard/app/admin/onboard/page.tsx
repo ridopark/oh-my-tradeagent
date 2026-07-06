@@ -25,12 +25,6 @@ const ENABLE_ENABLED = process.env.OPERATOR_STRATEGY_ENABLE_ENABLED === "true";
 // its own flag (plus dashboard.writer.enabled) is on, so step 4 degrades gracefully even if this is set
 // ahead of the backend.
 const INVITE_ENABLED = process.env.OPERATOR_TENANT_INVITE_ENABLED === "true";
-// Dark-by-default UI gate for the LIVE onboarding path (broker_target=alpaca-live + activate-live
-// step). Unset/anything-else => the form is paper-only, byte-for-byte the prior flow. Even with this
-// "true" the underlying gateway routes are themselves dark: enable needs operator.strategy-enable.enabled
-// and the Phase-1 per-target arm-guard; activate-live needs operator.activation.enabled — each 404s
-// until on, so the live steps degrade gracefully. This arms REAL money — keep it off until cutover.
-const LIVE_ONBOARD_ENABLED = process.env.OPERATOR_LIVE_ONBOARD_ENABLED === "true";
 // Independent UI kill-switch for step 3b (activate-live) — the highest-stakes, real-money action.
 // Same flag the tenants-page ActivateButton reads; the activate-live route is itself dark
 // (operator.activation.enabled → 404) until on, so step 3b degrades gracefully. Keep off until cutover.
@@ -43,52 +37,82 @@ const DEFAULT_WS_URL = "wss://paper-api.alpaca.markets/stream";
 const LIVE_BASE_URL = "https://api.alpaca.markets";
 const LIVE_WS_URL = "wss://api.alpaca.markets/stream";
 
-// Minimal paper StrategyConfig template. tenant_id/strategy_id are injected server-side from the
-// form (so they always match the create path); enabled:false creates the tenant dormant.
-const DEFAULT_CONFIG = JSON.stringify(
-  {
-    schema_version: 1,
-    broker_target: "alpaca-paper",
-    author_whitelist: [],
-    max_signal_age_bto_secs: 300,
-    max_signal_age_stc_secs: 300,
-    max_positions: 5,
-    capital_weight: 1.0,
-    min_contracts: 1,
-    max_contracts: 10,
-    enabled: false,
-  },
-  null,
-  2,
-);
-
-// LIVE StrategyConfig template. Carries the three live-required invariants the activate-live gate
-// (LiveActivationWorkflow / StrategyConfigInvariants.validateLiveRequiredGates) enforces, so the
-// later activation passes: daily_loss_threshold>0, notional_cap_pct_of_capital_base set, and
-// capital_source=account_cash (sizes a small real account from its own cash, never the static $100k
-// global). Also defaults pre_trade_check_enabled=true so the buying-power / PDT / margin pre-trade
-// gate is ARMED for real money (it is opt-in: null/false silently disables it). Defaults are
-// conservative and operator-editable before create; enabled:false stays dormant.
-const LIVE_CONFIG = JSON.stringify(
-  {
-    schema_version: 1,
-    broker_target: "alpaca-live",
-    author_whitelist: [],
-    max_signal_age_bto_secs: 300,
-    max_signal_age_stc_secs: 300,
-    max_positions: 5,
-    capital_weight: 1.0,
-    min_contracts: 1,
-    max_contracts: 10,
-    capital_source: "account_cash",
-    daily_loss_threshold: 250,
-    notional_cap_pct_of_capital_base: 0.8,
-    pre_trade_check_enabled: true,
-    enabled: false,
-  },
-  null,
-  2,
-);
+// StrategyConfig template. Mirrors prod_real's production strategy config so a new tenant starts from
+// the same battle-tested defaults, differing ONLY in broker_target (alpaca-paper vs alpaca-live).
+// tenant_id/strategy_id are injected server-side from the form (so they always match the create path);
+// enabled:false creates the tenant dormant. Three prod_real fields are DELIBERATELY OMITTED so this is
+// a safe template: broker_account_id (prod_real's real account 847309116 — would pin every new tenant
+// to it and fail the R-6.5 account-uniqueness check; the operator supplies the account per-tenant via
+// the keys step), alert_webhook_url (prod_real's private Discord webhook — a live secret that must
+// never live in source), and tenant_id/strategy_id (the form injects these). The live variant already
+// carries the activate-live gate's required invariants (daily_loss_threshold>0,
+// notional_cap_pct_of_capital_base set, capital_source=account_cash) so later activation passes.
+const prodConfig = (brokerTarget: string) =>
+  JSON.stringify(
+    {
+      schema_version: 1,
+      broker_target: brokerTarget,
+      author_whitelist: ["TradingTheTrend", "Edtrader", "TB22", "beendoubleyou", "ridopark"],
+      skip_avg: true,
+      max_positions: 5,
+      min_contracts: 1,
+      max_contracts: 50,
+      capital_source: "account_cash",
+      capital_weight: 0.2,
+      exit_floor_abs: 0.05,
+      exit_floor_pct: 0.5,
+      expiry_day_floor: 0.01,
+      max_slippage_abs: 0.05,
+      max_slippage_pct: 0.05,
+      trail_on_partial: false,
+      eod_force_flatten: false,
+      exit_reprice_tick: 0.05,
+      exit_reprice_steps: 3,
+      force_close_0dte_et: "14:45",
+      reset_cooldown_secs: 60,
+      daily_loss_threshold: 2500.0,
+      default_stc_fraction: 0.3,
+      flatten_lead_minutes: 30,
+      pending_ttl_live_secs: 30,
+      pending_ttl_paper_secs: 90,
+      max_signal_age_bto_secs: 30,
+      max_signal_age_stc_secs: 60,
+      min_partial_qty_behavior: "skip",
+      bto_price_move_reject_pct: 0.1,
+      notional_cap_pct_of_capital_base: 0.8,
+      // Arm the pre-trade affordability gate for new tenants (deliberately ON, unlike prod_real's
+      // current config which leaves it off). The gate verifies the account can afford the entry
+      // against AVAILABLE CASH (not margin buying power) before submitting. Opt-in: null/false disables.
+      pre_trade_check_enabled: true,
+      partial_fractions: {
+        out: 1.0,
+        half: 0.5,
+        trim: 0.25,
+        close: 1.0,
+        third: 0.33,
+        "sl hit": 1.0,
+        "all out": 1.0,
+        cutting: 1.0,
+        dumping: 1.0,
+        partial: 0.3,
+        "half out": 0.5,
+        "stop hit": 1.0,
+        "two thirds": 0.67,
+        "stopped out": 1.0,
+        "holding most": 0.2,
+        "keeping half": 0.5,
+        "taking the l": 1.0,
+        "swinging most": 0.25,
+        "taking profit": 1.0,
+        "keeping stop tight": 0.9,
+      },
+      enabled: false,
+    },
+    null,
+    2,
+  );
+const DEFAULT_CONFIG = prodConfig("alpaca-paper");
+const LIVE_CONFIG = prodConfig("alpaca-live");
 
 export default async function OnboardPage() {
   const session = await auth();
@@ -121,6 +145,17 @@ export default async function OnboardPage() {
     config.tenant_id = tenant;
     config.strategy_id = strategy;
     config.schema_version ??= 1;
+    // Per-tenant Discord alert webhook — set from the dedicated form field (overrides anything in the
+    // textarea, same discipline as the injected ids). Blank => leave the key absent so the backend
+    // falls back to the global/default alert channel. Light guard: a non-blank value must be https://
+    // (mirrors the ID_RE/EMAIL_RE 400s above); anything else is a client error.
+    const alertWebhookUrl = String(formData.get("alert_webhook_url") ?? "").trim();
+    if (alertWebhookUrl) {
+      if (!alertWebhookUrl.startsWith("https://")) {
+        return { ok: false, status: 400 };
+      }
+      config.alert_webhook_url = alertWebhookUrl;
+    }
     const r = await createTenant(tenant, strategy, config);
     return { ok: r.ok, status: r.status, createdVersion: r.createdVersion };
   }
@@ -217,10 +252,8 @@ export default async function OnboardPage() {
         <p className="mb-6 text-sm text-slate-400">
           Data-only onboarding: create a tenant&apos;s first strategy config, paste and verify its
           broker keys, then enable the strategy (unlocks only after the keys verify). All steps are
-          operator-scoped and dark-gated.
-          {LIVE_ONBOARD_ENABLED
-            ? " Pick paper or live below — the live path additionally activates real-money trading (a deliberate, gated step)."
-            : " This phase targets paper accounts only — arming real money is a separate, gated step."}
+          operator-scoped and dark-gated. Pick paper or live below — the live path additionally
+          activates real-money trading (a deliberate, separately gated step).
         </p>
 
         <OnboardForm
@@ -228,7 +261,6 @@ export default async function OnboardPage() {
           credentialEnabled={CREDENTIAL_ENABLED}
           enableEnabled={ENABLE_ENABLED}
           inviteEnabled={INVITE_ENABLED}
-          liveOnboardEnabled={LIVE_ONBOARD_ENABLED}
           activateEnabled={ACTIVATION_ENABLED}
           defaultConfig={DEFAULT_CONFIG}
           defaultBaseUrl={DEFAULT_BASE_URL}

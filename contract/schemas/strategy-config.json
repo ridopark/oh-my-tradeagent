@@ -372,6 +372,10 @@
       "type": "integer",
       "minimum": 0,
       "description": "Watchlist-trigger EOD entry cutoff: refuse to open a new position when fewer than this many minutes remain until the strategy's close/flatten time (force_close_eod_et if set, else the 16:00 ET market close). WatchlistTriggerWorkflowImpl.fire rejects with reason=too_close_to_eod and the leg completes with NO order (outcome=eod_skip), so a late breakout cannot open a lot that cannot be flattened before the bell. Opt-in: null/absent disables the cutoff. getVersion-gated (watchlist-eod-entry-guard-v1)."
+    },
+    "alert_webhook_url": {
+      "type": "string",
+      "description": "Per-strategy Discord alert webhook URL (order-execution/fill/broker-rejection alerts + daily digest). SAFE field class (plaintext, non-secret, operator-editable). Read by orchestrator TenantWebhookResolver via config->>'alert_webhook_url'; null/absent => falls back to the ALERT_DISCORD_WEBHOOK_URLS env map then the global default."
     }
   }
 }
