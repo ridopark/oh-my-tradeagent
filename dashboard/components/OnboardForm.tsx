@@ -171,6 +171,7 @@ export function OnboardForm({
   enableEnabled,
   inviteEnabled,
   liveOnboardEnabled,
+  activateEnabled,
   defaultConfig,
   defaultBaseUrl,
   defaultWsUrl,
@@ -188,6 +189,7 @@ export function OnboardForm({
   enableEnabled: boolean;
   inviteEnabled: boolean;
   liveOnboardEnabled: boolean;
+  activateEnabled: boolean;
   defaultConfig: string;
   defaultBaseUrl: string;
   defaultWsUrl: string;
@@ -563,12 +565,15 @@ export function OnboardForm({
           <form action={submitActivate} onSubmit={() => setActivateResult(null)}>
             <button
               type="submit"
-              disabled={activating || idsMissing || !strategyArmed}
+              disabled={!activateEnabled || activating || idsMissing || !strategyArmed}
               className="rounded border border-amber-500/60 bg-amber-600/20 px-3 py-1.5 text-sm font-medium text-amber-300 transition-colors hover:bg-amber-600/30 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {activating ? "Activating…" : "Activate live"}
             </button>
-            {!strategyArmed && (
+            {!activateEnabled && (
+              <p className="mt-2 text-xs text-slate-500">Live activation not enabled (read-only).</p>
+            )}
+            {activateEnabled && !strategyArmed && (
               <p className="mt-2 text-xs text-amber-300/60">Enable the strategy first (step 3).</p>
             )}
           </form>

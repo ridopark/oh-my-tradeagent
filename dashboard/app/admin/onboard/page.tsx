@@ -31,6 +31,10 @@ const INVITE_ENABLED = process.env.OPERATOR_TENANT_INVITE_ENABLED === "true";
 // and the Phase-1 per-target arm-guard; activate-live needs operator.activation.enabled — each 404s
 // until on, so the live steps degrade gracefully. This arms REAL money — keep it off until cutover.
 const LIVE_ONBOARD_ENABLED = process.env.OPERATOR_LIVE_ONBOARD_ENABLED === "true";
+// Independent UI kill-switch for step 3b (activate-live) — the highest-stakes, real-money action.
+// Same flag the tenants-page ActivateButton reads; the activate-live route is itself dark
+// (operator.activation.enabled → 404) until on, so step 3b degrades gracefully. Keep off until cutover.
+const ACTIVATION_ENABLED = process.env.OPERATOR_ACTIVATION_ENABLED === "true";
 
 // Paper broker endpoints — the default targets. Live arming rides the separate LIVE mode below.
 const DEFAULT_BASE_URL = "https://paper-api.alpaca.markets";
@@ -222,6 +226,7 @@ export default async function OnboardPage() {
           enableEnabled={ENABLE_ENABLED}
           inviteEnabled={INVITE_ENABLED}
           liveOnboardEnabled={LIVE_ONBOARD_ENABLED}
+          activateEnabled={ACTIVATION_ENABLED}
           defaultConfig={DEFAULT_CONFIG}
           defaultBaseUrl={DEFAULT_BASE_URL}
           defaultWsUrl={DEFAULT_WS_URL}
