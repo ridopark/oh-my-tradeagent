@@ -252,7 +252,7 @@ const CONFIG_FIELDS: ConfigField[] = [
     field: "pre_trade_check_enabled",
     what: "An opt-in pre-trade affordability gate checked before submitting an entry.",
     effect:
-      "When true, the order is checked against AVAILABLE CASH (not margin buying power); it is rejected (PRE_TRADE_CHECK_FAILED) if buying power < notional, PDT is blocked, or margin is insufficient. null/false disables the gate.",
+      "When true, before submitting an entry the order is checked against the account's AVAILABLE CASH (not margin buying power) — the entry is rejected (PRE_TRADE_CHECK_FAILED) when cash is less than the order's notional. null/false disables the gate.",
     example:
       "cash=$1,000 but the order needs $2,000 → the entry is rejected (PRE_TRADE_CHECK_FAILED).",
   },
