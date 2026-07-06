@@ -33,7 +33,7 @@ class PreTradeCheckResult(BaseModel):
     """
     buying_power: confloat(ge=0.0)
     """
-    Account buying power in dollars at the moment of the check. risk-svc rejects when buying_power < estimated_notional.
+    The broker's cash-affordability basis in dollars at the moment of the check: the funds actually available to fund the order, NOT margin/options buying power. For Alpaca this is the account's available cash, so a margin account (whose options_buying_power is 2-4x cash) cannot lever past its cash. risk-svc rejects when buying_power < estimated_notional.
     """
     pdt_status: PdtStatus
     """
