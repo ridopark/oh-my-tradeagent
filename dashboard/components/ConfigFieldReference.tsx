@@ -252,17 +252,17 @@ const CONFIG_FIELDS: ConfigField[] = [
     field: "pre_trade_check_enabled",
     what: "An opt-in pre-trade affordability gate checked before submitting an entry.",
     effect:
-      "When true, before submitting an entry the order is checked against the account's AVAILABLE CASH (not margin buying power) — the entry is rejected (PRE_TRADE_CHECK_FAILED) when cash is less than the order's notional. null/false disables the gate.",
+      "When true, before submitting an entry the order is checked against the account's AVAILABLE CASH (not margin buying power) — the entry is rejected (PRE_TRADE_CHECK_FAILED) when cash is less than the order's notional. The same rejection also covers a broker PDT block (no longer applicable since the PDT rule ended) and a margin-insufficient signal. null/false disables the gate.",
     example:
       "cash=$1,000 but the order needs $2,000 → the entry is rejected (PRE_TRADE_CHECK_FAILED).",
   },
   {
     field: "alert_webhook_url",
-    what: "The tenant's own Discord webhook URL for alerts and the daily digest. This is the ONE listed field you do NOT type into the JSON above — set it in the dedicated “Alert webhook URL” field in this form (Step 1). It is not a strategy-config JSON key, so adding it to the JSON is rejected on create.",
+    what: "The tenant's own Discord webhook URL for trade alerts (order fills, broker rejections) and the daily digest. It is a valid config field, but the recommended way to set it is the dedicated “Alert webhook URL” field in this form (Step 1) — that keeps a tenant-specific value out of a shared/checked-in JSON template.",
     effect:
-      "Set it in the “Alert webhook URL” form field (Step 1), which injects it on create. Order-execution / fill / broker-rejection alerts and the daily digest then post to that Discord channel. Left blank, they fall back to the global default channel.",
+      "Set it via the “Alert webhook URL” form field (recommended) or directly in the config JSON — either way it persists to this tenant's config. Order-execution / fill / broker-rejection alerts and the daily digest then post to that Discord channel. Left blank, they fall back to the global default channel.",
     example:
-      "Paste the tenant's webhook in the “Alert webhook URL” field → its fills and rejections post to that Discord channel; leave it blank → the global default channel. (No JSON snippet — this field is not typed into the config.)",
+      "Paste the tenant's webhook in the “Alert webhook URL” field → its fills and rejections post to that Discord channel; leave it blank → the global default channel.",
   },
   {
     field: "enabled",
