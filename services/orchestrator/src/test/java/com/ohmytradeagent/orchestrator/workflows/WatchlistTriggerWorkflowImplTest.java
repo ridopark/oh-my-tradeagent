@@ -2,6 +2,8 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
@@ -468,6 +470,46 @@ class WatchlistTriggerWorkflowImplTest {
     String result = WorkflowStub.fromTyped(wf).getResult(String.class);
     assertThat(result).endsWith(":fired");
     verify(exec, times(1)).placeOrder(any());
+  }
+
+  // Phase 3 (Defect A) happy path: once FillDispatcherImpl routes the entry fill to THIS `/wl/...`
+  // leg (the exec-side fix), a fill arriving inside the TTL wakes `Workflow.await(ttl, () ->
+  // fillEvent != null)` immediately — the leg emits EntryFilled(outcome=FILLED, no recovery),
+  // starts the PositionWorkflow inline (OCC->wfId cache seeded), and NEVER reaches the timeout
+  // branch: cancelOrder is not called and no TriggerEntryUnfilled is emitted. This is the
+  // wake-on-fill behavior the broken routing denied in prod; the workflow-side predicate is the
+  // bare match copytrade already uses (one order per leg execution -> a bare match is sufficient,
+  // no broker_order_id correlation needed).
+  @Test
+  void fillWithinTtl_wakesAwait_startsPositionInline_noTimeoutBranch() throws Exception {
+    WatchlistTriggerWorkflow wf = newStub("wl-fill-wakes");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false));
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // live cross into band -> FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("3.15"))); // fill routed to THIS leg within the TTL
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+    verify(exec, times(1)).placeOrder(any());
+    // The await woke on the fill, so the timeout branch is never entered.
+    verify(exec, never()).cancelOrder(any());
+
+    // Happy-path EntryFilled (outcome=FILLED, NOT the cancel_on_filled recovery label).
+    AuditEvent filled = captureKind("EntryFilled");
+    assertThat(filled.getSubject()).containsEntry("outcome", "FILLED");
+    assertThat(filled.getSubject()).doesNotContainKey("recovery");
+    assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(5L);
+
+    // PositionWorkflow started inline -> OCC->wfId mapping seeded (no orphan waiting on recon).
+    verify(positionLookup, times(1))
+        .cachePositionMapping(eq("dev"), eq("watchlist-trigger-v1"), eq(OCC), anyString());
+
+    // No orphan hand-off: the leg did not fall through to TriggerEntryUnfilled.
+    ArgumentCaptor<AuditEvent> allAudits = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(allAudits.capture());
+    assertThat(allAudits.getAllValues()).noneMatch(e -> "TriggerEntryUnfilled".equals(e.getKind()));
   }
 
   // Finding #2: order placed but no fill arrives within the TTL -> the leg cancels the resting

@@ -18,9 +18,18 @@ import org.springframework.stereotype.Component;
  * (STC):
  *
  * <ul>
- *   <li><b>BTO fills</b> (intent_key does not contain {@code :exit:}): route to the {@code
- *       CopytradeSignalWorkflow} that placed the entry order, via {@link
- *       WorkflowIds#copytradeSignal(String, String, String)}.
+ *   <li><b>BTO fills</b> (intent_key does not contain {@code :exit:}): route to the entry workflow
+ *       that placed the order. Every entry intent_key is {@code <owning-workflow-id>:entry}. For a
+ *       <b>watchlist</b> leg (prefix carries {@code /wl/}) the owning id ({@code
+ *       t-{tenant}/s-{strategy}/wl/{et_date}/{ticker}/{C|P}}) can NOT be reconstructed from the
+ *       row's {@code signalId}, so the fill is routed by stripping the {@code :entry} suffix — the
+ *       same prefix-extraction used for exits. Without it the watchlist entry {@code onFill} lands
+ *       on a non-existent {@code /sig/...} id ({@link WorkflowNotFoundException}, dropped), so the
+ *       leg's {@code Workflow.await(ttl, () -> fillEvent != null)} never wakes on a real broker
+ *       fill and the lot stays unmanaged until the 5-minute recon sweep adopts it. For
+ *       <b>copytrade</b> (and any other entry) the dispatcher KEEPS its existing reconstruct
+ *       routing via {@link WorkflowIds#copytradeSignal(String, String, String)} — byte-identical to
+ *       the prior behaviour — so this change's blast radius is exactly the watchlist path.
  *   <li><b>STC fills</b> (intent_key contains {@code :exit:}): route to the {@code
  *       PositionWorkflow} that placed the exit order. The intent_key encodes the position workflow
  *       ID as its prefix — extract everything before the first {@code :exit:} marker. Without this
@@ -58,6 +67,23 @@ public class FillDispatcherImpl implements FillDispatcher {
    * dispatcher routes such fills to the PositionWorkflow instead of the CopytradeSignalWorkflow.
    */
   private static final String EXIT_INTENT_KEY_MARKER = ":exit:";
+
+  /**
+   * Suffix appended by every entry-order placer when constructing an entry intent key: {@code
+   * <owning-workflow-id>:entry} ({@code CopytradeSignalWorkflowImpl}, {@code
+   * WatchlistTriggerWorkflowImpl}). Stripping it recovers the owning workflow id. Used only for the
+   * watchlist routing branch; copytrade keeps its reconstruct path (see {@link
+   * #resolveWorkflowId}).
+   */
+  private static final String ENTRY_INTENT_KEY_MARKER = ":entry";
+
+  /**
+   * Marker segment identifying a {@code WatchlistTriggerWorkflow} leg id ({@code
+   * .../wl/{et_date}/{ticker}/{C|P}}). Only entry fills whose intent-key prefix carries this
+   * segment take the new prefix-strip routing; every other entry fill stays on the copytrade
+   * reconstruct path, so this change's blast radius is exactly the watchlist path.
+   */
+  private static final String WATCHLIST_ID_SEGMENT = "/wl/";
 
   private final OrderIntentJournal journal;
   private final WorkflowClient workflowClient;
@@ -169,6 +195,20 @@ public class FillDispatcherImpl implements FillDispatcher {
       // STC fill — intent_key prefix IS the position workflow ID by construction
       // (PositionWorkflowImpl: `Workflow.getInfo().getWorkflowId() + ":exit:" + signalId`).
       return intentKey.substring(0, marker);
+    }
+    // Entry (BTO) fill. Every entry intent_key is `<owning-workflow-id>:entry`. For a WATCHLIST leg
+    // the owning id (`.../wl/{et_date}/{ticker}/{C|P}`) can NOT be reconstructed from the row's
+    // signalId, so route by stripping the `:entry` suffix (endsWith, not indexOf — the prefix may
+    // itself contain the substring). Scoped strictly to `/wl/` prefixes so copytrade (and any other
+    // entry) keeps the byte-identical reconstruct routing below — a zero-regression guarantee for
+    // the real-money copytrade path. Note prefix-strip and reconstruct actually AGREE for copytrade
+    // (`copytradeSignal` is a pure concat of the same signalId), but branching avoids relying on
+    // that equivalence surviving any future signalId sanitization at the workflow-start site.
+    if (intentKey.endsWith(ENTRY_INTENT_KEY_MARKER)) {
+      String owner = intentKey.substring(0, intentKey.length() - ENTRY_INTENT_KEY_MARKER.length());
+      if (owner.contains(WATCHLIST_ID_SEGMENT)) {
+        return owner;
+      }
     }
     return WorkflowIds.copytradeSignal(order.tenantId(), order.strategyId(), order.signalId());
   }

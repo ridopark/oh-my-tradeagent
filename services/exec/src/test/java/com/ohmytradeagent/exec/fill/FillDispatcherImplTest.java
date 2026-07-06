@@ -218,6 +218,127 @@ class FillDispatcherImplTest {
     assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(1.0);
   }
 
+  // Realistic copytrade ENTRY intent_key: `<CopytradeSignalWorkflow-id>:entry`
+  // (CopytradeSignalWorkflowImpl builds `Workflow.getInfo().getWorkflowId() + ":entry"`).
+  private static final String COPYTRADE_ENTRY_INTENT_KEY = "t-dev/s-copytrade-v1/sig/sig-42:entry";
+
+  private static final JournaledOrder COPYTRADE_ENTRY_ROW =
+      new JournaledOrder(
+          COPYTRADE_ENTRY_INTENT_KEY,
+          "sig-42",
+          "dev",
+          "copytrade-v1",
+          "alpaca-paper",
+          "ck-42",
+          "SPY   260519C00737000",
+          "BUY",
+          5L,
+          new BigDecimal("0.84"),
+          OrderState.SUBMITTED,
+          "brk-42",
+          OffsetDateTime.parse("2026-05-19T17:08:00Z"),
+          OffsetDateTime.parse("2026-05-19T17:08:01Z"),
+          OffsetDateTime.parse("2026-05-19T17:08:01Z"),
+          null,
+          null,
+          null,
+          null,
+          null,
+          1L);
+
+  // Realistic watchlist ENTRY intent_key: `<WatchlistTriggerWorkflow leg-id>:entry`
+  // (WatchlistTriggerWorkflowImpl builds `Workflow.getInfo().getWorkflowId() + ":entry"`; the leg
+  // id is `t-{tenant}/s-{strategy}/wl/{et_date}/{ticker}/{C|P}`).
+  private static final String WATCHLIST_LEG_WF_ID = "t-dev/s-watchlist-v1/wl/2026-07-06/QQQ/C";
+  private static final String WATCHLIST_ENTRY_INTENT_KEY = WATCHLIST_LEG_WF_ID + ":entry";
+
+  private static final JournaledOrder WATCHLIST_ENTRY_ROW =
+      new JournaledOrder(
+          WATCHLIST_ENTRY_INTENT_KEY,
+          "wl-sig-9",
+          "dev",
+          "watchlist-v1",
+          "alpaca-paper",
+          "ck-wl-9",
+          "QQQ   260710C00725000",
+          "BUY",
+          5L,
+          new BigDecimal("1.20"),
+          OrderState.SUBMITTED,
+          "brk-wl-9",
+          OffsetDateTime.parse("2026-07-06T18:39:00Z"),
+          OffsetDateTime.parse("2026-07-06T18:39:01Z"),
+          OffsetDateTime.parse("2026-07-06T18:39:01Z"),
+          null,
+          null,
+          null,
+          null,
+          null,
+          1L);
+
+  private static final BrokerFillEvent WATCHLIST_ENTRY_FILL =
+      new BrokerFillEvent(
+          "brk-wl-9",
+          "ck-wl-9",
+          5L,
+          new BigDecimal("1.21"),
+          OffsetDateTime.parse("2026-07-06T18:39:55Z"),
+          BrokerFillEvent.Source.WS);
+
+  @Test
+  void dispatch_copytradeEntryIntentKey_routesToSignalWorkflow_reconstructUnchanged() {
+    // HARD REQUIREMENT 1 — copytrade non-regression. Even with the REALISTIC `:entry` intent_key
+    // (`t-dev/s-copytrade-v1/sig/sig-42:entry`) the dispatcher routes the entry fill to the
+    // reconstructed CopytradeSignalWorkflow id `t-dev/s-copytrade-v1/sig/sig-42` — byte-identical
+    // to the prior reconstruct routing. (Prefix-strip would yield the SAME string here, proving the
+    // two agree for copytrade; the dispatcher branches on `/wl/` so copytrade never leaves the
+    // reconstruct path regardless.)
+    when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(COPYTRADE_ENTRY_ROW));
+    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any()))
+        .thenReturn(true);
+
+    dispatcher.dispatch(FILL);
+
+    verify(journal).markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), eq(5L), any(), any());
+    verify(workflowClient).newUntypedWorkflowStub("t-dev/s-copytrade-v1/sig/sig-42");
+    verify(workflowClient, never()).newUntypedWorkflowStub(COPYTRADE_ENTRY_INTENT_KEY);
+    verify(workflowClient, never()).newUntypedWorkflowStub(WATCHLIST_LEG_WF_ID);
+    verify(workflowStub).signal(eq("onFill"), any());
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(1.0);
+  }
+
+  @Test
+  void dispatch_watchlistEntryIntentKey_routesToWatchlistLeg_notReconstructedSignalWorkflow() {
+    // Defect A fix: a watchlist entry fill must route to the `/wl/...` leg that placed it,
+    // recovered
+    // by stripping the `:entry` suffix — NOT to the reconstructed `/sig/...` id, which never
+    // matches
+    // a watchlist leg. Before the fix the onFill hit a non-existent `/sig/{signalId}` workflow and
+    // was dropped, so the leg's `Workflow.await(ttl, () -> fillEvent != null)` never woke on a real
+    // fill and the lot was orphaned until the 5-minute recon sweep adopted it.
+    when(journal.findByBrokerOrderId("brk-wl-9")).thenReturn(Optional.of(WATCHLIST_ENTRY_ROW));
+    when(journal.markFilled(eq(WATCHLIST_ENTRY_INTENT_KEY), anyLong(), any(), any()))
+        .thenReturn(true);
+
+    dispatcher.dispatch(WATCHLIST_ENTRY_FILL);
+
+    verify(journal).markFilled(eq(WATCHLIST_ENTRY_INTENT_KEY), eq(5L), any(), any());
+    verify(workflowClient).newUntypedWorkflowStub(WATCHLIST_LEG_WF_ID);
+    // NOT the reconstructed signal-workflow id (the pre-fix mis-route).
+    verify(workflowClient, never()).newUntypedWorkflowStub("t-dev/s-watchlist-v1/sig/wl-sig-9");
+    ArgumentCaptor<Object> arg = ArgumentCaptor.forClass(Object.class);
+    verify(workflowStub).signal(eq("onFill"), arg.capture());
+    assertThat(arg.getValue())
+        .isInstanceOfSatisfying(
+            FillSignalPayload.class,
+            p -> {
+              assertThat(p.getBrokerOrderId()).isEqualTo("brk-wl-9");
+              assertThat(p.getFilledQty()).isEqualTo(5L);
+              assertThat(p.getAvgFillPrice()).isEqualByComparingTo(new BigDecimal("1.21"));
+            });
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(1.0);
+  }
+
   @Test
   void dispatch_routesFillToOriginatingTenantsWorkflow_notAnotherTenants() {
     // Fleet enablement Phase 2 (per-tenant fill sockets): a fill arriving on tenant B's socket must
