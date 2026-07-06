@@ -40,6 +40,7 @@ import io.temporal.api.enums.v1.ParentClosePolicy;
 import io.temporal.common.RetryOptions;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.failure.CanceledFailure;
+import io.temporal.failure.TemporalFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.ExternalWorkflowStub;
@@ -88,6 +89,21 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // emits its own PositionSupersededByCorrection + the flatten kinds when it actions the signal.
   // Registered in AuditEventKinds.ALL_KINDS.
   private static final String KIND_BTO_CORRECTION_SUPERSEDED = "BtoCorrectionSuperseded";
+
+  // Phase 2 (PLAN-2026-07-06-pretrade-check-orchestrator-wiring): the top-level failure-audit kind.
+  // The 2026-07-06 incident: pre_trade_check_enabled=true with the orchestrator routability bean
+  // unwired made assertPreTradeCheckRoutable throw a non-retryable ApplicationFailure
+  // (PreTradeCheckMisconfigured) BEFORE any audit row was written. OrderFailureAlerter is
+  // audit-driven (fires AFTER an audit row), so 3 real prod_real BTOs black-holed with only
+  // "Signal received" on Discord and NO failure alert. This kind is emitted by process()'s
+  // top-level catch when the entry workflow fails non-retryably (the guard, the
+  // ExecActivitiesFactory
+  // invalid-target throw, or any other unhandled TemporalFailure), giving the misconfig a page
+  // BEFORE the workflow re-throws and stays FAILED. Pure observability — NOT a position-lifecycle
+  // event; registered in AuditEventKinds.ALL_KINDS ONLY, plus
+  // OrderFailureAlerter.DEFAULT_FAILURE_KINDS
+  // and application.yml's failure-kinds IMAGE default so it pages.
+  private static final String KIND_ENTRY_WORKFLOW_FAILED = "EntryWorkflowFailed";
 
   private static final String REASON_TTL_EXPIRED = "ttl_expired";
   // Issue: orphan-STC alerting. handleStc's stale Redis lookup can return a DEAD (terminal)
@@ -242,6 +258,15 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // and NOT already partially exited. Mirrors VERSION_LIVE_PROMOTION_GATE's read-once discipline.
   private static final String VERSION_BTO_CORRECTION_SUPERSEDE = "bto-correction-supersede-v1";
 
+  // Phase 2 (PLAN-2026-07-06-pretrade-check-orchestrator-wiring): gate the top-level failure-audit.
+  // Read UNCONDITIONALLY at the very top of process() (before any command) so the command stream is
+  // identical across versions. The new EntryWorkflowFailed logAudit is a NEW activity command on
+  // the
+  // failure path, so pre-fix in-flight histories (DEFAULT_VERSION) must replay byte-identically
+  // WITHOUT it — at DEFAULT_VERSION the catch re-throws WITHOUT emitting. All previously-FAILED
+  // workflows are terminal (never replay). Only v>=1 emits the audit.
+  private static final String VERSION_ENTRY_FAILURE_AUDIT = "entry-workflow-failure-audit-v1";
+
   // Edited-signal supersede (F1) correction window: a prior leg may be auto-superseded ONLY when
   // its
   // confirmed entry is within this window of the corrected signal's posted_at. A CODE CONSTANT by
@@ -319,6 +344,38 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   @Override
   public String process(CopytradeSignalPayload payload) {
+    // Phase 2 (PLAN-2026-07-06): read the failure-audit version marker UNCONDITIONALLY at the very
+    // top, BEFORE any command (the first command is the SignalReceived audit inside
+    // processInternal). This keeps the command stream identical across versions: a NEW execution
+    // records the marker then the SignalReceived audit; a pre-fix in-flight history (no marker)
+    // replays getVersion -> DEFAULT_VERSION with no marker command, then matches the SignalReceived
+    // audit. Only v>=1 emits the EntryWorkflowFailed audit on the failure path below.
+    int failureAuditVersion =
+        Workflow.getVersion(VERSION_ENTRY_FAILURE_AUDIT, Workflow.DEFAULT_VERSION, 1);
+    try {
+      return processInternal(payload);
+    } catch (CanceledFailure cf) {
+      // Temporal cancellation must propagate untouched (mirrors the dispatchAccountSnapshot /
+      // metrics-emit CanceledFailure carve-outs) — it is not a failure to alert on.
+      throw cf;
+    } catch (TemporalFailure e) {
+      // Genuine unhandled failure that terminates the workflow EXECUTION as FAILED: the
+      // PreTradeCheckMisconfigured guard throw (the 2026-07-06 incident), the ExecActivitiesFactory
+      // invalid-broker_target throw, or an unhandled ActivityFailure/ChildWorkflowFailure. Emit an
+      // alertable audit BEFORE re-throwing so the failure pages (OrderFailureAlerter is
+      // audit-driven and fires AFTER the audit row) — the workflow still FAILS (we only add
+      // visibility, never swallow). Plain RuntimeException/NPE is deliberately NOT caught: those
+      // are workflow-TASK failures (retried, non-terminal, commands discarded) whose existing loud
+      // retry behavior must be preserved — catching them would only enqueue a discarded audit each
+      // retry with no committed page.
+      if (failureAuditVersion >= 1) {
+        logAudit(payload, KIND_ENTRY_WORKFLOW_FAILED, entryFailureSubject(payload, e));
+      }
+      throw e;
+    }
+  }
+
+  private String processInternal(CopytradeSignalPayload payload) {
     // Issue #308: enrich the SignalReceived subject with the parsed signal fields so the Discord
     // signal-feed mirror (SignalFeedAlerter) can render a "received" message at the fastest point —
     // before any risk gates. Carries action/ticker/expiry/strike/right/price/author/posted_at from
@@ -1438,6 +1495,60 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         "price", str(payload.getPrice()),
         "author", str(payload.getAuthor()),
         "posted_at", str(payload.getPostedAt()));
+  }
+
+  /**
+   * Phase 2 (PLAN-2026-07-06): builds the {@code EntryWorkflowFailed} subject for the top-level
+   * failure-audit. Carries {@code signal_id} (so the page stitches to the "Signal received" message
+   * already on Discord) and the failure forensics as {@code reason_code} / {@code reason_detail} —
+   * the exact shape {@link com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter}'s default
+   * order-failure embed reads ({@code reasonOf} -> "reason_code — reason_detail"). For an {@link
+   * ApplicationFailure} (the guard's {@code PreTradeCheckMisconfigured} throw, the
+   * ExecActivitiesFactory invalid-target throw) the {@code reason_code} is the failure type and
+   * {@code reason_detail} the original message; any other {@link TemporalFailure} falls back to the
+   * class simple-name + message. Every value is rendered deterministically (this runs only on the
+   * terminal failure path, so it commits once with the workflow's FAILED completion).
+   */
+  private static Map<String, Object> entryFailureSubject(
+      CopytradeSignalPayload payload, TemporalFailure t) {
+    // assertPreTradeCheckRoutable is an ACTIVITY, so its non-retryable ApplicationFailure surfaces
+    // at the workflow boundary wrapped in an ActivityFailure (t here). Unwrap the cause chain to
+    // the
+    // ApplicationFailure so reason_code carries the meaningful type (PreTradeCheckMisconfigured),
+    // not the generic wrapper. failure_type keeps the top-level type for forensics.
+    ApplicationFailure app = findApplicationFailure(t);
+    String reasonCode;
+    String reasonDetail;
+    if (app != null) {
+      reasonCode = app.getType();
+      reasonDetail = app.getOriginalMessage();
+    } else {
+      reasonCode = t.getClass().getSimpleName();
+      reasonDetail = t.getMessage();
+    }
+    return subject(
+        "signal_id",
+        payload.getSignalId(),
+        "reason_code",
+        reasonCode == null || reasonCode.isBlank() ? t.getClass().getSimpleName() : reasonCode,
+        "reason_detail",
+        reasonDetail == null ? "" : reasonDetail,
+        "failure_type",
+        t.getClass().getName(),
+        "outcome",
+        "FAILED");
+  }
+
+  /** Walks up to five cause levels looking for the underlying {@link ApplicationFailure}. */
+  private static ApplicationFailure findApplicationFailure(Throwable t) {
+    Throwable cur = t;
+    for (int i = 0; i < 5 && cur != null; i++) {
+      if (cur instanceof ApplicationFailure af) {
+        return af;
+      }
+      cur = cur.getCause();
+    }
+    return null;
   }
 
   /** Null-safe stringifier used to render the enriched SignalReceived subject deterministically. */

@@ -163,6 +163,16 @@ public final class AuditEventKinds {
           // a lifecycle event (the corrected leg's own entry rides EntryFilled/PositionEntered; the
           // superseded leg's close rides its PositionWorkflow flatten kinds). In ALL_KINDS only.
           "BtoCorrectionSuperseded",
+          // Phase 2 (PLAN-2026-07-06-pretrade-check-orchestrator-wiring): emitted by
+          // CopytradeSignalWorkflowImpl's top-level catch when the entry workflow fails
+          // non-retryably (the PreTradeCheckMisconfigured guard throw — the 2026-07-06 incident, or
+          // the ExecActivitiesFactory invalid-broker_target throw, or any other unhandled
+          // TemporalFailure) BEFORE re-throwing to keep the workflow FAILED. Gives an otherwise
+          // pre-audit black-holed failure a page (OrderFailureAlerter is audit-driven). Pure
+          // observability — NOT a position-lifecycle event: registered in ALL_KINDS ONLY, plus
+          // OrderFailureAlerter.DEFAULT_FAILURE_KINDS + application.yml's failure-kinds so it
+          // pages.
+          "EntryWorkflowFailed",
           // PositionWorkflowImpl
           "PositionEntered",
           "PositionNeverFilled",

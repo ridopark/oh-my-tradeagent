@@ -523,6 +523,65 @@ class OrderFailureAlerterTest {
             org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
+  // ---- Phase 2 (PLAN-2026-07-06-pretrade-check-orchestrator-wiring): entry-workflow-failure page
+  // --
+
+  @Test
+  void entryWorkflowFailedRendersDefaultBtoFailureEmbed_withReasonAndSignalId_phase2() {
+    // The top-level failure-audit uses the DEFAULT order-failure embed (NOT the orphan/flatten
+    // shape). Its subject carries signal_id + reason_code/reason_detail so the page stitches to the
+    // "Signal received" message already on Discord and shows the misconfig forensics.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, "EntryWorkflowFailed", true);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("signal_id", "111:0");
+    subject.put("reason_code", "PreTradeCheckMisconfigured");
+    subject.put(
+        "reason_detail",
+        "pre_trade_check enabled for tenant=prod_real strategy=copytrade-v1 but only the permissive"
+            + " default PreTradeCheckActivity bean is wired");
+    subject.put("failure_type", "io.temporal.failure.ApplicationFailure");
+    subject.put("outcome", "FAILED");
+    AuditEvent event = event("EntryWorkflowFailed", "wf-entry-fail-1", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("BTO (entry)");
+    assertThat(embed.color()).isEqualTo(15548997); // red
+    assertThat(field(embed, "kind")).isEqualTo("EntryWorkflowFailed");
+    assertThat(field(embed, "reason"))
+        .contains("PreTradeCheckMisconfigured", "only the permissive default");
+    assertThat(field(embed, "signal_id")).isEqualTo("111:0");
+    assertThat(embed.footer()).contains("wf-entry-fail-1");
+  }
+
+  @Test
+  void entryWorkflowFailedShipsInImageDefaultAndApplicationYml_phase2() throws Exception {
+    // The page must ship via the IMAGE default (DEFAULT_FAILURE_KINDS + application.yml), NOT via
+    // ALERT_DISCORD_FAILURE_KINDS env (unset on homelab, not applied by deploy.yml) — else the
+    // 2026-07-06 silent black-hole (3 real prod_real BTOs, only "Signal received", no alert) can
+    // silently reopen. Reads the real private constant + the packaged application.yml.
+    java.lang.reflect.Field f = OrderFailureAlerter.class.getDeclaredField("DEFAULT_FAILURE_KINDS");
+    f.setAccessible(true);
+    String imageDefault = (String) f.get(null);
+    assertThat(imageDefault).contains("EntryWorkflowFailed");
+
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter = new OrderFailureAlerter(webhook, RESOLVER, imageDefault, true);
+    assertThat(alerter.failureKinds()).contains("EntryWorkflowFailed");
+
+    String appYml =
+        new String(
+            OrderFailureAlerterTest.class.getResourceAsStream("/application.yml").readAllBytes(),
+            java.nio.charset.StandardCharsets.UTF_8);
+    assertThat(appYml)
+        .as("application.yml alert.discord.failure-kinds default must mirror EntryWorkflowFailed")
+        .contains("EntryWorkflowFailed");
+  }
+
   private static WebhookEmbed capture(WebhookClient webhook) {
     // Alerters now dispatch through postEmbedToUrl(resolvedUrl, embed).
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);

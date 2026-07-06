@@ -115,10 +115,19 @@ public class OrderFailureAlerter {
   // the
   // auto-cancel is never silent. application.yml's alert.discord.failure-kinds default mirrors
   // this.
+  // Phase 2 (PLAN-2026-07-06-pretrade-check-orchestrator-wiring): EntryWorkflowFailed MUST page —
+  // it
+  // is the top-level failure-audit CopytradeSignalWorkflowImpl emits when the entry workflow fails
+  // non-retryably (the PreTradeCheckMisconfigured guard, the 2026-07-06 incident) BEFORE
+  // re-throwing.
+  // Its whole reason to exist is to page a failure that previously black-holed with only a "Signal
+  // received" message. Shipped in the IMAGE default (NOT via ALERT_DISCORD_FAILURE_KINDS env, unset
+  // on homelab and not applied by deploy.yml) — relying on config would silently reopen the exact
+  // no-alert gap this closes. application.yml's alert.discord.failure-kinds default mirrors this.
   private static final String DEFAULT_FAILURE_KINDS =
       "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
           + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,"
-          + "BtoCorrectionSuperseded";
+          + "BtoCorrectionSuperseded,EntryWorkflowFailed";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 

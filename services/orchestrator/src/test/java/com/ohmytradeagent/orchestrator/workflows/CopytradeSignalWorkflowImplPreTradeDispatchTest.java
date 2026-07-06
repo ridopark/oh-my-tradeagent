@@ -1017,6 +1017,217 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     Mockito.verify(exec, Mockito.never()).placeOrder(any());
   }
 
+  // ----- Phase 2 (PLAN-2026-07-06): top-level failure-audit alert -----
+
+  /**
+   * Phase 2 reproduction of the 2026-07-06 incident: with {@code pre_trade_check_enabled=true} and
+   * only the permissive-default {@code PreTradeCheckActivity} bean wired, {@code
+   * assertPreTradeCheckRoutable} throws a non-retryable {@code PreTradeCheckMisconfigured} {@link
+   * ApplicationFailure} BEFORE any audit is written. The Phase 2 top-level catch must emit an
+   * alertable {@code EntryWorkflowFailed} audit (carrying {@code signal_id} + the misconfig
+   * forensics) AND still let the workflow FAIL (we add visibility, never swallow). Pre-Phase-2 this
+   * failure black-holed with only a "Signal received" Discord message and no page.
+   */
+  @Test
+  void process_emitsEntryWorkflowFailedAudit_andStillFails_whenPreTradeCheckMisconfigured_phase2() {
+    env.close();
+    TestWorkflowEnvironment localEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      Worker coreWorker = localEnv.newWorker(CORE_QUEUE);
+      coreWorker.registerWorkflowImplementationTypes(
+          CopytradeSignalWorkflowImpl.class, PositionWorkflowImpl.class);
+
+      RiskActivitiesImpl realRisk = realRiskWithPermissiveDefaultBean();
+      StrategyActivities localStrategy = Mockito.mock(StrategyActivities.class);
+      AuditActivities localAudit = Mockito.mock(AuditActivities.class);
+      ContractActivities localContract = Mockito.mock(ContractActivities.class);
+      ExecActivities localExec = Mockito.mock(ExecActivities.class);
+      PositionLookupActivities localPositionLookup = Mockito.mock(PositionLookupActivities.class);
+      MarketCalendarActivities localCalendar = Mockito.mock(MarketCalendarActivities.class);
+      when(localCalendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+      when(localCalendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
+
+      StrategyConfig cfg = configWithPreTradeEnabled();
+      when(localStrategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+
+      coreWorker.registerActivitiesImplementations(
+          localAudit, localStrategy, realRisk, localContract, localPositionLookup, localCalendar);
+
+      PreTradeCheckActivity noopPreTradeStub = request -> null;
+      Worker brokerWorker =
+          localEnv.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+      brokerWorker.registerActivitiesImplementations(localExec, noopPreTradeStub);
+      Worker mdWorker = localEnv.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
+      mdWorker.registerActivitiesImplementations(Mockito.mock(SubscribePremiumActivity.class));
+
+      localEnv.start();
+
+      CopytradeSignalWorkflow wf =
+          localEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  CopytradeSignalWorkflow.class,
+                  WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+
+      // Still FAILS — the workflow terminates FAILED with the non-retryable ApplicationFailure in
+      // its cause chain (we only added visibility).
+      assertThatThrownBy(() -> wf.process(btoPayload()))
+          .isInstanceOf(WorkflowFailedException.class)
+          .satisfies(
+              t -> {
+                ApplicationFailure af = unwrapApplicationFailure(t.getCause());
+                assertThat(af).isNotNull();
+                assertThat(af.getType()).isEqualTo("PreTradeCheckMisconfigured");
+                assertThat(af.isNonRetryable()).isTrue();
+              });
+
+      // AND the alertable EntryWorkflowFailed audit was emitted BEFORE the re-throw, carrying the
+      // signal_id (stitches to the Discord "Signal received") + the misconfig reason forensics.
+      ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+      verify(localAudit, atLeastOnce()).log(captor.capture());
+      AuditEvent failed =
+          captor.getAllValues().stream()
+              .filter(e -> "EntryWorkflowFailed".equals(e.getKind()))
+              .reduce((a, b) -> b)
+              .orElseThrow(() -> new AssertionError("expected an EntryWorkflowFailed audit"));
+      assertThat(failed.getSubject()).containsEntry("signal_id", "111:0");
+      assertThat(failed.getSubject()).containsEntry("reason_code", "PreTradeCheckMisconfigured");
+      assertThat(failed.getSubject()).containsEntry("outcome", "FAILED");
+      assertThat((String) failed.getSubject().get("reason_detail"))
+          .contains("dev")
+          .contains("copytrade-v1");
+      Mockito.verify(localExec, Mockito.never()).placeOrder(any());
+    } finally {
+      localEnv.close();
+    }
+  }
+
+  /**
+   * Phase 2 no-false-positive: a normal successful entry (order placed) must NOT emit an {@code
+   * EntryWorkflowFailed} audit — the top-level catch fires only on genuine unhandled failures.
+   */
+  @Test
+  void process_successPath_emitsNoEntryWorkflowFailedAudit_phase2() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setMarginSufficient(true);
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-K"));
+    env.start();
+
+    runWorkflow(btoPayload());
+
+    verify(exec).placeOrder(any());
+    verify(audit, Mockito.never())
+        .log(Mockito.argThat(e -> e != null && "EntryWorkflowFailed".equals(e.getKind())));
+  }
+
+  /**
+   * Phase 2 no-false-positive: a normal {@code SignalRejected} control-flow path (here: strategy
+   * disabled, which RETURNS rather than throwing) must NOT emit an {@code EntryWorkflowFailed}
+   * audit. Only genuine unhandled failures — not handled rejections — hit the top-level catch.
+   */
+  @Test
+  void process_signalRejectedPath_emitsNoEntryWorkflowFailedAudit_phase2() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setEnabled(false); // Phase 7 enable-gate: SignalRejected(STRATEGY_DISABLED), returns.
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    env.start();
+
+    runWorkflow(btoPayload());
+
+    AuditEvent rejected = capture("SignalRejected");
+    assertThat(rejected.getSubject()).containsEntry("reason_code", "STRATEGY_DISABLED");
+    verify(audit, Mockito.never())
+        .log(Mockito.argThat(e -> e != null && "EntryWorkflowFailed".equals(e.getKind())));
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+  }
+
+  /**
+   * Phase 2 CanceledFailure carve-out: workflow cancellation surfacing into {@code process()} must
+   * propagate untouched (mirrors the dispatchAccountSnapshot carve-out) and must NOT emit an {@code
+   * EntryWorkflowFailed} audit — cancellation is not a failure to alert on.
+   */
+  @Test
+  void process_canceledFailure_propagatesUnaudited_phase2() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(contract.resolve(any())).thenReturn(resolved());
+
+    PreTradeCheckActivity preTradeStub =
+        request -> {
+          PreTradeCheckResult r = new PreTradeCheckResult();
+          r.setSchemaVersion(1L);
+          r.setAllowed(true);
+          r.setBuyingPower(new BigDecimal("50000"));
+          r.setPdtStatus(PreTradeCheckResult.PdtStatus.OK);
+          r.setMarginSufficient(true);
+          return r;
+        };
+    AccountSnapshotActivity slowAccountStub =
+        request -> {
+          try {
+            Thread.sleep(60_000L);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          AccountSnapshotResult r = new AccountSnapshotResult();
+          r.setSchemaVersion(1L);
+          r.setCash(new BigDecimal("123456.78"));
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, preTradeStub, slowAccountStub);
+    env.start();
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+    WorkflowStub stub = WorkflowStub.fromTyped(wf);
+    stub.start(btoPayload());
+    env.sleep(Duration.ofSeconds(5));
+    stub.cancel();
+
+    assertThatThrownBy(() -> stub.getResult(Void.class))
+        .isInstanceOf(WorkflowFailedException.class);
+    // Cancellation re-throws untouched: no EntryWorkflowFailed page.
+    verify(audit, Mockito.never())
+        .log(Mockito.argThat(e -> e != null && "EntryWorkflowFailed".equals(e.getKind())));
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+  }
+
+  /**
+   * Phase 2 replay-stability pin: the failure-audit version marker id is load-bearing. Changing it
+   * after deploy re-introduces the nondeterminism the gate prevents. Mirrors the {@code
+   * VERSION_PRE_TRADE_DISPATCH} marker-string pin above.
+   */
+  @Test
+  void entryFailureAuditVersionIdIsStable_phase2() throws Exception {
+    Field marker =
+        CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_ENTRY_FAILURE_AUDIT");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("entry-workflow-failure-audit-v1");
+  }
+
   // ----- helpers -----
 
   /**
