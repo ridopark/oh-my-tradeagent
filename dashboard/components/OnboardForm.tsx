@@ -213,6 +213,9 @@ export function OnboardForm({
   // Non-secret account number (the pinned expected_account_id). Tracked in state ONLY to gate the
   // save button in live mode where it is required — it is NOT key material (MF-7 is about the secret).
   const [declaredAccount, setDeclaredAccount] = useState("");
+  // Per-tenant Discord alert webhook (optional). Starts EMPTY and is never pre-filled — a blank value
+  // means the tenant falls back to the global/default alert channel. Injected into the config on create.
+  const [alertWebhook, setAlertWebhook] = useState("");
 
   // Step 4 (invite) is independent — it has its own email input, not the shared tenant/strategy pair.
   const [inviteEmail, setInviteEmail] = useState("");
@@ -239,11 +242,13 @@ export function OnboardForm({
     setEnableResult(null);
     setActivateResult(null);
     setDeclaredAccount("");
+    setAlertWebhook("");
   }, [tenant, strategy, mode]);
 
   function submitCreate(formData: FormData) {
     formData.set("tenant_id", tenant);
     formData.set("strategy_id", strategy);
+    formData.set("alert_webhook_url", alertWebhook);
     startCreate(async () => setCreateResult(await createAction(formData)));
   }
 
@@ -390,6 +395,25 @@ export function OnboardForm({
             disabled={!createEnabled}
             spellCheck={false}
           />
+          <div className="mt-3">
+            <label className={labelCls} htmlFor="ob-alert-webhook">
+              Alert webhook URL (Discord)
+            </label>
+            <input
+              id="ob-alert-webhook"
+              className={inputCls}
+              type="url"
+              value={alertWebhook}
+              onChange={(e) => setAlertWebhook(e.target.value)}
+              placeholder="https://discord.com/api/webhooks/… (optional)"
+              disabled={!createEnabled}
+              autoComplete="off"
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Where THIS tenant&apos;s trade/order-execution alerts, broker rejections, and the daily
+              digest post. Leave blank to fall back to the global/default alert channel. Optional.
+            </p>
+          </div>
           <button
             type="submit"
             disabled={!createEnabled || creating || idsMissing}

@@ -141,6 +141,13 @@ export default async function OnboardPage() {
     config.tenant_id = tenant;
     config.strategy_id = strategy;
     config.schema_version ??= 1;
+    // Per-tenant Discord alert webhook — set from the dedicated form field (overrides anything in the
+    // textarea, same discipline as the injected ids). Blank => leave the key absent so the backend
+    // falls back to the global/default alert channel.
+    const alertWebhookUrl = String(formData.get("alert_webhook_url") ?? "").trim();
+    if (alertWebhookUrl) {
+      config.alert_webhook_url = alertWebhookUrl;
+    }
     const r = await createTenant(tenant, strategy, config);
     return { ok: r.ok, status: r.status, createdVersion: r.createdVersion };
   }
