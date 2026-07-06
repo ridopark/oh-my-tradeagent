@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
 
 // Dark-by-default UI gates, mirroring the api-gateway route flags. Unset/anything-else => that step
 // renders read-only. Even with these "true" each api-gateway route is itself dark (404s) until its
-// own flag is on, so the action degrades gracefully. Paper-only this phase (exec refuses -live).
+// own flag is on, so the action degrades gracefully. The LIVE path has its own gates (see below).
 const CREATE_ENABLED = process.env.OPERATOR_TENANT_CREATE_ENABLED === "true";
 const CREDENTIAL_ENABLED = process.env.OPERATOR_CREDENTIAL_WRITE_ENABLED === "true";
 // Mirrors the A1 backend `operator.strategy-enable.enabled` flag; the enable route itself 404s until
@@ -66,7 +66,9 @@ const DEFAULT_CONFIG = JSON.stringify(
 // (LiveActivationWorkflow / StrategyConfigInvariants.validateLiveRequiredGates) enforces, so the
 // later activation passes: daily_loss_threshold>0, notional_cap_pct_of_capital_base set, and
 // capital_source=account_cash (sizes a small real account from its own cash, never the static $100k
-// global). Defaults are conservative and operator-editable before create; enabled:false stays dormant.
+// global). Also defaults pre_trade_check_enabled=true so the buying-power / PDT / margin pre-trade
+// gate is ARMED for real money (it is opt-in: null/false silently disables it). Defaults are
+// conservative and operator-editable before create; enabled:false stays dormant.
 const LIVE_CONFIG = JSON.stringify(
   {
     schema_version: 1,
@@ -81,6 +83,7 @@ const LIVE_CONFIG = JSON.stringify(
     capital_source: "account_cash",
     daily_loss_threshold: 250,
     notional_cap_pct_of_capital_base: 0.8,
+    pre_trade_check_enabled: true,
     enabled: false,
   },
   null,
