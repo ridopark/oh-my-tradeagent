@@ -234,8 +234,9 @@ export function OnboardForm({
   // Any change of target identity or mode invalidates the in-session step pre-checks — never let a
   // prior tenant/strategy/mode's success gate a real-money action (Activate live) for a different
   // target. Resetting the step results re-locks the derived accountVerified/strategyArmed gates until
-  // the NEW identity actually completes create → creds → enable in-session. declaredAccount is
-  // tenant-specific, so it clears too. (Invite step 4 is independent and keeps its own email state.)
+  // the NEW identity actually completes create → creds → enable in-session. declaredAccount and
+  // alertWebhook are tenant-specific, so they clear too. (Invite step 4 is independent and keeps its
+  // own email state.)
   useEffect(() => {
     setCreateResult(null);
     setCredResult(null);

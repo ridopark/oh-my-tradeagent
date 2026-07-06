@@ -143,9 +143,13 @@ export default async function OnboardPage() {
     config.schema_version ??= 1;
     // Per-tenant Discord alert webhook — set from the dedicated form field (overrides anything in the
     // textarea, same discipline as the injected ids). Blank => leave the key absent so the backend
-    // falls back to the global/default alert channel.
+    // falls back to the global/default alert channel. Light guard: a non-blank value must be https://
+    // (mirrors the ID_RE/EMAIL_RE 400s above); anything else is a client error.
     const alertWebhookUrl = String(formData.get("alert_webhook_url") ?? "").trim();
     if (alertWebhookUrl) {
+      if (!alertWebhookUrl.startsWith("https://")) {
+        return { ok: false, status: 400 };
+      }
       config.alert_webhook_url = alertWebhookUrl;
     }
     const r = await createTenant(tenant, strategy, config);
