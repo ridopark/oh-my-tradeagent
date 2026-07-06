@@ -7,6 +7,7 @@ import { StrategySwitch } from "@/components/StrategySwitch";
 import { getStrategyConfig } from "@/lib/bff";
 import { postStrategyConfig } from "@/lib/apiGateway";
 import type { StrategyConfigResponse } from "@/lib/bff";
+import { CONFIG_FIELD_INFO } from "@/components/ConfigFieldReference";
 
 export const dynamic = "force-dynamic";
 
@@ -317,41 +318,69 @@ export default async function ConfigPage({
                         const editable =
                           WRITE_ENABLED && isEditableField(klass, kind);
                         const name = inputName(item.strategy_id, field);
+                        const info = CONFIG_FIELD_INFO[field];
 
                         return (
                           <li
                             key={field}
-                            className="flex flex-col gap-1 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+                            className="flex flex-col gap-2 px-3 py-2 text-sm"
                           >
-                            <div className="flex flex-wrap items-center gap-2">
-                              <label
-                                htmlFor={editable ? name : undefined}
-                                className="font-mono text-slate-200"
-                              >
-                                {field}
-                              </label>
-                              {badge && (
-                                <span
-                                  className={`rounded border px-1.5 py-0.5 text-xs ${badge.className}`}
+                            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <label
+                                  htmlFor={editable ? name : undefined}
+                                  className="font-mono text-slate-200"
                                 >
-                                  {badge.label}
-                                </span>
-                              )}
-                              {klass === "EXPOSURE" && editable && (
-                                <span className="text-xs text-slate-500">
-                                  tighten only
-                                </span>
-                              )}
+                                  {field}
+                                </label>
+                                {badge && (
+                                  <span
+                                    className={`rounded border px-1.5 py-0.5 text-xs ${badge.className}`}
+                                  >
+                                    {badge.label}
+                                  </span>
+                                )}
+                                {klass === "EXPOSURE" && editable && (
+                                  <span className="text-xs text-slate-500">
+                                    tighten only
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="sm:w-1/2 sm:max-w-md">
+                                <FieldValue
+                                  name={name}
+                                  value={value}
+                                  kind={kind}
+                                  editable={editable}
+                                />
+                              </div>
                             </div>
 
-                            <div className="sm:w-1/2 sm:max-w-md">
-                              <FieldValue
-                                name={name}
-                                value={value}
-                                kind={kind}
-                                editable={editable}
-                              />
-                            </div>
+                            {info && (
+                              <dl className="space-y-0.5 text-xs text-slate-400">
+                                <div>
+                                  <span className="font-medium text-slate-300">
+                                    What:{" "}
+                                  </span>
+                                  {info.what}
+                                </div>
+                                <div>
+                                  <span className="font-medium text-slate-300">
+                                    Effect:{" "}
+                                  </span>
+                                  {info.effect}
+                                </div>
+                                <div>
+                                  <span className="font-medium text-slate-300">
+                                    Example:{" "}
+                                  </span>
+                                  <span className="text-slate-500">
+                                    {info.example}
+                                  </span>
+                                </div>
+                              </dl>
+                            )}
                           </li>
                         );
                       })}

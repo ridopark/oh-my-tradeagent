@@ -7,7 +7,7 @@
 //     notional-cap math, pre-trade gate, daily-loss trip)
 // Pure help content: no gating, no secrets, no effect on the config template or form behavior.
 
-interface ConfigField {
+export interface ConfigField {
   field: string;
   what: string;
   effect: string;
@@ -273,6 +273,13 @@ const CONFIG_FIELDS: ConfigField[] = [
       "false — the tenant is created dormant; flip it to true (via the Enable step) to start accepting signals.",
   },
 ];
+
+// Lookup keyed by field name, so surfaces that render config fields individually (e.g. the /config
+// editor) can show the same grounded What/Effect/Example inline. Single source of truth with the
+// collapsible reference above — no duplicated copy.
+export const CONFIG_FIELD_INFO: Record<string, ConfigField> = Object.fromEntries(
+  CONFIG_FIELDS.map((f) => [f.field, f]),
+);
 
 // Collapsible plain-language reference for every config field. Native <details> keeps it collapsed by
 // default with no client state. Additive help only — reading it changes nothing.
