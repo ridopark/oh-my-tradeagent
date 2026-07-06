@@ -106,6 +106,25 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // handleCancelOnFilled instead of discarding the result and orphaning. Mirrors
   // VERSION_TTL_FILLED_ADOPTION.
   private static final String VERSION_BREACH_FILLED_ADOPTION = "breach-filled-adoption-v1";
+  // Copytrade-entry parity for the watchlist Phase-1 fix: defense-in-depth getOrderStatus reconcile
+  // on the TTL-expiry branch. The single exec.cancelOrder return can miss a fill that terminalized
+  // the journal FILLED a beat later (WS listener raced the cancel — the SPY 2026-07-06 incident on
+  // the sibling watchlist path). When inline cancel-on-filled did NOT adopt, re-read broker truth
+  // via exec.getOrderStatus and route a terminal FILLED through the SAME handleCancelOnFilled path
+  // instead of emitting EntryExpired and deferring to the 5-min recon sweep. Gated: the new
+  // getOrderStatus activity call + resulting adoption commands are a command-shape change on the
+  // timeout path, so pre-fix histories (DEFAULT_VERSION) must replay byte-identically via the
+  // legacy
+  // path. Mirrors VERSION_TTL_FILLED_ADOPTION.
+  private static final String VERSION_ENTRY_GETORDERSTATUS_RECONCILE =
+      "copytrade-entry-getorderstatus-reconcile-v1";
+  // Distinct `recovery` subject labels on the EntryFilled adoption evidence so incident forensics
+  // can tell the two timeout-branch adoption paths apart: `cancel_on_filled` = the single
+  // cancelOrder call itself reported FILLED; `getorderstatus_reconcile` = cancelOrder returned
+  // non-FILLED but the getOrderStatus re-check caught the race a beat later (the rarer, more
+  // interesting signal). Mirrors WatchlistTriggerWorkflowImpl's RECOVERY_* distinction.
+  private static final String RECOVERY_CANCEL_ON_FILLED = "cancel_on_filled";
+  private static final String RECOVERY_GETORDERSTATUS_RECONCILE = "getorderstatus_reconcile";
   // Issue #112: Gate the 3-activity pre-trade dispatch (assertPreTradeCheckRoutable →
   // dispatchPreTradeCheck → checkEntryWithLimit(payload, config, preTradeResult, limit))
   // introduced in PR #111 and tightened in #198 to thread the slip-adjusted limit through.
@@ -598,7 +617,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         return payload.getSignalId();
       }
       if (cancelResult.getState() == OrderIntentResult.State.FILLED) {
-        handleCancelOnFilled(payload, config, resolved, cancelResult);
+        handleCancelOnFilled(payload, config, resolved, cancelResult, RECOVERY_CANCEL_ON_FILLED);
         return payload.getSignalId();
       }
       // Genuinely cancelled (or any non-FILLED state): keep audit-and-abort.
@@ -1035,8 +1054,36 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     int adoptionVersion =
         Workflow.getVersion(VERSION_TTL_FILLED_ADOPTION, Workflow.DEFAULT_VERSION, 1);
     if (adoptionVersion >= 1 && cancelResult.getState() == OrderIntentResult.State.FILLED) {
-      handleCancelOnFilled(payload, config, resolved, cancelResult);
+      handleCancelOnFilled(payload, config, resolved, cancelResult, RECOVERY_CANCEL_ON_FILLED);
       return;
+    }
+
+    // Watchlist Phase-1 parity: defense-in-depth broker-truth reconcile. The single cancelOrder
+    // return above can miss a fill that terminalized the journal FILLED a beat later (the WS
+    // listener raced the cancel — exactly the SPY 2026-07-06 incident on the sibling watchlist
+    // path). When inline cancel-on-filled did NOT adopt, re-read the reconciled journal row via
+    // exec.getOrderStatus; if it reports terminal FILLED with a broker-confirmed qty, route through
+    // the SAME handleCancelOnFilled path instead of orphaning the lot to the 5-min recon sweep.
+    // Best-effort: a RuntimeException (broker down) falls through fail-closed to the legacy
+    // EntryExpired path, where reconciliation settles the orphan. Read UNCONDITIONALLY at this
+    // point in the timeout branch so the marker is deterministic on replay; pre-fix histories
+    // (DEFAULT_VERSION) take the byte-identical legacy path below with no getOrderStatus command.
+    int reconcileVersion =
+        Workflow.getVersion(VERSION_ENTRY_GETORDERSTATUS_RECONCILE, Workflow.DEFAULT_VERSION, 1);
+    if (reconcileVersion >= 1) {
+      OrderIntentResult status = null;
+      try {
+        status = exec.getOrderStatus(intentKey);
+      } catch (RuntimeException ignored) {
+        // Best-effort authoritative recheck; fall through to the legacy EntryExpired path.
+      }
+      if (status != null
+          && status.getState() == OrderIntentResult.State.FILLED
+          && status.getFilledQty() != null
+          && status.getFilledQty() > 0L) {
+        handleCancelOnFilled(payload, config, resolved, status, RECOVERY_GETORDERSTATUS_RECONCILE);
+        return;
+      }
     }
 
     if (cancelResult.getState() == OrderIntentResult.State.CANCELLED) {
@@ -1084,7 +1131,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       CopytradeSignalPayload payload,
       StrategyConfig config,
       ContractResolveResult resolved,
-      OrderIntentResult cancelResult) {
+      OrderIntentResult cancelResult,
+      String recovery) {
     long filledQty = cancelResult.getFilledQty() != null ? cancelResult.getFilledQty() : 0L;
     BigDecimal avgFillPrice =
         cancelResult.getAvgFillPrice() != null
@@ -1105,7 +1153,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "filled_qty", synth.getFilledQty(),
             "avg_fill_price", synth.getAvgFillPrice(),
             "outcome", "FILLED",
-            "recovery", "cancel_on_filled");
+            "recovery", recovery);
     // Issue #276: same option_symbol correlation key as the happy-path fill, same replay gate so
     // the cancel-on-filled recovery audit also groups per symbol in DailyPnl for new executions.
     if (Workflow.getVersion(VERSION_ENTRY_FILLED_OPTION_SYMBOL, Workflow.DEFAULT_VERSION, 1) >= 1) {

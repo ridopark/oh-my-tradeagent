@@ -658,6 +658,102 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
+  void handleTtlExpired_cancelNonFilled_getOrderStatusFilled_spawnsPositionWorkflow() {
+    // Copytrade parity for the watchlist Phase-1 fix: the single cancelOrder return can miss a fill
+    // that terminalized the journal FILLED a beat later (the WS listener raced the cancel — the SPY
+    // 2026-07-06 incident on the sibling watchlist path). cancelOrder here reports CANCELLED, but
+    // the defense-in-depth exec.getOrderStatus re-read reports terminal FILLED with a broker qty.
+    // The workflow must adopt the lot inline via handleCancelOnFilled (EntryFilled,
+    // PositionWorkflow
+    // spawned) rather than orphaning it to the 5-min recon sweep with EntryExpired.
+    setupApprovedMocks();
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-1"));
+    // No onFill signal -> TTL fires -> cancelOrder reports CANCELLED (order was resting at cancel
+    // time) -> getOrderStatus re-reads the reconciled journal row: FILLED qty=5.
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-1"));
+    OrderIntentResult filledStatus = submittedResult("intent-K", "brk-1");
+    filledStatus.setState(OrderIntentResult.State.FILLED);
+    filledStatus.setFilledQty(5L);
+    filledStatus.setAvgFillPrice(new BigDecimal("0.84"));
+    when(exec.getOrderStatus(anyString())).thenReturn(filledStatus);
+
+    runWorkflow(btoPayload());
+
+    // EntryFilled present with the getOrderStatus-reconcile recovery marker (distinct from the
+    // inline cancel_on_filled path) and broker-confirmed numbers.
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(filled.getSubject())
+        .containsEntry("outcome", "FILLED")
+        .containsEntry("recovery", "getorderstatus_reconcile")
+        .containsEntry("broker_order_id", "brk-1")
+        .containsEntry("option_symbol", "NVDA  260516C00140000");
+    assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(5L);
+    assertThat(((Number) filled.getSubject().get("avg_fill_price")).doubleValue()).isEqualTo(0.84);
+
+    // EntryExpired / OrderCancelFailed are NOT emitted on the reconcile-adoption path.
+    assertNoAudit("EntryExpired");
+    assertNoAudit("OrderCancelFailed");
+
+    // PositionWorkflow was started — cachePositionMapping is startPositionWorkflow's last side
+    // effect.
+    verify(positionLookup, atLeastOnce())
+        .cachePositionMapping(
+            eq("dev"), eq("copytrade-v1"), eq("NVDA  260516C00140000"), anyString());
+  }
+
+  @Test
+  void handleTtlExpired_getOrderStatusThrows_fallsThroughToEntryExpired() {
+    // The getOrderStatus re-read is best-effort: a broker-down RuntimeException must be swallowed
+    // and the workflow must fall through fail-closed to the legacy EntryExpired path (recon settles
+    // any orphan). NOTE: cancelOrder itself stays un-try/caught (a throw propagates + Temporal
+    // retries the activity — existing behavior preserved), so the "cancelOrder throws" variant is
+    // intentionally NOT exercised here; the best-effort guard lives only around getOrderStatus.
+    setupApprovedMocks();
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-1"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-1"));
+    when(exec.getOrderStatus(anyString())).thenThrow(new RuntimeException("broker unreachable"));
+
+    runWorkflow(btoPayload());
+
+    AuditEvent expired = capture("EntryExpired");
+    assertThat(expired.getSubject()).containsEntry("outcome", "EXPIRED");
+    assertNoAudit("EntryFilled");
+  }
+
+  @Test
+  void handleTtlExpired_bothNonFilled_emitsEntryExpiredUnchanged() {
+    // Legacy behavior preserved: cancelOrder CANCELLED and getOrderStatus also non-FILLED
+    // (CANCELLED) -> no adoption, EntryExpired unchanged.
+    setupApprovedMocks();
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-1"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-1"));
+    when(exec.getOrderStatus(anyString())).thenReturn(cancelledResult("intent-K", "brk-1"));
+
+    runWorkflow(btoPayload());
+
+    AuditEvent cancelled = capture("OrderCancelled");
+    assertThat(cancelled.getSubject()).containsEntry("reason", "ttl_expired");
+    AuditEvent expired = capture("EntryExpired");
+    assertThat(expired.getSubject()).containsEntry("outcome", "EXPIRED");
+    assertNoAudit("EntryFilled");
+  }
+
+  /**
+   * Version-id stability pin (mirrors {@link #versionFilledAdoptionConstantNamesAreStable}).
+   * Renaming or re-valuing the {@code Workflow.getVersion} change-id after the gate is deployed
+   * would leave in-flight histories minted with the OLD id unable to find their marker, replaying
+   * through the wrong branch. The string VALUE is load-bearing, so pin it exactly.
+   */
+  @Test
+  void entryGetOrderStatusReconcileVersionIdIsStable() throws Exception {
+    Field f =
+        CopytradeSignalWorkflowImpl.class.getDeclaredField(
+            "VERSION_ENTRY_GETORDERSTATUS_RECONCILE");
+    f.setAccessible(true);
+    assertThat((String) f.get(null)).isEqualTo("copytrade-entry-getorderstatus-reconcile-v1");
+  }
+
+  @Test
   void onFill_signaledTwice_spawnsPositionWorkflowExactlyOnce() throws Exception {
     // Phase 4 of the fill-listener plan pins the at-least-once safety claim: the WS listener and
     // polling fallback may both signal onFill for the same broker fill. The workflow must absorb
