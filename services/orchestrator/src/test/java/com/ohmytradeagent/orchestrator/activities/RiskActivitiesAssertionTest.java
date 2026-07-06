@@ -52,6 +52,22 @@ class RiskActivitiesAssertionTest {
   }
 
   @Test
+  void assertPreTradeCheckRoutable_returnsNormally_whenEnabledAndRoutableMarkerWired() {
+    // Reproduction linkage: the 2026-07-06 incident was the throw at RiskActivitiesImpl:608 when
+    // the
+    // DB flag was on but only the permissive default was wired. Wiring the non-permissive routable
+    // marker makes the guard pass so the check dispatches to exec.
+    PreTradeCheckActivity routable = new RoutablePreTradeCheckActivity();
+    assertThat(routable).isNotInstanceOf(PermissiveDefaultPreTradeCheck.class);
+
+    RiskActivitiesImpl risk = buildRiskWith(routable);
+    StrategyConfig config = config();
+    config.setPreTradeCheckEnabled(true);
+
+    assertThatCode(() -> risk.assertPreTradeCheckRoutable(config)).doesNotThrowAnyException();
+  }
+
+  @Test
   void assertPreTradeCheckRoutable_returnsNormally_whenDisabled() {
     RiskActivitiesImpl risk = buildRiskWith(RiskCollaboratorDefaults.permissivePreTradeCheck());
 
