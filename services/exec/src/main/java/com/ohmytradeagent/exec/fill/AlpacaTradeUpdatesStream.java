@@ -13,6 +13,7 @@ import java.net.http.WebSocket;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +32,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
@@ -85,7 +87,16 @@ public class AlpacaTradeUpdatesStream {
   private final HttpClient http;
 
   private volatile boolean stopped;
+
+  // {@code runners} + {@code runningTenants} are now mutated by BOTH the lifecycle thread
+  // (start/stop, per-tenant mode) AND the @Scheduled re-enumeration thread. All enumerate-diff-add
+  // and teardown access goes through {@code runnersLock} so a tenant can NEVER get two runners,
+  // even
+  // if the first scheduled tick races the initial start(). {@code runningTenants} is the
+  // idempotency key: a tenant already in it is never given a second socket.
+  private final Object runnersLock = new Object();
   private final List<TenantRunner> runners = new ArrayList<>();
+  private final Set<String> runningTenants = new HashSet<>();
 
   public AlpacaTradeUpdatesStream(
       FillListenerProperties props,
@@ -123,7 +134,9 @@ public class AlpacaTradeUpdatesStream {
             "pod-wide",
             "fill-listener-ws",
             () -> new Endpoint(props.wsUrl(), alpacaProps.apiKeyId(), alpacaProps.apiSecretKey()));
-    runners.add(runner);
+    synchronized (runnersLock) {
+      runners.add(runner);
+    }
     runner.start();
     log.info("fill-listener started (single-socket) ws_url={}", props.wsUrl());
   }
@@ -132,10 +145,9 @@ public class AlpacaTradeUpdatesStream {
    * Phase G path: one independently-supervised socket per enumerated live tenant. Each runner
    * re-resolves its tenant's credentials on every (re)connect so a credential rotation takes effect
    * without a restart. A tenant whose creds are missing/blank is SKIPPED with an error log rather
-   * than entering a blank-auth reconnect storm (a silent live-fill outage). Enumeration is
-   * startup-only: a tenant added at runtime is picked up by the 30s {@code FillPoller} fallback
-   * and, for real-time fills, requires a manual exec roll — a deliberate deferral over a periodic
-   * re-enumeration loop.
+   * than entering a blank-auth reconnect storm (a silent live-fill outage). Startup enumerates the
+   * roster once; {@link #reenumerateTick()} then re-enumerates periodically (Phase 3), so a tenant
+   * onboarded at runtime gets its real-time fill socket WITHOUT a manual exec roll.
    */
   private void startPerTenant() {
     // TreeSet → deterministic startup order; the roster is per-pod-broker-target-scoped by
@@ -158,32 +170,137 @@ public class AlpacaTradeUpdatesStream {
     }
     int started = 0;
     for (String tenant : tenants) {
-      // Fail-closed pre-check: if the tenant's creds can't be resolved (missing OR blank
-      // key/secret)
-      // at startup, skip it rather than spinning a runner that would send blank auth forever.
-      // resolveEndpoint() throws on missing/blank creds and the runner re-resolves through the SAME
-      // check on every reconnect, so a post-startup rotation to blank backs off instead of opening
-      // a
-      // blank-auth socket.
-      try {
-        resolveEndpoint(tenant);
-      } catch (RuntimeException e) {
-        log.error(
-            "fill-listener SKIPPING tenant={} — credential resolution failed at startup: {}",
-            tenant,
-            e.toString());
-        continue;
+      if (resolveAndStart(tenant)) {
+        started++;
       }
-      TenantRunner runner =
-          new TenantRunner(tenant, "fill-listener-ws-" + tenant, () -> resolveEndpoint(tenant));
-      runners.add(runner);
-      runner.start();
-      started++;
     }
     log.info(
         "fill-listener started (per-tenant) tenants_enumerated={} sockets_started={}",
         tenants.size(),
         started);
+  }
+
+  /**
+   * Periodic re-enumeration (Phase 3): a newly-onboarded live tenant's {@code trade_updates} socket
+   * opens WITHOUT a manual exec roll. Diffs the current live roster against {@link #runningTenants}
+   * and starts ONE idempotent {@link TenantRunner} per newly-appeared tenant; it NEVER restarts,
+   * replaces, or tears down an existing runner. Inert unless {@code perTenantEnabled} —
+   * single-socket mode must stay byte-for-byte the pre-Phase-3 behavior (no enumeration, no runner
+   * churn).
+   *
+   * <p>Deprovision is deliberately OUT OF SCOPE here: a tenant that disappears from the roster
+   * keeps its runner (removing it stays a manual exec roll), so this loop only ever ADDS sockets —
+   * never subtracts — which keeps it trivially safe against the {@code replicas: 1} exit-accounting
+   * invariant.
+   */
+  @Scheduled(fixedDelayString = "${exec.fill-listener.reenumerate-delay-ms:60000}")
+  public void reenumerateTick() {
+    if (!props.perTenantEnabled()) {
+      // Single-socket mode: enumeration was one-shot at start(); the tick is inert.
+      return;
+    }
+    reenumerateOnce();
+  }
+
+  /**
+   * One re-enumeration pass. Package-private so a unit test can drive a single deterministic tick.
+   * A transient enumeration fault ({@code liveTenants} throws) is caught and the tick skipped — it
+   * must never crash the scheduler thread. Per-tenant credential/endpoint faults fail closed on
+   * that tenant's own runner (it is simply not started this tick and retried next tick) without
+   * aborting the loop for the other newly-appeared tenants.
+   *
+   * <p>Lock discipline: the roster is enumerated off-lock, the candidate set (roster −
+   * already-running) is snapshotted under the lock and the lock RELEASED, then each candidate's
+   * (blocking) credential resolution runs OFF the lock — {@link #resolveAndStart} re-acquires the
+   * lock only for the atomic membership re-check + add + start, so the critical section never spans
+   * blocking DB/decrypt I/O.
+   */
+  void reenumerateOnce() {
+    if (stopped) {
+      return;
+    }
+    Set<String> tenants;
+    try {
+      tenants = new TreeSet<>(credentialSource.liveTenants(PROVIDER));
+    } catch (RuntimeException e) {
+      log.warn("fill-listener re-enumeration failed; skipping this tick: {}", e.toString());
+      return;
+    }
+    // Snapshot candidates (newly-appeared tenants) under the lock, then release it so the blocking
+    // per-candidate resolution below happens OFF the lock.
+    List<String> candidates = new ArrayList<>();
+    synchronized (runnersLock) {
+      for (String tenant : tenants) {
+        if (!runningTenants.contains(tenant)) {
+          candidates.add(tenant);
+        }
+      }
+    }
+    int started = 0;
+    for (String tenant : candidates) {
+      if (resolveAndStart(tenant)) {
+        started++;
+      }
+    }
+    if (started > 0) {
+      log.info(
+          "fill-listener re-enumerated new_tenants={} sockets_started={}",
+          candidates.size(),
+          started);
+    }
+  }
+
+  /**
+   * Resolves a candidate tenant's endpoint OFF the lock (a blocking DB SELECT + envelope-decrypt
+   * for the DB source), then commits ONE runner under {@link #runnersLock} with a fresh {@code
+   * stopped} + membership re-check — the single idempotency guard shared by startup and
+   * re-enumeration. Returns true iff a runner was started.
+   *
+   * <p>The eager pre-check resolve is deliberately OFF the lock so blocking I/O never widens the
+   * critical section: a credential resolution failure (missing OR blank key/secret) skips the
+   * tenant and, crucially, does NOT record it, so a later tick retries it once its creds land. A
+   * tenant that resolves fine is committed under the lock; the membership re-check there closes the
+   * TOCTOU window against a concurrent path (or a racing startup tick) that resolved the same
+   * tenant off-lock — whichever commits first wins, the other sees {@code runningTenants.contains}
+   * and backs out, so a tenant can NEVER get two runners.
+   */
+  private boolean resolveAndStart(String tenant) {
+    try {
+      resolveEndpoint(tenant); // eager pre-check, OFF the lock
+    } catch (RuntimeException e) {
+      log.error(
+          "fill-listener SKIPPING tenant={} — credential resolution failed: {}",
+          tenant,
+          e.toString());
+      return false;
+    }
+    synchronized (runnersLock) {
+      if (stopped) {
+        // Raced stop(): shutdown already snapshotted runners; never add a runner after teardown.
+        return false;
+      }
+      if (runningTenants.contains(tenant)) {
+        // A concurrent path already started it — NEVER open a second socket (no TOCTOU).
+        return false;
+      }
+      TenantRunner runner =
+          new TenantRunner(tenant, "fill-listener-ws-" + tenant, () -> resolveEndpoint(tenant));
+      runners.add(runner);
+      runningTenants.add(tenant);
+      // If runner.start() throws (e.g. OOM creating the native thread), the tenant STAYS marked
+      // running here: retry is blocked, which is the DELIBERATE safe direction for the
+      // no-duplicate-socket invariant. That tenant simply falls back to the 30s FillPoller until an
+      // exec roll, rather than risking a second socket on a later tick.
+      runner.start();
+      return true;
+    }
+  }
+
+  /** Visible for testing: current live runner count (both single-socket and per-tenant modes). */
+  int runnerCount() {
+    synchronized (runnersLock) {
+      return runners.size();
+    }
   }
 
   /**
@@ -215,7 +332,13 @@ public class AlpacaTradeUpdatesStream {
   @PreDestroy
   public void stop() {
     stopped = true;
-    for (TenantRunner runner : runners) {
+    // Snapshot under the lock (a re-enumeration tick may be adding runners concurrently), then stop
+    // outside it so the blocking socket-close/thread-join never holds up a scheduler tick.
+    List<TenantRunner> snapshot;
+    synchronized (runnersLock) {
+      snapshot = new ArrayList<>(runners);
+    }
+    for (TenantRunner runner : snapshot) {
       runner.stop();
     }
   }

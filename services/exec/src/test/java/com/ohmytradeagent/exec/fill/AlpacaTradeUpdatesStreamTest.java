@@ -424,6 +424,196 @@ class AlpacaTradeUpdatesStreamTest {
     }
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // Phase 3 — periodic re-enumeration (restart-free new-tenant socket)
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void reenumerateStartsSocketForNewlyAppearedTenant() throws Exception {
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of("alice", new BrokerCredentials("alice-key", "alice-secret", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+    awaitHandshake(); // alice's initial auth + listen
+    assertThat(stream.runnerCount()).isEqualTo(1);
+
+    // bob appears in the roster AFTER startup.
+    creds.put("bob", new BrokerCredentials("bob-key", "bob-secret", "", url, ""));
+    stream.reenumerateOnce();
+
+    // Exactly ONE new runner opens (for bob); alice's runner is untouched (not restarted).
+    assertThat(stream.runnerCount()).isEqualTo(2);
+    String f1 = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    String f2 = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(f1).isNotNull();
+    assertThat(f2).isNotNull();
+    String bobAuth = f1.contains("\"authenticate\"") ? f1 : f2;
+    assertThat(bobAuth).contains("\"key_id\":\"bob-key\"");
+    // alice did NOT re-authenticate (no restart) → no further frames arrive.
+    assertThat(server.frames.poll(500, TimeUnit.MILLISECONDS)).isNull();
+  }
+
+  @Test
+  void reenumerateNoChangeIsNoOp() throws Exception {
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of("alice", new BrokerCredentials("alice-key", "alice-secret", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+    awaitHandshake();
+    assertThat(stream.runnerCount()).isEqualTo(1);
+
+    // Roster unchanged ({alice}) → tick must not open a second runner or re-handshake alice.
+    stream.reenumerateOnce();
+
+    assertThat(stream.runnerCount()).isEqualTo(1);
+    assertThat(server.frames.poll(500, TimeUnit.MILLISECONDS)).isNull();
+  }
+
+  @Test
+  void reenumerateIsIdempotentUnderConcurrentTicks() throws Exception {
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of("alice", new BrokerCredentials("alice-key", "alice-secret", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+    awaitHandshake();
+
+    creds.put("bob", new BrokerCredentials("bob-key", "bob-secret", "", url, ""));
+
+    // Two ticks racing for the same enumerated set — bob must get EXACTLY ONE runner.
+    Thread t1 = new Thread(stream::reenumerateOnce);
+    Thread t2 = new Thread(stream::reenumerateOnce);
+    t1.start();
+    t2.start();
+    t1.join(AWAIT_MS);
+    t2.join(AWAIT_MS);
+
+    assertThat(stream.runnerCount()).isEqualTo(2);
+    // Exactly one bob authenticate frame — no duplicate socket for an already-running tenant.
+    List<String> frames = drainFrames(600);
+    long bobAuths =
+        frames.stream()
+            .filter(f -> f.contains("\"authenticate\"") && f.contains("\"key_id\":\"bob-key\""))
+            .count();
+    assertThat(bobAuths).isEqualTo(1L);
+  }
+
+  @Test
+  void reenumerateSurvivesEnumerationFaultThenRecovers() throws Exception {
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of("alice", new BrokerCredentials("alice-key", "alice-secret", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+    awaitHandshake();
+    assertThat(stream.runnerCount()).isEqualTo(1);
+
+    // A transient enumeration fault on a tick must be caught — no crash, runners unchanged.
+    creds.failEnumeration(true);
+    stream.reenumerateOnce();
+    assertThat(stream.runnerCount()).isEqualTo(1);
+
+    // A later good tick still picks up the new tenant.
+    creds.failEnumeration(false);
+    creds.put("bob", new BrokerCredentials("bob-key", "bob-secret", "", url, ""));
+    stream.reenumerateOnce();
+    assertThat(stream.runnerCount()).isEqualTo(2);
+  }
+
+  @Test
+  void reenumerateSkipsNewBlankCredTenantWithoutAbortingLoop() throws Exception {
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of("alice", new BrokerCredentials("alice-key", "alice-secret", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+    awaitHandshake();
+
+    // Two new tenants appear this tick: "blankguy" (blank creds → fail closed on its own runner)
+    // and "bob" (good). The blank one must be skipped WITHOUT aborting the loop for bob.
+    creds.put("blankguy", new BrokerCredentials("", "", "", url, ""));
+    creds.put("bob", new BrokerCredentials("bob-key", "bob-secret", "", url, ""));
+    stream.reenumerateOnce();
+
+    // alice + bob have runners; blankguy does not.
+    assertThat(stream.runnerCount()).isEqualTo(2);
+    List<String> frames = drainFrames(600);
+    long bobAuths =
+        frames.stream()
+            .filter(f -> f.contains("\"authenticate\"") && f.contains("\"key_id\":\"bob-key\""))
+            .count();
+    assertThat(bobAuths).isEqualTo(1L);
+  }
+
+  @Test
+  void reenumerateRetriesTenantOnceItsCredsLand() throws Exception {
+    // The liveness half of the docstring: a tenant skipped for blank creds is NOT recorded, so a
+    // later tick — once its creds resolve — starts exactly one runner for it.
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of("alice", new BrokerCredentials("alice-key", "alice-secret", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+    awaitHandshake();
+    assertThat(stream.runnerCount()).isEqualTo(1);
+
+    // Tick 1: "late" appears with blank creds → skipped, NOT recorded (no runner opens).
+    creds.put("late", new BrokerCredentials("", "", "", url, ""));
+    stream.reenumerateOnce();
+    assertThat(stream.runnerCount()).isEqualTo(1);
+
+    // Its creds land; a later tick starts EXACTLY ONE runner for it.
+    creds.put("late", new BrokerCredentials("late-key", "late-secret", "", url, ""));
+    stream.reenumerateOnce();
+    assertThat(stream.runnerCount()).isEqualTo(2);
+    List<String> frames = drainFrames(600);
+    long lateAuths =
+        frames.stream()
+            .filter(f -> f.contains("\"authenticate\"") && f.contains("\"key_id\":\"late-key\""))
+            .count();
+    assertThat(lateAuths).isEqualTo(1L);
+  }
+
+  @Test
+  void reenumerateTickIsInertInSingleSocketMode() throws Exception {
+    // Single-socket mode: the scheduled tick must NOT enumerate or add any runner.
+    EnumTrackingSource cs = new EnumTrackingSource();
+    stream =
+        new AlpacaTradeUpdatesStream(
+            new FillListenerProperties(
+                true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32),
+            new AlpacaProperties("http://unused", "test-key", "test-secret"),
+            cs,
+            dispatcher,
+            metrics,
+            new ObjectMapper().registerModule(new JavaTimeModule()));
+    stream.start();
+    awaitHandshake();
+    assertThat(stream.runnerCount()).isEqualTo(1);
+
+    stream.reenumerateTick(); // gated on perTenantEnabled() → inert
+
+    assertThat(cs.liveTenantsCalled).isFalse();
+    assertThat(stream.runnerCount()).isEqualTo(1);
+  }
+
+  private List<String> drainFrames(long quietMs) throws InterruptedException {
+    List<String> out = new ArrayList<>();
+    String f;
+    while ((f = server.frames.poll(quietMs, TimeUnit.MILLISECONDS)) != null) {
+      out.add(f);
+    }
+    return out;
+  }
+
   private AlpacaTradeUpdatesStream perTenantStream(BrokerCredentialSource creds) {
     return new AlpacaTradeUpdatesStream(
         new FillListenerProperties(
@@ -543,21 +733,30 @@ class AlpacaTradeUpdatesStreamTest {
   }
 
   /**
-   * In-memory per-tenant credential source. The roster defaults to the map keys; {@link #enumerate}
-   * overrides it to include tenants that have NO entry (so resolve throws for them — the
-   * skip-on-failure case).
+   * In-memory per-tenant credential source. The roster derives from the (mutable) map keys unless
+   * {@link #enumerate} sets an explicit roster (used to include tenants that have NO entry, so
+   * resolve throws for them — the skip-on-failure case). {@link #put} adds a tenant at runtime (the
+   * re-enumeration cases); {@link #failEnumeration} simulates a transient enumeration fault.
    */
   private static class MapCredentialSource implements BrokerCredentialSource {
     private final Map<String, BrokerCredentials> byTenant;
-    private Set<String> roster;
+    private Set<String> roster; // explicit override; null → derive live from the map keys
+    private volatile boolean failEnumeration;
 
     MapCredentialSource(Map<String, BrokerCredentials> byTenant) {
-      this.byTenant = byTenant;
-      this.roster = byTenant.keySet();
+      this.byTenant = new java.util.HashMap<>(byTenant);
     }
 
     void enumerate(String... tenants) {
       this.roster = Set.of(tenants);
+    }
+
+    void put(String tenant, BrokerCredentials creds) {
+      byTenant.put(tenant, creds);
+    }
+
+    void failEnumeration(boolean fail) {
+      this.failEnumeration = fail;
     }
 
     @Override
@@ -571,7 +770,30 @@ class AlpacaTradeUpdatesStreamTest {
 
     @Override
     public Set<String> liveTenants(String provider) {
-      return roster;
+      if (failEnumeration) {
+        throw new RuntimeException("enumeration boom");
+      }
+      return roster != null ? roster : new java.util.HashSet<>(byTenant.keySet());
+    }
+  }
+
+  /**
+   * Single-socket-mode probe: records whether {@code liveTenants} is ever called and hard-fails if
+   * it is, proving the scheduled re-enumeration tick is inert when {@code perTenantEnabled=false}.
+   */
+  private static class EnumTrackingSource implements BrokerCredentialSource {
+    volatile boolean liveTenantsCalled;
+
+    @Override
+    public BrokerCredentials resolve(String tenantId, String provider) {
+      throw new IllegalStateException(
+          "credential source must not be used on the single-socket path");
+    }
+
+    @Override
+    public Set<String> liveTenants(String provider) {
+      liveTenantsCalled = true;
+      throw new AssertionError("liveTenants must not be called in single-socket mode");
     }
   }
 }
