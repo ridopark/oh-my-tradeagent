@@ -150,20 +150,9 @@ class KillSwitchWorkflowImplTest {
     KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-resetfirst");
     WorkflowStub.fromTyped(stub).start(input());
 
-    assertThatThrownBy(() -> stub.reset(resetRequest("alice", "bob", "no trip yet")))
+    assertThatThrownBy(() -> stub.reset(resetRequest("alice", "no trip yet")))
         .isInstanceOf(WorkflowUpdateException.class)
         .hasStackTraceContaining("not_tripped");
-  }
-
-  @Test
-  void resetUpdate_sameApprovers_rejectedByValidator() {
-    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-sameappr");
-    WorkflowStub.fromTyped(stub).start(input());
-    stub.trip(tripRequest("manual:ops", "operator:c"));
-
-    assertThatThrownBy(() -> stub.reset(resetRequest("alice", "alice", "dual control fail")))
-        .isInstanceOf(WorkflowUpdateException.class)
-        .hasStackTraceContaining("approvers_must_differ");
   }
 
   @Test
@@ -172,18 +161,21 @@ class KillSwitchWorkflowImplTest {
     WorkflowStub.fromTyped(stub).start(input());
     stub.trip(tripRequest("manual:ops", "operator:c"));
 
-    assertThatThrownBy(() -> stub.reset(resetRequest("alice", "", "missing")))
+    assertThatThrownBy(() -> stub.reset(resetRequest("", "missing operator")))
         .isInstanceOf(WorkflowUpdateException.class)
-        .hasStackTraceContaining("approver_id_2_required");
+        .hasStackTraceContaining("approver_id_1_required");
   }
 
   @Test
-  void resetUpdate_distinctApprovers_clearsTrippedAndSetsCooldown() {
+  void resetUpdate_singleOperator_clearsTrippedAndSetsCooldown() {
+    // Single-operator reset (approver_id_1 only): untrips, arms cooldown, and emits exactly one
+    // KillSwitchResetApproved whose subject carries approver_id_1 + via=manual_reset +
+    // cooling_down_until + cooldown_secs and NEVER approver_id_2 (dual control retired).
     KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-reset");
     WorkflowStub.fromTyped(stub).start(input());
     stub.trip(tripRequest("manual:ops", "operator:c"));
 
-    stub.reset(resetRequest("alice", "bob", "investigation complete"));
+    stub.reset(resetRequest("alice", "investigation complete"));
 
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isFalse();
@@ -192,8 +184,10 @@ class KillSwitchWorkflowImplTest {
     AuditEvent reset = captureKind("KillSwitchResetApproved");
     assertThat(reset.getSubject())
         .containsEntry("approver_id_1", "alice")
-        .containsEntry("approver_id_2", "bob")
-        .containsEntry("note", "investigation complete");
+        .containsEntry("via", "manual_reset")
+        .containsEntry("note", "investigation complete")
+        .containsKey("cooling_down_until")
+        .doesNotContainKey("approver_id_2");
     // Cooldown matches strategy config (60s in strategyConfig()).
     assertThat(((Number) reset.getSubject().get("cooldown_secs")).longValue()).isEqualTo(60L);
   }
@@ -533,11 +527,10 @@ class KillSwitchWorkflowImplTest {
     return r;
   }
 
-  private static ResetKillSwitchRequest resetRequest(String a1, String a2, String note) {
+  private static ResetKillSwitchRequest resetRequest(String a1, String note) {
     ResetKillSwitchRequest r = new ResetKillSwitchRequest();
     r.setSchemaVersion(1L);
     r.setApproverId1(a1);
-    r.setApproverId2(a2);
     r.setNote(note);
     return r;
   }

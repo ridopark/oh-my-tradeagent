@@ -128,12 +128,13 @@ class KillSwitchControllerTest {
   }
 
   @Test
-  void reset_invokesUpdateWithBothApprovers() throws Exception {
+  void reset_singleOperator_invokesUpdateWithApprover1() throws Exception {
+    // Single-operator reset: no X-Approver-Id-2 header required; approver_id_1 is the authenticated
+    // operator and the reset_killswitch update forwards with only that approver.
     mvc.perform(
             org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
                     "/killswitch/reset")
                 .header("X-Operator-Id", "alice")
-                .header("X-Approver-Id-2", "bob")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"note\":\"PnL recovered after correction\"}"))
         .andExpect(
@@ -143,15 +144,14 @@ class KillSwitchControllerTest {
         ArgumentCaptor.forClass(ResetKillSwitchRequest.class);
     verify(stub).update(eq("reset_killswitch"), eq(Void.class), cap.capture());
     assertThat(cap.getValue().getApproverId1()).isEqualTo("alice");
-    assertThat(cap.getValue().getApproverId2()).isEqualTo("bob");
+    assertThat(cap.getValue().getNote()).isEqualTo("PnL recovered after correction");
   }
 
   @Test
-  void reset_missingApprover2_returns400() throws Exception {
+  void reset_missingOperatorHeader_returns400() throws Exception {
     mvc.perform(
             org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
                     "/killswitch/reset")
-                .header("X-Operator-Id", "alice")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{}"))
         .andExpect(
