@@ -199,6 +199,53 @@ class KillSwitchWorkflowImplTest {
   }
 
   @Test
+  void resetOnActivation_onTrippedSwitch_untripsAndAuditsSingleOperator() {
+    // The one-click activate path: a single operator untrips the switch (no dual control) so the
+    // strategy actually resumes. State clears, the 60s cooldown arms, and the audit is HONEST about
+    // being a live-activation reset (via + operator, and NO approver_id_2).
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-activate-reset");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("live_deactivation:one_click", "operator:ridopark"));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    stub.resetOnActivation(resetOnActivationRequest("operator:ridopark", "live_activation"));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isFalse();
+    assertThat(s.getCoolingDownUntil()).isNotNull();
+
+    AuditEvent reset = captureKind("KillSwitchResetApproved");
+    assertThat(reset.getSubject())
+        .containsEntry("via", "live_activation")
+        .containsEntry("operator", "operator:ridopark")
+        .doesNotContainKey("approver_id_2");
+    // Cooldown matches strategy config (60s in strategyConfig()).
+    assertThat(((Number) reset.getSubject().get("cooldown_secs")).longValue()).isEqualTo(60L);
+  }
+
+  @Test
+  void resetOnActivation_whenNotTripped_rejectedByValidator() {
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-activate-nottripped");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    assertThatThrownBy(
+            () -> stub.resetOnActivation(resetOnActivationRequest("operator:ridopark", null)))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("not_tripped");
+  }
+
+  @Test
+  void resetOnActivation_blankOperator_rejectedByValidator() {
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-activate-noop");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("live_deactivation:one_click", "operator:ridopark"));
+
+    assertThatThrownBy(() -> stub.resetOnActivation(resetOnActivationRequest("", "no operator")))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("operator_required");
+  }
+
+  @Test
   void queryBeforeAnyUpdate_returnsNotTripped() {
     KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-query");
     WorkflowStub.fromTyped(stub).start(input());
@@ -492,6 +539,16 @@ class KillSwitchWorkflowImplTest {
     r.setApproverId1(a1);
     r.setApproverId2(a2);
     r.setNote(note);
+    return r;
+  }
+
+  private static ResetKillSwitchRequest resetOnActivationRequest(String operator, String note) {
+    ResetKillSwitchRequest r = new ResetKillSwitchRequest();
+    r.setSchemaVersion(1L);
+    r.setApproverId1(operator);
+    if (note != null) {
+      r.setNote(note);
+    }
     return r;
   }
 

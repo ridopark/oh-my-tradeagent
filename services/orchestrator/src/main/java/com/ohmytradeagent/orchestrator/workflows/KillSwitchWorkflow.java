@@ -45,6 +45,22 @@ public interface KillSwitchWorkflow {
   void reset(ResetKillSwitchRequest request);
 
   /**
+   * Single-operator kill-switch reset issued by a successful one-click {@code
+   * LiveActivationWorkflow.activateLive} so activation actually resumes a strategy that a prior
+   * one-click deactivate had HALTED (deactivate trips the switch; without this, activate wrote a
+   * promotion row but {@code risk.check_entry} stayed fail-closed on {@code tripped==true}). This
+   * is an operator decision carried in {@code approverId1} (e.g. {@code "operator:<id>"}); {@code
+   * approverId2} is unused. It performs the SAME state mutation and cooldown as {@link
+   * #reset(ResetKillSwitchRequest)} but is HONESTLY audited as a single-operator live-activation
+   * reset — it is NOT dual-control and must never be used for the manual dual-control reset path.
+   */
+  @UpdateValidatorMethod(updateName = "reset_on_activation")
+  void resetOnActivationValidator(ResetKillSwitchRequest request);
+
+  @UpdateMethod(name = "reset_on_activation")
+  void resetOnActivation(ResetKillSwitchRequest request);
+
+  /**
    * Phase 7 prep (issue #87) — dual-control sign-off recording. Issued by api-gateway's {@code POST
    * /promotion/approve}. The Update invokes {@code LivePromotionActivities.approve(request)}, which
    * runs the validator and (on pass) emits one {@code LivePromotionApproved} audit event via the

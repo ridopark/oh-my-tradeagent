@@ -23,6 +23,13 @@ import java.time.Duration;
  * change-point. Determinism: all inputs are the workflow request; no clock/random reads (the
  * approval timestamp is stamped inside {@code LivePromotionActivities.activate}, an Activity).
  *
+ * <p><b>Replay note (kill-switch reset step):</b> the {@code gate.resetKillSwitch} Activity command
+ * added at the END of {@code activateLive} needs NO {@code getVersion} gate. These runs are
+ * ephemeral (seconds, one per operator click); the new command is strictly AFTER the last command
+ * any in-flight history can contain, so a worker upgraded mid-run only makes forward progress
+ * (issues the reset after replaying the recorded prefix) — it can never diverge from a recorded
+ * command. This matches the class's net-new-per-call contract.
+ *
  * <p><b>activateLive</b> runs the fail-closed gate in order, each step its own refusal reason:
  *
  * <ol>
@@ -37,7 +44,9 @@ import java.time.Duration;
  *   <li>fresh account probe ({@code AccountSnapshotActivity} on {@code broker-<target>}); blank
  *       account_number or cash &le; 0 → {@code REJECTED_ACCOUNT}. Captures account_number as {@code
  *       expected_account_id}.
- *   <li>all pass → {@code LivePromotionActivities.activate} → {@code ACTIVATED}.
+ *   <li>all pass → {@code LivePromotionActivities.activate}, then {@code
+ *       LiveActivationGateActivities.resetKillSwitch} (single-operator untrip so a prior one-click
+ *       deactivate's trip no longer keeps the strategy halted) → {@code ACTIVATED}.
  * </ol>
  *
  * <p><b>deactivateLive</b> emits the {@code LivePromotionDeactivated} row AND trips the kill
@@ -118,6 +127,13 @@ public class LiveActivationWorkflowImpl
     activateReq.setOperatorId(request.getOperatorId());
     activateReq.setExpectedAccountId(accountNumber);
     promotion.activate(activateReq);
+
+    // (g) UNTRIP the kill switch so the strategy actually resumes. A prior one-click deactivate
+    // trips the switch (deactivateLive), which leaves risk.check_entry fail-closed on tripped==true
+    // — so without this the fresh LivePromotionApproved row would be inert and the strategy would
+    // stay HALTED. Single-operator reset (NOT dual control), keeping the existing 60s cooldown;
+    // idempotent when the switch is not tripped (see LiveActivationGateActivities.resetKillSwitch).
+    gate.resetKillSwitch(tenant, strategyId, request.getOperatorId());
 
     return result(LiveActivationResult.Outcome.ACTIVATED, null, accountNumber);
   }
