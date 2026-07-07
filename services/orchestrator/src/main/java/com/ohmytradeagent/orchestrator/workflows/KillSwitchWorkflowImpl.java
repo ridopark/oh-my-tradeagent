@@ -366,15 +366,8 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
       throw new IllegalStateException("not_tripped");
     }
     String a1 = request.getApproverId1();
-    String a2 = request.getApproverId2();
     if (a1 == null || a1.isBlank()) {
       throw new IllegalArgumentException("approver_id_1_required");
-    }
-    if (a2 == null || a2.isBlank()) {
-      throw new IllegalArgumentException("approver_id_2_required");
-    }
-    if (a1.equals(a2)) {
-      throw new IllegalArgumentException("approvers_must_differ");
     }
   }
 
@@ -387,8 +380,8 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
         subject(
             "approver_id_1",
             request.getApproverId1(),
-            "approver_id_2",
-            request.getApproverId2(),
+            "via",
+            "manual_reset",
             "cooling_down_until",
             coolingUntil,
             "cooldown_secs",

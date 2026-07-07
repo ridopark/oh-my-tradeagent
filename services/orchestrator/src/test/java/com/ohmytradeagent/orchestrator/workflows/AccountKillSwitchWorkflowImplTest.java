@@ -293,29 +293,51 @@ class AccountKillSwitchWorkflowImplTest {
   }
 
   @Test
-  void resetUpdate_sameApprovers_rejectedByValidator() {
+  void resetUpdate_whenNotTripped_rejectedByValidator() {
     when(calendar.isMarketOpen()).thenReturn(false);
-    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-sameappr");
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-resetfirst");
     WorkflowStub.fromTyped(stub).start(input());
-    stub.trip(tripRequest("manual:ops", "operator:c"));
 
-    assertThatThrownBy(() -> stub.reset(resetRequest("alice", "alice")))
+    assertThatThrownBy(() -> stub.reset(resetRequest("alice")))
         .isInstanceOf(WorkflowUpdateException.class)
-        .hasStackTraceContaining("approvers_must_differ");
+        .hasStackTraceContaining("not_tripped");
   }
 
   @Test
-  void resetUpdate_distinctApprovers_clearsTrippedAndSetsCooldown() {
+  void resetUpdate_blankApprover_rejectedByValidator() {
+    when(calendar.isMarketOpen()).thenReturn(false);
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-blank");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("manual:ops", "operator:c"));
+
+    assertThatThrownBy(() -> stub.reset(resetRequest("")))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("approver_id_1_required");
+  }
+
+  @Test
+  void resetUpdate_singleOperator_clearsTrippedAndSetsCooldown() {
+    // Single-operator account reset: untrips, arms cooldown, emits KillSwitchResetApproved whose
+    // subject carries approver_id_1 + via=manual_reset + cooling_down_until + cooldown_secs and NO
+    // approver_id_2 (dual control retired).
     when(calendar.isMarketOpen()).thenReturn(false);
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-reset");
     WorkflowStub.fromTyped(stub).start(input());
     stub.trip(tripRequest("manual:ops", "operator:c"));
 
-    stub.reset(resetRequest("alice", "bob"));
+    stub.reset(resetRequest("alice"));
 
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isFalse();
     assertThat(s.getCoolingDownUntil()).isNotNull();
+
+    AuditEvent reset = captureKind("KillSwitchResetApproved");
+    assertThat(reset.getSubject())
+        .containsEntry("approver_id_1", "alice")
+        .containsEntry("via", "manual_reset")
+        .containsKey("cooling_down_until")
+        .containsKey("cooldown_secs")
+        .doesNotContainKey("approver_id_2");
   }
 
   // ---------- post-reset cooldown: a still-down book must not immediately re-trip ----------
@@ -345,8 +367,8 @@ class AccountKillSwitchWorkflowImplTest {
     env.sleep(Duration.ofSeconds(75));
     assertThat(stub.killswitchState().getTripped()).isTrue();
 
-    // Reset with distinct approvers -> coolingDownUntil = now + DEFAULT_RESET_COOLDOWN_SECS (60s).
-    stub.reset(resetRequest("alice", "bob"));
+    // Single-operator reset -> coolingDownUntil = now + DEFAULT_RESET_COOLDOWN_SECS (60s).
+    stub.reset(resetRequest("alice"));
     KillSwitchState afterReset = stub.killswitchState();
     assertThat(afterReset.getTripped()).isFalse();
     assertThat(afterReset.getCoolingDownUntil()).isNotNull();
@@ -736,11 +758,10 @@ class AccountKillSwitchWorkflowImplTest {
     return r;
   }
 
-  private static ResetKillSwitchRequest resetRequest(String a1, String a2) {
+  private static ResetKillSwitchRequest resetRequest(String a1) {
     ResetKillSwitchRequest r = new ResetKillSwitchRequest();
     r.setSchemaVersion(1L);
     r.setApproverId1(a1);
-    r.setApproverId2(a2);
     return r;
   }
 

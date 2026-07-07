@@ -54,7 +54,6 @@ class LiveActivationGateActivitiesImplTest {
     ResetKillSwitchRequest req = captor.getValue();
     assertThat(req.getSchemaVersion()).isEqualTo(1L);
     assertThat(req.getApproverId1()).isEqualTo("operator:" + OPERATOR);
-    assertThat(req.getApproverId2()).isNull();
     assertThat(req.getNote()).isEqualTo("live_activation:one_click");
   }
 

@@ -25,8 +25,8 @@ import org.springframework.web.bind.annotation.RestController;
  *   <li>{@code POST /killswitch/trip} — trip via {@code trip_killswitch} Update (WaitPolicy is
  *       SDK-default: {@code Accepted} when using {@code update()}; we use {@code startUpdate()}
  *       returning the handle and don't block on the cascade).
- *   <li>{@code POST /killswitch/reset} — dual-approver reset via {@code reset_killswitch} Update.
- *       Validator-side rejection on same approver IDs surfaces here as 400.
+ *   <li>{@code POST /killswitch/reset} — single-operator reset via {@code reset_killswitch} Update.
+ *       Validator-side rejection (not tripped / blank approver) surfaces here as 400.
  * </ul>
  */
 @RestController
@@ -75,12 +75,11 @@ public class KillSwitchController {
         Map.of("status", "TRIPPED", "tenant_id", tenant, "strategy_id", strategy));
   }
 
-  /** Dual-approver reset. Same-approver rejection from the Validator becomes HTTP 400. */
+  /** Single-operator reset. The authenticated operator is approver_id_1. */
   @PostMapping("/reset")
   public ResponseEntity<Map<String, Object>> reset(
       HttpServletRequest req, @RequestBody ResetPayload body) {
     String approver1 = ctx.operatorId(req);
-    String approver2 = ctx.approverId2(req);
     String tenant = ctx.tenantId(req);
     String strategy = ctx.strategyId(req);
     String wfId = WorkflowIds.killswitch(tenant, strategy);
@@ -88,7 +87,6 @@ public class KillSwitchController {
     ResetKillSwitchRequest rr = new ResetKillSwitchRequest();
     rr.setSchemaVersion(1L);
     rr.setApproverId1(approver1);
-    rr.setApproverId2(approver2);
     rr.setNote(body.note());
 
     WorkflowStub stub = client.newUntypedWorkflowStub(wfId);
