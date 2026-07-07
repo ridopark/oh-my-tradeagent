@@ -49,6 +49,15 @@ import java.time.Duration;
  *       deactivate's trip no longer keeps the strategy halted) → {@code ACTIVATED}.
  * </ol>
  *
+ * <p>Order is deliberately activate-THEN-reset and must NOT be swapped: the reset is fail-closed
+ * (if it fails the strategy stays halted), whereas a reset-before-promote would leave the
+ * watchlist-entry path — which does NOT gate on {@code LivePromotionApproved} — silently armed on a
+ * partial failure. The GREEN "Strategy activated live" Discord alert ({@code
+ * LiveActivationAlerter}) fires off the {@code KillSwitchResetApproved(via=live_activation)} audit
+ * row the reset writes, NOT off {@code LivePromotionApproved}: that row commits LAST and only when
+ * the untrip actually succeeded, so a {@code resetKillSwitch} failure produces no false "activated"
+ * message.
+ *
  * <p><b>deactivateLive</b> emits the {@code LivePromotionDeactivated} row AND trips the kill
  * switch, then returns {@code DEACTIVATED}.
  */

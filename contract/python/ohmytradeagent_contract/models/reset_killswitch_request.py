@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, conint, constr
 
 class ResetKillSwitchRequest(BaseModel):
     """
-    Update payload for KillSwitchWorkflow.reset_killswitch. Dual-control required: approver_id_1 and approver_id_2 must be non-empty and distinct. Validator rejects same-approver. After reset, a configurable cool-down (cfg.reset_cooldown_secs) blocks new entries with KILL_SWITCH_COOLING_DOWN.
+    Update payload shared by two kill-switch reset paths. Dual-control manual reset (reset_killswitch / reset_account_killswitch) requires approver_id_1 AND approver_id_2 to be non-empty and distinct — enforced by the workflow reset validators, which reject a same-approver or blank second approver. The single-operator activation reset (reset_on_activation, issued by a successful one-click LiveActivationWorkflow.activateLive) sets ONLY approver_id_1 (the operator, e.g. "operator:<id>") and omits approver_id_2. approver_id_2 is therefore OPTIONAL at the schema level; the dual-control validators enforce its presence where required. After reset, a configurable cool-down (cfg.reset_cooldown_secs) blocks new entries with KILL_SWITCH_COOLING_DOWN.
     """
 
     model_config = ConfigDict(
@@ -16,7 +16,10 @@ class ResetKillSwitchRequest(BaseModel):
     )
     schema_version: conint(ge=1)
     approver_id_1: constr(min_length=1)
-    approver_id_2: constr(min_length=1)
+    approver_id_2: constr(min_length=1) | None = None
+    """
+    Second approver for the dual-control manual reset paths (reset_killswitch / reset_account_killswitch); must differ from approver_id_1. Omitted by the single-operator reset_on_activation path. Optional at the schema level; presence is enforced by the dual-control validators where required.
+    """
     note: str | None = None
     """
     Operator-supplied free-form note recorded in the KillSwitchResetApproved audit event.

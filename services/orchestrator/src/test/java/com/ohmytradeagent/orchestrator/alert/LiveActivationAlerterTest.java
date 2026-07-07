@@ -16,32 +16,31 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 /**
- * LivePromotionApproved → GREEN Discord confirmation, the symmetric counterpart to {@link
- * KillSwitchAlerterTest}'s red trip page. Mirrors that test exactly: the webhook client is mocked
- * (no live secret needed) and the blank-resolving resolver keeps embed content the unit under test
- * (routing is covered by AlerterWebhookRoutingTest).
+ * KillSwitchResetApproved(via=live_activation) → GREEN Discord confirmation, the symmetric,
+ * false-success-free counterpart to {@link KillSwitchAlerterTest}'s red trip page. Firing off the
+ * UNTRIP audit row (written LAST, only when the reset actually committed) means a resetKillSwitch
+ * failure produces no green alert. The webhook client is mocked (no live secret) and the
+ * blank-resolving resolver keeps embed content the unit under test (routing is covered by
+ * AlerterWebhookRoutingTest).
  */
-class LivePromotionApprovedAlerterTest {
+class LiveActivationAlerterTest {
 
   private static final TenantWebhookResolver RESOLVER =
       new TenantWebhookResolver("", "", null, Duration.ofSeconds(30));
 
   @Test
-  void livePromotionApprovedDispatchesGreenEmbedWithActivationFields() {
+  void liveActivationResetDispatchesGreenEmbedWithOperatorAndCooldown() {
     WebhookClient webhook = mock(WebhookClient.class);
-    LivePromotionApprovedAlerter alerter = new LivePromotionApprovedAlerter(webhook, RESOLVER);
+    LiveActivationAlerter alerter = new LiveActivationAlerter(webhook, RESOLVER);
 
-    // The subject the LivePromotionActivitiesImpl.activate one-click path writes.
+    // The subject KillSwitchWorkflowImpl.resetOnActivation writes: via + operator + cooldown.
     Map<String, Object> subject = new LinkedHashMap<>();
-    subject.put("operator_id", "ridopark");
-    subject.put("tenant_id", "prod_real");
-    subject.put("strategy_id", "copytrade-v1");
-    subject.put("broker_target", "alpaca-live");
-    subject.put("expected_account_id", "847309116");
-    subject.put("activation_mode", "one_click");
-    subject.put("approved_at", "2026-06-14T13:30:00Z");
+    subject.put("via", "live_activation");
+    subject.put("operator", "operator:ridopark");
+    subject.put("cooling_down_until", "2026-06-14T13:31:00Z");
+    subject.put("cooldown_secs", 60L);
     AuditEvent event =
-        event("LivePromotionApproved", "t-prod_real/s-copytrade-v1/live-activation", subject);
+        event("KillSwitchResetApproved", "t-prod_real/s-copytrade-v1/killswitch", subject);
 
     alerter.onAuditEvent(event);
 
@@ -50,23 +49,42 @@ class LivePromotionApprovedAlerterTest {
     assertThat(embed.title()).contains("Strategy activated live");
     assertThat(field(embed, "tenant_id")).isEqualTo("prod_real");
     assertThat(field(embed, "strategy_id")).isEqualTo("copytrade-v1");
-    assertThat(field(embed, "broker_target")).isEqualTo("alpaca-live");
-    assertThat(field(embed, "operator_id")).isEqualTo("ridopark");
-    assertThat(field(embed, "expected_account_id")).isEqualTo("847309116");
-    assertThat(field(embed, "activation_mode")).isEqualTo("one_click");
+    assertThat(field(embed, "operator")).isEqualTo("operator:ridopark");
+    assertThat(field(embed, "cooling_down_until")).isEqualTo("2026-06-14T13:31:00Z");
     // workflow_id demoted to the footer.
-    assertThat(embed.footer()).contains("t-prod_real/s-copytrade-v1/live-activation");
+    assertThat(embed.footer()).contains("t-prod_real/s-copytrade-v1/killswitch");
     assertThat(embed.fields()).allMatch(f -> !f.inline());
+  }
+
+  @Test
+  void manualDualControlReset_withoutVia_doesNotDispatch() {
+    // A manual reset_killswitch writes KillSwitchResetApproved WITHOUT `via` — must NOT page green.
+    WebhookClient webhook = mock(WebhookClient.class);
+    LiveActivationAlerter alerter = new LiveActivationAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("approver_id_1", "alice");
+    subject.put("approver_id_2", "bob");
+    subject.put("cooling_down_until", "2026-06-14T13:31:00Z");
+    subject.put("cooldown_secs", 60L);
+    AuditEvent event = event("KillSwitchResetApproved", "wf-manual", subject);
+
+    alerter.onAuditEvent(event);
+
+    verify(webhook, never())
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
 
   @Test
   void nonMatchingKindDoesNotDispatch() {
     WebhookClient webhook = mock(WebhookClient.class);
-    LivePromotionApprovedAlerter alerter = new LivePromotionApprovedAlerter(webhook, RESOLVER);
+    LiveActivationAlerter alerter = new LiveActivationAlerter(webhook, RESOLVER);
 
-    alerter.onAuditEvent(event("KillSwitchTripped", "wf-1", Map.of("reason", "auto:daily_loss")));
-    alerter.onAuditEvent(event("LivePromotionMissing", "wf-2", Map.of("reason", "absent")));
-    alerter.onAuditEvent(event("LivePromotionDeactivated", "wf-3", Map.of("operator_id", "x")));
+    // LivePromotionApproved must no longer trigger (the alerter no longer keys on it).
+    alerter.onAuditEvent(
+        event("LivePromotionApproved", "wf-1", Map.of("activation_mode", "one_click")));
+    alerter.onAuditEvent(event("KillSwitchTripped", "wf-2", Map.of("reason", "auto:daily_loss")));
 
     verify(webhook, never())
         .postEmbedToUrl(
@@ -76,17 +94,16 @@ class LivePromotionApprovedAlerterTest {
   @Test
   void nullKindAndNullSubjectAreSafe() {
     WebhookClient webhook = mock(WebhookClient.class);
-    LivePromotionApprovedAlerter alerter = new LivePromotionApprovedAlerter(webhook, RESOLVER);
+    LiveActivationAlerter alerter = new LiveActivationAlerter(webhook, RESOLVER);
 
-    AuditEvent nullKind = event(null, "wf-4", Map.of());
-    AuditEvent nullSubject = event("LivePromotionApproved", "wf-4", null);
+    AuditEvent nullKind = event(null, "wf-3", Map.of());
+    // KillSwitchResetApproved with a null subject cannot carry via → no dispatch, no throw.
+    AuditEvent nullSubject = event("KillSwitchResetApproved", "wf-3", null);
 
     assertThatCode(() -> alerter.onAuditEvent(nullKind)).doesNotThrowAnyException();
     assertThatCode(() -> alerter.onAuditEvent(nullSubject)).doesNotThrowAnyException();
 
-    // null-kind must not dispatch; null-subject (LivePromotionApproved) still pages with n/a
-    // fields.
-    verify(webhook, times(1))
+    verify(webhook, never())
         .postEmbedToUrl(
             org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
   }
@@ -98,10 +115,9 @@ class LivePromotionApprovedAlerterTest {
         .when(webhook)
         .postEmbedToUrl(
             org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
-    LivePromotionApprovedAlerter alerter = new LivePromotionApprovedAlerter(webhook, RESOLVER);
+    LiveActivationAlerter alerter = new LiveActivationAlerter(webhook, RESOLVER);
 
-    AuditEvent event =
-        event("LivePromotionApproved", "wf-5", Map.of("activation_mode", "one_click"));
+    AuditEvent event = event("KillSwitchResetApproved", "wf-5", Map.of("via", "live_activation"));
 
     assertThatCode(() -> alerter.onAuditEvent(event)).doesNotThrowAnyException();
   }
@@ -109,11 +125,9 @@ class LivePromotionApprovedAlerterTest {
   @Test
   void unconfiguredWebhookIsNoOpNoThrow() {
     DiscordWebhookClient blankUrlClient = new DiscordWebhookClient("", "");
-    LivePromotionApprovedAlerter alerter =
-        new LivePromotionApprovedAlerter(blankUrlClient, RESOLVER);
+    LiveActivationAlerter alerter = new LiveActivationAlerter(blankUrlClient, RESOLVER);
 
-    AuditEvent event =
-        event("LivePromotionApproved", "wf-6", Map.of("activation_mode", "one_click"));
+    AuditEvent event = event("KillSwitchResetApproved", "wf-6", Map.of("via", "live_activation"));
 
     assertThatCode(() -> alerter.onAuditEvent(event)).doesNotThrowAnyException();
   }
@@ -137,10 +151,10 @@ class LivePromotionApprovedAlerterTest {
     ev.setSchemaVersion(1L);
     ev.setTenantId("prod_real");
     ev.setStrategyId("copytrade-v1");
-    ev.setEventId("00000000-0000-4000-8000-00000000bbbb");
+    ev.setEventId("00000000-0000-4000-8000-00000000cccc");
     ev.setOccurredAt(OffsetDateTime.parse("2026-06-14T13:30:00Z"));
     ev.setKind(kind);
-    ev.setActor("api-gateway:/activate-live");
+    ev.setActor("workflow:KillSwitchWorkflow");
     ev.setWorkflowId(workflowId);
     ev.setCorrelationId("prod_real/copytrade-v1");
     ev.setSubject(subject);

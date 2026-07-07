@@ -11,18 +11,26 @@ import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
 
 /**
- * Audit-driven Discord pager for successful one-click live activations — the GREEN counterpart to
+ * Audit-driven Discord pager for a successful one-click live activation — the GREEN counterpart to
  * {@link KillSwitchAlerter}'s red trip page on one-click deactivate. Mirrors {@link
  * KillSwitchAlerter} / {@link LivePromotionMissingAlerter} EXACTLY (same after-commit
  * {@code @TransactionalEventListener} wiring, same per-tenant {@link TenantWebhookResolver}
- * routing, same non-blocking guarantee) but owns exactly one audit kind: {@code
- * LivePromotionApproved}.
+ * routing, same non-blocking guarantee).
  *
- * <p>Every {@code LivePromotionApproved} event pages GREEN. It is the row {@code
- * LivePromotionActivitiesImpl.activate} writes inside {@code LiveActivationWorkflow.activateLive}
- * (activation_mode {@code one_click}) — one message per Activate — so an operator gets a symmetric
- * "activated live" confirmation on the same per-tenant channel that receives the "Kill switch
- * TRIPPED" message on deactivate.
+ * <p>Fires on the {@code KillSwitchResetApproved} audit row WHERE subject {@code via ==
+ * "live_activation"}. That row is written by {@code KillSwitchWorkflowImpl.resetOnActivation},
+ * which runs LAST in {@code LiveActivationWorkflow.activateLive} (after {@code promotion.activate})
+ * and only commits when the kill-switch UNTRIP actually succeeded — so the green "activated"
+ * message is HONEST: no false-success window. If the reset fails the strategy stays halted and no
+ * green alert fires; if it succeeds exactly one green alert fires and the strategy is genuinely
+ * live.
+ *
+ * <p>The {@code via == "live_activation"} filter is what distinguishes this from a manual
+ * dual-control reset ({@code reset_killswitch}), which writes the SAME {@code
+ * KillSwitchResetApproved} kind but WITHOUT a {@code via} key — so a manual reset never triggers
+ * this pager. {@link KillSwitchAlerter} only pages on {@code KillSwitchTripped} (it has a
+ * no-dispatch branch for every other kind, resets included), so exactly ONE green message fires for
+ * an activation reset.
  *
  * <p>NON-BLOCKING GUARANTEE: {@link #onAuditEvent(AuditEvent)} never throws. The {@link
  * WebhookClient} transport is itself best-effort (a blank/unconfigured webhook URL is a no-op and
@@ -36,18 +44,22 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * fallbackExecution = true} keeps the no-active-transaction unit-test path firing synchronously.
  */
 @Component
-public class LivePromotionApprovedAlerter {
+public class LiveActivationAlerter {
 
-  private static final Logger log = LoggerFactory.getLogger(LivePromotionApprovedAlerter.class);
+  private static final Logger log = LoggerFactory.getLogger(LiveActivationAlerter.class);
 
-  /** The single audit kind this alerter pages on. */
-  private static final String LIVE_PROMOTION_APPROVED_KIND = "LivePromotionApproved";
+  /** The audit kind this alerter inspects. */
+  private static final String KILL_SWITCH_RESET_APPROVED_KIND = "KillSwitchResetApproved";
+
+  /** The subject marker that scopes the page to the one-click activation reset ONLY. */
+  private static final String VIA_KEY = "via";
+
+  private static final String VIA_LIVE_ACTIVATION = "live_activation";
 
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
 
-  public LivePromotionApprovedAlerter(
-      WebhookClient webhookClient, TenantWebhookResolver webhookResolver) {
+  public LiveActivationAlerter(WebhookClient webhookClient, TenantWebhookResolver webhookResolver) {
     this.webhookClient = webhookClient;
     this.webhookResolver = webhookResolver;
   }
@@ -64,31 +76,37 @@ public class LivePromotionApprovedAlerter {
   }
 
   /**
-   * Builds and dispatches the green live-activation embed for a {@code LivePromotionApproved}
-   * event; returns silently for every other kind. Best-effort and non-blocking: never throws.
-   * Retained as public for direct unit testing of the dispatch logic.
+   * Builds and dispatches the green live-activation embed for a {@code KillSwitchResetApproved}
+   * event whose subject carries {@code via == "live_activation"}; returns silently for every other
+   * kind AND for a manual dual-control reset (no {@code via}). Best-effort and non-blocking: never
+   * throws. Retained as public for direct unit testing of the dispatch logic.
    */
   public void onAuditEvent(AuditEvent event) {
     try {
       if (event == null
           || event.getKind() == null
-          || !LIVE_PROMOTION_APPROVED_KIND.equals(event.getKind())) {
+          || !KILL_SWITCH_RESET_APPROVED_KIND.equals(event.getKind())) {
+        return;
+      }
+      Map<String, Object> subject = event.getSubject();
+      if (subject == null || !VIA_LIVE_ACTIVATION.equals(String.valueOf(subject.get(VIA_KEY)))) {
+        // Manual dual-control reset (no via) or any other reset — not an activation.
         return;
       }
       String url = webhookResolver.resolve(event.getTenantId(), event.getStrategyId());
       webhookClient.postEmbedToUrl(url, buildEmbed(event));
     } catch (RuntimeException e) {
       // Defensive: a notification must never break the audit write / trading path.
-      log.warn("live-promotion-approved-alert build/dispatch failed kind={}", safeKind(event), e);
+      log.warn("live-activation-alert build/dispatch failed kind={}", safeKind(event), e);
     }
   }
 
   /**
-   * Builds the green live-activation embed. Fields are the keys {@code
-   * LivePromotionActivitiesImpl.activate} actually writes into the {@code LivePromotionApproved}
-   * subject: {@code operator_id}, {@code broker_target}, {@code expected_account_id}, {@code
-   * activation_mode}. Every key is read null-safe because a render that throws is swallowed by
-   * {@link #onAuditEvent}'s catch — which would SILENTLY LOSE the confirmation.
+   * Builds the green live-activation embed. Fields are the keys the {@code resetOnActivation} audit
+   * subject actually carries ({@code operator}, {@code cooling_down_until}) plus the {@code
+   * tenant_id}/{@code strategy_id} audit-row columns. Every key is read null-safe because a render
+   * that throws is swallowed by {@link #onAuditEvent}'s catch — which would SILENTLY LOSE the
+   * confirmation.
    */
   private WebhookEmbed buildEmbed(AuditEvent event) {
     Map<String, Object> subject = event.getSubject();
@@ -98,14 +116,10 @@ public class LivePromotionApprovedAlerter {
     List<WebhookEmbed.Field> fields = new ArrayList<>();
     fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
     fields.add(new WebhookEmbed.Field("strategy_id", orNa(event.getStrategyId()), false));
-    fields.add(
-        new WebhookEmbed.Field("broker_target", subjectStr(subject, "broker_target"), false));
-    fields.add(new WebhookEmbed.Field("operator_id", subjectStr(subject, "operator_id"), false));
+    fields.add(new WebhookEmbed.Field("operator", subjectStr(subject, "operator"), false));
     fields.add(
         new WebhookEmbed.Field(
-            "expected_account_id", subjectStr(subject, "expected_account_id"), false));
-    fields.add(
-        new WebhookEmbed.Field("activation_mode", subjectStr(subject, "activation_mode"), false));
+            "cooling_down_until", subjectStr(subject, "cooling_down_until"), false));
 
     String footer = "workflow_id: " + orNa(event.getWorkflowId());
     return new WebhookEmbed(title, null, AlertColors.GREEN, footer, fields);
