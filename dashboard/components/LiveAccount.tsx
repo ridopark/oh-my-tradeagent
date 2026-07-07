@@ -8,12 +8,9 @@ import type { PortfolioHistory } from "@/lib/bff";
 
 // Structure (a): the chart owns the history fetch and lifts each frame up via onData; the header's
 // "+$X (Y%) for the selected range" reads the SAME profit_loss the chart drew, so the range delta
-// always matches the active tab. The headline TOTAL, however, is the live net-liquidation equity
-// (accountValue, from GET /v2/account — passed in from the server page, same source as /status), NOT
-// the chart's last equity point: Alpaca's portfolio-history lags a cash deposit by up to a trading
-// day, so the chart's last point would show a stale total right after funding. The live snapshot
-// reflects deposits immediately, at the cost of the headline sitting above the chart's right edge
-// until portfolio-history catches up (the note below explains that gap).
+// always matches the active tab. The headline TOTAL is the live account snapshot (accountValue,
+// passed in from the server page), NOT the chart's last point — see live/page.tsx for why (Alpaca's
+// portfolio-history lags a cash deposit). The note below explains the resulting headline-vs-chart gap.
 export function LiveAccount({
   accountValue,
   accountScope,
@@ -58,10 +55,16 @@ function AccountTotal({
     history && history.equity.length > 0
       ? history.equity[history.equity.length - 1]
       : null;
+  // Only surface the lag note for a DEPOSIT-SCALE gap. The two values are independent live reads at
+  // different instants (SSR account snapshot vs. the client portfolio-history last bar, itself
+  // minutes-stale and possibly a prior close), so during market hours they routinely differ by
+  // ordinary intraday drift — an exact-dollar comparison would fire the note almost constantly. The
+  // gap also absorbs a full day's market move when the last bar is stale, so the tolerance is
+  // generous: flag only when the gap exceeds the larger of $500 or 5% of the account value.
   const lagsChart =
     accountValue != null &&
     chartEquity != null &&
-    Math.round(accountValue) !== Math.round(chartEquity);
+    Math.abs(accountValue - chartEquity) > Math.max(500, accountValue * 0.05);
 
   const up = (pl ?? 0) >= 0;
   const changeCls = up ? "text-emerald-400" : "text-rose-400";
@@ -73,7 +76,7 @@ function AccountTotal({
         Total account value
       </div>
       <div className="mt-1 text-3xl font-semibold text-slate-100">
-        {accountValue == null ? "—" : fmtCurrency(accountValue)}
+        {fmtCurrency(accountValue)}
       </div>
       {pl != null && (
         <div className={`mt-1 text-sm font-medium ${changeCls}`}>
