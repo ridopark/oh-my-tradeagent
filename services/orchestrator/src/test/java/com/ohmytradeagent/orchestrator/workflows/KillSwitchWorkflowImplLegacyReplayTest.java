@@ -358,6 +358,12 @@ class KillSwitchWorkflowImplLegacyReplayTest {
     public void reset(ResetKillSwitchRequest request) {}
 
     @Override
+    public void resetOnActivationValidator(ResetKillSwitchRequest request) {}
+
+    @Override
+    public void resetOnActivation(ResetKillSwitchRequest request) {}
+
+    @Override
     public void recordLivePromotionValidator(LivePromotionApprovalRequest request) {}
 
     @Override

@@ -31,4 +31,16 @@ public interface LiveActivationGateActivities {
    * no live order can be placed after a one-click deactivation even before the next gate read.
    */
   void tripKillSwitch(String tenantId, String strategyId, String operatorId, String reason);
+
+  /**
+   * Reset the per-{@code (tenant, strategy)} {@code KillSwitchWorkflow} via its single-operator
+   * {@code reset_on_activation} Update so a successful one-click activation actually resumes a
+   * strategy that a prior one-click deactivation had HALTED (deactivate trips the switch). The
+   * operator is attributed as {@code operator:<operatorId>} in {@code approverId1}; this is NOT
+   * dual-control. Idempotent: if the switch is not tripped the Update's validator rejects with
+   * {@code not_tripped} — that already-desired end-state is swallowed (mirrors {@link
+   * #tripKillSwitch} swallowing {@code already_tripped}); any other failure is rethrown so the
+   * activation workflow's retry policy sees a genuine error.
+   */
+  void resetKillSwitch(String tenantId, String strategyId, String operatorId);
 }

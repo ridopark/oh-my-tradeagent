@@ -250,6 +250,21 @@ class LiveActivationWorkflowImplTest {
   }
 
   @Test
+  void allGatesPass_untripsKillSwitch_soStrategyResumes() {
+    // Core proof: a successful one-click activate must UNTRIP the kill switch (a prior one-click
+    // deactivate trips it) so the strategy actually resumes — otherwise the fresh promotion row is
+    // inert and risk.check_entry stays fail-closed on tripped==true. Reset is single-operator,
+    // attributed to the activating operator, and fired AFTER the promotion row is written.
+    allGatesPass();
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.ACTIVATED);
+    verify(promotion, times(1)).activate(any());
+    verify(gate, times(1)).resetKillSwitch(eq(TENANT), eq(STRATEGY), eq(OPERATOR));
+  }
+
+  @Test
   void secondTenant_allGatesPass_activatesWithItsOwnProbedAccount() {
     // Fleet enablement Phase 2: a SECOND distinct live tenant activates independently, emitting
     // LivePromotionApproved with ITS OWN probed account — proving the gate is tenant-parameterized,

@@ -381,11 +381,7 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   @Override
   public void reset(ResetKillSwitchRequest request) {
     long cooldownSecs = resetCooldownSecs();
-    this.tripped = false;
-    this.reason = "";
-    this.actor = "";
-    this.trippedAt = null;
-    this.coolingDownUntil = workflowNow().plusSeconds(cooldownSecs);
+    OffsetDateTime coolingUntil = workflowNow().plusSeconds(cooldownSecs);
 
     Map<String, Object> subj =
         subject(
@@ -394,12 +390,63 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
             "approver_id_2",
             request.getApproverId2(),
             "cooling_down_until",
-            coolingDownUntil,
+            coolingUntil,
             "cooldown_secs",
             cooldownSecs);
     if (request.getNote() != null && !request.getNote().isBlank()) {
       subj.put("note", request.getNote());
     }
+    doReset(coolingUntil, subj);
+  }
+
+  @Override
+  public void resetOnActivationValidator(ResetKillSwitchRequest request) {
+    if (!tripped) {
+      throw new IllegalStateException("not_tripped");
+    }
+    String operator = request.getApproverId1();
+    if (operator == null || operator.isBlank()) {
+      throw new IllegalArgumentException("operator_required");
+    }
+  }
+
+  @Override
+  public void resetOnActivation(ResetKillSwitchRequest request) {
+    long cooldownSecs = resetCooldownSecs();
+    OffsetDateTime coolingUntil = workflowNow().plusSeconds(cooldownSecs);
+
+    // HONEST audit: a single-operator reset via the one-click live-activation path (NOT dual
+    // control). No approver_id_2 is emitted — this path never records a second approver.
+    Map<String, Object> subj =
+        subject(
+            "via",
+            "live_activation",
+            "operator",
+            request.getApproverId1(),
+            "cooling_down_until",
+            coolingUntil,
+            "cooldown_secs",
+            cooldownSecs);
+    if (request.getNote() != null && !request.getNote().isBlank()) {
+      subj.put("note", request.getNote());
+    }
+    doReset(coolingUntil, subj);
+  }
+
+  /**
+   * Shared kill-switch reset mutation for both the dual-control {@link
+   * #reset(ResetKillSwitchRequest) } and the single-operator {@link
+   * #resetOnActivation(ResetKillSwitchRequest)} paths. Each caller builds its OWN audit subject
+   * (dual-control keeps its byte-identical subject so past reset histories replay unchanged); this
+   * method only clears the tripped state, arms the cooldown, and emits the {@code
+   * KillSwitchResetApproved} audit with the caller-provided subject.
+   */
+  private void doReset(OffsetDateTime coolingUntil, Map<String, Object> subj) {
+    this.tripped = false;
+    this.reason = "";
+    this.actor = "";
+    this.trippedAt = null;
+    this.coolingDownUntil = coolingUntil;
     auditLog(KIND_KILL_SWITCH_RESET_APPROVED, subj);
   }
 

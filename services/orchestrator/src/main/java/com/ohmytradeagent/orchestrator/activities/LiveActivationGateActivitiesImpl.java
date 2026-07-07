@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.activities;
 
 import com.ohmytradeagent.contract.KillSwitchState;
+import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import io.temporal.client.WorkflowClient;
@@ -77,10 +78,46 @@ public class LiveActivationGateActivitiesImpl implements LiveActivationGateActiv
     }
   }
 
+  @Override
+  public void resetKillSwitch(String tenantId, String strategyId, String operatorId) {
+    String wfId = WorkflowIds.killswitch(tenantId, strategyId);
+
+    ResetKillSwitchRequest req = new ResetKillSwitchRequest();
+    req.setSchemaVersion(1L);
+    req.setApproverId1("operator:" + operatorId);
+    req.setNote("live_activation:one_click");
+
+    try {
+      WorkflowStub stub = workflowClient.newUntypedWorkflowStub(wfId);
+      stub.update("reset_on_activation", Void.class, req);
+    } catch (Exception e) {
+      // A not-tripped switch is the DESIRED end-state of an activation (the strategy is already
+      // resumed) — the reset_on_activation validator rejects with "not_tripped". Swallow that
+      // idempotent case; rethrow anything else so the activation workflow's retry policy sees a
+      // genuine failure. Mirrors tripKillSwitch swallowing "already_tripped".
+      if (isNotTripped(e)) {
+        log.info(
+            "resetKillSwitch tenant={} strategy={} not tripped — activation idempotent",
+            tenantId,
+            strategyId);
+        return;
+      }
+      throw e;
+    }
+  }
+
   private static boolean isAlreadyTripped(Throwable e) {
+    return hasMessageContaining(e, "already_tripped");
+  }
+
+  private static boolean isNotTripped(Throwable e) {
+    return hasMessageContaining(e, "not_tripped");
+  }
+
+  private static boolean hasMessageContaining(Throwable e, String needle) {
     for (Throwable t = e; t != null; t = t.getCause()) {
       String m = t.getMessage();
-      if (m != null && m.contains("already_tripped")) {
+      if (m != null && m.contains(needle)) {
         return true;
       }
     }
