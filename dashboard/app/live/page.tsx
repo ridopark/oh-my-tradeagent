@@ -49,6 +49,16 @@ export default async function LivePage() {
 
   const count = portfolio.open_positions_count;
 
+  // Total account value = live net-liquidation equity (GET /v2/account), summed across the tenant's
+  // broker_targets — the SAME real-time source /status uses. The chart below draws Alpaca's
+  // portfolio-history series, which does NOT fold a cash deposit into equity in real time (it catches
+  // up next trading day). Sourcing the headline from the live snapshot (not the chart's last point)
+  // makes the total reflect deposits immediately. Seed null (not 0) so "all unavailable" renders "—".
+  const accountValue = portfolio.account_equity.reduce<number | null>((sum, a) => {
+    const n = a.equity == null ? NaN : Number(a.equity);
+    return Number.isNaN(n) ? sum : (sum ?? 0) + n;
+  }, null);
+
   return (
     <>
       <Nav tenantId={session?.tenantId} />
@@ -61,7 +71,7 @@ export default async function LivePage() {
           </p>
         </div>
 
-        <LiveAccount />
+        <LiveAccount accountValue={accountValue} accountScope={portfolio.account_equity_scope} />
 
         <section>
           <h2 className="mb-2 text-sm font-semibold text-slate-200">
