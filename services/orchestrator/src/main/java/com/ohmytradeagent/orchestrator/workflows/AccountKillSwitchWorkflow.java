@@ -22,7 +22,7 @@ import io.temporal.workflow.WorkflowMethod;
  * no behavioral change for tenants that have not opted in. The per-(tenant, strategy) {@link
  * KillSwitchWorkflow} is unaffected and continues to run independently.
  *
- * <p>State + dual-control (trip/reset) mirror {@link KillSwitchWorkflow}.
+ * <p>State + trip/reset mirror {@link KillSwitchWorkflow}.
  */
 @WorkflowInterface
 public interface AccountKillSwitchWorkflow {

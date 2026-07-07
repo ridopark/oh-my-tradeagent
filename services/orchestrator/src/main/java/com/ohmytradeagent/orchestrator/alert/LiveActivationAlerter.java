@@ -25,12 +25,11 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * green alert fires; if it succeeds exactly one green alert fires and the strategy is genuinely
  * live.
  *
- * <p>The {@code via == "live_activation"} filter is what distinguishes this from a manual
- * dual-control reset ({@code reset_killswitch}), which writes the SAME {@code
- * KillSwitchResetApproved} kind but WITHOUT a {@code via} key — so a manual reset never triggers
- * this pager. {@link KillSwitchAlerter} only pages on {@code KillSwitchTripped} (it has a
- * no-dispatch branch for every other kind, resets included), so exactly ONE green message fires for
- * an activation reset.
+ * <p>The {@code via == "live_activation"} filter is what distinguishes this from a manual reset
+ * ({@code reset_killswitch}), which writes the SAME {@code KillSwitchResetApproved} kind but with
+ * {@code via == "manual_reset"} — so a manual reset never triggers this pager. {@link
+ * KillSwitchAlerter} only pages on {@code KillSwitchTripped} (it has a no-dispatch branch for every
+ * other kind, resets included), so exactly ONE green message fires for an activation reset.
  *
  * <p>NON-BLOCKING GUARANTEE: {@link #onAuditEvent(AuditEvent)} never throws. The {@link
  * WebhookClient} transport is itself best-effort (a blank/unconfigured webhook URL is a no-op and
@@ -78,8 +77,8 @@ public class LiveActivationAlerter {
   /**
    * Builds and dispatches the green live-activation embed for a {@code KillSwitchResetApproved}
    * event whose subject carries {@code via == "live_activation"}; returns silently for every other
-   * kind AND for a manual dual-control reset (no {@code via}). Best-effort and non-blocking: never
-   * throws. Retained as public for direct unit testing of the dispatch logic.
+   * kind AND for a manual reset ({@code via == "manual_reset"}). Best-effort and non-blocking:
+   * never throws. Retained as public for direct unit testing of the dispatch logic.
    */
   public void onAuditEvent(AuditEvent event) {
     try {
@@ -90,7 +89,7 @@ public class LiveActivationAlerter {
       }
       Map<String, Object> subject = event.getSubject();
       if (subject == null || !VIA_LIVE_ACTIVATION.equals(String.valueOf(subject.get(VIA_KEY)))) {
-        // Manual dual-control reset (no via) or any other reset — not an activation.
+        // Manual reset (via=manual_reset) or any other reset — not an activation.
         return;
       }
       String url = webhookResolver.resolve(event.getTenantId(), event.getStrategyId());

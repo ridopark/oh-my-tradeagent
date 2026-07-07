@@ -49,10 +49,10 @@ public interface KillSwitchWorkflow {
    * LiveActivationWorkflow.activateLive} so activation actually resumes a strategy that a prior
    * one-click deactivate had HALTED (deactivate trips the switch; without this, activate wrote a
    * promotion row but {@code risk.check_entry} stayed fail-closed on {@code tripped==true}). This
-   * is an operator decision carried in {@code approverId1} (e.g. {@code "operator:<id>"}); {@code
-   * approverId2} is unused. It performs the SAME state mutation and cooldown as {@link
-   * #reset(ResetKillSwitchRequest)} but is HONESTLY audited as a single-operator live-activation
-   * reset — it is NOT dual-control and must never be used for the manual dual-control reset path.
+   * is an operator decision carried in {@code approverId1} (e.g. {@code "operator:<id>"}). It
+   * performs the SAME state mutation and cooldown as the manual {@link
+   * #reset(ResetKillSwitchRequest)} path but is audited as a live-activation reset ({@code
+   * via=live_activation}) rather than a manual reset ({@code via=manual_reset}).
    */
   @UpdateValidatorMethod(updateName = "reset_on_activation")
   void resetOnActivationValidator(ResetKillSwitchRequest request);

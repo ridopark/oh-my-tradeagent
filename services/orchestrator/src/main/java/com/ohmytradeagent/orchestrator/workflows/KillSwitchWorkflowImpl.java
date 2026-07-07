@@ -408,8 +408,8 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     long cooldownSecs = resetCooldownSecs();
     OffsetDateTime coolingUntil = workflowNow().plusSeconds(cooldownSecs);
 
-    // HONEST audit: a single-operator reset via the one-click live-activation path (NOT dual
-    // control). No approver_id_2 is emitted — this path never records a second approver.
+    // HONEST audit: a single-operator reset via the one-click live-activation path, marked
+    // via=live_activation to distinguish it from a manual reset (via=manual_reset).
     Map<String, Object> subj =
         subject(
             "via",
@@ -427,12 +427,11 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   }
 
   /**
-   * Shared kill-switch reset mutation for both the dual-control {@link
-   * #reset(ResetKillSwitchRequest) } and the single-operator {@link
-   * #resetOnActivation(ResetKillSwitchRequest)} paths. Each caller builds its OWN audit subject
-   * (dual-control keeps its byte-identical subject so past reset histories replay unchanged); this
-   * method only clears the tripped state, arms the cooldown, and emits the {@code
-   * KillSwitchResetApproved} audit with the caller-provided subject.
+   * Shared kill-switch reset mutation for both single-operator reset paths — the manual {@link
+   * #reset(ResetKillSwitchRequest)} ({@code via=manual_reset}) and the one-click {@link
+   * #resetOnActivation(ResetKillSwitchRequest)} ({@code via=live_activation}). Each caller builds
+   * its OWN audit subject; this method only clears the tripped state, arms the cooldown, and emits
+   * the {@code KillSwitchResetApproved} audit with the caller-provided subject.
    */
   private void doReset(OffsetDateTime coolingUntil, Map<String, Object> subj) {
     this.tripped = false;

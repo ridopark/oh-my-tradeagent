@@ -40,7 +40,7 @@ import java.util.Map;
 /**
  * Phase 6 account-level kill-switch impl. Lives on the {@code orchestrator-core} task queue. One
  * per tenant. Mirrors {@link KillSwitchWorkflowImpl} (heartbeat loop, market-hours gate,
- * dual-control trip/reset, continueAsNew, audit) but the trip predicate is the TENANT-WIDE total:
+ * trip/reset, continueAsNew, audit) but the trip predicate is the TENANT-WIDE total:
  *
  * <pre>totalPnl = tenantRealizedPnl + tenantOpenMtm ; trip when totalPnl &lt;= -threshold</pre>
  *
