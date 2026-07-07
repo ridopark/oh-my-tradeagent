@@ -136,6 +136,28 @@ else
   degraded=1
 fi
 
+# ---- (d) entry-workflow non-retryable failures today (silent black-hole guard) --
+# Post-2026-07-06 (PLAN-2026-07-06-pretrade-check-orchestrator-wiring): a
+# CopytradeSignalWorkflow that fails non-retryably BEFORE any lifecycle audit —
+# the canonical case being PreTradeCheckMisconfigured when the pre-trade routing
+# property (ORCHESTRATOR_PRE_TRADE_CHECK_ROUTING_ENABLED) is unset/dropped by a
+# redeploy — now emits EntryWorkflowFailed (PR #564). ANY such event on the
+# real-money tenant means a live signal was black-holed (received, no order placed),
+# so it is a hard anomaly. This is the deterministic guard for the exact outage that
+# lost 3 prod_real signals on 2026-07-06.
+if entryfails=$(count_q orchestrator <<SQL
+SELECT count(*) FROM audit_log
+WHERE tenant_id = '$TENANT'
+  AND occurred_at::date = (now() AT TIME ZONE 'America/New_York')::date
+  AND kind = 'EntryWorkflowFailed';
+SQL
+); then
+  [ "$entryfails" -gt 0 ] && anomalies+=("$entryfails prod_real entry-workflow failure(s) today (EntryWorkflowFailed — e.g. PreTradeCheckMisconfigured; live signal black-holed, no order placed)")
+else
+  log "WARN: entry-workflow-failure query failed (orchestrator audit_log unreadable) — cannot confirm entry-failure state"
+  degraded=1
+fi
+
 # ---- scorecard context: open positions + today's fills ----------------------
 # open_pos is CONTEXT ONLY, never an anomaly trigger: overnight exposure is
 # by-design here (eod_force_flatten=false), and per-position staleness/red-lot
