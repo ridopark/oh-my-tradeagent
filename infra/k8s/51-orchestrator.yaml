@@ -92,6 +92,16 @@ spec:
               value: /var/lib/copytrade/snapshot
             - name: ORCHESTRATOR_CAPITAL_PER_STRATEGY
               value: "100000"
+            # PLAN-2026-07-06-pretrade-check-orchestrator-wiring: opt-in routability marker for the
+            # pre-trade check. When "true", RiskCollaboratorsConfig wires the non-permissive
+            # RoutablePreTradeCheckActivity bean so RiskActivitiesImpl.assertPreTradeCheckRoutable
+            # passes and a strategy with pre_trade_check_enabled=true routes the check to exec's
+            # broker-<broker_target> queue instead of fail-closing (PreTradeCheckMisconfigured). Baked
+            # into the manifest so a redeploy can't silently drop the value (it was previously set
+            # only via `kubectl set env`, which a full manifest re-apply would wipe — re-breaking live
+            # copytrade). IMAGE default is false; only set true once exec services the pre-trade check.
+            - name: ORCHESTRATOR_PRE_TRADE_CHECK_ROUTING_ENABLED
+              value: "true"
             # Issue #297: non-blocking Discord alert on BTO/STC order failures. The webhook URL is
             # an operator-provisioned secret. `optional: true` so the pod still boots when the secret
             # is absent — the alerter is then a no-op (logs the would-be alert) and the trading path
