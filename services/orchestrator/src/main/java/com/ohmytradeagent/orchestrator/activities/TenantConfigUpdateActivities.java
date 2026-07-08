@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.activities;
 import com.ohmytradeagent.contract.TenantConfigUpdateRequest;
 import com.ohmytradeagent.contract.TenantConfigUpdateResult;
 import io.temporal.activity.ActivityInterface;
+import io.temporal.activity.ActivityMethod;
 
 /**
  * account-loss-cap-db (Phase 3) — DARK capability. Drives the tenant tighten-only account-cap write
@@ -18,5 +19,11 @@ import io.temporal.activity.ActivityInterface;
 @ActivityInterface
 public interface TenantConfigUpdateActivities {
 
+  // Explicit activity type name — WITHOUT this it defaults to the capitalized method name "Update",
+  // which COLLIDES with StrategyConfigUpdateActivities.update() (also "Update") on the shared
+  // orchestrator-core worker → TypeAlreadyRegisteredException at boot (the whole orchestrator fails
+  // to start). Both this workflow type and this activity name are net-new, so an explicit distinct
+  // name is replay-safe. Do NOT rename the strategy one — that would break its command history.
+  @ActivityMethod(name = "TenantConfigUpdate")
   TenantConfigUpdateResult update(TenantConfigUpdateRequest request);
 }
