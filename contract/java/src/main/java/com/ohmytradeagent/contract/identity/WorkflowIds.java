@@ -75,6 +75,21 @@ public final class WorkflowIds {
   }
 
   /**
+   * Workflow ID for the short-lived {@code TenantConfigUpdateWorkflow} that performs the
+   * account-loss-cap-db Phase 3 dark-gated, tighten-only account-cap write for a whole {@code
+   * tenant}.
+   *
+   * <p>Deliberately does NOT route through {@link #tenantStrategy}: the account cap spans every
+   * strategy on the tenant's shared {@code broker_target}, so it is tenant-scoped and
+   * strategy-agnostic (mirrors {@link #accountKillswitch} — there is no {@code s-} segment).
+   * Appends the {@code correlationId} so a retried api-gateway call collides on {@code
+   * REJECT_DUPLICATE} rather than double-applying the non-idempotent CAS.
+   */
+  public static String tenantConfigUpdate(String tenantId, String correlationId) {
+    return "t-" + tenantId + "/account/cfg-write/" + correlationId;
+  }
+
+  /**
    * Workflow ID for the short-lived {@code StrategyConfigCreateWorkflow} that performs the Phase
    * I-1b (operator-account-onboarding) dark-gated create-tenant INSERT for {@code (tenant,
    * strategy)} — the first config row at version 1.

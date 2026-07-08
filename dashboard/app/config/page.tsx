@@ -5,7 +5,7 @@ import { Nav } from "@/components/Nav";
 import { SubmitButton } from "@/components/SubmitButton";
 import { StrategySwitch } from "@/components/StrategySwitch";
 import { getStrategyConfig, getTenantConfig } from "@/lib/bff";
-import { postStrategyConfig } from "@/lib/apiGateway";
+import { postStrategyConfig, postTenantConfig } from "@/lib/apiGateway";
 import type { StrategyConfigResponse, TenantConfig } from "@/lib/bff";
 import { CONFIG_FIELD_INFO } from "@/components/ConfigFieldReference";
 import { fmtCurrency } from "@/components/Pnl";
@@ -17,6 +17,13 @@ export const dynamic = "force-dynamic";
 // is itself dark (404s) until its own flag is on, so even with this true the action degrades
 // gracefully on 404.
 const WRITE_ENABLED = process.env.STRATEGY_CONFIG_WRITE_ENABLED === "true";
+
+// Independent dark flag for the account-cap tighten-only WRITE form (account-loss-cap-db Phase 3).
+// Separate from STRATEGY_CONFIG_WRITE_ENABLED so the account-cap write handle flips on its own,
+// AFTER risk-manager sign-off. Unset/anything-else => read-only cap view. The api-gateway
+// /tenant-config route is itself dark (404s) until its own flag is on, so even with this true the
+// action degrades gracefully on 404. Server is authoritative; the client tighten hint is UX-only.
+const TENANT_WRITE_ENABLED = process.env.TENANT_CONFIG_WRITE_ENABLED === "true";
 
 // The per-tenant strategy on/off field. It gets a dedicated Switch (rendered in the section header)
 // instead of the generic boolean select, so it's excluded from the field list below. Treat a missing
@@ -146,11 +153,22 @@ function FieldValue({
   );
 }
 
-// Read-only account-level daily-loss cap (tenant-wide, realized + open P&L) — distinct from the
-// per-strategy `daily_loss_threshold` rendered above. WRITE-dark (Phase 3 adds the form). Reuses the
-// EXPOSURE "tighten-only" badge + read-only FieldValue. `cfg === null` = unset or the read degraded.
-// `account_daily_loss_pct` is a FRACTION (0.40 → "40%"); `account_daily_loss_threshold` is USD.
-function AccountCapSection({ cfg }: { cfg: TenantConfig | null }) {
+// Account-level daily-loss cap (tenant-wide, realized + open P&L) — distinct from the per-strategy
+// `daily_loss_threshold` rendered above. Read-only unless `writeEnabled` (account-loss-cap-db Phase
+// 3), in which case a SET cap becomes a tighten-only number input (a null cap stays read-only — the
+// server rejects ADDING a cap where none existed). Reuses the EXPOSURE "tighten-only" badge + the
+// SubmitButton + the coarse banner. `cfg === null` = unset or the read degraded (no section).
+// `account_daily_loss_pct` is a FRACTION (0.40 == "40%"); `account_daily_loss_threshold` is USD.
+// The client tighten hint is UX-only — the server (TenantConfigWriter) is authoritative.
+function AccountCapSection({
+  cfg,
+  writeEnabled,
+  action,
+}: {
+  cfg: TenantConfig | null;
+  writeEnabled: boolean;
+  action: (formData: FormData) => void;
+}) {
   if (cfg === null) return null;
   // Treat a non-positive value as unset ("not set"), agreeing with /live — a stored 0 must not
   // render as a configured "0% cap" (which would read as "halt at any loss") on a real-money page.
@@ -163,30 +181,37 @@ function AccountCapSection({ cfg }: { cfg: TenantConfig | null }) {
     cfg.account_daily_loss_threshold > 0
       ? cfg.account_daily_loss_threshold
       : null;
-  const rows: { field: string; label: string; display: string | null }[] = [
+  const rows: {
+    field: string;
+    label: string;
+    display: string | null;
+    // The raw value fed to the editable input (fraction for pct, USD for threshold).
+    raw: number | null;
+  }[] = [
     {
       field: "account_daily_loss_pct",
-      label: "% of start-of-day equity",
+      label: "fraction of start-of-day equity (min 0.05)",
       display: pct === null ? null : `${+(pct * 100).toFixed(2)}%`,
+      raw: pct,
     },
     {
       field: "account_daily_loss_threshold",
-      label: "absolute (realized + open P&L)",
+      label: "absolute USD (realized + open P&L, min $100)",
       display: usd === null ? null : fmtCurrency(usd),
+      raw: usd,
     },
   ];
   const badge = CLASS_BADGE.EXPOSURE;
-  return (
-    <section className="mt-8">
-      <h2 className="mb-2 text-lg font-medium text-slate-100">
-        Account daily-loss cap
-      </h2>
-      <p className="mb-2 text-sm text-slate-400">
-        Tenant-wide cap across all your strategies (realized + open P&amp;L) — separate from the
-        per-strategy limits above.
-      </p>
-      <ul className="flex flex-col divide-y divide-slate-800 rounded border border-slate-800 bg-slate-900">
-        {rows.map((r) => (
+  const inputClass =
+    "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
+
+  const list = (
+    <ul className="flex flex-col divide-y divide-slate-800 rounded border border-slate-800 bg-slate-900">
+      {rows.map((r) => {
+        // Editable only when write is enabled AND the cap is currently SET (a null cap can't be
+        // added tenant-side — the server rejects it — so it stays read-only "not set").
+        const editable = writeEnabled && r.raw !== null;
+        return (
           <li
             key={r.field}
             className="flex flex-col gap-1 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-4"
@@ -199,9 +224,22 @@ function AccountCapSection({ cfg }: { cfg: TenantConfig | null }) {
                 {badge.label}
               </span>
               <span className="text-xs text-slate-500">{r.label}</span>
+              {editable && (
+                <span className="text-xs text-slate-500">tighten only</span>
+              )}
             </div>
             <div className="sm:w-1/2 sm:max-w-md">
-              {r.display === null ? (
+              {editable ? (
+                <input
+                  id={r.field}
+                  name={r.field}
+                  type="number"
+                  step="any"
+                  defaultValue={String(r.raw)}
+                  spellCheck={false}
+                  className={inputClass}
+                />
+              ) : r.display === null ? (
                 <span className="block text-slate-500 sm:text-right">not set</span>
               ) : (
                 <FieldValue
@@ -213,8 +251,33 @@ function AccountCapSection({ cfg }: { cfg: TenantConfig | null }) {
               )}
             </div>
           </li>
-        ))}
-      </ul>
+        );
+      })}
+    </ul>
+  );
+
+  return (
+    <section className="mt-8">
+      <h2 className="mb-2 text-lg font-medium text-slate-100">
+        Account daily-loss cap
+      </h2>
+      <p className="mb-2 text-sm text-slate-400">
+        Tenant-wide cap across all your strategies (realized + open P&amp;L) — separate from the
+        per-strategy limits above. You can only make it <strong>stricter</strong> (a lower cap =
+        an earlier halt).
+      </p>
+      {writeEnabled ? (
+        <form action={action} className="flex flex-col gap-2">
+          {list}
+          <div className="mt-1">
+            <SubmitButton className="rounded border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-100 hover:bg-slate-800">
+              Save cap
+            </SubmitButton>
+          </div>
+        </form>
+      ) : (
+        list
+      )}
     </section>
   );
 }
@@ -246,6 +309,11 @@ export default async function ConfigPage({
       banner = {
         tone: "err",
         msg: "That change is not allowed (dangerous/tighten-only).",
+      };
+    } else if (errorStatus === "422") {
+      banner = {
+        tone: "err",
+        msg: "That cap is below the allowed minimum.",
       };
     } else if (errorStatus === "400") {
       banner = { tone: "err", msg: "Invalid value." };
@@ -326,6 +394,58 @@ export default async function ConfigPage({
 
     revalidatePath("/config");
     // NEVER put config values in the redirect — only a coarse saved/error marker.
+    redirect(result.ok ? "/config?saved=1" : "/config?error=" + result.status);
+  }
+
+  // account-loss-cap-db (Phase 3) server action: re-verifies the session, RECOMPUTES
+  // expected_version from a FRESH tenant-config read (optimistic CAS), overlays the edited cap
+  // fields onto the fresh stored state (a read-only null cap passes through untouched), forwards via
+  // the server-only client, then redirects with a COARSE result. NEVER puts cap values in the
+  // redirect. The server enforces tighten-only + floor; this is UX only.
+  async function saveAccountCap(formData: FormData) {
+    "use server";
+    const s = await auth();
+    if (!s?.tenantId) {
+      redirect("/signin");
+    }
+
+    const fresh = await getTenantConfig().catch(() => null);
+    // Fail safe: a degraded read or a missing/non-numeric version would send a bad expected_version
+    // (a silent mis-CAS). The DB column is BIGINT DEFAULT 1, so this only trips on a degraded read.
+    if (!fresh || !Number.isFinite(fresh.version)) {
+      redirect("/config?error=409");
+    }
+
+    // Full desired state = fresh stored values, with the edited (SET) fields overlaid. A null stored
+    // cap is read-only (no input rendered) so it passes through as null — the server rejects adding.
+    let threshold = fresh.account_daily_loss_threshold;
+    let pct = fresh.account_daily_loss_pct;
+
+    const rawThreshold = formData.get("account_daily_loss_threshold");
+    if (rawThreshold !== null && String(rawThreshold).trim() !== "") {
+      const n = Number(rawThreshold);
+      if (!Number.isFinite(n)) {
+        redirect("/config?error=400");
+      }
+      threshold = n;
+    }
+    const rawPct = formData.get("account_daily_loss_pct");
+    if (rawPct !== null && String(rawPct).trim() !== "") {
+      const n = Number(rawPct);
+      if (!Number.isFinite(n)) {
+        redirect("/config?error=400");
+      }
+      pct = n;
+    }
+
+    const result = await postTenantConfig({
+      account_daily_loss_threshold: threshold,
+      account_daily_loss_pct: pct,
+      expected_version: fresh.version as number,
+      correlation_id: crypto.randomUUID(),
+    });
+
+    revalidatePath("/config");
     redirect(result.ok ? "/config?saved=1" : "/config?error=" + result.status);
   }
 
@@ -479,7 +599,11 @@ export default async function ConfigPage({
           </div>
         )}
 
-        <AccountCapSection cfg={tenantConfig} />
+        <AccountCapSection
+          cfg={tenantConfig}
+          writeEnabled={TENANT_WRITE_ENABLED}
+          action={saveAccountCap}
+        />
       </main>
     </>
   );

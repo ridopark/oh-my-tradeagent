@@ -89,6 +89,51 @@ export async function postStrategyConfig(
   }
 }
 
+// account-loss-cap-db (Phase 3): snake_case body matching the api-gateway /tenant-config WRITE
+// contract, minus tenant_id (which is set FROM THE SESSION, never from caller input). Both caps are
+// the FULL desired state (either may be null); the server enforces tighten-only. No secret material.
+export interface TenantConfigInput {
+  account_daily_loss_threshold: number | null;
+  account_daily_loss_pct: number | null;
+  expected_version: number;
+  correlation_id: string;
+}
+
+export async function postTenantConfig(
+  input: TenantConfigInput,
+): Promise<PostBrokerCredentialResult> {
+  const session = await auth();
+  const tenantId = session?.tenantId;
+  if (!tenantId) {
+    throw new Error("no tenant in session");
+  }
+  try {
+    const res = await fetch(`${API_GATEWAY_BASE_URL}/tenant-config`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${API_GATEWAY_TOKEN}`,
+        "X-Tenant-Id": tenantId,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        // tenant_id is bound to the verified session — NEVER trusted from input.
+        tenant_id: tenantId,
+        account_daily_loss_threshold: input.account_daily_loss_threshold,
+        account_daily_loss_pct: input.account_daily_loss_pct,
+        expected_version: input.expected_version,
+        correlation_id: input.correlation_id,
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(API_GATEWAY_TIMEOUT_MS),
+    });
+    // Coarse result only — the server returns coarse statuses, never cap detail.
+    return { ok: res.ok, status: res.status };
+  } catch {
+    // Transport/abort error — the write did not happen. Coarse failure, no thrown detail.
+    return { ok: false, status: 0 };
+  }
+}
+
 export async function postBrokerCredential(
   input: BrokerCredentialInput,
 ): Promise<PostBrokerCredentialResult> {

@@ -444,6 +444,14 @@ public final class AuditEventKinds {
           "TriggerSubscriptionDeferred",
           // TenantConfigChangedEmitter (no KIND_ constant; literal string in the emitter)
           "TenantConfigChanged",
+          // AccountLossCapChangedEvents (account-loss-cap-db Phase 3): emitted by
+          // TenantConfigWriter
+          // on the tenant tighten-only account-cap write. Rides a dedicated per-tenant chain
+          // (strategy_id sentinel '_account'). One kind carries BOTH the honored change
+          // (outcome=changed) and the durable rejection tripwire (outcome=rejected_tighten_only /
+          // rejected_below_floor — risk-manager C4). A NEUTRAL event (tenant-scoped, not a
+          // position lifecycle) — in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "AccountLossCapChanged",
           // Operator tenant-delete epic (PLAN-2026-07-03-operator-tenant-delete). Phase 2 emits the
           // retained-audit tombstone TenantDeleted from StrategyConfigWriter.delete's in-txn audit
           // (a neutral, non-position-lifecycle event on the (tenant, strategy) hash chain — the
