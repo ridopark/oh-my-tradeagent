@@ -117,9 +117,12 @@ the streak; server-side persist errors never lock a tenant out.
 
 These are **not** satisfied by this runbook's paper flip and MUST land first:
 
-1. **Dual-control (HARD HALT #4).** Credential writes must become two-approver, mirroring
-   `/promotion/approve` (api-gateway → Temporal Update → orchestrator activity → audit),
-   before any live credential is ever accepted. The current path is single-actor.
+1. **Operator-authorization gate (HARD HALT #4).** Before any live credential is ever
+   accepted, credential writes must be gated to an authenticated, allowlisted operator
+   (the same single-operator posture the rest of the system now uses — there is no
+   second-approver path; the former live-promotion approval mirror has been
+   removed). Confirm the write route is reachable only by an authorized operator identity
+   and that each write is attributed in the `BrokerCredentialWritten` audit row.
 2. **Real mTLS** on the api-gateway↔exec hop (precondition 5), or an equivalently trusted
    transport, for any non-single-trusted-node deployment.
 3. **Relax the `*-live` construction refusal** — a deliberate, separately-reviewed change

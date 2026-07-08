@@ -23,7 +23,6 @@ public class TenantContext {
   static final String HEADER_TENANT = "X-Tenant-Id";
   static final String HEADER_STRATEGY = "X-Strategy-Id";
   static final String HEADER_OPERATOR = "X-Operator-Id";
-  static final String HEADER_APPROVER_2 = "X-Approver-Id-2";
 
   // The canonical tenant-id charset. A tenant value flows into Temporal workflow ids, Visibility
   // queries, and the exec X-Tenant-Id header, so it must stay restricted — kept here (compiled
@@ -44,7 +43,7 @@ public class TenantContext {
   // case-insensitive. FAIL-CLOSED: an empty/unset allowlist denies ALL operators — a misconfigured
   // deploy must 403 on these real-money-adjacent routes, never allow-all. Enforced only via
   // requireAllowlistedOperator(); the presence-only operatorId() is left untouched so the many
-  // non-admin operator readers (kill-switch approver, promotion approver, positions) are
+  // non-admin operator readers (kill-switch trip/reset, positions) are
   // unaffected.
   private final Set<String> operatorAllowlist;
 
@@ -141,15 +140,12 @@ public class TenantContext {
    * tenants and arm real-money trading, so the backend independently rejects a non-allowlisted
    * operator — a leaked shared bearer token alone cannot onboard/activate. An empty/unset allowlist
    * denies ALL operators (fail-closed). Distinct from {@link #operatorId} so the non-admin operator
-   * readers (kill-switch trip/reset, promotion approver, positions) keep their presence-only
-   * behavior — an empty allowlist must NEVER block a kill-switch trip.
+   * readers (kill-switch trip/reset, positions) keep their presence-only behavior — an empty
+   * allowlist must NEVER block a kill-switch trip.
    *
    * <p>Format is validated ({@link #isValidOperatorId}) BEFORE trimming + {@link Locale#ROOT}
    * lowercasing, so the case-fold runs only on the guaranteed-ASCII charset (no Turkish-İ locale
    * surprise) and a whitespace/control-char value can never be silently normalized into a match.
-   *
-   * <p>Scope note: {@code X-Approver-Id-2} ({@link #approverId2}) is deliberately NOT covered by
-   * this allowlist — dual-approval (promotion / kill-switch reset) stays header-trusted in Phase 2.
    */
   public String requireAllowlistedOperator(HttpServletRequest req) {
     String operator = operatorId(req); // 400 if X-Operator-Id absent/blank
@@ -161,14 +157,6 @@ public class TenantContext {
       throw new UnauthorizedOperatorException();
     }
     return operator;
-  }
-
-  public String approverId2(HttpServletRequest req) {
-    String v = req.getHeader(HEADER_APPROVER_2);
-    if (v == null || v.isBlank()) {
-      throw new MissingHeaderException(HEADER_APPROVER_2);
-    }
-    return v;
   }
 
   private String headerOr(HttpServletRequest req, String name, String fallback) {
