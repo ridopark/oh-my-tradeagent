@@ -30,6 +30,12 @@ public class TenantConfigReader {
    * existing EXPOSURE badge model. This is NOT the enforcement point; the Phase 3 writer re-checks
    * tighten-only server-side. Deliberately EXPOSURE (not DANGEROUS like the per-strategy {@code
    * daily_loss_threshold}) because a LOWER account cap is strictly safer.
+   *
+   * <p><b>Comment-pinned mirror of the writer's governance.</b> This EXPOSURE set MUST stay in sync
+   * with {@code TenantConfigWriter.TIGHTEN_ONLY_FIELDS} (orchestrator) — the single list of fields
+   * the writer actually enforces tighten-only. The BFF cannot import orchestrator, so the mirror is
+   * by comment rather than a shared constant: if the writer's governed set changes, update this
+   * list to match so the read-only "tighten only" badge can never drift from server enforcement.
    */
   public static final Map<String, List<String>> FIELD_CLASSES =
       Map.of("EXPOSURE", List.of("account_daily_loss_threshold", "account_daily_loss_pct"));

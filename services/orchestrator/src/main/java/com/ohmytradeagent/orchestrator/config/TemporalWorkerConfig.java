@@ -21,6 +21,7 @@ import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyConfigCreateActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyConfigUpdateActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
+import com.ohmytradeagent.orchestrator.activities.TenantConfigUpdateActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantDeleteActivities;
 import com.ohmytradeagent.orchestrator.activities.WatchlistMirrorActivities;
 import com.ohmytradeagent.orchestrator.activities.WatchlistTriggerActivities;
@@ -38,6 +39,7 @@ import com.ohmytradeagent.orchestrator.workflows.PositionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.ReconciliationWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.StrategyConfigCreateWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.StrategyConfigUpdateWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.TenantConfigUpdateWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.TenantDeleteWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistDigestMarkerWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.WatchlistMirrorWorkflowImpl;
@@ -100,6 +102,12 @@ public class TemporalWorkerConfig {
       // is
       // enabled (flag-gated, off by default).
       StrategyConfigCreateActivities strategyConfigCreate,
+      // account-loss-cap-db (Phase 3): DARK tenant tighten-only account-cap write capability.
+      // Drives
+      // the TenantConfigUpdateWorkflow; nothing calls it unless the api-gateway /tenant-config
+      // route
+      // is enabled (flag-gated, off by default).
+      TenantConfigUpdateActivities tenantConfigUpdate,
       StrategyActivities strategy,
       RiskActivities risk,
       ContractActivities contract,
@@ -183,6 +191,12 @@ public class TemporalWorkerConfig {
         // this orchestrator-core queue and returns the coarse outcome. Started by the api-gateway
         // create-tenant forward (dark-gated); the activity impl is registered below.
         StrategyConfigCreateWorkflowImpl.class,
+        // account-loss-cap-db (Phase 3) tenant tighten-only account-cap-write carrier: short-lived
+        // workflow that dispatches the TenantConfigUpdateActivities.update Activity (in-process
+        // TenantConfigWriter CAS) on this orchestrator-core queue and returns the coarse outcome.
+        // Started by the api-gateway /tenant-config forward (dark-gated); the activity impl is
+        // registered below. NET-NEW workflow type — no getVersion needed.
+        TenantConfigUpdateWorkflowImpl.class,
         // Phase F (operator-account-onboarding) one-click live activation/deactivation carrier.
         // The single impl class implements BOTH LiveActivationWorkflow (activateLive) and
         // LiveDeactivationWorkflow (deactivateLive) — two @WorkflowInterfaces, one @WorkflowMethod
@@ -227,6 +241,11 @@ public class TemporalWorkerConfig {
         // INSERT and coarsens its exceptions into the result outcome enum. Nothing calls it unless
         // the api-gateway create-tenant route is enabled (flag-gated, off by default).
         strategyConfigCreate,
+        // account-loss-cap-db (Phase 3): DARK tenant tighten-only account-cap write capability.
+        // Drives the in-process TenantConfigWriter CAS and coarsens its exceptions into the result
+        // outcome enum. Nothing calls it unless the api-gateway /tenant-config route is enabled
+        // (flag-gated, off by default).
+        tenantConfigUpdate,
         strategy,
         risk,
         contract,

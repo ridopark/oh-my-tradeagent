@@ -1,0 +1,22 @@
+-- account-loss-cap-db epic (Phase 3): the tenant tighten-only write path (TenantConfigWriter)
+-- performs an in-place compare-and-set UPDATE on tenant_config (account_daily_loss_threshold,
+-- account_daily_loss_pct, version, updated_at, updated_by). V8 deliberately withheld UPDATE from
+-- orchestrator_runtime because Phase 1 had no mutation path; Phase 3 adds the write path, so grant
+-- UPDATE here (mirrors V8's explicit per-table grant style — not GRANT ALL, principle of least
+-- privilege; the same V5→V6 progression strategy_config took).
+--
+-- DELETE is STILL withheld: the tenant write path never deletes a tenant_config row (removing a cap
+-- is itself REJECTED by the tighten-only rule — dropping a loss cap is not a tightening). Granting
+-- only UPDATE keeps the destructive operation off the runtime role.
+--
+-- PG16 gotcha (MEMORY reference_pg_where_needs_select): the CAS UPDATE ... WHERE tenant_id = ? AND
+-- version = ? READS tenant_id/version. orchestrator_runtime already holds table-level SELECT on
+-- tenant_config from V8, so no separate column-SELECT grant is needed here. If the writer is ever
+-- moved to a no-SELECT least-privilege role, add: GRANT SELECT(tenant_id, version) ON tenant_config.
+--
+-- Safety note: a runtime UPDATE may only make the cap STRICTER (tighten-only). The enforcement is in
+-- application code (TenantConfigWriter's tighten-only + floor checks), NOT in this grant —
+-- AccountKillSwitchWorkflow re-reads the cap every tick, so the writer hard-blocks any raise/remove/
+-- add/below-floor to avoid loosening (or self-bricking) the live account halt. This grant only opens
+-- the door; the writer is the lock.
+GRANT UPDATE ON tenant_config TO orchestrator_runtime;
