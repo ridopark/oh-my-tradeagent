@@ -14,9 +14,10 @@ import java.math.BigDecimal;
  * <p>Opt-in / inert: a null {@code account_daily_loss_threshold} disables the cap entirely
  * (AccountKillSwitchWorkflow never trips), so existing tenants are unaffected.
  *
- * <p>Deferred (out of scope this phase): there is no DB-backed tenant-config store or seed
- * reconciler — the per-strategy DB path ({@code DbStrategyRegistry}) is NOT mirrored here. This is
- * a YAML-only read, matching {@code YamlStrategyRegistry}.
+ * <p>Source-selected (account-loss-cap-db epic): read by {@code YamlTenantRegistry} (default) or
+ * {@code DbTenantRegistry} per the {@code tenant.config.source} property, mirroring the
+ * per-strategy {@code YamlStrategyRegistry}/{@code DbStrategyRegistry} split. A boot seed
+ * reconciler warms the DB from the YAML tree before the read-source cutover.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class TenantConfig {

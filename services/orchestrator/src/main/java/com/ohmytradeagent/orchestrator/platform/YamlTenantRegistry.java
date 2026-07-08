@@ -5,6 +5,9 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
 
 /**
  * Phase 6: YAML-backed {@link TenantRegistry} reading {@code tenants/<tenant>/tenant.yaml}. Mirrors
@@ -13,14 +16,21 @@ import java.nio.file.Path;
  *
  * <p>A missing tenant.yaml yields a default {@link TenantConfig} (null threshold => account cap
  * disabled) so a tenant that has not opted into the cap is fully inert — no exception, no trip.
+ *
+ * <p>account-loss-cap-db epic (Phase 1): the active {@link TenantRegistry} bean is property-driven
+ * exactly like the strategy path — {@code @ConditionalOnProperty(name = "tenant.config.source",
+ * havingValue = "yaml", matchIfMissing = true)}. Default (property unset) = Yaml, so switching to
+ * {@link DbTenantRegistry} is a deliberate operator opt-in ({@code tenant.config.source=db}).
  */
+@Component
+@ConditionalOnProperty(name = "tenant.config.source", havingValue = "yaml", matchIfMissing = true)
 public class YamlTenantRegistry implements TenantRegistry {
 
   private final Path tenantsDir;
   private final ObjectMapper yaml = new ObjectMapper(new YAMLFactory());
 
-  public YamlTenantRegistry(Path tenantsDir) {
-    this.tenantsDir = tenantsDir;
+  public YamlTenantRegistry(@Value("${orchestrator.tenants-dir:tenants}") String tenantsDir) {
+    this.tenantsDir = Path.of(tenantsDir);
   }
 
   @Override

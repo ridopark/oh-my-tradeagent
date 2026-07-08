@@ -26,7 +26,7 @@ class YamlTenantRegistryTest {
         account_daily_loss_threshold: 5000.00
         """);
 
-    TenantConfig cfg = new YamlTenantRegistry(tenantsDir).get("dev");
+    TenantConfig cfg = new YamlTenantRegistry(tenantsDir.toString()).get("dev");
 
     assertThat(cfg.getAccountDailyLossThreshold()).isEqualByComparingTo(new BigDecimal("5000.00"));
   }
@@ -45,7 +45,7 @@ class YamlTenantRegistryTest {
           - copytrade-v1
         """);
 
-    TenantConfig cfg = new YamlTenantRegistry(tenantsDir).get("dev");
+    TenantConfig cfg = new YamlTenantRegistry(tenantsDir.toString()).get("dev");
 
     assertThat(cfg.getAccountDailyLossThreshold()).isNull();
   }
@@ -64,7 +64,7 @@ class YamlTenantRegistryTest {
         account_daily_loss_pct: 0.40
         """);
 
-    TenantConfig cfg = new YamlTenantRegistry(tenantsDir).get("dev");
+    TenantConfig cfg = new YamlTenantRegistry(tenantsDir.toString()).get("dev");
 
     assertThat(cfg.getAccountDailyLossPct()).isEqualByComparingTo(new BigDecimal("0.40"));
     // pct-only config => absolute threshold absent (null).
@@ -82,7 +82,7 @@ class YamlTenantRegistryTest {
         account_daily_loss_threshold: 1500
         """);
 
-    TenantConfig cfg = new YamlTenantRegistry(tenantsDir).get("dev");
+    TenantConfig cfg = new YamlTenantRegistry(tenantsDir.toString()).get("dev");
 
     assertThat(cfg.getAccountDailyLossPct()).isNull();
     assertThat(cfg.getAccountDailyLossThreshold()).isEqualByComparingTo(new BigDecimal("1500"));
@@ -125,7 +125,7 @@ class YamlTenantRegistryTest {
         account_daily_loss_pct: 40
         """);
 
-    assertThatThrownBy(() -> new YamlTenantRegistry(tenantsDir).get("dev"))
+    assertThatThrownBy(() -> new YamlTenantRegistry(tenantsDir.toString()).get("dev"))
         .hasStackTraceContaining("account_daily_loss_pct")
         .hasStackTraceContaining("(0,1]");
   }
@@ -135,13 +135,13 @@ class YamlTenantRegistryTest {
     Path zero = tenantsDir.resolve("z/tenant.yaml");
     Files.createDirectories(zero.getParent());
     Files.writeString(zero, "tenant_id: z\naccount_daily_loss_pct: 0\n");
-    assertThatThrownBy(() -> new YamlTenantRegistry(tenantsDir).get("z"))
+    assertThatThrownBy(() -> new YamlTenantRegistry(tenantsDir.toString()).get("z"))
         .hasStackTraceContaining("account_daily_loss_pct");
 
     Path neg = tenantsDir.resolve("n/tenant.yaml");
     Files.createDirectories(neg.getParent());
     Files.writeString(neg, "tenant_id: n\naccount_daily_loss_pct: -0.1\n");
-    assertThatThrownBy(() -> new YamlTenantRegistry(tenantsDir).get("n"))
+    assertThatThrownBy(() -> new YamlTenantRegistry(tenantsDir.toString()).get("n"))
         .hasStackTraceContaining("account_daily_loss_pct");
   }
 
@@ -151,21 +151,21 @@ class YamlTenantRegistryTest {
     Path frac = tenantsDir.resolve("a/tenant.yaml");
     Files.createDirectories(frac.getParent());
     Files.writeString(frac, "tenant_id: a\naccount_daily_loss_pct: 0.40\n");
-    assertThat(new YamlTenantRegistry(tenantsDir).get("a").getAccountDailyLossPct())
+    assertThat(new YamlTenantRegistry(tenantsDir.toString()).get("a").getAccountDailyLossPct())
         .isEqualByComparingTo(new BigDecimal("0.40"));
 
     // Boundary 1.0 (100% of equity) is accepted — it is the inclusive upper bound.
     Path one = tenantsDir.resolve("b/tenant.yaml");
     Files.createDirectories(one.getParent());
     Files.writeString(one, "tenant_id: b\naccount_daily_loss_pct: 1.0\n");
-    assertThat(new YamlTenantRegistry(tenantsDir).get("b").getAccountDailyLossPct())
+    assertThat(new YamlTenantRegistry(tenantsDir.toString()).get("b").getAccountDailyLossPct())
         .isEqualByComparingTo(BigDecimal.ONE);
   }
 
   @Test
   void missingTenantYaml_returnsDefaultWithNullThreshold(@TempDir Path tenantsDir) {
     // No tenant.yaml at all => default config, null threshold => cap disabled (no throw).
-    TenantConfig cfg = new YamlTenantRegistry(tenantsDir).get("ghost");
+    TenantConfig cfg = new YamlTenantRegistry(tenantsDir.toString()).get("ghost");
 
     assertThat(cfg.getAccountDailyLossThreshold()).isNull();
   }
