@@ -162,8 +162,8 @@ function DailyLossProtection({ limits }: { limits: StrategyLimit[] | null }) {
         🛡️ Daily-loss protection
       </h2>
       <p className="mt-1 text-sm text-slate-400">
-        Each strategy has a daily loss limit. If a strategy&apos;s realized losses for the day reach
-        it, that strategy&apos;s kill switch trips automatically:
+        Each strategy can have a daily loss limit. If a strategy&apos;s realized losses for the day
+        reach it, that strategy&apos;s kill switch trips automatically:
       </p>
       <ul className="mt-2 space-y-1 text-sm text-slate-300">
         <li>
@@ -173,8 +173,8 @@ function DailyLossProtection({ limits }: { limits: StrategyLimit[] | null }) {
           (flattens them) — immediately.
         </li>
         <li>
-          <span className="font-medium text-slate-200">Stops new entries in that strategy</span> for
-          the rest of the day.
+          <span className="font-medium text-slate-200">Stops new entries in that strategy</span>{" "}
+          until the switch is reset.
         </li>
       </ul>
 
