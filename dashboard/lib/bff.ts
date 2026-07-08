@@ -55,6 +55,100 @@ export interface Envelope<T> {
   items: T[];
 }
 
+// Server-ONLY POST to the BFF. Mirrors bffGet (same X-Tenant-Id injection behind the shared token)
+// but sends a JSON body and, crucially, DOES NOT throw on a non-2xx — it returns the raw status +
+// parsed body so the caller can branch on the BFF's typed 409 envelopes (circuit_breaker_active /
+// not_tripped) rather than treating an expected "please wait" as a 500.
+async function bffPost(
+  path: string,
+  body: unknown,
+): Promise<{ status: number; body: unknown }> {
+  const session = await auth();
+  const tenantId = session?.tenantId;
+  if (!tenantId) {
+    throw new NotAuthenticatedError("no tenant in session");
+  }
+  const res = await fetch(`${BFF_URL}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${BFF_TOKEN}`,
+      "X-Tenant-Id": tenantId,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
+    signal: AbortSignal.timeout(BFF_TIMEOUT_MS),
+  });
+  let parsed: unknown = null;
+  try {
+    parsed = await res.json();
+  } catch {
+    parsed = null; // empty/non-JSON body — the status alone drives the branch.
+  }
+  return { status: res.status, body: parsed };
+}
+
+// Account daily-loss kill switch state. resettableAt = trippedAt + 15min (the circuit-breaker gate);
+// `resettable` is the BFF's own view of whether that wait has elapsed. The UI drives its live
+// countdown off resettableAt and only uses `resettable` to seed the initial enabled/disabled state.
+export interface AccountKillSwitch {
+  tripped: boolean;
+  trippedAt: string | null;
+  reason: string;
+  coolingDownUntil: string | null;
+  resettableAt: string | null;
+  resettable: boolean;
+}
+export const getAccountKillSwitch = () =>
+  bffGet<AccountKillSwitch>("/api/account-killswitch");
+
+// Typed result of a reset attempt. Never throws on the expected 409s — the UI needs to SHOW the wait
+// (circuit_breaker_active, with the resettableAt to resync its countdown) or the no-op (not_tripped)
+// rather than crash. `ok` is the 200 RESET path.
+export type ResetAccountKillSwitchResult =
+  | { ok: true }
+  | {
+      ok: false;
+      error: "circuit_breaker_active";
+      resettableAt: string | null;
+      retryAfterSeconds: number | null;
+    }
+  | { ok: false; error: "not_tripped" }
+  | { ok: false; error: "unauthorized" }
+  | { ok: false; error: "unknown"; status: number };
+
+export async function resetAccountKillSwitch(
+  note?: string,
+): Promise<ResetAccountKillSwitchResult> {
+  const { status, body } = await bffPost("/api/account-killswitch/reset", {
+    note,
+  });
+  if (status === 200) {
+    return { ok: true };
+  }
+  if (status === 409) {
+    const err = (body as { error?: string } | null)?.error;
+    if (err === "circuit_breaker_active") {
+      const b = body as {
+        resettableAt?: string | null;
+        retryAfterSeconds?: number | null;
+      };
+      return {
+        ok: false,
+        error: "circuit_breaker_active",
+        resettableAt: b.resettableAt ?? null,
+        retryAfterSeconds: b.retryAfterSeconds ?? null,
+      };
+    }
+    // The only other documented 409 is not_tripped (already reset / never tripped).
+    return { ok: false, error: "not_tripped" };
+  }
+  if (status === 401) {
+    return { ok: false, error: "unauthorized" };
+  }
+  return { ok: false, error: "unknown", status };
+}
+
 export interface Position {
   workflow_id: string;
   strategy_id: string;

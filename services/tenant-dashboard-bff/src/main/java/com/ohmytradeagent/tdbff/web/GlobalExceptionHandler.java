@@ -1,6 +1,7 @@
 package com.ohmytradeagent.tdbff.web;
 
 import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter.BrokerNotConfiguredException;
+import io.temporal.client.WorkflowUpdateException;
 import java.time.format.DateTimeParseException;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -43,6 +44,19 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
   public ResponseEntity<Map<String, Object>> unauthorizedOperator(
       TenantContext.UnauthorizedOperatorException e) {
     return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "forbidden"));
+  }
+
+  /**
+   * A workflow Update rejected by its validator (e.g. a concurrent account-kill-switch reset means
+   * the switch is already {@code not_tripped} by the time our reset lands) surfaces as a 409 — the
+   * request lost a race, it is not a server fault. Mirrors the api-gateway handler.
+   */
+  @ExceptionHandler(WorkflowUpdateException.class)
+  public ResponseEntity<Map<String, Object>> updateRejected(WorkflowUpdateException e) {
+    Throwable cause = e.getCause();
+    String detail = cause == null ? e.getMessage() : cause.getMessage();
+    return ResponseEntity.status(HttpStatus.CONFLICT)
+        .body(Map.of("error", "update_rejected", "detail", String.valueOf(detail)));
   }
 
   @ExceptionHandler(BrokerNotConfiguredException.class)
