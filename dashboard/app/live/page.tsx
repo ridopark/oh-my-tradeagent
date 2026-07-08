@@ -3,16 +3,18 @@ import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
 import { LiveAccount } from "@/components/LiveAccount";
 import { contractCell } from "@/components/ContractLink";
-import { pnlCell, priceCell } from "@/components/Pnl";
+import { pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
 import Link from "next/link";
 import {
   getOrders,
   getPortfolio,
   getTrades,
+  getStrategyConfig,
   NotAuthenticatedError,
   type Order,
   type Portfolio,
   type Trade,
+  type StrategyConfigItem,
 } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
@@ -47,6 +49,15 @@ export default async function LivePage() {
     return <LiveUnavailable tenantId={session?.tenantId} />;
   }
 
+  // Daily-loss protection card — optional context; degrade to a neutral state (never blanks the
+  // page) if the config read fails. Live tripped state + the reset itself live on /status.
+  let dailyLossLimit: AccountLossLimit | null = null;
+  try {
+    dailyLossLimit = accountLossLimit((await getStrategyConfig()).items);
+  } catch {
+    dailyLossLimit = null;
+  }
+
   const count = portfolio.open_positions_count;
 
   // Total account value = live net-liquidation equity (GET /v2/account), summed across the tenant's
@@ -72,6 +83,8 @@ export default async function LivePage() {
         </div>
 
         <LiveAccount accountValue={accountValue} accountScope={portfolio.account_equity_scope} />
+
+        <DailyLossProtection limit={dailyLossLimit} />
 
         <section>
           <h2 className="mb-2 text-sm font-semibold text-slate-200">
@@ -115,6 +128,107 @@ export default async function LivePage() {
         </section>
       </main>
     </>
+  );
+}
+
+// The tenant's account-level daily-loss limit, read from strategy config. Precedence matches the
+// AccountKillSwitch workflow: a percent-of-start-of-day-equity cap wins when set, else the absolute
+// dollar cap; `none` when neither is configured (the account guard is inert). `null` = read failed.
+type AccountLossLimit =
+  | { kind: "abs"; usd: number }
+  | { kind: "pct"; pct: number }
+  | { kind: "none" };
+
+function toNumber(v: unknown): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function accountLossLimit(items: StrategyConfigItem[]): AccountLossLimit {
+  for (const it of items) {
+    const pct = toNumber(it.config["account_daily_loss_pct"]);
+    if (pct != null && pct > 0) return { kind: "pct", pct };
+    const abs = toNumber(it.config["account_daily_loss_threshold"]);
+    if (abs != null && abs > 0) return { kind: "abs", usd: abs };
+  }
+  return { kind: "none" };
+}
+
+// Informational: explains what the account daily-loss circuit breaker does (flatten + halt) and how
+// resetting works. Purely read-only — the reset itself lives on /status. `limit === null` means the
+// config read degraded; render a neutral "unavailable" line rather than implying no protection.
+function DailyLossProtection({ limit }: { limit: AccountLossLimit | null }) {
+  return (
+    <section className="rounded border border-slate-800 bg-slate-900 px-4 py-3">
+      <h2 className="text-sm font-semibold text-slate-200">
+        🛡️ Daily-loss protection
+      </h2>
+      <p className="mt-1 text-sm text-slate-400">
+        Your account has a daily loss limit that acts as a circuit breaker. If your losses reach it
+        during a trading day, the system automatically:
+      </p>
+      <ul className="mt-2 space-y-1 text-sm text-slate-300">
+        <li>
+          <span className="font-medium text-slate-200">
+            Closes all open positions at market
+          </span>{" "}
+          (flattens them) — immediately.
+        </li>
+        <li>
+          <span className="font-medium text-slate-200">Stops opening new positions</span> for the
+          rest of the day.
+        </li>
+      </ul>
+      <p className="mt-2 text-sm text-slate-400">
+        The halt stays until it&apos;s reset. After it trips there&apos;s a{" "}
+        <span className="font-medium text-slate-200">15-minute cool-off</span>, then it can be reset
+        from the{" "}
+        <Link href="/status" className="text-sky-400 hover:text-white">
+          Status
+        </Link>{" "}
+        page — trading resumes only if your account has recovered above the limit.
+      </p>
+
+      <div className="mt-3 border-t border-slate-800 pt-3 text-sm">
+        <DailyLossLimitLine limit={limit} />
+      </div>
+
+      <p className="mt-2 text-xs text-slate-500">
+        Outside a daily-loss trip, positions are held overnight (not auto-closed at the market
+        close).
+      </p>
+    </section>
+  );
+}
+
+function DailyLossLimitLine({ limit }: { limit: AccountLossLimit | null }) {
+  if (limit === null) {
+    return (
+      <span className="text-slate-500">Daily-loss limit unavailable right now.</span>
+    );
+  }
+  if (limit.kind === "abs") {
+    return (
+      <span className="text-slate-300">
+        Your account daily-loss limit:{" "}
+        <span className="font-semibold text-slate-100">{fmtCurrency(limit.usd)}</span> (realized +
+        open P&amp;L).
+      </span>
+    );
+  }
+  if (limit.kind === "pct") {
+    return (
+      <span className="text-slate-300">
+        Your account daily-loss limit:{" "}
+        <span className="font-semibold text-slate-100">{limit.pct}%</span> of start-of-day equity.
+      </span>
+    );
+  }
+  return (
+    <span className="text-slate-500">
+      No account-wide daily-loss limit is currently set.
+    </span>
   );
 }
 
