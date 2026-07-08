@@ -4,19 +4,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.KillSwitchWorkflowInput;
-import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
@@ -24,7 +21,6 @@ import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
-import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import io.temporal.client.WorkflowOptions;
@@ -56,7 +52,6 @@ class KillSwitchWorkflowImplTest {
   private DailyPnlActivities pnl;
   private DailyPnlExecActivity execPnl;
   private KillSwitchCascadeActivities cascade;
-  private LivePromotionActivities livePromotion;
   private long originalHistoryLengthWatermark;
 
   @BeforeEach
@@ -73,7 +68,6 @@ class KillSwitchWorkflowImplTest {
     pnl = Mockito.mock(DailyPnlActivities.class);
     execPnl = Mockito.mock(DailyPnlExecActivity.class);
     cascade = Mockito.mock(KillSwitchCascadeActivities.class);
-    livePromotion = Mockito.mock(LivePromotionActivities.class);
 
     // Defaults: market closed (no auto-trip), today=2026-05-14.
     when(calendar.isMarketOpen()).thenReturn(false);
@@ -85,8 +79,7 @@ class KillSwitchWorkflowImplTest {
     when(cascade.cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString()))
         .thenReturn(0L);
 
-    coreWorker.registerActivitiesImplementations(
-        audit, calendar, strategy, pnl, cascade, livePromotion);
+    coreWorker.registerActivitiesImplementations(audit, calendar, strategy, pnl, cascade);
     // The realized read (v>=1) routes to broker-<target>; register the exec activity on both the
     // paper and live queues so the live-threshold config tests (broker_target=alpaca-live) resolve.
     Worker brokerWorker = env.newWorker(BROKER_QUEUE);
@@ -430,75 +423,6 @@ class KillSwitchWorkflowImplTest {
     assertThat(s.getTripped()).isFalse();
   }
 
-  @Test
-  void recordLivePromotionValidator_blankTenantId_rejected() {
-    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-lp-tenant");
-    WorkflowStub.fromTyped(stub).start(input());
-
-    LivePromotionApprovalRequest req = livePromotionRequest("alice", "bob", "tradier-live");
-    req.setTenantId("");
-
-    assertThatThrownBy(() -> stub.recordLivePromotion(req))
-        .isInstanceOf(WorkflowUpdateException.class)
-        .hasStackTraceContaining("tenant_id_required");
-  }
-
-  @Test
-  void recordLivePromotionValidator_sameApprovers_rejected() {
-    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-lp-same");
-    WorkflowStub.fromTyped(stub).start(input());
-
-    LivePromotionApprovalRequest req = livePromotionRequest("alice", "alice", "tradier-live");
-
-    assertThatThrownBy(() -> stub.recordLivePromotion(req))
-        .isInstanceOf(WorkflowUpdateException.class)
-        .hasStackTraceContaining("approvers_must_differ");
-  }
-
-  @Test
-  void recordLivePromotionValidator_blankBrokerTarget_rejected() {
-    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-lp-broker");
-    WorkflowStub.fromTyped(stub).start(input());
-
-    LivePromotionApprovalRequest req = livePromotionRequest("alice", "bob", "");
-
-    assertThatThrownBy(() -> stub.recordLivePromotion(req))
-        .isInstanceOf(WorkflowUpdateException.class)
-        .hasStackTraceContaining("broker_target_required");
-  }
-
-  @Test
-  void recordLivePromotion_distinctApprovers_invokesActivityWithRequest() {
-    // Round-3 reviewer ask (issue #122): the workflow code path for record_live_promotion is a
-    // pass-through — validator passes, the (mocked) LivePromotionActivities.approve(...) is
-    // invoked exactly once with the request propagated verbatim, and the workflow itself emits
-    // no LivePromotionApproved audit event (that responsibility belongs to the Activity, which
-    // is mocked here so no audit event of that kind ever fires).
-    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-lp-happy");
-    WorkflowStub.fromTyped(stub).start(input());
-
-    LivePromotionApprovalRequest req = livePromotionRequest("alice", "bob", "tradier-live");
-    req.setNote("phase-7 gate signoff drill");
-
-    stub.recordLivePromotion(req);
-
-    ArgumentCaptor<LivePromotionApprovalRequest> captor =
-        ArgumentCaptor.forClass(LivePromotionApprovalRequest.class);
-    verify(livePromotion, times(1)).approve(captor.capture());
-    LivePromotionApprovalRequest captured = captor.getValue();
-    assertThat(captured.getApproverId1()).isEqualTo("alice");
-    assertThat(captured.getApproverId2()).isEqualTo("bob");
-    assertThat(captured.getTenantId()).isEqualTo("dev");
-    assertThat(captured.getStrategyId()).isEqualTo("copytrade-v1");
-    assertThat(captured.getBrokerTarget()).isEqualTo("tradier-live");
-    assertThat(captured.getNote()).isEqualTo("phase-7 gate signoff drill");
-
-    // Heartbeat-related audit events from the running workflow are fine; only the kill-switch
-    // workflow code emitting a LivePromotionApproved event is forbidden — that lives in the
-    // Activity (mocked here, so it never fires).
-    verify(audit, never()).log(argThat(e -> "LivePromotionApproved".equals(e.getKind())));
-  }
-
   // ---------- helpers ----------
 
   private KillSwitchWorkflow newStub(String workflowId) {
@@ -581,18 +505,6 @@ class KillSwitchWorkflowImplTest {
     c.setBrokerTarget(StrategyConfig.BrokerTarget.PAPER);
     c.setDailyLossThreshold(null);
     return c;
-  }
-
-  private static LivePromotionApprovalRequest livePromotionRequest(
-      String a1, String a2, String brokerTarget) {
-    LivePromotionApprovalRequest r = new LivePromotionApprovalRequest();
-    r.setSchemaVersion(1L);
-    r.setTenantId("dev");
-    r.setStrategyId("copytrade-v1");
-    r.setApproverId1(a1);
-    r.setApproverId2(a2);
-    r.setBrokerTarget(brokerTarget);
-    return r;
   }
 
   private AuditEvent captureKind(String kind) {

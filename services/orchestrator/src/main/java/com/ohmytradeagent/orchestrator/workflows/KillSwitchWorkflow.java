@@ -2,7 +2,6 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.KillSwitchWorkflowInput;
-import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
 import io.temporal.workflow.QueryMethod;
@@ -59,19 +58,6 @@ public interface KillSwitchWorkflow {
 
   @UpdateMethod(name = "reset_on_activation")
   void resetOnActivation(ResetKillSwitchRequest request);
-
-  /**
-   * Phase 7 prep (issue #87) — dual-control sign-off recording. Issued by api-gateway's {@code POST
-   * /promotion/approve}. The Update invokes {@code LivePromotionActivities.approve(request)}, which
-   * runs the validator and (on pass) emits one {@code LivePromotionApproved} audit event via the
-   * shipped audit-chain writer. Validator rejection ({@code approvers_must_differ}) surfaces to the
-   * caller as an Update rejection. No kill-switch state is mutated.
-   */
-  @UpdateValidatorMethod(updateName = "record_live_promotion")
-  void recordLivePromotionValidator(LivePromotionApprovalRequest request);
-
-  @UpdateMethod(name = "record_live_promotion")
-  void recordLivePromotion(LivePromotionApprovalRequest request);
 
   @QueryMethod(name = "killswitch_state")
   KillSwitchState killswitchState();
