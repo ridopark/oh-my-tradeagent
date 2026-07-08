@@ -146,9 +146,14 @@ function toNumber(v: unknown): number | null {
 }
 
 function accountLossLimit(items: StrategyConfigItem[]): AccountLossLimit {
+  // Precedence mirrors the AccountKillSwitch workflow: a percent-of-SOD-equity cap wins over the
+  // absolute dollar cap. Scan ALL strategies for a pct first, then for an absolute, so item order
+  // never lets an earlier strategy's absolute cap shadow a later one's pct.
   for (const it of items) {
     const pct = toNumber(it.config["account_daily_loss_pct"]);
     if (pct != null && pct > 0) return { kind: "pct", pct };
+  }
+  for (const it of items) {
     const abs = toNumber(it.config["account_daily_loss_threshold"]);
     if (abs != null && abs > 0) return { kind: "abs", usd: abs };
   }
@@ -181,13 +186,13 @@ function DailyLossProtection({ limit }: { limit: AccountLossLimit | null }) {
         </li>
       </ul>
       <p className="mt-2 text-sm text-slate-400">
-        The halt stays until it&apos;s reset. After it trips there&apos;s a{" "}
-        <span className="font-medium text-slate-200">15-minute cool-off</span>, then it can be reset
-        from the{" "}
+        Trading stays halted until the switch is reset. You can reset it yourself from the{" "}
         <Link href="/status" className="text-sky-400 hover:text-white">
           Status
         </Link>{" "}
-        page — trading resumes only if your account has recovered above the limit.
+        page once a <span className="font-medium text-slate-200">15-minute cool-off</span> has
+        passed — but a reset only sticks if your account has recovered above the limit; if
+        you&apos;re still in breach it re-halts within about a minute.
       </p>
 
       <div className="mt-3 border-t border-slate-800 pt-3 text-sm">
@@ -195,8 +200,8 @@ function DailyLossProtection({ limit }: { limit: AccountLossLimit | null }) {
       </div>
 
       <p className="mt-2 text-xs text-slate-500">
-        Outside a daily-loss trip, positions are held overnight (not auto-closed at the market
-        close).
+        Outside a daily-loss trip, open positions are normally held overnight (unless your strategy
+        has end-of-day flatten enabled).
       </p>
     </section>
   );
