@@ -111,15 +111,26 @@ public class TenantConfigWriter {
     // b. Range validity (a client typo — NOT an abuse tripwire, so no rejection audit). Forbids 0.
     validateRange(tenantId, newThreshold, newPct);
 
-    // c. Tighten-only check vs the stored row. A raise/remove/add is a loosening attempt: emit the
-    // durable rejection audit (C4) OUTSIDE any transaction, then throw.
+    // c/d. Tighten-only (raise/remove/add = a loosening attempt) then floor (a valid tighten but
+    // below the near-zero self-brick floor). Order matters: a raise rejects as TIGHTEN_ONLY before
+    // the floor is ever considered. Both are abuse/compromise tripwires → one durable rejection
+    // audit
+    // (C4) OUTSIDE any transaction, then rethrow the distinctly-typed exception so the activity
+    // maps
+    // it to the right outcome/status (403 vs 422).
     try {
       requireTightenOnly("account_daily_loss_threshold", storedThreshold, newThreshold);
       requireTightenOnly("account_daily_loss_pct", storedPct, newPct);
-    } catch (DangerousFieldChangeRejected e) {
+      requireAboveFloor(newThreshold, newPct);
+    } catch (DangerousFieldChangeRejected | BelowFloorRejected e) {
+      String outcome =
+          e instanceof BelowFloorRejected
+              ? AccountLossCapChangedEvents.OUTCOME_REJECTED_BELOW_FLOOR
+              : AccountLossCapChangedEvents.OUTCOME_REJECTED_TIGHTEN_ONLY;
       log.warn(
-          "tenant account-cap tighten-only REJECTED tenant={} actor={} attempted(threshold={},pct={}) "
+          "tenant account-cap {} REJECTED tenant={} actor={} attempted(threshold={},pct={}) "
               + "stored(threshold={},pct={}) reason={}",
+          outcome,
           tenantId,
           actor,
           newThreshold,
@@ -131,32 +142,7 @@ public class TenantConfigWriter {
           AccountLossCapChangedEvents.rejected(
               tenantId,
               actor,
-              AccountLossCapChangedEvents.OUTCOME_REJECTED_TIGHTEN_ONLY,
-              storedThreshold,
-              storedPct,
-              storedVersion,
-              newThreshold,
-              newPct));
-      throw e;
-    }
-
-    // d. Floor check (C2): a valid tighten, but below the policy floor. Same abuse/self-brick
-    // tripwire → durable rejection audit, then throw.
-    try {
-      requireAboveFloor(newThreshold, newPct);
-    } catch (BelowFloorRejected e) {
-      log.warn(
-          "tenant account-cap below-floor REJECTED tenant={} actor={} attempted(threshold={},pct={}) reason={}",
-          tenantId,
-          actor,
-          newThreshold,
-          newPct,
-          e.getMessage());
-      audit.log(
-          AccountLossCapChangedEvents.rejected(
-              tenantId,
-              actor,
-              AccountLossCapChangedEvents.OUTCOME_REJECTED_BELOW_FLOOR,
+              outcome,
               storedThreshold,
               storedPct,
               storedVersion,

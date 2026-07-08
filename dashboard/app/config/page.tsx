@@ -181,6 +181,9 @@ function AccountCapSection({
     cfg.account_daily_loss_threshold > 0
       ? cfg.account_daily_loss_threshold
       : null;
+  // The "min 0.05" / "min $100" hints below are DISPLAY ONLY and mirror the authoritative policy
+  // floors TenantConfigWriter.MIN_ACCOUNT_DAILY_LOSS_PCT / MIN_ACCOUNT_DAILY_LOSS_THRESHOLD_USD — keep
+  // them in sync if those tune (the server enforces the real floor regardless of this hint).
   const rows: {
     field: string;
     label: string;
