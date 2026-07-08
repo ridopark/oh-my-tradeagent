@@ -10,11 +10,13 @@ import {
   getPortfolio,
   getTrades,
   getStrategyConfig,
+  getTenantConfig,
   NotAuthenticatedError,
   type Order,
   type Portfolio,
   type Trade,
   type StrategyConfigItem,
+  type TenantConfig,
 } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
@@ -49,14 +51,19 @@ export default async function LivePage() {
     return <LiveUnavailable tenantId={session?.tenantId} />;
   }
 
-  // Daily-loss protection card — optional context; degrade to a neutral state (never blanks the
-  // page) if the config read fails.
-  let dailyLossLimits: StrategyLimit[] | null = null;
-  try {
-    dailyLossLimits = strategyDailyLossLimits((await getStrategyConfig()).items);
-  } catch {
-    dailyLossLimits = null;
-  }
+  // Daily-loss protection card — per-strategy limits + the account-wide cap. Fetched together
+  // (independent reads); each degrades to null on failure so the card stays neutral rather than
+  // blanking the page.
+  const [strategyCfgRes, tenantCfgRes] = await Promise.allSettled([
+    getStrategyConfig(),
+    getTenantConfig(),
+  ]);
+  const dailyLossLimits: StrategyLimit[] | null =
+    strategyCfgRes.status === "fulfilled"
+      ? strategyDailyLossLimits(strategyCfgRes.value.items)
+      : null;
+  const tenantConfig: TenantConfig | null =
+    tenantCfgRes.status === "fulfilled" ? tenantCfgRes.value : null;
 
   const count = portfolio.open_positions_count;
 
@@ -84,7 +91,7 @@ export default async function LivePage() {
 
         <LiveAccount accountValue={accountValue} accountScope={portfolio.account_equity_scope} />
 
-        <DailyLossProtection limits={dailyLossLimits} />
+        <DailyLossProtection limits={dailyLossLimits} accountCap={tenantConfig} />
 
         <section>
           <h2 className="mb-2 text-sm font-semibold text-slate-200">
@@ -152,10 +159,35 @@ function strategyDailyLossLimits(items: StrategyConfigItem[]): StrategyLimit[] {
   return out;
 }
 
+// Human-readable account-wide cap, or null when it's unset / the read degraded. `account_daily_loss_pct`
+// is a FRACTION (0.40 → "40%") of start-of-day equity; `account_daily_loss_threshold` is absolute USD
+// on realized + open P&L. Both are independent knobs — show whichever is set (both, joined with "or").
+function accountCapText(cfg: TenantConfig | null): string | null {
+  if (cfg === null) return null;
+  const parts: string[] = [];
+  const pct = cfg.account_daily_loss_pct;
+  if (pct != null && pct > 0) {
+    parts.push(`${+(pct * 100).toFixed(2)}% of start-of-day equity`);
+  }
+  const usd = cfg.account_daily_loss_threshold;
+  if (usd != null && usd > 0) {
+    parts.push(`${fmtCurrency(usd)} (realized + open P&L)`);
+  }
+  return parts.length > 0 ? parts.join(" or ") : null;
+}
+
 // Informational: explains what a strategy's daily-loss kill switch does (flatten + halt) and how it
 // clears. Read-only. `limits === null` means the config read degraded; render a neutral
-// "unavailable" line rather than implying no protection.
-function DailyLossProtection({ limits }: { limits: StrategyLimit[] | null }) {
+// "unavailable" line rather than implying no protection. `accountCap` is the tenant-wide account cap
+// (null = unset or read degraded) — when present it replaces the vague "when it's configured" phrasing.
+function DailyLossProtection({
+  limits,
+  accountCap,
+}: {
+  limits: StrategyLimit[] | null;
+  accountCap: TenantConfig | null;
+}) {
+  const capText = accountCapText(accountCap);
   return (
     <section className="rounded border border-slate-800 bg-slate-900 px-4 py-3">
       <h2 className="text-sm font-semibold text-slate-200">
@@ -185,8 +217,19 @@ function DailyLossProtection({ limits }: { limits: StrategyLimit[] | null }) {
       <p className="mt-2 text-sm text-slate-400">
         Trading stays halted until the switch is reset by an operator, and resumes only once losses
         are back within the limit. A separate account-wide guard (total losses across all your
-        strategies, including open positions) can also trip — when it&apos;s configured you can reset
-        that one yourself from the{" "}
+        strategies, including open positions) can also trip
+        {capText ? (
+          <>
+            . Account-wide daily-loss cap:{" "}
+            <span className="font-semibold text-slate-200">{capText}</span>. You can reset that one
+            yourself from the{" "}
+          </>
+        ) : (
+          <>
+            {" "}
+            — when it&apos;s configured you can reset that one yourself from the{" "}
+          </>
+        )}
         <Link href="/status" className="text-sky-400 hover:text-white">
           Status
         </Link>{" "}
