@@ -11,7 +11,6 @@ import com.ohmytradeagent.orchestrator.activities.TenantConfigActivitiesImpl;
 import com.ohmytradeagent.orchestrator.activities.TenantStrategies;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantRegistry;
-import com.ohmytradeagent.orchestrator.platform.YamlTenantRegistry;
 import io.temporal.client.WorkflowClient;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -34,12 +33,6 @@ public class AccountKillSwitchConfig {
   public TenantStrategies tenantStrategies(
       @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir) {
     return new ScannerTenantStrategies(Path.of(tenantsDir));
-  }
-
-  @Bean
-  public TenantRegistry tenantRegistry(
-      @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir) {
-    return new YamlTenantRegistry(Path.of(tenantsDir));
   }
 
   @Bean
