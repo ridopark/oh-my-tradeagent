@@ -107,6 +107,26 @@ class TenantConfigSeedReconcilerIT {
         .isEqualByComparingTo(new BigDecimal("0.40"));
   }
 
+  /** A tenant with a cap but NO strategies/ subdir must still be seeded (dir-walk, not scanner). */
+  @Test
+  void seedsTenantWithCapButNoStrategies(@org.junit.jupiter.api.io.TempDir Path tenantsDir)
+      throws Exception {
+    // tenant.yaml carries a cap, but there is no strategies/ dir — TenantStrategyScanner would skip
+    // this tenant, so the seeded set would miss it and its cap would go inert at the source=db
+    // cutover. The reconciler walks tenant dirs directly (matching TenantConfigBootstrapper).
+    Files.createDirectories(tenantsDir.resolve("caponly"));
+    Files.writeString(
+        tenantsDir.resolve("caponly").resolve("tenant.yaml"),
+        "tenant_id: caponly\naccount_daily_loss_pct: 0.30\n");
+
+    new TenantConfigSeedReconciler(tenantsDir.toString(), dsl)
+        .run(new DefaultApplicationArguments());
+
+    assertThat(new DbTenantRegistry(dsl).get("caponly").getAccountDailyLossPct())
+        .as("a tenant with a cap but no strategies must still be seeded")
+        .isEqualByComparingTo(new BigDecimal("0.30"));
+  }
+
   /** A pre-existing row with a DIFFERENT (tighter) cap is NOT overwritten by the seeder. */
   @Test
   void leavesPreexistingRowUntouched(@org.junit.jupiter.api.io.TempDir Path tenantsDir)

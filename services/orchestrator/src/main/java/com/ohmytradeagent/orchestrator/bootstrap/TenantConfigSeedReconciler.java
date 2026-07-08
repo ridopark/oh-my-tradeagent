@@ -1,13 +1,12 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.orchestrator.platform.TenantConfig;
-import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import com.ohmytradeagent.orchestrator.platform.YamlTenantRegistry;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
+import java.util.stream.Stream;
 import org.jooq.DSLContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,11 +21,13 @@ import org.springframework.stereotype.Component;
 
 /**
  * account-loss-cap-db epic (Phase 1): on Spring start, back-fills the {@code tenant_config} table
- * (V8) from the mounted {@code tenants/} tree. For each distinct tenant enumerated by {@link
- * TenantStrategyScanner}, INSERTs the YAML {@link TenantConfig}'s two cap columns as a row <b>only
- * if the row is absent</b> (insert-if-absent via {@code ON CONFLICT DO NOTHING}). This is what
- * warms the DB from the live ConfigMap (prod_real's {@code account_daily_loss_pct: 0.40}) BEFORE an
- * operator flips {@code tenant.config.source=db}. Mirrors {@link StrategyConfigSeedReconciler}.
+ * (V8) from the mounted {@code tenants/} tree. For each tenant directory (walked directly, matching
+ * {@link TenantConfigBootstrapper} — not {@code TenantStrategyScanner}, which skips tenants without
+ * a {@code strategies/} subdir), INSERTs the YAML {@link TenantConfig}'s two cap columns as a row
+ * <b>only if the row is absent</b> (insert-if-absent via {@code ON CONFLICT DO NOTHING}). This is
+ * what warms the DB from the live ConfigMap (prod_real's {@code account_daily_loss_pct: 0.40})
+ * BEFORE an operator flips {@code tenant.config.source=db}. Mirrors {@link
+ * StrategyConfigSeedReconciler}.
  *
  * <p><b>Idempotent and non-destructive.</b> An existing row is left UNTOUCHED — no overwrite, no
  * duplicate. While the DB store is not yet authoritative (YAML stays the active reader by default),
@@ -73,27 +74,31 @@ public class TenantConfigSeedReconciler implements ApplicationRunner {
       log.warn("tenants dir {} not found; skipping tenant_config seed", tenantsDir);
       return;
     }
-    List<TenantStrategy> entries = TenantStrategyScanner.scan(tenantsDir);
-    // TenantStrategyScanner yields one entry per (tenant, strategy); the cap is tenant-scoped, so
-    // collapse to distinct tenants (LinkedHashSet for a deterministic, stable seed order).
-    Set<String> tenants = new LinkedHashSet<>();
-    for (TenantStrategy entry : entries) {
-      tenants.add(entry.tenantId());
+    // Enumerate tenant dirs DIRECTLY (not via TenantStrategyScanner, which only emits tenants that
+    // have a strategies/ subdir) so the seeded set == the set TenantConfigBootstrapper validates.
+    // Otherwise a tenant whose tenant.yaml carries a cap but has no strategy files would be
+    // validated
+    // at boot yet never seeded, and its cap would silently go inert at the source=db cutover.
+    List<Path> tenantDirs;
+    try (Stream<Path> s = Files.list(tenantsDir)) {
+      tenantDirs = s.filter(Files::isDirectory).toList();
+    } catch (IOException e) {
+      throw new IllegalStateException("Failed to list tenants dir " + tenantsDir, e);
     }
     int seeded = 0;
     int alreadyPresent = 0;
-    for (String tenantId : tenants) {
-      if (seedIfAbsent(tenantId)) {
+    for (Path tenantDir : tenantDirs) {
+      if (seedIfAbsent(tenantDir.getFileName().toString())) {
         seeded++;
       } else {
         alreadyPresent++;
       }
     }
     log.info(
-        "tenant_config seed reconciler: seeded {} tenants, {} already present (scanned {} tenants from {})",
+        "tenant_config seed reconciler: seeded {} tenants, {} already present (scanned {} tenant dirs from {})",
         seeded,
         alreadyPresent,
-        tenants.size(),
+        tenantDirs.size(),
         tenantsDir);
   }
 
