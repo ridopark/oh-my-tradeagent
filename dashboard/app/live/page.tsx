@@ -51,23 +51,19 @@ export default async function LivePage() {
     return <LiveUnavailable tenantId={session?.tenantId} />;
   }
 
-  // Daily-loss protection card — optional context; degrade to a neutral state (never blanks the
-  // page) if the config read fails.
-  let dailyLossLimits: StrategyLimit[] | null = null;
-  try {
-    dailyLossLimits = strategyDailyLossLimits((await getStrategyConfig()).items);
-  } catch {
-    dailyLossLimits = null;
-  }
-
-  // Account-wide daily-loss cap (tenant-wide, realized + open P&L) — separate read with its own
-  // guard: a tenant-config read failure degrades to no account-cap line, never blanks the page.
-  let tenantConfig: TenantConfig | null = null;
-  try {
-    tenantConfig = await getTenantConfig();
-  } catch {
-    tenantConfig = null;
-  }
+  // Daily-loss protection card — per-strategy limits + the account-wide cap. Fetched together
+  // (independent reads); each degrades to null on failure so the card stays neutral rather than
+  // blanking the page.
+  const [strategyCfgRes, tenantCfgRes] = await Promise.allSettled([
+    getStrategyConfig(),
+    getTenantConfig(),
+  ]);
+  const dailyLossLimits: StrategyLimit[] | null =
+    strategyCfgRes.status === "fulfilled"
+      ? strategyDailyLossLimits(strategyCfgRes.value.items)
+      : null;
+  const tenantConfig: TenantConfig | null =
+    tenantCfgRes.status === "fulfilled" ? tenantCfgRes.value : null;
 
   const count = portfolio.open_positions_count;
 
@@ -169,11 +165,11 @@ function strategyDailyLossLimits(items: StrategyConfigItem[]): StrategyLimit[] {
 function accountCapText(cfg: TenantConfig | null): string | null {
   if (cfg === null) return null;
   const parts: string[] = [];
-  const pct = toNumber(cfg.account_daily_loss_pct);
+  const pct = cfg.account_daily_loss_pct;
   if (pct != null && pct > 0) {
     parts.push(`${+(pct * 100).toFixed(2)}% of start-of-day equity`);
   }
-  const usd = toNumber(cfg.account_daily_loss_threshold);
+  const usd = cfg.account_daily_loss_threshold;
   if (usd != null && usd > 0) {
     parts.push(`${fmtCurrency(usd)} (realized + open P&L)`);
   }

@@ -221,17 +221,13 @@ export default async function ConfigPage({
 }: {
   searchParams: { saved?: string; error?: string };
 }) {
-  // Independent reads — run them together rather than serializing the BFF fetch behind auth().
-  const [session, cfg] = await Promise.all([auth(), getStrategyConfig()]);
-
-  // Account-level daily-loss cap — separate read with its own guard so a tenant-config read failure
-  // degrades to no account-cap section rather than failing the whole page.
-  let tenantConfig: TenantConfig | null = null;
-  try {
-    tenantConfig = await getTenantConfig();
-  } catch {
-    tenantConfig = null;
-  }
+  // Independent reads — run them together rather than serializing the BFF fetches. The tenant-config
+  // read degrades to null (no account-cap section) rather than failing the whole page.
+  const [session, cfg, tenantConfig] = await Promise.all([
+    auth(),
+    getStrategyConfig(),
+    getTenantConfig().catch(() => null),
+  ]);
 
   const saved = searchParams.saved === "1";
   const errorStatus = searchParams.error;
