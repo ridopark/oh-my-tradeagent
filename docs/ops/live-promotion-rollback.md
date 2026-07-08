@@ -153,8 +153,8 @@ approver:
 ```sh
 curl -X POST http://copytrade.homelab.local/killswitch/reset \
   -H 'Content-Type: application/json' \
+  -H 'X-Operator-Id: operator:alice' \
   -d '{
-    "approver_id_1": "operator:alice",
     "note": "rollback complete — broker_target reverted to <provider>-paper, recon clean"
   }'
 ```
