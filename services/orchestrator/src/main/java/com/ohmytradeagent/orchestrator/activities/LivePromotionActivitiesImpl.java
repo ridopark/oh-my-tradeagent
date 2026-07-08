@@ -41,9 +41,8 @@ public class LivePromotionActivitiesImpl implements LivePromotionActivities {
   public void activate(LiveActivationRequest request) {
     OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
-    // Single-operator one-click subject. Carries the REAL authenticated operator (NOT the static
-    // ACTOR constant), the probed expected_account_id, and activation_mode so the row is
-    // distinguishable from a dual-control approve() at audit time. ZERO key material.
+    // Single-operator one-click subject. Carries the REAL authenticated operator, the probed
+    // expected_account_id, and activation_mode. ZERO key material.
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("operator_id", request.getOperatorId());
     subject.put("tenant_id", request.getTenantId());

@@ -39,7 +39,7 @@ class LivePromotionActivitiesImplTest {
     verify(audit, times(1)).log(captor.capture());
     AuditEvent emitted = captor.getValue();
 
-    // SAME gate-readable kind as approve() so the order-time gate sees it.
+    // Gate-readable kind that the order-time checkLivePromotion gate matches on.
     assertThat(emitted.getKind()).isEqualTo("LivePromotionApproved");
     assertThat(emitted.getTenantId()).isEqualTo("dev");
     assertThat(emitted.getStrategyId()).isEqualTo("copytrade-v1");
