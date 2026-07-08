@@ -83,8 +83,9 @@ The reset sets `tripped=false` and starts a cooldown window (default 60s per
 `reset_cooldown_secs` in the strategy YAML) during which new entries still reject. Wait
 the cooldown, then verify with the state query above.
 
-If the api-gateway returns 400, either the operator header is missing
-(`approver_id_1_required`) or the switch is not tripped (`not_tripped`).
+If the api-gateway returns 400: a missing `X-Operator-Id` header is rejected at the
+gateway (missing-header), while a blank operator or an already-clear switch is rejected by
+the reset validator (`approver_id_1_required` / `not_tripped`).
 
 ## Path 3: stuck tripped despite reset
 

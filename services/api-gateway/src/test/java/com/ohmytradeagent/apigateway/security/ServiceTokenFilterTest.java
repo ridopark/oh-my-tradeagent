@@ -107,9 +107,10 @@ class ServiceTokenFilterTest {
 
   @Test
   void otherRoutesAreNotFiltered_evenWithNoToken() throws Exception {
-    // Route-scoping: /positions, /activate-live etc. must pass straight through (they keep their
-    // existing header-trust behavior) regardless of the credential-route token.
-    for (String uri : new String[] {"/positions", "/activate-live", "/audit"}) {
+    // Route-scoping: /positions, /orders etc. must pass straight through (they keep their
+    // existing header-trust behavior) regardless of the credential-route token. (Note: the
+    // activation route is UNDER /admin/tenants/, so it is bearer-gated — not listed here.)
+    for (String uri : new String[] {"/positions", "/orders", "/audit"}) {
       MockHttpServletRequest req = new MockHttpServletRequest("GET", uri);
       MockHttpServletResponse res = new MockHttpServletResponse();
       MockFilterChain chain = new MockFilterChain();
