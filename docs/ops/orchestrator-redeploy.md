@@ -63,10 +63,11 @@ kubectl -n temporal run --rm -it temporal-cli --restart=Never \
      orchestrator=ghcr.io/ridopark/oh-my-tradeagent-orchestrator:<new-sha>
    kubectl -n copytrade rollout status deployment/orchestrator --timeout=180s
    ```
-5. Reset kill switch (requires two distinct approver IDs per Phase 5 dual-control):
+5. Reset kill switch (single-operator; the `X-Operator-Id` header is `approver_id_1`):
    ```sh
    curl -X POST http://copytrade.homelab.local/killswitch/reset \
-     -d '{"approver_id_1":"<approver-a>","approver_id_2":"<approver-b>","note":"orchestrator redeploy"}'
+     -H 'X-Operator-Id: operator:<you>' \
+     -d '{"note":"orchestrator redeploy"}'
    ```
 
 ### Pin path (rolling)
@@ -110,8 +111,8 @@ affected workflows back to the last good WFT — see Temporal docs.
   pod in the `temporal` k8s ns) still shows `TenantStrategy` and `ContractSymbol`
   — `scripts/ops/temporal-copytrade-namespace-bootstrap.sh` is idempotent but
   worth confirming after any cluster-wide change.
-- Audit log shows a `KillSwitchReset` event with two distinct approver IDs (if the drain
-  path was used).
+- Audit log shows a `KillSwitchResetApproved` event carrying `approver_id_1` + `via`
+  (if the drain path was used).
 - If the redeploy included an audit-log schema migration, confirm the orchestrator login
   role still has membership in `orchestrator_app` (see
   [`docs/ops/audit-retention.md`](audit-retention.md) §4 "DB role posture"). Without it,

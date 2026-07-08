@@ -31,9 +31,9 @@ import java.util.Map;
 /**
  * Phase 5 kill switch impl. Lives on the {@code orchestrator-core} task queue. Heartbeats every 60s
  * during market hours; auto-trips when realized PnL crosses {@code -daily_loss_threshold}. Updates
- * (trip, reset) are dual-control gated by their Validators; the trip path also fan-outs a {@code
- * riskBreach} signal cascade to every Running workflow under {@code TenantStrategy} via the cascade
- * Activity (executed asynchronously so the Update ACKs fast).
+ * (trip, reset) are guarded by their Validators; the trip path also fan-outs a {@code riskBreach}
+ * signal cascade to every Running workflow under {@code TenantStrategy} via the cascade Activity
+ * (executed asynchronously so the Update ACKs fast).
  *
  * <p>Determinism: all time comes from {@link Workflow#currentTimeMillis()}; all randomness from
  * {@link Workflow#randomUUID()}; cross-workflow visibility queries run inside an Activity (never in

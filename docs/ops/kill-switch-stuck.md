@@ -7,7 +7,7 @@ The `KillSwitchWorkflow` is in a bad state:
 - The workflow is not Running (Temporal returns `kill_switch_unavailable`); risk check
   fails closed and every new BTO is rejected.
 - The switch tripped automatically (daily-loss threshold) and you want to reset.
-- The switch tripped but the reset path is failing dual-control validation.
+- The switch tripped but the reset path is failing validation.
 - The switch is "stuck tripped" — was reset but stays tripped on next `killswitchState`
   query (rare; usually a workflow-thread crash mid-reset).
 
@@ -67,15 +67,14 @@ Verify the next `risk.check_entry` succeeds via a synthetic non-trading signal:
 
 ## Path 2: tripped, reset via api-gateway
 
-Reset requires two distinct approver IDs (Phase 5 dual-control; Issue #21). Use your own
-handle for one and a teammate for the other; the api-gateway rejects if both IDs match.
+Reset is single-operator: the authenticated operator is `approver_id_1` (the
+`X-Operator-Id` header); there is no second approver.
 
 ```sh
 curl -X POST http://copytrade.homelab.local/killswitch/reset \
   -H 'Content-Type: application/json' \
+  -H 'X-Operator-Id: operator:alice' \
   -d '{
-    "approver_id_1": "operator:alice",
-    "approver_id_2": "operator:bob",
     "note": "manual reset after auto-trip on daily-loss threshold"
   }'
 ```
@@ -84,8 +83,9 @@ The reset sets `tripped=false` and starts a cooldown window (default 60s per
 `reset_cooldown_secs` in the strategy YAML) during which new entries still reject. Wait
 the cooldown, then verify with the state query above.
 
-If the api-gateway returns 400 with `approvers_must_differ`, you're trying to reset with
-both IDs the same. Use two distinct identifiers.
+Error responses: a missing/blank `X-Operator-Id` header returns **400** (`missing_header`,
+rejected at the gateway before the update). Resetting a switch that is not tripped returns
+**409 Conflict** (`update_rejected`, detail `not_tripped`) from the reset validator.
 
 ## Path 3: stuck tripped despite reset
 
@@ -151,6 +151,6 @@ entry is stale or missing.
 ## Why this exists
 
 The kill switch is the operator's "halt now" button — and the only path through which
-the dual-control reset can be enforced. PLAN.md lists this as one of the five Phase 5b
+the reset can be enforced. PLAN.md lists this as one of the five Phase 5b
 runbook drills; the failure modes are subtle (auto-trip re-firing, schema_version
-rejection, dual-control mis-config) and the recovery requires Temporal-side action.
+rejection, not-tripped mis-timing) and the recovery requires Temporal-side action.

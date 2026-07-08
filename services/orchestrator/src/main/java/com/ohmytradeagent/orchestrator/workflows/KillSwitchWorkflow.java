@@ -17,7 +17,7 @@ import io.temporal.workflow.WorkflowMethod;
  *
  * <p>State is exposed via {@link #killswitchState()} for {@code risk.check_entry} and mutated via
  * two Updates: {@link #trip(TripKillSwitchRequest)} (operator-issued or auto from the daily-loss
- * heartbeat) and {@link #reset(ResetKillSwitchRequest)} (dual-control reset with a cool-down
+ * heartbeat) and {@link #reset(ResetKillSwitchRequest)} (single-operator reset with a cool-down
  * window).
  */
 @WorkflowInterface

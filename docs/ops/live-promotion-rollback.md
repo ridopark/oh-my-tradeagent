@@ -146,15 +146,15 @@ is resolved.
 ## Path 4: reset the kill switch (only after recon is clean)
 
 Once recon shows zero discrepancies for two consecutive cycles and all in-flight live
-orders have either filled-and-acked or been cancelled, reset the kill switch via the
-dual-control flow (Phase 5; same dual-control as `reset_killswitch`):
+orders have either filled-and-acked or been cancelled, reset the kill switch. Reset is
+single-operator (Phase 1, #569): it requires only `approver_id_1` — there is no second
+approver:
 
 ```sh
 curl -X POST http://copytrade.homelab.local/killswitch/reset \
   -H 'Content-Type: application/json' \
+  -H 'X-Operator-Id: operator:alice' \
   -d '{
-    "approver_id_1": "operator:alice",
-    "approver_id_2": "operator:bob",
     "note": "rollback complete — broker_target reverted to <provider>-paper, recon clean"
   }'
 ```
@@ -187,7 +187,7 @@ curl -s 'http://copytrade.homelab.local/audit?tenant=<t>&strategy=<s>&kind=Tenan
 curl -s 'http://copytrade.homelab.local/audit?tenant=<t>&strategy=<s>&kind=ReconciliationCompleted&limit=2' | jq '.events[].attributes.discrepancies'
 # → [0, 0]
 
-# 4. The reset event with both approver IDs:
+# 4. The reset event (single-operator; subject carries approver_id_1, via, cooling_down_until):
 curl -s 'http://copytrade.homelab.local/audit?tenant=<t>&strategy=<s>&kind=KillSwitchResetApproved&limit=1' | jq '.events[0]'
 
 # 5. First paper BTO post-rollback (confirms the system is back in service):
@@ -210,7 +210,7 @@ no real risk:
    b. Trip the kill switch.
    c. Flip `broker_target` from `<provider>-live` to `<provider>-paper`.
    d. Wait one recon cycle and verify zero discrepancies.
-   e. Reset the kill switch via dual-control.
+   e. Reset the kill switch (single-operator; `approver_id_1` only).
 3. Inject a synthetic BTO via `scripts/harness/inject_synthetic_bto.py` (the same harness
    used in PLAN.md Phase 5b.E validation) and confirm it routes to the paper adapter.
 4. Re-flip `broker_target` back to `<provider>-live` and confirm shadow-live resumes
@@ -229,8 +229,8 @@ Drill **passes** if and only if:
 
 - Every audit event in the "Audit-log evidence to capture" section was successfully
   captured.
-- The reset path used two distinct approver IDs (single-operator reset must be
-  rejected — that's the dual-control guarantee, not a rollback failure).
+- The reset path completed with a single operator (`approver_id_1`) and wrote a
+  `KillSwitchResetApproved` audit row carrying `approver_id_1` + `via=manual_reset`.
 - The post-rollback synthetic BTO routed to the paper adapter (no leak to live).
 - Re-promotion in step 4 succeeded with no manual journal mutation required.
 
@@ -239,17 +239,20 @@ runbook that doesn't survive its own drill is not a release artifact.
 
 ## Sign-off recording
 
-Promotion sign-off is two-person dual-control (Phase 7 gate, criterion (g)). Both
-approvers must:
+Promotion sign-off is single-operator (Phase 3, #570): there is no second approver and no
+separate two-person approval endpoint. Going live is the one-click **Activate**
+button — `POST /admin/tenants/.../activate-live` (api-gateway → `LiveActivationWorkflow` →
+`LivePromotionActivitiesImpl.activate()`) — which emits the same gate-readable
+`LivePromotionApproved` audit row that the copytrade order-time gate (`checkLivePromotion`)
+reads, attributed to a single operator. Before clicking Activate, the operator must:
 
-1. Independently review the most recent **rollback drill** log entry and confirm it
-   passes the four drill criteria above.
-2. Independently review the shadow-live window metrics (N >= 20 trading days, zero
-   P0/P1, discrepancy rate < 0.1%, recon lag p99 < 60s, audit completeness 100%).
+1. Review the most recent **rollback drill** log entry and confirm it passes the four
+   drill criteria above.
+2. Review the shadow-live window metrics (N >= 20 trading days, zero P0/P1, discrepancy
+   rate < 0.1%, recon lag p99 < 60s, audit completeness 100%).
 3. Confirm the most recent **kill-switch drill** (per `docs/ops/kill-switch-stuck.md`)
    passed within 30 days.
-4. **Hard precondition — drill-freshness check.** Before issuing the
-   dual-control `LivePromotionApproved`, run
+4. **Hard precondition — drill-freshness check.** Before clicking Activate, run
    [`scripts/ops/check_drill_freshness.py`](../../scripts/ops/check_drill_freshness.py)
    against [`docs/ops/drill-log.md`](drill-log.md) for the target adapter. The
    script enforces Phase 7 gate criteria (f) and (h) mechanically — it exits 0
@@ -263,19 +266,19 @@ approvers must:
    # exit 0 → freshness contract satisfied; proceed to step 5
    # exit non-zero → stderr names the stale drill type; halt the gate
    ```
-5. Record the sign-off via the dedicated dual-control endpoint
-   `POST /promotion/approve` (mirror of `/killswitch/reset`, issue #87). The audit event
-   is `LivePromotionApproved`, written via the orchestrator's `LivePromotionActivities`
-   Activity through the hash-chain writer (PR #117); both `approver_id_1` and
-   `approver_id_2` are required and must be distinct — single-approver and same-ID
-   requests reject with `approvers_must_differ` and no audit row is written.
+5. Click **Activate** for the target (tenant, strategy). The one-click `activate-live`
+   flow writes the `LivePromotionApproved` audit row via the orchestrator's
+   `LivePromotionActivities` Activity through the hash-chain writer; the subject carries
+   `operator_id`, `tenant_id`, `strategy_id`, `broker_target`, `activation_mode`
+   (`one_click`), `approved_at`, and `expected_account_id` when probed. It is attributed
+   to the single authenticated operator — there is no second approver.
 
    Verify the sign-off purely by audit-log query (no out-of-band state):
 
    ```sh
    curl -s "http://copytrade.homelab.local/audit?kind=LivePromotionApproved" \
      -H "X-Tenant-Id: <t>" -H "X-Strategy-Id: <s>" | jq '.items[0].subject'
-   # Must return a row whose subject carries two distinct approver_id_* values
+   # Must return a row whose subject carries operator_id + broker_target
    # inside the gate window. If the row is absent, the gate has NOT cleared —
    # do not flip broker_target.
    ```
@@ -284,8 +287,8 @@ approvers must:
 is recorded, any change to a risk-relevant config field (the P0c-a DANGEROUS/EXPOSURE set —
 `broker_target`, `daily_loss_threshold`, the notional caps, the contract/position/capital caps,
 the portfolio gates) that lands after the approval's `occurred_at` re-opens the gate: the live
-dispatch verify returns `config_changed` and refuses live orders until a fresh
-`POST /promotion/approve` (again two distinct approvers) is recorded. This protects the
+dispatch verify returns `config_changed` and refuses live orders until a fresh Activate (a new
+one-click `activate-live` writing a fresh `LivePromotionApproved`) is recorded. This protects the
 configmap-reload path (edit YAML → restart), which the runtime config-write API guard does not
 cover. The specific changed field(s) are visible in the `TenantConfigChanged` audit rows for that
 (tenant, strategy) after the approval:
@@ -294,12 +297,13 @@ cover. The specific changed field(s) are visible in the `TenantConfigChanged` au
 curl -s 'http://copytrade.homelab.local/audit?tenant=<t>&strategy=<s>&kind=TenantConfigChanged&limit=5' \
   | jq '.events[] | {occurred_at, changed_keys: .subject.changed_keys}'
 # Any row whose occurred_at is after the LivePromotionApproved occurred_at AND whose
-# changed_keys touches a risk field is what trips config_changed — re-approve to clear it.
+# changed_keys touches a risk field is what trips config_changed — re-Activate to clear it.
 ```
 
-Once `LivePromotionApproved` is in the audit log with two distinct IDs, the operator
-flips `broker_target` to `<provider>-live` per the promotion procedure (mirror image of
-Path 2 above). The rollback runbook stays on file as the standing recovery procedure.
+Once `LivePromotionApproved` is in the audit log (subject carrying `operator_id` +
+`broker_target`), the operator flips `broker_target` to `<provider>-live` per the promotion
+procedure (mirror image of Path 2 above). The rollback runbook stays on file as the standing
+recovery procedure.
 
 ## Rollback (of the rollback)
 
@@ -329,7 +333,8 @@ on the broker side.
   and the running orchestrator-svc env (`kubectl -n copytrade exec deploy/orchestrator-svc
   -- env | grep BROKER_TARGET`).
 - `ReconciliationCompleted` shows `discrepancies: 0` for two consecutive cycles.
-- `KillSwitchResetApproved` event exists with two distinct approver IDs, post-revert.
+- `KillSwitchResetApproved` event exists (single-operator; subject carries `approver_id_1`
+  + `via`), post-revert.
 - A paper BTO has completed end-to-end through the journal → broker → audit path on the
   paper adapter.
 - The five audit events listed under "Audit-log evidence to capture" are attached to

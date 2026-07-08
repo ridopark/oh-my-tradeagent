@@ -23,8 +23,9 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * <p><b>Route-scoped.</b> {@link #shouldNotFilter} returns true for everything except paths under
  * {@code /broker-credentials} (UI-P2-a), {@code /admin/tenants/} (Phase F one-click
  * activation/deactivation), and {@code /internal/copytrade-fanout-targets} (Phase B1 sidecar
- * registry poll), so the existing operator routes ({@code /positions}, {@code /promotion}, …) are
- * untouched — they keep their current header-trust behavior.
+ * registry poll), so the existing operator routes ({@code /positions}, {@code /audit}, …) are
+ * untouched — they keep their current header-trust behavior. (The one-click activation route lives
+ * UNDER {@code /admin/tenants/}, so it is bearer-gated, not header-trusted.)
  *
  * <p><b>Dark by default.</b> Active when ANY of {@code broker.credentials.write.enabled=true},
  * {@code operator.activation.enabled=true}, {@code operator.tenant-create.enabled=true}, {@code
