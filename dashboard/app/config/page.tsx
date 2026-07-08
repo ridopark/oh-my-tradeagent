@@ -152,12 +152,15 @@ function FieldValue({
 // `account_daily_loss_pct` is a FRACTION (0.40 → "40%"); `account_daily_loss_threshold` is USD.
 function AccountCapSection({ cfg }: { cfg: TenantConfig | null }) {
   if (cfg === null) return null;
+  // Treat a non-positive value as unset ("not set"), agreeing with /live — a stored 0 must not
+  // render as a configured "0% cap" (which would read as "halt at any loss") on a real-money page.
   const pct =
-    typeof cfg.account_daily_loss_pct === "number"
+    typeof cfg.account_daily_loss_pct === "number" && cfg.account_daily_loss_pct > 0
       ? cfg.account_daily_loss_pct
       : null;
   const usd =
-    typeof cfg.account_daily_loss_threshold === "number"
+    typeof cfg.account_daily_loss_threshold === "number" &&
+    cfg.account_daily_loss_threshold > 0
       ? cfg.account_daily_loss_threshold
       : null;
   const rows: { field: string; label: string; display: string | null }[] = [
