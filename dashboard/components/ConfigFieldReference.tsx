@@ -177,9 +177,9 @@ const CONFIG_FIELDS: ConfigField[] = [
     field: "force_close_eod_et",
     what: "Wall-clock ET time (HH:MM) at which non-0DTE positions are force-flattened for the end-of-day sweep.",
     effect:
-      "Default 15:45 ET when unset. An earlier time closes non-0DTE positions with more book depth before the 16:00 ET close; a later time holds them nearer to the close on thinner spreads.",
+      "Default 15:55 ET when unset. An earlier time closes non-0DTE positions with more book depth before the 16:00 ET close; a later time holds them nearer to the close on thinner spreads.",
     example:
-      "15:45 — non-0DTE positions are force-flattened at 3:45pm ET, preserving a ~15-minute window of reasonable spreads.",
+      "15:45 — force-flatten non-0DTE positions at 3:45pm ET (an override earlier than the 15:55 default), preserving a ~15-minute window of reasonable spreads before the close.",
     control: "time",
   },
   {
