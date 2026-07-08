@@ -44,11 +44,12 @@ public class DbTenantRegistry implements TenantRegistry {
                 + "FROM tenant_config WHERE tenant_id = ?",
             tenantId);
 
-    TenantConfig cfg = new TenantConfig();
     if (row == null) {
       // Missing row => cap disabled/inert, matching YamlTenantRegistry's missing-file semantics.
-      return cfg;
+      return new TenantConfig();
     }
+
+    TenantConfig cfg = new TenantConfig();
     cfg.setAccountDailyLossThreshold(row.get("account_daily_loss_threshold", BigDecimal.class));
     // Reuses TenantConfig.setAccountDailyLossPct's (0,1] range guard — a bad stored value throws.
     cfg.setAccountDailyLossPct(row.get("account_daily_loss_pct", BigDecimal.class));
