@@ -50,12 +50,12 @@ export default async function LivePage() {
   }
 
   // Daily-loss protection card — optional context; degrade to a neutral state (never blanks the
-  // page) if the config read fails. Live tripped state + the reset itself live on /status.
-  let dailyLossLimit: AccountLossLimit | null = null;
+  // page) if the config read fails.
+  let dailyLossLimits: StrategyLimit[] | null = null;
   try {
-    dailyLossLimit = accountLossLimit((await getStrategyConfig()).items);
+    dailyLossLimits = strategyDailyLossLimits((await getStrategyConfig()).items);
   } catch {
-    dailyLossLimit = null;
+    dailyLossLimits = null;
   }
 
   const count = portfolio.open_positions_count;
@@ -84,7 +84,7 @@ export default async function LivePage() {
 
         <LiveAccount accountValue={accountValue} accountScope={portfolio.account_equity_scope} />
 
-        <DailyLossProtection limit={dailyLossLimit} />
+        <DailyLossProtection limits={dailyLossLimits} />
 
         <section>
           <h2 className="mb-2 text-sm font-semibold text-slate-200">
@@ -131,13 +131,11 @@ export default async function LivePage() {
   );
 }
 
-// The tenant's account-level daily-loss limit, read from strategy config. Precedence matches the
-// AccountKillSwitch workflow: a percent-of-start-of-day-equity cap wins when set, else the absolute
-// dollar cap; `none` when neither is configured (the account guard is inert). `null` = read failed.
-type AccountLossLimit =
-  | { kind: "abs"; usd: number }
-  | { kind: "pct"; pct: number }
-  | { kind: "none" };
+// A strategy's per-day realized-loss limit (`daily_loss_threshold`, absolute USD) read from its
+// strategy config. When a strategy's realized losses for the day reach it, that strategy's kill
+// switch trips (flatten that strategy's positions + halt its entries). Read at the call site with a
+// guard; `null` there = the config read failed.
+type StrategyLimit = { strategyId: string; usd: number };
 
 function toNumber(v: unknown): number | null {
   if (v == null) return null;
@@ -145,94 +143,95 @@ function toNumber(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function accountLossLimit(items: StrategyConfigItem[]): AccountLossLimit {
-  // Precedence mirrors the AccountKillSwitch workflow: a percent-of-SOD-equity cap wins over the
-  // absolute dollar cap. Scan ALL strategies for a pct first, then for an absolute, so item order
-  // never lets an earlier strategy's absolute cap shadow a later one's pct.
+function strategyDailyLossLimits(items: StrategyConfigItem[]): StrategyLimit[] {
+  const out: StrategyLimit[] = [];
   for (const it of items) {
-    const pct = toNumber(it.config["account_daily_loss_pct"]);
-    if (pct != null && pct > 0) return { kind: "pct", pct };
+    const usd = toNumber(it.config["daily_loss_threshold"]);
+    if (usd != null && usd > 0) out.push({ strategyId: it.strategy_id, usd });
   }
-  for (const it of items) {
-    const abs = toNumber(it.config["account_daily_loss_threshold"]);
-    if (abs != null && abs > 0) return { kind: "abs", usd: abs };
-  }
-  return { kind: "none" };
+  return out;
 }
 
-// Informational: explains what the account daily-loss circuit breaker does (flatten + halt) and how
-// resetting works. Purely read-only — the reset itself lives on /status. `limit === null` means the
-// config read degraded; render a neutral "unavailable" line rather than implying no protection.
-function DailyLossProtection({ limit }: { limit: AccountLossLimit | null }) {
+// Informational: explains what a strategy's daily-loss kill switch does (flatten + halt) and how it
+// clears. Read-only. `limits === null` means the config read degraded; render a neutral
+// "unavailable" line rather than implying no protection.
+function DailyLossProtection({ limits }: { limits: StrategyLimit[] | null }) {
   return (
     <section className="rounded border border-slate-800 bg-slate-900 px-4 py-3">
       <h2 className="text-sm font-semibold text-slate-200">
         🛡️ Daily-loss protection
       </h2>
       <p className="mt-1 text-sm text-slate-400">
-        Your account has a daily loss limit that acts as a circuit breaker. If your losses reach it
-        during a trading day, the system automatically:
+        Each strategy has a daily loss limit. If a strategy&apos;s realized losses for the day reach
+        it, that strategy&apos;s kill switch trips automatically:
       </p>
       <ul className="mt-2 space-y-1 text-sm text-slate-300">
         <li>
           <span className="font-medium text-slate-200">
-            Closes all open positions at market
+            Closes that strategy&apos;s open positions at market
           </span>{" "}
           (flattens them) — immediately.
         </li>
         <li>
-          <span className="font-medium text-slate-200">Stops opening new positions</span> for the
-          rest of the day.
+          <span className="font-medium text-slate-200">Stops new entries in that strategy</span> for
+          the rest of the day.
         </li>
       </ul>
+
+      <div className="mt-3 border-t border-slate-800 pt-3 text-sm">
+        <DailyLossLimitLine limits={limits} />
+      </div>
+
       <p className="mt-2 text-sm text-slate-400">
-        Trading stays halted until the switch is reset. You can reset it yourself from the{" "}
+        Trading stays halted until the switch is reset by an operator, and resumes only once losses
+        are back within the limit. A separate account-wide guard (total losses across all your
+        strategies, including open positions) can also trip — when it&apos;s configured you can reset
+        that one yourself from the{" "}
         <Link href="/status" className="text-sky-400 hover:text-white">
           Status
         </Link>{" "}
-        page once a <span className="font-medium text-slate-200">15-minute cool-off</span> has
-        passed — but a reset only sticks if your account has recovered above the limit; if
-        you&apos;re still in breach it re-halts within about a minute.
+        page after a 15-minute cool-off.
       </p>
 
-      <div className="mt-3 border-t border-slate-800 pt-3 text-sm">
-        <DailyLossLimitLine limit={limit} />
-      </div>
-
       <p className="mt-2 text-xs text-slate-500">
-        Outside a daily-loss trip, open positions are normally held overnight (unless your strategy
-        has end-of-day flatten enabled).
+        Outside a daily-loss trip, open positions are normally held overnight (unless a strategy has
+        end-of-day flatten enabled).
       </p>
     </section>
   );
 }
 
-function DailyLossLimitLine({ limit }: { limit: AccountLossLimit | null }) {
-  if (limit === null) {
+function DailyLossLimitLine({ limits }: { limits: StrategyLimit[] | null }) {
+  if (limits === null) {
     return (
       <span className="text-slate-500">Daily-loss limit unavailable right now.</span>
     );
   }
-  if (limit.kind === "abs") {
+  if (limits.length === 0) {
     return (
-      <span className="text-slate-300">
-        Your account daily-loss limit:{" "}
-        <span className="font-semibold text-slate-100">{fmtCurrency(limit.usd)}</span> (realized +
-        open P&amp;L).
-      </span>
+      <span className="text-slate-500">No daily-loss limit is currently set.</span>
     );
   }
-  if (limit.kind === "pct") {
+  const distinct = Array.from(new Set(limits.map((l) => l.usd)));
+  if (distinct.length === 1) {
     return (
       <span className="text-slate-300">
-        Your account daily-loss limit:{" "}
-        <span className="font-semibold text-slate-100">{limit.pct}%</span> of start-of-day equity.
+        Your daily-loss limit:{" "}
+        <span className="font-semibold text-slate-100">{fmtCurrency(distinct[0])}</span> per strategy
+        (on realized P&amp;L).
       </span>
     );
   }
   return (
-    <span className="text-slate-500">
-      No account-wide daily-loss limit is currently set.
+    <span className="text-slate-300">
+      Your daily-loss limits (on realized P&amp;L):{" "}
+      {limits.map((l, i) => (
+        <span key={l.strategyId}>
+          {i > 0 ? ", " : ""}
+          {l.strategyId}{" "}
+          <span className="font-semibold text-slate-100">{fmtCurrency(l.usd)}</span>
+        </span>
+      ))}
     </span>
   );
 }
