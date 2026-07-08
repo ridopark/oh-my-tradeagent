@@ -419,10 +419,21 @@ export default async function ConfigPage({
       redirect("/config?error=409");
     }
 
-    // Full desired state = fresh stored values, with the edited (SET) fields overlaid. A null stored
-    // cap is read-only (no input rendered) so it passes through as null — the server rejects adding.
-    let threshold = fresh.account_daily_loss_threshold;
-    let pct = fresh.account_daily_loss_pct;
+    // Full desired state = fresh stored values, with the edited (SET) fields overlaid. Normalize a
+    // NON-POSITIVE stored cap to null (unset) to match AccountCapSection's display: a <=0 field renders
+    // read-only "not set" and carries no input, so its baseline must be null here too. Otherwise a
+    // stored 0 would be resubmitted as literal 0, which TenantConfigWriter.validateRange forbids —
+    // rejecting the WHOLE request (400) and blocking an edit to the OTHER cap field. A null baseline
+    // passes through as null (the server rejects adding a cap where none existed).
+    let threshold =
+      typeof fresh.account_daily_loss_threshold === "number" &&
+      fresh.account_daily_loss_threshold > 0
+        ? fresh.account_daily_loss_threshold
+        : null;
+    let pct =
+      typeof fresh.account_daily_loss_pct === "number" && fresh.account_daily_loss_pct > 0
+        ? fresh.account_daily_loss_pct
+        : null;
 
     const rawThreshold = formData.get("account_daily_loss_threshold");
     if (rawThreshold !== null && String(rawThreshold).trim() !== "") {
