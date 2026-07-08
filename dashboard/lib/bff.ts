@@ -88,16 +88,13 @@ async function bffPost(
   return { status: res.status, body: parsed };
 }
 
-// Account daily-loss kill switch state. resettableAt = trippedAt + 15min (the circuit-breaker gate);
-// `resettable` is the BFF's own view of whether that wait has elapsed. The UI drives its live
-// countdown off resettableAt and only uses `resettable` to seed the initial enabled/disabled state.
+// Account daily-loss kill switch state. resettableAt = trippedAt + 15min — the circuit-breaker gate
+// the UI drives its live countdown off. Null timestamps mean "not tripped".
 export interface AccountKillSwitch {
   tripped: boolean;
   trippedAt: string | null;
   reason: string;
-  coolingDownUntil: string | null;
   resettableAt: string | null;
-  resettable: boolean;
 }
 export const getAccountKillSwitch = () =>
   bffGet<AccountKillSwitch>("/api/account-killswitch");
@@ -107,37 +104,24 @@ export const getAccountKillSwitch = () =>
 // rather than crash. `ok` is the 200 RESET path.
 export type ResetAccountKillSwitchResult =
   | { ok: true }
-  | {
-      ok: false;
-      error: "circuit_breaker_active";
-      resettableAt: string | null;
-      retryAfterSeconds: number | null;
-    }
+  | { ok: false; error: "circuit_breaker_active"; resettableAt: string | null }
   | { ok: false; error: "not_tripped" }
   | { ok: false; error: "unauthorized" }
   | { ok: false; error: "unknown"; status: number };
 
-export async function resetAccountKillSwitch(
-  note?: string,
-): Promise<ResetAccountKillSwitchResult> {
-  const { status, body } = await bffPost("/api/account-killswitch/reset", {
-    note,
-  });
+export async function resetAccountKillSwitch(): Promise<ResetAccountKillSwitchResult> {
+  const { status, body } = await bffPost("/api/account-killswitch/reset", {});
   if (status === 200) {
     return { ok: true };
   }
   if (status === 409) {
     const err = (body as { error?: string } | null)?.error;
     if (err === "circuit_breaker_active") {
-      const b = body as {
-        resettableAt?: string | null;
-        retryAfterSeconds?: number | null;
-      };
+      const b = body as { resettableAt?: string | null };
       return {
         ok: false,
         error: "circuit_breaker_active",
         resettableAt: b.resettableAt ?? null,
-        retryAfterSeconds: b.retryAfterSeconds ?? null,
       };
     }
     // The only other documented 409 is not_tripped (already reset / never tripped).

@@ -7,11 +7,11 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;
 import jakarta.servlet.http.HttpServletRequest;
-import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -53,9 +53,21 @@ public class AccountKillSwitchController {
   private final WorkflowClient client;
   private final TenantContext ctx;
 
-  public AccountKillSwitchController(WorkflowClient client, TenantContext ctx) {
+  /**
+   * Server-side dark-launch gate for the RESET WRITE (default false). Mirrors the dashboard's
+   * {@code ACCOUNT_KILLSWITCH_RESET_WRITE_ENABLED} UI flag so the "controlled rollout" is enforced
+   * server-side, not just cosmetically on the button: while off, {@code POST /reset} 404s. The GET
+   * state read stays ungated so the tenant still sees the tripped banner + countdown.
+   */
+  private final boolean resetWriteEnabled;
+
+  public AccountKillSwitchController(
+      WorkflowClient client,
+      TenantContext ctx,
+      @Value("${account-killswitch.reset.write-enabled:false}") boolean resetWriteEnabled) {
     this.client = client;
     this.ctx = ctx;
+    this.resetWriteEnabled = resetWriteEnabled;
   }
 
   @GetMapping
@@ -70,18 +82,12 @@ public class AccountKillSwitchController {
       OffsetDateTime trippedAt = s.getTrippedAt();
       OffsetDateTime resettableAt =
           (tripped && trippedAt != null) ? trippedAt.plusSeconds(CIRCUIT_BREAKER_SECONDS) : null;
-      boolean resettable =
-          resettableAt != null && !OffsetDateTime.now(ZoneOffset.UTC).isBefore(resettableAt);
 
       Map<String, Object> body = new LinkedHashMap<>();
       body.put("tripped", tripped);
       body.put("trippedAt", trippedAt == null ? null : trippedAt.toString());
       body.put("reason", s.getReason());
-      body.put(
-          "coolingDownUntil",
-          s.getCoolingDownUntil() == null ? null : s.getCoolingDownUntil().toString());
       body.put("resettableAt", resettableAt == null ? null : resettableAt.toString());
-      body.put("resettable", resettable);
       return ResponseEntity.ok(body);
     } catch (WorkflowNotFoundException e) {
       return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
@@ -91,6 +97,9 @@ public class AccountKillSwitchController {
   @PostMapping("/reset")
   public ResponseEntity<Map<String, Object>> reset(
       HttpServletRequest req, @RequestBody(required = false) ResetPayload body) {
+    if (!resetWriteEnabled) {
+      return ResponseEntity.status(HttpStatus.NOT_FOUND).build(); // dark-launch: write surface off
+    }
     String tenant = ctx.tenantId(req); // fail-closed 401 — the tenant is NEVER a client parameter
     String wfId = WorkflowIds.accountKillswitch(tenant);
     WorkflowStub stub = client.newUntypedWorkflowStub(wfId);
@@ -114,7 +123,6 @@ public class AccountKillSwitchController {
       b.put("error", "circuit_breaker_active");
       if (resettableAt != null) {
         b.put("resettableAt", resettableAt.toString());
-        b.put("retryAfterSeconds", Duration.between(now, resettableAt).getSeconds());
       }
       return ResponseEntity.status(HttpStatus.CONFLICT).body(b);
     }

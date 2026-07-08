@@ -29,17 +29,21 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
  * Web-layer guards for the tenant self-service account daily-loss kill-switch reset. Enforces
  * tenant isolation (fail-closed on a missing {@code X-Tenant-Id}), the 15-minute circuit-breaker
- * gate, and the threshold-immutable single-operator reset payload.
+ * gate, and the threshold-immutable single-operator reset payload. The reset write flag is ON here
+ * so the guard paths are exercised; the dark-launch (flag off → 404) case is in {@link
+ * AccountKillSwitchResetDarkLaunchTest}.
  */
 @WebMvcTest(AccountKillSwitchController.class)
 @AutoConfigureMockMvc(addFilters = false)
 @Import(TenantContext.class)
+@TestPropertySource(properties = "account-killswitch.reset.write-enabled=true")
 class AccountKillSwitchControllerWebMvcTest {
 
   @Autowired private MockMvc mvc;
@@ -96,18 +100,16 @@ class AccountKillSwitchControllerWebMvcTest {
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.tripped").value(true))
         .andExpect(jsonPath("$.trippedAt").value(trippedAt.toString()))
-        .andExpect(jsonPath("$.resettableAt").value(expectedResettableAt))
-        .andExpect(jsonPath("$.resettable").value(true));
+        .andExpect(jsonPath("$.resettableAt").value(expectedResettableAt));
 
-    // Tripped 5 minutes ago: still inside the circuit breaker → resettable=false.
+    // Tripped 5 minutes ago: still inside the circuit breaker (resettableAt in the future).
     OffsetDateTime recent = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5);
     whenState(state(true, recent));
 
     mvc.perform(get("/api/account-killswitch").header("X-Tenant-Id", "acme"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.tripped").value(true))
-        .andExpect(jsonPath("$.resettableAt").value(recent.plusSeconds(900).toString()))
-        .andExpect(jsonPath("$.resettable").value(false));
+        .andExpect(jsonPath("$.resettableAt").value(recent.plusSeconds(900).toString()));
   }
 
   @Test
@@ -153,8 +155,7 @@ class AccountKillSwitchControllerWebMvcTest {
                 .content("{}"))
         .andExpect(status().isConflict())
         .andExpect(jsonPath("$.error").value("circuit_breaker_active"))
-        .andExpect(jsonPath("$.resettableAt").exists())
-        .andExpect(jsonPath("$.retryAfterSeconds").exists());
+        .andExpect(jsonPath("$.resettableAt").exists());
 
     verify(stub, never()).update(any(), any(), any());
   }

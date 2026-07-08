@@ -19,8 +19,9 @@ export const dynamic = "force-dynamic";
 
 // Dark-by-default: the tenant-self-service reset button only fires when this flag is explicitly
 // "true". Unset/anything-else => the banner + countdown still render (so the tenant sees WHY trading
-// is halted and when reset unlocks) but the button is inert. The BFF reset route is itself gated, so
-// this is the UI half of the same dark launch.
+// is halted and when reset unlocks) but the button is inert. The BFF reset route is independently
+// flag-gated server-side (404s when its own flag is off), so this UI flag is only the visible half —
+// both must be enabled to actually reset.
 const RESET_WRITE_ENABLED =
   process.env.ACCOUNT_KILLSWITCH_RESET_WRITE_ENABLED === "true";
 
@@ -30,14 +31,13 @@ const RESET_WRITE_ENABLED =
 // Inline server action: re-verifies the session, forwards the reset to the BFF, and either refreshes
 // the page (on success / no-op) or returns the circuit-breaker result to the client so its countdown
 // can resync. Co-located with the page so it captures nothing but the request-scoped session.
-async function resetKillSwitchAction(formData: FormData) {
+async function resetKillSwitchAction() {
   "use server";
   const s = await auth();
   if (!s?.tenantId) {
     redirect("/signin");
   }
-  const note = String(formData.get("note") ?? "").trim();
-  const result = await resetAccountKillSwitch(note || undefined);
+  const result = await resetAccountKillSwitch();
 
   if (result.ok) {
     revalidatePath("/status");
@@ -71,25 +71,24 @@ export default async function StatusPage({
   // worker is unavailable (a deploy rollout, a crash) the BFF degrades each section but can still be
   // slow enough to hit the request timeout — render a clear "unavailable" state at HTTP 200 instead
   // of throwing into a 500. (#428)
-  let p: Portfolio;
-  try {
-    p = await getPortfolio();
-  } catch (err) {
-    if (err instanceof NotAuthenticatedError) {
-      throw err; // not a data outage — let the auth flow handle it.
+  // Fetch both in parallel — the kill-switch query (a Temporal workflow query) shouldn't stack its
+  // latency serially onto the portfolio read on every page load. Each is handled independently: a
+  // portfolio outage degrades the whole page; a kill-switch read failure degrades only to "no banner"
+  // (the portfolio tiles matter more than this optional widget).
+  const [pRes, ksRes] = await Promise.allSettled([
+    getPortfolio(),
+    getAccountKillSwitch(),
+  ]);
+
+  if (pRes.status === "rejected") {
+    if (pRes.reason instanceof NotAuthenticatedError) {
+      throw pRes.reason; // not a data outage — let the auth flow handle it.
     }
     return <StatusUnavailable tenantId={session?.tenantId} />;
   }
-
-  // Account daily-loss kill switch. Read separately with its own guard so a kill-switch read failure
-  // degrades to "no banner" rather than blanking the whole status page (the portfolio tiles matter
-  // more than this optional widget).
-  let killSwitch: AccountKillSwitch | null = null;
-  try {
-    killSwitch = await getAccountKillSwitch();
-  } catch {
-    killSwitch = null;
-  }
+  const p: Portfolio = pRes.value;
+  const killSwitch: AccountKillSwitch | null =
+    ksRes.status === "fulfilled" ? ksRes.value : null;
 
   const accounts = p.account_equity;
   const anyLive = accounts.some((a) => brokerMode(a.broker_target) === "live");
@@ -250,7 +249,6 @@ function KillSwitchPanel({ state }: { state: AccountKillSwitch | null }) {
         <AccountKillSwitchReset
           trippedAt={state.trippedAt}
           resettableAt={state.resettableAt}
-          resettable={state.resettable}
           action={resetKillSwitchAction}
           writeEnabled={RESET_WRITE_ENABLED}
         />

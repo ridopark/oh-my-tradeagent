@@ -7,9 +7,9 @@ import { useEffect, useState, useTransition } from "react";
 // an OBVIOUS live 15-minute circuit-breaker countdown: while resettableAt is in the future the reset
 // button is disabled and shows "Reset available in MM:SS"; when it reaches 0 the button enables.
 //
-// The countdown — not the server's `resettable` snapshot — is the live source of truth: `resettable`
-// only seeds the initial state so a page that renders after the wait already elapsed is enabled
-// immediately, and a page that renders mid-wait shows the ticking clock.
+// The countdown, computed from resettableAt, is the live source of truth: a page that renders after
+// the wait already elapsed is enabled immediately (0 remaining), and a mid-wait render shows the
+// ticking clock. The server still authoritatively re-enforces the wait on the reset POST.
 
 // Server action result shape. On success the action redirects (throws a Next redirect signal, so it
 // never returns here). It returns a value ONLY on the circuit-breaker race — the wait wasn't actually
@@ -36,25 +36,18 @@ function fmtCountdown(ms: number): string {
 export function AccountKillSwitchReset({
   trippedAt,
   resettableAt,
-  resettable,
   action,
   writeEnabled,
 }: {
   trippedAt: string | null;
   resettableAt: string | null;
-  // The server's view of whether the 15-min wait has elapsed — seeds the initial state only.
-  resettable: boolean;
-  action: (formData: FormData) => Promise<ResetActionResult>;
+  action: () => Promise<ResetActionResult>;
   writeEnabled: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   // The countdown target can be RESYNCED by the action if a click loses the circuit-breaker race.
   const [target, setTarget] = useState<string | null>(resettableAt);
-  // Seed from the server's `resettable`: if it says the wait is over, start enabled (0 remaining);
-  // otherwise compute the live remaining so a mid-wait render shows the correct clock.
-  const [remaining, setRemaining] = useState<number>(() =>
-    resettable ? 0 : remainingMs(resettableAt),
-  );
+  const [remaining, setRemaining] = useState<number>(() => remainingMs(resettableAt));
 
   useEffect(() => {
     setRemaining(remainingMs(target));
@@ -104,10 +97,8 @@ export function AccountKillSwitchReset({
         }
         onClick={() => {
           if (disabled) return;
-          const formData = new FormData();
-          formData.set("note", "");
           startTransition(async () => {
-            const result = await action(formData);
+            const result = await action();
             // Lost the circuit-breaker race: server says the wait wasn't actually elapsed. Keep the
             // button disabled and resync the countdown from the authoritative resettableAt.
             if (result?.circuitBreakerActive && result.resettableAt) {
