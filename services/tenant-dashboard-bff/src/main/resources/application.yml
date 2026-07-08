@@ -152,6 +152,13 @@ temporal:
   # on it (the workflow itself dispatches the AccountSnapshotActivity to broker-<target>).
   orchestrator-task-queue: ${TEMPORAL_ORCHESTRATOR_TASK_QUEUE:orchestrator-core}
 
+# Tenant self-service reset of the account daily-loss kill switch. Dark by default: while off, the
+# POST /api/account-killswitch/reset write surface 404s (the GET state read stays available). Flip
+# to true (alongside the dashboard's ACCOUNT_KILLSWITCH_RESET_WRITE_ENABLED) to enable the reset.
+account-killswitch:
+  reset:
+    write-enabled: ${ACCOUNT_KILLSWITCH_RESET_WRITE_ENABLED:false}
+
 management:
   endpoints:
     web:

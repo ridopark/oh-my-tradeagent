@@ -1,31 +1,94 @@
 import { auth } from "@/auth";
+import { redirect } from "next/navigation";
+import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
-import { getPortfolio, NotAuthenticatedError, type Portfolio } from "@/lib/bff";
+import {
+  getPortfolio,
+  getAccountKillSwitch,
+  resetAccountKillSwitch,
+  NotAuthenticatedError,
+  type Portfolio,
+  type AccountKillSwitch,
+} from "@/lib/bff";
 import { brokerMode, brokerProvider } from "@/lib/mode";
 import { Pnl, fmtCurrency } from "@/components/Pnl";
+import { AccountKillSwitchReset } from "@/components/AccountKillSwitchReset";
 
 export const dynamic = "force-dynamic";
+
+// Dark-by-default: the tenant-self-service reset button only fires when this flag is explicitly
+// "true". Unset/anything-else => the banner + countdown still render (so the tenant sees WHY trading
+// is halted and when reset unlocks) but the button is inert. The BFF reset route is independently
+// flag-gated server-side (404s when its own flag is off), so this UI flag is only the visible half —
+// both must be enabled to actually reset.
+const RESET_WRITE_ENABLED =
+  process.env.ACCOUNT_KILLSWITCH_RESET_WRITE_ENABLED === "true";
 
 // UI-P1: tenant operational status at a glance. Built ENTIRELY from the existing /api/portfolio
 // read — no new backend, no money-path surface — so it surfaces the one fact no page shows today:
 // is this tenant trading real money (LIVE) or simulated (PAPER)?
-export default async function StatusPage() {
+// Inline server action: re-verifies the session, forwards the reset to the BFF, and either refreshes
+// the page (on success / no-op) or returns the circuit-breaker result to the client so its countdown
+// can resync. Co-located with the page so it captures nothing but the request-scoped session.
+async function resetKillSwitchAction() {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    redirect("/signin");
+  }
+  const result = await resetAccountKillSwitch();
+
+  if (result.ok) {
+    revalidatePath("/status");
+    redirect("/status?killswitch=reset");
+  }
+  if (result.error === "circuit_breaker_active") {
+    // Race: the 15-min wait wasn't actually elapsed server-side. Hand the authoritative resettableAt
+    // back to the client island so it re-locks + resyncs its countdown (no redirect).
+    return { circuitBreakerActive: true, resettableAt: result.resettableAt };
+  }
+  if (result.error === "not_tripped") {
+    // Already reset (or never tripped) — just refresh to the healthy state.
+    revalidatePath("/status");
+    redirect("/status");
+  }
+  if (result.error === "unauthorized") {
+    redirect("/signin");
+  }
+  // Unknown/transport failure — surface a coarse error marker.
+  redirect("/status?killswitch=error");
+}
+
+export default async function StatusPage({
+  searchParams,
+}: {
+  searchParams: { killswitch?: string };
+}) {
   const session = await auth();
 
   // The portfolio read fans out to Temporal-backed sub-reads on the orchestrator worker. When that
   // worker is unavailable (a deploy rollout, a crash) the BFF degrades each section but can still be
   // slow enough to hit the request timeout — render a clear "unavailable" state at HTTP 200 instead
   // of throwing into a 500. (#428)
-  let p: Portfolio;
-  try {
-    p = await getPortfolio();
-  } catch (err) {
-    if (err instanceof NotAuthenticatedError) {
-      throw err; // not a data outage — let the auth flow handle it.
+  // Fetch both in parallel — the kill-switch query (a Temporal workflow query) shouldn't stack its
+  // latency serially onto the portfolio read on every page load. Each is handled independently: a
+  // portfolio outage degrades the whole page; a kill-switch read failure degrades only to "no banner"
+  // (the portfolio tiles matter more than this optional widget).
+  const [pRes, ksRes] = await Promise.allSettled([
+    getPortfolio(),
+    getAccountKillSwitch(),
+  ]);
+
+  if (pRes.status === "rejected") {
+    if (pRes.reason instanceof NotAuthenticatedError) {
+      throw pRes.reason; // not a data outage — let the auth flow handle it.
     }
     return <StatusUnavailable tenantId={session?.tenantId} />;
   }
+  const p: Portfolio = pRes.value;
+  const killSwitch: AccountKillSwitch | null =
+    ksRes.status === "fulfilled" ? ksRes.value : null;
 
   const accounts = p.account_equity;
   const anyLive = accounts.some((a) => brokerMode(a.broker_target) === "live");
@@ -71,6 +134,19 @@ export default async function StatusPage() {
         </p>
 
         <ModeBanner anyLive={anyLive} hasAccounts={accounts.length > 0} />
+
+        {searchParams.killswitch === "reset" && (
+          <div className="mb-6 rounded border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
+            Account kill switch reset — trading can resume.
+          </div>
+        )}
+        {searchParams.killswitch === "error" && (
+          <div className="mb-6 rounded border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+            Could not reset the kill switch. Try again in a moment.
+          </div>
+        )}
+
+        <KillSwitchPanel state={killSwitch} />
 
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold text-slate-200">Brokers &amp; accounts</h2>
@@ -143,6 +219,41 @@ function StatusUnavailable({ tenantId }: { tenantId?: string }) {
         </div>
       </main>
     </>
+  );
+}
+
+// Account daily-loss kill switch surface. When tripped: a prominent RED banner + the client reset
+// island (live 15-min circuit-breaker countdown → enabled reset button). When not tripped: a minimal
+// "guard active" line. Renders nothing if the read degraded (state === null).
+function KillSwitchPanel({ state }: { state: AccountKillSwitch | null }) {
+  if (!state) return null;
+
+  if (!state.tripped) {
+    return (
+      <div className="mb-6 text-xs text-slate-500">
+        Daily-loss guard: <span className="text-emerald-400">active</span>.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-6 rounded border border-red-600/60 bg-red-950/40 px-4 py-3">
+      <div className="text-sm font-semibold text-red-300">
+        ● Account daily-loss limit hit — trading halted
+      </div>
+      <div className="mt-1 text-xs text-red-200/80">
+        {state.reason ||
+          "The account's daily loss cap was crossed. Trading is halted until you reset the kill switch."}
+      </div>
+      <div className="mt-3">
+        <AccountKillSwitchReset
+          trippedAt={state.trippedAt}
+          resettableAt={state.resettableAt}
+          action={resetKillSwitchAction}
+          writeEnabled={RESET_WRITE_ENABLED}
+        />
+      </div>
+    </div>
   );
 }
 
