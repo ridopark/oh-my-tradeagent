@@ -8,14 +8,12 @@ import static org.mockito.Mockito.when;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.KillSwitchWorkflowInput;
-import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
-import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import io.temporal.activity.ActivityOptions;
@@ -198,7 +196,6 @@ class KillSwitchWorkflowImplLegacyReplayTest {
       StrategyActivities strategy = Mockito.mock(StrategyActivities.class);
       DailyPnlActivities pnl = Mockito.mock(DailyPnlActivities.class);
       KillSwitchCascadeActivities cascade = Mockito.mock(KillSwitchCascadeActivities.class);
-      LivePromotionActivities livePromotion = Mockito.mock(LivePromotionActivities.class);
 
       when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 6, 14));
       when(calendar.isMarketOpen()).thenReturn(true);
@@ -210,8 +207,7 @@ class KillSwitchWorkflowImplLegacyReplayTest {
       when(pnl.computeRealizedPnl(anyString(), anyString(), any()))
           .thenReturn(new BigDecimal("-100"));
 
-      worker.registerActivitiesImplementations(
-          audit, calendar, strategy, pnl, cascade, livePromotion);
+      worker.registerActivitiesImplementations(audit, calendar, strategy, pnl, cascade);
       env.start();
 
       WorkflowClient client = env.getWorkflowClient();
@@ -362,12 +358,6 @@ class KillSwitchWorkflowImplLegacyReplayTest {
 
     @Override
     public void resetOnActivation(ResetKillSwitchRequest request) {}
-
-    @Override
-    public void recordLivePromotionValidator(LivePromotionApprovalRequest request) {}
-
-    @Override
-    public void recordLivePromotion(LivePromotionApprovalRequest request) {}
 
     @Override
     public KillSwitchState killswitchState() {

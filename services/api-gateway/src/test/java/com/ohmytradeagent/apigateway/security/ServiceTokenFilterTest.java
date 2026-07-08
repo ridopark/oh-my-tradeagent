@@ -107,9 +107,9 @@ class ServiceTokenFilterTest {
 
   @Test
   void otherRoutesAreNotFiltered_evenWithNoToken() throws Exception {
-    // Route-scoping: /positions, /promotion etc. must pass straight through (they keep their
+    // Route-scoping: /positions, /activate-live etc. must pass straight through (they keep their
     // existing header-trust behavior) regardless of the credential-route token.
-    for (String uri : new String[] {"/positions", "/promotion/approve", "/audit"}) {
+    for (String uri : new String[] {"/positions", "/activate-live", "/audit"}) {
       MockHttpServletRequest req = new MockHttpServletRequest("GET", uri);
       MockHttpServletResponse res = new MockHttpServletResponse();
       MockFilterChain chain = new MockFilterChain();

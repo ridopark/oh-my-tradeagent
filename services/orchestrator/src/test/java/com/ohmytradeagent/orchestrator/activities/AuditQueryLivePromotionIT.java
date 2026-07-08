@@ -7,7 +7,6 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.LiveActivationRequest;
 import com.ohmytradeagent.contract.LiveDeactivationRequest;
-import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
@@ -30,14 +29,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * P3-a (multi-tenant-broker-credentials): Testcontainers IT for {@link
- * AuditQueryActivitiesImpl#checkLivePromotion}, the live-promotion safety-gate verify. Mirrors
- * {@link LivePromotionApprovalIT} — same container shape, same gating, and seeds {@code
- * LivePromotionApproved} rows by calling the REAL {@link LivePromotionActivitiesImpl#approve} so
- * the JSONB subject shape (incl. {@code broker_target} and {@code occurred_at == approved_at}) is
- * authoritative rather than hand-rolled.
+ * AuditQueryActivitiesImpl#checkLivePromotion}, the live-promotion safety-gate verify. Seeds {@code
+ * LivePromotionApproved} rows by calling the REAL {@link LivePromotionActivitiesImpl#activate} (the
+ * single-operator one-click path) so the JSONB subject shape (incl. {@code broker_target} and
+ * {@code occurred_at == approved_at}) is authoritative rather than hand-rolled.
  *
- * <p>Asserts the four classification outcomes: a fresh matching approval → {@link
- * LivePromotionStatus#VALID}; a 31-day-old approval against a now−30d floor → {@link
+ * <p>Asserts the four classification outcomes: a fresh matching activation → {@link
+ * LivePromotionStatus#VALID}; a 31-day-old activation against a now−30d floor → {@link
  * LivePromotionStatus#STALE}; a different {@code broker_target} → {@link
  * LivePromotionStatus#ABSENT}; a different tenant/strategy → {@link LivePromotionStatus#ABSENT}.
  */
@@ -95,17 +93,6 @@ class AuditQueryLivePromotionIT {
     try (Statement st = adminConn.createStatement()) {
       st.executeUpdate("DELETE FROM audit_log");
     }
-  }
-
-  private void seedApproval(String tenant, String strategy, String brokerTarget) {
-    LivePromotionApprovalRequest req = new LivePromotionApprovalRequest();
-    req.setSchemaVersion(1L);
-    req.setApproverId1("alice");
-    req.setApproverId2("bob");
-    req.setTenantId(tenant);
-    req.setStrategyId(strategy);
-    req.setBrokerTarget(brokerTarget);
-    livePromotion.approve(req);
   }
 
   /** Phase F: seed a one-click activation via the REAL activate() (gate-readable approval row). */
@@ -180,7 +167,7 @@ class AuditQueryLivePromotionIT {
 
   @Test
   void matchesFreshApproval_returnsValid() {
-    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
 
     OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
     LivePromotionStatus status =
@@ -191,7 +178,7 @@ class AuditQueryLivePromotionIT {
 
   @Test
   void staleApproval_returnsStale() throws Exception {
-    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
     // Backdate the seeded approval to 31 days ago so it sits before the now−30d staleness floor.
     try (Statement st = adminConn.createStatement()) {
       st.executeUpdate(
@@ -209,7 +196,7 @@ class AuditQueryLivePromotionIT {
   @Test
   void differentBrokerTarget_returnsAbsent() {
     // An approval for tradier-live must not satisfy an alpaca-live verify.
-    seedApproval("dev", "copytrade-v1", "tradier-live");
+    seedActivation("dev", "copytrade-v1", "tradier-live");
 
     OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
     LivePromotionStatus status =
@@ -221,7 +208,7 @@ class AuditQueryLivePromotionIT {
   @Test
   void otherTenantOrStrategy_returnsAbsent() {
     // Approval exists for (other, other-strategy) — must not satisfy a (dev, copytrade-v1) verify.
-    seedApproval("other", "other-strategy", "alpaca-live");
+    seedActivation("other", "other-strategy", "alpaca-live");
 
     OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
     assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
@@ -288,7 +275,7 @@ class AuditQueryLivePromotionIT {
     // Fresh approval, then a risk-relevant TenantConfigChanged (notional_cap_pct_of_capital_base)
     // whose occurred_at is AFTER the approval → the risk envelope the approvers signed off on no
     // longer holds → CONFIG_CHANGED.
-    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
     String cfgEventId =
         seedConfigChanged("dev", "copytrade-v1", "notional_cap_pct_of_capital_base");
     forceOccurredAt(cfgEventId, "1 hour");
@@ -302,7 +289,7 @@ class AuditQueryLivePromotionIT {
   void nonRiskConfigChangedAfterApproval_returnsValid() throws Exception {
     // A config change touching only a NON-risk field (max_slippage_pct is not in the void set) must
     // not invalidate the approval → VALID.
-    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
     String cfgEventId = seedConfigChanged("dev", "copytrade-v1", "max_slippage_pct");
     forceOccurredAt(cfgEventId, "1 hour");
 
@@ -316,7 +303,7 @@ class AuditQueryLivePromotionIT {
     // A risk change that occurred BEFORE the approval is already subsumed by the sign-off (strict
     // >)
     // → VALID. Approval is at ~now; force the config change one hour into the PAST.
-    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
     String cfgEventId =
         seedConfigChanged("dev", "copytrade-v1", "notional_cap_pct_of_capital_base");
     forceOccurredAt(cfgEventId, "-1 hour");
@@ -329,7 +316,7 @@ class AuditQueryLivePromotionIT {
   @Test
   void configChangedOtherTenantOrStrategy_returnsValid() throws Exception {
     // A risk change scoped to a DIFFERENT (tenant, strategy) must not invalidate this approval.
-    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
     String cfgEventId =
         seedConfigChanged("other", "other-strategy", "notional_cap_pct_of_capital_base");
     forceOccurredAt(cfgEventId, "1 hour");
@@ -344,7 +331,7 @@ class AuditQueryLivePromotionIT {
     // Set up a fresh, valid, non-stale approval so the verify reaches the P3-b 2nd query, then
     // close
     // the runtime connection so that 2nd query throws — fail-CLOSED to VERIFY_ERROR, never VALID.
-    seedApproval("dev", "copytrade-v1", "alpaca-live");
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
 
     // Use a dedicated runtime connection + DSLContext we can close mid-test without poisoning the
     // shared one used by the other tests in this class.

@@ -3,7 +3,6 @@ package com.ohmytradeagent.orchestrator.workflows;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.KillSwitchWorkflowInput;
-import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
@@ -11,7 +10,6 @@ import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
-import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
@@ -116,8 +114,6 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
       Workflow.newActivityStub(DailyPnlActivities.class, DEFAULT_OPTIONS);
   private final KillSwitchCascadeActivities cascade =
       Workflow.newActivityStub(KillSwitchCascadeActivities.class, CASCADE_OPTIONS);
-  private final LivePromotionActivities livePromotion =
-      Workflow.newActivityStub(LivePromotionActivities.class, DEFAULT_OPTIONS);
 
   // State
   private final KillSwitchWorkflowInput input;
@@ -440,33 +436,6 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     this.trippedAt = null;
     this.coolingDownUntil = coolingUntil;
     auditLog(KIND_KILL_SWITCH_RESET_APPROVED, subj);
-  }
-
-  @Override
-  public void recordLivePromotionValidator(LivePromotionApprovalRequest request) {
-    if (request.getTenantId() == null || request.getTenantId().isBlank()) {
-      throw new IllegalArgumentException("tenant_id_required");
-    }
-    if (request.getStrategyId() == null || request.getStrategyId().isBlank()) {
-      throw new IllegalArgumentException("strategy_id_required");
-    }
-    if (request.getBrokerTarget() == null || request.getBrokerTarget().isBlank()) {
-      throw new IllegalArgumentException("broker_target_required");
-    }
-    String a1 = request.getApproverId1();
-    String a2 = request.getApproverId2();
-    if (a1 == null || a1.isBlank() || a2 == null || a2.isBlank() || a1.equals(a2)) {
-      throw new IllegalArgumentException("approvers_must_differ");
-    }
-  }
-
-  @Override
-  public void recordLivePromotion(LivePromotionApprovalRequest request) {
-    // Validation + audit emission live in the Activity. The workflow Update is a thin pass-through
-    // so the api-gateway can reach the orchestrator over Temporal without depending on the
-    // orchestrator service directly. No kill-switch state is mutated; the existing trip/reset
-    // paths are untouched.
-    livePromotion.approve(request);
   }
 
   @Override

@@ -2,32 +2,22 @@ package com.ohmytradeagent.orchestrator.activities;
 
 import com.ohmytradeagent.contract.LiveActivationRequest;
 import com.ohmytradeagent.contract.LiveDeactivationRequest;
-import com.ohmytradeagent.contract.LivePromotionApprovalRequest;
 import io.temporal.activity.ActivityInterface;
 
 /**
- * Phase 7 prep (issue #87) — dual-control sign-off recording for live-broker promotion, plus the
- * Phase F (operator-account-onboarding) single-operator one-click activate / deactivate writes.
+ * Phase F (operator-account-onboarding) single-operator one-click activate / deactivate writes for
+ * live-broker promotion.
  *
- * <p>{@link #approve} emits one {@code LivePromotionApproved} audit event via {@link
- * AuditActivities#log} once dual-control approver IDs pass the validator. Validation rejects
- * same-ID or blank dual-control requests with {@code
- * IllegalArgumentException("approvers_must_differ")}; the audit event is emitted only after
- * validation passes.
- *
- * <p>{@link #activate} (Phase F) emits the SAME gate-readable {@code LivePromotionApproved} kind
- * via the SAME on-chain {@link AuditActivities#log} path, but for a SINGLE authenticated operator
- * (no two-approver requirement) — the gate-validity checks (live config, loss gates,
- * capital_source, kill-switch, fresh account probe) are performed UPSTREAM by {@code
- * LiveActivationWorkflow}, not here. {@link #deactivate} emits a {@code LivePromotionDeactivated}
- * row that invalidates a prior approval (the order-time gate then fails closed). The actual {@code
- * broker_target} ConfigMap flip remains operator-driven post-sign-off; these Activities are
- * verification-record-only.
+ * <p>{@link #activate} emits one gate-readable {@code LivePromotionApproved} kind via the on-chain
+ * {@link AuditActivities#log} path for a SINGLE authenticated operator (no two-approver
+ * requirement) — the gate-validity checks (live config, loss gates, capital_source, kill-switch,
+ * fresh account probe) are performed UPSTREAM by {@code LiveActivationWorkflow}, not here. {@link
+ * #deactivate} emits a {@code LivePromotionDeactivated} row that invalidates a prior approval (the
+ * order-time gate then fails closed). The actual {@code broker_target} ConfigMap flip remains
+ * operator-driven post-sign-off; these Activities are verification-record-only.
  */
 @ActivityInterface
 public interface LivePromotionActivities {
-
-  void approve(LivePromotionApprovalRequest request);
 
   /**
    * Phase F: emit one gate-readable {@code LivePromotionApproved} row attributed to a single
