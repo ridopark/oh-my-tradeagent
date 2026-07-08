@@ -10,11 +10,13 @@ import {
   getPortfolio,
   getTrades,
   getStrategyConfig,
+  getTenantConfig,
   NotAuthenticatedError,
   type Order,
   type Portfolio,
   type Trade,
   type StrategyConfigItem,
+  type TenantConfig,
 } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
@@ -58,6 +60,15 @@ export default async function LivePage() {
     dailyLossLimits = null;
   }
 
+  // Account-wide daily-loss cap (tenant-wide, realized + open P&L) — separate read with its own
+  // guard: a tenant-config read failure degrades to no account-cap line, never blanks the page.
+  let tenantConfig: TenantConfig | null = null;
+  try {
+    tenantConfig = await getTenantConfig();
+  } catch {
+    tenantConfig = null;
+  }
+
   const count = portfolio.open_positions_count;
 
   // Total account value = live net-liquidation equity (GET /v2/account), summed across the tenant's
@@ -84,7 +95,7 @@ export default async function LivePage() {
 
         <LiveAccount accountValue={accountValue} accountScope={portfolio.account_equity_scope} />
 
-        <DailyLossProtection limits={dailyLossLimits} />
+        <DailyLossProtection limits={dailyLossLimits} accountCap={tenantConfig} />
 
         <section>
           <h2 className="mb-2 text-sm font-semibold text-slate-200">
@@ -152,10 +163,35 @@ function strategyDailyLossLimits(items: StrategyConfigItem[]): StrategyLimit[] {
   return out;
 }
 
+// Human-readable account-wide cap, or null when it's unset / the read degraded. `account_daily_loss_pct`
+// is a FRACTION (0.40 → "40%") of start-of-day equity; `account_daily_loss_threshold` is absolute USD
+// on realized + open P&L. Both are independent knobs — show whichever is set (both, joined with "or").
+function accountCapText(cfg: TenantConfig | null): string | null {
+  if (cfg === null) return null;
+  const parts: string[] = [];
+  const pct = toNumber(cfg.account_daily_loss_pct);
+  if (pct != null && pct > 0) {
+    parts.push(`${+(pct * 100).toFixed(2)}% of start-of-day equity`);
+  }
+  const usd = toNumber(cfg.account_daily_loss_threshold);
+  if (usd != null && usd > 0) {
+    parts.push(`${fmtCurrency(usd)} (realized + open P&L)`);
+  }
+  return parts.length > 0 ? parts.join(" or ") : null;
+}
+
 // Informational: explains what a strategy's daily-loss kill switch does (flatten + halt) and how it
 // clears. Read-only. `limits === null` means the config read degraded; render a neutral
-// "unavailable" line rather than implying no protection.
-function DailyLossProtection({ limits }: { limits: StrategyLimit[] | null }) {
+// "unavailable" line rather than implying no protection. `accountCap` is the tenant-wide account cap
+// (null = unset or read degraded) — when present it replaces the vague "when it's configured" phrasing.
+function DailyLossProtection({
+  limits,
+  accountCap,
+}: {
+  limits: StrategyLimit[] | null;
+  accountCap: TenantConfig | null;
+}) {
+  const capText = accountCapText(accountCap);
   return (
     <section className="rounded border border-slate-800 bg-slate-900 px-4 py-3">
       <h2 className="text-sm font-semibold text-slate-200">
@@ -185,8 +221,19 @@ function DailyLossProtection({ limits }: { limits: StrategyLimit[] | null }) {
       <p className="mt-2 text-sm text-slate-400">
         Trading stays halted until the switch is reset by an operator, and resumes only once losses
         are back within the limit. A separate account-wide guard (total losses across all your
-        strategies, including open positions) can also trip — when it&apos;s configured you can reset
-        that one yourself from the{" "}
+        strategies, including open positions) can also trip
+        {capText ? (
+          <>
+            . Account-wide daily-loss cap:{" "}
+            <span className="font-semibold text-slate-200">{capText}</span>. You can reset that one
+            yourself from the{" "}
+          </>
+        ) : (
+          <>
+            {" "}
+            — when it&apos;s configured you can reset that one yourself from the{" "}
+          </>
+        )}
         <Link href="/status" className="text-sky-400 hover:text-white">
           Status
         </Link>{" "}

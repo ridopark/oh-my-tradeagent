@@ -4,10 +4,11 @@ import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
 import { SubmitButton } from "@/components/SubmitButton";
 import { StrategySwitch } from "@/components/StrategySwitch";
-import { getStrategyConfig } from "@/lib/bff";
+import { getStrategyConfig, getTenantConfig } from "@/lib/bff";
 import { postStrategyConfig } from "@/lib/apiGateway";
-import type { StrategyConfigResponse } from "@/lib/bff";
+import type { StrategyConfigResponse, TenantConfig } from "@/lib/bff";
 import { CONFIG_FIELD_INFO } from "@/components/ConfigFieldReference";
+import { fmtCurrency } from "@/components/Pnl";
 
 export const dynamic = "force-dynamic";
 
@@ -145,6 +146,76 @@ function FieldValue({
   );
 }
 
+// Read-only account-level daily-loss cap (tenant-wide, realized + open P&L) — distinct from the
+// per-strategy `daily_loss_threshold` rendered above. WRITE-dark (Phase 3 adds the form). Reuses the
+// EXPOSURE "tighten-only" badge + read-only FieldValue. `cfg === null` = unset or the read degraded.
+// `account_daily_loss_pct` is a FRACTION (0.40 → "40%"); `account_daily_loss_threshold` is USD.
+function AccountCapSection({ cfg }: { cfg: TenantConfig | null }) {
+  if (cfg === null) return null;
+  const pct =
+    typeof cfg.account_daily_loss_pct === "number"
+      ? cfg.account_daily_loss_pct
+      : null;
+  const usd =
+    typeof cfg.account_daily_loss_threshold === "number"
+      ? cfg.account_daily_loss_threshold
+      : null;
+  const rows: { field: string; label: string; display: string | null }[] = [
+    {
+      field: "account_daily_loss_pct",
+      label: "% of start-of-day equity",
+      display: pct === null ? null : `${+(pct * 100).toFixed(2)}%`,
+    },
+    {
+      field: "account_daily_loss_threshold",
+      label: "absolute (realized + open P&L)",
+      display: usd === null ? null : fmtCurrency(usd),
+    },
+  ];
+  const badge = CLASS_BADGE.EXPOSURE;
+  return (
+    <section className="mt-8">
+      <h2 className="mb-2 text-lg font-medium text-slate-100">
+        Account daily-loss cap
+      </h2>
+      <p className="mb-2 text-sm text-slate-400">
+        Tenant-wide cap across all your strategies (realized + open P&amp;L) — separate from the
+        per-strategy limits above.
+      </p>
+      <ul className="flex flex-col divide-y divide-slate-800 rounded border border-slate-800 bg-slate-900">
+        {rows.map((r) => (
+          <li
+            key={r.field}
+            className="flex flex-col gap-1 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-slate-200">{r.field}</span>
+              <span
+                className={`rounded border px-1.5 py-0.5 text-xs ${badge.className}`}
+              >
+                {badge.label}
+              </span>
+              <span className="text-xs text-slate-500">{r.label}</span>
+            </div>
+            <div className="sm:w-1/2 sm:max-w-md">
+              {r.display === null ? (
+                <span className="block text-slate-500 sm:text-right">not set</span>
+              ) : (
+                <FieldValue
+                  name={r.field}
+                  value={r.display}
+                  kind="string"
+                  editable={false}
+                />
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export default async function ConfigPage({
   searchParams,
 }: {
@@ -152,6 +223,15 @@ export default async function ConfigPage({
 }) {
   // Independent reads — run them together rather than serializing the BFF fetch behind auth().
   const [session, cfg] = await Promise.all([auth(), getStrategyConfig()]);
+
+  // Account-level daily-loss cap — separate read with its own guard so a tenant-config read failure
+  // degrades to no account-cap section rather than failing the whole page.
+  let tenantConfig: TenantConfig | null = null;
+  try {
+    tenantConfig = await getTenantConfig();
+  } catch {
+    tenantConfig = null;
+  }
 
   const saved = searchParams.saved === "1";
   const errorStatus = searchParams.error;
@@ -399,6 +479,8 @@ export default async function ConfigPage({
             })}
           </div>
         )}
+
+        <AccountCapSection cfg={tenantConfig} />
       </main>
     </>
   );

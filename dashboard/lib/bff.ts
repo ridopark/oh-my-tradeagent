@@ -227,6 +227,19 @@ export interface StrategyConfigResponse {
 export const getStrategyConfig = () =>
   bffGet<StrategyConfigResponse>("/api/strategy-config");
 
+// UI-P2: the tenant's ACCOUNT-level daily-loss cap (tenant-wide, realized + open P&L) — distinct
+// from the per-strategy `daily_loss_threshold`. Two mutually-independent knobs, either or both may
+// be null (unset): `account_daily_loss_threshold` is absolute USD; `account_daily_loss_pct` is a
+// FRACTION of start-of-day equity (0.40 == 40%). `version` backs the future write path's CAS.
+// `field_classes` marks both fields EXPOSURE (tighten-only) for the read-only badge.
+export interface TenantConfig {
+  account_daily_loss_threshold: number | null;
+  account_daily_loss_pct: number | null;
+  version: number | null;
+  field_classes: { EXPOSURE: string[] };
+}
+export const getTenantConfig = () => bffGet<TenantConfig>("/api/tenant-config");
+
 // Live proximity (/live view). last_tick_age_ms is -1 before the first tick; status is "ok" when
 // the market-data actuator answered, "unknown" when it was unreachable (the tables still render).
 export interface FeedState {
