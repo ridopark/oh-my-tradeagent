@@ -54,15 +54,66 @@ jobs:
           tar -xzf kubeconform.tar.gz kubeconform
           sudo mv kubeconform /usr/local/bin/
 
+      # Persist kubeconform's downloaded JSON schemas across runs. kubeconform's
+      # default schema source is raw.githubusercontent.com (yannh/kubernetes-json-schema),
+      # fetched per-resource on EVERY run; under a burst of concurrent CI jobs that
+      # host rate-limits unauthenticated GETs, so a random subset of fetches fail
+      # ("giving up after 3 attempts") and the run flakes (Invalid: 0, Errors: N).
+      # A warm cache serves the schemas locally (via -cache below) so a green run
+      # never touches the network. Key is scoped to the k8s + kubeconform versions
+      # so it self-invalidates when either bumps.
+      - name: Restore kubeconform schema cache
+        id: kubeconform-cache
+        if: steps.changed.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .kubeconform-cache
+          key: kubeconform-schemas-k8s1.35.0-kc0.6.7
+
       - name: kubeconform -strict infra/k8s/
         if: steps.changed.outputs.run == 'true'
         # Client-side schema validation only — does not contact a cluster,
         # so it won't catch admission webhooks or namespace-bound refs
         # (e.g. missing Secrets). The homelab `--dry-run=server` step in
         # infra/k8s/README.md remains the pre-merge cluster-level gate.
+        # -cache serves schemas from the restored cache above; only a cold cache
+        # (first run after this change / a key bump) hits the network.
         run: |
-          kubeconform -strict -kubernetes-version 1.35.0 \
-            -summary infra/k8s/
+          # -cache requires the folder to exist; on a cold cache (restore miss) it
+          # doesn't yet, and kubeconform errors "no such file or directory".
+          mkdir -p .kubeconform-cache
+          # kubeconform's default schema source (raw.githubusercontent) rate-limits
+          # unauthenticated GETs, so a cold run can fail a random few of the ~39
+          # per-resource fetches ("failed downloading schema … giving up"). Retry with
+          # backoff: -cache persists each schema it DID download, so every attempt only
+          # re-fetches the still-missing ones and the loop converges to a full local
+          # cache (which the Save step then persists so future runs never hit the
+          # network). A REAL validation error (no "failed downloading" line) fails fast
+          # — we never retry a genuine manifest break.
+          for attempt in 1 2 3 4 5; do
+            out=$(kubeconform -strict -kubernetes-version 1.35.0 \
+              -cache .kubeconform-cache -summary infra/k8s/ 2>&1) && { echo "$out"; exit 0; }
+            echo "$out"
+            if ! echo "$out" | grep -q 'failed downloading schema'; then
+              echo "kubeconform failed with a non-network (real validation) error — not retrying."
+              exit 1
+            fi
+            echo "kubeconform attempt ${attempt}: schema download throttled; retrying after backoff…"
+            sleep $((attempt * 10))
+          done
+          echo "kubeconform still failing after retries (schema host persistently throttling)"
+          exit 1
+
+      # Save only on a cold cache (no restore hit) AND only if kubeconform above
+      # SUCCEEDED — a failed step halts the job so this step is skipped, meaning a
+      # partial schema set from a rate-limited cold run is never persisted (no
+      # cache poisoning). One green cold run warms the cache permanently.
+      - name: Save kubeconform schema cache
+        if: steps.changed.outputs.run == 'true' && steps.kubeconform-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .kubeconform-cache
+          key: kubeconform-schemas-k8s1.35.0-kc0.6.7
 
       - name: tenants ConfigMap drift vs tenants/dev/*
         if: steps.changed.outputs.run == 'true'
