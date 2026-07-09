@@ -168,7 +168,7 @@ const CONFIG_FIELDS: ConfigField[] = [
     field: "force_close_0dte_et",
     what: "Wall-clock ET time (HH:MM) at which same-day-expiry (0DTE) positions are voluntarily force-flattened.",
     effect:
-      "Pulls the exit ahead of the late-day gamma/theta/liquidity collapse. Default 15:00 ET. A hard 15:30 ET cap on ITM 0DTE and a 15:25 ET cancel-all-resting sweep run regardless of this value.",
+      "Pulls the exit ahead of the late-day gamma/theta/liquidity collapse. Default 15:30 ET. A hard 15:30 ET cap on ITM 0DTE and a 15:25 ET cancel-all-resting sweep run regardless of this value.",
     example:
       "14:45 — 0DTE positions are force-closed at 2:45pm ET (used for SPX/NDX-style names that decay earlier).",
     control: "time",
