@@ -335,8 +335,7 @@
     "equity_emit_delta_pct": {
       "type": "number",
       "minimum": 0,
-      "default": 0.0005,
-      "description": "Minimum fractional move in the underlying equity price before a new equity tick is emitted to the trigger-strategy workflow. Throttles tick volume. Default 0.0005 (0.05%) when null/absent. Reasonable range is typically 0.0002-0.002 (0.02%-0.2%); values outside this are accepted but rarely sensible."
+      "description": "Minimum fractional move in the underlying equity price before a new equity tick is emitted to the trigger-strategy workflow. Throttles tick volume. Optional and null-when-absent; the watchlist consumer applies the 0.0005 (0.05%) code default when unset, so copytrade configs that never set it carry no inert value. Reasonable range is typically 0.0002-0.002 (0.02%-0.2%); values outside this are accepted but rarely sensible."
     },
     "enabled": {
       "type": "boolean",

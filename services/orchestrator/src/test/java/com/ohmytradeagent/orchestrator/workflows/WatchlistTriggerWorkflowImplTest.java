@@ -210,7 +210,7 @@ class WatchlistTriggerWorkflowImplTest {
 
     AuditEvent armed = captureKind("TriggerArmed");
     assertThat(armed.getSubject()).containsEntry("entry_mode", "BREAKOUT");
-    verify(exec, times(1)).placeOrder(any());
+    // (placeOrder count already asserted by waitForPlaceOrderCount(1) above.)
   }
 
   // Sub-penny option-quote midpoint (e.g. (2.65+2.70)/2 = 2.675) must be rounded to a 2-decimal

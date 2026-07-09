@@ -30,12 +30,14 @@ class TenantConfigSnapshotTest {
     config.setCapitalWeight(new BigDecimal("0.2"));
     config.setMinContracts(1L);
     config.setMaxContracts(50L);
-    // entry_mode / watchlist_expiry_rule / gap_tolerance_pct deliberately left unset (null).
+    // The 4 watchlist-only fields (entry_mode / watchlist_expiry_rule / gap_tolerance_pct /
+    // equity_emit_delta_pct) deliberately left unset (null) — a copytrade config never sets them.
 
     Map<String, Object> canonical = TenantConfigSnapshot.canonicalize(objectMapper, config);
 
     assertThat(canonical)
-        .doesNotContainKeys("entry_mode", "watchlist_expiry_rule", "gap_tolerance_pct");
+        .doesNotContainKeys(
+            "entry_mode", "watchlist_expiry_rule", "gap_tolerance_pct", "equity_emit_delta_pct");
     assertThat(canonical).containsEntry("enabled", true);
   }
 }
