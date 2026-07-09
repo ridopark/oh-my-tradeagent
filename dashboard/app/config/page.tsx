@@ -99,11 +99,18 @@ function FieldValue({
   value,
   kind,
   editable,
+  options,
+  control,
 }: {
   name: string;
   value: unknown;
   kind: ScalarKind | null;
   editable: boolean;
+  // Optional control hints from the field's CONFIG_FIELD_INFO metadata (single source of truth):
+  // `options` ⇒ enum <select>; `control === "time"` ⇒ HH:MM time input. Server validation is still
+  // the authority — these only prevent typos on known-enum / time-of-day string fields.
+  options?: { value: string; label: string }[];
+  control?: "time";
 }) {
   const inputClass =
     "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
@@ -119,6 +126,35 @@ function FieldValue({
         <option value="true">true</option>
         <option value="false">false</option>
       </select>
+    );
+  }
+  // Enum string → <select> over exactly the schema values (defaulted to the current stored value).
+  if (editable && kind === "string" && options) {
+    return (
+      <select
+        id={name}
+        name={name}
+        defaultValue={String(value)}
+        className={inputClass}
+      >
+        {options.map((opt) => (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  // Time-of-day (HH:MM ET) string → native time input.
+  if (editable && kind === "string" && control === "time") {
+    return (
+      <input
+        id={name}
+        name={name}
+        type="time"
+        defaultValue={String(value)}
+        className={inputClass}
+      />
     );
   }
   if (editable && (kind === "number" || kind === "string")) {
@@ -566,6 +602,8 @@ export default async function ConfigPage({
                                   value={value}
                                   kind={kind}
                                   editable={editable}
+                                  options={info?.options}
+                                  control={info?.control}
                                 />
                               </div>
                             </div>

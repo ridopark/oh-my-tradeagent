@@ -2362,13 +2362,16 @@ class PositionWorkflowImplTest {
   }
 
   /**
-   * Issue #205 Done-when 3b: when {@code min_partial_qty_behavior=full_close}, the same edge
-   * (remainingQty=1 + fraction=0.5) MUST place a 1-contract close order — the runner is flushed on
-   * the partial signal. PartialExitFilled fires normally; PartialExitSkippedMinQty does NOT.
+   * Issue #205 Done-when 3b — incident-equivalent regression guard: when {@code
+   * min_partial_qty_behavior=full_close}, a partial STC that rounds to zero contracts under the
+   * integer broker quantum (remainingQty=1 + fraction=0.3 → floor(0.3)=0) MUST CLOSE the last lot —
+   * {@code qtyToClose == remainingQty == 1} — rather than skip it. This is the exact operator
+   * behavior the {@code /config} {@code min_partial_qty_behavior} control exposes: on a 1-lot
+   * residual, {@code full_close} flushes the runner on the partial signal. PartialExitFilled fires
+   * normally; PartialExitSkippedMinQty does NOT.
    */
   @Test
-  void partialExit_remainingQty1_fraction0_5_fullCloseBranch_placesOneContractCloseOrder()
-      throws Exception {
+  void partialExit_remainingQty1_fraction0_3_fullCloseBranch_closesLastLotQty1() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-min-qty-full-close");
@@ -2377,7 +2380,8 @@ class PositionWorkflowImplTest {
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 1L);
 
-    stub.partialExit(partialExitRequest("sig-flush", "pos-min-qty-full-close", 0.5));
+    // 30%-out on a 1-contract runner: floor(1 * 0.3) = 0 → runner-quantum gate; full_close flushes.
+    stub.partialExit(partialExitRequest("sig-flush", "pos-min-qty-full-close", 0.3));
     waitForPlaceOrderCount(1);
     stub.onFill(fill("brk-flush", 1L, new BigDecimal("3.05")));
 
@@ -2393,9 +2397,20 @@ class PositionWorkflowImplTest {
     List<String> kinds = captor.getAllValues().stream().map(AuditEvent::getKind).toList();
     assertThat(kinds).doesNotContain("PartialExitSkippedMinQty");
 
-    // The PartialExitRequested audit reflects the rounded-up qty_to_close=1.
+    // Load-bearing incident assertion: the last lot is CLOSED with qtyToClose == 1.
+    // (a) the PartialExitRequested audit reports qty_to_close = remainingQty = 1, and
+    // (b) the exit OrderIntent actually placed on the broker carries qty == 1.
     AuditEvent requested = captureKind("PartialExitRequested");
     assertThat(asLong(requested.getSubject().get("qty_to_close"))).isEqualTo(1L);
+
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent exit =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow(() -> new AssertionError("no SELL exit OrderIntent placed"));
+    assertThat(exit.getQty()).isEqualTo(1L);
   }
 
   @Test

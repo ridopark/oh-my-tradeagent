@@ -12,6 +12,11 @@ export interface ConfigField {
   what: string;
   effect: string;
   example: string;
+  // Optional UX control hints for the /config editor. Purely a typo-prevention layer — server-side
+  // enum/pattern validation stays authoritative. `options` present ⇒ render a <select> over EXACTLY
+  // these values (must mirror the schema enum). `control: "time"` ⇒ render an HH:MM time input.
+  options?: { value: string; label: string }[];
+  control?: "time";
 }
 
 const CONFIG_FIELDS: ConfigField[] = [
@@ -75,6 +80,10 @@ const CONFIG_FIELDS: ConfigField[] = [
       "'static' uses the global per-strategy figure ($100k) for every tenant, which over-sizes a small real account. 'account_cash' reads the broker's live CASH so a small account is sized to its real buying power. account_cash is fail-CLOSED: if cash is zero/unavailable the entry is REJECTED (capital_unavailable) — it never falls back to the $100k global.",
     example:
       "account_cash on a $5,000 account sizes entries from $5,000, not from the $100k global.",
+    options: [
+      { value: "static", label: "Static" },
+      { value: "account_cash", label: "Account cash" },
+    ],
   },
   {
     field: "capital_weight",
@@ -162,6 +171,37 @@ const CONFIG_FIELDS: ConfigField[] = [
       "Pulls the exit ahead of the late-day gamma/theta/liquidity collapse. Default 15:00 ET. A hard 15:30 ET cap on ITM 0DTE and a 15:25 ET cancel-all-resting sweep run regardless of this value.",
     example:
       "14:45 — 0DTE positions are force-closed at 2:45pm ET (used for SPX/NDX-style names that decay earlier).",
+    control: "time",
+  },
+  {
+    field: "force_close_eod_et",
+    what: "Wall-clock ET time (HH:MM) at which non-0DTE positions are force-flattened for the end-of-day sweep.",
+    effect:
+      "Default 15:55 ET when unset. An earlier time closes non-0DTE positions with more book depth before the 16:00 ET close; a later time holds them nearer to the close on thinner spreads.",
+    example:
+      "15:45 — force-flatten non-0DTE positions at 3:45pm ET (an override earlier than the 15:55 default), preserving a ~15-minute window of reasonable spreads before the close.",
+    control: "time",
+  },
+  {
+    field: "entry_mode",
+    what: "The watchlist-trigger entry style once a setup's trigger level is reached.",
+    effect:
+      "BREAKOUT (default; unset treated as BREAKOUT) enters when the underlying first trades through the trigger in the setup's direction. RETEST waits for a pullback that retests the trigger level before entering.",
+    example:
+      "BREAKOUT — a long setup enters the moment price trades through the trigger, without waiting for a pullback.",
+    options: [
+      { value: "BREAKOUT", label: "Breakout" },
+      { value: "RETEST", label: "Retest" },
+    ],
+  },
+  {
+    field: "watchlist_expiry_rule",
+    what: "The rule that selects which option expiry a watchlist-trigger entry buys.",
+    effect:
+      "NEAREST_WEEKLY (default; unset treated as NEAREST_WEEKLY) picks the nearest weekly expiry on or after the trigger's et_date.",
+    example:
+      "NEAREST_WEEKLY — a trigger firing today buys the nearest weekly expiry on or after today.",
+    options: [{ value: "NEAREST_WEEKLY", label: "Nearest weekly" }],
   },
   {
     field: "reset_cooldown_secs",
@@ -224,6 +264,10 @@ const CONFIG_FIELDS: ConfigField[] = [
       "'skip' (default) places no order and rides the last contract to trail/EOD/STC; 'full_close' closes that last contract on the partial signal.",
     example:
       'full_close — with 1 contract left, a "sell half" signal closes that last contract instead of skipping it.',
+    options: [
+      { value: "skip", label: "Skip (leave last lot)" },
+      { value: "full_close", label: "Full close (exit last lot on any trim)" },
+    ],
   },
   {
     field: "bto_price_move_reject_pct",
