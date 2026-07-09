@@ -320,20 +320,17 @@
     "entry_mode": {
       "type": "string",
       "enum": ["BREAKOUT", "RETEST"],
-      "default": "BREAKOUT",
-      "description": "Watchlist-trigger entry style. BREAKOUT (DEFAULT; null/absent treated as BREAKOUT) enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional; absent preserves the BREAKOUT default for every existing strategy."
+      "description": "Watchlist-trigger entry style. BREAKOUT enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional and null-when-absent; the watchlist consumer applies the BREAKOUT code default when unset, so copytrade configs that never set it carry no inert value."
     },
     "watchlist_expiry_rule": {
       "type": "string",
       "enum": ["NEAREST_WEEKLY"],
-      "default": "NEAREST_WEEKLY",
-      "description": "Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY (DEFAULT; null/absent treated as NEAREST_WEEKLY) picks the nearest weekly expiry on/after et_date. Optional; absent preserves the default for every existing strategy."
+      "description": "Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY picks the nearest weekly expiry on/after et_date. Optional and null-when-absent; the watchlist consumer resolves the nearest weekly expiry unconditionally, so an unset value is spec-only and never leaks into non-watchlist configs."
     },
     "gap_tolerance_pct": {
       "type": "number",
       "minimum": 0,
-      "default": 0.005,
-      "description": "Watchlist-trigger gap tolerance as a fraction of `trigger`. A trigger that gaps through its level by more than this fraction at open is treated as gapped (handled per entry_mode) rather than a clean breakout. Default 0.005 (0.5%) when null/absent. Reasonable range is typically 0.001-0.02 (0.1%-2%); values outside this are accepted but rarely sensible."
+      "description": "Watchlist-trigger gap tolerance as a fraction of `trigger`. A trigger that gaps through its level by more than this fraction at open is treated as gapped (handled per entry_mode) rather than a clean breakout. Optional and null-when-absent; the watchlist consumer applies the 0.005 (0.5%) code default when unset, so copytrade configs that never set it carry no inert value. Reasonable range is typically 0.001-0.02 (0.1%-2%); values outside this are accepted but rarely sensible."
     },
     "equity_emit_delta_pct": {
       "type": "number",

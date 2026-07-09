@@ -41,7 +41,7 @@ class MinPartialQtyBehavior(StrEnum):
 
 class EntryMode(StrEnum):
     """
-    Watchlist-trigger entry style. BREAKOUT (DEFAULT; null/absent treated as BREAKOUT) enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional; absent preserves the BREAKOUT default for every existing strategy.
+    Watchlist-trigger entry style. BREAKOUT enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional and null-when-absent; the watchlist consumer applies the BREAKOUT code default when unset, so copytrade configs that never set it carry no inert value.
     """
 
     breakout = "BREAKOUT"
@@ -50,7 +50,7 @@ class EntryMode(StrEnum):
 
 class WatchlistExpiryRule(StrEnum):
     """
-    Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY (DEFAULT; null/absent treated as NEAREST_WEEKLY) picks the nearest weekly expiry on/after et_date. Optional; absent preserves the default for every existing strategy.
+    Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY picks the nearest weekly expiry on/after et_date. Optional and null-when-absent; the watchlist consumer resolves the nearest weekly expiry unconditionally, so an unset value is spec-only and never leaks into non-watchlist configs.
     """
 
     nearest_weekly = "NEAREST_WEEKLY"
@@ -269,17 +269,17 @@ class StrategyConfig(BaseModel):
     """
     Plan-2B R-AB-2: per-step price concession (dollars per contract premium) the bounded stepped exit reprice walks toward the market each step. Each step's limit = max(floor, anchor - step * exit_reprice_tick) where anchor is the fresh live bid/mid. Conservative default ~0.05 in PositionWorkflowImpl when null. Bounded by exit_floor so the walk never crosses the configured fail-safe.
     """
-    entry_mode: EntryMode | None = EntryMode.breakout
+    entry_mode: EntryMode | None = None
     """
-    Watchlist-trigger entry style. BREAKOUT (DEFAULT; null/absent treated as BREAKOUT) enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional; absent preserves the BREAKOUT default for every existing strategy.
+    Watchlist-trigger entry style. BREAKOUT enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional and null-when-absent; the watchlist consumer applies the BREAKOUT code default when unset, so copytrade configs that never set it carry no inert value.
     """
-    watchlist_expiry_rule: WatchlistExpiryRule | None = WatchlistExpiryRule.nearest_weekly
+    watchlist_expiry_rule: WatchlistExpiryRule | None = None
     """
-    Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY (DEFAULT; null/absent treated as NEAREST_WEEKLY) picks the nearest weekly expiry on/after et_date. Optional; absent preserves the default for every existing strategy.
+    Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY picks the nearest weekly expiry on/after et_date. Optional and null-when-absent; the watchlist consumer resolves the nearest weekly expiry unconditionally, so an unset value is spec-only and never leaks into non-watchlist configs.
     """
-    gap_tolerance_pct: confloat(ge=0.0) | None = 0.005
+    gap_tolerance_pct: confloat(ge=0.0) | None = None
     """
-    Watchlist-trigger gap tolerance as a fraction of `trigger`. A trigger that gaps through its level by more than this fraction at open is treated as gapped (handled per entry_mode) rather than a clean breakout. Default 0.005 (0.5%) when null/absent. Reasonable range is typically 0.001-0.02 (0.1%-2%); values outside this are accepted but rarely sensible.
+    Watchlist-trigger gap tolerance as a fraction of `trigger`. A trigger that gaps through its level by more than this fraction at open is treated as gapped (handled per entry_mode) rather than a clean breakout. Optional and null-when-absent; the watchlist consumer applies the 0.005 (0.5%) code default when unset, so copytrade configs that never set it carry no inert value. Reasonable range is typically 0.001-0.02 (0.1%-2%); values outside this are accepted but rarely sensible.
     """
     equity_emit_delta_pct: confloat(ge=0.0) | None = 0.0005
     """

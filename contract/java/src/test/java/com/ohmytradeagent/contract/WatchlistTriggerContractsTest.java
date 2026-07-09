@@ -96,9 +96,11 @@ class WatchlistTriggerContractsTest {
   }
 
   @Test
-  void strategyConfig_absentNewFields_appliesDefaults() throws Exception {
-    // A config without any of the five new fields must deserialize to their schema defaults,
-    // preserving today's behavior for every existing strategy (e.g. copytrade-v1).
+  void strategyConfig_absentNewFields_leavesNewFieldsNull() throws Exception {
+    // The three watchlist-only fields are opt-in: a config that omits them (e.g. copytrade-v1)
+    // deserializes them as null so they never leak into a non-watchlist canonical config. The
+    // watchlist consumer applies the code-side BREAKOUT/NEAREST_WEEKLY/0.005 fallbacks. The
+    // universal equity_emit_delta_pct and enabled fields keep their schema defaults.
     String json =
         "{\"schema_version\":1,\"tenant_id\":\"dev\",\"strategy_id\":\"copytrade-v1\","
             + "\"broker_target\":\"alpaca-paper\",\"author_whitelist\":[\"a\"],"
@@ -107,10 +109,9 @@ class WatchlistTriggerContractsTest {
 
     StrategyConfig deserialized = mapper.readValue(json, StrategyConfig.class);
 
-    assertThat(deserialized.getEntryMode()).isEqualTo(StrategyConfig.EntryMode.BREAKOUT);
-    assertThat(deserialized.getWatchlistExpiryRule())
-        .isEqualTo(StrategyConfig.WatchlistExpiryRule.NEAREST_WEEKLY);
-    assertThat(deserialized.getGapTolerancePct()).isEqualByComparingTo(new BigDecimal("0.005"));
+    assertThat(deserialized.getEntryMode()).isNull();
+    assertThat(deserialized.getWatchlistExpiryRule()).isNull();
+    assertThat(deserialized.getGapTolerancePct()).isNull();
     assertThat(deserialized.getEquityEmitDeltaPct()).isEqualByComparingTo(new BigDecimal("0.0005"));
     assertThat(deserialized.getEnabled()).isTrue();
   }
