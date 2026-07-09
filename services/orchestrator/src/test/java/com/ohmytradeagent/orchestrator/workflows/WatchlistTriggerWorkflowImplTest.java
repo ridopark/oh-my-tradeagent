@@ -190,6 +190,29 @@ class WatchlistTriggerWorkflowImplTest {
     assertThat(intent.getQty()).isEqualTo(50L);
   }
 
+  // PLAN-2026-07-09: entry_mode is now opt-in (null-when-absent) in the shared schema. A watchlist
+  // config that leaves it unset must still behave as BREAKOUT via the code-side entryMode()
+  // fallback: the TriggerArmed audit records entry_mode=BREAKOUT and the breakout cross fires.
+  @Test
+  void breakoutAbove_nullEntryMode_resolvesBreakout() throws Exception {
+    StrategyConfig c = config();
+    c.setEntryMode(null); // opt-in field left unset -> code default BREAKOUT
+    WatchlistTriggerWorkflow wf = newStub("wl-null-entrymode");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), c));
+
+    wf.equityTick(tick(new BigDecimal("760.80"), false)); // seed below T
+    wf.equityTick(tick(new BigDecimal("761.40"), false)); // live cross into band -> FIRE
+    waitForPlaceOrderCount(1);
+    wf.onFill(fill(5L, new BigDecimal("3.15")));
+
+    String result = WorkflowStub.fromTyped(wf).getResult(String.class);
+    assertThat(result).endsWith(":fired");
+
+    AuditEvent armed = captureKind("TriggerArmed");
+    assertThat(armed.getSubject()).containsEntry("entry_mode", "BREAKOUT");
+    // (placeOrder count already asserted by waitForPlaceOrderCount(1) above.)
+  }
+
   // Sub-penny option-quote midpoint (e.g. (2.65+2.70)/2 = 2.675) must be rounded to a 2-decimal
   // penny tick before it becomes the BTO limit, else Alpaca rejects the order with a non-retryable
   // 422. HALF_UP at the half-cent rounds up: 2.675 -> 2.68.

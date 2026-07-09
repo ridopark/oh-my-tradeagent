@@ -539,11 +539,12 @@ def test_arm_context_round_trips() -> None:
     assert serialized == original
 
 
-def test_strategy_config_new_fields_default_when_absent() -> None:
-    """Phase 0: the five new optional fields default for any config that omits them."""
+def test_strategy_config_watchlist_only_fields_null_when_absent() -> None:
+    """The four watchlist-only fields are opt-in: null when a config omits them, so
+    copytrade never carries them. Only enabled (universal) keeps its default."""
     model = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
-    assert model.entry_mode == "BREAKOUT"
-    assert model.watchlist_expiry_rule == "NEAREST_WEEKLY"
-    assert model.gap_tolerance_pct == 0.005
-    assert model.equity_emit_delta_pct == 0.0005
+    assert model.entry_mode is None
+    assert model.watchlist_expiry_rule is None
+    assert model.gap_tolerance_pct is None
+    assert model.equity_emit_delta_pct is None
     assert model.enabled is True
