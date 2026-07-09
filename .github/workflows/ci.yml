@@ -79,6 +79,9 @@ jobs:
         # -cache serves schemas from the restored cache above; only a cold cache
         # (first run after this change / a key bump) hits the network.
         run: |
+          # -cache requires the folder to exist; on a cold cache (restore miss) it
+          # doesn't yet, and kubeconform errors "no such file or directory".
+          mkdir -p .kubeconform-cache
           kubeconform -strict -kubernetes-version 1.35.0 \
             -cache .kubeconform-cache \
             -summary infra/k8s/
