@@ -41,9 +41,12 @@ import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -54,6 +57,28 @@ import org.mockito.Mockito;
 class PositionWorkflowImplTest {
 
   private static final String CORE_QUEUE = "orchestrator-core";
+
+  /**
+   * A definitively-PAST OCC expiry (2026-05-16). The incident / worthless-close tests want a
+   * KNOWN-expired contract, so a fixed past literal is correct here. NOTE: two spaces after {@code
+   * NVDA} — OCC 6-char root padding.
+   */
+  private static final String EXPIRED_OCC_SYMBOL = "NVDA  260516C00140000";
+
+  /**
+   * A self-renewing FUTURE OCC expiry, computed once as now+2yr (ET) so these tests NEVER expire as
+   * the real calendar advances (TestWorkflowEnvironment's virtual clock starts at ~wall-now and
+   * only advances by minutes via env.sleep, so now+2yr stays comfortably in the future for the
+   * whole run). Same {@code NVDA } root + {@code C00140000} strike as {@link #EXPIRED_OCC_SYMBOL};
+   * only the YYMMDD expiry segment is computed. (Wall-clock LocalDate.now is fine in a TEST fixture
+   * — the no-LocalDate.now rule guards replay-deterministic WORKFLOW code, not tests.)
+   */
+  private static final String FUTURE_OCC_SYMBOL =
+      "NVDA  "
+          + LocalDate.now(ZoneId.of("America/New_York"))
+              .plusYears(2)
+              .format(DateTimeFormatter.ofPattern("yyMMdd"))
+          + "C00140000";
 
   private TestWorkflowEnvironment env;
   private AuditActivities audit;
@@ -103,7 +128,7 @@ class PositionWorkflowImplTest {
   private static OptionQuoteResult quoteOk(BigDecimal bid, BigDecimal mid, BigDecimal ask) {
     OptionQuoteResult r = new OptionQuoteResult();
     r.setSchemaVersion(1L);
-    r.setContractSymbol("NVDA  260516C00140000");
+    r.setContractSymbol(EXPIRED_OCC_SYMBOL);
     r.setBid(bid);
     r.setMid(mid);
     r.setAsk(ask);
@@ -115,7 +140,7 @@ class PositionWorkflowImplTest {
   private static OptionQuoteResult quoteFailed(String error) {
     OptionQuoteResult r = new OptionQuoteResult();
     r.setSchemaVersion(1L);
-    r.setContractSymbol("NVDA  260516C00140000");
+    r.setContractSymbol(EXPIRED_OCC_SYMBOL);
     r.setRetrievedAt(OffsetDateTime.now());
     r.setStatus(OptionQuoteResult.Status.FAILED);
     r.setError(error);
@@ -176,7 +201,7 @@ class PositionWorkflowImplTest {
   private PremiumTick tick(BigDecimal premium) {
     PremiumTick t = new PremiumTick();
     t.setSchemaVersion(1L);
-    t.setContractSymbol("NVDA  260516C00140000");
+    t.setContractSymbol(EXPIRED_OCC_SYMBOL);
     t.setPremium(premium);
     t.setRetrievedAt(OffsetDateTime.now());
     return t;
@@ -220,10 +245,8 @@ class PositionWorkflowImplTest {
     assertThat(asLong(partialFills.get(1).getSubject().get("qty_filled"))).isEqualTo(2L);
     // Issue #276: new executions (TestWorkflowEnvironment reports getVersion==1) carry the
     // per-symbol correlation key so DailyPnl can group FIFO by option_symbol.
-    assertThat(partialFills.get(0).getSubject())
-        .containsEntry("option_symbol", "NVDA  260516C00140000");
-    assertThat(partialFills.get(1).getSubject())
-        .containsEntry("option_symbol", "NVDA  260516C00140000");
+    assertThat(partialFills.get(0).getSubject()).containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
+    assertThat(partialFills.get(1).getSubject()).containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
   }
 
   /**
@@ -431,7 +454,7 @@ class PositionWorkflowImplTest {
     assertThat(((Number) flattenFill.getSubject().get("avg_fill_price")).doubleValue())
         .isEqualTo(2.50);
     assertThat(asLong(flattenFill.getSubject().get("qty_filled"))).isEqualTo(5L);
-    assertThat(flattenFill.getSubject()).containsEntry("option_symbol", "NVDA  260516C00140000");
+    assertThat(flattenFill.getSubject()).containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
     assertThat(flattenFill.getSubject()).containsEntry("signal_id", "flatten-eod");
   }
 
@@ -504,7 +527,7 @@ class PositionWorkflowImplTest {
     assertThat(asLong(expired.getSubject().get("remaining_qty_before"))).isEqualTo(25L);
     assertThat(expired.getSubject())
         .containsEntry("reason", "worthless_expiry")
-        .containsEntry("option_symbol", "NVDA  260516C00140000");
+        .containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
 
     // No worthless-expiry exit credit: PositionExpired is P&L-neutral (no PartialExitFilled for the
     // flatten, since nothing filled).
@@ -553,7 +576,7 @@ class PositionWorkflowImplTest {
     assertThat(asLong(expired.getSubject().get("remaining_qty_before"))).isEqualTo(7L);
     assertThat(expired.getSubject())
         .containsEntry("reason", "worthless_expiry")
-        .containsEntry("option_symbol", "NVDA  260516C00140000");
+        .containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
 
     // P&L-neutral: nothing filled, so no exit credit and no next-session retry churn.
     assertThat(captureAll("PartialExitFilled")).isEmpty();
@@ -594,7 +617,7 @@ class PositionWorkflowImplTest {
     assertThat(asLong(expired.getSubject().get("remaining_qty_before"))).isEqualTo(4L);
     assertThat(expired.getSubject())
         .containsEntry("reason", "worthless_expiry")
-        .containsEntry("option_symbol", "NVDA  260516C00140000");
+        .containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
     assertThat(captureAll("PartialExitFilled")).isEmpty();
     assertThat(captureAll("FlattenRetryScheduled")).isEmpty();
   }
@@ -615,7 +638,7 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-eod-notexpired");
     PositionWorkflowInput in = input(5);
-    in.setContractSymbol("NVDA  270115C00140000"); // FUTURE expiry -> NOT physically expired
+    in.setContractSymbol(FUTURE_OCC_SYMBOL); // FUTURE expiry -> NOT physically expired
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L); // short TTL so the unfilled-await elapses quickly under virtual time
     WorkflowStub.fromTyped(stub).start(in);
@@ -671,7 +694,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(3);
     // NOT-yet-expired OCC: the physical-expiry guard returns false BEFORE the version read, giving
     // the identical return-false → stay-ALIVE outcome a v=0 in-flight history replays with.
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -775,7 +798,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(5);
     // Phase 2: NOT-yet-expired OCC so this exercises the stay-ALIVE path for a multi-day hold, not
     // the physically-expired worthless-close (which is expiry-date gated).
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L); // short TTL so the unfilled-await elapses quickly under virtual time
     WorkflowStub.fromTyped(stub).start(in);
@@ -819,7 +842,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(5);
     // Phase 2: NOT-yet-expired OCC so the retry-next-session path is exercised, not the worthless-
     // close (which is expiry-date gated).
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L); // short TTL so each unfilled await elapses fast under virtual time
     WorkflowStub.fromTyped(stub).start(in);
@@ -860,7 +883,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(5);
     // Phase 2: NOT-yet-expired OCC so the retry-next-session budget path is exercised, not the
     // worthless-close (which is expiry-date gated).
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -916,7 +939,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(5);
     // Phase 2: NOT-yet-expired OCC so the late-fill recovery path is exercised, not the worthless-
     // close (which is expiry-date gated).
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -953,7 +976,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(5);
     // Phase 2: NOT-yet-expired OCC so the partial-then-residual stay-ALIVE path is exercised, not
     // the worthless-close (which is expiry-date gated).
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
@@ -1131,7 +1154,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(5);
     // Phase 2: NOT-yet-expired OCC so the genuinely-unfilled stay-ALIVE path is exercised, not the
     // worthless-close (which is expiry-date gated).
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -1180,7 +1203,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(5);
     // Phase 2: NOT-yet-expired OCC so the next-session reconcile path is exercised, not the
     // worthless-close (which is expiry-date gated).
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -1231,7 +1254,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(5);
     // Phase 2: NOT-yet-expired OCC so the partial-cancel stay-ALIVE path is exercised, not the
     // worthless-close (which is expiry-date gated).
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -1290,7 +1313,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(5);
     // Phase 2: NOT-yet-expired OCC so the same-key no-double-book retry path is exercised, not the
     // worthless-close (which is expiry-date gated).
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -1351,7 +1374,7 @@ class PositionWorkflowImplTest {
     // Phase 2: NOT-yet-expired OCC so the residual-replace-and-fill retry path is exercised, not
     // the
     // worthless-close (which is expiry-date gated).
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -1753,7 +1776,7 @@ class PositionWorkflowImplTest {
     assertThat(exhausted.getSubject())
         .containsEntry("signal_id", "sig-qqq")
         .containsEntry("attempts", 1)
-        .containsEntry("option_symbol", "NVDA  260516C00140000");
+        .containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
 
     // Bounded: no third placeOrder for the partial. Sleep generously to prove no further re-drive.
     env.sleep(Duration.ofMinutes(30));
@@ -1806,7 +1829,7 @@ class PositionWorkflowImplTest {
     // is still managed at the UNCHANGED qty (nothing was sold).
     PositionState afterFailure = stub.positionState();
     assertThat(afterFailure.remainingQty()).isEqualTo(5L);
-    assertThat(afterFailure.contractSymbol()).isEqualTo("NVDA  260516C00140000");
+    assertThat(afterFailure.contractSymbol()).isEqualTo(EXPIRED_OCC_SYMBOL);
 
     // Follow-up STC drains (proving the in-flight latch was released) and fills normally.
     stub.partialExit(partialExitRequest("sig-ok", "pos-exit-place-fail", 1.0));
@@ -1821,7 +1844,7 @@ class PositionWorkflowImplTest {
     AuditEvent placeFailed = captureKind("PartialExitPlaceFailed");
     assertThat(placeFailed.getSubject())
         .containsEntry("signal_id", "sig-fail")
-        .containsEntry("option_symbol", "NVDA  260516C00140000");
+        .containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
     assertThat(asLong(placeFailed.getSubject().get("qty"))).isEqualTo(3L);
     assertThat(placeFailed.getSubject())
         .containsEntry("intent_key", "pos-exit-place-fail:exit:sig-fail");
@@ -1865,7 +1888,7 @@ class PositionWorkflowImplTest {
     AuditEvent alreadyFlat = captureKind("PartialExitAlreadyFlat");
     assertThat(alreadyFlat.getSubject())
         .containsEntry("signal_id", "sig-flat")
-        .containsEntry("option_symbol", "NVDA  260516C00140000")
+        .containsEntry("option_symbol", EXPIRED_OCC_SYMBOL)
         .containsEntry("intent_key", "pos-over-exit-flat:exit:sig-flat");
     // remaining_qty_before>0 → the divergence WARN+metric branch fired (same gate as this value).
     assertThat(asLong(alreadyFlat.getSubject().get("remaining_qty_before"))).isEqualTo(5L);
@@ -2436,7 +2459,7 @@ class PositionWorkflowImplTest {
     AuditEvent neverFilled = captureKind("PositionNeverFilled");
     assertThat(neverFilled.getSubject())
         .containsEntry("entry_signal_id", "entry-1")
-        .containsEntry("contract_symbol", "NVDA  260516C00140000");
+        .containsEntry("contract_symbol", EXPIRED_OCC_SYMBOL);
     assertThat(asLong(neverFilled.getSubject().get("expected_qty"))).isEqualTo(5L);
     assertThat(asLong(neverFilled.getSubject().get("ttl_secs"))).isEqualTo(90L);
 
@@ -2672,7 +2695,7 @@ class PositionWorkflowImplTest {
     assertThat(asLong(neverFilled.getSubject().get("ttl_secs"))).isEqualTo(10L);
     assertThat(neverFilled.getSubject())
         .containsEntry("entry_signal_id", "entry-1")
-        .containsEntry("contract_symbol", "NVDA  260516C00140000");
+        .containsEntry("contract_symbol", EXPIRED_OCC_SYMBOL);
 
     // No PositionEntered audit fired — the position never existed.
     ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
@@ -3630,7 +3653,7 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(4);
     // Phase 2: NOT-yet-expired OCC — the lead timer on a MULTI-DAY lot firing on a closed market is
     // a safe no-op (stays ALIVE); the worthless-close is expiry-date gated and must NOT fire here.
-    in.setContractSymbol("NVDA  270115C00140000");
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 4L);
 
@@ -3799,7 +3822,7 @@ class PositionWorkflowImplTest {
     in.setTenantId("dev");
     in.setStrategyId("copytrade-v1");
     in.setEntrySignalId("entry-1");
-    in.setContractSymbol("NVDA  260516C00140000");
+    in.setContractSymbol(EXPIRED_OCC_SYMBOL);
     in.setQty(qty);
     in.setEntryPremium(new BigDecimal("2.30"));
     return in;
