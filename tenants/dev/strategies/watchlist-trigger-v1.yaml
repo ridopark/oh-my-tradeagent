@@ -50,6 +50,13 @@ no_progress_time_stop_secs: 1500
 force_close_eod_et: "15:30"
 no_entry_within_close_minutes: 30
 eod_force_flatten: true
+# Bounded-flatten floors (Plan-2A): fail-SAFE → marketable; the expiry session collapses the floor
+# to expiry_day_floor. Without these three the bounded-flatten path can't resolve a floor and emits
+# FlattenFloorConfigError (losing floor protection). Mirrors copytrade-v1; keep in sync with the
+# embedded copy in infra/k8s/40-tenants-config.yaml.
+exit_floor_abs: 0.05
+exit_floor_pct: 0.5
+expiry_day_floor: 0.01
 
 # SHIP DISABLED. The operator flips this on (dashboard per-tenant toggle) ONLY AFTER confirming the
 # real-time stock feed is entitled/configured. With enabled:false the strategy loads but admits no
