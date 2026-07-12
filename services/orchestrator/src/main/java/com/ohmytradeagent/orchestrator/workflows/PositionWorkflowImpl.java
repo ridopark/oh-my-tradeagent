@@ -539,6 +539,25 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_EXPIRE_WORTHLESS = "expire-worthless-v1";
 
   /**
+   * Phase 2 (PLAN-2026-07-12-watchlist-flatten-floor-and-expired-readoption, concern B1) replay
+   * gate. The original {@link #VERSION_EXPIRE_WORTHLESS} worthless-close fires ONLY for a {@code
+   * reason=="expiry"} flatten. A lot whose TERMINAL scheduled flatten is {@code reason=eod} or
+   * {@code reason=expiry_lead} on a PHYSICALLY-expired contract that rests unfilled (a 0DTE
+   * deep-OTM no-bid lot — the 2026-07-10 AMZN incident) therefore never closed and lingered as a
+   * phantom until manual termination. This marker broadens {@link #maybeCloseWorthlessAtExpiry} to
+   * worthless-close on {@code eod}/{@code expiry_lead} too, but ONLY on a physically-expired
+   * contract (the OCC expiry-date check remains the real guard, unchanged).
+   *
+   * <p>Under {@code DEFAULT_VERSION} (in-flight histories recorded before this deploy) the
+   * broadened {@code eod}/{@code expiry_lead} branch keeps returning {@code false} (legacy
+   * stay-ALIVE) so those histories replay byte-identically — the ONLY new command on v=0 is this
+   * appended getVersion marker. The existing {@code reason=="expiry"} path keeps reading {@link
+   * #VERSION_EXPIRE_WORTHLESS} at the same point, so its command stream is untouched. Long-lived
+   * multi-day workflow: in-flight executions replay across the redeploy, so the gate is mandatory.
+   */
+  private static final String VERSION_EXPIRE_WORTHLESS_SCHEDULED = "expire-worthless-scheduled-v1";
+
+  /**
    * Phase 4 (PLAN-2026-06-24-trading-remediation) replay gate. When a force-flatten
    * (stop_loss/time_stop/eod/expiry) rests UNFILLED — typically because the orders were submitted
    * at/after the 16:00 close — the legacy behaviour is to emit {@link
@@ -2636,32 +2655,52 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * <p>Gated on three conditions, ALL required:
    *
    * <ul>
-   *   <li>{@code reason == "expiry"} — ONLY the physical-expiry flatten. NOT {@code expiry_lead}
-   *       (fires before expiry; its no-fill must keep the real expiry-close attempt) nor {@code
-   *       eod}/{@code risk_breach}/{@code force_close}/{@code chandelier} (a no-fill there is not a
-   *       worthless-at-expiry condition).
+   *   <li>{@code reason} is a scheduled expiry-equivalent flatten: {@code expiry} (the 0DTE
+   *       physical-expiry close), {@code eod} (the blanket end-of-day sweep), or {@code
+   *       expiry_lead} (the multi-day lead flatten). Phase 2 (PLAN-2026-07-12, B1) broadened this
+   *       from {@code expiry}-only: a terminal {@code eod}/{@code expiry_lead} flatten on a
+   *       physically-expired no-bid lot used to linger forever (the 2026-07-10 AMZN incident). NOT
+   *       {@code risk_breach}/{@code force_close}/{@code chandelier}/{@code bto_corrected} — a
+   *       no-fill there is not a worthless-at-expiry condition.
    *   <li>The contract has PHYSICALLY expired: its OCC expiry date &lt;= the workflow's current ET
    *       date, derived deterministically from {@link Workflow#currentTimeMillis()} (never {@code
-   *       LocalDate.now()}). The expiry timer can fire slightly before midnight-of-expiry in
-   *       degenerate configs, so this re-checks physical expiry rather than trusting the timer
-   *       alone.
-   *   <li>{@link #VERSION_EXPIRE_WORTHLESS} v&gt;=1. v=DEFAULT_VERSION (in-flight pre-#434
-   *       workflows) returns {@code false} → unchanged lingering behavior; the only new command on
-   *       v=0 is this appended getVersion marker.
+   *       LocalDate.now()}). This stays the REAL guard, unchanged: a non-expiry-day {@code eod}
+   *       flatten still returns {@code false} because the contract has not physically expired, so
+   *       there is no behavior change off the expiry date. The expiry timer can fire slightly
+   *       before midnight-of-expiry in degenerate configs, so this re-checks physical expiry rather
+   *       than trusting the timer alone.
+   *   <li>The reason-scoped version marker v&gt;=1. {@code expiry} reads the original {@link
+   *       #VERSION_EXPIRE_WORTHLESS} (unchanged command stream); {@code eod}/{@code expiry_lead}
+   *       read the NEW {@link #VERSION_EXPIRE_WORTHLESS_SCHEDULED}. v=DEFAULT_VERSION (in-flight
+   *       histories) returns {@code false} → unchanged lingering behavior; the only new command on
+   *       v=0 is the appended getVersion marker for whichever reason this execution took.
    * </ul>
    *
    * <p>On close: zero {@code remainingQty}, clear the late-fill flag, and emit the terminal {@link
    * #KIND_POSITION_EXPIRED} (P&amp;L-neutral — a worthless expiry realizes no exit credit).
    */
   private boolean maybeCloseWorthlessAtExpiry(String reason) {
-    if (!"expiry".equals(reason)) {
+    // Phase 2 (PLAN-2026-07-12, B1): the physical-expiry close ("expiry") plus the two scheduled
+    // flattens that can be the TERMINAL flatten on an expired lot ("eod"/"expiry_lead"). The
+    // physical-expiry date check below remains the real guard for all three.
+    boolean physicalExpiryReason = "expiry".equals(reason);
+    boolean scheduledExpiryReason = "eod".equals(reason) || "expiry_lead".equals(reason);
+    if (!physicalExpiryReason && !scheduledExpiryReason) {
       return false;
     }
     LocalDate expiryDate = expiryDateFromOcc(input.getContractSymbol());
     if (expiryDate == null || expiryDate.isAfter(currentEtDate())) {
       return false;
     }
-    int v = Workflow.getVersion(VERSION_EXPIRE_WORTHLESS, Workflow.DEFAULT_VERSION, 1);
+    // Reason-scoped version read: "expiry" keeps its original marker so its recorded command stream
+    // is byte-identical; "eod"/"expiry_lead" gate behind the NEW marker so pre-Phase-2 in-flight
+    // histories replay identically (stay ALIVE at DEFAULT_VERSION). `reason` is deterministic and
+    // fixed for this execution's terminal flatten, so exactly one marker is read, at the same point
+    // on every replay.
+    int v =
+        physicalExpiryReason
+            ? Workflow.getVersion(VERSION_EXPIRE_WORTHLESS, Workflow.DEFAULT_VERSION, 1)
+            : Workflow.getVersion(VERSION_EXPIRE_WORTHLESS_SCHEDULED, Workflow.DEFAULT_VERSION, 1);
     if (v == Workflow.DEFAULT_VERSION) {
       return false;
     }
