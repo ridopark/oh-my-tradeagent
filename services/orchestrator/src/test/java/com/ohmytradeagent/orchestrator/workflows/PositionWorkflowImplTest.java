@@ -511,6 +511,181 @@ class PositionWorkflowImplTest {
     assertThat(captureAll("PartialExitFilled")).isEmpty();
   }
 
+  // ---------- Phase 2 (PLAN-2026-07-12, B1): broaden worthless-close to eod / expiry_lead
+  // ----------
+
+  /**
+   * Phase 2 (PLAN-2026-07-12, B1) — REPRODUCES THE 2026-07-10 AMZN INCIDENT. A 0DTE deep-OTM no-bid
+   * lot whose TERMINAL flatten is {@code reason=eod} (the blanket end-of-day sweep) rests UNFILLED
+   * — a worthless contract has no buyer. Before this fix the worthless-close fired ONLY for {@code
+   * reason=="expiry"}, so an {@code eod}-adopted expired lot fell through to the stay-ALIVE block
+   * and lingered as a phantom for ~2 days until manual termination. Under {@code
+   * VERSION_EXPIRE_WORTHLESS_SCHEDULED} v&gt;=1 (TestWorkflowEnvironment resolves getVersion to the
+   * max, 1) and a PHYSICALLY-expired OCC (NVDA 260516 is well in the past), the {@code eod} no-fill
+   * now worthless-closes: remainingQty -&gt; 0, a terminal PositionExpired ({@code
+   * reason=worthless_expiry}), and {@code run()} COMPLETES instead of lingering / retrying.
+   */
+  @Test
+  void expiredContract_eodFlatten_noFill_closesWorthless_notLinger() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-eod-worthless");
+    PositionWorkflowInput in = input(7);
+    in.setEodForceFlatten(Boolean.TRUE); // opt into the blanket EOD flatten (reason=eod)
+    in.setExitFillTtlSecs(2L); // short bounded await so the unfilled flatten resolves fast
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 7L);
+
+    // EOD fires -> bounded flatten placed -> NO fill (worthless no-bid lot) -> bounded await
+    // elapses
+    // -> reason=eod on a physically-expired OCC worthless-closes instead of lingering.
+    env.sleep(Duration.ofMinutes(2));
+    waitForPlaceOrderCount(1);
+
+    // run() COMPLETES (does NOT hang ALIVE / retry next session).
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-eod-worthless");
+
+    captureKind("EodForceFlattenRequested");
+    AuditEvent expired = captureKind("PositionExpired");
+    assertThat(asLong(expired.getSubject().get("remaining_qty_before"))).isEqualTo(7L);
+    assertThat(expired.getSubject())
+        .containsEntry("reason", "worthless_expiry")
+        .containsEntry("option_symbol", "NVDA  260516C00140000");
+
+    // P&L-neutral: nothing filled, so no exit credit and no next-session retry churn.
+    assertThat(captureAll("PartialExitFilled")).isEmpty();
+    assertThat(captureAll("FlattenRetryScheduled")).isEmpty();
+  }
+
+  /**
+   * Phase 2 (PLAN-2026-07-12, B1) — same broadening for {@code reason=expiry_lead}. A multi-day
+   * lead flatten that ends up firing on/after the lot's OCC expiry date and rests unfilled
+   * (worthless no-bid) must ALSO worthless-close rather than linger. The lead timer is driven by
+   * {@code durationUntilExpiryFlattenEt}; the OCC (NVDA 260516) is physically expired, so under
+   * v&gt;=1 the {@code expiry_lead} no-fill terminates as expire-worthless.
+   */
+  @Test
+  void expiredContract_expiryLeadFlatten_noFill_closesWorthless() throws Exception {
+    when(calendar.durationUntilExpiryFlattenEt(
+            any(), org.mockito.ArgumentMatchers.anyLong(), any()))
+        .thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-lead-worthless");
+    PositionWorkflowInput in = input(4);
+    in.setExitFillTtlSecs(2L); // short bounded await so the unfilled lead flatten resolves fast
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 4L);
+
+    // Lead timer fires -> bounded flatten placed -> NO fill -> bounded await elapses -> reason=
+    // expiry_lead on a physically-expired OCC worthless-closes.
+    env.sleep(Duration.ofMinutes(2));
+    waitForPlaceOrderCount(1);
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-lead-worthless");
+
+    captureKind("ExpiryLeadFlattenRequested");
+    AuditEvent expired = captureKind("PositionExpired");
+    assertThat(asLong(expired.getSubject().get("remaining_qty_before"))).isEqualTo(4L);
+    assertThat(expired.getSubject())
+        .containsEntry("reason", "worthless_expiry")
+        .containsEntry("option_symbol", "NVDA  260516C00140000");
+    assertThat(captureAll("PartialExitFilled")).isEmpty();
+    assertThat(captureAll("FlattenRetryScheduled")).isEmpty();
+  }
+
+  /**
+   * Phase 2 (PLAN-2026-07-12, B1) — REGRESSION: the physical-expiry date check stays the REAL
+   * guard. OFF the expiry date (OCC NVDA 270115 is well in the FUTURE), an {@code eod} flatten that
+   * rests unfilled must STILL stay ALIVE exactly as before — {@code maybeCloseWorthlessAtExpiry}
+   * returns false at the physical-expiry guard, never reaching the worthless-close, so there is NO
+   * behavior change off the expiry date. The lot stays managed (retry-next-session / late-fill),
+   * never worthless-closed.
+   */
+  @Test
+  void notExpiredContract_eodFlatten_noFill_staysAliveUnchanged() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-eod-notexpired");
+    PositionWorkflowInput in = input(5);
+    in.setContractSymbol("NVDA  270115C00140000"); // FUTURE expiry -> NOT physically expired
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L); // short TTL so the unfilled-await elapses quickly under virtual time
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // EOD fires -> bounded flatten placed -> fill never arrives -> TTL elapses -> stays alive
+    // (physical-expiry guard returns false; no worthless-close on a not-yet-expired contract).
+    env.sleep(Duration.ofMinutes(2));
+    waitForPlaceOrderCount(1);
+
+    // Still RUNNING (queryable), remainingQty unchanged, and NO worthless-close / no
+    // PositionClosed.
+    PositionState state = stub.positionState();
+    assertThat(state.remainingQty()).isEqualTo(5L);
+    assertThat(captureAll("PositionExpired")).isEmpty();
+    assertThat(captureAll("PositionClosed")).isEmpty();
+    AuditEvent failed = captureKind("EodForceFlattenFailed");
+    assertThat(failed.getSubject())
+        .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
+  }
+
+  /**
+   * Phase 2 (PLAN-2026-07-12, B1) — DEFAULT_VERSION replay determinism for the new {@code
+   * VERSION_EXPIRE_WORTHLESS_SCHEDULED} gate.
+   *
+   * <p><b>Test-scope note (mirrors {@code
+   * processOne_exitFillTimeout_retryGateUnderVersionResolutionDocsAndAsserts}):</b> {@link
+   * io.temporal.testing.TestWorkflowEnvironment} starts every workflow with a fresh history, so
+   * {@code Workflow.getVersion(VERSION_EXPIRE_WORTHLESS_SCHEDULED, DEFAULT_VERSION, 1)} resolves to
+   * {@code 1} (the max registered version) — there is no clean knob to force {@code
+   * DEFAULT_VERSION} without {@code WorkflowReplayer} replaying a real pre-Phase-2 history file.
+   * The v=0 preservation (an in-flight {@code eod}/{@code expiry_lead} history keeps returning
+   * {@code false} → stay-ALIVE, byte-identical) is therefore enforced by Temporal's marker-based
+   * version resolution itself; the ONLY new command appended on v=0 is the getVersion marker.
+   *
+   * <p>What this test DOES assert against the live code path: at DEFAULT_VERSION the broadened
+   * branch returns {@code false} through the SAME early-return in {@code
+   * maybeCloseWorthlessAtExpiry} that the physical-expiry guard uses. We exercise that exact
+   * return-false → stay-ALIVE outcome by driving an {@code eod} no-fill on a NOT-yet-expired OCC
+   * (the guard returns false before the version read) and proving the lot stays ALIVE with NO
+   * PositionExpired — the identical observable behavior a v=0 in-flight history replays with.
+   * Paired with {@code expiredContract_eodFlatten_noFill_closesWorthless_notLinger} (which proves
+   * v=max closes), this brackets the gate: v=0 stays alive, v&gt;=1 worthless-closes.
+   */
+  @Test
+  void expiredContract_eodFlatten_defaultVersionReplay_staysAlive_docsAndAsserts()
+      throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-eod-v0-replay");
+    PositionWorkflowInput in = input(3);
+    // NOT-yet-expired OCC: the physical-expiry guard returns false BEFORE the version read, giving
+    // the identical return-false → stay-ALIVE outcome a v=0 in-flight history replays with.
+    in.setContractSymbol("NVDA  270115C00140000");
+    in.setEodForceFlatten(Boolean.TRUE);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 3L);
+
+    env.sleep(Duration.ofMinutes(2));
+    waitForPlaceOrderCount(1);
+
+    // Legacy/v=0 observable: still ALIVE, no worthless-close, remainingQty intact.
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+    assertThat(captureAll("PositionExpired")).isEmpty();
+    assertThat(captureAll("PositionClosed")).isEmpty();
+  }
+
   @Test
   void expiryTimer_configuredForceClose0dte_drivesBoundedLimitFlatten() throws Exception {
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
@@ -598,6 +773,9 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-eod-unfilled");
     PositionWorkflowInput in = input(5);
+    // Phase 2: NOT-yet-expired OCC so this exercises the stay-ALIVE path for a multi-day hold, not
+    // the physically-expired worthless-close (which is expiry-date gated).
+    in.setContractSymbol("NVDA  270115C00140000");
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L); // short TTL so the unfilled-await elapses quickly under virtual time
     WorkflowStub.fromTyped(stub).start(in);
@@ -639,6 +817,9 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-flatten-retry");
     PositionWorkflowInput in = input(5);
+    // Phase 2: NOT-yet-expired OCC so the retry-next-session path is exercised, not the worthless-
+    // close (which is expiry-date gated).
+    in.setContractSymbol("NVDA  270115C00140000");
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L); // short TTL so each unfilled await elapses fast under virtual time
     WorkflowStub.fromTyped(stub).start(in);
@@ -677,6 +858,9 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-flatten-exhaust");
     PositionWorkflowInput in = input(5);
+    // Phase 2: NOT-yet-expired OCC so the retry-next-session budget path is exercised, not the
+    // worthless-close (which is expiry-date gated).
+    in.setContractSymbol("NVDA  270115C00140000");
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -730,6 +914,9 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-flatten-latefill");
     PositionWorkflowInput in = input(5);
+    // Phase 2: NOT-yet-expired OCC so the late-fill recovery path is exercised, not the worthless-
+    // close (which is expiry-date gated).
+    in.setContractSymbol("NVDA  270115C00140000");
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -764,6 +951,9 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-eod-partial");
     PositionWorkflowInput in = input(5);
+    // Phase 2: NOT-yet-expired OCC so the partial-then-residual stay-ALIVE path is exercised, not
+    // the worthless-close (which is expiry-date gated).
+    in.setContractSymbol("NVDA  270115C00140000");
     in.setEodForceFlatten(Boolean.TRUE);
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
@@ -939,6 +1129,9 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-flatten-genuine-timeout");
     PositionWorkflowInput in = input(5);
+    // Phase 2: NOT-yet-expired OCC so the genuinely-unfilled stay-ALIVE path is exercised, not the
+    // worthless-close (which is expiry-date gated).
+    in.setContractSymbol("NVDA  270115C00140000");
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -985,6 +1178,9 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-flatten-retry-reconcile");
     PositionWorkflowInput in = input(5);
+    // Phase 2: NOT-yet-expired OCC so the next-session reconcile path is exercised, not the
+    // worthless-close (which is expiry-date gated).
+    in.setContractSymbol("NVDA  270115C00140000");
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -1033,6 +1229,9 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-flatten-partial-alive");
     PositionWorkflowInput in = input(5);
+    // Phase 2: NOT-yet-expired OCC so the partial-cancel stay-ALIVE path is exercised, not the
+    // worthless-close (which is expiry-date gated).
+    in.setContractSymbol("NVDA  270115C00140000");
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -1089,6 +1288,9 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-flatten-partial-retry");
     PositionWorkflowInput in = input(5);
+    // Phase 2: NOT-yet-expired OCC so the same-key no-double-book retry path is exercised, not the
+    // worthless-close (which is expiry-date gated).
+    in.setContractSymbol("NVDA  270115C00140000");
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -1146,6 +1348,10 @@ class PositionWorkflowImplTest {
 
     PositionWorkflow stub = newStub("pos-flatten-residual-fill");
     PositionWorkflowInput in = input(5);
+    // Phase 2: NOT-yet-expired OCC so the residual-replace-and-fill retry path is exercised, not
+    // the
+    // worthless-close (which is expiry-date gated).
+    in.setContractSymbol("NVDA  270115C00140000");
     in.setEodForceFlatten(Boolean.TRUE);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
@@ -3421,7 +3627,11 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-lead-closed-market");
-    WorkflowStub.fromTyped(stub).start(input(4));
+    PositionWorkflowInput in = input(4);
+    // Phase 2: NOT-yet-expired OCC — the lead timer on a MULTI-DAY lot firing on a closed market is
+    // a safe no-op (stays ALIVE); the worthless-close is expiry-date gated and must NOT fire here.
+    in.setContractSymbol("NVDA  270115C00140000");
+    WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 4L);
 
     env.sleep(Duration.ofMinutes(1));
