@@ -145,6 +145,11 @@ data:
     force_close_eod_et: "15:30"
     no_entry_within_close_minutes: 30
     eod_force_flatten: true
+    # Bounded-flatten floors (Plan-2A): fail-SAFE → marketable; expiry collapses to expiry_day_floor.
+    # Keep in sync with tenants/dev/strategies/watchlist-trigger-v1.yaml.
+    exit_floor_abs: 0.05
+    exit_floor_pct: 0.5
+    expiry_day_floor: 0.01
     # SHIP DISABLED: enabled:false + the unconfigured stock feed are the two live-trade gates.
     enabled: false
     # Copytrade-only schema-required fields, inert here (the trigger path ignores them). The schema
