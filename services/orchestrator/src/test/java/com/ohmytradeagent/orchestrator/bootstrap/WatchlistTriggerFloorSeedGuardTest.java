@@ -33,15 +33,12 @@ class WatchlistTriggerFloorSeedGuardTest {
     // bounded-flatten / expiry-session flatten resolves a real floor instead of null.
     assertThat(cfg.getExitFloorAbs())
         .as("exit_floor_abs must be seeded non-null on watchlist-trigger-v1")
-        .isNotNull()
         .isEqualByComparingTo(new BigDecimal("0.05"));
     assertThat(cfg.getExitFloorPct())
         .as("exit_floor_pct must be seeded non-null on watchlist-trigger-v1")
-        .isNotNull()
         .isEqualByComparingTo(new BigDecimal("0.5"));
     assertThat(cfg.getExpiryDayFloor())
         .as("expiry_day_floor must be seeded non-null on watchlist-trigger-v1")
-        .isNotNull()
         .isEqualByComparingTo(new BigDecimal("0.01"));
   }
 
