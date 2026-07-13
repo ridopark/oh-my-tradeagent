@@ -25,6 +25,7 @@ import io.temporal.workflow.Workflow;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -102,6 +103,20 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
    */
   private static final String VERSION_MISSING_VISIBILITY_FALLBACK =
       "recon-missing-visibility-fallback-v1";
+
+  /**
+   * Phase 3 (PLAN-2026-07-12, B2) change id. Tightens the {@link #maybeAutoAdopt} refuse-expired
+   * gate so a physically-done OCC is refused on its expiry DAY once past the 16:00 ET close (0DTE),
+   * not just on the day AFTER expiry (the prior #434 {@code isBefore}-only behavior). Behind the
+   * marker so existing reconciliation histories replay byte-identically: under {@code
+   * DEFAULT_VERSION} the legacy {@code isBefore}-only condition runs (a same-day 0DTE OCC is still
+   * adopted regardless of time-of-day) and the only new command appended on v=0 is this marker;
+   * under v&gt;=1 the same-day-post-close refuse also applies.
+   */
+  private static final String VERSION_REFUSE_EXPIRED_SAMEDAY = "recon-refuse-expired-sameday-v1";
+
+  /** Hard expiry-session close in America/New_York (16:00 ET); past this a 0DTE OCC is done. */
+  private static final LocalTime ET_MARKET_CLOSE = LocalTime.of(16, 0);
 
   // Plan-2A R-AA-4: recon.auto_adopt.{initiated,already_owned,refused_not_held} metric outcomes.
   private static final String AUTO_ADOPT_INITIATED = "initiated";
@@ -302,6 +317,12 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     // command stream is deterministic regardless of how many broker positions are present.
     int missingVisibilityFallback =
         Workflow.getVersion(VERSION_MISSING_VISIBILITY_FALLBACK, Workflow.DEFAULT_VERSION, 1);
+    // Phase 3 (PLAN-2026-07-12, B2): read the refuse-expired-sameday marker ONCE here (outside the
+    // per-position adopt loop) so the command stream is deterministic regardless of how many broker
+    // positions are present — mirroring the missing-visibility-fallback read above. Passed into
+    // maybeAutoAdopt; NOT read freshly per position.
+    int refuseExpiredSameday =
+        Workflow.getVersion(VERSION_REFUSE_EXPIRED_SAMEDAY, Workflow.DEFAULT_VERSION, 1);
     long positionOrphans = 0;
     for (BrokerPosition p : brokerPositions) {
       List<JournalEntry> filled =
@@ -432,7 +453,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // reaches here. No recon-side version gate: recon executions are short-lived per scheduled
         // run (workflowId carries {{.ScheduledRunID}}), so there is no long-lived in-flight history
         // to replay-protect — a getVersion marker here would be vacuous.
-        maybeAutoAdopt(in, brokerTarget, p, occ, brokerOpen);
+        maybeAutoAdopt(in, brokerTarget, p, occ, brokerOpen, refuseExpiredSameday);
       }
     }
 
@@ -643,32 +664,56 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       String brokerTarget,
       BrokerPosition p,
       String occ,
-      List<BrokerOpenOrder> brokerOpen) {
+      List<BrokerOpenOrder> brokerOpen,
+      int refuseExpiredSameday) {
     String adoptWfId =
         WorkflowIds.adoption(in.getTenantId(), in.getStrategyId(), p.getOptionSymbol());
 
-    // Issue #434: refuse to adopt an OCC whose expiry has physically passed. The broker dropped the
-    // contract at expiry; a worthless expired contract has no buyer, so an adopted PositionWorkflow
-    // would never get a closing fill, linger "open", and be re-adopted every recon cycle (the TSLA
-    // 260618P incident). "Today" is derived deterministically from Workflow.currentTimeMillis() ->
-    // the America/New_York LocalDate (NOT LocalDate.now(), which is non-deterministic in workflow
-    // code). A null expiry (unparseable OCC) falls through to the normal adopt path (fail-safe: we
-    // do not silently skip a contract we cannot classify).
+    // Issue #434 + Phase 3 (PLAN-2026-07-12, B2): refuse to adopt an OCC whose expiry has
+    // physically
+    // passed. The broker dropped the contract at expiry; a worthless expired contract has no buyer,
+    // so an adopted PositionWorkflow would never get a closing fill, linger "open", and be
+    // re-adopted every recon cycle (the TSLA 260618P and AMZN 260710C incidents). "Today" is
+    // derived
+    // deterministically from Workflow.currentTimeMillis() -> the America/New_York LocalDate (NOT
+    // LocalDate.now(), which is non-deterministic in workflow code). A null expiry (unparseable
+    // OCC)
+    // falls through to the normal adopt path (fail-safe: we do not silently skip a contract we
+    // cannot classify).
+    //
+    // Refuse when the OCC is physically done:
+    //   - prior day: occExpiry.isBefore(etDate)   -> refuse at ANY time of day (#434, always).
+    //   - expiry day (0DTE) AND past the 16:00 ET close: refuse (Phase 3, v>=1 only) — an intraday
+    //     still-tradeable orphan on its own expiry day BEFORE the close is STILL adopted (Fork 2B).
+    // Under DEFAULT_VERSION the same-day-post-close branch is skipped so in-flight recon histories
+    // replay byte-identically (legacy isBefore-only behavior); the marker itself is read once at a
+    // stable scope by the caller and passed in.
     LocalDate occExpiry = OccSymbol.expiryOf(p.getOptionSymbol());
-    if (occExpiry != null && occExpiry.isBefore(workflowEtDate())) {
-      auditLog(
-          KIND_AUTO_ADOPT_REFUSED_EXPIRED,
-          subject(
-              "option_symbol",
-              p.getOptionSymbol(),
-              "qty",
-              p.getQty(),
-              "occ_expiry",
-              occExpiry.toString(),
-              "recon_et_date",
-              workflowEtDate().toString()));
-      recordAutoAdoptMetric(in, brokerTarget, AUTO_ADOPT_REFUSED_EXPIRED);
-      return;
+    if (occExpiry != null) {
+      LocalDate etDate = workflowEtDate();
+      String refuseReason = null;
+      if (occExpiry.isBefore(etDate)) {
+        refuseReason = "prior_day";
+      } else if (refuseExpiredSameday >= 1 && occExpiry.isEqual(etDate) && pastEtClose()) {
+        refuseReason = "same_day_post_close";
+      }
+      if (refuseReason != null) {
+        auditLog(
+            KIND_AUTO_ADOPT_REFUSED_EXPIRED,
+            subject(
+                "option_symbol",
+                p.getOptionSymbol(),
+                "qty",
+                p.getQty(),
+                "occ_expiry",
+                occExpiry.toString(),
+                "recon_et_date",
+                etDate.toString(),
+                "refuse_reason",
+                refuseReason));
+        recordAutoAdoptMetric(in, brokerTarget, AUTO_ADOPT_REFUSED_EXPIRED);
+        return;
+      }
     }
 
     // Over-sell gate (b): refuse if any open/pending SELL for this OCC exists at the broker.
@@ -798,5 +843,19 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     return Instant.ofEpochMilli(Workflow.currentTimeMillis())
         .atZone(ZoneId.of("America/New_York"))
         .toLocalDate();
+  }
+
+  /**
+   * Phase 3 (PLAN-2026-07-12, B2): true when the workflow's deterministic clock is at/after the
+   * 16:00 ET hard close. Derived from {@link Workflow#currentTimeMillis()} -> America/New_York
+   * local time (NOT {@code LocalTime.now()}), so it replays identically. Used to decide whether a
+   * 0DTE OCC on its own expiry date has passed its expiry-session close (physically done).
+   */
+  private static boolean pastEtClose() {
+    LocalTime etNow =
+        Instant.ofEpochMilli(Workflow.currentTimeMillis())
+            .atZone(ZoneId.of("America/New_York"))
+            .toLocalTime();
+    return !etNow.isBefore(ET_MARKET_CLOSE);
   }
 }
