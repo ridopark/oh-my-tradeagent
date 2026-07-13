@@ -34,6 +34,8 @@ import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -1332,6 +1334,223 @@ class ReconciliationWorkflowImplTest {
         .recordAutoAdopt(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("refused_expired"));
     verify(metrics, never())
         .recordAutoAdopt(anyString(), anyString(), anyString(), eq("initiated"));
+  }
+
+  // ---------- Phase 3 (PLAN-2026-07-12, B2): refuse-expired-sameday, post-close guarded ----------
+  //
+  // These tests depend on "is the workflow clock past 16:00 ET on the OCC's expiry date", so they
+  // PIN the TestWorkflowEnvironment clock to a KNOWN instant via setInitialTime and choose the OCC
+  // expiry date RELATIVE to that pinned instant (NOT the wall clock) — otherwise they'd be a
+  // time-bomb that passes/fails depending on the wall-clock time-of-day. Each new test builds its
+  // OWN pinned env (the shared @BeforeEach env is left untouched for the existing tests). The
+  // pinned expiry date 2026-01-16 is EST (UTC-5): 16:00 ET == 21:00Z.
+  private static final LocalDate PINNED_EXPIRY_DATE = LocalDate.of(2026, 1, 16);
+
+  @Test
+  void expiredOcc_onExpiryDayAfterClose_refusesAdopt_notReadopt() {
+    // REPRODUCES THE 2026-07-10 INCIDENT: a broker remnant for a 0DTE OCC seen AFTER the 16:00 ET
+    // close on its OWN expiry date. Physically done (no buyer) -> recon must refuse to adopt so it
+    // is not re-adopted every ~25-30 min cycle. Clock pinned to 17:00 ET on the expiry date.
+    Instant afterClose = Instant.parse("2026-01-16T22:00:00Z"); // 17:00 America/New_York (EST)
+    String occ = paddedOccExpiring(PINNED_EXPIRY_DATE);
+    stubOrphanFixture(occ);
+
+    TestWorkflowEnvironment penv = newStartedPinnedEnv(afterClose);
+    try {
+      ReconciliationSummary summary = runWorkflowOn(penv);
+
+      // The orphan page still fires (detection unchanged); only adoption is refused.
+      assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+
+      AuditEvent refused = captureKind("AutoAdoptRefusedExpired");
+      assertThat(refused.getSubject())
+          .containsEntry("option_symbol", occ)
+          .containsEntry("refuse_reason", "same_day_post_close");
+      assertThat(((Number) refused.getSubject().get("qty")).longValue()).isEqualTo(5L);
+
+      // No adoption child started, no Initiated audit/metric — only the refused_expired counter.
+      assertThat(ADOPT_STARTED).isEmpty();
+      Mockito.verify(audit, never())
+          .log(Mockito.argThat(e -> e != null && "ReconAutoAdoptionInitiated".equals(e.getKind())));
+      verify(metrics, times(1))
+          .recordAutoAdopt(
+              eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("refused_expired"));
+      verify(metrics, never())
+          .recordAutoAdopt(anyString(), anyString(), anyString(), eq("initiated"));
+    } finally {
+      penv.close();
+    }
+  }
+
+  @Test
+  void expiredOcc_onExpiryDayBeforeClose_stillAdopts() {
+    // Fork-2B still-tradeable guard (the whole point of 2B over 2C): the SAME 0DTE OCC on its own
+    // expiry date but BEFORE the 16:00 ET close is still tradeable -> a genuine orphan must STILL
+    // be
+    // adopted and managed, NOT refused. Clock pinned to 10:00 ET on the expiry date.
+    Instant beforeClose = Instant.parse("2026-01-16T15:00:00Z"); // 10:00 America/New_York (EST)
+    String occ = paddedOccExpiring(PINNED_EXPIRY_DATE);
+    stubOrphanFixture(occ);
+
+    TestWorkflowEnvironment penv = newStartedPinnedEnv(beforeClose);
+    try {
+      ReconciliationSummary summary = runWorkflowOn(penv);
+
+      assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+
+      String adoptWfId = WorkflowIds.adoption("dev", "copytrade-v1", occ);
+      waitUntilAdoptStarted(adoptWfId);
+      assertThat(ADOPT_STARTED).containsKey(adoptWfId);
+
+      AuditEvent initiated = captureKind("ReconAutoAdoptionInitiated");
+      assertThat(initiated.getSubject()).containsEntry("option_symbol", occ);
+      verify(metrics, times(1))
+          .recordAutoAdopt(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("initiated"));
+      // NOT refused.
+      Mockito.verify(audit, never())
+          .log(Mockito.argThat(e -> e != null && "AutoAdoptRefusedExpired".equals(e.getKind())));
+      verify(metrics, never())
+          .recordAutoAdopt(anyString(), anyString(), anyString(), eq("refused_expired"));
+    } finally {
+      penv.close();
+    }
+  }
+
+  @Test
+  void expiredOcc_priorDay_stillRefuses() {
+    // REGRESSION on the existing #434 day-after path: an OCC that expired on a PRIOR day is refused
+    // at ANY time of day. Clock pinned to 10:00 ET (well BEFORE close) on the day AFTER expiry to
+    // prove the prior-day refuse does NOT depend on the post-close guard.
+    Instant beforeClose = Instant.parse("2026-01-16T15:00:00Z"); // 10:00 ET on 2026-01-16
+    String occ = paddedOccExpiring(PINNED_EXPIRY_DATE.minusDays(1)); // expired 2026-01-15
+    stubOrphanFixture(occ);
+
+    TestWorkflowEnvironment penv = newStartedPinnedEnv(beforeClose);
+    try {
+      ReconciliationSummary summary = runWorkflowOn(penv);
+
+      assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+
+      AuditEvent refused = captureKind("AutoAdoptRefusedExpired");
+      assertThat(refused.getSubject())
+          .containsEntry("option_symbol", occ)
+          .containsEntry("refuse_reason", "prior_day");
+
+      assertThat(ADOPT_STARTED).isEmpty();
+      Mockito.verify(audit, never())
+          .log(Mockito.argThat(e -> e != null && "ReconAutoAdoptionInitiated".equals(e.getKind())));
+      verify(metrics, times(1))
+          .recordAutoAdopt(
+              eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("refused_expired"));
+    } finally {
+      penv.close();
+    }
+  }
+
+  /**
+   * DEFAULT_VERSION replay-determinism bracket for the {@code VERSION_REFUSE_EXPIRED_SAMEDAY} gate.
+   *
+   * <p><b>Test-scope note (mirrors {@code
+   * PositionWorkflowImplTest.expiredContract_eodFlatten_defaultVersionReplay_staysAlive_docsAndAsserts}):</b>
+   * {@link io.temporal.testing.TestWorkflowEnvironment} starts every workflow with a fresh history,
+   * so {@code Workflow.getVersion(VERSION_REFUSE_EXPIRED_SAMEDAY, DEFAULT_VERSION, 1)} resolves to
+   * {@code 1} (the max registered version) — there is no clean knob to force {@code
+   * DEFAULT_VERSION} without {@code WorkflowReplayer} replaying a real pre-Phase-3 history file.
+   * The v=0 preservation (an in-flight recon history keeps adopting a same-day 0DTE OCC at ANY time
+   * of day, byte- identically; the only new v=0 command is the appended marker) is therefore
+   * enforced by Temporal's marker-based version resolution itself.
+   *
+   * <p>What this test DOES assert against the live path: a same-day 0DTE OCC BEFORE the 16:00 ET
+   * close is ADOPTED — the identical observable outcome a v=0 in-flight history replays with at ANY
+   * time of day (the v>=1 change is ONLY the same-day-post-close refuse, proven by {@code
+   * expiredOcc_onExpiryDayAfterClose_refusesAdopt_notReadopt}). Paired, the two bracket the gate:
+   * same-day pre-close (and all of v=0) adopts; same-day post-close at v>=1 refuses.
+   */
+  @Test
+  void expiredOcc_sameDay_defaultVersionReplay_adopts_docsAndAsserts() {
+    Instant beforeClose = Instant.parse("2026-01-16T17:00:00Z"); // 12:00 ET on the expiry date
+    String occ = paddedOccExpiring(PINNED_EXPIRY_DATE);
+    stubOrphanFixture(occ);
+
+    TestWorkflowEnvironment penv = newStartedPinnedEnv(beforeClose);
+    try {
+      ReconciliationSummary summary = runWorkflowOn(penv);
+
+      assertThat(summary.getPositionOrphans()).isEqualTo(1L);
+
+      String adoptWfId = WorkflowIds.adoption("dev", "copytrade-v1", occ);
+      waitUntilAdoptStarted(adoptWfId);
+      assertThat(ADOPT_STARTED).containsKey(adoptWfId);
+      verify(metrics, times(1))
+          .recordAutoAdopt(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("initiated"));
+      Mockito.verify(audit, never())
+          .log(Mockito.argThat(e -> e != null && "AutoAdoptRefusedExpired".equals(e.getKind())));
+    } finally {
+      penv.close();
+    }
+  }
+
+  /**
+   * Common orphan fixture for the Phase 3 tests: a broker-held lot (qty 5) with a FILLED journal
+   * anchor + no running owner + no open SELL, so the filled-anchor auto-adopt path is reached and
+   * only the expiry gate decides adopt vs refuse.
+   */
+  private void stubOrphanFixture(String occ) {
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(occ, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(occ)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", occ)));
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+  }
+
+  /** A padded canonical OCC (root SPY, put, strike 38.00) expiring on the given ET date. */
+  private static String paddedOccExpiring(LocalDate exp) {
+    return String.format(
+        "%-6s%02d%02d%02dP00380000",
+        "SPY", exp.getYear() % 100, exp.getMonthValue(), exp.getDayOfMonth());
+  }
+
+  /**
+   * Build + start a TestWorkflowEnvironment whose deterministic clock is PINNED to {@code
+   * initialTime} (so {@code Workflow.currentTimeMillis()} the recon guard reads is stable and
+   * time-of-day is not wall-clock-dependent). Registers the same workflow types + activity mocks as
+   * the shared @BeforeEach env. Time-skipping stays disabled to match the shared env; the recon
+   * workflow runs in milliseconds, so the ET time-of-day stays at the pinned value. The caller MUST
+   * close it.
+   */
+  private TestWorkflowEnvironment newStartedPinnedEnv(Instant initialTime) {
+    TestWorkflowEnvironment penv =
+        TestWorkflowEnvironment.newInstance(
+            TestEnvironmentOptions.newBuilder()
+                .setUseTimeskipping(false)
+                .setInitialTime(initialTime)
+                .build());
+    Worker core = penv.newWorker(CORE_QUEUE);
+    core.registerWorkflowImplementationTypes(
+        ReconciliationWorkflowImpl.class, RecordingAdoptionWorkflowImpl.class);
+    core.registerActivitiesImplementations(audit, auditQuery, metrics, positionLookup);
+    Worker brokerWorker = penv.newWorker(EXEC_QUEUE);
+    brokerWorker.registerActivitiesImplementations(exec);
+    penv.start();
+    return penv;
+  }
+
+  private ReconciliationSummary runWorkflowOn(TestWorkflowEnvironment penv) {
+    ReconciliationWorkflowInput in = new ReconciliationWorkflowInput();
+    in.setSchemaVersion(1L);
+    in.setTenantId("dev");
+    in.setStrategyId("copytrade-v1");
+    in.setBrokerTarget(ReconciliationWorkflowInput.BrokerTarget.ALPACA_PAPER);
+    ReconciliationWorkflow wf =
+        penv.getWorkflowClient()
+            .newWorkflowStub(
+                ReconciliationWorkflow.class,
+                WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+    return wf.run(in);
   }
 
   /**
