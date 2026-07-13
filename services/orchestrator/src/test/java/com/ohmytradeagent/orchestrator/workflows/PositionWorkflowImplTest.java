@@ -1762,15 +1762,21 @@ class PositionWorkflowImplTest {
     // Original partial fails (place #1) -> page + schedule re-drive.
     stub.partialExit(partialExitRequest("sig-qqq", "pos-partial-exhaust", 0.5));
     waitForPlaceOrderCount(1);
-    // Query barrier: settle the workflow so the post-catch audit command is committed.
+    // The post-catch PartialExitPlaceFailed audit is emitted via an async audit.log() activity
+    // AFTER
+    // the placeOrder throw, so the positionState query barrier alone doesn't guarantee Mockito has
+    // recorded that invocation — a bare captureKind here races under CI parallel load. Poll for it
+    // deterministically (same fix as #530), then the state assertion.
+    waitForAuditKind("PartialExitPlaceFailed");
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
-    captureKind("PartialExitPlaceFailed");
 
     // Next session: the single budgeted re-drive (place #2) also fails -> budget spent -> terminal
     // PartialExitRetryExhausted page, NO further re-drive.
     env.sleep(Duration.ofMinutes(6));
     waitForPlaceOrderCount(2);
-    // Query barrier: settle the workflow so the post-catch exhausted audit command is committed.
+    // Same async-audit race as the first place failure: poll for the terminal exhausted audit
+    // before capturing it, rather than relying on the positionState query barrier alone.
+    waitForAuditKind("PartialExitRetryExhausted");
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
     AuditEvent exhausted = captureKind("PartialExitRetryExhausted");
     assertThat(exhausted.getSubject())
