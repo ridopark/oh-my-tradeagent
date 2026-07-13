@@ -450,9 +450,12 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // Plan-2A R-AA-4: a FILLED journal anchor exists (this branch) AND no running owner →
         // auto-adopt the orphaned-but-legit lot by starting AdoptionWorkflow as an ABANDON child.
         // The "missing"/no-anchor branch above intentionally falls through (page only) and never
-        // reaches here. No recon-side version gate: recon executions are short-lived per scheduled
-        // run (workflowId carries {{.ScheduledRunID}}), so there is no long-lived in-flight history
-        // to replay-protect — a getVersion marker here would be vacuous.
+        // reaches here. Recon runs are short-lived (workflowId carries {{.ScheduledRunID}}), but a
+        // worker restart still replays an in-flight run, so command-shape changes ARE
+        // version-gated:
+        // the two markers used at this call site — missingVisibilityFallback and
+        // refuseExpiredSameday
+        // (Phase 3 refuse-expired-sameday) — are read ONCE outside the loop and passed in.
         maybeAutoAdopt(in, brokerTarget, p, occ, brokerOpen, refuseExpiredSameday);
       }
     }
