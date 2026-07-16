@@ -98,14 +98,25 @@ public class KillSwitchAlerter {
 
     String title = ":octagonal_sign: Kill switch TRIPPED — " + reason;
 
-    // Phase 2 (PLAN-2026-07-15): a loss-cap trip no longer auto-flattens (subject flatten=manual /
-    // auto_flatten=false). Make the page actionable — say so explicitly so the operator knows open
-    // positions are still live and must be flattened by hand. Absent key (a legacy trip, or a trip
-    // recorded before this policy) => no line, so the embed stays unchanged for older histories.
-    String description =
-        "manual".equals(subjectStr(subject, "flatten"))
-            ? "Open positions were NOT auto-flattened — flatten manually if desired."
-            : null;
+    // Phase 2 (PLAN-2026-07-15): an AUTO loss-cap trip no longer auto-flattens (subject
+    // flatten=manual / auto_flatten=false). Make the page actionable — say so explicitly, and carry
+    // the open-position count + current MTM when present so the operator can gauge exposure. Absent
+    // key (a manual/operator flatten trip, a legacy trip, or a trip recorded before this policy) =>
+    // no line, so the embed stays unchanged for those.
+    String description = null;
+    if ("manual".equals(subjectStr(subject, "flatten"))) {
+      description =
+          "Open positions were NOT auto-flattened — close them manually in Alpaca, or trip the"
+              + " kill switch to flatten.";
+      String openPositions = subjectStr(subject, "open_positions");
+      String openMtm = subjectStr(subject, "open_mtm");
+      if (!"n/a".equals(openPositions)) {
+        description += "\nOpen positions: " + openPositions;
+      }
+      if (!"n/a".equals(openMtm)) {
+        description += "\nOpen MTM: " + openMtm;
+      }
+    }
 
     List<WebhookEmbed.Field> fields = new ArrayList<>();
     fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));

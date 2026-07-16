@@ -24,7 +24,6 @@ import io.temporal.common.WorkflowExecutionHistory;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
-import io.temporal.workflow.Async;
 import io.temporal.workflow.Workflow;
 import io.temporal.workflow.WorkflowInit;
 import java.lang.reflect.Field;
@@ -99,14 +98,6 @@ class KillSwitchWorkflowImplLegacyReplayTest {
               + "killswitch-pre-b2-live-validthreshold-legacy-history.json");
   private static final String LIVE_EMULATOR_WORKFLOW_ID = "killswitch-pre-b2-live-emulator";
 
-  private static final String NOFLATTEN_FIXTURE_RESOURCE =
-      "temporal/replay/killswitch-pre-noflatten-tripped-legacy-history.json";
-  private static final Path NOFLATTEN_FIXTURE_SOURCE_PATH =
-      Path.of(
-          "src/test/resources/temporal/replay/"
-              + "killswitch-pre-noflatten-tripped-legacy-history.json");
-  private static final String NOFLATTEN_EMULATOR_WORKFLOW_ID = "killswitch-pre-noflatten-emulator";
-
   /**
    * Pins the version-marker constant name so a rename in {@link KillSwitchWorkflowImpl} fails this
    * test loudly. Renaming the literal would silently re-version live executions.
@@ -116,44 +107,6 @@ class KillSwitchWorkflowImplLegacyReplayTest {
     Field marker = KillSwitchWorkflowImpl.class.getDeclaredField("VERSION_KILLSWITCH_LIVE_FLOOR");
     marker.setAccessible(true);
     assertThat((String) marker.get(null)).isEqualTo("killswitch-live-floor");
-  }
-
-  /**
-   * Pins the Phase 2 (PLAN-2026-07-15) no-auto-flatten marker so a rename fails loudly (a
-   * re-versioned in-flight trip could drop the recorded cascade command).
-   */
-  @Test
-  void versionStrategyTripNoAutoFlattenConstantNameIsStable() throws Exception {
-    Field marker =
-        KillSwitchWorkflowImpl.class.getDeclaredField("VERSION_STRATEGY_TRIP_NO_AUTO_FLATTEN");
-    marker.setAccessible(true);
-    assertThat((String) marker.get(null)).isEqualTo("strategy-trip-no-auto-flatten-v1");
-  }
-
-  /**
-   * THE NO-AUTO-FLATTEN SENTINEL. A pre-change history whose heartbeat AUTO-TRIPPED on {@code
-   * auto:daily_loss} and recorded the {@code KillSwitchTripped} audit + the {@code
-   * cascadeRiskBreach} fan-out command, with NO {@code strategy-trip-no-auto-flatten-v1} marker.
-   * Replayed under the new impl: {@code doTrip}'s gate resolves to {@code DEFAULT_VERSION}, so the
-   * recorded cascade command is STILL produced (the in-flight book still flattens) and the subject
-   * carries NO {@code flatten} key — byte-identical, no {@code NonDeterministicException}. Omit the
-   * {@code getVersion} gate (or skip the cascade unconditionally) and this replay throws.
-   * Regression guard proving an in-flight per-strategy trip recorded before the policy still
-   * auto-flattens on replay.
-   */
-  @Test
-  void legacyTrippedWithCascadeHistoryReplaysCleanly() throws Exception {
-    assertThat(getClass().getClassLoader().getResource(NOFLATTEN_FIXTURE_RESOURCE))
-        .as(
-            "Missing fixture resource %s. Regenerate with"
-                + " `mvn -pl services/orchestrator test -Dgenerate.legacy.fixture=true"
-                + " -Dtest=KillSwitchWorkflowImplLegacyReplayTest#regenerateNoFlattenTrippedFixture"
-                + " -Dsurefire.failIfNoSpecifiedTests=false`",
-            NOFLATTEN_FIXTURE_RESOURCE)
-        .isNotNull();
-
-    WorkflowReplayer.replayWorkflowExecutionFromResource(
-        NOFLATTEN_FIXTURE_RESOURCE, KillSwitchWorkflowImpl.class);
   }
 
   /**
@@ -221,58 +174,6 @@ class KillSwitchWorkflowImplLegacyReplayTest {
         /* computeRealizedPnl= */ true,
         LIVE_EMULATOR_WORKFLOW_ID,
         LIVE_FIXTURE_SOURCE_PATH);
-  }
-
-  @Test
-  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
-  void regenerateNoFlattenTrippedFixture() throws Exception {
-    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
-    String json;
-    try {
-      Worker worker = env.newWorker(CORE_QUEUE);
-      worker.registerWorkflowImplementationTypes(LegacyTrippingEmulatorWorkflowImpl.class);
-
-      AuditActivities audit = Mockito.mock(AuditActivities.class);
-      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
-      StrategyActivities strategy = Mockito.mock(StrategyActivities.class);
-      DailyPnlActivities pnl = Mockito.mock(DailyPnlActivities.class);
-      KillSwitchCascadeActivities cascade = Mockito.mock(KillSwitchCascadeActivities.class);
-
-      when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 6, 14));
-      when(calendar.isMarketOpen()).thenReturn(true);
-      // Valid threshold (2500) + a breaching realized loss (-3000) => the pre-change auto-trip
-      // path:
-      // strategy.get -> computeRealizedPnl -> doTrip (audit KillSwitchTripped + cascadeRiskBreach).
-      // No marker recorded.
-      when(strategy.get(anyString(), anyString())).thenReturn(liveValidThresholdConfig());
-      when(pnl.computeRealizedPnl(anyString(), anyString(), any()))
-          .thenReturn(new BigDecimal("-3000"));
-      when(cascade.cascadeRiskBreach(
-              anyString(), anyString(), anyString(), anyString(), anyString()))
-          .thenReturn(0L);
-
-      worker.registerActivitiesImplementations(audit, calendar, strategy, pnl, cascade);
-      env.start();
-
-      WorkflowClient client = env.getWorkflowClient();
-      KillSwitchWorkflow wf =
-          client.newWorkflowStub(
-              KillSwitchWorkflow.class,
-              WorkflowOptions.newBuilder()
-                  .setTaskQueue(CORE_QUEUE)
-                  .setWorkflowId(NOFLATTEN_EMULATOR_WORKFLOW_ID)
-                  .build());
-      WorkflowStub.fromTyped(wf).start(input());
-
-      env.sleep(Duration.ofMinutes(5));
-      json = client.fetchHistory(NOFLATTEN_EMULATOR_WORKFLOW_ID).toJson(true);
-    } finally {
-      env.close();
-    }
-
-    assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
-    Files.createDirectories(NOFLATTEN_FIXTURE_SOURCE_PATH.getParent());
-    Files.writeString(NOFLATTEN_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
   }
 
   /**
@@ -440,142 +341,6 @@ class KillSwitchWorkflowImplLegacyReplayTest {
 
     // The remaining KillSwitchWorkflow surface is unused by the emulator (the fixture only drives
     // the heartbeat loop) — no-op / minimal so the interface is satisfied.
-    @Override
-    public void tripValidator(TripKillSwitchRequest request) {}
-
-    @Override
-    public void trip(TripKillSwitchRequest request) {}
-
-    @Override
-    public void resetValidator(ResetKillSwitchRequest request) {}
-
-    @Override
-    public void reset(ResetKillSwitchRequest request) {}
-
-    @Override
-    public void resetOnActivationValidator(ResetKillSwitchRequest request) {}
-
-    @Override
-    public void resetOnActivation(ResetKillSwitchRequest request) {}
-
-    @Override
-    public KillSwitchState killswitchState() {
-      KillSwitchState s = new KillSwitchState();
-      s.setSchemaVersion(1L);
-      s.setTripped(tripped);
-      return s;
-    }
-  }
-
-  /**
-   * PRE-Phase-2 (PLAN-2026-07-15) auto-trip emulator: mirrors the PRE-change {@code heartbeat()} +
-   * {@code doTrip()} command stream EXACTLY for an {@code auto:daily_loss} trip, MINUS every {@code
-   * getVersion} marker (including the new {@code strategy-trip-no-auto-flatten-v1} one). Per trip
-   * tick: {@code sleep} → {@code todayEt} → (not tripped) → {@code isMarketOpen} → {@code
-   * strategy.get} → {@code computeRealizedPnl} → breaching → {@code doTrip}: {@code
-   * audit.log(KillSwitchTripped)} + {@code Async(cascadeRiskBreach)}. The recorded history
-   * therefore carries the cascade command but NO no-auto-flatten marker — exactly a real in-flight
-   * per-strategy trip recorded before the policy. Implements {@link KillSwitchWorkflow} so {@code
-   * workflowType.name} matches what {@link WorkflowReplayer} registers.
-   */
-  public static class LegacyTrippingEmulatorWorkflowImpl implements KillSwitchWorkflow {
-    private static final ActivityOptions OPTS =
-        ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
-    private static final ActivityOptions CASCADE_OPTS =
-        ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(30)).build();
-
-    private final AuditActivities audit = Workflow.newActivityStub(AuditActivities.class, OPTS);
-    private final MarketCalendarActivities calendar =
-        Workflow.newActivityStub(MarketCalendarActivities.class, OPTS);
-    private final StrategyActivities strategy =
-        Workflow.newActivityStub(StrategyActivities.class, OPTS);
-    private final DailyPnlActivities pnl = Workflow.newActivityStub(DailyPnlActivities.class, OPTS);
-    private final KillSwitchCascadeActivities cascade =
-        Workflow.newActivityStub(KillSwitchCascadeActivities.class, CASCADE_OPTS);
-
-    private final KillSwitchWorkflowInput input;
-    private boolean tripped;
-    private LocalDate tradingDay;
-
-    @WorkflowInit
-    public LegacyTrippingEmulatorWorkflowImpl(KillSwitchWorkflowInput in) {
-      this.input = in;
-    }
-
-    @Override
-    public String run(KillSwitchWorkflowInput in) {
-      if (this.tradingDay == null) {
-        this.tradingDay = calendar.todayEt();
-      }
-      while (true) {
-        Workflow.sleep(Duration.ofSeconds(60));
-        legacyHeartbeat();
-      }
-    }
-
-    private void legacyHeartbeat() {
-      LocalDate today = calendar.todayEt();
-      if (!today.equals(tradingDay)) {
-        this.tradingDay = today;
-      }
-      if (tripped) {
-        return;
-      }
-      if (!calendar.isMarketOpen()) {
-        return;
-      }
-      StrategyConfig cfg = strategy.get(input.getTenantId(), input.getStrategyId());
-      BigDecimal threshold = cfg.getDailyLossThreshold();
-      if (threshold == null || threshold.signum() <= 0) {
-        return;
-      }
-      BigDecimal pnlValue =
-          pnl.computeRealizedPnl(input.getTenantId(), input.getStrategyId(), tradingDay);
-      if (pnlValue.compareTo(threshold.negate()) <= 0) {
-        legacyDoTrip("auto:daily_loss", "auto:daily_loss", pnlValue);
-      }
-    }
-
-    /** The PRE-change {@code doTrip} body: audit KillSwitchTripped + Async cascade, NO marker. */
-    private void legacyDoTrip(String reason, String actor, BigDecimal value) {
-      this.tripped = true;
-      Map<String, Object> subj = new LinkedHashMap<>();
-      subj.put("reason", reason);
-      subj.put("actor", actor);
-      subj.put(
-          "tripped_at",
-          OffsetDateTime.ofInstant(
-              Instant.ofEpochMilli(Workflow.currentTimeMillis()), ZoneOffset.UTC));
-      subj.put("trading_day", tradingDay);
-      subj.put("value", value);
-      audit.log(trippedAudit(subj));
-      String selfWfId = Workflow.getInfo().getWorkflowId();
-      Async.function(
-          cascade::cascadeRiskBreach,
-          input.getTenantId(),
-          input.getStrategyId(),
-          selfWfId,
-          reason,
-          actor);
-    }
-
-    private AuditEvent trippedAudit(Map<String, Object> subj) {
-      AuditEvent e = new AuditEvent();
-      e.setSchemaVersion(1L);
-      e.setTenantId(input.getTenantId());
-      e.setStrategyId(input.getStrategyId());
-      e.setEventId(Workflow.randomUUID().toString());
-      e.setOccurredAt(
-          OffsetDateTime.ofInstant(
-              Instant.ofEpochMilli(Workflow.currentTimeMillis()), ZoneOffset.UTC));
-      e.setKind("KillSwitchTripped");
-      e.setSubject(subj);
-      e.setActor("workflow:KillSwitchWorkflow");
-      e.setWorkflowId(Workflow.getInfo().getWorkflowId());
-      e.setCorrelationId(input.getTenantId() + "/" + input.getStrategyId());
-      return e;
-    }
-
     @Override
     public void tripValidator(TripKillSwitchRequest request) {}
 

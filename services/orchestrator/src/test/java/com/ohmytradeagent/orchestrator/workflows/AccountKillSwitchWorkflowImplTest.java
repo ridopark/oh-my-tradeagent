@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -179,7 +180,10 @@ class AccountKillSwitchWorkflowImplTest {
     AuditEvent tripped = captureKind("KillSwitchTripped");
     assertThat(tripped.getSubject())
         .containsEntry("scope", "account")
-        .containsEntry("flatten", "manual");
+        .containsEntry("flatten", "manual")
+        // C3: the page carries the open-position count + current MTM (two priced positions here).
+        .containsEntry("open_positions", 2)
+        .containsKey("open_mtm");
   }
 
   // Below threshold: total loss does not cross the cap -> no trip.
@@ -250,15 +254,24 @@ class AccountKillSwitchWorkflowImplTest {
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isTrue();
     assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
-    // Phase 2 (PLAN-2026-07-15): a fail-closed trip also halts + pages but no longer auto-flattens.
+    // Phase 2 (PLAN-2026-07-15): a fail-closed AUTO trip also halts + pages but no longer
+    // auto-flattens.
     verify(cascade, never())
         .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
+    // flatten=manual + the listed open-position count; NO open_mtm (book is unpriceable here).
+    AuditEvent tripped = captureKind("KillSwitchTripped");
+    assertThat(tripped.getSubject())
+        .containsEntry("flatten", "manual")
+        .containsEntry("open_positions", 2)
+        .doesNotContainKey("open_mtm");
   }
 
   // ---------- dual-control trip/reset (mirror per-strategy) ----------
 
   @Test
-  void tripUpdate_setsStateAndAudits_noAutoFlatten() {
+  void tripUpdate_setsStateAndAuditsAndCascades() {
+    // Phase 2 (PLAN-2026-07-15): a MANUAL operator trip (non-auto: reason) STILL flattens — the
+    // deliberate one-click flatten path — so the cascade is dispatched and NO flatten=manual key.
     // Avoid an auto-trip racing the manual trip: market closed.
     when(calendar.isMarketOpen()).thenReturn(false);
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-trip");
@@ -270,12 +283,15 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(state.getTripped()).isTrue();
     assertThat(state.getReason()).isEqualTo("manual:operator_initiated");
 
-    // Phase 2 (PLAN-2026-07-15): the no-auto-flatten policy applies to manual trips too — the
-    // cascade is never dispatched and the trip subject carries flatten=manual.
-    verify(cascade, never())
-        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
+    verify(cascade, timeout(2000).times(1))
+        .cascadeAccountRiskBreach(
+            eq("dev"),
+            eq("t-dev/account/killswitch-trip"),
+            eq("manual:operator_initiated"),
+            eq("operator:ridopark"));
+    // Manual trip flattens => NO no-auto-flatten marker on the subject.
     AuditEvent tripped = captureKind("KillSwitchTripped");
-    assertThat(tripped.getSubject()).containsEntry("flatten", "manual");
+    assertThat(tripped.getSubject()).doesNotContainKey("flatten");
   }
 
   @Test
@@ -289,8 +305,8 @@ class AccountKillSwitchWorkflowImplTest {
         .isInstanceOf(WorkflowUpdateException.class)
         .hasStackTraceContaining("already_tripped");
 
-    // No auto-flatten under the Phase 2 policy (the second trip is rejected by the validator).
-    verify(cascade, never())
+    // Manual trip cascade fired exactly once (first trip); the second is rejected by the validator.
+    verify(cascade, timeout(2000).times(1))
         .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
   }
 

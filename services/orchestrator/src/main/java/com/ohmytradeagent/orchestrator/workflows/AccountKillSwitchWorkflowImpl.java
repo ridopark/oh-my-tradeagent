@@ -535,13 +535,26 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // (falsely small) computed loss.
     int combinedFailures = book.valueFailures() + quoteFailures;
     if (book.listed() > 0 && failsClosed(book.listed(), combinedFailures)) {
-      doTrip("auto:account_mtm_unavailable", "auto:account_mtm_unavailable", null);
+      // Fail-closed trip: the book is (partly) unpriceable, so the MTM is unreliable — carry the
+      // listed open-position count for the page but no MTM.
+      doTrip(
+          "auto:account_mtm_unavailable",
+          "auto:account_mtm_unavailable",
+          null,
+          book.positions().size(),
+          null);
       return true; // cap engaged (fail-closed trip) — armed.
     }
 
     BigDecimal totalPnl = realized.add(openMtm);
     if (totalPnl.compareTo(threshold.negate()) <= 0) {
-      doTrip("auto:account_daily_loss", "auto:account_daily_loss", totalPnl);
+      // Carry the open-position count + current open MTM so the (no-flatten) page is actionable.
+      doTrip(
+          "auto:account_daily_loss",
+          "auto:account_daily_loss",
+          totalPnl,
+          book.positions().size(),
+          openMtm);
     }
     // Threshold resolved and the loss was evaluated against it — the cap is ARMED this tick.
     return true;
@@ -772,7 +785,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
 
   @Override
   public void trip(TripKillSwitchRequest request) {
-    doTrip(request.getReason(), request.getActor(), request.getValue());
+    // Manual operator trip: no open-book context (and, at v>=1, an explicit operator trip still
+    // flattens — the deliberate one-click flatten path).
+    doTrip(request.getReason(), request.getActor(), request.getValue(), null, null);
   }
 
   @Override
@@ -824,18 +839,40 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     return s;
   }
 
-  private void doTrip(String tripReason, String tripActor, BigDecimal tripValue) {
+  /**
+   * Core trip mutation. {@code openPositions} / {@code openMtm} are the open-book context computed
+   * by the heartbeat right before an AUTO trip (null for a manual operator trip); they only enrich
+   * the {@code flatten=manual} page and, being audit subject/activity-input payloads, are
+   * replay-ignored (no version gate needed for them).
+   *
+   * <p>Phase 2 (PLAN-2026-07-15) no-auto-flatten policy, gated by {@link
+   * #VERSION_ACCOUNT_TRIP_NO_AUTO_FLATTEN} and scoped to AUTO trips only: at {@code v>=1} an AUTO
+   * trip (reason {@code auto:*} — the 10% cap breach or the fail-closed MTM-unavailable trip) HALTS
+   * + PAGES but does NOT auto-flatten (skips the cascade, stamps {@code flatten=manual} + the
+   * open-book context). An explicit MANUAL operator trip via {@link #trip} STILL flattens — the
+   * deliberate one-click flatten path. At {@link Workflow#DEFAULT_VERSION} the cascade always fires
+   * (byte-identical legacy replay), regardless of reason.
+   */
+  private void doTrip(
+      String tripReason,
+      String tripActor,
+      BigDecimal tripValue,
+      Integer openPositions,
+      BigDecimal openMtm) {
     this.tripped = true;
     this.reason = tripReason;
     this.actor = tripActor;
     this.trippedAt = workflowNow();
 
-    // Phase 2 (PLAN-2026-07-15): a loss-cap trip halts + pages but no longer auto-flattens. Read
-    // the gate ONCE at a stable point before any command. All NEW commands (the flatten="manual"
-    // subject key + the SKIPPED cascade) are strictly behind v>=1; at DEFAULT_VERSION the
-    // pre-change stream (no flatten key, cascade dispatched) replays byte-identically.
+    // Read the gate ONCE at a stable point before any command. The skip-flatten branch (and its
+    // flatten=manual subject key) is strictly behind v>=1 AND an auto: reason; at DEFAULT_VERSION
+    // the pre-change stream (no flatten key, cascade dispatched) replays byte-identically.
     int noAutoFlattenVersion =
         Workflow.getVersion(VERSION_ACCOUNT_TRIP_NO_AUTO_FLATTEN, Workflow.DEFAULT_VERSION, 1);
+    // AUTO trips (auto:account_daily_loss / auto:account_mtm_unavailable) halt + page but no longer
+    // flatten; a MANUAL operator trip still flattens.
+    boolean autoTrip = tripReason != null && tripReason.startsWith("auto:");
+    boolean skipFlatten = noAutoFlattenVersion >= 1 && autoTrip;
 
     Map<String, Object> subj =
         subject(
@@ -847,17 +884,24 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     if (tripValue != null) {
       subj.put("value", tripValue);
     }
-    if (noAutoFlattenVersion >= 1) {
+    if (skipFlatten) {
       // auto_flatten=false: the operator flattens manually. Surfaced by KillSwitchAlerter as an
-      // explicit "positions were NOT auto-flattened" page line.
+      // explicit "positions were NOT auto-flattened" page line, enriched with the open-book
+      // context.
       subj.put("flatten", "manual");
+      if (openPositions != null) {
+        subj.put("open_positions", openPositions);
+      }
+      if (openMtm != null) {
+        subj.put("open_mtm", openMtm);
+      }
     }
     auditLog(KIND_KILL_SWITCH_TRIPPED, subj);
 
-    if (noAutoFlattenVersion == Workflow.DEFAULT_VERSION) {
-      // Legacy in-flight histories only: preserve the pre-change auto-flatten cascade
-      // byte-identically. Best-effort async cascade, fired detached so the trip update returns
-      // promptly. (v>=1 skips this entirely — the operator flattens manually.)
+    if (!skipFlatten) {
+      // MANUAL operator trip (deliberate flatten) OR legacy DEFAULT_VERSION replay: dispatch the
+      // auto-flatten cascade. Best-effort async, fired detached so the trip update returns
+      // promptly.
       String selfWfId = Workflow.getInfo().getWorkflowId();
       Async.function(
           cascade::cascadeAccountRiskBreach, input.getTenantId(), selfWfId, tripReason, tripActor);
