@@ -8,7 +8,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -126,10 +125,12 @@ class AccountKillSwitchWorkflowImplTest {
   // ---------- THE DRILL: two strategies, realized + MTM crossing the cap ----------
 
   // A tenant with TWO strategies whose realized + open-MTM loss crosses
-  // account_daily_loss_threshold trips the account kill switch EXACTLY once and cascades a
-  // riskBreach/MARKET flatten to running PositionWorkflows in BOTH strategies.
+  // account_daily_loss_threshold trips the account kill switch EXACTLY once, HALTS + pages, and —
+  // per the Phase 2 (PLAN-2026-07-15) no-auto-flatten policy — does NOT cascade a MARKET flatten
+  // (fresh execution == v>=1). The trip subject carries flatten=manual so the operator is paged to
+  // flatten by hand.
   @Test
-  void heartbeat_twoStrategies_realizedPlusMtmCrossesThreshold_tripsOnceAndCascadesAccountWide() {
+  void heartbeat_twoStrategies_realizedPlusMtmCrossesThreshold_tripsOnceNoAutoFlatten() {
     // Phase 2 (C4): a tenant with TWO strategies on DIFFERENT broker_targets. The account path
     // routes each per-strategy realized read to its OWN broker queue and sums them:
     //   s1 (alpaca-paper) realized -1200 + s2 (alpaca-live) realized -1800 = -3000.
@@ -171,14 +172,14 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
     assertThat(s.getActor()).isEqualTo("auto:account_daily_loss");
 
-    // Account-scoped cascade invoked at least once (the heartbeat keeps ticking but `tripped`
-    // short-circuits subsequent ticks, so the trip fires exactly once).
-    verify(cascade, timeout(2000).atLeastOnce())
-        .cascadeAccountRiskBreach(
-            eq("dev"), anyString(), eq("auto:account_daily_loss"), eq("auto:account_daily_loss"));
+    // Phase 2 (PLAN-2026-07-15): NO auto-flatten — the account-scoped cascade is never dispatched.
+    verify(cascade, never())
+        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
 
     AuditEvent tripped = captureKind("KillSwitchTripped");
-    assertThat(tripped.getSubject()).containsEntry("scope", "account");
+    assertThat(tripped.getSubject())
+        .containsEntry("scope", "account")
+        .containsEntry("flatten", "manual");
   }
 
   // Below threshold: total loss does not cross the cap -> no trip.
@@ -249,15 +250,15 @@ class AccountKillSwitchWorkflowImplTest {
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isTrue();
     assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
-    verify(cascade, timeout(2000).atLeastOnce())
-        .cascadeAccountRiskBreach(
-            eq("dev"), anyString(), eq("auto:account_mtm_unavailable"), anyString());
+    // Phase 2 (PLAN-2026-07-15): a fail-closed trip also halts + pages but no longer auto-flattens.
+    verify(cascade, never())
+        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
   }
 
   // ---------- dual-control trip/reset (mirror per-strategy) ----------
 
   @Test
-  void tripUpdate_setsStateAndAuditsAndCascades() {
+  void tripUpdate_setsStateAndAudits_noAutoFlatten() {
     // Avoid an auto-trip racing the manual trip: market closed.
     when(calendar.isMarketOpen()).thenReturn(false);
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-trip");
@@ -269,12 +270,12 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(state.getTripped()).isTrue();
     assertThat(state.getReason()).isEqualTo("manual:operator_initiated");
 
-    verify(cascade, timeout(2000).times(1))
-        .cascadeAccountRiskBreach(
-            eq("dev"),
-            eq("t-dev/account/killswitch-trip"),
-            eq("manual:operator_initiated"),
-            eq("operator:ridopark"));
+    // Phase 2 (PLAN-2026-07-15): the no-auto-flatten policy applies to manual trips too — the
+    // cascade is never dispatched and the trip subject carries flatten=manual.
+    verify(cascade, never())
+        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
+    AuditEvent tripped = captureKind("KillSwitchTripped");
+    assertThat(tripped.getSubject()).containsEntry("flatten", "manual");
   }
 
   @Test
@@ -288,7 +289,8 @@ class AccountKillSwitchWorkflowImplTest {
         .isInstanceOf(WorkflowUpdateException.class)
         .hasStackTraceContaining("already_tripped");
 
-    verify(cascade, timeout(2000).times(1))
+    // No auto-flatten under the Phase 2 policy (the second trip is rejected by the validator).
+    verify(cascade, never())
         .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
   }
 

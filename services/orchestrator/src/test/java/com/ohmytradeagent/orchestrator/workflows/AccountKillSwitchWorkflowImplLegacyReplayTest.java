@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.AccountKillSwitchWorkflowInput;
+import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.GetOptionQuoteRequest;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.OptionQuoteResult;
@@ -27,6 +28,7 @@ import io.temporal.common.WorkflowExecutionHistory;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
+import io.temporal.workflow.Async;
 import io.temporal.workflow.Workflow;
 import io.temporal.workflow.WorkflowInit;
 import java.lang.reflect.Field;
@@ -39,7 +41,9 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.mockito.Mockito;
@@ -103,6 +107,15 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   private static final String OPEN_POS_EMULATOR_WORKFLOW_ID =
       "account-killswitch-pre-pct-openpositions-emulator";
 
+  private static final String NOFLATTEN_FIXTURE_RESOURCE =
+      "temporal/replay/account-killswitch-pre-noflatten-tripped-legacy-history.json";
+  private static final Path NOFLATTEN_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "account-killswitch-pre-noflatten-tripped-legacy-history.json");
+  private static final String NOFLATTEN_EMULATOR_WORKFLOW_ID =
+      "account-killswitch-pre-noflatten-emulator";
+
   /**
    * Pins the version-marker constant value so a rename in {@link AccountKillSwitchWorkflowImpl}
    * fails this test loudly. Renaming the literal would silently re-version live executions.
@@ -124,6 +137,47 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
         AccountKillSwitchWorkflowImpl.class.getDeclaredField("VERSION_CAP_INACTIVE_ALERT");
     marker.setAccessible(true);
     assertThat((String) marker.get(null)).isEqualTo("account-cap-inactive-alert-v1");
+  }
+
+  /**
+   * Pins the Phase 2 (PLAN-2026-07-15) no-auto-flatten marker so a rename fails loudly. Renaming
+   * the literal would silently re-version live executions — and a re-versioned in-flight trip could
+   * then either double-flatten or fail to preserve the recorded cascade command.
+   */
+  @Test
+  void versionAccountTripNoAutoFlattenConstantNameIsStable() throws Exception {
+    Field marker =
+        AccountKillSwitchWorkflowImpl.class.getDeclaredField(
+            "VERSION_ACCOUNT_TRIP_NO_AUTO_FLATTEN");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("account-trip-no-auto-flatten-v1");
+  }
+
+  /**
+   * THE NO-AUTO-FLATTEN SENTINEL. A pre-change history whose heartbeat AUTO-TRIPPED on {@code
+   * auto:account_daily_loss} and recorded the {@code KillSwitchTripped} audit + the {@code
+   * cascadeAccountRiskBreach} MARKET-flatten command, with NO {@code
+   * account-trip-no-auto-flatten-v1} marker. Replayed under the new impl: {@code doTrip}'s gate
+   * resolves to {@code DEFAULT_VERSION}, so the recorded cascade command is STILL produced (the
+   * in-flight book still flattens) and the subject carries NO {@code flatten} key — byte-identical,
+   * no {@code NonDeterministicException}. Omit the {@code getVersion} gate (or skip the cascade
+   * unconditionally) and this replay throws: the recorded cascade command would have no
+   * counterpart. This is the regression guard proving an in-flight trip recorded before the policy
+   * still auto-flattens on replay.
+   */
+  @Test
+  void legacyTrippedWithCascadeHistoryReplaysCleanly() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(NOFLATTEN_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. Regenerate with"
+                + " `mvn -pl services/orchestrator test -Dgenerate.legacy.fixture=true"
+                + " -Dtest=AccountKillSwitchWorkflowImplLegacyReplayTest#regenerateNoFlattenTrippedFixture"
+                + " -Dsurefire.failIfNoSpecifiedTests=false`",
+            NOFLATTEN_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    WorkflowReplayer.replayWorkflowExecutionFromResource(
+        NOFLATTEN_FIXTURE_RESOURCE, AccountKillSwitchWorkflowImpl.class);
   }
 
   /**
@@ -282,6 +336,59 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
     assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
     Files.createDirectories(OPEN_POS_FIXTURE_SOURCE_PATH.getParent());
     Files.writeString(OPEN_POS_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
+  @Test
+  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
+  void regenerateNoFlattenTrippedFixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(LegacyTrippedEmulatorWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
+      TenantConfigActivities tenantConfig = Mockito.mock(TenantConfigActivities.class);
+      AccountPnlActivities accountPnl = Mockito.mock(AccountPnlActivities.class);
+      AccountKillSwitchCascadeActivities cascade =
+          Mockito.mock(AccountKillSwitchCascadeActivities.class);
+
+      when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 6, 14));
+      when(calendar.isMarketOpen()).thenReturn(true);
+      // Valid absolute threshold + a breaching realized loss + an EMPTY book (no quote loop) => the
+      // pre-change auto-trip path: threshold -> computeTenantRealizedPnl -> accountOpenBook ->
+      // doTrip (audit KillSwitchTripped + cascadeAccountRiskBreach). No marker recorded.
+      when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+      when(accountPnl.computeTenantRealizedPnl(anyString(), any()))
+          .thenReturn(new BigDecimal("-6000"));
+      when(accountPnl.accountOpenBook(anyString()))
+          .thenReturn(new AccountOpenBook(List.of(), 0, 0));
+      when(cascade.cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString()))
+          .thenReturn(0L);
+
+      worker.registerActivitiesImplementations(audit, calendar, tenantConfig, accountPnl, cascade);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      AccountKillSwitchWorkflow wf =
+          client.newWorkflowStub(
+              AccountKillSwitchWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(NOFLATTEN_EMULATOR_WORKFLOW_ID)
+                  .build());
+      WorkflowStub.fromTyped(wf).start(input());
+
+      env.sleep(Duration.ofMinutes(5));
+      json = client.fetchHistory(NOFLATTEN_EMULATOR_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
+    Files.createDirectories(NOFLATTEN_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(NOFLATTEN_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
   }
 
   private static OptionQuoteResult okQuote(String contractSymbol, BigDecimal bid) {
@@ -499,6 +606,137 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
       boolean exceedsRelative = (long) failures * RELATIVE_FAILURE_THRESHOLD_MULTIPLIER > listed;
       boolean tripsSmallBookFloor = listed <= SMALL_BOOK_MAX_POSITIONS && failures >= 1;
       return exceedsRelative || tripsSmallBookFloor;
+    }
+
+    @Override
+    public void tripValidator(TripKillSwitchRequest request) {}
+
+    @Override
+    public void trip(TripKillSwitchRequest request) {}
+
+    @Override
+    public void resetValidator(ResetKillSwitchRequest request) {}
+
+    @Override
+    public void reset(ResetKillSwitchRequest request) {}
+
+    @Override
+    public KillSwitchState killswitchState() {
+      KillSwitchState s = new KillSwitchState();
+      s.setSchemaVersion(1L);
+      s.setTripped(tripped);
+      return s;
+    }
+  }
+
+  /**
+   * PRE-Phase-2 (PLAN-2026-07-15) auto-trip emulator: mirrors the PRE-change {@code heartbeat()} +
+   * {@code doTrip()} command stream EXACTLY for an {@code auto:account_daily_loss} trip on an EMPTY
+   * book (no quote loop), MINUS every {@code getVersion} marker (including the new {@code
+   * account-trip-no-auto-flatten-v1} one). Per trip tick: {@code sleep} → {@code todayEt} → (not
+   * tripped, no cooldown) → {@code isMarketOpen} → {@code accountDailyLossThreshold} → {@code
+   * computeTenantRealizedPnl} → {@code accountOpenBook} → (empty book, no fail-closed) → breaching
+   * total → {@code doTrip}: {@code audit.log(KillSwitchTripped)} + {@code
+   * Async(cascadeAccountRiskBreach)}. The recorded history therefore carries the cascade command
+   * but NO no-auto-flatten marker — exactly a real in-flight trip recorded before the policy.
+   * Implements {@link AccountKillSwitchWorkflow} so {@code workflowType.name} matches what {@link
+   * WorkflowReplayer} registers.
+   */
+  public static class LegacyTrippedEmulatorWorkflowImpl implements AccountKillSwitchWorkflow {
+    private static final String ACCOUNT_SCOPE = "__account__";
+    private static final ActivityOptions OPTS =
+        ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
+    private static final ActivityOptions CASCADE_OPTS =
+        ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(30)).build();
+
+    private final AuditActivities audit = Workflow.newActivityStub(AuditActivities.class, OPTS);
+    private final MarketCalendarActivities calendar =
+        Workflow.newActivityStub(MarketCalendarActivities.class, OPTS);
+    private final TenantConfigActivities tenantConfig =
+        Workflow.newActivityStub(TenantConfigActivities.class, OPTS);
+    private final AccountPnlActivities accountPnl =
+        Workflow.newActivityStub(AccountPnlActivities.class, OPTS);
+    private final AccountKillSwitchCascadeActivities cascade =
+        Workflow.newActivityStub(AccountKillSwitchCascadeActivities.class, CASCADE_OPTS);
+
+    private final AccountKillSwitchWorkflowInput input;
+    private boolean tripped;
+    private LocalDate tradingDay;
+
+    @WorkflowInit
+    public LegacyTrippedEmulatorWorkflowImpl(AccountKillSwitchWorkflowInput in) {
+      this.input = in;
+    }
+
+    @Override
+    public String run(AccountKillSwitchWorkflowInput in) {
+      if (this.tradingDay == null) {
+        this.tradingDay = calendar.todayEt();
+      }
+      while (true) {
+        Workflow.sleep(Duration.ofSeconds(60));
+        legacyHeartbeat();
+      }
+    }
+
+    private void legacyHeartbeat() {
+      LocalDate today = calendar.todayEt();
+      if (!today.equals(tradingDay)) {
+        this.tradingDay = today;
+      }
+      if (tripped) {
+        return;
+      }
+      if (!calendar.isMarketOpen()) {
+        return;
+      }
+      BigDecimal threshold = tenantConfig.accountDailyLossThreshold(input.getTenantId());
+      if (threshold == null || threshold.signum() <= 0) {
+        return;
+      }
+      BigDecimal realized = accountPnl.computeTenantRealizedPnl(input.getTenantId(), tradingDay);
+      AccountOpenBook book = accountPnl.accountOpenBook(input.getTenantId());
+      // Empty book => no quote loop, no fail-closed. Breaching total => doTrip.
+      BigDecimal totalPnl = realized.add(BigDecimal.ZERO);
+      if (totalPnl.compareTo(threshold.negate()) <= 0) {
+        legacyDoTrip("auto:account_daily_loss", "auto:account_daily_loss", totalPnl);
+      }
+    }
+
+    /** The PRE-change {@code doTrip} body: audit KillSwitchTripped + Async cascade, NO marker. */
+    private void legacyDoTrip(String reason, String actor, BigDecimal value) {
+      this.tripped = true;
+      Map<String, Object> subj = new LinkedHashMap<>();
+      subj.put("reason", reason);
+      subj.put("actor", actor);
+      subj.put(
+          "tripped_at",
+          OffsetDateTime.ofInstant(
+              Instant.ofEpochMilli(Workflow.currentTimeMillis()), ZoneOffset.UTC));
+      subj.put("trading_day", tradingDay);
+      subj.put("scope", "account");
+      subj.put("value", value);
+      audit.log(trippedAudit(subj));
+      String selfWfId = Workflow.getInfo().getWorkflowId();
+      Async.function(
+          cascade::cascadeAccountRiskBreach, input.getTenantId(), selfWfId, reason, actor);
+    }
+
+    private AuditEvent trippedAudit(Map<String, Object> subj) {
+      AuditEvent e = new AuditEvent();
+      e.setSchemaVersion(1L);
+      e.setTenantId(input.getTenantId());
+      e.setStrategyId(ACCOUNT_SCOPE);
+      e.setEventId(Workflow.randomUUID().toString());
+      e.setOccurredAt(
+          OffsetDateTime.ofInstant(
+              Instant.ofEpochMilli(Workflow.currentTimeMillis()), ZoneOffset.UTC));
+      e.setKind("KillSwitchTripped");
+      e.setSubject(subj);
+      e.setActor("workflow:AccountKillSwitchWorkflow");
+      e.setWorkflowId(Workflow.getInfo().getWorkflowId());
+      e.setCorrelationId(input.getTenantId() + "/account");
+      return e;
     }
 
     @Override

@@ -98,6 +98,15 @@ public class KillSwitchAlerter {
 
     String title = ":octagonal_sign: Kill switch TRIPPED — " + reason;
 
+    // Phase 2 (PLAN-2026-07-15): a loss-cap trip no longer auto-flattens (subject flatten=manual /
+    // auto_flatten=false). Make the page actionable — say so explicitly so the operator knows open
+    // positions are still live and must be flattened by hand. Absent key (a legacy trip, or a trip
+    // recorded before this policy) => no line, so the embed stays unchanged for older histories.
+    String description =
+        "manual".equals(subjectStr(subject, "flatten"))
+            ? "Open positions were NOT auto-flattened — flatten manually if desired."
+            : null;
+
     List<WebhookEmbed.Field> fields = new ArrayList<>();
     fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
     fields.add(new WebhookEmbed.Field("strategy_id", orNa(event.getStrategyId()), false));
@@ -110,7 +119,7 @@ public class KillSwitchAlerter {
     fields.add(new WebhookEmbed.Field("trading_day", subjectStr(subject, "trading_day"), false));
 
     String footer = "workflow_id: " + orNa(event.getWorkflowId());
-    return new WebhookEmbed(title, null, AlertColors.RED, footer, fields);
+    return new WebhookEmbed(title, description, AlertColors.RED, footer, fields);
   }
 
   private static String subjectStr(Map<String, Object> subject, String key) {

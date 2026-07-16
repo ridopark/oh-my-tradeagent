@@ -68,6 +68,17 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
       "killswitch-realized-from-exec-journal-v1";
 
   /**
+   * Phase 2 (PLAN-2026-07-15, operator decision) gate: a daily-loss-cap trip HALTS new entries and
+   * PAGES but does NOT auto-flatten — the operator flattens manually. At {@code v>=1} {@link
+   * #doTrip} SKIPS the {@code cascadeRiskBreach} fan-out and stamps {@code flatten="manual"} on the
+   * {@code KillSwitchTripped} subject; at {@link Workflow#DEFAULT_VERSION} the pre-change stream
+   * (cascade dispatched, NO {@code flatten} key) replays byte-identically. Applies to auto AND
+   * manual trips (both route through {@link #doTrip}) — consistent with the account kill switch.
+   * Pinned by {@code KillSwitchWorkflowImplLegacyReplayTest}.
+   */
+  static final String VERSION_STRATEGY_TRIP_NO_AUTO_FLATTEN = "strategy-trip-no-auto-flatten-v1";
+
+  /**
    * Consecutive exec-realized-read failures the heartbeat tolerates before paging (guardrail G1). A
    * failed read is NEVER treated as a loss (never a spurious trip); the counter + bounded alert
    * make a persistent exec outage visible instead of silently skipping ticks forever. 3 ticks at
@@ -461,6 +472,13 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     this.actor = tripActor;
     this.trippedAt = workflowNow();
 
+    // Phase 2 (PLAN-2026-07-15): a loss-cap trip halts + pages but no longer auto-flattens. Read
+    // the gate ONCE at a stable point before any command. All NEW commands (the flatten="manual"
+    // subject key + the SKIPPED cascade) are strictly behind v>=1; at DEFAULT_VERSION the
+    // pre-change stream (no flatten key, cascade dispatched) replays byte-identically.
+    int noAutoFlattenVersion =
+        Workflow.getVersion(VERSION_STRATEGY_TRIP_NO_AUTO_FLATTEN, Workflow.DEFAULT_VERSION, 1);
+
     Map<String, Object> subj =
         subject(
             "reason", tripReason,
@@ -470,17 +488,26 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     if (tripValue != null) {
       subj.put("value", tripValue);
     }
+    if (noAutoFlattenVersion >= 1) {
+      // auto_flatten=false: the operator flattens manually. Surfaced by KillSwitchAlerter as an
+      // explicit "positions were NOT auto-flattened" page line.
+      subj.put("flatten", "manual");
+    }
     auditLog(KIND_KILL_SWITCH_TRIPPED, subj);
 
-    // Fan-out asynchronously: the Activity does listWorkflowExecutions + signal per match.
-    String selfWfId = Workflow.getInfo().getWorkflowId();
-    Async.function(
-        cascade::cascadeRiskBreach,
-        input.getTenantId(),
-        input.getStrategyId(),
-        selfWfId,
-        tripReason,
-        tripActor);
+    if (noAutoFlattenVersion == Workflow.DEFAULT_VERSION) {
+      // Legacy in-flight histories only: preserve the pre-change auto-flatten cascade
+      // byte-identically. Fan-out asynchronously: the Activity does listWorkflowExecutions + signal
+      // per match. (v>=1 skips this entirely — the operator flattens manually.)
+      String selfWfId = Workflow.getInfo().getWorkflowId();
+      Async.function(
+          cascade::cascadeRiskBreach,
+          input.getTenantId(),
+          input.getStrategyId(),
+          selfWfId,
+          tripReason,
+          tripActor);
+    }
   }
 
   private long resetCooldownSecs() {

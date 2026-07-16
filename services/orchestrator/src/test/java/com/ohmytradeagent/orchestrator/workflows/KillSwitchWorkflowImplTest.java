@@ -4,10 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -96,7 +94,7 @@ class KillSwitchWorkflowImplTest {
   }
 
   @Test
-  void tripUpdate_setsStateAndAuditsAndCascades() {
+  void tripUpdate_setsStateAndAudits_noAutoFlatten() {
     KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch");
     WorkflowStub.fromTyped(stub).start(input());
 
@@ -111,15 +109,11 @@ class KillSwitchWorkflowImplTest {
     AuditEvent tripped = captureKind("KillSwitchTripped");
     assertThat(tripped.getSubject()).containsEntry("reason", "manual:operator_initiated");
     assertThat(tripped.getSubject()).containsEntry("actor", "operator:ridopark");
-
-    // Cascade Activity invoked exactly once, excluding the kill-switch workflow itself.
-    verify(cascade, timeout(2000).times(1))
-        .cascadeRiskBreach(
-            eq("dev"),
-            eq("copytrade-v1"),
-            eq("t-dev/s-copytrade-v1/killswitch"),
-            eq("manual:operator_initiated"),
-            eq("operator:ridopark"));
+    // Phase 2 (PLAN-2026-07-15): the no-auto-flatten policy applies to manual trips too — the trip
+    // subject carries flatten=manual and NO cascade is dispatched.
+    assertThat(tripped.getSubject()).containsEntry("flatten", "manual");
+    verify(cascade, never())
+        .cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString());
   }
 
   @Test
@@ -133,8 +127,8 @@ class KillSwitchWorkflowImplTest {
         .isInstanceOf(WorkflowUpdateException.class)
         .hasStackTraceContaining("already_tripped");
 
-    // Cascade fired exactly once (first trip), not twice.
-    verify(cascade, timeout(2000).times(1))
+    // Phase 2 (PLAN-2026-07-15): no auto-flatten (the second trip is rejected by the validator).
+    verify(cascade, never())
         .cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString());
   }
 
@@ -265,13 +259,12 @@ class KillSwitchWorkflowImplTest {
     assertThat(s.getActor()).isEqualTo("auto:daily_loss");
     assertThat(s.getReason()).isEqualTo("auto:daily_loss");
 
-    verify(cascade, timeout(2000).atLeastOnce())
-        .cascadeRiskBreach(
-            eq("dev"),
-            eq("copytrade-v1"),
-            anyString(),
-            eq("auto:daily_loss"),
-            eq("auto:daily_loss"));
+    // Phase 2 (PLAN-2026-07-15): a fresh auto-trip HALTS + pages but does NOT auto-flatten — the
+    // cascade is never dispatched and the trip subject carries flatten=manual.
+    verify(cascade, never())
+        .cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString());
+    AuditEvent tripped = captureKind("KillSwitchTripped");
+    assertThat(tripped.getSubject()).containsEntry("flatten", "manual");
     // The audit_log path is NOT consulted on v>=1 — broker truth wins.
     verify(pnl, never()).computeRealizedPnl(anyString(), anyString(), any());
   }
