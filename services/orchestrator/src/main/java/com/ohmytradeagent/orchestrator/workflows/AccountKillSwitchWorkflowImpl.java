@@ -133,6 +133,35 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   static final String VERSION_ACCOUNT_TRIP_NO_AUTO_FLATTEN = "account-trip-no-auto-flatten-v1";
 
   /**
+   * Phase 2b (PLAN-2026-07-15, risk C1) gate for the periodic still-holding re-page. Because the
+   * heartbeat short-circuits at the {@code tripped} early-return, an alert-only auto trip pages
+   * only ONCE — "a hope, not a control". At {@code v>=1} a tripped tick instead runs {@link
+   * #maybeRepageWhileHolding()}: all its NEW commands (the {@code isMarketOpen} read, the {@code
+   * accountOpenBook} + quote loop, and the {@code AccountKillSwitchStillHolding} re-page audit) are
+   * strictly behind this marker. At {@link Workflow#DEFAULT_VERSION} the tripped tick stays the
+   * byte-identical bare early-return (no re-page), so an in-flight tripped history replays
+   * unchanged. Pinned by {@code AccountKillSwitchWorkflowImplLegacyReplayTest}.
+   */
+  static final String VERSION_ACCOUNT_TRIP_REPAGE_WHILE_HOLDING =
+      "account-trip-repage-while-holding-v1";
+
+  /**
+   * Phase 2b (risk C1): emitted (and Discord-paged via {@code AccountKillSwitchCapAlerter}) on the
+   * bounded periodic re-page while the account cap stays tripped AND market-open AND holding open
+   * positions. Carries the open-position count, current MTM (when priceable), and
+   * minutes-since-trip so the page is actionable.
+   */
+  private static final String KIND_ACCOUNT_STILL_HOLDING = "AccountKillSwitchStillHolding";
+
+  /**
+   * Phase 2b: while the cap stays tripped-and-holding during market hours, re-page at most once
+   * every this many ticks (15 ticks * 60s = ~15 min) so the operator keeps being reminded that open
+   * positions are unflattened, without spamming a page every minute. Package-private for test
+   * override (mirrors {@link #INACTIVE_REPAGE_TICKS}).
+   */
+  static int STILL_HOLDING_REPAGE_TICKS = 15;
+
+  /**
    * Audit kind emitted when the exec-realized read has been unavailable for too many ticks (G1).
    */
   private static final String KIND_REALIZED_READ_UNAVAILABLE = "KillSwitchRealizedReadUnavailable";
@@ -249,6 +278,15 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private int consecutiveRealizedReadFailures;
 
   private boolean realizedReadUnavailableAlerted;
+
+  /**
+   * Phase 2b (risk C1) still-holding re-page throttle (deterministic workflow state, no commands).
+   * Counts tripped + market-open ticks since the last re-page; on crossing {@link
+   * #STILL_HOLDING_REPAGE_TICKS} a bounded re-page fires and it resets. Cleared on market-close
+   * (inside {@link #maybeRepageWhileHolding()}) and on reset/untrip. Not carried across
+   * continue-as-new (observability-only; a re-page resets its window after an infrequent CAN).
+   */
+  private int stillHoldingRepageTicks;
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
@@ -452,6 +490,10 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // per-strategy broker-truth reads.
     int realizedVersion =
         Workflow.getVersion(VERSION_KILLSWITCH_REALIZED_FROM_EXEC, Workflow.DEFAULT_VERSION, 1);
+    // Phase 2b (risk C1): read the still-holding re-page gate ONCE at this stable scope. At
+    // DEFAULT_VERSION the tripped early-return below stays byte-identical (no re-page commands).
+    int repageVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_TRIP_REPAGE_WHILE_HOLDING, Workflow.DEFAULT_VERSION, 1);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -460,6 +502,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       this.sodEquity = null;
     }
     if (tripped) {
+      // Phase 2b (risk C1): while tripped + market-open + holding, emit a bounded periodic re-page
+      // so the alert-only posture is a control, not a one-shot page. Strictly v>=1; at
+      // DEFAULT_VERSION this is the byte-identical bare early-return (no re-page).
+      if (repageVersion >= 1) {
+        maybeRepageWhileHolding();
+      }
       return true; // cap already engaged — not an inactive condition.
     }
     // Post-reset cooldown: after a reset the cap stays inert until coolingDownUntil so a still-down
@@ -512,28 +560,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     AccountOpenBook book = accountPnl.accountOpenBook(input.getTenantId());
 
-    BigDecimal openMtm = BigDecimal.ZERO;
-    int quoteFailures = 0;
-    for (OpenPositionValuation pos : book.positions()) {
-      BigDecimal bid = liveBid(pos.contractSymbol());
-      if (bid == null) {
-        quoteFailures++;
-        continue;
-      }
-      // Unrealized P&L per the cap definition: (liveBid - entryPremium) * remainingQty * 100.
-      BigDecimal perContract = bid.subtract(pos.entryPremium());
-      openMtm =
-          openMtm.add(
-              perContract
-                  .multiply(BigDecimal.valueOf(pos.remainingQty()))
-                  .multiply(CONTRACT_MULTIPLIER));
-    }
+    OpenBookMtm valued = valueOpenBook(book);
+    BigDecimal openMtm = valued.openMtm();
 
     // Fail-CLOSED: a correlated positionState + quote outage that drops too many listed positions
     // must NOT under-count the loss (fail-OPEN). Mirror the #325 relative >50% / small-book bound
     // over the COMBINED failure count. At/above the bound, engage the cap rather than trust the
     // (falsely small) computed loss.
-    int combinedFailures = book.valueFailures() + quoteFailures;
+    int combinedFailures = book.valueFailures() + valued.quoteFailures();
     if (book.listed() > 0 && failsClosed(book.listed(), combinedFailures)) {
       // Fail-closed trip: the book is (partly) unpriceable, so the MTM is unreliable — carry the
       // full listed open-position count for the page (the number the operator must flatten by hand)
@@ -557,6 +591,100 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     // Threshold resolved and the loss was evaluated against it — the cap is ARMED this tick.
     return true;
+  }
+
+  /** Open MTM ({@code sum (liveBid - entryPremium) * remainingQty * 100}) + the #quote failures. */
+  private record OpenBookMtm(BigDecimal openMtm, int quoteFailures) {}
+
+  /**
+   * Values the open book by dispatching a per-position live-bid quote and summing the unrealized
+   * P&amp;L per the cap definition. Shared by the trip-eval path and the Phase 2b re-page path so
+   * the two agree and the quote loop is not duplicated. A missing quote increments {@code
+   * quoteFailures} and is skipped (the caller decides fail-closed vs best-effort).
+   */
+  private OpenBookMtm valueOpenBook(AccountOpenBook book) {
+    BigDecimal openMtm = BigDecimal.ZERO;
+    int quoteFailures = 0;
+    for (OpenPositionValuation pos : book.positions()) {
+      BigDecimal bid = liveBid(pos.contractSymbol());
+      if (bid == null) {
+        quoteFailures++;
+        continue;
+      }
+      // Unrealized P&L per the cap definition: (liveBid - entryPremium) * remainingQty * 100.
+      BigDecimal perContract = bid.subtract(pos.entryPremium());
+      openMtm =
+          openMtm.add(
+              perContract
+                  .multiply(BigDecimal.valueOf(pos.remainingQty()))
+                  .multiply(CONTRACT_MULTIPLIER));
+    }
+    return new OpenBookMtm(openMtm, quoteFailures);
+  }
+
+  /**
+   * Phase 2b (risk C1) still-holding re-page. Called on every tripped tick (v&gt;=1). Re-pages at
+   * most once every {@link #STILL_HOLDING_REPAGE_TICKS} while the cap stays tripped AND market-open
+   * AND holding open positions. STOPS re-paging on market-close (counter reset), on holding-&gt;0
+   * (empty book), and on reset/untrip (the heartbeat no longer reaches the tripped branch). A book
+   * read failure or an unavailable quote degrade quietly (skip the page / omit the MTM) — never a
+   * spurious alert.
+   */
+  private void maybeRepageWhileHolding() {
+    // Only re-page during market hours (no overnight spam; a closed market also resets the cadence
+    // so the first post-open re-page is a full window later, not immediate).
+    if (!calendar.isMarketOpen()) {
+      stillHoldingRepageTicks = 0;
+      return;
+    }
+    stillHoldingRepageTicks++;
+    if (stillHoldingRepageTicks < STILL_HOLDING_REPAGE_TICKS) {
+      return;
+    }
+    // Throttle boundary reached — reset the window regardless of the outcome below (a failed read
+    // or
+    // a flat book waits another full window, never a per-tick retry storm).
+    stillHoldingRepageTicks = 0;
+    AccountOpenBook book;
+    try {
+      book = accountPnl.accountOpenBook(input.getTenantId());
+    } catch (RuntimeException e) {
+      return; // book read failed — degrade quietly, retry next window.
+    }
+    if (book.listed() <= 0) {
+      return; // holding -> 0: nothing left to flatten, stop paging.
+    }
+    OpenBookMtm valued;
+    try {
+      valued = valueOpenBook(book);
+    } catch (RuntimeException e) {
+      valued = null; // quote activity threw — page the count/elapsed without an MTM figure.
+    }
+    // Omit the MTM unless EVERY position priced: a partial (or thrown) valuation is unreliable, so
+    // page the count + elapsed only rather than a misleading number.
+    BigDecimal mtm = (valued != null && valued.quoteFailures() == 0) ? valued.openMtm() : null;
+    emitStillHolding(book.listed(), mtm);
+  }
+
+  private void emitStillHolding(int openPositions, BigDecimal openMtm) {
+    Map<String, Object> subj =
+        subject(
+            "reason", reason,
+            "trading_day", tradingDay,
+            "scope", "account",
+            "open_positions", openPositions,
+            "minutes_since_trip", minutesSinceTrip());
+    if (openMtm != null) {
+      subj.put("open_mtm", openMtm);
+    }
+    auditLog(KIND_ACCOUNT_STILL_HOLDING, subj);
+  }
+
+  private long minutesSinceTrip() {
+    if (trippedAt == null) {
+      return 0L;
+    }
+    return Duration.between(trippedAt, workflowNow()).toMinutes();
   }
 
   /**
@@ -808,6 +936,8 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     this.actor = "";
     this.trippedAt = null;
     this.coolingDownUntil = workflowNow().plusSeconds(cooldownSecs);
+    // Phase 2b: clear the still-holding re-page window so a later re-trip starts a fresh cadence.
+    this.stillHoldingRepageTicks = 0;
 
     Map<String, Object> subj =
         subject(

@@ -66,9 +66,12 @@ class AccountKillSwitchWorkflowImplTest {
   private AccountKillSwitchCascadeActivities cascade;
   private GetOptionQuoteActivity optionQuote;
   private AccountSnapshotActivity accountSnapshot;
+  private int originalStillHoldingRepageTicks;
 
   @BeforeEach
   void setUp() {
+    // Phase 2b: capture the production re-page cadence so tests that shrink it can restore it.
+    originalStillHoldingRepageTicks = AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS;
     env = TestWorkflowEnvironment.newInstance();
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(AccountKillSwitchWorkflowImpl.class);
@@ -120,6 +123,7 @@ class AccountKillSwitchWorkflowImplTest {
 
   @AfterEach
   void tearDown() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = originalStillHoldingRepageTicks;
     env.close();
   }
 
@@ -742,7 +746,157 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(countKind("KillSwitchRealizedReadUnavailable")).isEqualTo(1L);
   }
 
+  // ---------- Phase 2b (risk C1): periodic still-holding re-page ----------
+
+  // Tripped + market-open + holding across the throttle cadence: re-page fires on the boundary
+  // (carrying count/MTM/minutes-since-trip), NOT every tick.
+  @Test
+  void trippedHoldingMarketOpen_repagesOnThrottleBoundary_notEveryTick() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000")); // crosses the 5000 absolute cap -> auto trip
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Trip on tick 1 (t~=60s); first re-page after 3 more tripped market-open ticks (t~=240s).
+    env.sleep(Duration.ofSeconds(260));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+    assertThat(stub.killswitchState().getReason()).isEqualTo("auto:account_daily_loss");
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    // Between boundaries (next at ~420s) NO new page — proves it does not fire every tick.
+    env.sleep(Duration.ofSeconds(120)); // total ~380s
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    // Past the next boundary -> second re-page.
+    env.sleep(Duration.ofSeconds(80)); // total ~460s
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(2L);
+
+    AuditEvent repage = captureKind("AccountKillSwitchStillHolding");
+    assertThat(repage.getSubject())
+        .containsEntry("scope", "account")
+        .containsEntry("open_positions", 1)
+        .containsKey("open_mtm")
+        .containsKey("minutes_since_trip");
+  }
+
+  // Operator flattens (book -> empty): re-paging STOPS (holding -> 0).
+  @Test
+  void tripped_holdingDropsToZero_stopsRepaging() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-flat");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(260));
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    // Operator manually flattened -> the book is now empty.
+    Mockito.doReturn(new AccountOpenBook(List.of(), 0, 0))
+        .when(accountPnl)
+        .accountOpenBook(anyString());
+    env.sleep(Duration.ofSeconds(300));
+
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+  }
+
+  // Market closes after a trip: re-paging STOPS (no overnight spam).
+  @Test
+  void tripped_marketCloses_stopsRepaging() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-closed");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(260));
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    // Market closes -> the re-page cadence resets and no further pages fire.
+    Mockito.doReturn(false).when(calendar).isMarketOpen();
+    env.sleep(Duration.ofSeconds(300));
+
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+  }
+
+  // Reset (untrip) STOPS re-paging: the loss is resolved and the switch does not re-trip / re-page.
+  @Test
+  void tripped_thenReset_stopsRepaging() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-reset");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(260));
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    // Operator resets; loss is resolved (flattened) so it neither re-trips nor re-pages.
+    stub.reset(resetRequest("alice"));
+    Mockito.doReturn(BigDecimal.ZERO)
+        .when(execPnl)
+        .computeRealizedPnl(anyString(), anyString(), any());
+    Mockito.doReturn(new AccountOpenBook(List.of(), 0, 0))
+        .when(accountPnl)
+        .accountOpenBook(anyString());
+    env.sleep(Duration.ofSeconds(400));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+  }
+
+  // Quotes go dark before a re-page: the page still fires with the count + minutes, but OMITS the
+  // (now unreliable) MTM — degrade quietly.
+  @Test
+  void tripped_quoteUnavailableDuringRepage_pagesCountWithoutMtm() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-noquote");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(70)); // trip on tick 1
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    // Quotes go dark before the first re-page boundary.
+    Mockito.doReturn(unavailableQuote("NVDA  250516C00140000"))
+        .when(optionQuote)
+        .getOptionQuote(any());
+    env.sleep(Duration.ofSeconds(200)); // past the ~t=240s boundary
+
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+    AuditEvent repage = captureKind("AccountKillSwitchStillHolding");
+    assertThat(repage.getSubject())
+        .containsEntry("open_positions", 1)
+        .containsKey("minutes_since_trip")
+        .doesNotContainKey("open_mtm");
+  }
+
   // ---------- helpers ----------
+
+  private static AccountOpenBook holdingBook() {
+    return new AccountOpenBook(
+        List.of(new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+        1,
+        0);
+  }
 
   private static AccountSnapshotResult snapshot(BigDecimal equity) {
     AccountSnapshotResult r = new AccountSnapshotResult();

@@ -154,16 +154,31 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   }
 
   /**
-   * THE NO-AUTO-FLATTEN SENTINEL. A pre-change history whose heartbeat AUTO-TRIPPED on {@code
-   * auto:account_daily_loss} and recorded the {@code KillSwitchTripped} audit + the {@code
-   * cascadeAccountRiskBreach} MARKET-flatten command, with NO {@code
-   * account-trip-no-auto-flatten-v1} marker. Replayed under the new impl: {@code doTrip}'s gate
-   * resolves to {@code DEFAULT_VERSION}, so the recorded cascade command is STILL produced (the
-   * in-flight book still flattens) and the subject carries NO {@code flatten} key — byte-identical,
-   * no {@code NonDeterministicException}. Omit the {@code getVersion} gate (or skip the cascade
-   * unconditionally) and this replay throws: the recorded cascade command would have no
-   * counterpart. This is the regression guard proving an in-flight trip recorded before the policy
-   * still auto-flattens on replay.
+   * Pins the Phase 2b (PLAN-2026-07-15, risk C1) still-holding re-page marker so a rename fails
+   * loudly (a re-versioned in-flight tripped history could then spuriously re-page mid-replay).
+   */
+  @Test
+  void versionAccountTripRepageWhileHoldingConstantNameIsStable() throws Exception {
+    Field marker =
+        AccountKillSwitchWorkflowImpl.class.getDeclaredField(
+            "VERSION_ACCOUNT_TRIP_REPAGE_WHILE_HOLDING");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("account-trip-repage-while-holding-v1");
+  }
+
+  /**
+   * THE NO-AUTO-FLATTEN + NO-REPAGE SENTINEL. A pre-change history whose heartbeat AUTO-TRIPPED on
+   * {@code auto:account_daily_loss} and recorded the {@code KillSwitchTripped} audit + the {@code
+   * cascadeAccountRiskBreach} MARKET-flatten command, then ran several more TRIPPED ticks (each
+   * just {@code todayEt} → tripped-return), with NEITHER {@code account-trip-no-auto-flatten-v1}
+   * NOR {@code account-trip-repage-while-holding-v1} marker. Replayed under the new impl: {@code
+   * doTrip}'s gate resolves to {@code DEFAULT_VERSION} so the recorded cascade command is STILL
+   * produced (the in-flight book still flattens, no {@code flatten} key), AND the tripped-tick
+   * re-page gate resolves to {@code DEFAULT_VERSION} so NO {@code accountOpenBook}/re-page command
+   * is scheduled against the marker-free tripped ticks — byte-identical, no {@code
+   * NonDeterministicException}. Omit either gate (skip the cascade unconditionally, or re-page at
+   * DEFAULT_VERSION) and this replay throws. Regression guard proving an in-flight trip recorded
+   * before the policy still auto-flattens AND does NOT re-page on replay.
    */
   @Test
   void legacyTrippedWithCascadeHistoryReplaysCleanly() throws Exception {
