@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.platform.TenantRegistry;
 import java.nio.file.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,16 +33,20 @@ public class LiveRequiredGateBootstrapper implements ApplicationRunner {
 
   private final Path tenantsDir;
   private final StrategyRegistry registry;
+  private final TenantRegistry tenantRegistry;
 
   public LiveRequiredGateBootstrapper(
-      @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir, StrategyRegistry registry) {
+      @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir,
+      StrategyRegistry registry,
+      TenantRegistry tenantRegistry) {
     this.tenantsDir = Path.of(tenantsDir);
     this.registry = registry;
+    this.tenantRegistry = tenantRegistry;
   }
 
   @Override
   public void run(ApplicationArguments args) {
-    LiveRequiredGateValidator.validate(tenantsDir, registry);
+    LiveRequiredGateValidator.validate(tenantsDir, registry, tenantRegistry);
     log.info("live required-gate invariant validated for tenants dir {}", tenantsDir);
   }
 }

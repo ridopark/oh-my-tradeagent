@@ -68,6 +68,21 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
       "killswitch-realized-from-exec-journal-v1";
 
   /**
+   * Phase 3 (PLAN-2026-07-15 single-account-loss-rule) change-id: makes a null/≤0 per-strategy
+   * {@code daily_loss_threshold} on a {@code -live} strategy a paper-like NO-OP instead of the
+   * fail-closed {@code auto:missing_loss_threshold} trip. The account-level cap is now the sole
+   * daily-loss breaker and the boot invariant ({@code LiveRequiredGateValidator}) guarantees it is
+   * armed for every {@code -live} tenant (and {@code TenantConfigWriter} is tighten-only so it can
+   * never be removed), so the per-strategy heartbeat can stop tripping on a missing threshold
+   * without a new activity read. At {@link Workflow#DEFAULT_VERSION} (every pre-Phase-3 in-flight
+   * history — no marker recorded) the EXACT legacy trip is preserved so the heartbeat command
+   * stream replays byte-identically. Read ONCE early in {@link #heartbeat()} after the two existing
+   * gates (stable scope; never reorders their recorded markers).
+   */
+  static final String VERSION_KILLSWITCH_MISSING_THRESHOLD_OPTIONAL =
+      "killswitch-missing-threshold-optional-when-account-cap-v1";
+
+  /**
    * Consecutive exec-realized-read failures the heartbeat tolerates before paging (guardrail G1). A
    * failed read is NEVER treated as a loss (never a spurious trip); the counter + bounded alert
    * make a persistent exec outage visible instead of silently skipping ticks forever. 3 ticks at
@@ -249,17 +264,31 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     // gate above). v>=1 => broker-truth exec journal; DEFAULT_VERSION => legacy audit_log path.
     int realizedVersion =
         Workflow.getVersion(VERSION_KILLSWITCH_REALIZED_FROM_EXEC, Workflow.DEFAULT_VERSION, 1);
+    // Phase 3: read the missing-threshold-optional gate ONCE, AFTER the two existing gates so their
+    // recorded markers are never reordered on replay. At v>=1 a null/≤0 threshold on a -live
+    // strategy is a no-op (the account cap is the sole breaker, guaranteed armed by the boot
+    // invariant); at DEFAULT_VERSION the exact legacy trip is preserved (byte-identical replay).
+    int missingThresholdOptional =
+        Workflow.getVersion(
+            VERSION_KILLSWITCH_MISSING_THRESHOLD_OPTIONAL, Workflow.DEFAULT_VERSION, 1);
     boolean isLive = StrategyConfigInvariants.isLive(cfg);
     if (threshold == null || threshold.signum() <= 0) {
       if (v == Workflow.DEFAULT_VERSION || !isLive) {
         // Legacy in-flight replays + all paper/non-live: original opt-out behavior, unchanged.
         return;
       }
-      // v>=1 && live && no valid loss gate: an upstream control was bypassed on a real-money
-      // strategy — fail closed. Trip with a DISTINCT reason so reporting never conflates this with
-      // a
-      // real daily-loss trip. doTrip already emits the KIND_KILL_SWITCH_TRIPPED audit + cascade
-      // flatten.
+      if (missingThresholdOptional >= 1) {
+        // Phase 3 (single-account-loss-rule): the account-level cap is now the sole daily-loss
+        // breaker and the boot invariant guarantees it armed for every -live tenant, so a null
+        // per-strategy daily_loss_threshold no longer trips — it becomes a paper-like no-op.
+        return;
+      }
+      // DEFAULT_VERSION of the Phase-3 gate: preserve the EXACT legacy fail-closed trip so
+      // in-flight
+      // histories replay byte-identically. v>=1 && live && no valid loss gate: an upstream control
+      // was bypassed on a real-money strategy — fail closed. Trip with a DISTINCT reason so
+      // reporting never conflates this with a real daily-loss trip. doTrip already emits the
+      // KIND_KILL_SWITCH_TRIPPED audit + cascade flatten.
       doTrip("auto:missing_loss_threshold", "auto:missing_loss_threshold", null);
       return;
     }
