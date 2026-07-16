@@ -3,9 +3,11 @@ package com.ohmytradeagent.orchestrator.platform;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -101,17 +103,64 @@ class StrategyConfigWriterTest {
   }
 
   @Test
-  void rejectsLiveMissingDailyLossGate_wrappingInvariantMessage() {
-    // stored is a -live strategy with the gates set; next drops daily_loss_threshold → the live
-    // invariant fails. Because daily_loss_threshold is ALSO a DANGEROUS field, validate() (B1) runs
-    // before the field-class checks, so the InvalidConfigException wins and wraps the invariant
-    // msg.
+  void rejectsLiveWithNoAccountCapArmed_wrappingInvariantMessage() {
+    // Phase 3b (single-account-loss-rule): the account cap is now the sole live loss breaker, so a
+    // -live strategy whose tenant has NO armed account cap fails the 4-arg invariant. validate()
+    // rewraps the IllegalStateException as InvalidConfigException. next == stored (no field change)
+    // so the ONLY thing that can reject is the missing-account-cap invariant.
     StrategyConfig stored = liveSafeStored();
     StrategyConfig next = copy(stored);
-    next.setDailyLossThreshold(null);
-    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
+    assertThatThrownBy(
+            () ->
+                writerFor(stored, unarmedTenantRegistry())
+                    .update(TENANT, STRATEGY, next, 1L, "alice"))
         .isInstanceOf(InvalidConfigException.class)
-        .hasMessageContaining("daily_loss_threshold");
+        .hasMessageContaining("account_daily_loss");
+  }
+
+  @Test
+  void allowsLiveWithNoDailyLossThreshold_whenAccountCapArmed() {
+    // Phase 3b core case: a -live strategy with NO per-strategy daily_loss_threshold is now VALID
+    // when the tenant account cap is armed (the account cap replaces daily_loss_threshold as the
+    // live loss breaker). stored AND next both have a null daily_loss_threshold, so the DANGEROUS
+    // field-class guard (must equal stored) is satisfied (null == null) and the only gate that
+    // could fire — the live invariant — passes because the cap is armed.
+    StrategyConfig stored = liveSafeStoredNoDailyLoss();
+    StrategyConfig next = copy(stored);
+
+    long newVersion = writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice");
+
+    assertThat(newVersion).isEqualTo(2L);
+    verify(audit).log(any());
+  }
+
+  @Test
+  void rejectsLiveWithNoDailyLossThreshold_whenAccountCapNotArmed() {
+    // The fail-safe half of Phase 3b: no per-strategy daily_loss_threshold AND no armed account cap
+    // → the -live strategy has no daily-loss breaker at all → REJECTED.
+    StrategyConfig stored = liveSafeStoredNoDailyLoss();
+    StrategyConfig next = copy(stored);
+    assertThatThrownBy(
+            () ->
+                writerFor(stored, unarmedTenantRegistry())
+                    .update(TENANT, STRATEGY, next, 1L, "alice"))
+        .isInstanceOf(InvalidConfigException.class)
+        .hasMessageContaining("account_daily_loss");
+  }
+
+  @Test
+  void paperStrategy_unaffectedByAccountCap() {
+    // A -paper strategy is not live, so the live invariant is a no-op regardless of the account cap
+    // — a paper write with no daily_loss_threshold and an unarmed tenant still succeeds.
+    StrategyConfig stored = liveSafeStoredNoDailyLoss();
+    stored.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
+    StrategyConfig next = copy(stored);
+
+    long newVersion =
+        writerFor(stored, unarmedTenantRegistry()).update(TENANT, STRATEGY, next, 1L, "alice");
+
+    assertThat(newVersion).isEqualTo(2L);
+    verify(audit).log(any());
   }
 
   // --- DANGEROUS field class (the disarm-vector regression guards) ---
@@ -363,7 +412,33 @@ class StrategyConfigWriterTest {
         };
     MockConnection connection = new MockConnection(provider);
     DSLContext dsl = DSL.using(connection, SQLDialect.POSTGRES);
-    return new StrategyConfigWriter(dsl, om, audit);
+    // Delete never validates, so the registry is unused; pass an armed one for consistency.
+    return new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
+  }
+
+  /**
+   * A {@link TenantRegistry} mock whose {@code get(...)} returns a tenant with an ARMED account cap
+   * ({@code account_daily_loss_pct = 0.40}) for ANY tenant id. Phase 3b: the 4-arg live invariant
+   * requires the tenant account cap to be armed for a {@code -live} strategy, so the existing
+   * {@code -live} {@code liveSafeStored()} fixtures model a tenant that has one.
+   */
+  private static TenantRegistry armedTenantRegistry() {
+    TenantConfig tc = new TenantConfig();
+    tc.setAccountDailyLossPct(new BigDecimal("0.40"));
+    TenantRegistry reg = mock(TenantRegistry.class);
+    when(reg.get(anyString())).thenReturn(tc);
+    return reg;
+  }
+
+  /**
+   * A {@link TenantRegistry} mock whose {@code get(...)} returns a config-absent tenant (both
+   * account-cap fields null) — the "no armed cap" case the Phase 3b invariant rejects for a {@code
+   * -live} strategy.
+   */
+  private static TenantRegistry unarmedTenantRegistry() {
+    TenantRegistry reg = mock(TenantRegistry.class);
+    when(reg.get(anyString())).thenReturn(new TenantConfig());
+    return reg;
   }
 
   /**
@@ -371,10 +446,19 @@ class StrategyConfigWriterTest {
    * {@code stored} (serialized) and whose UPDATE reports 1 affected row.
    */
   private StrategyConfigWriter writerFor(StrategyConfig stored) {
-    return writerFor(stored, 1);
+    return writerFor(stored, 1, armedTenantRegistry());
+  }
+
+  private StrategyConfigWriter writerFor(StrategyConfig stored, TenantRegistry tenantRegistry) {
+    return writerFor(stored, 1, tenantRegistry);
   }
 
   private StrategyConfigWriter writerFor(StrategyConfig stored, int updateRows) {
+    return writerFor(stored, updateRows, armedTenantRegistry());
+  }
+
+  private StrategyConfigWriter writerFor(
+      StrategyConfig stored, int updateRows, TenantRegistry tenantRegistry) {
     String storedJson;
     try {
       storedJson = om.writeValueAsString(stored);
@@ -404,7 +488,7 @@ class StrategyConfigWriterTest {
         };
     MockConnection connection = new MockConnection(provider);
     DSLContext dsl = DSL.using(connection, SQLDialect.POSTGRES);
-    return new StrategyConfigWriter(dsl, om, audit);
+    return new StrategyConfigWriter(dsl, om, audit, tenantRegistry);
   }
 
   /** A complete, live-safe stored config (passes all B1 checks; -live with gates set). */
@@ -423,6 +507,17 @@ class StrategyConfigWriterTest {
     c.setMaxContracts(5L);
     c.setDailyLossThreshold(new BigDecimal("500"));
     c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.25"));
+    return c;
+  }
+
+  /**
+   * Phase 3b: a live-safe stored config with NO per-strategy {@code daily_loss_threshold} — the
+   * shape that is valid ONLY when the tenant account cap is armed. Notional cap is still set (it
+   * remains required for a {@code -live} strategy).
+   */
+  private static StrategyConfig liveSafeStoredNoDailyLoss() {
+    StrategyConfig c = liveSafeStored();
+    c.setDailyLossThreshold(null);
     return c;
   }
 

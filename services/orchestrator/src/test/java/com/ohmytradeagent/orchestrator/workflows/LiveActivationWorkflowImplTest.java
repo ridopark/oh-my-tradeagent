@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -19,9 +20,11 @@ import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.orchestrator.activities.LiveActivationGateActivities;
 import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -50,6 +53,7 @@ class LiveActivationWorkflowImplTest {
   private LiveActivationGateActivities gate;
   private LivePromotionActivities promotion;
   private AccountSnapshotActivity snapshot;
+  private TenantConfigActivities tenantConfig;
 
   @BeforeEach
   void setUp() {
@@ -58,10 +62,16 @@ class LiveActivationWorkflowImplTest {
     gate = mock(LiveActivationGateActivities.class);
     promotion = mock(LivePromotionActivities.class);
     snapshot = mock(AccountSnapshotActivity.class);
+    tenantConfig = mock(TenantConfigActivities.class);
+    // Phase 3b: at v>=1 (which TestWorkflowEnvironment always reports for fresh workflows) step (b)
+    // reads the tenant account cap. Default to an ARMED cap so a -live compliantConfig passes; the
+    // no-cap-armed case overrides these to null per-test.
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
 
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(LiveActivationWorkflowImpl.class);
-    coreWorker.registerActivitiesImplementations(strategy, gate, promotion);
+    coreWorker.registerActivitiesImplementations(strategy, gate, promotion, tenantConfig);
 
     Worker brokerWorker = env.newWorker(EXEC_QUEUE);
     brokerWorker.registerActivitiesImplementations(snapshot);
@@ -151,16 +161,53 @@ class LiveActivationWorkflowImplTest {
   }
 
   @Test
-  void dailyLossThresholdMissing_isRejectedConfig_noActivate() {
-    StrategyConfig cfg = compliantConfig();
-    cfg.setDailyLossThreshold(BigDecimal.ZERO); // not > 0
-    when(strategy.get(TENANT, STRATEGY)).thenReturn(cfg);
+  void noAccountCapArmed_isRejectedConfig_noActivate() {
+    // Phase 3b: the tenant account cap is now the sole live loss breaker (step (b), v>=1). A -live
+    // strategy whose tenant has NO armed account cap is REJECTED_CONFIG even with a per-strategy
+    // daily_loss_threshold set on the config — the 4-arg invariant requires the account cap.
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(compliantConfig());
+    when(tenantConfig.accountDailyLossPct(TENANT)).thenReturn(null);
+    when(tenantConfig.accountDailyLossThreshold(TENANT)).thenReturn(null);
 
     LiveActivationResult result = activateStub().activateLive(activateReq());
 
     assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.REJECTED_CONFIG);
-    assertThat(result.getReason()).contains("daily_loss_threshold");
+    assertThat(result.getReason()).contains("account_daily_loss");
     verify(promotion, never()).activate(any());
+  }
+
+  @Test
+  void noDailyLossThresholdButAccountCapArmed_activates_andReadsTenantCap() {
+    // Phase 3b core case: a -live strategy with NO per-strategy daily_loss_threshold is now VALID
+    // at
+    // step (b) when the tenant account cap is armed (the armed cap satisfies the invariant). Proves
+    // the v>=1 branch reads the cap via TenantConfigActivities and does NOT return REJECTED_CONFIG.
+    StrategyConfig cfg = compliantConfig();
+    cfg.setDailyLossThreshold(null);
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(cfg);
+    when(gate.killSwitchArmable(TENANT, STRATEGY)).thenReturn(true);
+    when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class)))
+        .thenReturn(snap(ACCOUNT, new BigDecimal("5000")));
+    // default setUp stub: tenantConfig reports an armed pct cap.
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.ACTIVATED);
+    verify(promotion, times(1)).activate(any());
+    // v>=1 issues the two account-cap Activity commands (the proof they run at v>=1).
+    verify(tenantConfig, times(1)).accountDailyLossPct(TENANT);
+    verify(tenantConfig, times(1)).accountDailyLossThreshold(TENANT);
+  }
+
+  @Test
+  void versionAccountCapAwareConstantNameIsStable() throws Exception {
+    // Pins the version-marker constant so a rename fails loudly — a rename would silently
+    // re-version
+    // in-flight activations (the DEFAULT_VERSION legacy branch would no longer match old
+    // histories).
+    Field marker = LiveActivationWorkflowImpl.class.getDeclaredField("VERSION_ACCOUNT_CAP_AWARE");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("live-activation-account-cap-aware-v1");
   }
 
   @Test

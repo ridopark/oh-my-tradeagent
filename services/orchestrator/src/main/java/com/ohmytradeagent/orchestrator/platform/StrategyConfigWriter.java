@@ -74,12 +74,18 @@ public class StrategyConfigWriter {
   private final DSLContext dsl;
   private final ObjectMapper objectMapper;
   private final AuditActivities audit;
+  private final TenantRegistry tenantRegistry;
 
   @Autowired
-  public StrategyConfigWriter(DSLContext dsl, ObjectMapper objectMapper, AuditActivities audit) {
+  public StrategyConfigWriter(
+      DSLContext dsl,
+      ObjectMapper objectMapper,
+      AuditActivities audit,
+      TenantRegistry tenantRegistry) {
     this.dsl = dsl;
     this.objectMapper = objectMapper;
     this.audit = audit;
+    this.tenantRegistry = tenantRegistry;
   }
 
   /**
@@ -413,8 +419,20 @@ public class StrategyConfigWriter {
     }
 
     // (iii) live-required gates: reuse the source-agnostic invariant, rewrap its failure.
+    // Phase 3b (single-account-loss-rule): read the tenant's account cap directly (this is a plain
+    // component, no Temporal replay concern) and thread it into the 4-arg overload, so an armed
+    // account cap satisfies the live loss-breaker invariant (per-strategy daily_loss_threshold
+    // optional). cfg.getTenantId() is requireNonNull-checked above; a config-absent tenant
+    // (tenantRegistry.get == null) or unset cap passes nulls → the overload (correctly) rejects a
+    // -live strategy with no armed account cap.
+    TenantConfig tenantConfig = tenantRegistry.get(cfg.getTenantId());
+    BigDecimal accountDailyLossPct =
+        tenantConfig == null ? null : tenantConfig.getAccountDailyLossPct();
+    BigDecimal accountDailyLossThreshold =
+        tenantConfig == null ? null : tenantConfig.getAccountDailyLossThreshold();
     try {
-      StrategyConfigInvariants.validateLiveRequiredGates(cfg, label);
+      StrategyConfigInvariants.validateLiveRequiredGates(
+          cfg, accountDailyLossPct, accountDailyLossThreshold, label);
     } catch (IllegalStateException e) {
       throw new InvalidConfigException(e.getMessage(), e);
     }

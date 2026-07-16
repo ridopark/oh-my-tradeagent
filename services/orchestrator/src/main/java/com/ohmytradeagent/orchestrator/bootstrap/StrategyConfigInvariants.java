@@ -24,13 +24,16 @@ public final class StrategyConfigInvariants {
    * (must be non-null and &gt; 0) or {@code notional_cap_pct_of_capital_base} (must be non-null). A
    * null/false {@code pre_trade_check_enabled} logs a WARNING (advisory) and does not throw.
    *
-   * <p>This 2-arg form is the CONSERVATIVE gate used by callers that have no tenant-level
-   * account-cap context — {@code LiveActivationWorkflowImpl} (in-workflow; threading tenant data
-   * would need an activity + version gate) and {@code StrategyConfigWriter} (a per-strategy write).
-   * It keeps requiring {@code daily_loss_threshold} because it cannot know whether the tenant's
-   * account cap is armed. The BOOT path uses {@link #validateLiveRequiredGates(StrategyConfig,
-   * BigDecimal, BigDecimal, String)}, which HAS the account cap and therefore treats {@code
-   * daily_loss_threshold} as optional (Phase 3).
+   * <p>This 2-arg form is the CONSERVATIVE gate that requires {@code daily_loss_threshold} without
+   * account-cap context. As of Phase 3b it is retained ONLY as the {@code DEFAULT_VERSION} legacy
+   * branch of {@code LiveActivationWorkflowImpl.activateLive} (behind the {@code
+   * live-activation-account-cap-aware-v1} version gate, so in-flight histories replay
+   * byte-identically). ALL live callers — the BOOT path ({@link LiveRequiredGateValidator}), {@code
+   * LiveActivationWorkflowImpl} (at {@code v>=1}, reading the cap via an Activity), and {@code
+   * StrategyConfigWriter} (a plain component that reads the cap directly) — now read the tenant's
+   * account cap and use {@link #validateLiveRequiredGates(StrategyConfig, BigDecimal, BigDecimal,
+   * String)}, which treats {@code daily_loss_threshold} as optional when the account cap is armed
+   * (Phase 3).
    *
    * @param cfg the strategy config to validate
    * @param label the {@code "tenantId/strategyId"} string used in messages

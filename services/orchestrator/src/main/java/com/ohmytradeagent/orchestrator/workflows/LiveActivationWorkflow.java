@@ -11,8 +11,10 @@ import io.temporal.workflow.WorkflowMethod;
  * Temporal <em>client</em> cannot dispatch an Activity directly), mirroring {@code
  * StrategyConfigUpdateWorkflow}'s start-and-getResult pattern.
  *
- * <p><b>No {@code getVersion} change-point</b> — a net-new workflow type started fresh per call, so
- * replay determinism is trivial (no long-lived history to version). It runs a fail-closed
+ * <p>A net-new workflow type started fresh per call, so replay determinism is largely trivial (no
+ * long-lived history to version). Phase 3b DOES add ONE {@code getVersion} change-point ({@code
+ * live-activation-account-cap-aware-v1}) because its account-cap read inserts Activity commands
+ * BEFORE existing ones — see {@code LiveActivationWorkflowImpl}. It runs a fail-closed
  * required-config gate + a fresh account probe and, on pass, writes a fresh {@code
  * LivePromotionApproved} row via {@code LivePromotionActivities.activate} so the ALREADY-wired
  * order-time gate at {@code CopytradeSignalWorkflowImpl} keeps firing — this workflow does NOT
