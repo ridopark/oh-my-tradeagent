@@ -536,25 +536,24 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     int combinedFailures = book.valueFailures() + quoteFailures;
     if (book.listed() > 0 && failsClosed(book.listed(), combinedFailures)) {
       // Fail-closed trip: the book is (partly) unpriceable, so the MTM is unreliable — carry the
-      // listed open-position count for the page but no MTM.
+      // full listed open-position count for the page (the number the operator must flatten by hand)
+      // but no MTM. listed() is the whole book; positions() drops the ones whose state query
+      // failed.
       doTrip(
           "auto:account_mtm_unavailable",
           "auto:account_mtm_unavailable",
           null,
-          book.positions().size(),
+          book.listed(),
           null);
       return true; // cap engaged (fail-closed trip) — armed.
     }
 
     BigDecimal totalPnl = realized.add(openMtm);
     if (totalPnl.compareTo(threshold.negate()) <= 0) {
-      // Carry the open-position count + current open MTM so the (no-flatten) page is actionable.
+      // Carry the full listed open-position count + current open MTM so the (no-flatten) page is
+      // actionable.
       doTrip(
-          "auto:account_daily_loss",
-          "auto:account_daily_loss",
-          totalPnl,
-          book.positions().size(),
-          openMtm);
+          "auto:account_daily_loss", "auto:account_daily_loss", totalPnl, book.listed(), openMtm);
     }
     // Threshold resolved and the loss was evaluated against it — the cap is ARMED this tick.
     return true;
