@@ -7,6 +7,8 @@ import com.ohmytradeagent.orchestrator.platform.TenantRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Phase P2 live-safety: config-load invariant requiring every {@code -live} strategy to declare its
@@ -59,9 +61,13 @@ public final class LiveRequiredGateValidator {
     if (!Files.exists(tenantsDir)) {
       return;
     }
+    // Cache the tenant-level config per tenantId: a tenant with N strategies would otherwise
+    // re-read
+    // the same tenant_config row N times (DbTenantRegistry.get is a fresh DB query each call).
+    Map<String, TenantConfig> tenantConfigs = new HashMap<>();
     for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       StrategyConfig cfg = registry.get(ts.tenantId(), ts.strategyId());
-      TenantConfig tenantConfig = tenantRegistry.get(ts.tenantId());
+      TenantConfig tenantConfig = tenantConfigs.computeIfAbsent(ts.tenantId(), tenantRegistry::get);
       String label = ts.tenantId() + "/" + ts.strategyId();
       StrategyConfigInvariants.validateLiveRequiredGates(
           cfg,

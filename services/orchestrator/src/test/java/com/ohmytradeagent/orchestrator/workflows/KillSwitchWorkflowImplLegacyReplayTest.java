@@ -16,6 +16,7 @@ import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.KillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
@@ -508,10 +509,8 @@ class KillSwitchWorkflowImplLegacyReplayTest {
       // Read (record the marker for) the realized-from-exec gate exactly as the pre-Phase-3
       // heartbeat did — before the null-threshold branch. Deliberately NO Phase-3 getVersion.
       Workflow.getVersion("killswitch-realized-from-exec-journal-v1", Workflow.DEFAULT_VERSION, 1);
-      boolean isLive =
-          cfg.getBrokerTarget() != null
-              && cfg.getBrokerTarget().value() != null
-              && cfg.getBrokerTarget().value().endsWith("-live");
+      // Mirror pre-Phase-3 production, which used the shared isLive predicate (pure, no command).
+      boolean isLive = StrategyConfigInvariants.isLive(cfg);
       if (threshold == null || threshold.signum() <= 0) {
         if (v == Workflow.DEFAULT_VERSION || !isLive) {
           return;
