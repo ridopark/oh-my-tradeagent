@@ -3,11 +3,14 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.platform.TenantConfig;
+import com.ohmytradeagent.orchestrator.platform.TenantRegistry;
 import com.ohmytradeagent.orchestrator.platform.YamlStrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.YamlStrategyRegistry.StrategyNotFoundException;
 import java.math.BigDecimal;
@@ -17,14 +20,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Phase P2 live-safety: every {@code -live} strategy must declare its loss gates (daily-loss
- * threshold and notional cap). The repo tree has no {@code -live} strategy, so these build a
- * synthetic tenants dir (mirrors {@link CrossTenantBrokerTargetValidatorTest}).
+ * Phase P2 live-safety: every {@code -live} strategy must declare its notional cap AND its tenant
+ * must have an armed account-level daily-loss cap. The repo tree has no {@code -live} strategy, so
+ * these build a synthetic tenants dir (mirrors {@link CrossTenantBrokerTargetValidatorTest}).
  *
- * <p>P0c-b2: the validator now reads config through the active {@link StrategyRegistry}. The
- * yaml-mode cases below drive a real {@link YamlStrategyRegistry} over the synthetic tree
- * (regression: behavior identical to the pre-P0c-b2 disk reader). The {@code dbMode*} cases use a
- * Mockito stub to prove the registry-driven fail-closed behavior independent of YAML.
+ * <p>Phase 3 (single-account-loss-rule, 2026-07-15): the account cap is now the sole daily-loss
+ * breaker, threaded in per tenant via a {@link TenantRegistry}. The per-strategy {@code
+ * daily_loss_threshold} became OPTIONAL; a {@code -live} tenant with no armed account cap fails
+ * boot.
  */
 class LiveRequiredGateValidatorTest {
 
@@ -74,35 +77,61 @@ class LiveRequiredGateValidatorTest {
     return new YamlStrategyRegistry(tenantsDir.toString());
   }
 
-  // ---- yaml-mode regression (behavior identical to the pre-P0c-b2 disk reader) ----
+  /** A {@link TenantRegistry} whose every tenant has the account cap armed (pct). */
+  private static TenantRegistry armedTenantRegistry() {
+    TenantRegistry r = mock(TenantRegistry.class);
+    TenantConfig tc = new TenantConfig();
+    tc.setAccountDailyLossPct(new BigDecimal("0.10"));
+    when(r.get(anyString())).thenReturn(tc);
+    return r;
+  }
 
+  /** A {@link TenantRegistry} whose tenants have NO armed account cap (both fields null). */
+  private static TenantRegistry unarmedTenantRegistry() {
+    TenantRegistry r = mock(TenantRegistry.class);
+    when(r.get(anyString())).thenReturn(new TenantConfig());
+    return r;
+  }
+
+  // ---- Phase 3: account cap mandatory; daily_loss optional ----
+
+  /** A live strategy whose tenant has NO armed account cap fails boot (the new invariant). */
   @Test
-  void liveStrategyMissingDailyLossThrows(@TempDir Path tenantsDir) throws Exception {
-    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live", null, "0.25", true);
+  void liveStrategyWithNoArmedAccountCapThrows(@TempDir Path tenantsDir) throws Exception {
+    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live", "500", "0.25", true);
 
     assertThatThrownBy(
-            () -> LiveRequiredGateValidator.validate(tenantsDir, yamlRegistry(tenantsDir)))
+            () ->
+                LiveRequiredGateValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), unarmedTenantRegistry()))
         .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("daily_loss_threshold")
+        .hasMessageContaining("account loss cap")
         .hasMessageContaining("acme/copytrade-v1");
   }
 
+  /** A live strategy with NO per-strategy daily_loss but an armed account cap boots clean. */
   @Test
-  void liveStrategyZeroDailyLossThrows(@TempDir Path tenantsDir) throws Exception {
-    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live", "0", "0.25", true);
+  void liveStrategyMissingDailyLossButAccountCapArmedPasses(@TempDir Path tenantsDir)
+      throws Exception {
+    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live", null, "0.25", true);
 
-    assertThatThrownBy(
-            () -> LiveRequiredGateValidator.validate(tenantsDir, yamlRegistry(tenantsDir)))
-        .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("daily_loss_threshold");
+    assertThatCode(
+            () ->
+                LiveRequiredGateValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), armedTenantRegistry()))
+        .doesNotThrowAnyException();
   }
+
+  // ---- unchanged gates (account cap armed so we reach them) ----
 
   @Test
   void liveStrategyMissingNotionalCapThrows(@TempDir Path tenantsDir) throws Exception {
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live", "500", null, true);
 
     assertThatThrownBy(
-            () -> LiveRequiredGateValidator.validate(tenantsDir, yamlRegistry(tenantsDir)))
+            () ->
+                LiveRequiredGateValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), armedTenantRegistry()))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("notional_cap_pct_of_capital_base")
         .hasMessageContaining("acme/copytrade-v1");
@@ -114,7 +143,10 @@ class LiveRequiredGateValidatorTest {
     // pre_trade_check omitted (null) → WARN logged, NOT a failure.
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live", "500", "0.25", null);
 
-    assertThatCode(() -> LiveRequiredGateValidator.validate(tenantsDir, yamlRegistry(tenantsDir)))
+    assertThatCode(
+            () ->
+                LiveRequiredGateValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), armedTenantRegistry()))
         .doesNotThrowAnyException();
   }
 
@@ -122,16 +154,21 @@ class LiveRequiredGateValidatorTest {
   void paperStrategyMissingEverythingPasses(@TempDir Path tenantsDir) throws Exception {
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper", null, null, null);
 
-    assertThatCode(() -> LiveRequiredGateValidator.validate(tenantsDir, yamlRegistry(tenantsDir)))
+    // Paper is skipped even with no account cap.
+    assertThatCode(
+            () ->
+                LiveRequiredGateValidator.validate(
+                    tenantsDir, yamlRegistry(tenantsDir), unarmedTenantRegistry()))
         .doesNotThrowAnyException();
   }
 
   @Test
   void noOpWhenTenantsDirMissing(@TempDir Path parent) {
     Path missing = parent.resolve("nope");
-    // Registry is never consulted when the dir is missing.
+    // Neither registry is consulted when the dir is missing.
     StrategyRegistry registry = mock(StrategyRegistry.class);
-    assertThatCode(() -> LiveRequiredGateValidator.validate(missing, registry))
+    TenantRegistry tenantRegistry = mock(TenantRegistry.class);
+    assertThatCode(() -> LiveRequiredGateValidator.validate(missing, registry, tenantRegistry))
         .doesNotThrowAnyException();
   }
 
@@ -146,7 +183,8 @@ class LiveRequiredGateValidatorTest {
     when(registry.get("acme", "copytrade-v1"))
         .thenThrow(new StrategyNotFoundException("Strategy config not found in DB"));
 
-    assertThatThrownBy(() -> LiveRequiredGateValidator.validate(tenantsDir, registry))
+    assertThatThrownBy(
+            () -> LiveRequiredGateValidator.validate(tenantsDir, registry, armedTenantRegistry()))
         .isInstanceOf(StrategyNotFoundException.class);
   }
 
@@ -158,19 +196,21 @@ class LiveRequiredGateValidatorTest {
     when(registry.get("acme", "copytrade-v1"))
         .thenThrow(new IllegalStateException("strategy_config schema_version 2 exceeds build"));
 
-    assertThatThrownBy(() -> LiveRequiredGateValidator.validate(tenantsDir, registry))
+    assertThatThrownBy(
+            () -> LiveRequiredGateValidator.validate(tenantsDir, registry, armedTenantRegistry()))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("schema_version");
   }
 
-  /** A valid seeded row passes the live-gate invariant. */
+  /** A valid seeded row + armed account cap passes the live-gate invariant. */
   @Test
   void dbModePassesOnValidSeededRow(@TempDir Path tenantsDir) throws Exception {
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live", "500", "0.25", true);
     StrategyRegistry registry = mock(StrategyRegistry.class);
     when(registry.get(any(), any())).thenReturn(liveConfig("alpaca-live", new BigDecimal("500")));
 
-    assertThatCode(() -> LiveRequiredGateValidator.validate(tenantsDir, registry))
+    assertThatCode(
+            () -> LiveRequiredGateValidator.validate(tenantsDir, registry, armedTenantRegistry()))
         .doesNotThrowAnyException();
   }
 

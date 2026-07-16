@@ -18,11 +18,19 @@ public final class StrategyConfigInvariants {
   private StrategyConfigInvariants() {}
 
   /**
-   * Enforces the {@code -live} loss-control gates for one strategy. Non-{@code -live} (paper or
-   * absent) {@code broker_target} → no-op. Throws {@link IllegalStateException} if a {@code -live}
-   * strategy is missing {@code daily_loss_threshold} (must be non-null and &gt; 0) or {@code
-   * notional_cap_pct_of_capital_base} (must be non-null). A null/false {@code
-   * pre_trade_check_enabled} logs a WARNING (advisory) and does not throw.
+   * Per-strategy {@code -live} loss-control gates WITHOUT tenant-level account-cap context.
+   * Non-{@code -live} (paper or absent) {@code broker_target} → no-op. Throws {@link
+   * IllegalStateException} if a {@code -live} strategy is missing {@code daily_loss_threshold}
+   * (must be non-null and &gt; 0) or {@code notional_cap_pct_of_capital_base} (must be non-null). A
+   * null/false {@code pre_trade_check_enabled} logs a WARNING (advisory) and does not throw.
+   *
+   * <p>This 2-arg form is the CONSERVATIVE gate used by callers that have no tenant-level
+   * account-cap context — {@code LiveActivationWorkflowImpl} (in-workflow; threading tenant data
+   * would need an activity + version gate) and {@code StrategyConfigWriter} (a per-strategy write).
+   * It keeps requiring {@code daily_loss_threshold} because it cannot know whether the tenant's
+   * account cap is armed. The BOOT path uses {@link #validateLiveRequiredGates(StrategyConfig,
+   * BigDecimal, BigDecimal, String)}, which HAS the account cap and therefore treats {@code
+   * daily_loss_threshold} as optional (Phase 3).
    *
    * @param cfg the strategy config to validate
    * @param label the {@code "tenantId/strategyId"} string used in messages
@@ -46,6 +54,61 @@ public final class StrategyConfigInvariants {
               + "). A real-money strategy must declare a kill-switch loss threshold.");
     }
 
+    requireNotionalCap(cfg, brokerTarget, label);
+    warnIfPreTradeDisabled(cfg, label);
+  }
+
+  /**
+   * Phase 3 (single-account-loss-rule, 2026-07-15) BOOT invariant: the tenant's account-level cap
+   * is now the sole daily-loss breaker for a {@code -live} strategy. Non-{@code -live} → no-op. For
+   * a {@code -live} strategy:
+   *
+   * <ul>
+   *   <li>The tenant's account cap MUST be armed — {@code accountDailyLossPct > 0} OR {@code
+   *       accountDailyLossThreshold > 0}. A {@code -live} strategy whose tenant has NO armed
+   *       account cap throws {@link IllegalStateException} (the new mandatory invariant).
+   *   <li>The per-strategy {@code daily_loss_threshold} is OPTIONAL (null/≤0 OK) — the armed
+   *       account cap satisfies the live loss-breaker invariant.
+   *   <li>{@code notional_cap_pct_of_capital_base} — still required (non-null).
+   * </ul>
+   *
+   * <p>A null/false {@code pre_trade_check_enabled} logs a WARNING (advisory) and does not throw.
+   *
+   * @param cfg the strategy config to validate
+   * @param accountDailyLossPct the tenant's {@code account_daily_loss_pct} (fraction) or null
+   * @param accountDailyLossThreshold the tenant's absolute {@code account_daily_loss_threshold} or
+   *     null
+   * @param label the {@code "tenantId/strategyId"} string used in messages
+   */
+  public static void validateLiveRequiredGates(
+      StrategyConfig cfg,
+      BigDecimal accountDailyLossPct,
+      BigDecimal accountDailyLossThreshold,
+      String label) {
+    if (!isLive(cfg)) {
+      return;
+    }
+    String brokerTarget = cfg.getBrokerTarget().value();
+
+    boolean accountCapArmed =
+        (accountDailyLossPct != null && accountDailyLossPct.signum() > 0)
+            || (accountDailyLossThreshold != null && accountDailyLossThreshold.signum() > 0);
+    if (!accountCapArmed) {
+      throw new IllegalStateException(
+          "live tenant "
+              + label
+              + " (broker_target="
+              + brokerTarget
+              + ") missing account loss cap: account_daily_loss_pct or account_daily_loss_threshold"
+              + " must be set > 0. The account-level cap is the sole daily-loss breaker for a"
+              + " real-money strategy.");
+    }
+
+    requireNotionalCap(cfg, brokerTarget, label);
+    warnIfPreTradeDisabled(cfg, label);
+  }
+
+  private static void requireNotionalCap(StrategyConfig cfg, String brokerTarget, String label) {
     if (cfg.getNotionalCapPctOfCapitalBase() == null) {
       throw new IllegalStateException(
           "live strategy "
@@ -55,7 +118,9 @@ public final class StrategyConfigInvariants {
               + ") is missing a required loss gate: notional_cap_pct_of_capital_base must be set."
               + " A real-money strategy must declare a portfolio notional cap.");
     }
+  }
 
+  private static void warnIfPreTradeDisabled(StrategyConfig cfg, String label) {
     Boolean preTrade = cfg.getPreTradeCheckEnabled();
     if (preTrade == null || !preTrade) {
       log.warn(

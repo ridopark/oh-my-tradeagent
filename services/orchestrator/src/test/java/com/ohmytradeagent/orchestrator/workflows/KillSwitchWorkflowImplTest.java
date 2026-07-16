@@ -357,9 +357,12 @@ class KillSwitchWorkflowImplTest {
   // ---------- B2 (P0c-b1): live kill-switch heartbeat floor ----------
 
   @Test
-  void heartbeat_liveWithNullThreshold_tripsWithDistinctReason() throws InterruptedException {
-    // Market open + a LIVE strategy whose daily_loss_threshold is null (an upstream control was
-    // bypassed). The heartbeat must fail closed: trip with the distinct anomaly reason.
+  void heartbeat_liveWithNullThreshold_doesNotTrip() {
+    // Phase 3 (single-account-loss-rule): a fresh execution resolves the
+    // killswitch-missing-threshold-optional-when-account-cap-v1 gate to v>=1, so a LIVE strategy
+    // with a null daily_loss_threshold NO LONGER trips auto:missing_loss_threshold — it becomes a
+    // paper-like no-op. The account-level cap is now the sole daily-loss breaker (its armed state
+    // is enforced by the boot invariant, not this per-strategy heartbeat).
     when(calendar.isMarketOpen()).thenReturn(true);
     when(strategy.get(anyString(), anyString())).thenReturn(liveNullThresholdConfig());
 
@@ -370,21 +373,14 @@ class KillSwitchWorkflowImplTest {
     env.sleep(Duration.ofSeconds(75));
 
     KillSwitchState s = stub.killswitchState();
-    assertThat(s.getTripped()).isTrue();
-    assertThat(s.getReason()).isEqualTo("auto:missing_loss_threshold");
-    assertThat(s.getActor()).isEqualTo("auto:missing_loss_threshold");
+    assertThat(s.getTripped()).isFalse();
 
-    // Deterministic sync: the trip audit is emitted on the activity worker thread during the
-    // skipped
-    // heartbeat tick; wait for it before the instantaneous captor read below.
-    waitForAuditKind("KillSwitchTripped");
-    AuditEvent tripped = captureKind("KillSwitchTripped");
-    assertThat(tripped.getSubject()).containsEntry("reason", "auto:missing_loss_threshold");
-    // Anomaly trip carries no quantified value (null pnl was never computed).
-    assertThat(tripped.getSubject()).doesNotContainKey("value");
-
-    // pnl is never computed on the anomaly path — the trip short-circuits before the pnl Activity.
+    // No trip → no cascade flatten, and no realized-pnl read (the null-threshold branch returns
+    // before the pnl Activity).
+    verify(cascade, never())
+        .cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString());
     verify(pnl, never()).computeRealizedPnl(anyString(), anyString(), any());
+    verify(execPnl, never()).computeRealizedPnl(anyString(), anyString(), any());
   }
 
   @Test

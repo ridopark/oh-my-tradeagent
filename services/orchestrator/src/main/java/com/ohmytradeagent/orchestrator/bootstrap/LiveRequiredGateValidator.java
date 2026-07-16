@@ -2,9 +2,13 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.platform.TenantConfig;
+import com.ohmytradeagent.orchestrator.platform.TenantRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Phase P2 live-safety: config-load invariant requiring every {@code -live} strategy to declare its
@@ -25,9 +29,14 @@ import java.nio.file.Path;
  * <p>Required (FAIL on violation):
  *
  * <ul>
- *   <li>{@code daily_loss_threshold} — non-null and &gt; 0 (KillSwitch auto-trip threshold).
+ *   <li>The tenant's account-level cap ({@code account_daily_loss_pct} or {@code
+ *       account_daily_loss_threshold}) — armed (&gt; 0). Phase 3: this is now the sole daily-loss
+ *       breaker, so a {@code -live} tenant MUST have it armed.
  *   <li>{@code notional_cap_pct_of_capital_base} — non-null (portfolio notional cap).
  * </ul>
+ *
+ * <p>Phase 3 (single-account-loss-rule): the per-strategy {@code daily_loss_threshold} is now
+ * OPTIONAL (the armed account cap replaces it as the live loss breaker).
  *
  * <p>Advisory ({@code pre_trade_check_enabled} null/false → WARN, not fail): the operator may
  * deliberately run with the PDT/buying-power gate off.
@@ -41,15 +50,30 @@ public final class LiveRequiredGateValidator {
    * gate. No-op when the tenants dir does not exist. Config for each scanned strategy is read via
    * {@code registry.get}; that read throws on a missing/invalid row, and the throw propagates (boot
    * fails closed).
+   *
+   * <p>Phase 3 (single-account-loss-rule): the tenant-level account cap ({@code
+   * account_daily_loss_pct} / {@code account_daily_loss_threshold}) is now the sole live loss
+   * breaker, so it is read per tenant via {@code tenantRegistry.get} (the same registry the account
+   * kill switch reads) and threaded into the per-strategy invariant.
    */
-  public static void validate(Path tenantsDir, StrategyRegistry registry) {
+  public static void validate(
+      Path tenantsDir, StrategyRegistry registry, TenantRegistry tenantRegistry) {
     if (!Files.exists(tenantsDir)) {
       return;
     }
+    // Cache the tenant-level config per tenantId: a tenant with N strategies would otherwise
+    // re-read
+    // the same tenant_config row N times (DbTenantRegistry.get is a fresh DB query each call).
+    Map<String, TenantConfig> tenantConfigs = new HashMap<>();
     for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
       StrategyConfig cfg = registry.get(ts.tenantId(), ts.strategyId());
+      TenantConfig tenantConfig = tenantConfigs.computeIfAbsent(ts.tenantId(), tenantRegistry::get);
       String label = ts.tenantId() + "/" + ts.strategyId();
-      StrategyConfigInvariants.validateLiveRequiredGates(cfg, label);
+      StrategyConfigInvariants.validateLiveRequiredGates(
+          cfg,
+          tenantConfig == null ? null : tenantConfig.getAccountDailyLossPct(),
+          tenantConfig == null ? null : tenantConfig.getAccountDailyLossThreshold(),
+          label);
     }
   }
 }
