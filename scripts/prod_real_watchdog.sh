@@ -16,6 +16,16 @@
 #   2-59/5 13-21 * * 1-5  /opt/oh-my-tradeagent/scripts/prod_real_watchdog.sh >> /var/log/prod_real_watchdog.log 2>&1
 #   #                ^^^^^ 13-21 UTC ≈ 09-17 ET; adjust to your host TZ (the ET gate below is the real boundary)
 #
+# Pre-unset hard-gate (single-account-loss-rule C6): run
+#   scripts/prod_real_watchdog.sh --preunset-gate     (or PREUNSET_GATE=1)
+# BEFORE the operator unsets copytrade-v1's daily_loss_threshold. It bypasses the
+# market-hours gate (run it market-closed), skips the anomaly sweep, and instead
+# verifies the account cap is a healthy SOLE loss breaker: cap armed in the DB the
+# kill switch reads, no recent AccountKillSwitchCapInactive, the account-KS workflow
+# Running + queryable + NOT tripped, and the prod_real page webhook resolvable. It
+# prints per-check PASS/FAIL and exits 0 = GO / 1 = NO-GO. Strictly read-only; posts
+# nothing to Discord.
+#
 # Env overrides:
 #   KUBECTL             kubectl invocation (default: kubectl). Remote: KUBECTL="ssh user@host kubectl"
 #   COPYTRADE_NS        copytrade namespace (default: copytrade)
@@ -23,8 +33,10 @@
 #   WATCHDOG_FORCE=1    bypass the market-hours gate (manual run / testing)
 #   DRY_RUN=1           run the sweep + classify but do NOT post to Discord (print instead)
 #   WATCHDOG_STATE_DIR  dedup state dir (default: /var/tmp/prod_real_watchdog)
+#   PREUNSET_GATE=1     run the pre-unset hard-gate (above) instead of the sweep
 #
-# Exit codes: 0 = clean (or market closed) · 1 = anomaly detected.
+# Exit codes (sweep):     0 = clean · 1 = anomaly detected · 2 = degraded (a check could not run).
+# Exit codes (--preunset-gate): 0 = GO (all checks pass) · 1 = NO-GO (any check failed/unreadable).
 #
 set -uo pipefail
 
@@ -36,11 +48,17 @@ TENANT="prod_real"
 LIVE_DB="exec_alpaca_live"
 mkdir -p "$STATE_DIR"
 
+# --preunset-gate (C6) is a distinct market-closed operator mode; map the flag onto
+# the PREUNSET_GATE env so either invocation form works.
+[ "${1:-}" = "--preunset-gate" ] && PREUNSET_GATE=1
+PREUNSET_GATE="${PREUNSET_GATE:-0}"
+
 log() { printf '%s %s\n' "$(TZ=America/New_York date +'%Y-%m-%d %H:%M:%S ET')" "$*"; }
 
 # ---- STEP 0: market-hours gate (ET 09:30–16:05, Mon–Fri) --------------------
-# Exit BEFORE any kubectl/ssh so a closed market costs nothing.
-if [ "${WATCHDOG_FORCE:-0}" != "1" ]; then
+# Exit BEFORE any kubectl/ssh so a closed market costs nothing. The pre-unset gate
+# is a deliberate market-CLOSED check, so it bypasses this gate (like WATCHDOG_FORCE).
+if [ "${WATCHDOG_FORCE:-0}" != "1" ] && [ "$PREUNSET_GATE" != "1" ]; then
   dow=$(TZ=America/New_York date +%u)              # 1=Mon … 7=Sun
   hm=$((10#$(TZ=America/New_York date +%H%M)))     # 10# = force base-10 (avoid octal on leading 0)
   if [ "$dow" -gt 5 ] || [ "$hm" -lt 930 ] || [ "$hm" -gt 1605 ]; then
@@ -84,6 +102,130 @@ check_ks() {
   fi
 }
 
+# account_ks_liveness — durable liveness probe (C1) for the tenant's account
+# kill-switch workflow, which after the single-account-loss-rule epic is the SOLE
+# daily-loss breaker. Distinct from check_ks (which reads the trip STATE and fails
+# SOFT to degraded when unreadable): a TERMINATED/CLOSED/absent account-KS workflow
+# means every copytrade entry fail-closes with KILL_SWITCH_UNAVAILABLE while NO
+# loss trip can fire — a silent outage of the last breaker. This distinguishes
+# "probe could not run" (transient → caller degrades) from "workflow is not in the
+# Running set" (hard → caller pages).
+# Echoes: "running" | "not_running" | "unreadable".
+account_ks_liveness() {
+  [ -n "$ADMIN_POD" ] || { printf 'unreadable'; return; }
+  local out rc wfid="t-$TENANT/account/killswitch"
+  out=$($KUBECTL exec -n "$TEMPORAL_NS" "$ADMIN_POD" -- \
+    temporal workflow list --namespace "$NS" \
+    --query 'WorkflowType="AccountKillSwitchWorkflow" AND ExecutionStatus="Running"' 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then printf 'unreadable'; return; fi
+  if printf '%s' "$out" | grep -qF "$wfid"; then printf 'running'; else printf 'not_running'; fi
+}
+
+# ---- pre-unset hard-gate (C6) ----------------------------------------------
+# Verifies the account cap is a healthy SOLE loss breaker before the operator
+# unsets copytrade-v1's daily_loss_threshold. Prints per-check PASS/FAIL; returns
+# 0 (GO) only when EVERY check passes, else 1 (NO-GO). Read-only, posts nothing.
+preunset_gate() {
+  local fails=0
+  echo "== prod_real pre-unset hard-gate (single-account-loss-rule C6) =="
+  echo "   Purpose: confirm the account cap can safely be the SOLE daily-loss breaker"
+  echo "   before unsetting copytrade-v1 daily_loss_threshold. GO only if all PASS."
+  echo
+
+  # (1) account cap armed in the DB the kill switch reads (tenant_config, orchestrator DB).
+  local armed
+  armed=$(psql_q orchestrator <<SQL
+SELECT CASE WHEN COALESCE(account_daily_loss_pct,0) > 0
+             OR COALESCE(account_daily_loss_threshold,0) > 0
+            THEN 'armed' ELSE 'unarmed' END
+FROM tenant_config WHERE tenant_id = '$TENANT';
+SQL
+) || armed=""
+  if [ "$armed" = "armed" ]; then
+    local pctline
+    pctline=$(psql_q orchestrator <<SQL
+SELECT 'pct=' || COALESCE(account_daily_loss_pct::text,'null')
+     || ' abs=' || COALESCE(account_daily_loss_threshold::text,'null')
+FROM tenant_config WHERE tenant_id = '$TENANT';
+SQL
+) || pctline="?"
+    echo "[PASS] (1) account cap ARMED in tenant_config ($pctline)"
+  elif [ "$armed" = "unarmed" ]; then
+    echo "[FAIL] (1) account cap UNARMED in tenant_config — the sole breaker would be OFF; DO NOT unset"
+    fails=$((fails+1))
+  else
+    echo "[FAIL] (1) could not read tenant_config.account_daily_loss_* (orchestrator DB unreadable)"
+    fails=$((fails+1))
+  fi
+
+  # (2) no recent AccountKillSwitchCapInactive — the cap check itself has been running.
+  local capinactive
+  capinactive=$(count_q orchestrator <<SQL
+SELECT count(*) FROM audit_log
+WHERE tenant_id = '$TENANT'
+  AND kind = 'AccountKillSwitchCapInactive'
+  AND occurred_at > now() - interval '1 day';
+SQL
+)
+  if [ $? -ne 0 ] || [ -z "$capinactive" ]; then
+    echo "[FAIL] (2) could not read AccountKillSwitchCapInactive events (orchestrator audit_log unreadable)"
+    fails=$((fails+1))
+  elif [ "$capinactive" -eq 0 ]; then
+    echo "[PASS] (2) no AccountKillSwitchCapInactive in the last 24h (cap check is live)"
+  else
+    echo "[FAIL] (2) $capinactive AccountKillSwitchCapInactive event(s) in 24h — the cap check has been INERT; do not rely on it yet"
+    fails=$((fails+1))
+  fi
+
+  # (3) account-KS workflow Running + queryable + NOT tripped.
+  local liveness state
+  liveness=$(account_ks_liveness)
+  if [ "$liveness" = "running" ]; then
+    state=$(tq "t-$TENANT/account/killswitch" account_killswitch_state)
+    if [ -z "$state" ]; then
+      echo "[FAIL] (3) account-KS workflow Running but state query returned nothing (not queryable)"
+      fails=$((fails+1))
+    elif printf '%s' "$state" | grep -q '"tripped":true'; then
+      echo "[FAIL] (3) account-KS workflow is TRIPPED — resolve/reset before unsetting the per-strategy breaker"
+      fails=$((fails+1))
+    else
+      echo "[PASS] (3) account-KS workflow Running, queryable, not tripped"
+    fi
+  elif [ "$liveness" = "not_running" ]; then
+    echo "[FAIL] (3) account-KS workflow NOT RUNNING (t-$TENANT/account/killswitch) — sole breaker is DOWN"
+    fails=$((fails+1))
+  else
+    echo "[FAIL] (3) could not probe account-KS liveness (temporal admintools unreadable)"
+    fails=$((fails+1))
+  fi
+
+  # (4) prod_real page webhook resolvable — a trip CAN page (delivery path wired).
+  local wh
+  wh=$($KUBECTL get secret discord-alert-credentials -n "$NS" \
+         -o jsonpath='{.data.ALERT_DISCORD_WEBHOOK_URLS}' 2>/dev/null | base64 -d 2>/dev/null \
+       | tr ';' '\n' | tr -d '\r' | sed -n 's/^[[:space:]]*prod_real=//p' | head -1)
+  if [ -n "$wh" ]; then
+    echo "[PASS] (4) prod_real Discord webhook resolves (page path wired; secret NOT printed)"
+  else
+    echo "[FAIL] (4) prod_real Discord webhook did NOT resolve — a cap trip could not page"
+    fails=$((fails+1))
+  fi
+
+  echo
+  if [ "$fails" -eq 0 ]; then
+    echo "== GO: all pre-unset checks PASS. Recommend a live test-trip (operator) to confirm end-to-end paging before unsetting. =="
+    return 0
+  fi
+  echo "== NO-GO: $fails check(s) failed. Do NOT unset copytrade-v1 daily_loss_threshold. =="
+  return 1
+}
+
+if [ "$PREUNSET_GATE" = "1" ]; then
+  preunset_gate
+  exit $?
+fi
+
 anomalies=()
 degraded=0   # set when a check could not run (unreadable) — suppresses a false ALL CLEAR
 
@@ -101,6 +243,17 @@ else
     check_ks "t-$TENANT/s-$strat/killswitch" killswitch_state
   done
   check_ks "t-$TENANT/account/killswitch" account_killswitch_state
+
+  # (d.1) account-KS LIVENESS (C1) — the account cap is the SOLE daily-loss breaker
+  # (single-account-loss-rule epic). check_ks above only reads the trip STATE and
+  # fails SOFT to degraded when unreadable; a TERMINATED/CLOSED/absent account-KS
+  # workflow is a silent outage of the last breaker (copytrade entries fail-closed,
+  # no trip can fire), so treat "not Running" as a HARD anomaly that pages. A probe
+  # that could not RUN only degrades (no false page on a transient temporal blip).
+  case "$(account_ks_liveness)" in
+    not_running) anomalies+=("ACCOUNT KILL SWITCH WORKFLOW NOT RUNNING (t-$TENANT/account/killswitch) — the sole daily-loss breaker is DOWN; copytrade entries fail-closed, no loss trip can fire") ;;
+    unreadable)  log "WARN: account-KS liveness probe could not run — cannot confirm the sole loss breaker is alive"; degraded=1 ;;
+  esac
 fi
 
 # ---- (e) blocked / stuck live orders (403 40310000 = account re-block) -------
