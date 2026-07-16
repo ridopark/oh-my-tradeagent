@@ -696,8 +696,8 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
       }
       BigDecimal realized = accountPnl.computeTenantRealizedPnl(input.getTenantId(), tradingDay);
       AccountOpenBook book = accountPnl.accountOpenBook(input.getTenantId());
-      // Empty book => no quote loop, no fail-closed. Breaching total => doTrip.
-      BigDecimal totalPnl = realized.add(BigDecimal.ZERO);
+      // Empty book => no quote loop, no fail-closed, openMtm == 0 => total is just realized.
+      BigDecimal totalPnl = realized;
       if (totalPnl.compareTo(threshold.negate()) <= 0) {
         legacyDoTrip("auto:account_daily_loss", "auto:account_daily_loss", totalPnl);
       }
