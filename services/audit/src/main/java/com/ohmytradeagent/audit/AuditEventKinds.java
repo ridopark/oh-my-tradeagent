@@ -314,6 +314,14 @@ public final class AuditEventKinds {
           // Observability-only — in ALL_KINDS only, not in any *_KINDS lifecycle group.
           "AccountKillSwitchCapInactive",
           "AccountKillSwitchCapReArmed",
+          // Phase 2b (PLAN-2026-07-15, risk C1): emitted by AccountKillSwitchWorkflowImpl on the
+          // bounded PERIODIC re-page while the account cap stays tripped AND market-open AND
+          // holding
+          // open positions — so an alert-only (no-auto-flatten) trip keeps reminding the operator
+          // to
+          // flatten. Pages via AccountKillSwitchCapAlerter. Observability-only — in ALL_KINDS only,
+          // not in any *_KINDS lifecycle group.
+          "AccountKillSwitchStillHolding",
           // Phase 2 (PLAN-2026-06-30 kill-switch realized re-source): emitted by BOTH
           // KillSwitchWorkflowImpl and AccountKillSwitchWorkflowImpl (guardrail G1) when the
           // broker-routed exec realized read has been unavailable for N consecutive heartbeats —

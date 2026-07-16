@@ -68,6 +68,41 @@ class AccountKillSwitchCapAlerterTest {
   }
 
   @Test
+  void stillHoldingDispatchesRedEmbedWithCountMtmAndMinutes() {
+    // Phase 2b (risk C1): the periodic still-tripped-and-holding re-page. RED embed carrying the
+    // open-position count, current MTM, and minutes-since-trip, with the actionable body line.
+    WebhookClient webhook = mock(WebhookClient.class);
+    AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("reason", "auto:account_daily_loss");
+    subject.put("trading_day", "2026-06-29");
+    subject.put("scope", "account");
+    subject.put("open_positions", 3);
+    subject.put("open_mtm", "-2500");
+    subject.put("minutes_since_trip", 45L);
+    AuditEvent event =
+        event("AccountKillSwitchStillHolding", "t-prod_real/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(15548997); // red
+    assertThat(embed.title()).contains("STILL tripped");
+    assertThat(embed.description())
+        .contains(
+            "3 open positions",
+            "MTM -2500",
+            "45 min since trip",
+            "flatten manually in Alpaca",
+            "trip-to-flatten",
+            "reset");
+    assertThat(field(embed, "open_positions")).isEqualTo("3");
+    assertThat(field(embed, "open_mtm")).isEqualTo("-2500");
+    assertThat(field(embed, "minutes_since_trip")).isEqualTo("45");
+  }
+
+  @Test
   void otherKindsDoNotDispatch() {
     WebhookClient webhook = mock(WebhookClient.class);
     AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);

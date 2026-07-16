@@ -81,6 +81,75 @@ class KillSwitchAlerterTest {
   }
 
   @Test
+  void killSwitchTrippedFlattenManual_pagesExplicitNoAutoFlattenLineWithCountAndMtm() {
+    // Phase 2 (PLAN-2026-07-15) + C3: an AUTO loss-cap trip that no longer auto-flattens stamps
+    // flatten=manual plus the open-position count + MTM. The embed must carry the explicit
+    // actionable body line AND surface the count/MTM so the operator can gauge exposure.
+    WebhookClient webhook = mock(WebhookClient.class);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("reason", "auto:account_daily_loss");
+    subject.put("actor", "auto:account_daily_loss");
+    subject.put("trading_day", "2026-06-14");
+    subject.put("scope", "account");
+    subject.put("flatten", "manual");
+    subject.put("open_positions", 3);
+    subject.put("open_mtm", "-2500");
+    AuditEvent event = event("KillSwitchTripped", "t-dev/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.description())
+        .contains(
+            "NOT auto-flattened",
+            "close them manually in Alpaca",
+            "trip the kill switch to flatten",
+            "Open positions: 3",
+            "Open MTM: -2500");
+  }
+
+  @Test
+  void killSwitchTrippedFlattenManual_withoutCountOrMtm_stillPagesTheLine() {
+    // The count/MTM keys may be absent (e.g. the fail-closed mtm-unavailable trip carries no MTM):
+    // the actionable line still renders; the missing keys just add no extra rows.
+    WebhookClient webhook = mock(WebhookClient.class);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("reason", "auto:account_mtm_unavailable");
+    subject.put("flatten", "manual");
+    subject.put("open_positions", 2);
+    AuditEvent event = event("KillSwitchTripped", "t-dev/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.description()).contains("NOT auto-flattened", "Open positions: 2");
+    assertThat(embed.description()).doesNotContain("Open MTM:");
+  }
+
+  @Test
+  void killSwitchTrippedWithoutFlattenKey_hasNoManualFlattenLine() {
+    // A legacy trip (or any trip recorded before the no-auto-flatten policy) carries no `flatten`
+    // key => the embed must NOT add the manual-flatten line (description stays null).
+    WebhookClient webhook = mock(WebhookClient.class);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("reason", "auto:daily_loss");
+    subject.put("actor", "auto:daily_loss");
+    subject.put("trading_day", "2026-06-14");
+    AuditEvent event = event("KillSwitchTripped", "t-dev/s-copytrade-v1/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.description()).isNull();
+  }
+
+  @Test
   void nonKillSwitchKindDoesNotDispatch() {
     WebhookClient webhook = mock(WebhookClient.class);
     KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);

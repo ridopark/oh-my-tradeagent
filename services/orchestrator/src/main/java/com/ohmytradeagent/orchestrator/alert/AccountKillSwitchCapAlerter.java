@@ -39,6 +39,13 @@ public class AccountKillSwitchCapAlerter {
   static final String KIND_CAP_INACTIVE = "AccountKillSwitchCapInactive";
   static final String KIND_CAP_REARMED = "AccountKillSwitchCapReArmed";
 
+  /**
+   * Phase 2b (PLAN-2026-07-15, risk C1): the bounded periodic re-page while the account cap stays
+   * tripped AND holding open positions (alert-only, no-auto-flatten posture). RED — this is an
+   * unresolved real-money exposure the operator must act on.
+   */
+  static final String KIND_STILL_HOLDING = "AccountKillSwitchStillHolding";
+
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
 
@@ -64,7 +71,9 @@ public class AccountKillSwitchCapAlerter {
         return;
       }
       String kind = event.getKind();
-      if (!KIND_CAP_INACTIVE.equals(kind) && !KIND_CAP_REARMED.equals(kind)) {
+      if (!KIND_CAP_INACTIVE.equals(kind)
+          && !KIND_CAP_REARMED.equals(kind)
+          && !KIND_STILL_HOLDING.equals(kind)) {
         return;
       }
       String url = webhookResolver.resolve(event.getTenantId(), event.getStrategyId());
@@ -75,8 +84,11 @@ public class AccountKillSwitchCapAlerter {
   }
 
   private WebhookEmbed buildEmbed(AuditEvent event, String kind) {
-    boolean inactive = KIND_CAP_INACTIVE.equals(kind);
     Map<String, Object> subject = event.getSubject();
+    if (KIND_STILL_HOLDING.equals(kind)) {
+      return buildStillHoldingEmbed(event, subject);
+    }
+    boolean inactive = KIND_CAP_INACTIVE.equals(kind);
 
     String title =
         inactive
@@ -100,6 +112,38 @@ public class AccountKillSwitchCapAlerter {
 
     String footer = "workflow_id: " + orNa(event.getWorkflowId());
     return new WebhookEmbed(title, null, color, footer, fields);
+  }
+
+  /**
+   * Phase 2b (risk C1): the still-tripped-and-holding re-page (RED). Carries the open-position
+   * count, current MTM (when priceable), and minutes-since-trip so the operator can gauge exposure,
+   * with an actionable body line naming the three resolutions (flatten in Alpaca / trip-to-flatten
+   * / reset).
+   */
+  private WebhookEmbed buildStillHoldingEmbed(AuditEvent event, Map<String, Object> subject) {
+    String openPositions = subjectStr(subject, "open_positions");
+    String openMtm = subjectStr(subject, "open_mtm");
+    String minutes = subjectStr(subject, "minutes_since_trip");
+
+    String title = ":rotating_light: Account cap STILL tripped — open positions NOT flattened";
+    String description =
+        "Account cap STILL tripped — "
+            + openPositions
+            + " open positions, MTM "
+            + openMtm
+            + ", "
+            + minutes
+            + " min since trip — flatten manually in Alpaca (or trip-to-flatten), or reset.";
+
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
+    fields.add(new WebhookEmbed.Field("trading_day", subjectStr(subject, "trading_day"), false));
+    fields.add(new WebhookEmbed.Field("open_positions", openPositions, false));
+    fields.add(new WebhookEmbed.Field("open_mtm", openMtm, false));
+    fields.add(new WebhookEmbed.Field("minutes_since_trip", minutes, false));
+
+    String footer = "workflow_id: " + orNa(event.getWorkflowId());
+    return new WebhookEmbed(title, description, AlertColors.RED, footer, fields);
   }
 
   private static String subjectStr(Map<String, Object> subject, String key) {

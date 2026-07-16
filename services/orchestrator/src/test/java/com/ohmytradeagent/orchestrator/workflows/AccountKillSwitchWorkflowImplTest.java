@@ -66,9 +66,12 @@ class AccountKillSwitchWorkflowImplTest {
   private AccountKillSwitchCascadeActivities cascade;
   private GetOptionQuoteActivity optionQuote;
   private AccountSnapshotActivity accountSnapshot;
+  private int originalStillHoldingRepageTicks;
 
   @BeforeEach
   void setUp() {
+    // Phase 2b: capture the production re-page cadence so tests that shrink it can restore it.
+    originalStillHoldingRepageTicks = AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS;
     env = TestWorkflowEnvironment.newInstance();
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(AccountKillSwitchWorkflowImpl.class);
@@ -120,16 +123,19 @@ class AccountKillSwitchWorkflowImplTest {
 
   @AfterEach
   void tearDown() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = originalStillHoldingRepageTicks;
     env.close();
   }
 
   // ---------- THE DRILL: two strategies, realized + MTM crossing the cap ----------
 
   // A tenant with TWO strategies whose realized + open-MTM loss crosses
-  // account_daily_loss_threshold trips the account kill switch EXACTLY once and cascades a
-  // riskBreach/MARKET flatten to running PositionWorkflows in BOTH strategies.
+  // account_daily_loss_threshold trips the account kill switch EXACTLY once, HALTS + pages, and —
+  // per the Phase 2 (PLAN-2026-07-15) no-auto-flatten policy — does NOT cascade a MARKET flatten
+  // (fresh execution == v>=1). The trip subject carries flatten=manual so the operator is paged to
+  // flatten by hand.
   @Test
-  void heartbeat_twoStrategies_realizedPlusMtmCrossesThreshold_tripsOnceAndCascadesAccountWide() {
+  void heartbeat_twoStrategies_realizedPlusMtmCrossesThreshold_tripsOnceNoAutoFlatten() {
     // Phase 2 (C4): a tenant with TWO strategies on DIFFERENT broker_targets. The account path
     // routes each per-strategy realized read to its OWN broker queue and sums them:
     //   s1 (alpaca-paper) realized -1200 + s2 (alpaca-live) realized -1800 = -3000.
@@ -171,14 +177,17 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
     assertThat(s.getActor()).isEqualTo("auto:account_daily_loss");
 
-    // Account-scoped cascade invoked at least once (the heartbeat keeps ticking but `tripped`
-    // short-circuits subsequent ticks, so the trip fires exactly once).
-    verify(cascade, timeout(2000).atLeastOnce())
-        .cascadeAccountRiskBreach(
-            eq("dev"), anyString(), eq("auto:account_daily_loss"), eq("auto:account_daily_loss"));
+    // Phase 2 (PLAN-2026-07-15): NO auto-flatten — the account-scoped cascade is never dispatched.
+    verify(cascade, never())
+        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
 
     AuditEvent tripped = captureKind("KillSwitchTripped");
-    assertThat(tripped.getSubject()).containsEntry("scope", "account");
+    assertThat(tripped.getSubject())
+        .containsEntry("scope", "account")
+        .containsEntry("flatten", "manual")
+        // C3: the page carries the open-position count + current MTM (two priced positions here).
+        .containsEntry("open_positions", 2)
+        .containsKey("open_mtm");
   }
 
   // Below threshold: total loss does not cross the cap -> no trip.
@@ -249,15 +258,24 @@ class AccountKillSwitchWorkflowImplTest {
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isTrue();
     assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
-    verify(cascade, timeout(2000).atLeastOnce())
-        .cascadeAccountRiskBreach(
-            eq("dev"), anyString(), eq("auto:account_mtm_unavailable"), anyString());
+    // Phase 2 (PLAN-2026-07-15): a fail-closed AUTO trip also halts + pages but no longer
+    // auto-flattens.
+    verify(cascade, never())
+        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
+    // flatten=manual + the listed open-position count; NO open_mtm (book is unpriceable here).
+    AuditEvent tripped = captureKind("KillSwitchTripped");
+    assertThat(tripped.getSubject())
+        .containsEntry("flatten", "manual")
+        .containsEntry("open_positions", 2)
+        .doesNotContainKey("open_mtm");
   }
 
   // ---------- dual-control trip/reset (mirror per-strategy) ----------
 
   @Test
   void tripUpdate_setsStateAndAuditsAndCascades() {
+    // Phase 2 (PLAN-2026-07-15): a MANUAL operator trip (non-auto: reason) STILL flattens — the
+    // deliberate one-click flatten path — so the cascade is dispatched and NO flatten=manual key.
     // Avoid an auto-trip racing the manual trip: market closed.
     when(calendar.isMarketOpen()).thenReturn(false);
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-trip");
@@ -275,6 +293,9 @@ class AccountKillSwitchWorkflowImplTest {
             eq("t-dev/account/killswitch-trip"),
             eq("manual:operator_initiated"),
             eq("operator:ridopark"));
+    // Manual trip flattens => NO no-auto-flatten marker on the subject.
+    AuditEvent tripped = captureKind("KillSwitchTripped");
+    assertThat(tripped.getSubject()).doesNotContainKey("flatten");
   }
 
   @Test
@@ -288,6 +309,7 @@ class AccountKillSwitchWorkflowImplTest {
         .isInstanceOf(WorkflowUpdateException.class)
         .hasStackTraceContaining("already_tripped");
 
+    // Manual trip cascade fired exactly once (first trip); the second is rejected by the validator.
     verify(cascade, timeout(2000).times(1))
         .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
   }
@@ -724,7 +746,157 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(countKind("KillSwitchRealizedReadUnavailable")).isEqualTo(1L);
   }
 
+  // ---------- Phase 2b (risk C1): periodic still-holding re-page ----------
+
+  // Tripped + market-open + holding across the throttle cadence: re-page fires on the boundary
+  // (carrying count/MTM/minutes-since-trip), NOT every tick.
+  @Test
+  void trippedHoldingMarketOpen_repagesOnThrottleBoundary_notEveryTick() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000")); // crosses the 5000 absolute cap -> auto trip
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Trip on tick 1 (t~=60s); first re-page after 3 more tripped market-open ticks (t~=240s).
+    env.sleep(Duration.ofSeconds(260));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+    assertThat(stub.killswitchState().getReason()).isEqualTo("auto:account_daily_loss");
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    // Between boundaries (next at ~420s) NO new page — proves it does not fire every tick.
+    env.sleep(Duration.ofSeconds(120)); // total ~380s
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    // Past the next boundary -> second re-page.
+    env.sleep(Duration.ofSeconds(80)); // total ~460s
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(2L);
+
+    AuditEvent repage = captureKind("AccountKillSwitchStillHolding");
+    assertThat(repage.getSubject())
+        .containsEntry("scope", "account")
+        .containsEntry("open_positions", 1)
+        .containsKey("open_mtm")
+        .containsKey("minutes_since_trip");
+  }
+
+  // Operator flattens (book -> empty): re-paging STOPS (holding -> 0).
+  @Test
+  void tripped_holdingDropsToZero_stopsRepaging() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-flat");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(260));
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    // Operator manually flattened -> the book is now empty.
+    Mockito.doReturn(new AccountOpenBook(List.of(), 0, 0))
+        .when(accountPnl)
+        .accountOpenBook(anyString());
+    env.sleep(Duration.ofSeconds(300));
+
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+  }
+
+  // Market closes after a trip: re-paging STOPS (no overnight spam).
+  @Test
+  void tripped_marketCloses_stopsRepaging() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-closed");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(260));
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    // Market closes -> the re-page cadence resets and no further pages fire.
+    Mockito.doReturn(false).when(calendar).isMarketOpen();
+    env.sleep(Duration.ofSeconds(300));
+
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+  }
+
+  // Reset (untrip) STOPS re-paging: the loss is resolved and the switch does not re-trip / re-page.
+  @Test
+  void tripped_thenReset_stopsRepaging() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-reset");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(260));
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    // Operator resets; loss is resolved (flattened) so it neither re-trips nor re-pages.
+    stub.reset(resetRequest("alice"));
+    Mockito.doReturn(BigDecimal.ZERO)
+        .when(execPnl)
+        .computeRealizedPnl(anyString(), anyString(), any());
+    Mockito.doReturn(new AccountOpenBook(List.of(), 0, 0))
+        .when(accountPnl)
+        .accountOpenBook(anyString());
+    env.sleep(Duration.ofSeconds(400));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+  }
+
+  // Quotes go dark before a re-page: the page still fires with the count + minutes, but OMITS the
+  // (now unreliable) MTM — degrade quietly.
+  @Test
+  void tripped_quoteUnavailableDuringRepage_pagesCountWithoutMtm() {
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-noquote");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(70)); // trip on tick 1
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    // Quotes go dark before the first re-page boundary.
+    Mockito.doReturn(unavailableQuote("NVDA  250516C00140000"))
+        .when(optionQuote)
+        .getOptionQuote(any());
+    env.sleep(Duration.ofSeconds(200)); // past the ~t=240s boundary
+
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+    AuditEvent repage = captureKind("AccountKillSwitchStillHolding");
+    assertThat(repage.getSubject())
+        .containsEntry("open_positions", 1)
+        .containsKey("minutes_since_trip")
+        .doesNotContainKey("open_mtm");
+  }
+
   // ---------- helpers ----------
+
+  private static AccountOpenBook holdingBook() {
+    return new AccountOpenBook(
+        List.of(new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+        1,
+        0);
+  }
 
   private static AccountSnapshotResult snapshot(BigDecimal equity) {
     AccountSnapshotResult r = new AccountSnapshotResult();

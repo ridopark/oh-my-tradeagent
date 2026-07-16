@@ -100,46 +100,60 @@ halts entries is visible.
 
 ---
 
-## Phase 2 — loss-cap trips halt + page, NO auto-flatten (orchestrator; risk-manager sign-off)
+## Phase 2 — account-cap AUTO trip halts + pages, no auto-flatten (orchestrator; risk-manager signed off)
 
-**Goal:** a daily-loss-cap trip halts new entries and pages loudly, but does NOT auto-flatten — the
-operator flattens manually. Applies to BOTH kill switches for a consistent policy.
+**Goal:** an AUTO account-cap breach halts new entries + pages loudly but does NOT auto-flatten; the
+operator flattens manually. **Account switch ONLY** — the per-strategy switch is left untouched (its
+`riskBreach` cascade also aborts resting BTOs; suppressing it regressed that, and it's retired in
+Phase 3 anyway). A MANUAL operator trip STILL flattens — that is the operator's deliberate
+one-click flatten path (no new UI), so no flatten button is built (operator decision (b), 2026-07-15).
 
+**Ships as two PRs that MUST deploy together** (no-flatten without the re-page control is unsafe —
+risk C1):
+
+### Phase 2a — no auto-flatten on AUTO trip + actionable page
 **Changes** (anchors):
-- `services/orchestrator/.../workflows/AccountKillSwitchWorkflowImpl.java:838-839` — gate the
-  `Async.function(cascade::cascadeAccountRiskBreach, …)` behind
-  `Workflow.getVersion("account-trip-no-auto-flatten-v1", DEFAULT_VERSION, 1)`: at `DEFAULT_VERSION`
-  keep the cascade (byte-identical replay for in-flight histories); at `v>=1` SKIP it (no flatten).
-  This gates a workflow command → version gate REQUIRED.
-- `services/orchestrator/.../workflows/KillSwitchWorkflowImpl.java:478` — same treatment for the
-  per-strategy `cascade::cascadeRiskBreach` behind
-  `Workflow.getVersion("strategy-trip-no-auto-flatten-v1", DEFAULT_VERSION, 1)`. (Keeps parity while
-  the per-strategy field still exists in the interim; consistent once it's removed.)
-- **Alert copy — make the page actionable.** The trip still emits `KillSwitchTripped` →
-  `KillSwitchAlerter` already pages. Add a `flatten="manual"` (or `auto_flatten=false`) key to the
-  `doTrip` audit subject in BOTH workflows, and surface it in `KillSwitchAlerter`'s embed
-  (`KillSwitchAlerter.java:88-99`) as an explicit line: **"Open positions NOT auto-flattened — flatten
-  manually if desired."** No new audit KIND (still `KillSwitchTripped`), so no `AuditEventKinds`
-  registration needed.
+- `AccountKillSwitchWorkflowImpl.doTrip` (cascade at `:838-839`) — gate behind
+  `Workflow.getVersion("account-trip-no-auto-flatten-v1", DEFAULT_VERSION, 1)`. At `v>=1`, skip
+  `cascadeAccountRiskBreach` + set subject `flatten=manual` ONLY when `reason.startsWith("auto:")`
+  (i.e. `auto:account_daily_loss`, `auto:account_mtm_unavailable`); for a MANUAL `trip()` (non-`auto:`
+  reason) KEEP the cascade (flatten). At `DEFAULT_VERSION`, always cascade (byte-identical replay).
+- **Do NOT touch `KillSwitchWorkflowImpl` (per-strategy).** Leave its cascade as on main.
+- Actionable page (C3): thread the open-position COUNT + MTM (already computed in the heartbeat before
+  the auto trip) into the `flatten=manual` subject (subject payload → replay-ignored, no gate), and in
+  `KillSwitchAlerter` render: **"Open positions were NOT auto-flattened — close them manually in
+  Alpaca, or trip the kill switch to flatten."** + count + MTM. No new audit KIND.
 
-**Decision folded in (operator, 2026-07-15):** flatten is operator-only. Consequence: the cap
-becomes an entry-halt + alert, NOT a hard flatten-stop — open drawdown past −10% is bounded only by
-per-position exits + operator response to the page, not by the cap. This is an accepted softening of
-the loss cap; **risk-manager sign-off required before merge.**
+**Tests:** auto trip → NO cascade + `flatten=manual`; MANUAL trip → STILL cascades; legacy-replay
+sentinel (DEFAULT_VERSION still cascades); `KillSwitchAlerterTest` for the manual-flatten line + count/MTM.
 
-**Tests (TDD):**
-- `AccountKillSwitchWorkflowImplTest`: new execution, trip (`auto:account_daily_loss`) → NO
-  `cascadeAccountRiskBreach` dispatched; `KillSwitchTripped` still emitted with `flatten=manual`.
-- `AccountKillSwitchWorkflowImplLegacyReplayTest` / `KillSwitchWorkflowImplTest` (flaky — **re-run,
-  don't fix**): pinned pre-gate history still dispatches the cascade (byte-identical at
-  `DEFAULT_VERSION`).
-- `KillSwitchAlerterTest`: embed for a `flatten=manual` trip contains the manual-flatten line.
+### Phase 2b — re-page while tripped + holding (risk C1, BLOCKING)
+The heartbeat short-circuits once tripped (`AccountKillSwitchWorkflowImpl:449`) so today the page
+fires ONCE. For an alert-only posture that is not a control. Add a bounded periodic re-page while
+`tripped AND market-open AND open-positions > 0`, showing count + MTM + minutes-since-trip
+(mirror the existing `INACTIVE_REPAGE_TICKS` bookkeeping in `run()`). New commands (book read while
+tripped) → version-gate (`account-trip-repage-while-holding-v1`); a new audit KIND (e.g.
+`AccountKillSwitchStillHolding`) needs `AuditEventKinds.ALL_KINDS` registration (KindRegistryGuard).
+Stop re-paging on reset / market-close / holding→0.
 
-**Verify / success criteria:**
+**Verify / success criteria (2a+2b):**
 `mvn -pl services/orchestrator -am spotless:apply && mvn -pl services/orchestrator test`.
-Behavioral: a fresh account-cap trip emits `KillSwitchTripped` + a red Discord page whose body says
-positions were not auto-flattened, and NO `riskBreach` signal reaches any `PositionWorkflow`;
-in-flight replay of a pre-change trip still flattens.
+Behavioral: a fresh AUTO account-cap trip emits `KillSwitchTripped` + a red page saying positions were
+NOT flattened (with count + MTM), NO `riskBreach` reaches any `PositionWorkflow`, and while it stays
+tripped-and-holding a bounded re-page keeps firing; a MANUAL trip still flattens; in-flight replay of
+a pre-change trip still flattens.
+
+**Risk-manager: GO-WITH-CONDITIONS** (2026-07-15). C1 (re-page) = Phase 2b above (blocking). C2:
+live-channel delivery test + mobile/push escalation before enabling. C3: page carries count + MTM
+(2a). C4: manual-trip-flattens IS the one-click flatten path (satisfied without new UI). C5: document
+the accepted no-guaranteed-liquidation max-loss posture (long legs bounded at premium; short/spread
+legs are the tail). C6: surface open exposure/MTM on the kill-switch RESET path so resume-entries
+isn't done blind.
+
+**Accepted softening:** the 10% cap becomes an entry-halt + loud page, NOT a hard flatten-stop. Open
+drawdown past −10% is bounded only by per-position exits + operator response to the page (positions
+close manually in Alpaca, or the operator trips the switch to flatten). Overnight risk persists
+(`eod_force_flatten=false`).
 
 ---
 
