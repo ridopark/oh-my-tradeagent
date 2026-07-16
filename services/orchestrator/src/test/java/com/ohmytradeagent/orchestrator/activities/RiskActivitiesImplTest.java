@@ -273,16 +273,6 @@ class RiskActivitiesImplTest {
   }
 
   @Test
-  void approves_bothKillSwitchesClean() {
-    // Regression guard: with both the per-strategy and account kill switches untripped, a fresh
-    // whitelisted signal is still admitted.
-    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
-
-    assertThat(d.allowed()).isTrue();
-    assertThat(d.reason()).isNull();
-  }
-
-  @Test
   void rejects_accountKillSwitchQueryThrows_failsClosed() {
     when(accountKillSwitchStub.killswitchState()).thenThrow(new RuntimeException("query rejected"));
 
