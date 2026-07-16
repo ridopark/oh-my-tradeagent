@@ -29,6 +29,13 @@ const TENANT_WRITE_ENABLED = process.env.TENANT_CONFIG_WRITE_ENABLED === "true";
 // instead of the generic boolean select, so it's excluded from the field list below. Treat a missing
 // value as enabled (older configs predate the flag).
 const ENABLED_FIELD = "enabled";
+
+// Deprecated per single-account-loss-rule (2026-07-15): the account cap (account_daily_loss_pct) is
+// the sole daily-loss breaker; the dead per-strategy field is hidden from /config (still nullable in
+// the schema). It must be FILTERED OUT explicitly — classOf() defaults unlisted fields to SAFE,
+// which would otherwise render it as an editable input.
+const DEPRECATED_HIDDEN_FIELDS = new Set(["daily_loss_threshold"]);
+
 function resolveEnabled(config: Record<string, unknown>): boolean {
   // Absent OR null (JSONB null / older configs that predate the flag) -> enabled, matching the
   // backend's "absent/null treated as true" semantics; only an explicit false renders off.
@@ -396,6 +403,9 @@ export default async function ConfigPage({
     // (arrays/objects) also pass through untouched.
     const nextConfig: Record<string, unknown> = { ...item.config };
     for (const [field, value] of Object.entries(item.config)) {
+      // Deprecated + hidden (no input rendered): never overlay from the form. The field is now SAFE
+      // server-side, so without this a crafted POST could change it — pass through the stored value.
+      if (DEPRECATED_HIDDEN_FIELDS.has(field)) continue;
       const klass = classOf(field, current.field_classes);
       const kind = scalarKind(value);
       // IDENTITY/DANGEROUS or complex values are never editable — pass through untouched.
@@ -532,7 +542,10 @@ export default async function ConfigPage({
               .sort((a, b) => a.strategy_id.localeCompare(b.strategy_id))
               .map((item) => {
               const fields = Object.entries(item.config)
-                .filter(([field]) => field !== ENABLED_FIELD)
+                .filter(
+                  ([field]) =>
+                    field !== ENABLED_FIELD && !DEPRECATED_HIDDEN_FIELDS.has(field),
+                )
                 .sort(([a], [b]) => a.localeCompare(b));
               return (
                 <section key={item.strategy_id}>

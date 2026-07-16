@@ -40,8 +40,9 @@ import org.mockito.ArgumentCaptor;
  * affected-row count. {@link AuditActivities} is mocked so the hash-chain path is not exercised.
  *
  * <p>The most important cases are the kill-switch disarm-vector regression guards (the risk
- * consult's requirement): a runtime write may NEVER change daily_loss_threshold or
- * notional_cap_pct_of_capital_base — null AND widened are both rejected.
+ * consult's requirement): a runtime write may NEVER change notional_cap_pct_of_capital_base — null
+ * AND widened are both rejected. (single-account-loss-rule Phase 4a: the per-strategy
+ * daily_loss_threshold is a dead field and is no longer DANGEROUS — a write may change/clear it.)
  */
 class StrategyConfigWriterTest {
 
@@ -190,27 +191,34 @@ class StrategyConfigWriterTest {
   }
 
   @Test
-  void rejectsDailyLossThresholdWidened_theDisarmVector() {
+  void allowsDailyLossThresholdChange_noLongerDangerous() {
+    // single-account-loss-rule Phase 4a: daily_loss_threshold is a dead field (the account cap is
+    // the sole daily-loss breaker), so it is NO LONGER DANGEROUS — a runtime write may change it
+    // (widen, lower, or clear). The account-cap-armed live invariant (Phase 3b) still passes, so
+    // the write succeeds. Previously (pre-4a) any change to this field was rejected as a disarm
+    // vector; that guard is intentionally gone.
     StrategyConfig stored = liveSafeStored(); // daily_loss_threshold = 500
     StrategyConfig next = copy(stored);
-    next.setDailyLossThreshold(new BigDecimal("5000")); // widening the loss budget = disarm
-    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
-        .isInstanceOf(DangerousFieldChangeRejected.class)
-        .hasMessageContaining("daily_loss_threshold");
-    verify(audit, never()).log(any());
+    next.setDailyLossThreshold(new BigDecimal("5000")); // widening would have been a disarm pre-4a
+
+    long newVersion = writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice");
+
+    assertThat(newVersion).isEqualTo(2L);
+    verify(audit).log(any());
   }
 
   @Test
-  void rejectsDailyLossThresholdLowered_stillDangerous() {
-    // Even LOWERING daily_loss_threshold is rejected: it is a DANGEROUS field (must equal stored),
-    // not an EXPOSURE field. KillSwitchWorkflowImpl.heartbeat() re-reads it, so any runtime change
-    // — tighter or looser — is deferred to P3 dual-control.
+  void allowsDailyLossThresholdCleared_noLongerDangerous() {
+    // The clear-to-null case: dropping the dead field is now permitted (this is the operator's
+    // eventual unset), because the armed account cap satisfies the live loss-breaker invariant.
     StrategyConfig stored = liveSafeStored();
     StrategyConfig next = copy(stored);
-    next.setDailyLossThreshold(new BigDecimal("100"));
-    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
-        .isInstanceOf(DangerousFieldChangeRejected.class)
-        .hasMessageContaining("daily_loss_threshold");
+    next.setDailyLossThreshold(null);
+
+    long newVersion = writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice");
+
+    assertThat(newVersion).isEqualTo(2L);
+    verify(audit).log(any());
   }
 
   @Test
