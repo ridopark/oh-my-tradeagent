@@ -1287,6 +1287,12 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
     untripped.setTripped(false);
     when(ksStub.killswitchState()).thenReturn(untripped);
     when(client.newWorkflowStub(eq(KillSwitchWorkflow.class), anyString())).thenReturn(ksStub);
+    // The entry gate now also consults the account-scope kill switch; stub it untripped so the
+    // notional-cap gate stays the binding constraint (not a fail-closed KILL_SWITCH_UNAVAILABLE).
+    AccountKillSwitchWorkflow accountKsStub = Mockito.mock(AccountKillSwitchWorkflow.class);
+    when(accountKsStub.killswitchState()).thenReturn(untripped);
+    when(client.newWorkflowStub(eq(AccountKillSwitchWorkflow.class), anyString()))
+        .thenReturn(accountKsStub);
     return new RiskActivitiesImpl(
         (tenant, strategy) -> 0L,
         clock,
