@@ -152,6 +152,29 @@ class TenantConfigSeedReconcilerIT {
     assertThat(versionOf("acme")).as("pre-existing version preserved").isEqualTo(7L);
   }
 
+  /**
+   * Kubernetes ConfigMap-volume internals — the {@code ..data} symlink target and the {@code
+   * ..<timestamp>} atomic-update snapshot dirs — are NOT tenants and must be skipped. Otherwise the
+   * seeder inserts a junk {@code tenant_config} row per snapshot dir, one accreting each boot that
+   * follows a ConfigMap update.
+   */
+  @Test
+  void skipsDotPrefixedConfigMapDirs(@org.junit.jupiter.api.io.TempDir Path tenantsDir)
+      throws Exception {
+    writeTenantFixture(tenantsDir, "acme", "0.40"); // the one real tenant
+    Files.createDirectories(tenantsDir.resolve("..data"));
+    Files.createDirectories(tenantsDir.resolve("..2026_07_16_22_10_16.1178692407"));
+
+    new TenantConfigSeedReconciler(tenantsDir.toString(), dsl)
+        .run(new DefaultApplicationArguments());
+
+    assertThat(rowCount())
+        .as("only the real tenant is seeded; dot-prefixed ConfigMap dirs are skipped")
+        .isEqualTo(1);
+    assertThat(new DbTenantRegistry(dsl).get("acme").getAccountDailyLossPct())
+        .isEqualByComparingTo(new BigDecimal("0.40"));
+  }
+
   private int rowCount() {
     return dsl.select(count()).from(table("tenant_config")).fetchOneInto(int.class);
   }
