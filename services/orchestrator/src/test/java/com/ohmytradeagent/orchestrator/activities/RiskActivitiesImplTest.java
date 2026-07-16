@@ -13,6 +13,7 @@ import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflow;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.client.WorkflowClient;
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -280,6 +281,93 @@ class RiskActivitiesImplTest {
 
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_UNAVAILABLE);
+  }
+
+  // --- C2: scope-tag + metric on KILL_SWITCH_UNAVAILABLE fail-closed ---
+
+  @Test
+  void accountKillSwitchQueryThrows_scopeTaggedDetail_andCounterIncremented() {
+    when(accountKillSwitchStub.killswitchState())
+        .thenThrow(new IllegalStateException("query rejected"));
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    RiskActivitiesImpl r = riskWithRegistry(registry);
+
+    RiskDecision d = r.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_UNAVAILABLE);
+    assertThat(d.detail()).isEqualTo("account:IllegalStateException");
+    assertThat(
+            registry
+                .get("risk.kill_switch_unavailable")
+                .tags("scope", "account", "reason", "IllegalStateException")
+                .counter()
+                .count())
+        .isEqualTo(1.0);
+  }
+
+  @Test
+  void accountKillSwitchNullState_scopeTaggedDetail_andCounterIncremented() {
+    when(accountKillSwitchStub.killswitchState()).thenReturn(null);
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    RiskActivitiesImpl r = riskWithRegistry(registry);
+
+    RiskDecision d = r.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_UNAVAILABLE);
+    assertThat(d.detail()).isEqualTo("account:null_state");
+    assertThat(
+            registry
+                .get("risk.kill_switch_unavailable")
+                .tags("scope", "account", "reason", "null_state")
+                .counter()
+                .count())
+        .isEqualTo(1.0);
+  }
+
+  @Test
+  void perStrategyKillSwitchQueryThrows_scopeTaggedDetail_andCounterIncremented() {
+    when(killSwitchStub.killswitchState()).thenThrow(new IllegalStateException("query rejected"));
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    RiskActivitiesImpl r = riskWithRegistry(registry);
+
+    RiskDecision d = r.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_UNAVAILABLE);
+    assertThat(d.detail()).isEqualTo("strategy:IllegalStateException");
+    assertThat(
+            registry
+                .get("risk.kill_switch_unavailable")
+                .tags("scope", "strategy", "reason", "IllegalStateException")
+                .counter()
+                .count())
+        .isEqualTo(1.0);
+  }
+
+  @Test
+  void cleanEntry_doesNotIncrementKillSwitchUnavailableCounter() {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    RiskActivitiesImpl r = riskWithRegistry(registry);
+
+    RiskDecision d = r.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
+
+    assertThat(d.allowed()).isTrue();
+    assertThat(registry.find("risk.kill_switch_unavailable").counter()).isNull();
+  }
+
+  private RiskActivitiesImpl riskWithRegistry(SimpleMeterRegistry registry) {
+    return new RiskActivitiesImpl(
+        (tenant, strategy) -> openCount,
+        clock,
+        workflowClient,
+        RiskCollaboratorDefaults.permissivePortfolioSnapshot(),
+        SectorResolver.CONFIG_BACKED,
+        RiskCollaboratorDefaults.zeroDailyTradeCounter(),
+        RiskCollaboratorDefaults.zeroDrawdownSampler(),
+        RiskCollaboratorDefaults.permissivePreTradeCheck(),
+        registry);
   }
 
   private static KillSwitchState notTrippedState() {

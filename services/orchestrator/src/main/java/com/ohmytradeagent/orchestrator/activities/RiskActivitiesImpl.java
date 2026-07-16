@@ -73,6 +73,15 @@ public class RiskActivitiesImpl implements RiskActivities {
   static final String DEPRECATED_EQUITY_FIELD_COUNTER_NAME =
       "notional_cap_deprecated_equity_field_total";
 
+  /**
+   * C2 (single-account-loss-rule): incremented on every {@link
+   * RejectionReason#KILL_SWITCH_UNAVAILABLE} fail-closed in {@link #checkAccountKillSwitch} /
+   * {@link #checkKillSwitch}. Tagged {@code scope=account|strategy} and {@code
+   * reason=no_client|null_state|<ExceptionClass>} so a flaky account-scope KS query (now the sole
+   * daily-loss breaker) is visible in metrics instead of silently fail-closing every entry.
+   */
+  static final String KILL_SWITCH_UNAVAILABLE_COUNTER_NAME = "risk.kill_switch_unavailable";
+
   private static final Logger log = LoggerFactory.getLogger(RiskActivitiesImpl.class);
 
   private final PositionCounter positionCounter;
@@ -85,6 +94,8 @@ public class RiskActivitiesImpl implements RiskActivities {
   private final PreTradeCheckActivity preTradeCheckActivity;
   private final MeterRegistry meterRegistry;
   private final ConcurrentMap<String, Counter> deprecatedEquityFieldCounters =
+      new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, Counter> killSwitchUnavailableCounters =
       new ConcurrentHashMap<>();
 
   /**
@@ -755,7 +766,7 @@ public class RiskActivitiesImpl implements RiskActivities {
    */
   private RiskDecision checkAccountKillSwitch(String tenantId, OffsetDateTime now) {
     if (workflowClient == null) {
-      return RiskDecision.rejected(RejectionReason.KILL_SWITCH_UNAVAILABLE, "no_client");
+      return killSwitchUnavailable("account", "no_client");
     }
     KillSwitchState state;
     try {
@@ -764,11 +775,10 @@ public class RiskActivitiesImpl implements RiskActivities {
           workflowClient.newWorkflowStub(AccountKillSwitchWorkflow.class, wfId);
       state = stub.killswitchState();
     } catch (Exception e) {
-      return RiskDecision.rejected(
-          RejectionReason.KILL_SWITCH_UNAVAILABLE, e.getClass().getSimpleName());
+      return killSwitchUnavailable("account", e.getClass().getSimpleName());
     }
     if (state == null) {
-      return RiskDecision.rejected(RejectionReason.KILL_SWITCH_UNAVAILABLE, "null_state");
+      return killSwitchUnavailable("account", "null_state");
     }
     if (Boolean.TRUE.equals(state.getTripped())) {
       String detail = state.getReason() != null ? "reason=" + state.getReason() : null;
@@ -785,7 +795,7 @@ public class RiskActivitiesImpl implements RiskActivities {
   private RiskDecision checkKillSwitch(String tenantId, String strategyId, OffsetDateTime now) {
     if (workflowClient == null) {
       // Defensive: production env always wires WorkflowClient; fail closed if it is somehow null.
-      return RiskDecision.rejected(RejectionReason.KILL_SWITCH_UNAVAILABLE, "no_client");
+      return killSwitchUnavailable("strategy", "no_client");
     }
     KillSwitchState state;
     try {
@@ -793,11 +803,10 @@ public class RiskActivitiesImpl implements RiskActivities {
       KillSwitchWorkflow stub = workflowClient.newWorkflowStub(KillSwitchWorkflow.class, wfId);
       state = stub.killswitchState();
     } catch (Exception e) {
-      return RiskDecision.rejected(
-          RejectionReason.KILL_SWITCH_UNAVAILABLE, e.getClass().getSimpleName());
+      return killSwitchUnavailable("strategy", e.getClass().getSimpleName());
     }
     if (state == null) {
-      return RiskDecision.rejected(RejectionReason.KILL_SWITCH_UNAVAILABLE, "null_state");
+      return killSwitchUnavailable("strategy", "null_state");
     }
     if (Boolean.TRUE.equals(state.getTripped())) {
       String detail = state.getReason() != null ? "reason=" + state.getReason() : null;
@@ -809,5 +818,28 @@ public class RiskActivitiesImpl implements RiskActivities {
           RejectionReason.KILL_SWITCH_COOLING_DOWN, "until=" + cd.toString());
     }
     return null;
+  }
+
+  /**
+   * C2 fail-closed emitter shared by {@link #checkAccountKillSwitch} and {@link #checkKillSwitch}:
+   * increments the tagged {@link #KILL_SWITCH_UNAVAILABLE_COUNTER_NAME} counter and returns the
+   * {@link RejectionReason#KILL_SWITCH_UNAVAILABLE} decision with a {@code scope:reason} detail, so
+   * the metric fires exactly where the scope-tagged detail is produced. Counters are cached per
+   * {@code scope|reason} (bounded cardinality: reason is {@code no_client}/{@code null_state}/an
+   * exception class name).
+   */
+  private RiskDecision killSwitchUnavailable(String scope, String reason) {
+    Counter counter =
+        killSwitchUnavailableCounters.computeIfAbsent(
+            scope + "|" + reason,
+            key ->
+                Counter.builder(KILL_SWITCH_UNAVAILABLE_COUNTER_NAME)
+                    .description(
+                        "Kill-switch read fail-closed to KILL_SWITCH_UNAVAILABLE (C2); tagged by scope (account|strategy) and reason.")
+                    .tag("scope", scope)
+                    .tag("reason", reason)
+                    .register(meterRegistry));
+    counter.increment();
+    return RiskDecision.rejected(RejectionReason.KILL_SWITCH_UNAVAILABLE, scope + ":" + reason);
   }
 }
