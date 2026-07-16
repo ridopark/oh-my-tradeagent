@@ -28,17 +28,19 @@ import org.springframework.stereotype.Component;
  * or dangerous changes are rejected and deferred to P3 dual-control.
  *
  * <p>The safety model is non-negotiable: {@code KillSwitchWorkflowImpl.heartbeat()} re-reads {@code
- * daily_loss_threshold} + {@code notional_cap_pct_of_capital_base} from the {@code strategy_config}
- * table every tick, so a runtime write to those fields would disarm the live loss circuit-breaker
- * on the real-money account. Writes are therefore classified and constrained against the
- * currently-stored row:
+ * notional_cap_pct_of_capital_base} from the {@code strategy_config} table every tick, so a runtime
+ * write to that field would disarm the live notional circuit-breaker on the real-money account.
+ * Writes are therefore classified and constrained against the currently-stored row:
  *
  * <ul>
  *   <li><b>IDENTITY</b> ({@code tenant_id}, {@code strategy_id}, {@code schema_version}) — must
  *       equal stored.
  *   <li><b>DANGEROUS / hard-block</b> ({@code broker_target}, {@code broker_account_id}, {@code
- *       daily_loss_threshold}, {@code notional_cap_pct_of_capital_base}) — must equal stored;
- *       deferred to P3. ({@code broker_account_id} routes real orders to a brokerage account.)
+ *       notional_cap_pct_of_capital_base}) — must equal stored; deferred to P3. ({@code
+ *       broker_account_id} routes real orders to a brokerage account.) (single-account-loss-rule
+ *       Phase 4a: the per-strategy {@code daily_loss_threshold} is a dead field — the account cap
+ *       {@code account_daily_loss_pct} is the sole daily-loss breaker — so it is no longer
+ *       DANGEROUS; it falls through to SAFE and is freely writable.)
  *   <li><b>EXPOSURE / tighten-only</b> ({@code max_contracts}, {@code min_contracts}, {@code
  *       max_positions}, {@code capital_weight}, {@code max_notional_per_signal}, {@code
  *       max_daily_notional_deployed}) — must not increase vs stored.
@@ -465,17 +467,17 @@ public class StrategyConfigWriter {
     requireIdentity("strategy_id", stored.getStrategyId(), next.getStrategyId());
     requireIdentity("schema_version", stored.getSchemaVersion(), next.getSchemaVersion());
 
-    // DANGEROUS: must equal stored (deferred to P3 dual-control). daily_loss_threshold and
-    // notional_cap_pct_of_capital_base are the kill-switch disarm vectors — null AND widened are
-    // both rejected here because anything other than an exact match changes them.
+    // DANGEROUS: must equal stored (deferred to P3 dual-control). notional_cap_pct_of_capital_base
+    // is the kill-switch disarm vector — null AND widened are both rejected here because anything
+    // other than an exact match changes it. (single-account-loss-rule Phase 4a: the per-strategy
+    // daily_loss_threshold is a dead field — the account cap account_daily_loss_pct is the sole
+    // daily-loss breaker — so it is NO LONGER DANGEROUS and a write may change/clear it freely.)
     requireDangerousUnchanged("broker_target", stored.getBrokerTarget(), next.getBrokerTarget());
     // P4-c: broker_account_id routes real orders to a specific brokerage account; a runtime change
     // would re-route live orders to a different account. Same DANGEROUS class as broker_target.
     // Objects.equals tolerates null==null (absent on both sides → allowed), rejects null→value.
     requireDangerousUnchanged(
         "broker_account_id", stored.getBrokerAccountId(), next.getBrokerAccountId());
-    requireDangerousUnchanged(
-        "daily_loss_threshold", stored.getDailyLossThreshold(), next.getDailyLossThreshold());
     requireDangerousUnchanged(
         "notional_cap_pct_of_capital_base",
         stored.getNotionalCapPctOfCapitalBase(),
@@ -510,7 +512,7 @@ public class StrategyConfigWriter {
   }
 
   private static void requireDangerousUnchanged(String field, Object stored, Object next) {
-    // VALUE-equality for numeric fields (daily_loss_threshold, notional_cap_pct_of_capital_base):
+    // VALUE-equality for numeric fields (notional_cap_pct_of_capital_base):
     // BigDecimal.equals is scale-sensitive, so a JSON round-trip that drops a trailing zero
     // (2500.00 → 2500) would falsely read as a "change" and reject an otherwise-unchanged write.
     // compareTo == 0 is the correct "unchanged value" test; a real value change still fails it. All

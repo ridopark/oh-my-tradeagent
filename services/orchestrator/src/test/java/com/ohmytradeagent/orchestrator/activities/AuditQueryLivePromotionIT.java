@@ -299,6 +299,20 @@ class AuditQueryLivePromotionIT {
   }
 
   @Test
+  void dailyLossThresholdConfigChangedAfterApproval_returnsValid() throws Exception {
+    // single-account-loss-rule Phase 4a: the account cap is the sole daily-loss breaker, so the
+    // dead per-strategy daily_loss_threshold was dropped from RISK_RELEVANT_CONFIG_KEYS. A config
+    // change touching ONLY daily_loss_threshold must NOT void the sign-off → VALID.
+    seedActivation("dev", "copytrade-v1", "alpaca-live");
+    String cfgEventId = seedConfigChanged("dev", "copytrade-v1", "daily_loss_threshold");
+    forceOccurredAt(cfgEventId, "1 hour");
+
+    OffsetDateTime notStaleSince = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30);
+    assertThat(auditQuery.checkLivePromotion("dev", "copytrade-v1", "alpaca-live", notStaleSince))
+        .isEqualTo(LivePromotionStatus.VALID);
+  }
+
+  @Test
   void riskConfigChangedBeforeApproval_returnsValid() throws Exception {
     // A risk change that occurred BEFORE the approval is already subsumed by the sign-off (strict
     // >)

@@ -35,8 +35,10 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
    * truth for what counts as a risk-envelope edit):
    *
    * <ul>
-   *   <li>DANGEROUS (must-equal-stored): {@code broker_target}, {@code daily_loss_threshold},
-   *       {@code notional_cap_pct_of_capital_base}.
+   *   <li>DANGEROUS (must-equal-stored): {@code broker_target}, {@code
+   *       notional_cap_pct_of_capital_base}. (single-account-loss-rule Phase 4a: {@code
+   *       daily_loss_threshold} is a dead field — the account cap is the sole daily-loss breaker —
+   *       so it is no longer risk-relevant and a change to it no longer voids a live promotion.)
    *   <li>EXPOSURE (tighten-only): {@code max_contracts}, {@code min_contracts}, {@code
    *       max_positions}, {@code capital_weight}, {@code max_notional_per_signal}, {@code
    *       max_daily_notional_deployed}.
@@ -55,7 +57,6 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
       Set.of(
           // CORE — DANGEROUS (StrategyConfigWriter.checkFieldClasses)
           "broker_target",
-          "daily_loss_threshold",
           "notional_cap_pct_of_capital_base",
           // CORE — EXPOSURE (StrategyConfigWriter.checkFieldClasses)
           "max_contracts",

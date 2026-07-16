@@ -67,16 +67,15 @@ class StrategyConfigControllerWebMvcTest {
 
   @Test
   void fieldClassesMirrorTheWriterGovernance() {
-    // broker_account_id + the two kill-switch gates are DANGEROUS (dual-control); the sizing caps
-    // are EXPOSURE (tighten-only). Locks the display-metadata against drift from
-    // StrategyConfigWriter.
+    // broker_account_id + the notional-cap kill-switch gate are DANGEROUS (dual-control); the
+    // sizing
+    // caps are EXPOSURE (tighten-only). Locks the display-metadata against drift from
+    // StrategyConfigWriter. single-account-loss-rule Phase 4a: daily_loss_threshold is a dead field
+    // (the account cap is the sole daily-loss breaker), so it is NO LONGER DANGEROUS.
     Map<String, List<String>> fc = StrategyConfigReader.FIELD_CLASSES;
     org.assertj.core.api.Assertions.assertThat(fc.get("DANGEROUS"))
-        .contains(
-            "broker_target",
-            "broker_account_id",
-            "daily_loss_threshold",
-            "notional_cap_pct_of_capital_base");
+        .contains("broker_target", "broker_account_id", "notional_cap_pct_of_capital_base")
+        .doesNotContain("daily_loss_threshold");
     org.assertj.core.api.Assertions.assertThat(fc.get("EXPOSURE"))
         .contains("max_contracts", "min_contracts", "max_positions", "capital_weight");
   }

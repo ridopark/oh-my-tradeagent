@@ -35,12 +35,11 @@ public class StrategyConfigReader {
   public static final Map<String, List<String>> FIELD_CLASSES =
       Map.of(
           "IDENTITY", List.of("tenant_id", "strategy_id", "schema_version"),
+          // single-account-loss-rule Phase 4a: daily_loss_threshold is a dead field (the account
+          // cap
+          // is the sole daily-loss breaker), so it is dropped from DANGEROUS to mirror the writer.
           "DANGEROUS",
-              List.of(
-                  "broker_target",
-                  "broker_account_id",
-                  "daily_loss_threshold",
-                  "notional_cap_pct_of_capital_base"),
+              List.of("broker_target", "broker_account_id", "notional_cap_pct_of_capital_base"),
           "EXPOSURE",
               List.of(
                   "max_contracts",
