@@ -81,7 +81,16 @@ public class TenantConfigSeedReconciler implements ApplicationRunner {
     // at boot yet never seeded, and its cap would silently go inert at the source=db cutover.
     List<Path> tenantDirs;
     try (Stream<Path> s = Files.list(tenantsDir)) {
-      tenantDirs = s.filter(Files::isDirectory).toList();
+      tenantDirs =
+          s.filter(Files::isDirectory)
+              // Skip Kubernetes ConfigMap-volume internals (the `..data` symlink target and the
+              // `..<timestamp>` atomic-update snapshot dirs) and any other dot-prefixed entry —
+              // they
+              // are NOT tenants. Without this the seeder inserts a junk tenant_config row named
+              // after
+              // each snapshot dir, accreting one row on every boot that follows a ConfigMap update.
+              .filter(p -> !p.getFileName().toString().startsWith("."))
+              .toList();
     } catch (IOException e) {
       throw new IllegalStateException("Failed to list tenants dir " + tenantsDir, e);
     }
