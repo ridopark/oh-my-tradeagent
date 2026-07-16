@@ -251,9 +251,15 @@ function AccountCapSection({
   const inputClass =
     "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
 
+  // The cap is a single loss rule expressed as EITHER a fraction (pct) OR an absolute USD threshold.
+  // Show only the form(s) actually set; if none is set, show a single "not set" line (the pct form)
+  // rather than two confusing "not set" rows for a knob the tenant isn't using.
+  const setRows = rows.filter((r) => r.raw !== null);
+  const displayRows = setRows.length > 0 ? setRows : rows.slice(0, 1);
+
   const list = (
     <ul className="flex flex-col divide-y divide-slate-800 rounded border border-slate-800 bg-slate-900">
-      {rows.map((r) => {
+      {displayRows.map((r) => {
         // Editable only when write is enabled AND the cap is currently SET (a null cap can't be
         // added tenant-side — the server rejects it — so it stays read-only "not set").
         const editable = writeEnabled && r.raw !== null;
