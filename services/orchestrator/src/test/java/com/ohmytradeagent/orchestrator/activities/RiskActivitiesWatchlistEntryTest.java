@@ -42,6 +42,7 @@ class RiskActivitiesWatchlistEntryTest {
   private long openCount;
   private WorkflowClient workflowClient;
   private KillSwitchWorkflow killSwitchStub;
+  private AccountKillSwitchWorkflow accountKillSwitchStub;
   private PortfolioSnapshot portfolioSnapshot;
   private DailyTradeCounter dailyTradeCounter;
   private DrawdownVelocitySampler drawdownSampler;
@@ -59,7 +60,7 @@ class RiskActivitiesWatchlistEntryTest {
     when(killSwitchStub.killswitchState()).thenReturn(notTrippedState());
     // Account-scope kill switch defaults to untripped: runStrategyAgnosticGates now consults it
     // too.
-    AccountKillSwitchWorkflow accountKillSwitchStub = mock(AccountKillSwitchWorkflow.class);
+    accountKillSwitchStub = mock(AccountKillSwitchWorkflow.class);
     when(workflowClient.newWorkflowStub(eq(AccountKillSwitchWorkflow.class), anyString()))
         .thenReturn(accountKillSwitchStub);
     when(accountKillSwitchStub.killswitchState()).thenReturn(notTrippedState());
@@ -111,6 +112,25 @@ class RiskActivitiesWatchlistEntryTest {
             watchlistPayload(), config(), null, new BigDecimal("2.30"), new BigDecimal("100000"));
     assertThat(d.allowed()).isFalse();
     assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_TRIPPED);
+  }
+
+  @Test
+  void rejects_whenAccountKillSwitchTripped_perStrategyClean() {
+    // The shared runStrategyAgnosticGates now consults the account-scope kill switch, so a
+    // watchlist
+    // entry is halted by an account-cap trip (auto:account_daily_loss) even when the per-strategy
+    // kill switch is clean.
+    KillSwitchState accountTripped = notTrippedState();
+    accountTripped.setTripped(true);
+    accountTripped.setReason("auto:account_daily_loss");
+    when(accountKillSwitchStub.killswitchState()).thenReturn(accountTripped);
+
+    RiskDecision d =
+        risk.checkWatchlistEntry(
+            watchlistPayload(), config(), null, new BigDecimal("2.30"), new BigDecimal("100000"));
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_TRIPPED);
+    assertThat(d.detail()).contains("auto:account_daily_loss");
   }
 
   @Test
