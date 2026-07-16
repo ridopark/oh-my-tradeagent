@@ -10,6 +10,7 @@ import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.orchestrator.activities.LiveActivationGateActivities;
 import com.ohmytradeagent.orchestrator.activities.LivePromotionActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
 import com.ohmytradeagent.orchestrator.bootstrap.StrategyConfigInvariants;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
@@ -19,9 +20,9 @@ import java.time.Duration;
 
 /**
  * Phase F (operator-account-onboarding) impl of the one-click live activation / deactivation
- * carriers. Net-new workflow type started fresh per call — NO {@code Workflow.getVersion}
- * change-point. Determinism: all inputs are the workflow request; no clock/random reads (the
- * approval timestamp is stamped inside {@code LivePromotionActivities.activate}, an Activity).
+ * carriers. Net-new workflow type started fresh per call. Determinism: all inputs are the workflow
+ * request; no clock/random reads (the approval timestamp is stamped inside {@code
+ * LivePromotionActivities.activate}, an Activity).
  *
  * <p><b>Replay note (kill-switch reset step):</b> the {@code gate.resetKillSwitch} Activity command
  * added at the END of {@code activateLive} needs NO {@code getVersion} gate. These runs are
@@ -30,13 +31,28 @@ import java.time.Duration;
  * (issues the reset after replaying the recorded prefix) — it can never diverge from a recorded
  * command. This matches the class's net-new-per-call contract.
  *
+ * <p><b>Replay note (Phase 3b account-cap-aware step (b)):</b> unlike the reset (a trailing
+ * command), step (b) reads the tenant account cap via TWO {@code TenantConfigActivities} commands
+ * inserted BEFORE existing commands ({@code gate.killSwitchArmable}, the probe) — that changes
+ * command ordering for an in-flight history, so it IS version-gated ({@code
+ * live-activation-account-cap-aware-v1}) even though runs are ephemeral. At {@code DEFAULT_VERSION}
+ * the pre-3b 2-arg gate runs and issues no new command (recorded histories replay byte-identically,
+ * proven by {@code LiveActivationWorkflowImplLegacyReplayTest}); at {@code v>=1} the two Activities
+ * run and the 4-arg overload treats {@code daily_loss_threshold} as optional when the account cap
+ * is armed.
+ *
  * <p><b>activateLive</b> runs the fail-closed gate in order, each step its own refusal reason:
  *
  * <ol>
  *   <li>read config (in-process {@code StrategyActivities.get}); not live → {@code
  *       REJECTED_NOT_LIVE}.
- *   <li>{@code StrategyConfigInvariants.validateLiveRequiredGates} (daily_loss_threshold &gt; 0 +
- *       notional cap set); {@code IllegalStateException} → {@code REJECTED_CONFIG}.
+ *   <li>{@code StrategyConfigInvariants.validateLiveRequiredGates}; {@code IllegalStateException} →
+ *       {@code REJECTED_CONFIG}. Phase 3b + version gate {@code
+ *       live-activation-account-cap-aware-v1}: at {@code v>=1} the tenant account cap is read via
+ *       {@code TenantConfigActivities} and the 4-arg overload is used, so an armed account cap
+ *       satisfies the invariant (per-strategy daily_loss_threshold optional) — a {@code -live}
+ *       tenant with NO armed cap is still {@code REJECTED_CONFIG}. At {@code DEFAULT_VERSION} the
+ *       pre-3b 2-arg gate (daily_loss_threshold &gt; 0 + notional cap set) runs unchanged.
  *   <li>{@code capital_source == account_cash} → else {@code REJECTED_CAPITAL_SOURCE} (checked
  *       HERE, NOT inside the byte-stable {@code StrategyConfigInvariants}).
  *   <li>kill switch armable ({@code LiveActivationGateActivities.killSwitchArmable}); not → {@code
@@ -64,6 +80,16 @@ import java.time.Duration;
 public class LiveActivationWorkflowImpl
     implements LiveActivationWorkflow, LiveDeactivationWorkflow {
 
+  /**
+   * Phase 3b (single-account-loss-rule) version marker for the account-cap-aware step (b). At
+   * {@code DEFAULT_VERSION} activateLive keeps the EXACT pre-3b behavior (2-arg {@code
+   * validateLiveRequiredGates}, NO {@code TenantConfigActivities} command) so recorded histories
+   * replay byte-identically; at {@code v>=1} it reads the tenant account cap via two Activities and
+   * uses the 4-arg overload. Pinned by a name-stability test — a rename would silently re-version
+   * in-flight executions.
+   */
+  static final String VERSION_ACCOUNT_CAP_AWARE = "live-activation-account-cap-aware-v1";
+
   private static final ActivityOptions CORE_OPTIONS =
       ActivityOptions.newBuilder()
           .setStartToCloseTimeout(Duration.ofSeconds(15))
@@ -76,6 +102,8 @@ public class LiveActivationWorkflowImpl
       Workflow.newActivityStub(LiveActivationGateActivities.class, CORE_OPTIONS);
   private final LivePromotionActivities promotion =
       Workflow.newActivityStub(LivePromotionActivities.class, CORE_OPTIONS);
+  private final TenantConfigActivities tenantConfig =
+      Workflow.newActivityStub(TenantConfigActivities.class, CORE_OPTIONS);
 
   @Override
   public LiveActivationResult activateLive(LiveActivationRequest request) {
@@ -83,15 +111,33 @@ public class LiveActivationWorkflowImpl
     String strategyId = request.getStrategyId();
     String label = tenant + "/" + strategyId;
 
+    // Phase 3b version gate — read UNCONDITIONALLY at the top so the marker is recorded on every
+    // path (including the early REJECTED_NOT_LIVE return). A legacy in-flight history carries no
+    // marker → resolves to DEFAULT_VERSION on replay → the pre-3b 2-arg step (b) below, issuing NO
+    // TenantConfigActivities command (byte-identical replay).
+    int accountCapAwareVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_CAP_AWARE, Workflow.DEFAULT_VERSION, 1);
+
     // (a) stored config must be live.
     StrategyConfig config = strategy.get(tenant, strategyId);
     if (config == null || !StrategyConfigInvariants.isLive(config)) {
       return result(LiveActivationResult.Outcome.REJECTED_NOT_LIVE, "strategy is not live", null);
     }
 
-    // (b) required live loss gates (daily_loss_threshold > 0 + notional cap set).
+    // (b) required live loss gates. At v>=1 (Phase 3b) read the tenant account cap via Activities
+    // and use the 4-arg overload — an armed account cap satisfies the live loss-breaker invariant
+    // (per-strategy daily_loss_threshold optional; a -live tenant with NO armed cap is still
+    // rejected). At DEFAULT_VERSION keep the pre-3b 2-arg gate (daily_loss_threshold > 0 + notional
+    // cap set) with NO Activity call, so recorded histories replay byte-identically.
     try {
-      StrategyConfigInvariants.validateLiveRequiredGates(config, label);
+      if (accountCapAwareVersion >= 1) {
+        BigDecimal accountDailyLossPct = tenantConfig.accountDailyLossPct(tenant);
+        BigDecimal accountDailyLossThreshold = tenantConfig.accountDailyLossThreshold(tenant);
+        StrategyConfigInvariants.validateLiveRequiredGates(
+            config, accountDailyLossPct, accountDailyLossThreshold, label);
+      } else {
+        StrategyConfigInvariants.validateLiveRequiredGates(config, label);
+      }
     } catch (IllegalStateException e) {
       return result(LiveActivationResult.Outcome.REJECTED_CONFIG, e.getMessage(), null);
     }

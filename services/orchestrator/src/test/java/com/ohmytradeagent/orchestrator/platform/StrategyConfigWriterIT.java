@@ -2,6 +2,9 @@ package com.ohmytradeagent.orchestrator.platform;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -129,7 +132,7 @@ class StrategyConfigWriterIT {
     StrategyConfig next = copy(stored);
     next.setMaxPositions(3L); // tighten (equal-or-lower exposure allowed)
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     long newVersion = writer.update("dev", "copytrade-v1", next, 1L, "alice");
 
     assertThat(newVersion).isEqualTo(2L);
@@ -145,7 +148,7 @@ class StrategyConfigWriterIT {
     StrategyConfig stored = liveSafeConfig("dev", "copytrade-v1");
     seedRow("dev", "copytrade-v1", stored, 1L);
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     StrategyConfig next = copy(stored);
     next.setMaxPositions(4L);
     writer.update("dev", "copytrade-v1", next, 1L, "alice"); // → version 2
@@ -161,7 +164,7 @@ class StrategyConfigWriterIT {
   /** An absent (tenant, strategy) throws StrategyNotFoundException. */
   @Test
   void rowAbsentThrowsStrategyNotFound() {
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     StrategyConfig next = liveSafeConfig("dev", "ghost");
     assertThatThrownBy(() -> writer.update("dev", "ghost", next, 1L, "alice"))
         .isInstanceOf(YamlStrategyRegistry.StrategyNotFoundException.class);
@@ -178,7 +181,7 @@ class StrategyConfigWriterIT {
     StrategyConfig next = copy(stored);
     next.setBrokerTarget(StrategyConfig.BrokerTarget.TRADIER_PAPER);
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     assertThatThrownBy(() -> writer.update("dev", "copytrade-v1", next, 1L, "alice"))
         .isInstanceOf(DangerousFieldChangeRejected.class);
 
@@ -196,7 +199,7 @@ class StrategyConfigWriterIT {
     StrategyConfig next = copy(stored);
     next.setDailyLossThreshold(new BigDecimal("5000")); // disarm attempt
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     assertThatThrownBy(() -> writer.update("dev", "copytrade-v1", next, 1L, "alice"))
         .isInstanceOf(DangerousFieldChangeRejected.class);
 
@@ -219,7 +222,7 @@ class StrategyConfigWriterIT {
     next.setDailyLossThreshold(new BigDecimal("500.00")); // same value, scale 2 (vs stored scale 0)
     next.setMaxPositions(3L); // a real tighten alongside, like a UI edit that re-posts everything
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     long newVersion = writer.update("dev", "copytrade-v1", next, 1L, "alice");
 
     assertThat(newVersion).isEqualTo(2L); // accepted, NOT REJECTED_DANGEROUS on the scale diff
@@ -236,7 +239,7 @@ class StrategyConfigWriterIT {
     StrategyConfig next = copy(stored);
     next.setMaxContracts(10L);
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     assertThatThrownBy(() -> writer.update("dev", "copytrade-v1", next, 1L, "alice"))
         .isInstanceOf(DangerousFieldChangeRejected.class);
 
@@ -255,7 +258,7 @@ class StrategyConfigWriterIT {
     StrategyConfig next = copy(stored);
     next.setMaxPositions(3L);
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     writer.update("dev", "copytrade-v1", next, 1L, "alice");
 
     try (var ps =
@@ -287,7 +290,7 @@ class StrategyConfigWriterIT {
     StrategyConfig next = copy(stored);
     next.setDailyLossThreshold(new BigDecimal("5000"));
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     assertThatThrownBy(() -> writer.update("dev", "copytrade-v1", next, 1L, "alice"))
         .isInstanceOf(DangerousFieldChangeRejected.class);
 
@@ -314,7 +317,7 @@ class StrategyConfigWriterIT {
   void delete_asRuntimeRole_removesRowAndWritesTombstone() throws Exception {
     seedRow("dev", "copytrade-v1", liveSafeConfig("dev", "copytrade-v1"), 1L);
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     int deleted = writer.delete("dev", "copytrade-v1", "ridopark@gmail.com");
 
     assertThat(deleted).as("V7 DELETE grant must let the runtime role remove the row").isEqualTo(1);
@@ -356,7 +359,7 @@ class StrategyConfigWriterIT {
   void create_insertsFirstRowAtVersionOne() throws Exception {
     StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     long version = writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com");
 
     assertThat(version).isEqualTo(1L);
@@ -370,7 +373,7 @@ class StrategyConfigWriterIT {
   @Test
   void create_duplicate_throwsRowAlreadyExists_doesNotOverwrite() throws Exception {
     StrategyConfig first = liveSafeConfig("acme", "copytrade-v1");
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     writer.create("acme", "copytrade-v1", first, "ridopark@gmail.com");
 
     StrategyConfig second = copy(first);
@@ -389,7 +392,7 @@ class StrategyConfigWriterIT {
   void create_identityMismatch_throwsInvalidConfig_persistsNothing() {
     StrategyConfig config = liveSafeConfig("other", "copytrade-v1"); // config says tenant "other"
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     assertThatThrownBy(() -> writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com"))
         .isInstanceOf(InvalidConfigException.class);
 
@@ -397,14 +400,18 @@ class StrategyConfigWriterIT {
   }
 
   /**
-   * A LIVE create missing the loss gate is rejected (the live-required gate), nothing persisted.
+   * A LIVE create with no daily-loss breaker at all is rejected (the live-required gate), nothing
+   * persisted. Phase 3b (single-account-loss-rule): the breaker is now the tenant account cap, so
+   * this drops the per-strategy {@code daily_loss_threshold} AND uses an UNARMED tenant — with no
+   * armed account cap the {@code -live} create has no loss breaker and the 4-arg invariant rejects.
    */
   @Test
   void create_liveMissingLossGate_throwsInvalidConfig() {
     StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
-    config.setDailyLossThreshold(null); // a live strategy must declare a kill-switch loss threshold
+    config.setDailyLossThreshold(null); // no per-strategy breaker...
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    // ...and no armed account cap either → the -live strategy has no daily-loss breaker.
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, unarmedTenantRegistry());
     assertThatThrownBy(() -> writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com"))
         .isInstanceOf(InvalidConfigException.class);
 
@@ -419,7 +426,7 @@ class StrategyConfigWriterIT {
     config.setDailyLossThreshold(null); // not required for paper
     config.setNotionalCapPctOfCapitalBase(null); // not required for paper
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     long version = writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com");
 
     assertThat(version).isEqualTo(1L);
@@ -432,7 +439,7 @@ class StrategyConfigWriterIT {
   void create_emitsTenantCreateAuditRow() throws Exception {
     StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
 
-    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit);
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com");
 
     try (var ps =
@@ -465,6 +472,27 @@ class StrategyConfigWriterIT {
   }
 
   // --- helpers ---
+
+  /**
+   * Phase 3b: a {@link TenantRegistry} whose {@code get(...)} returns a tenant with an ARMED
+   * account cap ({@code account_daily_loss_pct = 0.40}) for ANY tenant — the {@code -live} loss
+   * breaker the 4-arg invariant now requires. Modeled per-test (not autowired) because the IT
+   * drives the writer directly rather than through Spring.
+   */
+  private static TenantRegistry armedTenantRegistry() {
+    TenantConfig tc = new TenantConfig();
+    tc.setAccountDailyLossPct(new BigDecimal("0.40"));
+    TenantRegistry reg = mock(TenantRegistry.class);
+    when(reg.get(anyString())).thenReturn(tc);
+    return reg;
+  }
+
+  /** A {@link TenantRegistry} with NO armed account cap (both cap fields null) for any tenant. */
+  private static TenantRegistry unarmedTenantRegistry() {
+    TenantRegistry reg = mock(TenantRegistry.class);
+    when(reg.get(anyString())).thenReturn(new TenantConfig());
+    return reg;
+  }
 
   private static StrategyConfig liveSafeConfig(String tenantId, String strategyId) {
     StrategyConfig c = new StrategyConfig();
