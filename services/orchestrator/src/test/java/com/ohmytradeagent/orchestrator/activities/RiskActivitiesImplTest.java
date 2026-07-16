@@ -11,6 +11,7 @@ import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
+import com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflow;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
 import io.temporal.client.WorkflowClient;
 import java.math.BigDecimal;
@@ -31,6 +32,7 @@ class RiskActivitiesImplTest {
   private long openCount;
   private WorkflowClient workflowClient;
   private KillSwitchWorkflow killSwitchStub;
+  private AccountKillSwitchWorkflow accountKillSwitchStub;
   private RiskActivitiesImpl risk;
 
   @BeforeEach
@@ -39,9 +41,16 @@ class RiskActivitiesImplTest {
     openCount = 0L;
     workflowClient = mock(WorkflowClient.class);
     killSwitchStub = mock(KillSwitchWorkflow.class);
+    accountKillSwitchStub = mock(AccountKillSwitchWorkflow.class);
     when(workflowClient.newWorkflowStub(eq(KillSwitchWorkflow.class), anyString()))
         .thenReturn(killSwitchStub);
     when(killSwitchStub.killswitchState()).thenReturn(notTrippedState());
+    // Default the account-scope kill switch to untripped so the pre-existing copytrade risk
+    // suite (which only exercises the per-strategy KS) stays green now that the entry gate also
+    // consults the account KS.
+    when(workflowClient.newWorkflowStub(eq(AccountKillSwitchWorkflow.class), anyString()))
+        .thenReturn(accountKillSwitchStub);
+    when(accountKillSwitchStub.killswitchState()).thenReturn(notTrippedState());
     risk = new RiskActivitiesImpl((tenant, strategy) -> openCount, clock, workflowClient);
   }
 
@@ -238,6 +247,44 @@ class RiskActivitiesImplTest {
   @Test
   void rejects_killSwitchQueryThrows_failsClosed() {
     when(killSwitchStub.killswitchState()).thenThrow(new RuntimeException("query rejected"));
+
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_UNAVAILABLE);
+  }
+
+  @Test
+  void rejects_accountKillSwitchTripped_perStrategyClean() {
+    // Reproduces the entry-halt gap: an account-cap trip (auto:account_daily_loss) must halt new
+    // copytrade entries even though the per-strategy kill switch is clean. Before the entry gate
+    // consulted the account KS this signal was ALLOWED.
+    KillSwitchState accountTripped = notTrippedState();
+    accountTripped.setTripped(true);
+    accountTripped.setReason("auto:account_daily_loss");
+    accountTripped.setActor("auto:account_daily_loss");
+    when(accountKillSwitchStub.killswitchState()).thenReturn(accountTripped);
+
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.KILL_SWITCH_TRIPPED);
+    assertThat(d.detail()).contains("auto:account_daily_loss");
+  }
+
+  @Test
+  void approves_bothKillSwitchesClean() {
+    // Regression guard: with both the per-strategy and account kill switches untripped, a fresh
+    // whitelisted signal is still admitted.
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
+
+    assertThat(d.allowed()).isTrue();
+    assertThat(d.reason()).isNull();
+  }
+
+  @Test
+  void rejects_accountKillSwitchQueryThrows_failsClosed() {
+    when(accountKillSwitchStub.killswitchState()).thenThrow(new RuntimeException("query rejected"));
 
     RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), config(), null);
 

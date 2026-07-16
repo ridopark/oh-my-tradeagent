@@ -238,6 +238,12 @@ public class RiskActivitiesImpl implements RiskActivities {
     if (killSwitchDecision != null) {
       return killSwitchDecision;
     }
+    // Also consult the account-scope kill switch so an account-cap trip halts NEW entries (not just
+    // flattens). Per-strategy first (preserves the existing verdict order), then account.
+    RiskDecision accountKillSwitchDecision = checkAccountKillSwitch(tenantId, now);
+    if (accountKillSwitchDecision != null) {
+      return accountKillSwitchDecision;
+    }
 
     long openPositions = positionCounter.countOpen(tenantId, strategyId);
     if (openPositions >= config.getMaxPositions()) {

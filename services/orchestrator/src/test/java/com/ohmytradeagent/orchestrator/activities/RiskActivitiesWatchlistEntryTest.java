@@ -14,6 +14,7 @@ import com.ohmytradeagent.contract.WatchlistTriggerPayload;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
+import com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflow;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
 import io.temporal.client.WorkflowClient;
 import java.math.BigDecimal;
@@ -56,6 +57,12 @@ class RiskActivitiesWatchlistEntryTest {
     when(workflowClient.newWorkflowStub(eq(KillSwitchWorkflow.class), anyString()))
         .thenReturn(killSwitchStub);
     when(killSwitchStub.killswitchState()).thenReturn(notTrippedState());
+    // Account-scope kill switch defaults to untripped: runStrategyAgnosticGates now consults it
+    // too.
+    AccountKillSwitchWorkflow accountKillSwitchStub = mock(AccountKillSwitchWorkflow.class);
+    when(workflowClient.newWorkflowStub(eq(AccountKillSwitchWorkflow.class), anyString()))
+        .thenReturn(accountKillSwitchStub);
+    when(accountKillSwitchStub.killswitchState()).thenReturn(notTrippedState());
 
     portfolioSnapshot = mock(PortfolioSnapshot.class);
     when(portfolioSnapshot.openPositions(anyString(), anyString())).thenReturn(List.of());
