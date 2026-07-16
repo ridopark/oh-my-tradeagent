@@ -540,6 +540,15 @@ export default async function ConfigPage({
           </p>
         )}
 
+        {/* Account-wide cap first — it governs every strategy below. */}
+        <div className="mb-8">
+          <AccountCapSection
+            cfg={tenantConfig}
+            writeEnabled={TENANT_WRITE_ENABLED}
+            action={saveAccountCap}
+          />
+        </div>
+
         {cfg.items.length === 0 ? (
           <p className="text-sm text-slate-400">No strategy config available.</p>
         ) : (
@@ -553,23 +562,38 @@ export default async function ConfigPage({
                     field !== ENABLED_FIELD && !DEPRECATED_HIDDEN_FIELDS.has(field),
                 )
                 .sort(([a], [b]) => a.localeCompare(b));
+              const enabled = resolveEnabled(item.config);
               return (
-                <section key={item.strategy_id}>
-                  <h2 className="mb-2 flex flex-wrap items-center gap-2 text-lg font-medium text-slate-100">
-                    {item.strategy_id}
+                // Collapsible so the page stays short — the summary (name + version + on/off) shows
+                // when collapsed; expand to see/edit fields. Native <details>: no client JS needed.
+                <details
+                  key={item.strategy_id}
+                  className="rounded border border-slate-800 bg-slate-900/30"
+                >
+                  <summary className="cursor-pointer px-3 py-2 text-lg font-medium text-slate-100 marker:text-slate-500 hover:bg-slate-800/40">
+                    {item.strategy_id}{" "}
                     <span className="text-sm font-normal text-slate-400">
-                      version {item.version}
+                      v{item.version}
+                    </span>{" "}
+                    <span
+                      className={`text-xs ${enabled ? "text-emerald-400" : "text-slate-500"}`}
+                    >
+                      {enabled ? "● enabled" : "○ disabled"}
                     </span>
-                    <StrategySwitch
-                      strategyId={item.strategy_id}
-                      enabled={resolveEnabled(item.config)}
-                      writeEnabled={WRITE_ENABLED}
-                      enabledFieldName={inputName(item.strategy_id, ENABLED_FIELD)}
-                      action={saveConfig}
-                    />
-                  </h2>
+                  </summary>
 
-                  <form action={saveConfig} className="flex flex-col gap-2">
+                  <div className="px-3 pb-3 pt-1">
+                    <div className="mb-3">
+                      <StrategySwitch
+                        strategyId={item.strategy_id}
+                        enabled={enabled}
+                        writeEnabled={WRITE_ENABLED}
+                        enabledFieldName={inputName(item.strategy_id, ENABLED_FIELD)}
+                        action={saveConfig}
+                      />
+                    </div>
+
+                    <form action={saveConfig} className="flex flex-col gap-2">
                     <input
                       type="hidden"
                       name="strategy_id"
@@ -663,18 +687,13 @@ export default async function ConfigPage({
                         </SubmitButton>
                       </div>
                     )}
-                  </form>
-                </section>
+                    </form>
+                  </div>
+                </details>
               );
             })}
           </div>
         )}
-
-        <AccountCapSection
-          cfg={tenantConfig}
-          writeEnabled={TENANT_WRITE_ENABLED}
-          action={saveAccountCap}
-        />
       </main>
     </>
   );
