@@ -25,8 +25,8 @@ class KeywordPartialMatcherVocabularyTest {
 
   /**
    * Mirrors strategy_config.partial_fractions for copytrade-v1 as of 2026-07-01; prod_real v6 /
-   * staging_paper v9. Insertion order is irrelevant to the matcher (longest-key-wins) but preserved
-   * here to mirror the live config for auditability.
+   * staging_paper v9. Insertion order is irrelevant to the matcher (smallest-fraction-wins as of
+   * PLAN-2026-07-20) but preserved here to mirror the live config for auditability.
    */
   private static final Map<String, Double> MAP = liveMap();
 
@@ -82,11 +82,15 @@ class KeywordPartialMatcherVocabularyTest {
         Arguments.of("keeping stop tight", 0.9),
 
         // ---- 0.67 ----
+        // "two thirds"(0.67) also contains the substring "third"(0.33), but substring subsumption
+        // drops the subsumed "third" so the explicit "two thirds" quantity is honored — NOT a
+        // collision (the shorter token is not an independent intent).
         Arguments.of("two thirds", 0.67),
 
-        // ---- 0.5 ----
-        // "keeping half"(12) must out-length "partial"(7): 0.5 wins over 0.3.
-        Arguments.of("partial. Half out keeping half", 0.5),
+        // ---- 0.5 / 0.3 ----
+        // "partial. Half out keeping half" matches partial(0.3) + half*(0.5) + out(1.0):
+        // smallest-fraction-wins resolves to 0.3 (was 0.5 under longest-key-wins).
+        Arguments.of("partial. Half out keeping half", 0.3),
         Arguments.of("half out", 0.5),
 
         // ---- 0.33 ----
@@ -125,20 +129,23 @@ class KeywordPartialMatcherVocabularyTest {
         Arguments.of("scaling out of a bit", 1.0));
   }
 
-  // ---- Explicit KNOWN-BEHAVIOR (footgun) locks ----
+  // ---- Explicit KNOWN-BEHAVIOR locks (PLAN-2026-07-20: conservative on collision) ----
 
   @Test
-  void takingProfitOutLengthsHoldingMost_resolvesFullClose() {
-    // "taking profit"(13) out-lengths "holding most"(12) -> 1.0, even though the author is holding.
+  void takingProfitPlusHoldingMost_resolvesToHoldingMost() {
+    // The exact 2026-07-20 defect class: "taking profit"(1.0) + "holding most"(0.2) collide;
+    // longest-key-wins full-closed (1.0) a position the author is holding. Smallest-fraction-wins
+    // now resolves to 0.2 (keep most), matching author intent, and flags the collision.
     assertThat(KeywordPartialMatcher.match("taking profit here, holding most of it", MAP, DEFAULT))
-        .isEqualTo(1.0, within(1e-9));
+        .isEqualTo(0.2, within(1e-9));
   }
 
   @Test
-  void cuttingOutLengthsHalf_resolvesFullClose() {
-    // "cutting"(7) out-lengths "half"(4) -> 1.0, even though the author said half.
+  void cuttingPlusHalf_resolvesToHalf() {
+    // "cutting"(1.0) + "half"(0.5) collide; longest-key-wins full-closed (1.0) even though the
+    // author said half. Smallest-fraction-wins now resolves to 0.5, matching intent.
     assertThat(KeywordPartialMatcher.match("cutting half here", MAP, DEFAULT))
-        .isEqualTo(1.0, within(1e-9));
+        .isEqualTo(0.5, within(1e-9));
   }
 
   @Test
