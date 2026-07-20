@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class KeywordPartialMatcherTest {
@@ -81,6 +82,79 @@ class KeywordPartialMatcherTest {
   }
 
   // ---------------------------------------------------------------------------
+  // PLAN-2026-07-20-stc-fraction-keyword-collision: when a tail matches multiple
+  // keys mapping to DIFFERENT fractions, resolve to the SMALLEST (conservative)
+  // fraction and flag the collision — was longest-key-wins, which full-closed an
+  // explicitly-partial signal.
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void incidentTail_multiFractionMatch_resolvesToSmallest_andFlagsCollision() {
+    // Live incident: "STC ... partial. Taking profit as it comes" matched "partial"(0.3) AND
+    // "taking profit"(1.0). Longest-key-wins picked 1.0 → full-closed a 50-lot position. The
+    // conservative policy picks min(0.3, 1.0) = 0.3 and reports the collision.
+    Map<String, Double> fractions = new LinkedHashMap<>();
+    fractions.put("partial", 0.3);
+    fractions.put("taking profit", 1.0);
+
+    KeywordPartialMatcher.MatchResult r =
+        KeywordPartialMatcher.matchReporting("partial. Taking profit as it comes", fractions, 0.3);
+
+    assertThat(r.fraction()).isEqualTo(0.3, within(1e-9));
+    assertThat(r.matchedKey()).contains("partial");
+    assertThat(r.fractionCollision()).isTrue();
+  }
+
+  @Test
+  void singleMatch_noCollision() {
+    KeywordPartialMatcher.MatchResult r =
+        KeywordPartialMatcher.matchReporting("all out", Map.of("out", 1.0), 0.3);
+
+    assertThat(r.fraction()).isEqualTo(1.0, within(1e-9));
+    assertThat(r.matchedKey()).contains("out");
+    assertThat(r.fractionCollision()).isFalse();
+  }
+
+  @Test
+  void sameFractionMultiMatch_isNotACollision() {
+    Map<String, Double> fractions = new LinkedHashMap<>();
+    fractions.put("partial", 0.5);
+    fractions.put("trim", 0.5);
+
+    KeywordPartialMatcher.MatchResult r =
+        KeywordPartialMatcher.matchReporting("partial trim", fractions, DEFAULT);
+
+    assertThat(r.fraction()).isEqualTo(0.5, within(1e-9));
+    assertThat(r.fractionCollision()).isFalse();
+  }
+
+  @Test
+  void noMatch_defaultFraction_noCollision_emptyKey() {
+    KeywordPartialMatcher.MatchResult r =
+        KeywordPartialMatcher.matchReporting("nothing relevant", Map.of("out", 1.0), DEFAULT);
+
+    assertThat(r.fraction()).isEqualTo(DEFAULT, within(1e-9));
+    assertThat(r.matchedKey()).isEmpty();
+    assertThat(r.fractionCollision()).isFalse();
+  }
+
+  @Test
+  void match_delegatesToMatchReportingFraction() {
+    Map<String, Double> fractions = new LinkedHashMap<>();
+    fractions.put("partial", 0.3);
+    fractions.put("taking profit", 1.0);
+
+    double f = KeywordPartialMatcher.match("partial. Taking profit as it comes", fractions, 0.3);
+
+    assertThat(f)
+        .isEqualTo(
+            KeywordPartialMatcher.matchReporting(
+                    "partial. Taking profit as it comes", fractions, 0.3)
+                .fraction(),
+            within(1e-9));
+  }
+
+  // ---------------------------------------------------------------------------
   // Issue F3: full-close synonyms. Mirrors dev's copytrade-v1.yaml partial_fractions
   // key set (including the new full-close synonyms) so the test reflects real config.
   // The matcher CODE is unchanged; only config + these tests change.
@@ -130,13 +204,16 @@ class KeywordPartialMatcherTest {
   }
 
   @Test
-  void longestKeyWins_collisionGuard() {
-    // Tail contains BOTH a 0.5 key ("half out", 8 chars) and a 1.0 key ("cutting",
-    // 7 chars). Longest-key-wins => "half out" (8 > 7) => 0.5. Locks the documented
-    // behavior so a future map edit can't silently flip a mixed-phrase outcome.
-    double f = KeywordPartialMatcher.match("half out, cutting the rest", DEV_FRACTIONS, DEFAULT);
+  void mixedFractionTail_resolvesToSmallestFraction_flagsCollision() {
+    // PLAN-2026-07-20: tail contains BOTH a 0.5 key ("half out") and a 1.0 key ("cutting").
+    // The conservative policy resolves to the SMALLEST matched fraction => 0.5 and flags the
+    // multi-fraction collision. (Pre-2026-07-20 longest-key-wins also landed on 0.5 here by
+    // coincidence; this now locks the fraction-based rule.)
+    KeywordPartialMatcher.MatchResult r =
+        KeywordPartialMatcher.matchReporting("half out, cutting the rest", DEV_FRACTIONS, DEFAULT);
 
-    assertThat(f).isEqualTo(0.5, within(1e-9));
+    assertThat(r.fraction()).isEqualTo(0.5, within(1e-9));
+    assertThat(r.fractionCollision()).isTrue();
   }
 
   @Test
@@ -148,25 +225,24 @@ class KeywordPartialMatcherTest {
   }
 
   @ParameterizedTest
-  @ValueSource(
-      strings = {
-        "closing half", // "closing"(7) > "half"(4)
-        "closed a third", // "closed"(6) > "third"(5)
-        "cutting half", // "cutting"(7) > "half"(4)
-        "dumped half", // "dumped"(6) > "half"(4)
-        "dumping a third", // "dumping"(7) > "third"(5)
-      })
-  void closeVerbPlusQuantity_resolvesFullClose_documentedHazard(String tail) {
-    // DOCUMENTED HAZARD (not a regression of this change — it locks the behavior so a
-    // future map edit can't change it silently). Under longest-key-wins substring
-    // matching, a close-VERB synonym that is longer than the partial-QUANTITY token beats
-    // it: e.g. "closing half" contains "closing"(7) and "half"(4) -> "closing" wins -> 1.0
-    // (full close), even though the author likely meant half. This is inherent to
-    // substring+longest-wins; resolving it cleanly needs grammar-aware parsing, out of
-    // scope for F3 (config-only). The operator keeps these full-close synonyms; this test
-    // makes the accepted trade-off explicit rather than letting it pass unnoticed.
-    assertThat(KeywordPartialMatcher.match(tail, DEV_FRACTIONS, DEFAULT))
-        .isEqualTo(1.0, within(1e-9));
+  @CsvSource({
+    "closing half, 0.5", // "closing"(1.0) + "half"(0.5) -> min 0.5
+    "closed a third, 0.33", // "close"/"closed"(1.0) + "third"(0.33) -> min 0.33
+    "cutting half, 0.5", // "cutting"(1.0) + "half"(0.5) -> min 0.5
+    "dumped half, 0.5", // "dumped"(1.0) + "half"(0.5) -> min 0.5
+    "dumping a third, 0.33", // "dumping"(1.0) + "third"(0.33) -> min 0.33
+  })
+  void closeVerbPlusQuantity_resolvesToSmallerFraction_afterCollisionFix(
+      String tail, double expected) {
+    // PLAN-2026-07-20: previously a DOCUMENTED HAZARD — under longest-key-wins a close-VERB
+    // synonym longer than the partial-QUANTITY token full-closed a signal the author meant to
+    // scale ("closing half" -> "closing"(7) beat "half"(4) -> 1.0). The conservative policy now
+    // resolves the multi-fraction collision to the SMALLER fraction, matching author intent, and
+    // flags the collision so the operator can verify.
+    KeywordPartialMatcher.MatchResult r =
+        KeywordPartialMatcher.matchReporting(tail, DEV_FRACTIONS, DEFAULT);
+    assertThat(r.fraction()).isEqualTo(expected, within(1e-9));
+    assertThat(r.fractionCollision()).isTrue();
   }
 
   @ParameterizedTest
