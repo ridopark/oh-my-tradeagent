@@ -124,6 +124,55 @@ class UnrecognizedStcTailAlerterTest {
   }
 
   @Test
+  void fractionCollisionPostsOneCollisionPage_namingResolvedFraction() {
+    // PLAN-2026-07-20: the STC tail matched multiple keywords with DIFFERENT fractions; the
+    // matcher auto-resolved conservatively to the smallest (0.3). A keyword DID match, so the
+    // unrecognized-tail path stays silent — but the collision must page so the operator verifies.
+    WebhookClient webhook = mock(WebhookClient.class);
+    UnrecognizedStcTailAlerter alerter = new UnrecognizedStcTailAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("signal_id", "777:0");
+    subject.put("option_symbol", "NVDA260727P00200000");
+    subject.put("fraction", 0.3);
+    subject.put("matched_keyword", "partial"); // a keyword matched (smallest fraction)
+    subject.put("matched_keywords", "partial,taking profit");
+    subject.put("fraction_collision", true);
+    subject.put("tail", "partial. Taking profit as it comes");
+    subject.put("author", "nvda_trader");
+    subject.put("raw_line", "STC NVDA 7/27 200p @ 2.44 partial. Taking profit as it comes");
+    AuditEvent event = event("ExitRequested", "wf-stc-collision", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).containsIgnoringCase("multiple fractions");
+    assertThat(field(embed, "resolved fraction")).isEqualTo("0.3");
+    assertThat(field(embed, "matched keywords")).isEqualTo("partial,taking profit");
+    assertThat(field(embed, "tail")).isEqualTo("partial. Taking profit as it comes");
+  }
+
+  @Test
+  void noCollisionWithMatchedKeywordPostsNothing() {
+    // fraction_collision=false + a matched keyword → neither the collision page nor the
+    // unrecognized-tail page fires.
+    WebhookClient webhook = mock(WebhookClient.class);
+    UnrecognizedStcTailAlerter alerter = new UnrecognizedStcTailAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("matched_keyword", "partial");
+    subject.put("matched_keywords", "partial");
+    subject.put("fraction_collision", false);
+    subject.put("fraction", 0.3);
+    subject.put("tail", "partial here");
+    AuditEvent event = event("ExitRequested", "wf-stc-nocollision", subject);
+
+    alerter.onAuditEvent(event);
+
+    verify(webhook, never()).postEmbedToUrl(anyString(), any());
+  }
+
+  @Test
   void nonExitRequestedKindPostsNothing() {
     WebhookClient webhook = mock(WebhookClient.class);
     UnrecognizedStcTailAlerter alerter = new UnrecognizedStcTailAlerter(webhook, RESOLVER);

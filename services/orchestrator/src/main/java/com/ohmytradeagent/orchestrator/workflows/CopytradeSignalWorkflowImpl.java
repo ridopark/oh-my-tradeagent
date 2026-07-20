@@ -1009,7 +1009,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "matched_keyword", matchResult.matchedKey().orElse(null),
             "tail", payload.getTail(),
             "author", payload.getAuthor(),
-            "raw_line", payload.getRawLine()));
+            "raw_line", payload.getRawLine(),
+            // PLAN-2026-07-20-stc-fraction-keyword-collision: subject-only enrichment (same
+            // replay-safety rationale — no new command, no version gate). fraction_collision flags
+            // a tail that matched ≥2 keywords with DIFFERENT fractions (auto-resolved to the
+            // smallest); matched_keywords lists every phrase that fired so the alerter can page.
+            "fraction_collision", matchResult.fractionCollision(),
+            "matched_keywords", String.join(",", matchResult.matchedKeys())));
 
     ExternalWorkflowStub stub = Workflow.newUntypedExternalWorkflowStub(positionId);
     // Change point B (defense-in-depth): even past the running-guard the target can die between the
