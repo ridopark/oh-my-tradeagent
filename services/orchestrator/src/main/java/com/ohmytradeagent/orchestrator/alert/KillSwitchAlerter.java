@@ -96,25 +96,48 @@ public class KillSwitchAlerter {
     Map<String, Object> subject = event.getSubject();
     String reason = subjectStr(subject, "reason");
 
-    String title = ":octagonal_sign: Kill switch TRIPPED — " + reason;
+    // Reason-aware framing (PLAN-2026-07-21): a fail-closed *data-availability* trip — the account
+    // value was temporarily unreadable (e.g. a transient option-quote miss) — is NOT a loss-cap
+    // breach and can fire on a profitable day. Frame it YELLOW "fail-safe halt" so a benign,
+    // possibly-in-the-money halt never pages identically to a real loss breach. Every other reason
+    // (a real loss-cap breach, a manual or anomaly trip) keeps the existing RED "TRIPPED" framing.
+    boolean dataBlip = isDataUnavailableTrip(reason);
+    String title =
+        dataBlip
+            ? ":large_yellow_circle: Kill switch fail-safe halt — account value temporarily"
+                + " unreadable — "
+                + reason
+            : ":octagonal_sign: Kill switch TRIPPED — " + reason;
+    int color = dataBlip ? AlertColors.YELLOW : AlertColors.RED;
+
+    String description = null;
+    if (dataBlip) {
+      description =
+          "Fail-safe halt: the account value was temporarily unreadable (a transient quote miss),"
+              + " so trading was halted as a precaution — a data-availability safeguard, not a risk"
+              + " event. Positions may be fine.";
+    }
 
     // Phase 2 (PLAN-2026-07-15): an AUTO loss-cap trip no longer auto-flattens (subject
     // flatten=manual / auto_flatten=false). Make the page actionable — say so explicitly, and carry
-    // the open-position count + current MTM when present so the operator can gauge exposure. Absent
-    // key (a manual/operator flatten trip, a legacy trip, or a trip recorded before this policy) =>
-    // no line, so the embed stays unchanged for those.
-    String description = null;
+    // the open-position count + current unrealized P&L when present so the operator can gauge
+    // exposure. Absent key (a manual/operator flatten trip, a legacy trip, or a trip recorded
+    // before
+    // this policy) => no line, so the embed stays unchanged for those.
     if ("manual".equals(subjectStr(subject, "flatten"))) {
-      description =
+      String manualLine =
           "Open positions were NOT auto-flattened — close them manually in Alpaca, or trip the"
               + " kill switch to flatten.";
+      description = description == null ? manualLine : description + "\n" + manualLine;
       String openPositions = subjectStr(subject, "open_positions");
       String openMtm = subjectStr(subject, "open_mtm");
       if (!"n/a".equals(openPositions)) {
         description += "\nOpen positions: " + openPositions;
       }
       if (!"n/a".equals(openMtm)) {
-        description += "\nOpen MTM: " + openMtm;
+        // open_mtm is unrealized P&L ((bid−entry)×qty×100) — render signed so a gain never reads
+        // as underwater.
+        description += "\nUnrealized P&L: " + signedUnrealizedPnl(openMtm);
       }
     }
 
@@ -130,7 +153,40 @@ public class KillSwitchAlerter {
     fields.add(new WebhookEmbed.Field("trading_day", subjectStr(subject, "trading_day"), false));
 
     String footer = "workflow_id: " + orNa(event.getWorkflowId());
-    return new WebhookEmbed(title, description, AlertColors.RED, footer, fields);
+    return new WebhookEmbed(title, description, color, footer, fields);
+  }
+
+  /**
+   * A fail-closed <em>data-availability</em> trip — the account value was temporarily unreadable
+   * (e.g. a transient option-quote miss). Distinct from a real loss-cap breach: it can fire on a
+   * profitable day, so it must not be framed as a loss.
+   */
+  private static boolean isDataUnavailableTrip(String reason) {
+    return "auto:account_mtm_unavailable".equals(reason);
+  }
+
+  /**
+   * Renders {@code open_mtm} (unrealized P&L, computed {@code (bid−entry)×qty×100}) as a signed
+   * whole-dollar amount — {@code +$1,551} for a gain, {@code -$2,500} for a loss — so an unsigned
+   * value can never be misread as underwater. Null/blank/non-numeric => {@code "n/a"}.
+   */
+  private static String signedUnrealizedPnl(String raw) {
+    if (raw == null) {
+      return "n/a";
+    }
+    String trimmed = raw.trim();
+    if (trimmed.isEmpty() || "n/a".equals(trimmed)) {
+      return "n/a";
+    }
+    double parsed;
+    try {
+      parsed = Double.parseDouble(trimmed);
+    } catch (NumberFormatException e) {
+      return "n/a";
+    }
+    long dollars = Math.round(parsed);
+    String sign = dollars >= 0 ? "+" : "-";
+    return sign + "$" + String.format(java.util.Locale.US, "%,d", Math.abs(dollars));
   }
 
   private static String subjectStr(Map<String, Object> subject, String key) {

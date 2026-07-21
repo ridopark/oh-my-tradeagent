@@ -125,12 +125,16 @@ public class AccountKillSwitchCapAlerter {
     String openMtm = subjectStr(subject, "open_mtm");
     String minutes = subjectStr(subject, "minutes_since_trip");
 
+    // open_mtm is UNREALIZED P&L ((bid−entry)×qty×100), not a loss amount — render it signed
+    // (+$1,551 gain / -$2,500 loss) so an unsigned number can never be misread as underwater.
+    String pnl = signedUnrealizedPnl(openMtm);
+
     String title = ":rotating_light: Account cap STILL tripped — open positions NOT flattened";
     String description =
         "Account cap STILL tripped — "
             + openPositions
-            + " open positions, MTM "
-            + openMtm
+            + " open positions, unrealized P&L "
+            + pnl
             + ", "
             + minutes
             + " min since trip — flatten manually in Alpaca (or trip-to-flatten), or reset.";
@@ -139,7 +143,7 @@ public class AccountKillSwitchCapAlerter {
     fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
     fields.add(new WebhookEmbed.Field("trading_day", subjectStr(subject, "trading_day"), false));
     fields.add(new WebhookEmbed.Field("open_positions", openPositions, false));
-    fields.add(new WebhookEmbed.Field("open_mtm", openMtm, false));
+    fields.add(new WebhookEmbed.Field("unrealized P&L", pnl, false));
     fields.add(new WebhookEmbed.Field("minutes_since_trip", minutes, false));
 
     String footer = "workflow_id: " + orNa(event.getWorkflowId());
@@ -156,6 +160,30 @@ public class AccountKillSwitchCapAlerter {
 
   private static String orNa(String value) {
     return value == null || value.isBlank() ? "n/a" : value;
+  }
+
+  /**
+   * Renders {@code open_mtm} (unrealized P&L, computed {@code (bid−entry)×qty×100}) as a signed
+   * whole-dollar amount — {@code +$1,551} for a gain, {@code -$2,500} for a loss — so an unsigned
+   * value can never be misread as underwater. Null/blank/non-numeric => {@code "n/a"}.
+   */
+  private static String signedUnrealizedPnl(String raw) {
+    if (raw == null) {
+      return "n/a";
+    }
+    String trimmed = raw.trim();
+    if (trimmed.isEmpty() || "n/a".equals(trimmed)) {
+      return "n/a";
+    }
+    double parsed;
+    try {
+      parsed = Double.parseDouble(trimmed);
+    } catch (NumberFormatException e) {
+      return "n/a";
+    }
+    long dollars = Math.round(parsed);
+    String sign = dollars >= 0 ? "+" : "-";
+    return sign + "$" + String.format(java.util.Locale.US, "%,d", Math.abs(dollars));
   }
 
   private static String safeKind(AuditEvent event) {

@@ -92,14 +92,78 @@ class AccountKillSwitchCapAlerterTest {
     assertThat(embed.description())
         .contains(
             "3 open positions",
-            "MTM -2500",
+            "unrealized P&L -$2,500",
             "45 min since trip",
             "flatten manually in Alpaca",
             "trip-to-flatten",
             "reset");
+    assertThat(embed.description()).doesNotContain("MTM -2500");
     assertThat(field(embed, "open_positions")).isEqualTo("3");
-    assertThat(field(embed, "open_mtm")).isEqualTo("-2500");
+    assertThat(field(embed, "unrealized P&L")).isEqualTo("-$2,500");
     assertThat(field(embed, "minutes_since_trip")).isEqualTo("45");
+  }
+
+  @Test
+  void stillHolding_positiveMtm_rendersSignedGain() {
+    // 2026-07-21: open_mtm is UNREALIZED P&L ((bid−entry)×qty×100); an unsigned "MTM 1551.0"
+    // fooled a reader into thinking the book was underwater. Render it signed so +$1,551 reads as
+    // a GAIN, not a loss.
+    WebhookClient webhook = mock(WebhookClient.class);
+    AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("reason", "auto:account_mtm_unavailable");
+    subject.put("trading_day", "2026-07-21");
+    subject.put("open_positions", 2);
+    subject.put("open_mtm", "1551.0");
+    subject.put("minutes_since_trip", 10L);
+    AuditEvent event =
+        event("AccountKillSwitchStillHolding", "t-prod_real/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(field(embed, "unrealized P&L")).isEqualTo("+$1,551");
+    assertThat(embed.description()).contains("unrealized P&L +$1,551");
+    assertThat(embed.description()).doesNotContain("MTM 1551.0");
+  }
+
+  @Test
+  void stillHolding_negativeMtm_rendersSignedLoss() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("open_positions", 1);
+    subject.put("open_mtm", "-820.4");
+    subject.put("minutes_since_trip", 30L);
+    AuditEvent event =
+        event("AccountKillSwitchStillHolding", "t-prod_real/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(field(embed, "unrealized P&L")).isEqualTo("-$820");
+    assertThat(embed.description()).contains("unrealized P&L -$820");
+  }
+
+  @Test
+  void openMtm_absentOrBlank_rendersNaSafely() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("open_positions", 2);
+    subject.put("open_mtm", "  "); // blank / non-numeric
+    subject.put("minutes_since_trip", 5L);
+    AuditEvent event =
+        event("AccountKillSwitchStillHolding", "t-prod_real/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(field(embed, "unrealized P&L")).isEqualTo("n/a");
+    assertThat(embed.description()).contains("unrealized P&L n/a");
   }
 
   @Test
