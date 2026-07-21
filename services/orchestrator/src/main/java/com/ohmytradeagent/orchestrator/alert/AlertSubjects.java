@@ -20,4 +20,30 @@ final class AlertSubjects {
     Object value = subject.get(key);
     return value == null ? null : String.valueOf(value);
   }
+
+  /**
+   * Renders an {@code open_mtm} subject value (unrealized P&L, computed {@code
+   * (bid−entry)×qty×100}) as a signed whole-dollar amount — {@code +$1,551} for a gain, {@code
+   * -$2,500} for a loss — so an unsigned value can never be misread as underwater.
+   * Null/blank/non-numeric => {@code "n/a"}. Shared by {@link KillSwitchAlerter} and {@link
+   * AccountKillSwitchCapAlerter}.
+   */
+  static String signedUnrealizedPnl(String raw) {
+    if (raw == null) {
+      return "n/a";
+    }
+    String trimmed = raw.trim();
+    if (trimmed.isEmpty() || "n/a".equals(trimmed)) {
+      return "n/a";
+    }
+    double parsed;
+    try {
+      parsed = Double.parseDouble(trimmed);
+    } catch (NumberFormatException e) {
+      return "n/a";
+    }
+    long dollars = Math.round(parsed);
+    String sign = dollars >= 0 ? "+" : "-";
+    return sign + "$" + String.format(java.util.Locale.US, "%,d", Math.abs(dollars));
+  }
 }

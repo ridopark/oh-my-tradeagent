@@ -1,5 +1,7 @@
 package com.ohmytradeagent.orchestrator.alert;
 
+import static com.ohmytradeagent.orchestrator.alert.AlertSubjects.signedUnrealizedPnl;
+
 import com.ohmytradeagent.contract.AuditEvent;
 import java.util.ArrayList;
 import java.util.List;
@@ -122,8 +124,7 @@ public class KillSwitchAlerter {
     // flatten=manual / auto_flatten=false). Make the page actionable — say so explicitly, and carry
     // the open-position count + current unrealized P&L when present so the operator can gauge
     // exposure. Absent key (a manual/operator flatten trip, a legacy trip, or a trip recorded
-    // before
-    // this policy) => no line, so the embed stays unchanged for those.
+    // before this policy) => no line, so the embed stays unchanged for those.
     if ("manual".equals(subjectStr(subject, "flatten"))) {
       String manualLine =
           "Open positions were NOT auto-flattened — close them manually in Alpaca, or trip the"
@@ -163,30 +164,6 @@ public class KillSwitchAlerter {
    */
   private static boolean isDataUnavailableTrip(String reason) {
     return "auto:account_mtm_unavailable".equals(reason);
-  }
-
-  /**
-   * Renders {@code open_mtm} (unrealized P&L, computed {@code (bid−entry)×qty×100}) as a signed
-   * whole-dollar amount — {@code +$1,551} for a gain, {@code -$2,500} for a loss — so an unsigned
-   * value can never be misread as underwater. Null/blank/non-numeric => {@code "n/a"}.
-   */
-  private static String signedUnrealizedPnl(String raw) {
-    if (raw == null) {
-      return "n/a";
-    }
-    String trimmed = raw.trim();
-    if (trimmed.isEmpty() || "n/a".equals(trimmed)) {
-      return "n/a";
-    }
-    double parsed;
-    try {
-      parsed = Double.parseDouble(trimmed);
-    } catch (NumberFormatException e) {
-      return "n/a";
-    }
-    long dollars = Math.round(parsed);
-    String sign = dollars >= 0 ? "+" : "-";
-    return sign + "$" + String.format(java.util.Locale.US, "%,d", Math.abs(dollars));
   }
 
   private static String subjectStr(Map<String, Object> subject, String key) {
