@@ -54,6 +54,11 @@ public class PortfolioReturnCalculator {
    *     base_value_asof}); any cash flow dated at/before it is already baked into {@code baseValue}
    *     and is EXCLUDED so the initial funding is not subtracted twice. Null → fall back to the
    *     {@code timestamps[0]}-derived window (behavior-preserving when the field is absent).
+   * @param liveEquity live account net-liquidation equity — the SAME figure the {@code /live}
+   *     header total uses. Used as EV (end value) when non-null so a daily-bar range (1M/3M/YTD/1Y)
+   *     values the book at NOW, not at the series' last point (the last COMPLETED session =
+   *     yesterday's close), which otherwise overstates the range by today's move. Null → fall back
+   *     to {@code equity[last]} (behavior-preserving when the live snapshot is unavailable).
    */
   public RangeReturn compute(
       List<BigDecimal> equity,
@@ -62,7 +67,8 @@ public class PortfolioReturnCalculator {
       List<Long> flowTimestamps,
       List<BigDecimal> flowAmounts,
       Boolean flowsAvailable,
-      Long baseValueAsof) {
+      Long baseValueAsof,
+      BigDecimal liveEquity) {
     if (!Boolean.TRUE.equals(flowsAvailable)) {
       return NULL;
     }
@@ -72,7 +78,11 @@ public class PortfolioReturnCalculator {
     if (baseValue == null) {
       return NULL;
     }
-    BigDecimal ev = equity.get(equity.size() - 1);
+    // EV = live account equity when available (the header total's value, valued at NOW), else the
+    // series' last point. For a daily-bar range the last point is the last COMPLETED session
+    // (yesterday's close), so falling to it would overstate the range by today's intraday move; the
+    // live-equity EV keeps the range reconciled with "total − funded" and matches the 1W value.
+    BigDecimal ev = liveEquity != null ? liveEquity : equity.get(equity.size() - 1);
     if (ev == null) {
       return NULL;
     }
