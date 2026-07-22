@@ -6,8 +6,11 @@ import java.math.BigDecimal;
 
 /**
  * Alpaca {@code GET /v2/account/activities} entry, trimmed to the fields the live-account-view
- * deposit-adjustment consumes. {@link JsonIgnoreProperties} suppresses the rest (e.g. {@code id},
- * {@code status}, {@code description}).
+ * deposit-adjustment consumes. {@link JsonIgnoreProperties} suppresses the rest (e.g. {@code
+ * status}, {@code description}).
+ *
+ * <p>{@code id} is mapped solely to drive pagination: Alpaca pages this endpoint by {@code
+ * page_token} = the {@code id} of the last row of the previous page.
  *
  * <p>Only non-trade cash activities are queried ({@code CSD} deposit, {@code CSW} withdrawal,
  * {@code JNLC} cash journal). Each carries a {@code net_amount} (deposit {@code +}, withdrawal
@@ -22,6 +25,7 @@ import java.math.BigDecimal;
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record AlpacaAccountActivity(
+    @JsonProperty("id") String id,
     @JsonProperty("activity_type") String activityType,
     @JsonProperty("net_amount") BigDecimal netAmount,
     @JsonProperty("date") String date,

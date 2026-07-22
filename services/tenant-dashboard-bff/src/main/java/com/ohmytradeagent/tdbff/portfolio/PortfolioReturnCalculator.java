@@ -30,6 +30,11 @@ public class PortfolioReturnCalculator {
   // 20 significant digits is ample for a currency ratio; HALF_UP matches everyday rounding.
   private static final MathContext MC = new MathContext(20, RoundingMode.HALF_UP);
 
+  /**
+   * Cash-flow timestamps are day-granular (midnight UTC); see the window note in {@link #compute}.
+   */
+  private static final long SECONDS_PER_DAY = 86_400L;
+
   /** Deposit-adjusted range return; either field may be null when undefined (UI renders "—"). */
   public record RangeReturn(BigDecimal rangePl, BigDecimal rangePlPct) {}
 
@@ -72,19 +77,36 @@ public class PortfolioReturnCalculator {
     boolean spanPositive = t1 > t0;
     BigDecimal span = spanPositive ? BigDecimal.valueOf(t1 - t0) : null;
 
+    // The two timestamp series have DIFFERENT granularity, and comparing them exactly is a bug.
+    // Cash flows come from Alpaca's non-trade activities, which carry only a "date" — the exec
+    // adapter parses it to MIDNIGHT UTC. Equity timestamps are MARKET time: a 1D bar for 2026-07-15
+    // lands around 20:00Z. So a deposit made on the range's FIRST day has
+    // t(=00:00Z) < t0(=20:00Z) and an exact `t < t0` filter silently drops it — which puts the
+    // deposit straight back into EV − BV as if it were profit. That is precisely the +945%
+    // inflation this class exists to remove, just narrowed to ranges that begin on a transfer day.
+    // Fix: admit any flow dated on t0's calendar day by flooring the lower bound to that day's UTC
+    // midnight. The UPPER bound stays exactly t1 — a same-day flow parses to midnight and is
+    // therefore always <= t1, so no widening is needed there, and widening it would wrongly pull in
+    // flows from days the equity series doesn't cover.
+    long windowStart = Math.floorDiv(t0, SECONDS_PER_DAY) * SECONDS_PER_DAY;
+
     BigDecimal netFlows = BigDecimal.ZERO;
     BigDecimal weightedFlows = BigDecimal.ZERO;
     int n = Math.min(size(flowTimestamps), size(flowAmounts));
     for (int i = 0; i < n; i++) {
       Long t = flowTimestamps.get(i);
       BigDecimal amount = flowAmounts.get(i);
-      if (t == null || amount == null || t < t0 || t > t1) {
+      if (t == null || amount == null || t < windowStart || t > t1) {
         // Defensively ignore out-of-window / malformed flows.
         continue;
       }
       netFlows = netFlows.add(amount);
       if (spanPositive) {
-        BigDecimal weight = BigDecimal.valueOf(t1 - t).divide(span, MC);
+        // w_i = (T1 − t_i)/(T1 − T0), CLAMPED to 1. A first-day flow sits at midnight, before t0,
+        // so the raw ratio exceeds 1 and would over-weight the deposit in the denominator
+        // (understating the return). Capping at 1 states the truth for that case: the money was in
+        // the account for the whole window.
+        BigDecimal weight = BigDecimal.valueOf(t1 - t).divide(span, MC).min(BigDecimal.ONE);
         weightedFlows = weightedFlows.add(weight.multiply(amount));
       }
     }

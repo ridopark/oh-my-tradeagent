@@ -28,6 +28,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -126,6 +127,16 @@ public class AlpacaPaperBroker implements OptionsBroker {
 
   /** Read timeout for the read-only cash-flow lookup. See {@link #activitiesClient}. */
   private static final Duration ACTIVITIES_READ_TIMEOUT = Duration.ofSeconds(5);
+
+  /** Alpaca's max {@code page_size} for {@code /v2/account/activities}. */
+  static final int ACTIVITIES_PAGE_SIZE = 100;
+
+  /**
+   * Page ceiling for the cash-flow walk (100 × 100 = 10k transfers over one chart range — orders of
+   * magnitude beyond any real account). Exhausting it means the cursor isn't advancing, so the read
+   * fails rather than returning a truncated list that would silently understate net flows.
+   */
+  static final int ACTIVITIES_MAX_PAGES = 100;
 
   private final RestClient client;
 
@@ -744,39 +755,50 @@ public class AlpacaPaperBroker implements OptionsBroker {
    */
   @Override
   public List<AccountCashFlow> getAccountActivities(long startEpochSec, long endEpochSec) {
-    String after = Instant.ofEpochSecond(startEpochSec).toString();
-    String until = Instant.ofEpochSecond(endEpochSec).toString();
-    List<AlpacaAccountActivity> raw;
-    try {
-      raw =
-          activitiesClient
-              .get()
-              .uri(
-                  uriBuilder ->
-                      uriBuilder
-                          .path("/v2/account/activities")
-                          .queryParam("activity_types", "CSD,CSW,JNLC")
-                          .queryParam("after", after)
-                          .queryParam("until", until)
-                          .build())
-              .retrieve()
-              .body(new ParameterizedTypeReference<List<AlpacaAccountActivity>>() {});
-    } catch (HttpStatusCodeException e) {
-      // Deliberately NOT mapError(e): that helper's classifications are order-worded ("Alpaca
-      // rejected order: ...", InsufficientFundsError, InvalidContractError) and would describe an
-      // order that was never placed if an activities-endpoint body happened to carry one of those
-      // tokens. This is a read; the caller degrades on any RuntimeException either way, so a
-      // plainly-worded read failure is strictly more honest in logs.
-      throw ApplicationFailure.newFailureWithCause(
-          "Alpaca /v2/account/activities read failed (status="
-              + e.getStatusCode().value()
-              + "): "
-              + extractMessage(tryParse(e.getResponseBodyAsString()), e.getResponseBodyAsString()),
-          ACCOUNT_ACTIVITIES_READ_ERROR_TYPE,
-          e);
+    // Query WHOLE UTC DAYS, not the raw equity-bar instants. Non-trade activities (CSD/CSW/JNLC)
+    // are dated to a calendar day, while the caller's bounds are portfolio-history bar timestamps
+    // at MARKET time (~20:00Z). Passing after=<2026-07-15T20:00Z> would make Alpaca omit a deposit
+    // dated 2026-07-15 entirely — the range would then count that deposit as profit, the exact bug
+    // the deposit-adjustment exists to remove. Over-fetching is safe: the BFF calculator applies
+    // the authoritative in-window filter.
+    String after = Instant.ofEpochSecond(startEpochSec).truncatedTo(ChronoUnit.DAYS).toString();
+    String until =
+        Instant.ofEpochSecond(endEpochSec)
+            .truncatedTo(ChronoUnit.DAYS)
+            .plus(1, ChronoUnit.DAYS)
+            .toString();
+    // Alpaca PAGES this endpoint. A single unpaged GET silently truncates at the page size, and a
+    // dropped deposit is indistinguishable from no deposit — it would put that money back into the
+    // range return as profit. Walk the pages instead, and if the walk doesn't terminate within
+    // ACTIVITIES_MAX_PAGES, THROW rather than return a partial list: the caller degrades to
+    // cash_flows_available=false and the UI shows "—", which is honest. Silently understating
+    // netFlows is not.
+    List<AlpacaAccountActivity> raw = new ArrayList<>();
+    String pageToken = null;
+    boolean complete = false;
+    for (int page = 0; page < ACTIVITIES_MAX_PAGES; page++) {
+      List<AlpacaAccountActivity> batch = fetchActivitiesPage(after, until, pageToken);
+      if (batch == null || batch.isEmpty()) {
+        complete = true;
+        break;
+      }
+      raw.addAll(batch);
+      if (batch.size() < ACTIVITIES_PAGE_SIZE) {
+        complete = true;
+        break;
+      }
+      pageToken = batch.get(batch.size() - 1).id();
+      if (pageToken == null || pageToken.isBlank()) {
+        // No cursor to advance on — refuse to loop forever AND refuse to claim the list is whole.
+        break;
+      }
     }
-    if (raw == null) {
-      return List.of();
+    if (!complete) {
+      throw ApplicationFailure.newFailure(
+          "Alpaca /v2/account/activities did not paginate to completion within "
+              + ACTIVITIES_MAX_PAGES
+              + " pages — refusing to report a truncated cash-flow list",
+          ACCOUNT_ACTIVITIES_READ_ERROR_TYPE);
     }
     List<AccountCashFlow> out = new ArrayList<>(raw.size());
     for (AlpacaAccountActivity a : raw) {
@@ -794,6 +816,45 @@ public class AlpacaPaperBroker implements OptionsBroker {
       out.add(new AccountCashFlow(epoch, a.netAmount()));
     }
     return out;
+  }
+
+  /**
+   * One page of {@code /v2/account/activities}. {@code pageToken} is null for the first page and
+   * the previous page's last {@code id} thereafter. Read-path errors are deliberately NOT routed
+   * through the order-worded {@link #mapError}: that helper's classifications say "Alpaca rejected
+   * order: ..." and would describe an order that was never placed if an activities body happened to
+   * carry one of its tokens. The caller degrades on any RuntimeException either way, so a plainly
+   * worded read failure is strictly more honest in logs.
+   */
+  private List<AlpacaAccountActivity> fetchActivitiesPage(
+      String after, String until, String pageToken) {
+    try {
+      return activitiesClient
+          .get()
+          .uri(
+              uriBuilder -> {
+                uriBuilder
+                    .path("/v2/account/activities")
+                    .queryParam("activity_types", "CSD,CSW,JNLC")
+                    .queryParam("after", after)
+                    .queryParam("until", until)
+                    .queryParam("page_size", ACTIVITIES_PAGE_SIZE);
+                if (pageToken != null) {
+                  uriBuilder.queryParam("page_token", pageToken);
+                }
+                return uriBuilder.build();
+              })
+          .retrieve()
+          .body(new ParameterizedTypeReference<List<AlpacaAccountActivity>>() {});
+    } catch (HttpStatusCodeException e) {
+      throw ApplicationFailure.newFailureWithCause(
+          "Alpaca /v2/account/activities read failed (status="
+              + e.getStatusCode().value()
+              + "): "
+              + extractMessage(tryParse(e.getResponseBodyAsString()), e.getResponseBodyAsString()),
+          ACCOUNT_ACTIVITIES_READ_ERROR_TYPE,
+          e);
+    }
   }
 
   /**

@@ -19,6 +19,7 @@ import io.temporal.failure.ApplicationFailure;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -577,11 +578,106 @@ class AlpacaPaperBrokerTest {
     assertThat(req.getMethod()).isEqualTo("GET");
     assertThat(req.getRequestUrl().encodedPath()).isEqualTo("/v2/account/activities");
     assertThat(req.getRequestUrl().queryParameter("activity_types")).isEqualTo("CSD,CSW,JNLC");
+    // Both bounds are already midnight-UTC here, so `after` is unchanged; `until` is pushed to the
+    // following midnight so the whole end day is in scope (see the day-widening test below).
     assertThat(req.getRequestUrl().queryParameter("after"))
-        .isEqualTo(java.time.Instant.ofEpochSecond(start).toString());
+        .isEqualTo(Instant.ofEpochSecond(start).toString());
     assertThat(req.getRequestUrl().queryParameter("until"))
-        .isEqualTo(java.time.Instant.ofEpochSecond(end).toString());
+        .isEqualTo(
+            Instant.ofEpochSecond(end).plus(1, java.time.temporal.ChronoUnit.DAYS).toString());
     assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
+  }
+
+  @Test
+  void getAccountActivities_widensBoundsToWholeUtcDaysSoAFirstDayDepositIsNotOmitted()
+      throws Exception {
+    // The caller's bounds are portfolio-history bar timestamps at MARKET time (~20:00Z), but
+    // non-trade activities are dated to a calendar DAY. Sending after=2026-07-15T20:00Z would make
+    // Alpaca omit a deposit dated 2026-07-15 — which then reads as profit in the range return.
+    // Assert the query floors `after` to that day's midnight and pushes `until` to the day AFTER
+    // the end bar, so the whole first and last calendar days are in scope.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("[]"));
+
+    long start = Instant.parse("2026-07-15T20:00:00Z").getEpochSecond();
+    long end = Instant.parse("2026-07-17T20:00:00Z").getEpochSecond();
+    broker.getAccountActivities(start, end);
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getRequestUrl().queryParameter("after")).isEqualTo("2026-07-15T00:00:00Z");
+    assertThat(req.getRequestUrl().queryParameter("until")).isEqualTo("2026-07-18T00:00:00Z");
+  }
+
+  @Test
+  void getAccountActivities_walksAllPagesSoOlderCashFlowsAreNotSilentlyDropped() {
+    // Alpaca pages this endpoint. An unpaged read truncates at page_size and a dropped deposit is
+    // indistinguishable from no deposit — it would land back in the range return as profit. Assert
+    // the walk continues while a full page comes back, cursors on the last row's id, and unions.
+    StringBuilder fullPage = new StringBuilder("[");
+    for (int i = 0; i < 100; i++) {
+      fullPage
+          .append(i == 0 ? "" : ",")
+          .append("{\"id\":\"act-")
+          .append(i)
+          .append("\",\"activity_type\":\"CSD\",\"net_amount\":\"1.00\",\"date\":\"2026-07-15\"}");
+    }
+    fullPage.append("]");
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(fullPage.toString()));
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"id\":\"act-100\",\"activity_type\":\"CSD\",\"net_amount\":\"7.00\","
+                    + "\"date\":\"2026-07-16\"}]"));
+
+    List<OptionsBroker.AccountCashFlow> flows =
+        broker.getAccountActivities(1751328000L, 1753142400L);
+
+    assertThat(flows).hasSize(101);
+    assertThat(flows.get(100).amount()).isEqualByComparingTo(new BigDecimal("7.00"));
+    assertThat(server.getRequestCount()).isEqualTo(2);
+  }
+
+  @Test
+  void getAccountActivities_pageCursorMissing_failsRatherThanReturningATruncatedList()
+      throws Exception {
+    // A full page whose last row carries no id leaves no cursor to advance on. Returning what we
+    // have would silently understate net flows (a deposit counted as profit); throwing degrades the
+    // caller to cash_flows_available=false and the UI shows "—", which is honest.
+    StringBuilder fullPageNoIds = new StringBuilder("[");
+    for (int i = 0; i < 100; i++) {
+      fullPageNoIds
+          .append(i == 0 ? "" : ",")
+          .append("{\"activity_type\":\"CSD\",\"net_amount\":\"1.00\",\"date\":\"2026-07-15\"}");
+    }
+    fullPageNoIds.append("]");
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(fullPageNoIds.toString()));
+
+    assertThatThrownBy(() -> broker.getAccountActivities(1751328000L, 1753142400L))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType())
+                  .isEqualTo(AlpacaPaperBroker.ACCOUNT_ACTIVITIES_READ_ERROR_TYPE);
+              assertThat(f.getOriginalMessage()).contains("truncated");
+            });
+
+    // First page requested with page_size, no page_token.
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getRequestUrl().queryParameter("page_size")).isEqualTo("100");
+    assertThat(req.getRequestUrl().queryParameter("page_token")).isNull();
   }
 
   @Test

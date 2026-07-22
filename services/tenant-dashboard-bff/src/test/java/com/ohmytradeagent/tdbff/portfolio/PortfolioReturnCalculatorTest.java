@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.within;
 
 import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator.RangeReturn;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -136,17 +137,77 @@ class PortfolioReturnCalculatorTest {
 
   @Test
   void outOfWindowFlowsIgnored() {
-    // A flow before T0 and one after T1 are ignored; only the in-window +41230 counts.
+    // A flow on a day BEFORE the range and one AFTER T1 are ignored; only the in-window +41230
+    // counts. Uses realistic epochs (equity bars at market time, flows at midnight UTC) because the
+    // window's lower bound is t0's CALENDAR DAY, not the t0 instant — see the first-day-deposit
+    // test above. Synthetic small integers would put every flow inside UTC day 0 and prove nothing.
+    long t0 = Instant.parse("2026-07-15T20:00:00Z").getEpochSecond();
+    long t1 = Instant.parse("2026-07-17T20:00:00Z").getEpochSecond();
+
     RangeReturn rr =
         calc.compute(
             List.of(new BigDecimal("5000.00"), new BigDecimal("52259.56")),
             new BigDecimal("5000.00"),
-            List.of(1000L, 3000L),
-            List.of(500L, 2000L, 3500L),
+            List.of(t0, t1),
+            List.of(
+                Instant.parse("2026-07-14T00:00:00Z").getEpochSecond(), // day before the range
+                Instant.parse("2026-07-16T00:00:00Z").getEpochSecond(), // in window
+                Instant.parse("2026-07-18T00:00:00Z").getEpochSecond()), // after T1
             List.of(new BigDecimal("999"), new BigDecimal("41230"), new BigDecimal("777")),
             true);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("6029.56");
+  }
+
+  @Test
+  void depositOnTheRangeFirstDay_isStillNettedOutDespiteMidnightVsMarketTimestamps() {
+    // REGRESSION: the two timestamp series have different granularity. Cash flows are parsed from
+    // Alpaca's date-only non-trade activities → MIDNIGHT UTC. Equity bars are MARKET time. So a
+    // deposit made on the range's FIRST day arrives with t < t0 and an exact `t < t0` window filter
+    // silently dropped it — re-inflating the range by the full deposit, i.e. the +945% class of bug
+    // this whole calculator exists to remove, narrowed to ranges that start on a transfer day.
+    // Real epochs: 2026-07-15 20:00Z .. 2026-07-17 20:00Z, deposit dated 2026-07-15 → 00:00Z.
+    long t0 = Instant.parse("2026-07-15T20:00:00Z").getEpochSecond();
+    long t1 = Instant.parse("2026-07-17T20:00:00Z").getEpochSecond();
+    long depositTs = Instant.parse("2026-07-15T00:00:00Z").getEpochSecond();
+    assertThat(depositTs).isLessThan(t0); // the exact condition that used to drop the flow
+
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000.00"), new BigDecimal("52259.56")),
+            new BigDecimal("5000.00"),
+            List.of(t0, t1),
+            List.of(depositTs),
+            List.of(new BigDecimal("41230")),
+            true);
+
+    // Deposit netted out → trading-only P&L, NOT 47259.56.
+    assertThat(rr.rangePl()).isEqualByComparingTo("6029.56");
+    // Weight clamps to 1 (money present for the whole window) → denom = 5000 + 41230 = 46230.
+    assertThat(rr.rangePlPct().doubleValue()).isCloseTo(6029.56 / 46230.0, within(1e-9));
+    // Sanity: nowhere near the 9.45 (945%) inflation the dropped-flow path produced.
+    assertThat(rr.rangePlPct().compareTo(BigDecimal.ONE)).isLessThan(0);
+  }
+
+  @Test
+  void flowOnTheDayBeforeTheRange_isStillExcluded() {
+    // The lower bound is floored to t0's UTC DAY, not widened arbitrarily: a deposit dated the
+    // previous calendar day is already inside base_value and must stay out, or it would be
+    // subtracted twice and understate the return.
+    long t0 = Instant.parse("2026-07-15T20:00:00Z").getEpochSecond();
+    long t1 = Instant.parse("2026-07-17T20:00:00Z").getEpochSecond();
+    long priorDay = Instant.parse("2026-07-14T00:00:00Z").getEpochSecond();
+
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000.00"), new BigDecimal("6000.00")),
+            new BigDecimal("5000.00"),
+            List.of(t0, t1),
+            List.of(priorDay),
+            List.of(new BigDecimal("41230")),
+            true);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("1000.00");
   }
 
   @Test
