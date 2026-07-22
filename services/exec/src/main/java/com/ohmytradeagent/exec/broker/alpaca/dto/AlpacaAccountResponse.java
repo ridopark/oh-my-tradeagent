@@ -44,6 +44,13 @@ public record AlpacaAccountResponse(
     @JsonProperty("daytrade_count") Integer daytradeCount,
     @JsonProperty("multiplier") BigDecimal multiplier,
     /**
+     * Prior market-close net-liquidation equity (Alpaca {@code /v2/account 'last_equity'}). The
+     * live intraday "today" P&L on the dashboard is {@code equity - last_equity}. Informational
+     * only — NOT a credential and NOT used by any risk gate. Nullable: a response omitting it
+     * simply leaves the downstream {@code today_pl} unavailable (never fabricated).
+     */
+    @JsonProperty("last_equity") BigDecimal lastEquity,
+    /**
      * Informational brokerage account identity for the tenant dashboard (Alpaca {@code
      * account_number}). NOT a credential and NOT used by any gate.
      */

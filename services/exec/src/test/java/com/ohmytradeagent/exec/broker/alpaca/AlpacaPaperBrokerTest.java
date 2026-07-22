@@ -1075,7 +1075,7 @@ class AlpacaPaperBrokerTest {
             .setBody(
                 "{\"id\":\"acct-1\",\"account_number\":\"PA3ER05HLHMB\","
                     + "\"equity\":\"123456.78\",\"buying_power\":\"999999.00\","
-                    + "\"cash\":\"5000.00\",\"status\":\"ACTIVE\"}"));
+                    + "\"cash\":\"5000.00\",\"last_equity\":\"124000.00\",\"status\":\"ACTIVE\"}"));
 
     OptionsBroker.AccountSummary account = broker.getAccount();
 
@@ -1083,6 +1083,9 @@ class AlpacaPaperBrokerTest {
     assertThat(account.cash()).isEqualByComparingTo(new BigDecimal("5000.00"));
     // Informational account_number is mapped through (not used by any gate).
     assertThat(account.accountNumber()).isEqualTo("PA3ER05HLHMB");
+    // last_equity (prior market close) is mapped through — backs the dashboard's live intraday
+    // "today" figure (equity - last_equity). Informational, not a gate input.
+    assertThat(account.lastEquity()).isEqualByComparingTo(new BigDecimal("124000.00"));
 
     assertThat(server.getRequestCount()).isEqualTo(1);
     RecordedRequest req = server.takeRequest();
@@ -1117,6 +1120,26 @@ class AlpacaPaperBrokerTest {
         .isInstanceOf(ApplicationFailure.class)
         .satisfies(
             t -> assertThat(((ApplicationFailure) t).getType()).isEqualTo("BrokerProtocolError"));
+  }
+
+  @Test
+  void getAccount_missingLastEquityField_isNullNotAProtocolError() throws Exception {
+    // last_equity is informational (backs the dashboard's intraday "today"), NOT a gate input — a
+    // response that omits it must NOT fail closed like a missing equity/cash. equity+cash are
+    // present, so getAccount() succeeds with a null lastEquity (the dashboard then degrades "today"
+    // to the last completed daily bar rather than fabricating an intraday figure).
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"123456.78\",\"cash\":\"5000.00\","
+                    + "\"buying_power\":\"999999.00\"}"));
+
+    OptionsBroker.AccountSummary account = broker.getAccount();
+
+    assertThat(account.equity()).isEqualByComparingTo(new BigDecimal("123456.78"));
+    assertThat(account.lastEquity()).isNull();
   }
 
   @Test
