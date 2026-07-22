@@ -290,6 +290,127 @@ class AccountKillSwitchWorkflowImplTest {
         .doesNotContainKey("open_mtm");
   }
 
+  // ---------- PLAN-2026-07-22: deferred-fail-close YELLOW page ----------
+
+  // A single unpriceable tick (a blip) DEFERS and now emits EXACTLY ONE
+  // AccountKillSwitchMtmDeferred
+  // audit (the YELLOW "cap deferred a fail-close on a quote blip — watching" page) — and still does
+  // NOT trip. Makes the previously silent WARN-only defer operator-visible.
+  @Test
+  void heartbeat_smallBookBlip_emitsOneMtmDeferredNoTrip() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                2,
+                0));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-defer-blip");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // One unpriceable tick: DEFERRED (not tripped) and paged exactly once.
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("KillSwitchTripped")).isEqualTo(0L);
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(1L);
+    AuditEvent deferred = captureKind("AccountKillSwitchMtmDeferred");
+    assertThat(deferred.getSubject())
+        .containsEntry("scope", "account")
+        .containsEntry("listed", 2)
+        .containsEntry("failures", 2)
+        .containsEntry("consecutive_ticks", 1)
+        .containsEntry("trip_ticks", 2)
+        .containsKey("trading_day");
+  }
+
+  // Two consecutive unpriceable ticks: the deferred page fires ONCE (on tick 1), then the trip
+  // fires
+  // on tick 2 — and NO second deferred emit on tick 2 (the counter reaches trip_ticks so the defer
+  // branch is not entered). One page per miss-episode, not per-tick spam.
+  @Test
+  void heartbeat_smallBookTwoConsecutive_deferredPageOnceThenTrip() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                2,
+                0));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-defer-then-trip");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Tick 1: deferred page, not tripped.
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(1L);
+
+    // Tick 2: fail-closes — and NO second deferred emit (still exactly one).
+    env.sleep(Duration.ofSeconds(60));
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(1L);
+  }
+
+  // A cleanly-priced book never enters the defer branch → no deferred page.
+  @Test
+  void heartbeat_cleanBook_noMtmDeferredEmit() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                1,
+                0));
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-defer-clean");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(4 * 60));
+
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(0L);
+  }
+
+  // A genuine computed-loss trip (priced book, reason auto:account_daily_loss) never touches the
+  // defer branch → no deferred page (unchanged loss path).
+  @Test
+  void heartbeat_genuineDailyLoss_noMtmDeferredEmit() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000")); // crosses the 5000 absolute cap
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                1,
+                0));
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-defer-realloss");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75)); // ONE tick
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(0L);
+  }
+
   // A single transient miss followed by a clean price must NOT trip — the debounce counter resets
   // on
   // any cleanly-priced tick, so non-consecutive misses cannot accumulate. (In-tick re-fetch

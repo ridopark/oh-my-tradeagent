@@ -50,6 +50,13 @@ public class AccountKillSwitchCapAlerter {
    */
   static final String KIND_STILL_HOLDING = "AccountKillSwitchStillHolding";
 
+  /**
+   * PLAN-2026-07-22: the FIRST deferred tick of a small-book MTM-unavailable blip episode. YELLOW
+   * (fail-safe) — the cap is WORKING (it caught a transient quote blip and did NOT trip); this page
+   * surfaces a chronic every-other-tick quote degradation instead of letting it hide in a WARN log.
+   */
+  static final String KIND_MTM_DEFERRED = "AccountKillSwitchMtmDeferred";
+
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
 
@@ -77,7 +84,8 @@ public class AccountKillSwitchCapAlerter {
       String kind = event.getKind();
       if (!KIND_CAP_INACTIVE.equals(kind)
           && !KIND_CAP_REARMED.equals(kind)
-          && !KIND_STILL_HOLDING.equals(kind)) {
+          && !KIND_STILL_HOLDING.equals(kind)
+          && !KIND_MTM_DEFERRED.equals(kind)) {
         return;
       }
       String url = webhookResolver.resolve(event.getTenantId(), event.getStrategyId());
@@ -89,6 +97,9 @@ public class AccountKillSwitchCapAlerter {
 
   private WebhookEmbed buildEmbed(AuditEvent event, String kind) {
     Map<String, Object> subject = event.getSubject();
+    if (KIND_MTM_DEFERRED.equals(kind)) {
+      return buildMtmDeferredEmbed(event, subject);
+    }
     if (KIND_STILL_HOLDING.equals(kind)) {
       return buildStillHoldingEmbed(event, subject);
     }
@@ -149,6 +160,38 @@ public class AccountKillSwitchCapAlerter {
 
     String footer = "workflow_id: " + orNa(event.getWorkflowId());
     return new WebhookEmbed(title, null, AlertColors.RED, footer, fields);
+  }
+
+  /**
+   * PLAN-2026-07-22: the deferred-fail-close page (YELLOW, fail-safe). The account cap caught a
+   * transient quote blip on a small book — it did NOT trip, it re-fetched in-tick and is now
+   * watching. This is NOT a failure (never RED): its whole job is to surface a chronic
+   * every-other-tick quote degradation that would otherwise hide in a WARN log until an eventual
+   * trip. The body names it as fail-safe and states that a genuine sustained outage still
+   * fail-closes after {@code trip_ticks} consecutive unpriceable ticks.
+   */
+  private WebhookEmbed buildMtmDeferredEmbed(AuditEvent event, Map<String, Object> subject) {
+    String tenant = orNa(event.getTenantId());
+    String tripTicks = subjectStr(subject, "trip_ticks");
+    String ticks = subjectStr(subject, "consecutive_ticks") + "/" + tripTicks;
+
+    String title =
+        ":hourglass_flowing_sand: Account cap deferred a fail-close — quote blip on " + tenant;
+    String description =
+        "Account book momentarily unpriceable; the cap did NOT trip (transient quote blip) — "
+            + "watching, will fail-close if it stays unpriceable for "
+            + tripTicks
+            + " consecutive ticks.";
+
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("tenant_id", tenant, false));
+    fields.add(new WebhookEmbed.Field("trading_day", subjectStr(subject, "trading_day"), false));
+    fields.add(new WebhookEmbed.Field("listed", subjectStr(subject, "listed"), false));
+    fields.add(new WebhookEmbed.Field("failures", subjectStr(subject, "failures"), false));
+    fields.add(new WebhookEmbed.Field("consecutive_ticks", ticks, false));
+
+    String footer = "workflow_id: " + orNa(event.getWorkflowId());
+    return new WebhookEmbed(title, description, AlertColors.YELLOW, footer, fields);
   }
 
   /**

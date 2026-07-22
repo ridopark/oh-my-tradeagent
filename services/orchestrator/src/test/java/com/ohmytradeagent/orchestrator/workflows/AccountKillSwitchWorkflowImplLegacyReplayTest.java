@@ -116,6 +116,15 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   private static final String NOFLATTEN_EMULATOR_WORKFLOW_ID =
       "account-killswitch-pre-noflatten-emulator";
 
+  private static final String MTM_DEFER_FIXTURE_RESOURCE =
+      "temporal/replay/account-killswitch-mtm-defer-v1-legacy-history.json";
+  private static final Path MTM_DEFER_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "account-killswitch-mtm-defer-v1-legacy-history.json");
+  private static final String MTM_DEFER_EMULATOR_WORKFLOW_ID =
+      "account-killswitch-mtm-defer-v1-emulator";
+
   /**
    * Pins the version-marker constant value so a rename in {@link AccountKillSwitchWorkflowImpl}
    * fails this test loudly. Renaming the literal would silently re-version live executions.
@@ -220,6 +229,44 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
 
     WorkflowReplayer.replayWorkflowExecutionFromResource(
         NOFLATTEN_FIXTURE_RESOURCE, AccountKillSwitchWorkflowImpl.class);
+  }
+
+  /**
+   * PLAN-2026-07-22 (defer-page) SENTINEL. A v1 history recorded BEFORE the widen — its heartbeat
+   * recorded the {@code account-mtm-debounce-v1} marker at value 1 (a #606 defer) and took the
+   * small-book DEFER path (in-tick re-fetch disabled, one unpriceable tick, counter=1 &lt;
+   * trip_ticks → WARN + return, NO audit emit). Replayed under the widened {@code getVersion(...,
+   * DEFAULT_VERSION, 2)}: the recorded marker resolves to 1 (within {@code [DEFAULT_VERSION, 2]}),
+   * so the new {@code mtmDebounceVersion >= 2} emit branch stays OFF and the command stream matches
+   * byte-for-byte — proving an in-flight v1 defer history replays with NO new {@code
+   * AccountKillSwitchMtmDeferred} emit. Break the gate (emit at {@code >= 1}, or forget the widen
+   * and mint a new change-id) and this replay throws {@code NonDeterministicException}.
+   *
+   * <p>The in-tick re-fetch static is pinned to 0 for the replay so production issues no re-fetch
+   * quote/timer commands the fixture does not carry (the fixture was generated with re-fetch off).
+   */
+  @Test
+  void legacyMtmDeferV1HistoryReplaysCleanlyNoEmit() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(MTM_DEFER_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. Regenerate with"
+                + " `mvn -pl services/orchestrator test -Dgenerate.legacy.fixture=true"
+                + " -Dtest=AccountKillSwitchWorkflowImplLegacyReplayTest#regenerateMtmDeferFixture"
+                + " -Dsurefire.failIfNoSpecifiedTests=false`",
+            MTM_DEFER_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    int origRefetches = AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES;
+    int origTripTicks = AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS;
+    try {
+      AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+      AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+      WorkflowReplayer.replayWorkflowExecutionFromResource(
+          MTM_DEFER_FIXTURE_RESOURCE, AccountKillSwitchWorkflowImpl.class);
+    } finally {
+      AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = origRefetches;
+      AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = origTripTicks;
+    }
   }
 
   /**
@@ -433,6 +480,66 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
     Files.writeString(NOFLATTEN_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
   }
 
+  @Test
+  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
+  void regenerateMtmDeferFixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(LegacyMtmDeferEmulatorWorkflowImpl.class);
+
+      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
+      TenantConfigActivities tenantConfig = Mockito.mock(TenantConfigActivities.class);
+      AccountPnlActivities accountPnl = Mockito.mock(AccountPnlActivities.class);
+      GetOptionQuoteActivity optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
+
+      when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 6, 14));
+      when(calendar.isMarketOpen()).thenReturn(true);
+      // Valid absolute threshold => the heartbeat reaches the book/quote/fail-closed path.
+      when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+      when(accountPnl.computeTenantRealizedPnl(anyString(), any())).thenReturn(BigDecimal.ZERO);
+      // A SMALL (1-position) book whose single quote is UNAVAILABLE => the fail-close bound holds
+      // =>
+      // the small-book DEFER path (counter=1 < trip_ticks). No trip, no emit (v1).
+      when(accountPnl.accountOpenBook(anyString()))
+          .thenReturn(
+              new AccountOpenBook(
+                  List.of(
+                      new OpenPositionValuation(
+                          "NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                  1,
+                  0));
+      when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+
+      worker.registerActivitiesImplementations(calendar, tenantConfig, accountPnl);
+      Worker mdWorker = env.newWorker(MARKET_DATA_QUEUE);
+      mdWorker.registerActivitiesImplementations(optionQuote);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      AccountKillSwitchWorkflow wf =
+          client.newWorkflowStub(
+              AccountKillSwitchWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(MTM_DEFER_EMULATOR_WORKFLOW_ID)
+                  .build());
+      WorkflowStub.fromTyped(wf).start(input());
+
+      // EXACTLY ONE heartbeat (60s interval): one unpriceable tick => counter=1 => DEFER, no trip.
+      // A second tick would fail-close (counter=2); capture only the single defer tick.
+      env.sleep(Duration.ofSeconds(90));
+      json = client.fetchHistory(MTM_DEFER_EMULATOR_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
+    Files.createDirectories(MTM_DEFER_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(MTM_DEFER_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
   private static OptionQuoteResult okQuote(String contractSymbol, BigDecimal bid) {
     OptionQuoteResult q = new OptionQuoteResult();
     q.setSchemaVersion(1L);
@@ -440,6 +547,15 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
     q.setBid(bid);
     q.setRetrievedAt(OffsetDateTime.ofInstant(Instant.EPOCH, ZoneOffset.UTC));
     q.setStatus(OptionQuoteResult.Status.OK);
+    return q;
+  }
+
+  private static OptionQuoteResult unavailableQuote(String contractSymbol) {
+    OptionQuoteResult q = new OptionQuoteResult();
+    q.setSchemaVersion(1L);
+    q.setContractSymbol(contractSymbol);
+    q.setRetrievedAt(OffsetDateTime.ofInstant(Instant.EPOCH, ZoneOffset.UTC));
+    q.setStatus(OptionQuoteResult.Status.UNAVAILABLE);
     return q;
   }
 
@@ -779,6 +895,159 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
       e.setWorkflowId(Workflow.getInfo().getWorkflowId());
       e.setCorrelationId(input.getTenantId() + "/account");
       return e;
+    }
+
+    @Override
+    public void tripValidator(TripKillSwitchRequest request) {}
+
+    @Override
+    public void trip(TripKillSwitchRequest request) {}
+
+    @Override
+    public void resetValidator(ResetKillSwitchRequest request) {}
+
+    @Override
+    public void reset(ResetKillSwitchRequest request) {}
+
+    @Override
+    public KillSwitchState killswitchState() {
+      KillSwitchState s = new KillSwitchState();
+      s.setSchemaVersion(1L);
+      s.setTripped(tripped);
+      return s;
+    }
+  }
+
+  /**
+   * PLAN-2026-07-22 (defer-page) v1 defer emulator: mirrors the {@code heartbeat()} command stream
+   * for the small-book MTM-unavailable DEFER path EXACTLY as it was AT #606 (BEFORE the widen), so
+   * the recorded history carries the {@code account-mtm-debounce-v1} marker at value 1 and takes a
+   * single defer tick with NO audit emit.
+   *
+   * <p>Per tick: {@code getVersion("account-mtm-debounce-v1", DEFAULT_VERSION, 1)} (records the
+   * marker at 1, at the SAME position production records it — before {@code todayEt}) → {@code
+   * todayEt} → (not tripped) → {@code isMarketOpen} → {@code accountDailyLossThreshold} → {@code
+   * computeTenantRealizedPnl} (the legacy realized path — the PCT/REALIZED/REPAGE/CAP_INACTIVE
+   * markers are intentionally ABSENT, so production resolves them to {@code DEFAULT_VERSION} on
+   * replay and takes these same legacy branches) → {@code accountOpenBook} → per-position {@code
+   * getOptionQuote} (unavailable) → fail-close bound holds on the small book → in-tick re-fetch
+   * DISABLED (0 attempts, no commands) → {@code ++counter (=1) < trip_ticks} → DEFER (return, no
+   * emit). Exactly one tick is captured so the counter never reaches {@code trip_ticks} (no trip).
+   */
+  public static class LegacyMtmDeferEmulatorWorkflowImpl implements AccountKillSwitchWorkflow {
+    private static final String ACCOUNT_SCOPE = "__account__";
+    private static final String MARKET_DATA_TASK_QUEUE = "market-data";
+    private static final String VERSION_ACCOUNT_MTM_DEBOUNCE = "account-mtm-debounce-v1";
+    private static final int RELATIVE_FAILURE_THRESHOLD_MULTIPLIER = 2;
+    private static final int SMALL_BOOK_MAX_POSITIONS = 2;
+    private static final int MTM_UNAVAILABLE_TRIP_TICKS = 2;
+
+    private static final ActivityOptions OPTS =
+        ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
+    private static final ActivityOptions QUOTE_OPTS =
+        ActivityOptions.newBuilder()
+            .setTaskQueue(MARKET_DATA_TASK_QUEUE)
+            .setStartToCloseTimeout(Duration.ofSeconds(5))
+            .build();
+
+    private final MarketCalendarActivities calendar =
+        Workflow.newActivityStub(MarketCalendarActivities.class, OPTS);
+    private final TenantConfigActivities tenantConfig =
+        Workflow.newActivityStub(TenantConfigActivities.class, OPTS);
+    private final AccountPnlActivities accountPnl =
+        Workflow.newActivityStub(AccountPnlActivities.class, OPTS);
+    private final GetOptionQuoteActivity optionQuote =
+        Workflow.newActivityStub(GetOptionQuoteActivity.class, QUOTE_OPTS);
+
+    private final AccountKillSwitchWorkflowInput input;
+    private boolean tripped;
+    private LocalDate tradingDay;
+    private int consecutiveMtmUnavailableTicks;
+
+    @WorkflowInit
+    public LegacyMtmDeferEmulatorWorkflowImpl(AccountKillSwitchWorkflowInput in) {
+      this.input = in;
+    }
+
+    @Override
+    public String run(AccountKillSwitchWorkflowInput in) {
+      if (this.tradingDay == null) {
+        this.tradingDay = calendar.todayEt();
+      }
+      while (true) {
+        Workflow.sleep(Duration.ofSeconds(60));
+        legacyHeartbeat();
+      }
+    }
+
+    private void legacyHeartbeat() {
+      // Record ONLY the debounce marker, at the PRE-widen maxSupported (1), at the same position
+      // production records it (before todayEt).
+      int mtmDebounceVersion =
+          Workflow.getVersion(VERSION_ACCOUNT_MTM_DEBOUNCE, Workflow.DEFAULT_VERSION, 1);
+      LocalDate today = calendar.todayEt();
+      if (!today.equals(tradingDay)) {
+        this.tradingDay = today;
+      }
+      if (tripped) {
+        return;
+      }
+      if (!calendar.isMarketOpen()) {
+        return;
+      }
+      BigDecimal threshold = tenantConfig.accountDailyLossThreshold(input.getTenantId());
+      if (threshold == null || threshold.signum() <= 0) {
+        return;
+      }
+      // Legacy realized path (REALIZED marker absent => DEFAULT_VERSION on replay).
+      BigDecimal realized = accountPnl.computeTenantRealizedPnl(input.getTenantId(), tradingDay);
+      AccountOpenBook book = accountPnl.accountOpenBook(input.getTenantId());
+      int quoteFailures = 0;
+      for (OpenPositionValuation pos : book.positions()) {
+        if (liveBid(pos.contractSymbol()) == null) {
+          quoteFailures++;
+        }
+      }
+      int combinedFailures = book.valueFailures() + quoteFailures;
+      if (book.listed() > 0 && failsClosed(book.listed(), combinedFailures)) {
+        if (mtmDebounceVersion >= 1 && book.listed() <= SMALL_BOOK_MAX_POSITIONS) {
+          // In-tick re-fetch DISABLED in this fixture (0 attempts => no re-fetch commands).
+          if (failsClosed(book.listed(), combinedFailures)
+              && ++consecutiveMtmUnavailableTicks < MTM_UNAVAILABLE_TRIP_TICKS) {
+            // DEFER: no marker >= 2 in v1, so NO audit emit — just return.
+            return;
+          }
+        }
+        // Unreached in the single-tick fixture (would be the fail-closed trip at counter=N).
+        this.tripped = true;
+        return;
+      }
+      this.consecutiveMtmUnavailableTicks = 0;
+      // Loss-eval tail unused by the fixture (the defer path returns above).
+      if (realized.compareTo(threshold.negate()) <= 0) {
+        this.tripped = true;
+      }
+    }
+
+    private BigDecimal liveBid(String contractSymbol) {
+      GetOptionQuoteRequest qreq = new GetOptionQuoteRequest();
+      qreq.setSchemaVersion(1L);
+      qreq.setTenantId(input.getTenantId());
+      qreq.setStrategyId(ACCOUNT_SCOPE);
+      qreq.setContractSymbol(contractSymbol);
+      OptionQuoteResult quote = optionQuote.getOptionQuote(qreq);
+      if (quote == null
+          || quote.getStatus() != OptionQuoteResult.Status.OK
+          || quote.getBid() == null) {
+        return null;
+      }
+      return quote.getBid();
+    }
+
+    private static boolean failsClosed(int listed, int failures) {
+      boolean exceedsRelative = (long) failures * RELATIVE_FAILURE_THRESHOLD_MULTIPLIER > listed;
+      boolean tripsSmallBookFloor = listed <= SMALL_BOOK_MAX_POSITIONS && failures >= 1;
+      return exceedsRelative || tripsSmallBookFloor;
     }
 
     @Override
