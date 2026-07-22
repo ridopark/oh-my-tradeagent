@@ -34,6 +34,25 @@ export function LiveAccount({
   );
 }
 
+// Pure: formats a P&L ($, fraction) pair into a display change string. Both non-null → "▲ $X (Y%)"
+// (up = pl >= 0); either null → an em-dash placeholder (isNull). `up` is meaningful only when !isNull.
+// Alpaca-style pct is a decimal fraction (0.0123 = 1.23%) → x100 for display.
+function formatChange(
+  pl: number | null,
+  plPct: number | null,
+): { text: string; up: boolean; isNull: boolean } {
+  if (pl == null || plPct == null) {
+    return { text: "—", up: true, isNull: true };
+  }
+  const up = pl >= 0;
+  const arrow = up ? "▲" : "▼";
+  return {
+    text: `${arrow} ${fmtCurrency(pl)} (${(plPct * 100).toFixed(2)}%)`,
+    up,
+    isNull: false,
+  };
+}
+
 function AccountTotal({
   history,
   accountValue,
@@ -72,6 +91,18 @@ function AccountTotal({
   const changeCls = up ? "text-emerald-400" : "text-rose-400";
   const arrow = up ? "▲" : "▼";
 
+  // Deposit-adjusted trading return over the selected range (BFF-computed; null when cash flows are
+  // unavailable or the denominator is undefined). Distinct from the per-day "today" number above.
+  const rangeChange = formatChange(
+    history ? history.range_pl : null,
+    history ? history.range_pl_pct : null,
+  );
+  const rangeCls = rangeChange.isNull
+    ? "text-slate-500"
+    : rangeChange.up
+      ? "text-emerald-400"
+      : "text-rose-400";
+
   return (
     <div>
       <div className="text-xs uppercase tracking-wide text-slate-500">
@@ -86,6 +117,15 @@ function AccountTotal({
           {/* Alpaca returns profit_loss_pct as a decimal fraction (0.0123 = 1.23%) → x100 for display. */}
           {plPct != null && <> ({(plPct * 100).toFixed(2)}%)</>}
           <span className="ml-1 text-slate-500">today</span>
+        </div>
+      )}
+      <div className="mt-1 text-sm font-medium">
+        <span className="text-slate-500">This range (excl. deposits)</span>{" "}
+        <span className={rangeCls}>{rangeChange.text}</span>
+      </div>
+      {rangeChange.isNull && (
+        <div className="mt-0.5 text-xs text-slate-500">
+          excludes deposits &amp; withdrawals; unavailable for this range
         </div>
       )}
       <div className="mt-1 text-xs text-slate-500">
