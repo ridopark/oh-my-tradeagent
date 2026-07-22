@@ -3,10 +3,12 @@ package com.ohmytradeagent.tdbff.web;
 import com.ohmytradeagent.contract.PortfolioHistoryResult;
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
+import com.ohmytradeagent.tdbff.portfolio.AccountEquityClient;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioHistoryClient;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator.RangeReturn;
 import jakarta.servlet.http.HttpServletRequest;
+import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,6 +46,7 @@ public class PortfolioHistoryController {
   private final TenantStrategyResolver strategyResolver;
   private final DbStrategyConfigReader strategyRegistry;
   private final PortfolioReturnCalculator returnCalculator;
+  private final AccountEquityClient accountEquityClient;
   private final TenantContext ctx;
 
   public PortfolioHistoryController(
@@ -51,11 +54,13 @@ public class PortfolioHistoryController {
       TenantStrategyResolver strategyResolver,
       DbStrategyConfigReader strategyRegistry,
       PortfolioReturnCalculator returnCalculator,
+      AccountEquityClient accountEquityClient,
       TenantContext ctx) {
     this.client = client;
     this.strategyResolver = strategyResolver;
     this.strategyRegistry = strategyRegistry;
     this.returnCalculator = returnCalculator;
+    this.accountEquityClient = accountEquityClient;
     this.ctx = ctx;
   }
 
@@ -78,6 +83,12 @@ public class PortfolioHistoryController {
     body.put("base_value_asof", history == null ? null : history.getBaseValueAsof());
     body.put("timeframe", history == null ? null : history.getTimeframe());
 
+    // Live account equity — the SAME net-liq figure the /live header total shows — used as EV so a
+    // daily-bar range (1M/3M/YTD/1Y) values the book at NOW, not at the series' last COMPLETED
+    // session (yesterday's close). A degraded/failed snapshot → null → the calc falls back to
+    // equity[last]; NEVER fail the chart on an equity-read hiccup.
+    BigDecimal liveEquity = history == null ? null : liveEquityFor(tenant, brokerTarget);
+
     // Deposit-adjusted range return (additive; "Today" still reads profit_loss[last] above). A
     // degraded (null) history or unavailable cash flows yield null range figures → UI renders "—".
     RangeReturn rr =
@@ -90,7 +101,8 @@ public class PortfolioHistoryController {
                 history.getCashFlowTimestamps(),
                 history.getCashFlowAmounts(),
                 history.getCashFlowsAvailable(),
-                history.getBaseValueAsof());
+                history.getBaseValueAsof(),
+                liveEquity);
     body.put("range_pl", rr.rangePl());
     body.put("range_pl_pct", rr.rangePlPct());
     body.put(
@@ -115,6 +127,24 @@ public class PortfolioHistoryController {
       }
     }
     return null;
+  }
+
+  /**
+   * Live net-liquidation equity for the tenant's OWN account behind {@code brokerTarget}, read from
+   * one {@code AccountSnapshotWorkflow} round-trip — the same value the {@code /live} header total
+   * uses. Returns null on any degrade so the range return falls back to the chart's last point; a
+   * failed/slow equity read must NEVER fail the chart. {@link AccountEquityClient#snapshotFor}
+   * already degrades internally, but we guard defensively so no exception escapes here.
+   */
+  private BigDecimal liveEquityFor(String tenant, String brokerTarget) {
+    if (brokerTarget == null) {
+      return null;
+    }
+    try {
+      return accountEquityClient.snapshotFor(tenant, brokerTarget).equity();
+    } catch (RuntimeException e) {
+      return null;
+    }
   }
 
   private static <T> List<T> nullToEmpty(List<T> values) {

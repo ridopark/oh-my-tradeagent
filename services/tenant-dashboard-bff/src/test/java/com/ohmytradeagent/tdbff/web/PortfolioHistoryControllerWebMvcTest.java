@@ -9,6 +9,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.ohmytradeagent.contract.PortfolioHistoryResult;
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
+import com.ohmytradeagent.tdbff.portfolio.AccountEquityClient;
+import com.ohmytradeagent.tdbff.portfolio.AccountEquityClient.BrokerAccount;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioHistoryClient;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator;
 import java.math.BigDecimal;
@@ -34,6 +36,7 @@ class PortfolioHistoryControllerWebMvcTest {
   @MockitoBean private PortfolioHistoryClient client;
   @MockitoBean private TenantStrategyResolver strategyResolver;
   @MockitoBean private DbStrategyConfigReader strategyRegistry;
+  @MockitoBean private AccountEquityClient accountEquityClient;
 
   @Test
   void missingTenantHeaderIs401() throws Exception {
@@ -89,6 +92,9 @@ class PortfolioHistoryControllerWebMvcTest {
     result.setCashFlowAmounts(List.of(new BigDecimal("41230")));
     result.setCashFlowsAvailable(true);
     when(client.historyFor(eq("acme"), eq("alpaca-live"), eq("1M"))).thenReturn(result);
+    // Degraded live-equity snapshot → EV falls back to equity[last]=52259.56 (behavior-preserving).
+    when(accountEquityClient.snapshotFor(eq("acme"), eq("alpaca-live")))
+        .thenReturn(new BrokerAccount(null, null));
 
     mvc.perform(get("/api/portfolio-history?range=1M").header("X-Tenant-Id", "acme"))
         .andExpect(status().isOk())
@@ -96,6 +102,55 @@ class PortfolioHistoryControllerWebMvcTest {
         .andExpect(jsonPath("$.range_pl").value(6029.56))
         .andExpect(jsonPath("$.range_pl_pct").value(org.hamcrest.Matchers.notNullValue()))
         .andExpect(jsonPath("$.cash_flows_available").value(true));
+  }
+
+  @Test
+  void liveEquityUsedAsEv_overStaleDailyBar() throws Exception {
+    // prod-kipark frame: a daily-bar 1M range whose last point (54360.02) is yesterday's close.
+    // The controller reads live equity (52577.52) and threads it as EV → range = 52577.52 - 50000.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-live");
+
+    PortfolioHistoryResult result = new PortfolioHistoryResult();
+    result.setSchemaVersion(1L);
+    result.setTimestamps(List.of(1000L, 3000L));
+    result.setEquity(List.of(new BigDecimal("50000.00"), new BigDecimal("54360.02")));
+    result.setBaseValue(new BigDecimal("50000.00"));
+    result.setCashFlowTimestamps(List.of());
+    result.setCashFlowAmounts(List.of());
+    result.setCashFlowsAvailable(true);
+    when(client.historyFor(eq("acme"), eq("alpaca-live"), eq("1M"))).thenReturn(result);
+    when(accountEquityClient.snapshotFor(eq("acme"), eq("alpaca-live")))
+        .thenReturn(new BrokerAccount(new BigDecimal("52577.52"), "310056593"));
+
+    mvc.perform(get("/api/portfolio-history?range=1M").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        // Live EV, NOT the stale daily bar's 4360.02.
+        .andExpect(jsonPath("$.range_pl").value(2577.52));
+  }
+
+  @Test
+  void throwingEquitySnapshot_fallsBackToEquityLast_no500() throws Exception {
+    // A throwing/degraded snapshot read must NEVER fail the chart: EV falls back to equity[last].
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-live");
+
+    PortfolioHistoryResult result = new PortfolioHistoryResult();
+    result.setSchemaVersion(1L);
+    result.setTimestamps(List.of(1000L, 3000L));
+    result.setEquity(List.of(new BigDecimal("50000.00"), new BigDecimal("54360.02")));
+    result.setBaseValue(new BigDecimal("50000.00"));
+    result.setCashFlowTimestamps(List.of());
+    result.setCashFlowAmounts(List.of());
+    result.setCashFlowsAvailable(true);
+    when(client.historyFor(eq("acme"), eq("alpaca-live"), eq("1M"))).thenReturn(result);
+    when(accountEquityClient.snapshotFor(eq("acme"), eq("alpaca-live")))
+        .thenThrow(new RuntimeException("temporal unavailable"));
+
+    mvc.perform(get("/api/portfolio-history?range=1M").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        // Fell back to the series' last point (54360.02 - 50000), no 500.
+        .andExpect(jsonPath("$.range_pl").value(4360.02));
   }
 
   @Test
