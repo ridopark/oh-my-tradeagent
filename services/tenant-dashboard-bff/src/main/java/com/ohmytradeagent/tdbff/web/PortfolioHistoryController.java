@@ -12,6 +12,15 @@ import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -42,6 +51,8 @@ public class PortfolioHistoryController {
           + " (broker-account-level truth for that account) — NOT this tenant's per-strategy"
           + " portfolio value.";
 
+  private static final Logger log = LoggerFactory.getLogger(PortfolioHistoryController.class);
+
   private final PortfolioHistoryClient client;
   private final TenantStrategyResolver strategyResolver;
   private final DbStrategyConfigReader strategyRegistry;
@@ -49,19 +60,38 @@ public class PortfolioHistoryController {
   private final AccountEquityClient accountEquityClient;
   private final TenantContext ctx;
 
+  // Per-read wall-clock bound for the concurrent history + live-equity sub-reads. Shares the same
+  // property (and 12s-BFF-budget invariant) as PortfolioService's sub-reads so both degrade below
+  // the
+  // dashboard's call timeout rather than failing the page.
+  private final long subreadTimeoutSeconds;
+
+  // Daemon, cached pool: low-QPS dashboard reads; idle threads are reclaimed and never block JVM
+  // exit. A timed-out sub-read is abandoned here and self-resolves when its own Temporal RPC
+  // returns.
+  private final ExecutorService subreadPool =
+      Executors.newCachedThreadPool(
+          r -> {
+            Thread t = new Thread(r, "bff-portfolio-history-subread");
+            t.setDaemon(true);
+            return t;
+          });
+
   public PortfolioHistoryController(
       PortfolioHistoryClient client,
       TenantStrategyResolver strategyResolver,
       DbStrategyConfigReader strategyRegistry,
       PortfolioReturnCalculator returnCalculator,
       AccountEquityClient accountEquityClient,
-      TenantContext ctx) {
+      TenantContext ctx,
+      @Value("${bff.portfolio.subread-timeout-seconds:9}") long subreadTimeoutSeconds) {
     this.client = client;
     this.strategyResolver = strategyResolver;
     this.strategyRegistry = strategyRegistry;
     this.returnCalculator = returnCalculator;
     this.accountEquityClient = accountEquityClient;
     this.ctx = ctx;
+    this.subreadTimeoutSeconds = subreadTimeoutSeconds;
   }
 
   @GetMapping
@@ -70,8 +100,27 @@ public class PortfolioHistoryController {
     String tenant = ctx.tenantId(req);
 
     String brokerTarget = primaryBrokerTarget(tenant);
-    PortfolioHistoryResult history =
-        brokerTarget == null ? null : client.historyFor(tenant, brokerTarget, range);
+
+    // Fire the history read AND (for daily-bar ranges only) the live-equity read CONCURRENTLY: both
+    // are independent blocking Temporal round-trips, so running them SEQUENTIALLY would sum their
+    // latencies and could exceed the dashboard's 12s BFF call budget under a slow/degraded
+    // orchestrator — failing the whole chart instead of degrading. Concurrent submit + bounded
+    // await
+    // degrades each read on its own (mirrors PortfolioService's sub-read pattern). No broker_target
+    // →
+    // no reads (empty chart, client never called).
+    PortfolioHistoryResult history = null;
+    BigDecimal liveEquity = null;
+    if (brokerTarget != null) {
+      final String bt = brokerTarget;
+      Future<PortfolioHistoryResult> historyFuture =
+          subreadPool.submit(() -> client.historyFor(tenant, bt, range));
+      Future<BigDecimal> equityFuture =
+          client.usesDailyBars(range) ? subreadPool.submit(() -> liveEquityFor(tenant, bt)) : null;
+      history = await(historyFuture, null, "portfolio-history range=" + range);
+      liveEquity =
+          equityFuture == null ? null : await(equityFuture, null, "live-equity range=" + range);
+    }
 
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("timestamps", history == null ? List.of() : nullToEmpty(history.getTimestamps()));
@@ -82,19 +131,6 @@ public class PortfolioHistoryController {
     body.put("base_value", history == null ? null : history.getBaseValue());
     body.put("base_value_asof", history == null ? null : history.getBaseValueAsof());
     body.put("timeframe", history == null ? null : history.getTimeframe());
-
-    // Live account equity — the SAME net-liq figure the /live header total shows — used as EV so a
-    // daily-bar range (1M/3M/YTD/1Y) values the book at NOW, not at the series' last COMPLETED
-    // session (yesterday's close). SCOPED to daily-bar ranges ONLY: an intraday range (1D/1W)
-    // already
-    // carries a live last point, so we skip the extra broker read there — critically the 1D tab
-    // polls
-    // every ~15s, and the header already reads equity for the total. A degraded/failed snapshot →
-    // null → the calc falls back to equity[last]; NEVER fail the chart on an equity-read hiccup.
-    BigDecimal liveEquity =
-        (history != null && client.usesDailyBars(range))
-            ? liveEquityFor(tenant, brokerTarget)
-            : null;
 
     // Deposit-adjusted range return (additive; "Today" still reads profit_loss[last] above). A
     // degraded (null) history or unavailable cash flows yield null range figures → UI renders "—".
@@ -151,6 +187,35 @@ public class PortfolioHistoryController {
       return accountEquityClient.snapshotFor(tenant, brokerTarget).equity();
     } catch (RuntimeException e) {
       return null;
+    }
+  }
+
+  /**
+   * Awaits one concurrent sub-read under {@link #subreadTimeoutSeconds}. On timeout or failure it
+   * logs and returns {@code fallback} so a single stalled dependency (a down/rolling orchestrator
+   * worker, a slow broker fetch) degrades just its section of this read-only chart rather than
+   * failing the whole response — which would otherwise stack past the dashboard's BFF call timeout
+   * and 500 the page. Mirrors {@link com.ohmytradeagent.tdbff.portfolio.PortfolioService#await}.
+   */
+  private <T> T await(Future<T> future, T fallback, String label) {
+    try {
+      return future.get(subreadTimeoutSeconds, TimeUnit.SECONDS);
+    } catch (TimeoutException e) {
+      future.cancel(true);
+      log.warn(
+          "portfolio-history sub-read timed out after {}s; degrading {}",
+          subreadTimeoutSeconds,
+          label);
+      return fallback;
+    } catch (ExecutionException e) {
+      Throwable cause = e.getCause() != null ? e.getCause() : e;
+      log.warn("portfolio-history sub-read failed; degrading {} err={}", label, cause.getMessage());
+      return fallback;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      future.cancel(true);
+      log.warn("portfolio-history sub-read interrupted; degrading {}", label);
+      return fallback;
     }
   }
 
