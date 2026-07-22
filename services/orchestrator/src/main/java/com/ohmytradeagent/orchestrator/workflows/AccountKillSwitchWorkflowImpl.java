@@ -170,6 +170,22 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       "account-trip-repage-while-holding-v1";
 
   /**
+   * PLAN-2026-07-22 gate for the small-book MTM-unavailable fail-close DEBOUNCE. On 2026-07-21 a
+   * single transient option-quote miss on prod_real's 1-position book spuriously tripped {@code
+   * auto:account_mtm_unavailable} on a PROFITABLE day (a 1-of-1 miss trivially satisfies the
+   * fail-close bound). At {@code v>=1} the fail-close condition ({@code book.listed() > 0 &&
+   * failsClosed(...)}) on a SMALL book ({@code listed <= }{@link #SMALL_BOOK_MAX_POSITIONS}) must
+   * hold for {@link #MTM_UNAVAILABLE_TRIP_TICKS} CONSECUTIVE heartbeats before the trip fires;
+   * below the threshold the tick DEFERS (no trip), exactly like the can't-price path. A LARGE
+   * book's relative {@code >50%} failure still fail-CLOSES immediately (unchanged). At {@link
+   * Workflow#DEFAULT_VERSION} the cap fail-closes on the FIRST miss (byte-identical pre-change
+   * command stream) — required because the trip now emits its {@code doTrip} commands on a LATER
+   * tick (changed command ordering). The consecutive-tick counter is pure workflow state (no
+   * command). Pinned by {@code AccountKillSwitchWorkflowImplLegacyReplayTest}.
+   */
+  static final String VERSION_ACCOUNT_MTM_DEBOUNCE = "account-mtm-debounce-v1";
+
+  /**
    * Phase 2b (risk C1): emitted (and Discord-paged via {@code AccountKillSwitchCapAlerter}) on the
    * bounded periodic re-page while the account cap stays tripped AND market-open AND holding open
    * positions. Carries the open-position count, current MTM (when priceable), and
@@ -227,6 +243,34 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private static final int RELATIVE_FAILURE_THRESHOLD_MULTIPLIER = 2;
 
   private static final int SMALL_BOOK_MAX_POSITIONS = 2;
+
+  /**
+   * PLAN-2026-07-22: consecutive unpriceable heartbeats a SMALL book ({@code listed <= }{@link
+   * #SMALL_BOOK_MAX_POSITIONS}) must stay unpriceable before the cap fail-CLOSES on {@code
+   * auto:account_mtm_unavailable}. Default 2: a single/transient option-quote miss on a 1–2
+   * position book must NOT trip (the 2026-07-21 spurious trip on a PROFITABLE day); two consecutive
+   * unpriceable ticks still do (fail-closed posture preserved). A LARGE book's relative {@code
+   * >50%} failure is unaffected — it still fail-closes immediately. Package-private for test
+   * override.
+   */
+  static int MTM_UNAVAILABLE_TRIP_TICKS = 2;
+
+  /**
+   * PLAN-2026-07-22 primary defense: bounded IN-TICK option-quote re-fetch attempts before a
+   * momentarily-unpriceable small book is deferred/failed-closed this heartbeat. A quote blip
+   * usually clears within seconds; re-valuing the book a bounded few times WITHIN the tick removes
+   * the 2026-07-21 failure mode with NO widened blind window, leaving the cross-tick {@link
+   * #MTM_UNAVAILABLE_TRIP_TICKS} debounce as the backstop for outages that outlast the in-tick
+   * retries. {@code 0} disables in-tick re-fetch (tests set it to isolate the cross-tick debounce).
+   * Package-private for test override.
+   */
+  static int MTM_UNAVAILABLE_INTICK_REFETCHES = 2;
+
+  /**
+   * Delay between bounded in-tick option-quote re-fetch attempts — short, since a quote blip clears
+   * fast. Deterministic {@link Workflow#sleep(Duration)} timer (time-skipped in tests).
+   */
+  static final Duration MTM_UNAVAILABLE_INTICK_REFETCH_DELAY = Duration.ofSeconds(2);
 
   private static final BigDecimal CONTRACT_MULTIPLIER = Sizing.CONTRACT_MULTIPLIER;
 
@@ -321,6 +365,26 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * continue-as-new (observability-only; a re-page resets its window after an infrequent CAN).
    */
   private int stillHoldingRepageTicks;
+
+  /**
+   * PLAN-2026-07-22 small-book MTM-unavailable debounce counter (deterministic workflow state, no
+   * commands). Counts CONSECUTIVE heartbeats on which a SMALL book stayed unpriceable (the
+   * fail-close condition held) AFTER the bounded in-tick re-fetch. Reset to 0 on ANY tick that
+   * prices the book cleanly (so non-consecutive misses can never accumulate), on a new trading day,
+   * and on reset/untrip. Strictly gated behind {@link #VERSION_ACCOUNT_MTM_DEBOUNCE} v&gt;=1; at
+   * {@link Workflow#DEFAULT_VERSION} it stays 0 (never consulted) and the cap fail-closes on the
+   * first miss (byte-identical legacy command stream).
+   *
+   * <p>Like {@link #consecutiveInactiveTicks} / {@link #stillHoldingRepageTicks} this is
+   * intentionally NOT carried across continue-as-new: {@code buildCarryForwardInput} does not
+   * thread it because the {@link AccountKillSwitchWorkflowInput} DTO caps schema_version at 3 and
+   * threading it would force a v4 contract change (forbidden by this PR's scope / ship order). The
+   * CAN watermark ({@link #historyLengthWatermark}) is thousands of ticks, so a CAN landing between
+   * the two consecutive misses of an N=2 debounce is practically impossible, and a reset merely
+   * re-accumulates from zero — the fail-closed posture is preserved (it still trips after N
+   * consecutive misses).
+   */
+  private int consecutiveMtmUnavailableTicks;
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
@@ -559,12 +623,22 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // DEFAULT_VERSION the tripped early-return below stays byte-identical (no re-page commands).
     int repageVersion =
         Workflow.getVersion(VERSION_ACCOUNT_TRIP_REPAGE_WHILE_HOLDING, Workflow.DEFAULT_VERSION, 1);
+    // PLAN-2026-07-22: read the small-book MTM-unavailable debounce gate ONCE at this stable scope.
+    // At DEFAULT_VERSION the small-book fail-close still trips on the FIRST miss (byte-identical);
+    // at
+    // v>=1 it re-fetches in-tick and requires MTM_UNAVAILABLE_TRIP_TICKS consecutive unpriceable
+    // ticks. All new commands (in-tick re-fetch quotes + timers) are strictly behind v>=1.
+    int mtmDebounceVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_MTM_DEBOUNCE, Workflow.DEFAULT_VERSION, 1);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
       this.tradingDay = today;
       // New trading day => the prior SOD-equity snapshot is stale; re-capture lazily below.
       this.sodEquity = null;
+      // New trading day => a stale mid-outage debounce count must not carry into a fresh session
+      // (pure workflow state; a no-op at DEFAULT_VERSION where the counter is always 0).
+      this.consecutiveMtmUnavailableTicks = 0;
     }
     if (tripped) {
       // Phase 2b (risk C1): while tripped + market-open + holding, emit a bounded periodic re-page
@@ -626,7 +700,6 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     AccountOpenBook book = accountPnl.accountOpenBook(input.getTenantId());
 
     OpenBookMtm valued = valueOpenBook(book);
-    BigDecimal openMtm = valued.openMtm();
 
     // Fail-CLOSED: a correlated positionState + quote outage that drops too many listed positions
     // must NOT under-count the loss (fail-OPEN). Mirror the #325 relative >50% / small-book bound
@@ -634,19 +707,77 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // (falsely small) computed loss.
     int combinedFailures = book.valueFailures() + valued.quoteFailures();
     if (book.listed() > 0 && failsClosed(book.listed(), combinedFailures)) {
-      // Fail-closed trip: the book is (partly) unpriceable, so the MTM is unreliable — carry the
-      // full listed open-position count for the page (the number the operator must flatten by hand)
-      // but no MTM. listed() is the whole book; positions() drops the ones whose state query
-      // failed.
-      doTrip(
-          "auto:account_mtm_unavailable",
-          "auto:account_mtm_unavailable",
-          null,
-          book.listed(),
-          null);
-      return true; // cap engaged (fail-closed trip) — armed.
+      // PLAN-2026-07-22: a SMALL book (listed <= SMALL_BOOK_MAX_POSITIONS) is over-sensitive — a
+      // single 1-of-1 / 2-of-2 quote miss trivially satisfies the fail-close bound and spuriously
+      // tripped prod_real on a PROFITABLE day (2026-07-21). A LARGE book's relative >50% failure is
+      // a correlated market-data degradation and STILL fail-closes immediately (unchanged). At
+      // DEFAULT_VERSION the whole block below is skipped and the cap fail-closes on the first miss
+      // (byte-identical pre-change command stream).
+      if (mtmDebounceVersion >= 1 && book.listed() <= SMALL_BOOK_MAX_POSITIONS) {
+        // (1) PRIMARY defense: a momentary quote blip usually clears within seconds. Re-value the
+        // book a BOUNDED few times WITHIN this heartbeat before deferring — a blip that clears
+        // mid-tick never widens the blind window at all. Mutates valued + combinedFailures.
+        for (int attempt = 1;
+            attempt <= MTM_UNAVAILABLE_INTICK_REFETCHES
+                && failsClosed(book.listed(), combinedFailures);
+            attempt++) {
+          Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
+              .warn(
+                  "account MTM unavailable (tenant={} listed={} failures={}) — in-tick re-fetch"
+                      + " {}/{}",
+                  input.getTenantId(),
+                  book.listed(),
+                  combinedFailures,
+                  attempt,
+                  MTM_UNAVAILABLE_INTICK_REFETCHES);
+          Workflow.sleep(MTM_UNAVAILABLE_INTICK_REFETCH_DELAY);
+          valued = valueOpenBook(book);
+          combinedFailures = book.valueFailures() + valued.quoteFailures();
+        }
+        // (2) BACKSTOP: still unpriceable after the in-tick re-fetch => cross-tick debounce. Defer
+        // this tick LOUDLY (WARN so an operator can eyeball the book / a chronic every-other-tick
+        // miss surfaces) and only fail-close after MTM_UNAVAILABLE_TRIP_TICKS CONSECUTIVE
+        // unpriceable heartbeats. A single/transient miss never trips; a genuine sustained outage
+        // still fail-closes N ticks later.
+        if (failsClosed(book.listed(), combinedFailures)) {
+          consecutiveMtmUnavailableTicks++;
+          if (consecutiveMtmUnavailableTicks < MTM_UNAVAILABLE_TRIP_TICKS) {
+            Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
+                .warn(
+                    "account MTM unavailable (tenant={} listed={} failures={}) — deferring {}/{},"
+                        + " will fail-close after {} consecutive unpriceable ticks",
+                    input.getTenantId(),
+                    book.listed(),
+                    combinedFailures,
+                    consecutiveMtmUnavailableTicks,
+                    MTM_UNAVAILABLE_TRIP_TICKS,
+                    MTM_UNAVAILABLE_TRIP_TICKS);
+            return false; // momentarily-unpriceable small book — defer (not armed), do not trip
+            // yet.
+          }
+        }
+      }
+      // Fail-closed trip (v0 / large book / debounce satisfied at N) IF still unpriceable: the book
+      // is (partly) unpriceable so the MTM is unreliable — carry the full listed open-position
+      // count
+      // for the page (the number the operator must flatten by hand) but no MTM. listed() is the
+      // whole book; positions() drops the ones whose state query failed.
+      if (failsClosed(book.listed(), combinedFailures)) {
+        doTrip(
+            "auto:account_mtm_unavailable",
+            "auto:account_mtm_unavailable",
+            null,
+            book.listed(),
+            null);
+        return true; // cap engaged (fail-closed trip) — armed.
+      }
     }
+    // Book priced cleanly this tick (or an in-tick blip cleared) — reset the debounce counter so
+    // only CONSECUTIVE unpriceable heartbeats accumulate toward a fail-close (pure workflow state;
+    // a no-op at DEFAULT_VERSION where the counter is always 0).
+    consecutiveMtmUnavailableTicks = 0;
 
+    BigDecimal openMtm = valued.openMtm();
     BigDecimal totalPnl = realized.add(openMtm);
     if (totalPnl.compareTo(threshold.negate()) <= 0) {
       // Carry the full listed open-position count + current open MTM so the (no-flatten) page is
@@ -1029,6 +1160,10 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     this.coolingDownUntil = workflowNow().plusSeconds(cooldownSecs);
     // Phase 2b: clear the still-holding re-page window so a later re-trip starts a fresh cadence.
     this.stillHoldingRepageTicks = 0;
+    // PLAN-2026-07-22: clear the MTM-unavailable debounce so a later re-trip starts a fresh N-tick
+    // count (else a post-cooldown unpriceable tick would immediately re-fail-close on the stale
+    // counter). Pure workflow state; a no-op at DEFAULT_VERSION where the counter is always 0.
+    this.consecutiveMtmUnavailableTicks = 0;
 
     Map<String, Object> subj =
         subject(

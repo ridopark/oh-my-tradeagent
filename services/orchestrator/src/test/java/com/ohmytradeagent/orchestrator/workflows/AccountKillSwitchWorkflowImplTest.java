@@ -67,11 +67,17 @@ class AccountKillSwitchWorkflowImplTest {
   private GetOptionQuoteActivity optionQuote;
   private AccountSnapshotActivity accountSnapshot;
   private int originalStillHoldingRepageTicks;
+  private int originalMtmTripTicks;
+  private int originalMtmIntickRefetches;
 
   @BeforeEach
   void setUp() {
     // Phase 2b: capture the production re-page cadence so tests that shrink it can restore it.
     originalStillHoldingRepageTicks = AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS;
+    // PLAN-2026-07-22: capture the mtm-debounce tunables so tests that isolate the cross-tick
+    // debounce (in-tick re-fetch disabled) can restore them.
+    originalMtmTripTicks = AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS;
+    originalMtmIntickRefetches = AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES;
     env = TestWorkflowEnvironment.newInstance();
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(AccountKillSwitchWorkflowImpl.class);
@@ -124,6 +130,8 @@ class AccountKillSwitchWorkflowImplTest {
   @AfterEach
   void tearDown() {
     AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = originalStillHoldingRepageTicks;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = originalMtmTripTicks;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = originalMtmIntickRefetches;
     env.close();
   }
 
@@ -234,12 +242,20 @@ class AccountKillSwitchWorkflowImplTest {
     verify(accountPnl, never()).accountOpenBook(anyString());
   }
 
-  // Fail-closed MTM: every quote UNAVAILABLE on a small book must NOT fail-open. The cap engages
-  // (trips with the distinct reason) rather than computing a falsely-small loss and staying open.
+  // ---------- PLAN-2026-07-22: small-book MTM-unavailable quote debounce ----------
+
+  // The 2026-07-21 fix. A small (2-position) book with BOTH quotes UNAVAILABLE is over-sensitive (a
+  // single miss trivially satisfies the fail-close bound). It must NOT trip on the FIRST
+  // unpriceable
+  // tick (debounce); only a SECOND CONSECUTIVE unpriceable tick fail-closes — still fail-CLOSED,
+  // but
+  // past a single/transient blip. Isolate the cross-tick debounce by disabling the in-tick
+  // re-fetch. (Replaces the old heartbeat_quoteUnavailable_failsClosed_doesNotFailOpen, which
+  // asserted a trip on the first miss — that is exactly the over-sensitivity being fixed.)
   @Test
-  void heartbeat_quoteUnavailable_failsClosed_doesNotFailOpen() {
-    // Realized 0; two positions but BOTH quotes UNAVAILABLE. Combined failures (2 of 2) trips the
-    // small-book fail-closed bound.
+  void heartbeat_smallBookUnpriceable_debouncesThenFailsClosedOnSecondTick() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
     when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
     when(accountPnl.accountOpenBook(anyString()))
         .thenReturn(
@@ -251,23 +267,297 @@ class AccountKillSwitchWorkflowImplTest {
                 0));
     when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
 
-    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-failclosed");
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-debounce");
     WorkflowStub.fromTyped(stub).start(input());
-    env.sleep(Duration.ofSeconds(75));
 
+    // First unpriceable tick: DEFERRED, not tripped (a single/transient miss must not fail-close).
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("KillSwitchTripped")).isEqualTo(0L);
+
+    // Second consecutive unpriceable tick: fail-closes with the distinct reason.
+    env.sleep(Duration.ofSeconds(60));
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isTrue();
     assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
-    // Phase 2 (PLAN-2026-07-15): a fail-closed AUTO trip also halts + pages but no longer
-    // auto-flattens.
+    // Fail-closed AUTO trip halts + pages but does NOT auto-flatten (Phase 2 no-auto-flatten).
     verify(cascade, never())
         .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
-    // flatten=manual + the listed open-position count; NO open_mtm (book is unpriceable here).
     AuditEvent tripped = captureKind("KillSwitchTripped");
     assertThat(tripped.getSubject())
         .containsEntry("flatten", "manual")
         .containsEntry("open_positions", 2)
         .doesNotContainKey("open_mtm");
+  }
+
+  // A single transient miss followed by a clean price must NOT trip — the debounce counter resets
+  // on
+  // any cleanly-priced tick, so non-consecutive misses cannot accumulate. (In-tick re-fetch
+  // disabled
+  // so exactly one quote call per tick makes the miss/price sequence deterministic.)
+  @Test
+  void heartbeat_smallBookSingleUnpriceableTickThenPriced_doesNotTrip() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                1,
+                0));
+    // Tick 1 quote UNAVAILABLE (a blip); every later tick priced (benign -10 MTM, no loss trip).
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(unavailableQuote("NVDA  250516C00140000"))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-debounce-blip");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(4 * 60));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("KillSwitchTripped")).isEqualTo(0L);
+  }
+
+  // "Consecutive" semantics: miss / clean / miss / clean ... must NEVER trip — every cleanly-priced
+  // tick resets the counter to 0, so non-consecutive misses can never reach N. (In-tick re-fetch
+  // off.)
+  @Test
+  void heartbeat_smallBookInterleavedMissThenClean_neverAccumulatesToTrip() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                1,
+                0));
+    // Alternate unavailable / ok on every tick (one call/tick with in-tick re-fetch disabled).
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            unavailableQuote("NVDA  250516C00140000"),
+            okQuote("NVDA  250516C00140000", new BigDecimal("2.90")),
+            unavailableQuote("NVDA  250516C00140000"),
+            okQuote("NVDA  250516C00140000", new BigDecimal("2.90")),
+            unavailableQuote("NVDA  250516C00140000"),
+            okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-interleaved");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(6 * 60));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("KillSwitchTripped")).isEqualTo(0L);
+  }
+
+  // PRIMARY defense: a momentary quote blip that clears within the SAME heartbeat (via the bounded
+  // in-tick re-fetch) never even enters the cross-tick debounce — the book prices on the re-fetch
+  // and the tick evaluates normally (no trip, no defer). Removes the 2026-07-21 failure mode with
+  // no
+  // widened blind window.
+  @Test
+  void heartbeat_smallBookBlipClearsViaInTickRefetch_doesNotDeferOrTrip() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 2;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                1,
+                0));
+    // First quote (initial valuation) UNAVAILABLE; the in-tick re-fetch call returns OK — the blip
+    // cleared mid-tick.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(unavailableQuote("NVDA  250516C00140000"))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-intick-blip");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75)); // ONE tick (the in-tick re-fetch happens within it)
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("KillSwitchTripped")).isEqualTo(0L);
+  }
+
+  // The relative >50% large-book threshold is UNCHANGED: a large book (3 positions) with 2 quotes
+  // UNAVAILABLE (>50% failures) fail-closes on the VERY FIRST tick — the debounce touches only the
+  // small-book floor, never the relative large-book bound.
+  @Test
+  void heartbeat_largeBookRelativeFailure_failsClosedImmediately_unchanged() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L),
+                    new OpenPositionValuation("TSLA  250516C00300000", new BigDecimal("4.00"), 5L)),
+                3,
+                0));
+    // Two of three unpriceable (66% > 50%), one priced.
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  250516C00140000")))
+        .thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  250516C00200000")))
+        .thenReturn(unavailableQuote("AAPL  250516C00200000"));
+    when(optionQuote.getOptionQuote(quoteFor("TSLA  250516C00300000")))
+        .thenReturn(okQuote("TSLA  250516C00300000", new BigDecimal("3.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-largebook");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75)); // ONE tick
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
+  }
+
+  // Real-loss separation (a): a genuine computed-loss breach on a FULLY PRICED book trips on the
+  // FIRST qualifying tick with reason auto:account_daily_loss — the debounce lives inside the
+  // fail-close branch, which a priced book never enters, so the counter is never consulted on the
+  // loss path.
+  @Test
+  void heartbeat_genuineDailyLoss_tripsFirstTick_debounceNotConsulted() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000")); // crosses the 5000 absolute cap
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                1,
+                0));
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-realloss-first");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75)); // ONE tick
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+  }
+
+  // Real-loss separation (b): a book that is partially unpriceable but BELOW the fail-close bound
+  // (a
+  // large book, 1-of-3 miss) AND whose priced portion crosses the loss trips IMMEDIATELY with
+  // reason
+  // auto:account_daily_loss — the debounce never gates a real computed loss.
+  @Test
+  void heartbeat_lossBreachWithPartialMiss_dailyLossWinsImmediately() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation(
+                        "NVDA  250516C00140000", new BigDecimal("12.00"), 10L),
+                    new OpenPositionValuation(
+                        "AAPL  250516C00200000", new BigDecimal("12.00"), 10L),
+                    new OpenPositionValuation("TSLA  250516C00300000", new BigDecimal("4.00"), 1L)),
+                3,
+                0));
+    // 1 of 3 unpriceable (33% < 50% => NOT fail-closed on a 3-book); the two priced positions carry
+    // a large loss that crosses the cap: (2-12)*10*100 = -10000 each = -20000.
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  250516C00140000")))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.00")));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  250516C00200000")))
+        .thenReturn(okQuote("AAPL  250516C00200000", new BigDecimal("2.00")));
+    when(optionQuote.getOptionQuote(quoteFor("TSLA  250516C00300000")))
+        .thenReturn(unavailableQuote("TSLA  250516C00300000")); // the partial miss
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-loss-partialmiss");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75)); // ONE tick
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+  }
+
+  // Reset/untrip CLEARS the debounce counter: after a debounced fail-close and a reset, a fresh
+  // unpriceable outage must take N ticks AGAIN (not immediately re-fail-close on a stale counter).
+  @Test
+  void heartbeat_smallBookDebounce_clearedOnUntrip() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                2,
+                0));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-debounce-reset");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Two consecutive unpriceable ticks -> fail-close.
+    env.sleep(Duration.ofSeconds(135));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    // Reset (clears the debounce counter + arms a 60s cooldown).
+    stub.reset(resetRequest("alice"));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+
+    // One unpriceable tick PAST the cooldown must NOT immediately re-fail-close (counter was
+    // cleared
+    // -> back to 1, deferred). Had reset left the counter at 2, this tick would re-trip at once.
+    env.sleep(Duration.ofSeconds(135));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+
+    // A second consecutive unpriceable tick re-fail-closes (a fresh N-tick debounce completed).
+    env.sleep(Duration.ofSeconds(60));
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
+  }
+
+  // A new trading day RESETS the debounce counter: an unpriceable tick on day 1 followed by the day
+  // rollover must NOT let a single day-2 unpriceable tick fail-close — day 2 starts a fresh N-tick
+  // count.
+  @Test
+  void heartbeat_smallBookDebounce_resetOnNewTradingDay() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                2,
+                0));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-debounce-newday");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Day 1, first unpriceable tick -> deferred (counter=1).
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+
+    // Roll the trading day forward BEFORE the next tick -> the rollover resets the counter to 0.
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+
+    // Day 2, first unpriceable tick: counter reset then incremented to 1 -> still deferred, NOT
+    // tripped. (Without the day-rollover reset it would be the 2nd consecutive tick and trip.)
+    env.sleep(Duration.ofSeconds(60));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+
+    // Day 2, second consecutive unpriceable tick -> fail-closes.
+    env.sleep(Duration.ofSeconds(60));
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
   }
 
   // ---------- dual-control trip/reset (mirror per-strategy) ----------

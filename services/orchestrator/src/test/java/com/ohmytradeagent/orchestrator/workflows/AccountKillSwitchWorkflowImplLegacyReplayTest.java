@@ -180,6 +180,20 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Pins the PLAN-2026-07-22 small-book MTM-unavailable debounce marker so a rename fails loudly.
+   * Renaming the literal would silently re-version live executions — and a re-versioned in-flight
+   * heartbeat could then schedule the in-tick re-fetch / deferred-trip commands against ticks that
+   * recorded none (fail-close on the FIRST miss).
+   */
+  @Test
+  void versionAccountMtmDebounceConstantNameIsStable() throws Exception {
+    Field marker =
+        AccountKillSwitchWorkflowImpl.class.getDeclaredField("VERSION_ACCOUNT_MTM_DEBOUNCE");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("account-mtm-debounce-v1");
+  }
+
+  /**
    * THE NO-AUTO-FLATTEN + NO-REPAGE SENTINEL. A pre-change history whose heartbeat AUTO-TRIPPED on
    * {@code auto:account_daily_loss} and recorded the {@code KillSwitchTripped} audit + the {@code
    * cascadeAccountRiskBreach} MARKET-flatten command, then ran several more TRIPPED ticks (each
