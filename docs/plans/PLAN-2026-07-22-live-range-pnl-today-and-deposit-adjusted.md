@@ -19,10 +19,10 @@ The `/live` header "▲ $4,282.03 (8.93%) for the selected range" is **not** the
 - `dashboard/components/LiveAccount.tsx:9-13` — update the header comment block to state the number is the latest trading day's P&L (per-day-reset `profit_loss[last]`), not a range delta; remove the "range delta always matches the active tab" claim.
 - Keep reading `profit_loss[last]`/`profit_loss_pct[last]` (`:44-51`) — for every range that value is the latest day's P&L (confirmed 1D/1W/1M/3M all ≈ today), so it is the correct "Today" source with no new fetch. Minor cross-tab wobble of a few dollars (5Min vs 1D granularity) is acceptable; a dedicated `1D` fetch for a rock-stable Today is explicitly deferred.
 
-**Tests (TDD):**
-- `dashboard/components/__tests__/LiveAccount.test.tsx` (add or extend): render `AccountTotal` with a history frame → asserts the change line renders `▲ $X (Y%) today` and does **not** contain the string "selected range". (Reproduces the mislabel.)
+**Verification (no JS test runner in repo — operator decision 2026-07-22):**
+- The dashboard has no jest/vitest. Gate on `cd dashboard && npm run typecheck && npx next lint && npm run build` (all green) plus a code assertion that the rendered label string is `today` and the literal "selected range" no longer appears in `LiveAccount.tsx`. No `LiveAccount.test.tsx`.
 
-**Verify / success criteria:** `cd dashboard && npm test -- LiveAccount` green; header text asserts "today", not "selected range". No backend/schema touched. Dashboard auto-deploys via `deploy.yml` SERVICES matrix on merge.
+**Verify / success criteria:** typecheck + lint + build green; `grep -c "selected range" dashboard/components/LiveAccount.tsx` == 0 and the change line renders "today". No backend/schema touched. Dashboard auto-deploys via `deploy.yml` SERVICES matrix on merge.
 
 ---
 
@@ -81,10 +81,10 @@ The `/live` header "▲ $4,282.03 (8.93%) for the selected range" is **not** the
 - `dashboard/components/LiveAccount.tsx:81-88` — under the existing "Today" line, add a second line reading `range_pl`/`range_pl_pct`: `This range (excl. deposits) ▲ {fmtCurrency(range_pl)} ({(range_pl_pct*100).toFixed(2)}%)`; when `range_pl==null` or `range_pl_pct==null`, render "—" with a tooltip/subtext ("excludes deposits & withdrawals; unavailable for this range"). Reuse `fmtCurrency`, the up/down arrow + emerald/rose classes.
 - (`dashboard/app/api/portfolio-history/route.ts` needs no change — it forwards the BFF body verbatim.)
 
-**Tests (TDD):**
-- `LiveAccount.test.tsx` — frame with `range_pl=1234.56, range_pl_pct=0.0234` → renders "This range (excl. deposits) ▲ $1,234.56 (2.34%)"; frame with `range_pl_pct=null` → renders "—"; asserts Today and Range are **distinct** lines with distinct values when a deposit is present.
+**Verification (no JS test runner — operator decision 2026-07-22):**
+- Extract the change-line rendering (arrow + `$`/% + null→"—") into a small pure helper (e.g. `formatChange(pl, plPct)`) so the null-vs-value branch is inspectable, and gate on `npm run typecheck && npx next lint && npm run build`. Manual/visual check that Today and Range render as two distinct lines and a null range → "—".
 
-**Verify / success criteria:** `cd dashboard && npm test -- LiveAccount` green; both numbers render; null → "—". Dashboard auto-deploys on merge.
+**Verify / success criteria:** typecheck + lint + build green; both lines render; `range_pl==null` → "—". Dashboard auto-deploys on merge.
 
 ---
 
