@@ -715,21 +715,41 @@ public class AlpacaPaperBroker implements OptionsBroker {
         toDecimalArray(resp.profitLoss()),
         toDecimalArray(resp.profitLossPct()),
         resp.baseValue(),
-        // base_value_asof is a date string in Alpaca's response (not an epoch Long) and unused by
-        // the UI — dropped at the DTO; the contract field stays null. See
-        // AlpacaPortfolioHistoryResponse.
-        null,
+        // base_value_asof is a date string in Alpaca's response (e.g. "2026-06-18"); parse it to an
+        // epoch-second as-of date so the BFF can exclude cash flows already baked into base_value
+        // (the initial funding) from the deposit-adjusted range return. Null/blank → null.
+        parseAsofEpochSecond(resp.baseValueAsof()),
         resp.timeframe());
+  }
+
+  /**
+   * Alpaca's {@code base_value_asof} is a calendar date string (e.g. {@code "2026-06-18"}); parse
+   * it to that day's UTC-midnight epoch-second. A null/blank or unparseable value yields null — the
+   * BFF then falls back to its {@code timestamps[0]} window rather than failing the read.
+   */
+  private static Long parseAsofEpochSecond(String asof) {
+    if (asof == null || asof.isBlank()) {
+      return null;
+    }
+    try {
+      return LocalDate.parse(asof.trim()).atStartOfDay(ZoneOffset.UTC).toEpochSecond();
+    } catch (DateTimeParseException e) {
+      return null;
+    }
   }
 
   private static long[] toLongArray(List<Long> values) {
     if (values == null) {
       return new long[0];
     }
+    // MUST stay index-aligned with equity/profit_loss/profit_loss_pct (toDecimalArray keeps every
+    // slot) — the calculator and chart read timestamps[i] against equity[i]. A null timestamp is
+    // therefore coerced to 0L in place, NOT dropped (dropping desyncs the parallel arrays). A stray
+    // leading 0L no longer causes the deposit double-count: the range calc now windows cash flows
+    // by
+    // base_value_asof (this PR), so timestamps[0] is not the flow-exclusion boundary.
     long[] out = new long[values.size()];
     for (int i = 0; i < values.size(); i++) {
-      // Alpaca can return sparse arrays with null trailing elements (market-closed slots); a null
-      // unboxing Long → long would NPE. Treat an absent timestamp as 0L.
       Long v = values.get(i);
       out[i] = v == null ? 0L : v;
     }

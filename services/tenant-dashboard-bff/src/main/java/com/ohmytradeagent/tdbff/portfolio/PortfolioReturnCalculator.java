@@ -50,6 +50,10 @@ public class PortfolioReturnCalculator {
    * @param flowAmounts signed cash-flow amounts (deposit +, withdrawal −).
    * @param flowsAvailable false/null when the activities read failed → both fields null (never show
    *     a deposit-polluted number).
+   * @param baseValueAsof epoch-seconds of the range baseline's as-of date (Alpaca {@code
+   *     base_value_asof}); any cash flow dated at/before it is already baked into {@code baseValue}
+   *     and is EXCLUDED so the initial funding is not subtracted twice. Null → fall back to the
+   *     {@code timestamps[0]}-derived window (behavior-preserving when the field is absent).
    */
   public RangeReturn compute(
       List<BigDecimal> equity,
@@ -57,7 +61,8 @@ public class PortfolioReturnCalculator {
       List<Long> timestamps,
       List<Long> flowTimestamps,
       List<BigDecimal> flowAmounts,
-      Boolean flowsAvailable) {
+      Boolean flowsAvailable,
+      Long baseValueAsof) {
     if (!Boolean.TRUE.equals(flowsAvailable)) {
       return NULL;
     }
@@ -88,7 +93,16 @@ public class PortfolioReturnCalculator {
     // midnight. The UPPER bound stays exactly t1 — a same-day flow parses to midnight and is
     // therefore always <= t1, so no widening is needed there, and widening it would wrongly pull in
     // flows from days the equity series doesn't cover.
-    long windowStart = Math.floorDiv(t0, SECONDS_PER_DAY) * SECONDS_PER_DAY;
+    //
+    // When base_value_asof is present, it is the AUTHORITATIVE lower bound: base_value already
+    // bakes
+    // in every cash flow dated at/before that as-of date (notably the initial funding deposit), so
+    // a
+    // flow dated <= base_value_asof must be EXCLUDED — counting it would subtract the funding twice
+    // and sign-flip a real profit into a loss. A flow dated AFTER base_value_asof (e.g. the range's
+    // first-day deposit) is still counted and weight-clamped below. The t0-floored window is the
+    // fallback used only when base_value_asof is null (behavior-preserving for the legacy path).
+    long fallbackWindowStart = Math.floorDiv(t0, SECONDS_PER_DAY) * SECONDS_PER_DAY;
 
     BigDecimal netFlows = BigDecimal.ZERO;
     BigDecimal weightedFlows = BigDecimal.ZERO;
@@ -96,8 +110,12 @@ public class PortfolioReturnCalculator {
     for (int i = 0; i < n; i++) {
       Long t = flowTimestamps.get(i);
       BigDecimal amount = flowAmounts.get(i);
-      if (t == null || amount == null || t < windowStart || t > t1) {
-        // Defensively ignore out-of-window / malformed flows.
+      boolean beforeWindow =
+          baseValueAsof != null
+              ? t != null && t <= baseValueAsof
+              : t != null && t < fallbackWindowStart;
+      if (t == null || amount == null || beforeWindow || t > t1) {
+        // Defensively ignore out-of-window / malformed / already-in-base flows.
         continue;
       }
       netFlows = netFlows.add(amount);

@@ -22,6 +22,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import okhttp3.mockwebserver.MockResponse;
@@ -492,13 +493,11 @@ class AlpacaPaperBrokerTest {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(
-                // base_value_asof is a DATE STRING in Alpaca's real response (not an epoch number)
-                // —
-                // binding it to a Long previously threw a Jackson parse error that failed the whole
-                // read (the /live "Account history unavailable" incident). Keep it as a string here
-                // so
-                // this test reproduces + guards that shape; the DTO drops it and baseValueAsof maps
-                // null.
+                // base_value_asof is a DATE STRING in Alpaca's real response (not an epoch number).
+                // It is mapped as a String and parsed to that day's UTC-midnight epoch-second so
+                // the
+                // BFF can exclude the initial funding (already baked into base_value) from the
+                // deposit-adjusted range return.
                 "{\"timestamp\":[1719446400,1719532800],"
                     + "\"equity\":[10000.00,10120.50],"
                     + "\"profit_loss\":[0.00,120.50],"
@@ -513,8 +512,9 @@ class AlpacaPaperBrokerTest {
     assertThat(h.profitLoss()).containsExactly(new BigDecimal("0.00"), new BigDecimal("120.50"));
     assertThat(h.profitLossPct()).containsExactly(new BigDecimal("0.0"), new BigDecimal("0.01205"));
     assertThat(h.baseValue()).isEqualByComparingTo(new BigDecimal("10000.00"));
-    // Alpaca's date-string base_value_asof is intentionally dropped (unused by the UI) → null.
-    assertThat(h.baseValueAsof()).isNull();
+    // Alpaca's date-string base_value_asof is parsed to that day's UTC-midnight epoch-second.
+    assertThat(h.baseValueAsof())
+        .isEqualTo(LocalDate.parse("2026-06-17").atStartOfDay(ZoneOffset.UTC).toEpochSecond());
     assertThat(h.timeframe()).isEqualTo("1D");
 
     RecordedRequest req = server.takeRequest();
@@ -525,6 +525,58 @@ class AlpacaPaperBrokerTest {
     // date_end is null → the param must be omitted entirely.
     assertThat(req.getRequestUrl().queryParameter("date_end")).isNull();
     assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
+  }
+
+  @Test
+  void getPortfolioHistory_blankBaseValueAsof_mapsNull() {
+    // A missing/blank base_value_asof must not fail the read — it maps to null and the BFF falls
+    // back to its timestamps[0] window.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"timestamp\":[1719446400,1719532800],"
+                    + "\"equity\":[10000.00,10120.50],"
+                    + "\"profit_loss\":[0.00,120.50],"
+                    + "\"profit_loss_pct\":[0.0,0.01205],"
+                    + "\"base_value\":10000.00,\"base_value_asof\":\"\","
+                    + "\"timeframe\":\"1D\"}"));
+
+    OptionsBroker.PortfolioHistory h = broker.getPortfolioHistory("1M", "1D", null);
+
+    assertThat(h.baseValueAsof()).isNull();
+  }
+
+  @Test
+  void getPortfolioHistory_nullTimestamp_coercedToZeroInPlace_keepsArraysAligned()
+      throws Exception {
+    // timestamp/equity/profit_loss/profit_loss_pct are INDEX-PARALLEL — the calculator and chart
+    // read timestamps[i] against equity[i]. A null timestamp is coerced to 0L IN PLACE (not
+    // dropped),
+    // so every axis keeps the same length and stays aligned. Dropping the null would desync the
+    // arrays (a worse bug); the deposit double-count a leading 0L used to cause is now prevented by
+    // the BFF windowing cash flows on base_value_asof instead of timestamps[0].
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"timestamp\":[null,1719446400,1719532800],"
+                    + "\"equity\":[10000.00,10000.00,10120.50],"
+                    + "\"profit_loss\":[0.00,0.00,120.50],"
+                    + "\"profit_loss_pct\":[0.0,0.0,0.01205],"
+                    + "\"base_value\":10000.00,\"base_value_asof\":\"2026-06-17\","
+                    + "\"timeframe\":\"1D\"}"));
+
+    OptionsBroker.PortfolioHistory h = broker.getPortfolioHistory("1M", "1D", null);
+
+    // Null → 0L in place; all four parallel axes keep the same length (alignment preserved).
+    assertThat(h.timestamps()).containsExactly(0L, 1719446400L, 1719532800L);
+    assertThat(h.timestamps()).hasSize(h.equity().length);
+    assertThat(h.equity().length)
+        .isEqualTo(h.profitLoss().length)
+        .isEqualTo(h.profitLossPct().length);
   }
 
   @Test

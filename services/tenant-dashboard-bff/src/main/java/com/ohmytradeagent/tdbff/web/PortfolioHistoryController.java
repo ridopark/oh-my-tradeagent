@@ -89,7 +89,8 @@ public class PortfolioHistoryController {
                 history.getTimestamps(),
                 history.getCashFlowTimestamps(),
                 history.getCashFlowAmounts(),
-                history.getCashFlowsAvailable());
+                history.getCashFlowsAvailable(),
+                history.getBaseValueAsof());
     body.put("range_pl", rr.rangePl());
     body.put("range_pl_pct", rr.rangePlPct());
     body.put(
