@@ -49,6 +49,55 @@ class AccountKillSwitchCapAlerterTest {
   }
 
   @Test
+  void capInactiveWithReasonAndOpenPositions_escalatesToRedNotProtecting() {
+    // PLAN-2026-07-22: a configured cap that can't arm (typed reason) WHILE the tenant holds open
+    // positions escalates to a loud-RED "cap NOT protecting <tenant> — <reason>" page.
+    WebhookClient webhook = mock(WebhookClient.class);
+    AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("trading_day", "2026-07-21");
+    subject.put("consecutive_inactive_ticks", 3);
+    subject.put("scope", "account");
+    subject.put("reason", "broker_target_unresolved");
+    subject.put("open_positions", 2);
+    AuditEvent event =
+        event("AccountKillSwitchCapInactive", "t-prod_real/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(15548997); // red
+    assertThat(embed.title()).contains("NOT protecting", "prod_real", "broker_target_unresolved");
+    assertThat(field(embed, "tenant_id")).isEqualTo("prod_real");
+    assertThat(field(embed, "reason")).isEqualTo("broker_target_unresolved");
+    assertThat(field(embed, "open_positions")).isEqualTo("2");
+  }
+
+  @Test
+  void capInactiveWithReasonButFlat_staysGenericInactive() {
+    // Fatigue control: no open positions -> no loud "NOT protecting" escalation, just the generic
+    // (still-RED) inactive note. Also proves a single transient defer never over-escalates.
+    WebhookClient webhook = mock(WebhookClient.class);
+    AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("trading_day", "2026-07-21");
+    subject.put("consecutive_inactive_ticks", 3);
+    subject.put("reason", "broker_target_unresolved");
+    subject.put("open_positions", 0);
+    AuditEvent event =
+        event("AccountKillSwitchCapInactive", "t-prod_real/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(15548997); // red
+    assertThat(embed.title()).contains("INACTIVE", "OFF");
+    assertThat(embed.title()).doesNotContain("NOT protecting");
+  }
+
+  @Test
   void capReArmedDispatchesGreenEmbed() {
     WebhookClient webhook = mock(WebhookClient.class);
     AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);

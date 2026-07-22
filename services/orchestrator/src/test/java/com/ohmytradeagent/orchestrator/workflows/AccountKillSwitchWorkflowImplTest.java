@@ -698,6 +698,36 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(stub.killswitchState().getTripped()).isFalse();
   }
 
+  // PLAN-2026-07-22 (fail-loud): a configured pct cap whose broker_target does NOT resolve (the
+  // DB-onboarded-tenant-absent-from-the-tree structural silent-unprotect, prod-kipark 2026-07-21)
+  // must DEFER fail-LOUD — the AccountKillSwitchCapInactive subject names the typed reason
+  // (broker_target_unresolved) and, because the tenant HOLDS an open position, carries the
+  // open_positions count that gates the loud-RED "cap NOT protecting" escalation.
+  @Test
+  void brokerTargetUnresolved_capInactive_carriesTypedReasonAndOpenPositions() {
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    // broker_target does not resolve -> captureSodEquity defers with
+    // reason=broker_target_unresolved.
+    when(tenantConfig.tenantBrokerTarget(anyString())).thenReturn(null);
+    // The tenant is holding one open position (probed on the emit tick for the holds-risk gate).
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-broker-unresolved");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(8 * 60));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    // No spurious trip on an unknown loss base, no heartbeat-error spam.
+    assertThat(countKind("KillSwitchHeartbeatError")).isEqualTo(0L);
+    assertThat(countKind("AccountKillSwitchCapInactive")).isEqualTo(1L);
+
+    AuditEvent inactive = captureKind("AccountKillSwitchCapInactive");
+    assertThat(inactive.getSubject())
+        .containsEntry("reason", "broker_target_unresolved")
+        .containsEntry("open_positions", 1);
+  }
+
   // ---------- Phase 2 (C4/G2): account fail-CLOSED on a per-strategy realized read failure
   // ----------
 

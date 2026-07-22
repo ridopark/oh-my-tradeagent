@@ -1,6 +1,8 @@
 package com.ohmytradeagent.orchestrator.alert;
 
 import static com.ohmytradeagent.orchestrator.alert.AlertSubjects.signedUnrealizedPnl;
+import static com.ohmytradeagent.orchestrator.alert.AlertSubjects.subjectInt;
+import static com.ohmytradeagent.orchestrator.alert.AlertSubjects.trimmedSubject;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import java.util.ArrayList;
@@ -90,30 +92,63 @@ public class AccountKillSwitchCapAlerter {
     if (KIND_STILL_HOLDING.equals(kind)) {
       return buildStillHoldingEmbed(event, subject);
     }
-    boolean inactive = KIND_CAP_INACTIVE.equals(kind);
+    if (KIND_CAP_INACTIVE.equals(kind)) {
+      return buildCapInactiveEmbed(event, subject);
+    }
 
-    String title =
-        inactive
-            ? ":warning: Account daily-loss cap INACTIVE — portfolio safety net is OFF"
-            : ":white_check_mark: Account daily-loss cap RE-ARMED";
-    int color = inactive ? AlertColors.RED : AlertColors.GREEN;
-
+    // KIND_CAP_REARMED (recovery, GREEN).
     List<WebhookEmbed.Field> fields = new ArrayList<>();
     fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
     fields.add(new WebhookEmbed.Field("trading_day", subjectStr(subject, "trading_day"), false));
-    if (inactive) {
-      fields.add(
-          new WebhookEmbed.Field(
-              "consecutive_inactive_ticks",
-              subjectStr(subject, "consecutive_inactive_ticks"),
-              false));
-    } else {
-      fields.add(
-          new WebhookEmbed.Field("inactive_ticks", subjectStr(subject, "inactive_ticks"), false));
+    fields.add(
+        new WebhookEmbed.Field("inactive_ticks", subjectStr(subject, "inactive_ticks"), false));
+
+    String footer = "workflow_id: " + orNa(event.getWorkflowId());
+    return new WebhookEmbed(
+        ":white_check_mark: Account daily-loss cap RE-ARMED",
+        null,
+        AlertColors.GREEN,
+        footer,
+        fields);
+  }
+
+  /**
+   * The cap-inactive page (RED). PLAN-2026-07-22: when the workflow named a typed defer {@code
+   * reason} AND the tenant HOLDS open positions ({@code open_positions > 0}), ESCALATE to a loud
+   * "Account cap NOT protecting &lt;tenant&gt; — &lt;reason&gt;" page so a real-money tenant
+   * carrying unprotected risk gets a sharper first page. When the reason is absent or the tenant is
+   * flat (or the open-book count could not be probed), fall back to the generic "safety net OFF"
+   * wording — both are RED (the net is off either way), but only the escalated one names the tenant
+   * + reason.
+   */
+  private WebhookEmbed buildCapInactiveEmbed(AuditEvent event, Map<String, Object> subject) {
+    String reason = trimmedSubject(subject, "reason");
+    Integer openPositions = subjectInt(subject, "open_positions");
+    boolean unprotected = reason != null && openPositions != null && openPositions > 0;
+
+    String tenant = orNa(event.getTenantId());
+    String title =
+        unprotected
+            ? ":rotating_light: Account cap NOT protecting " + tenant + " — " + reason
+            : ":warning: Account daily-loss cap INACTIVE — portfolio safety net is OFF";
+
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("tenant_id", tenant, false));
+    fields.add(new WebhookEmbed.Field("trading_day", subjectStr(subject, "trading_day"), false));
+    fields.add(
+        new WebhookEmbed.Field(
+            "consecutive_inactive_ticks",
+            subjectStr(subject, "consecutive_inactive_ticks"),
+            false));
+    if (reason != null) {
+      fields.add(new WebhookEmbed.Field("reason", reason, false));
+    }
+    if (openPositions != null) {
+      fields.add(new WebhookEmbed.Field("open_positions", String.valueOf(openPositions), false));
     }
 
     String footer = "workflow_id: " + orNa(event.getWorkflowId());
-    return new WebhookEmbed(title, null, color, footer, fields);
+    return new WebhookEmbed(title, null, AlertColors.RED, footer, fields);
   }
 
   /**

@@ -21,6 +21,29 @@ final class AlertSubjects {
     return value == null ? null : String.valueOf(value);
   }
 
+  /** Trimmed subject value, or {@code null} when absent/blank — for presence-gated fields. */
+  static String trimmedSubject(Map<String, Object> subject, String key) {
+    String raw = rawSubject(subject, key);
+    if (raw == null) {
+      return null;
+    }
+    String trimmed = raw.trim();
+    return trimmed.isEmpty() ? null : trimmed;
+  }
+
+  /** Integer subject value, or {@code null} when absent/blank/non-numeric. */
+  static Integer subjectInt(Map<String, Object> subject, String key) {
+    String s = trimmedSubject(subject, key);
+    if (s == null) {
+      return null;
+    }
+    try {
+      return Integer.valueOf(s);
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
   /**
    * Renders an {@code open_mtm} subject value (unrealized P&L, computed {@code
    * (bid−entry)×qty×100}) as a signed whole-dollar amount — {@code +$1,551} for a gain, {@code
