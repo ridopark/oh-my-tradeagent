@@ -92,6 +92,12 @@ public class AccountKillSwitchController {
       body.put("trippedAt", trippedAt == null ? null : trippedAt.toString());
       body.put("reason", s.getReason());
       body.put("resettableAt", resettableAt == null ? null : resettableAt.toString());
+      // Open exposure the operator would resume OVER on reset (from the last-heartbeat book read):
+      // count + SIGNED unrealized P&L. Nullable pass-through — null for the per-strategy switch, a
+      // pre-first-heartbeat account switch, or (open_mtm only) an unpriceable book. The UI surfaces
+      // these at the reset control so a reset isn't done blind over a still-underwater book (#591).
+      body.put("openPositions", s.getOpenPositions());
+      body.put("openMtm", s.getOpenMtm());
       return ResponseEntity.ok(body);
     } catch (WorkflowNotFoundException e) {
       return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
