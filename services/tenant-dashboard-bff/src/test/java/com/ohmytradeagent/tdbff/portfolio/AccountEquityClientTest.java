@@ -37,6 +37,7 @@ class AccountEquityClientTest {
     result.setSchemaVersion(1L);
     result.setEquity(new BigDecimal("10000.00"));
     result.setAccountNumber("PA3ER05HLHMB");
+    result.setLastEquity(new BigDecimal("10250.00"));
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
         .thenReturn(result);
 
@@ -45,6 +46,9 @@ class AccountEquityClientTest {
 
     assertThat(acct.equity()).isEqualByComparingTo(new BigDecimal("10000.00"));
     assertThat(acct.accountNumber()).isEqualTo("PA3ER05HLHMB");
+    // last_equity (prior market close) carries through end-to-end so the header can compute the
+    // live intraday "today" figure (equity - last_equity).
+    assertThat(acct.lastEquity()).isEqualByComparingTo(new BigDecimal("10250.00"));
     verify(stub, never()).cancel();
   }
 

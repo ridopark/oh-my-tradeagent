@@ -225,6 +225,26 @@ public class PortfolioService {
       Map<String, Object> m = new LinkedHashMap<>();
       m.put("broker_target", brokerTarget);
       m.put("equity", acct.equity());
+      // Live intraday "today" P&L = equity - last_equity (last_equity is the prior market close).
+      // This is the GENUINE today figure the /live header shows, distinct from Alpaca
+      // portfolio-history's last COMPLETED daily bar. Null (never fabricated) when either equity or
+      // last_equity is unavailable — the dashboard then falls back to the last daily bar.
+      // last_equity
+      // is surfaced too so the header can aggregate the percentage denominator across
+      // broker_targets.
+      BigDecimal lastEquity = acct.lastEquity();
+      m.put("last_equity", lastEquity);
+      BigDecimal todayPl =
+          (acct.equity() != null && lastEquity != null) ? acct.equity().subtract(lastEquity) : null;
+      m.put("today_pl", todayPl);
+      // Percentage return only when the prior-close denominator is strictly positive (a
+      // zero/negative
+      // base makes the ratio undefined/meaningless); null otherwise (the header shows $ without %).
+      m.put(
+          "today_pl_pct",
+          (todayPl != null && lastEquity.signum() > 0)
+              ? todayPl.divide(lastEquity, 6, java.math.RoundingMode.HALF_UP)
+              : null);
       // Informational account identity, dev-gated. Never exposed in prod (flag defaults false) and
       // omitted when the broker adapter / degraded snapshot carries no account number.
       if (exposeBrokerAccountNumber && acct.accountNumber() != null) {
