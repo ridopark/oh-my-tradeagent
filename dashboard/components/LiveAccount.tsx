@@ -6,19 +6,25 @@ import { fmtCurrency } from "@/components/Pnl";
 // Type-only import (erased at compile): lib/bff is server-only, only its shape crosses here.
 import type { PortfolioHistory } from "@/lib/bff";
 
-// Structure (a): the chart owns the history fetch and lifts each frame up via onData; the header
-// reads profit_loss[last]/profit_loss_pct[last] from that same frame. Alpaca returns portfolio
-// history with per-day-reset P&L, so the last element is the LATEST TRADING DAY's P&L ("today"),
-// NOT a delta over the active range — it is ~identical across 1D/1W/1M/3M. The headline TOTAL is
-// the live account snapshot (accountValue, passed in from the server page), NOT the chart's last
-// point — see live/page.tsx for why (Alpaca's portfolio-history lags a cash deposit). The note below
-// explains the resulting headline-vs-chart gap.
+// Structure (a): the chart owns the history fetch and lifts each frame up via onData. The "today"
+// line prefers the live intraday figure (todayPl = equity - last_equity, from the same live account
+// snapshot as the headline TOTAL) and falls back to the chart frame's profit_loss[last] only when
+// that intraday figure is unavailable. profit_loss[last] is Alpaca portfolio-history's LAST COMPLETED
+// daily bar — for a daily-bar range that is YESTERDAY's session, not live intraday (the bug this
+// fixes). The headline TOTAL is the live account snapshot (accountValue, passed in from the server
+// page), NOT the chart's last point — see live/page.tsx (Alpaca portfolio-history lags a deposit).
 export function LiveAccount({
   accountValue,
   accountScope,
+  todayPl,
+  todayPlPct,
 }: {
   accountValue: number | null;
   accountScope: string;
+  // Live intraday "today" P&L / pct (equity - last_equity), or null when last_equity is unavailable
+  // (then the "today" line falls back to the chart's last completed daily bar).
+  todayPl?: number | null;
+  todayPlPct?: number | null;
 }) {
   const [history, setHistory] = useState<PortfolioHistory | null>(null);
 
@@ -28,6 +34,8 @@ export function LiveAccount({
         history={history}
         accountValue={accountValue}
         accountScope={accountScope}
+        todayPl={todayPl ?? null}
+        todayPlPct={todayPlPct ?? null}
       />
       <AccountValueChart onData={setHistory} />
     </section>
@@ -62,19 +70,33 @@ function AccountTotal({
   history,
   accountValue,
   accountScope,
+  todayPl,
+  todayPlPct,
 }: {
   history: PortfolioHistory | null;
   accountValue: number | null;
   accountScope: string;
+  todayPl: number | null;
+  todayPlPct: number | null;
 }) {
-  const pl =
+  // "today" = live intraday P&L (equity - last_equity from the account snapshot) when present; this
+  // is the GENUINE today figure. Fall back to portfolio-history's last COMPLETED daily bar
+  // (profit_loss[last]) ONLY when the intraday figure is unavailable (null last_equity). The %
+  // follows the $: use todayPlPct with the intraday $, else the history bar's pct with its $.
+  // TODO(#today): no dashboard test runner (no jest/vitest) — behaviors verified via tsc + next
+  // build. Cases: (1) todayPl present -> "today" shows todayPl/todayPlPct (prod_real: -$1,782.50);
+  // (2) todayPl null -> falls back to profit_loss[last]/profit_loss_pct[last]; (3) todayPl present
+  // but todayPlPct null (last_equity <= 0) -> $ shown without %.
+  const histPl =
     history && history.profit_loss.length > 0
       ? history.profit_loss[history.profit_loss.length - 1]
       : null;
-  const plPct =
+  const histPlPct =
     history && history.profit_loss_pct.length > 0
       ? history.profit_loss_pct[history.profit_loss_pct.length - 1]
       : null;
+  const pl = todayPl != null ? todayPl : histPl;
+  const plPct = todayPl != null ? todayPlPct : histPlPct;
 
   // Chart's last equity point — used ONLY to flag the deposit-lag gap, not as the headline total.
   const chartEquity =

@@ -88,6 +88,27 @@ export default async function LivePage() {
     return Number.isNaN(n) ? sum : (sum ?? 0) + n;
   }, null);
 
+  // Live intraday "today" P&L = equity - last_equity (BFF-computed per broker_target). Summed the
+  // same null-aware way as accountValue so the header shows the GENUINE today figure, not Alpaca
+  // portfolio-history's last completed daily bar. Null (→ LiveAccount falls back to the daily bar)
+  // when NO broker_target carries last_equity. todayPlPct = sum(today_pl) / sum(last_equity); the
+  // per-target last_equity is the denominator, only counted when its today_pl was counted.
+  const todayPl = portfolio.account_equity.reduce<number | null>((sum, a) => {
+    const n = a.today_pl == null ? NaN : Number(a.today_pl);
+    return Number.isNaN(n) ? sum : (sum ?? 0) + n;
+  }, null);
+  const lastEquityTotal = portfolio.account_equity.reduce<number | null>((sum, a) => {
+    // Only fold in a broker_target's last_equity when its today_pl is a real number, so the pct
+    // denominator matches the numerator exactly.
+    if (a.today_pl == null || Number.isNaN(Number(a.today_pl))) return sum;
+    const n = a.last_equity == null ? NaN : Number(a.last_equity);
+    return Number.isNaN(n) ? sum : (sum ?? 0) + n;
+  }, null);
+  const todayPlPct =
+    todayPl != null && lastEquityTotal != null && lastEquityTotal > 0
+      ? todayPl / lastEquityTotal
+      : null;
+
   return (
     <>
       <Nav tenantId={session?.tenantId} />
@@ -110,7 +131,12 @@ export default async function LivePage() {
           </p>
         </div>
 
-        <LiveAccount accountValue={accountValue} accountScope={portfolio.account_equity_scope} />
+        <LiveAccount
+          accountValue={accountValue}
+          accountScope={portfolio.account_equity_scope}
+          todayPl={todayPl}
+          todayPlPct={todayPlPct}
+        />
 
         <DailyLossProtection accountCap={tenantConfig} />
 
