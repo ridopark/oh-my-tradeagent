@@ -30,6 +30,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import org.slf4j.Logger;
@@ -715,25 +716,46 @@ public class AlpacaPaperBroker implements OptionsBroker {
         toDecimalArray(resp.profitLoss()),
         toDecimalArray(resp.profitLossPct()),
         resp.baseValue(),
-        // base_value_asof is a date string in Alpaca's response (not an epoch Long) and unused by
-        // the UI — dropped at the DTO; the contract field stays null. See
-        // AlpacaPortfolioHistoryResponse.
-        null,
+        // base_value_asof is a date string in Alpaca's response (e.g. "2026-06-18"); parse it to an
+        // epoch-second as-of date so the BFF can exclude cash flows already baked into base_value
+        // (the initial funding) from the deposit-adjusted range return. Null/blank → null.
+        parseAsofEpochSecond(resp.baseValueAsof()),
         resp.timeframe());
+  }
+
+  /**
+   * Alpaca's {@code base_value_asof} is a calendar date string (e.g. {@code "2026-06-18"}); parse
+   * it to that day's UTC-midnight epoch-second. A null/blank or unparseable value yields null — the
+   * BFF then falls back to its {@code timestamps[0]} window rather than failing the read.
+   */
+  private static Long parseAsofEpochSecond(String asof) {
+    if (asof == null || asof.isBlank()) {
+      return null;
+    }
+    try {
+      return LocalDate.parse(asof.trim()).atStartOfDay(ZoneOffset.UTC).toEpochSecond();
+    } catch (DateTimeParseException e) {
+      return null;
+    }
   }
 
   private static long[] toLongArray(List<Long> values) {
     if (values == null) {
       return new long[0];
     }
+    // Alpaca can return sparse arrays with a leading null timestamp (a degenerate market-closed
+    // slot). Coercing it to 0L would push a 0 epoch to the front, which the BFF reads as the window
+    // lower bound and admits every inception cash flow. Drop leading nulls instead;
+    // interior/trailing
+    // nulls (should not occur for the timestamp axis) are likewise skipped so no 0L is emitted.
     long[] out = new long[values.size()];
-    for (int i = 0; i < values.size(); i++) {
-      // Alpaca can return sparse arrays with null trailing elements (market-closed slots); a null
-      // unboxing Long → long would NPE. Treat an absent timestamp as 0L.
-      Long v = values.get(i);
-      out[i] = v == null ? 0L : v;
+    int j = 0;
+    for (Long v : values) {
+      if (v != null) {
+        out[j++] = v;
+      }
     }
-    return out;
+    return j == values.size() ? out : Arrays.copyOf(out, j);
   }
 
   private static BigDecimal[] toDecimalArray(List<BigDecimal> values) {
