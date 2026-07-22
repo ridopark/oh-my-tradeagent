@@ -41,10 +41,23 @@ function fmtCountdown(ms: number): string {
 
 // Signed USD, whole dollars, thousands-separated: "+$1,496" / "-$2,500". This is SIGNED unrealized
 // P&L (a gain leads with +), never an unsigned/"value" number — a gain must not read as underwater.
+// Signed whole-dollar USD. Sign is derived from the ROUNDED value (not the raw), and a value that
+// rounds to zero (|mtm| < $0.50) renders neutral "$0" with NO sign — otherwise a tiny negative like
+// -$0.40 rounds to -0, and JS `-0 >= 0` is true, so a raw-vs-rounded split would show a red "+$0"
+// (sign/color disagreeing). Callers must color off `mtmToneClass(mtm)` so the tone matches this sign.
 function fmtSignedUsd(mtm: number): string {
   const rounded = Math.round(mtm);
-  const sign = rounded >= 0 ? "+" : "-";
+  if (rounded === 0) return "$0";
+  const sign = rounded > 0 ? "+" : "-";
   return `${sign}$${Math.abs(rounded).toLocaleString("en-US")}`;
+}
+
+// Tailwind tone class matching fmtSignedUsd's sign: green for a rounded gain, rose for a rounded
+// loss, neutral for a rounded-zero — keyed off the SAME rounded value so sign and color never split.
+function mtmToneClass(mtm: number): string {
+  const rounded = Math.round(mtm);
+  if (rounded === 0) return "text-slate-300";
+  return rounded > 0 ? "text-emerald-300" : "text-rose-300";
 }
 
 export function AccountKillSwitchReset({
@@ -110,9 +123,7 @@ export function AccountKillSwitchReset({
             <>
               unrealized P&amp;L{" "}
               <span
-                className={`font-semibold tabular-nums ${
-                  openMtm >= 0 ? "text-emerald-300" : "text-rose-300"
-                }`}
+                className={`font-semibold tabular-nums ${mtmToneClass(openMtm)}`}
               >
                 {fmtSignedUsd(openMtm)}
               </span>
