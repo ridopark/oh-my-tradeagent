@@ -31,7 +31,8 @@ class PortfolioReturnCalculatorTest {
             List.of(1000L, 3000L),
             List.of(2000L),
             List.of(new BigDecimal("41230")),
-            true);
+            true,
+            null);
 
     // Trading-only $ P&L, deposit removed.
     assertThat(rr.rangePl()).isEqualByComparingTo("6029.56");
@@ -56,7 +57,8 @@ class PortfolioReturnCalculatorTest {
             List.of(1000L, 3000L),
             List.of(2000L),
             List.of(new BigDecimal("8000")),
-            true);
+            true,
+            null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("2000");
     assertThat(rr.rangePl()).isNotEqualByComparingTo("4282");
@@ -73,7 +75,8 @@ class PortfolioReturnCalculatorTest {
             List.of(1000L, 3000L),
             List.of(),
             List.of(),
-            true);
+            true,
+            null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("1000");
     assertThat(rr.rangePlPct()).isNull();
@@ -88,7 +91,8 @@ class PortfolioReturnCalculatorTest {
             List.of(1000L, 3000L),
             List.of(2000L),
             List.of(new BigDecimal("41230")),
-            false);
+            false,
+            null);
 
     assertThat(rr.rangePl()).isNull();
     assertThat(rr.rangePlPct()).isNull();
@@ -104,7 +108,8 @@ class PortfolioReturnCalculatorTest {
             List.of(2000L, 2000L),
             List.of(),
             List.of(),
-            true);
+            true,
+            null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("1000");
     assertThat(rr.rangePlPct()).isNull();
@@ -114,7 +119,13 @@ class PortfolioReturnCalculatorTest {
   void emptyEquity_bothNull() {
     RangeReturn rr =
         calc.compute(
-            List.of(), new BigDecimal("5000"), List.of(1000L, 3000L), List.of(), List.of(), true);
+            List.of(),
+            new BigDecimal("5000"),
+            List.of(1000L, 3000L),
+            List.of(),
+            List.of(),
+            true,
+            null);
 
     assertThat(rr.rangePl()).isNull();
     assertThat(rr.rangePlPct()).isNull();
@@ -129,7 +140,8 @@ class PortfolioReturnCalculatorTest {
             List.of(1000L, 3000L),
             List.of(),
             List.of(),
-            true);
+            true,
+            null);
 
     assertThat(rr.rangePl()).isNull();
     assertThat(rr.rangePlPct()).isNull();
@@ -154,7 +166,8 @@ class PortfolioReturnCalculatorTest {
                 Instant.parse("2026-07-16T00:00:00Z").getEpochSecond(), // in window
                 Instant.parse("2026-07-18T00:00:00Z").getEpochSecond()), // after T1
             List.of(new BigDecimal("999"), new BigDecimal("41230"), new BigDecimal("777")),
-            true);
+            true,
+            null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("6029.56");
   }
@@ -179,7 +192,8 @@ class PortfolioReturnCalculatorTest {
             List.of(t0, t1),
             List.of(depositTs),
             List.of(new BigDecimal("41230")),
-            true);
+            true,
+            null);
 
     // Deposit netted out → trading-only P&L, NOT 47259.56.
     assertThat(rr.rangePl()).isEqualByComparingTo("6029.56");
@@ -205,7 +219,8 @@ class PortfolioReturnCalculatorTest {
             List.of(t0, t1),
             List.of(priorDay),
             List.of(new BigDecimal("41230")),
-            true);
+            true,
+            null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("1000.00");
   }
@@ -222,7 +237,8 @@ class PortfolioReturnCalculatorTest {
             List.of(1000L, 3000L),
             List.of(2000L),
             List.of(new BigDecimal("-5000")),
-            true);
+            true,
+            null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("2000");
     assertThat(rr.rangePlPct().doubleValue()).isCloseTo(0.1142857, within(1e-6));
@@ -242,9 +258,84 @@ class PortfolioReturnCalculatorTest {
             List.of(0L, 1000L),
             List.of(250L, 750L),
             List.of(new BigDecimal("1000"), new BigDecimal("-400")),
-            true);
+            true,
+            null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("400");
     assertThat(rr.rangePlPct().doubleValue()).isCloseTo(0.03755868, within(1e-8));
+  }
+
+  @Test
+  void baseValueAsof_excludesInitialFundingBakedIntoBase_prodRealIncident() {
+    // INCIDENT REPRODUCTION (prod_real, real money, 2026-07-22). 1M range: base_value=5000 asof
+    // 2026-06-18, equity[last]=52259.56. Deposits: 06-12:+5000 (the INITIAL FUNDING, already in
+    // base_value), 07-06:+3000, 07-13:+1000, 07-15:+40000. The leading equity timestamp is a
+    // pre-funding degenerate slot (0L) — the exact production shape that floored windowStart to 0
+    // and admitted the 06-12 funding as an in-window flow, subtracting it TWICE.
+    long asof = Instant.parse("2026-06-18T00:00:00Z").getEpochSecond();
+    long t1 = Instant.parse("2026-07-22T20:00:00Z").getEpochSecond();
+    List<BigDecimal> equity = List.of(new BigDecimal("5000.00"), new BigDecimal("52259.56"));
+    BigDecimal baseValue = new BigDecimal("5000.00");
+    List<Long> timestamps = List.of(0L, t1); // production shape: leading pre-funding slot
+    List<Long> flowTs =
+        List.of(
+            Instant.parse("2026-06-12T00:00:00Z").getEpochSecond(), // initial funding (<= asof)
+            Instant.parse("2026-07-06T00:00:00Z").getEpochSecond(),
+            Instant.parse("2026-07-13T00:00:00Z").getEpochSecond(),
+            Instant.parse("2026-07-15T00:00:00Z").getEpochSecond());
+    List<BigDecimal> flowAmt =
+        List.of(
+            new BigDecimal("5000"),
+            new BigDecimal("3000"),
+            new BigDecimal("1000"),
+            new BigDecimal("40000"));
+
+    // BEFORE (baseValueAsof=null): the 0L window admits the 06-12 funding → all $49,000 subtracted
+    // →
+    // 52259.56 - 5000 - 49000 = -1740.44, a FAKE LOSS. This is the shipped bug.
+    RangeReturn buggy = calc.compute(equity, baseValue, timestamps, flowTs, flowAmt, true, null);
+    assertThat(buggy.rangePl()).isEqualByComparingTo("-1740.44");
+
+    // AFTER (baseValueAsof=2026-06-18): the 06-12 funding is at/before the as-of and is excluded
+    // (already in base_value) → 52259.56 - 5000 - 44000 = +3259.56, the TRUE profit.
+    RangeReturn fixed = calc.compute(equity, baseValue, timestamps, flowTs, flowAmt, true, asof);
+    assertThat(fixed.rangePl()).isEqualByComparingTo("3259.56");
+    assertThat(fixed.rangePlPct()).isNotNull();
+  }
+
+  @Test
+  void baseValueAsof_boundary_excludesFlowOnAsofDay_includesNextDay() {
+    // A flow dated EXACTLY on base_value_asof is already baked into base_value → EXCLUDED. The next
+    // calendar day is a fresh in-window flow → INCLUDED.
+    long asof = Instant.parse("2026-06-18T00:00:00Z").getEpochSecond();
+    long t1 = Instant.parse("2026-06-30T20:00:00Z").getEpochSecond();
+    List<BigDecimal> equity = List.of(new BigDecimal("5000.00"), new BigDecimal("10000.00"));
+    BigDecimal baseValue = new BigDecimal("5000.00");
+    List<Long> timestamps = List.of(0L, t1);
+
+    // Flow exactly ON the as-of day → excluded: rangePl = 10000 - 5000 - 0 = 5000.
+    RangeReturn onAsof =
+        calc.compute(
+            equity,
+            baseValue,
+            timestamps,
+            List.of(asof),
+            List.of(new BigDecimal("2000")),
+            true,
+            asof);
+    assertThat(onAsof.rangePl()).isEqualByComparingTo("5000.00");
+
+    // Flow the NEXT day → included: rangePl = 10000 - 5000 - 2000 = 3000.
+    long nextDay = Instant.parse("2026-06-19T00:00:00Z").getEpochSecond();
+    RangeReturn nextDayFlow =
+        calc.compute(
+            equity,
+            baseValue,
+            timestamps,
+            List.of(nextDay),
+            List.of(new BigDecimal("2000")),
+            true,
+            asof);
+    assertThat(nextDayFlow.rangePl()).isEqualByComparingTo("3000.00");
   }
 }
