@@ -952,9 +952,14 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
           payload,
           KIND_STC_NO_OPEN_POSITION,
           subject(
-              "signal_id", payload.getSignalId(),
-              "option_symbol", occ,
-              "attempts", attempts));
+              "signal_id",
+              payload.getSignalId(),
+              "option_symbol",
+              occ,
+              "attempts",
+              attempts,
+              "author",
+              payload.getAuthor()));
       return payload.getSignalId();
     }
 
@@ -973,7 +978,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               "signal_id", payload.getSignalId(),
               "option_symbol", occ,
               "position_workflow_id", positionId,
-              "reason", REASON_POSITION_WF_NOT_RUNNING));
+              "reason", REASON_POSITION_WF_NOT_RUNNING,
+              "author", payload.getAuthor()));
       return payload.getSignalId();
     }
 
