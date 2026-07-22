@@ -140,6 +140,19 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Pins the PLAN-2026-07-22 cap-inactive open-book (unprotected-escalation) marker so a rename
+   * fails loudly. A re-versioned in-flight CapInactive history could then schedule the open-book
+   * probe command against ticks that recorded none.
+   */
+  @Test
+  void versionCapInactiveUnprotectedConstantNameIsStable() throws Exception {
+    Field marker =
+        AccountKillSwitchWorkflowImpl.class.getDeclaredField("VERSION_CAP_INACTIVE_UNPROTECTED");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("account-cap-inactive-unprotected-openbook-v1");
+  }
+
+  /**
    * Pins the Phase 2 (PLAN-2026-07-15) no-auto-flatten marker so a rename fails loudly. Renaming
    * the literal would silently re-version live executions — and a re-versioned in-flight trip could
    * then either double-flatten or fail to preserve the recorded cascade command.

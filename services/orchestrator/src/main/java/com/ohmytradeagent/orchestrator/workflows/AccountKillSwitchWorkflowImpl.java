@@ -107,6 +107,30 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   static final String VERSION_CAP_INACTIVE_ALERT = "account-cap-inactive-alert-v1";
 
   /**
+   * PLAN-2026-07-22 gate for the open-book probe that enriches the {@code
+   * AccountKillSwitchCapInactive} emit with an {@code open_positions} count (so the alerter
+   * escalates to a loud-RED "cap NOT protecting &lt;tenant&gt;" page ONLY when the tenant actually
+   * holds risk — fatigue control). The probe is a NEW {@code accountOpenBook} command, so it is
+   * strictly behind {@code v >= 1}; at {@link Workflow#DEFAULT_VERSION} an in-flight history that
+   * already emitted a CapInactive audit replays byte-identically (no probe command). The typed
+   * {@code reason} added to the same subject is activity INPUT (not a command), so it needs no
+   * gate. Pinned by {@code AccountKillSwitchWorkflowImplLegacyReplayTest}.
+   */
+  static final String VERSION_CAP_INACTIVE_UNPROTECTED =
+      "account-cap-inactive-unprotected-openbook-v1";
+
+  /**
+   * Typed defer reasons carried on the {@code AccountKillSwitchCapInactive} subject so a cap that
+   * cannot arm names WHY (fail-loud, PLAN-2026-07-22): the {@code broker_target} could not be
+   * resolved (empty enumeration / no routable target), the SOD-equity snapshot failed, or the
+   * snapshot returned a non-positive equity.
+   */
+  static final String DEFER_BROKER_TARGET_UNRESOLVED = "broker_target_unresolved";
+
+  static final String DEFER_SNAPSHOT_FAILED = "snapshot_failed";
+  static final String DEFER_EQUITY_NONPOSITIVE = "equity_nonpositive";
+
+  /**
    * Phase 2 (PLAN-2026-06-30) gate for re-sourcing tenant realized P&amp;L from the exec {@code
    * order_intent_journal} (broker truth) instead of {@code audit_log}. At {@code v>=1} the
    * heartbeat resolves each strategy's {@code broker_target} and routes a per-strategy realized
@@ -269,6 +293,16 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private Boolean pctConfiguredLastSeen;
 
   /**
+   * PLAN-2026-07-22: the typed reason (one of {@link #DEFER_BROKER_TARGET_UNRESOLVED}, {@link
+   * #DEFER_SNAPSHOT_FAILED}, {@link #DEFER_EQUITY_NONPOSITIVE}) the pct cap last DEFERRED for.
+   * Refreshed each tick a configured cap fails to resolve its SOD-equity base and cleared when it
+   * arms; threaded onto the {@code AccountKillSwitchCapInactive} subject so the operator page names
+   * WHY the safety net is off. Pure workflow state (subject data only — no command), so it is
+   * replay-safe without a version gate.
+   */
+  private String capDeferReason;
+
+  /**
    * Guardrail G1 (Phase 2 exec-realized re-source): consecutive account-realized-read failures on
    * the {@code v>=1} path (deterministic workflow state, no commands). A failed / fail-closed read
    * defers the whole tick (never a spurious trip) and increments this; on crossing {@link
@@ -406,15 +440,46 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   }
 
   private void emitCapInactive() {
-    auditLog(
-        KIND_ACCOUNT_CAP_INACTIVE,
+    Map<String, Object> subj =
         subject(
             "trading_day",
             tradingDay,
             "consecutive_inactive_ticks",
             consecutiveInactiveTicks,
             "scope",
-            "account"));
+            "account");
+    // Fail-loud (PLAN-2026-07-22): name WHY the cap could not arm. Subject data only (activity
+    // input, not a command), so no version gate — replay only checks command type/ordering.
+    if (capDeferReason != null) {
+      subj.put("reason", capDeferReason);
+    }
+    // Fatigue control: escalate to a loud-RED "cap NOT protecting <tenant>" page only when the
+    // tenant actually holds open risk. Probe the open book here — a NEW command, so strictly behind
+    // the v>=1 marker (an in-flight pre-change CapInactive history replays byte-identically).
+    int unprotectedVersion =
+        Workflow.getVersion(VERSION_CAP_INACTIVE_UNPROTECTED, Workflow.DEFAULT_VERSION, 1);
+    if (unprotectedVersion >= 1) {
+      Integer openPositions = probeOpenPositions();
+      if (openPositions != null) {
+        subj.put("open_positions", openPositions);
+      }
+    }
+    auditLog(KIND_ACCOUNT_CAP_INACTIVE, subj);
+  }
+
+  /**
+   * Best-effort open-position count for the cap-inactive page's holds-risk gate. Returns {@code
+   * null} (omit the field, no RED escalation) when the book cannot be read — including the
+   * fail-closed throw an empty resolved strategy set raises — so an unreadable/flat book never
+   * produces a spurious "cap NOT protecting" page.
+   */
+  private Integer probeOpenPositions() {
+    try {
+      AccountOpenBook book = accountPnl.accountOpenBook(input.getTenantId());
+      return book.listed();
+    } catch (RuntimeException e) {
+      return null;
+    }
   }
 
   private AccountKillSwitchWorkflowInput buildCarryForwardInput() {
@@ -826,13 +891,22 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       return absolute; // pct cap not configured => legacy absolute path.
     }
     if (sodEquity == null) {
-      // Capture SOD equity ONCE per day, lazily, on the first heartbeat that needs it.
+      // Capture SOD equity ONCE per day, lazily, on the first heartbeat that needs it. captureSod-
+      // Equity sets capDeferReason (broker_target_unresolved / snapshot_failed) on a null return.
       sodEquity = captureSodEquity();
     }
     if (sodEquity == null || sodEquity.signum() <= 0) {
-      // DEFER: equity unknown this tick. Fall back to the absolute threshold if one exists.
+      // DEFER: equity unknown/non-positive this tick. Fall back to the absolute threshold if one
+      // exists. Carry the typed defer reason so the cap-inactive page names WHY the net is off.
+      if (sodEquity != null) {
+        // Snapshot returned a non-positive equity (distinct from an unresolved target / failed
+        // read).
+        capDeferReason = DEFER_EQUITY_NONPOSITIVE;
+      }
       return absolute;
     }
+    // Armed: SOD-equity base resolved — clear any stale defer reason.
+    capDeferReason = null;
     return pct.multiply(sodEquity);
   }
 
@@ -864,6 +938,17 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private BigDecimal captureSodEquity() {
     String brokerTarget = tenantConfig.tenantBrokerTarget(input.getTenantId());
     if (brokerTarget == null || brokerTarget.isBlank()) {
+      // Fail-LOUD (PLAN-2026-07-22): a configured cap whose broker_target does not resolve is the
+      // structural silent-unprotect (a DB-onboarded tenant absent from the enumeration source, or a
+      // strategy with no routable target). WARN + a typed reason so the cap-inactive page names it
+      // rather than deferring silently.
+      capDeferReason = DEFER_BROKER_TARGET_UNRESOLVED;
+      Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
+          .warn(
+              "SOD-equity capture: broker_target unresolved for tenant={} — pct cap NOT arming this"
+                  + " tick (deferring; reason={})",
+              input.getTenantId(),
+              DEFER_BROKER_TARGET_UNRESOLVED);
       return null;
     }
     try {
@@ -882,11 +967,17 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       request.setTenantId(input.getTenantId());
       request.setCorrelationId(input.getTenantId() + "/account/sod-equity");
       AccountSnapshotResult result = accountStub.accountSnapshot(request);
-      return result == null ? null : result.getEquity();
+      if (result == null || result.getEquity() == null) {
+        // A successful call that carried no equity is a failed read for cap purposes.
+        capDeferReason = DEFER_SNAPSHOT_FAILED;
+        return null;
+      }
+      return result.getEquity();
     } catch (TemporalFailure | IllegalArgumentException e) {
       // Fail SAFE: a broker/equity outage (after Temporal's own retries) OR an unroutable/bare
       // broker_target leaves sodEquity null so the pct check defers and retries next tick — it does
       // NOT trip on an unknown base and does NOT surface as a heartbeat error / cap-off audit spam.
+      capDeferReason = DEFER_SNAPSHOT_FAILED;
       Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
           .warn(
               "SOD-equity snapshot failed; deferring pct cap this tick tenant={} broker_target={} err={}",
