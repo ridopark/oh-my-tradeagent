@@ -2,6 +2,7 @@ import { auth } from "@/auth";
 import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
 import { LiveAccount } from "@/components/LiveAccount";
+import { AccountGuardBanner } from "@/components/AccountGuardBanner";
 import { contractCell } from "@/components/ContractLink";
 import { pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
 import Link from "next/link";
@@ -10,11 +11,13 @@ import {
   getPortfolio,
   getTrades,
   getTenantConfig,
+  getAccountKillSwitch,
   NotAuthenticatedError,
   type Order,
   type Portfolio,
   type Trade,
   type TenantConfig,
+  type AccountKillSwitch,
 } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
@@ -57,6 +60,22 @@ export default async function LivePage() {
   // failure so the card stays neutral rather than blanking the page.
   const tenantConfig: TenantConfig | null = await getTenantConfig().catch(() => null);
 
+  // Account kill-switch state — read INDEPENDENTLY (its own degrade) so a kill-switch read failure
+  // logs and renders no banner rather than blanking /live (mirrors /status). The tripped state is
+  // already wired end-to-end; this is frontend reuse, zero backend.
+  const killSwitch: AccountKillSwitch | null = await getAccountKillSwitch().catch(
+    (err) => {
+      console.error(
+        "getAccountKillSwitch failed; rendering /live without the guard banner",
+        err,
+      );
+      return null;
+    },
+  );
+  const guardState: "tripped" | "healthy" = killSwitch?.tripped
+    ? "tripped"
+    : "healthy";
+
   const count = portfolio.open_positions_count;
 
   // Total account value = live net-liquidation equity (GET /v2/account), summed across the tenant's
@@ -73,6 +92,11 @@ export default async function LivePage() {
     <>
       <Nav tenantId={session?.tenantId} />
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-6">
+        <AccountGuardBanner
+          state={guardState}
+          reason={killSwitch?.reason}
+          resetEligibleAt={killSwitch?.resettableAt}
+        />
         <div>
           <h1 className="mb-1 text-xl font-semibold text-slate-100">Live</h1>
           <p className="text-sm text-slate-400">
