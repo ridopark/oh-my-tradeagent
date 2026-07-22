@@ -49,14 +49,17 @@ class AlpacaPaperBrokerTest {
   void start() throws IOException {
     server = new MockWebServer();
     server.start();
-    RestClient client =
-        RestClient.builder()
-            .baseUrl(server.url("/").toString().replaceAll("/$", ""))
-            .defaultHeader("APCA-API-KEY-ID", "key-id-for-test")
-            .defaultHeader("APCA-API-SECRET-KEY", "key-secret-for-test")
-            .defaultHeader("Accept", "application/json")
-            .build();
-    broker = new AlpacaPaperBroker(client, mapper, meterRegistry);
+    broker = new AlpacaPaperBroker(restClient(), mapper, meterRegistry);
+  }
+
+  /** A RestClient wired to the MockWebServer exactly as the registry wires the real one. */
+  private RestClient restClient() {
+    return RestClient.builder()
+        .baseUrl(server.url("/").toString().replaceAll("/$", ""))
+        .defaultHeader("APCA-API-KEY-ID", "key-id-for-test")
+        .defaultHeader("APCA-API-SECRET-KEY", "key-secret-for-test")
+        .defaultHeader("Accept", "application/json")
+        .build();
   }
 
   @AfterEach
@@ -612,16 +615,9 @@ class AlpacaPaperBrokerTest {
     // must NOT be able to burn that shared budget (which would make Temporal retry the entire
     // Activity, including the already-successful portfolio-history read). Assert the call is
     // bounded by its own read timeout and surfaces a RuntimeException the caller degrades on.
-    RestClient client =
-        RestClient.builder()
-            .baseUrl(server.url("/").toString().replaceAll("/$", ""))
-            .defaultHeader("APCA-API-KEY-ID", "key-id-for-test")
-            .defaultHeader("APCA-API-SECRET-KEY", "key-secret-for-test")
-            .defaultHeader("Accept", "application/json")
-            .build();
     AlpacaPaperBroker bounded =
         new AlpacaPaperBroker(
-            client, mapper, meterRegistry, Duration.ofMillis(200), Duration.ofMillis(200));
+            restClient(), mapper, meterRegistry, Duration.ofMillis(200), Duration.ofMillis(200));
 
     server.enqueue(
         new MockResponse()
