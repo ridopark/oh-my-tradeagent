@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.activities;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -62,6 +63,53 @@ class PortfolioHistoryExecActivityImplTest {
     assertThat(result.getBaseValue()).isEqualByComparingTo(new BigDecimal("10000.00"));
     assertThat(result.getBaseValueAsof()).isEqualTo(1719360000L);
     assertThat(result.getTimeframe()).isEqualTo("1D");
+  }
+
+  @Test
+  void portfolioHistory_surfacesCashFlowsAndMarksAvailable() {
+    // Deposit-adjustment: the impl makes a SECOND broker call (getAccountActivities) over the
+    // history window and surfaces the flows as the parallel arrays + cash_flows_available=true.
+    OptionsBroker broker = mock(OptionsBroker.class);
+    when(broker.getPortfolioHistory(any(), any(), any())).thenReturn(sampleHistory());
+    when(broker.getAccountActivities(1719446400L, 1719532800L))
+        .thenReturn(
+            java.util.List.of(
+                new OptionsBroker.AccountCashFlow(1719450000L, new BigDecimal("41230.00")),
+                new OptionsBroker.AccountCashFlow(1719460000L, new BigDecimal("-500.00"))));
+    PortfolioHistoryExecActivityImpl impl =
+        new PortfolioHistoryExecActivityImpl(new FixedBrokerClientRegistry(broker));
+
+    PortfolioHistoryResult result = impl.portfolioHistory(request());
+
+    assertThat(result.getCashFlowsAvailable()).isTrue();
+    assertThat(result.getCashFlowTimestamps()).containsExactly(1719450000L, 1719460000L);
+    assertThat(result.getCashFlowAmounts())
+        .containsExactly(new BigDecimal("41230.00"), new BigDecimal("-500.00"));
+    // Window is the first..last history timestamp.
+    verify(broker).getAccountActivities(1719446400L, 1719532800L);
+  }
+
+  @Test
+  void portfolioHistory_degradesWhenActivitiesThrow() {
+    // Graceful degrade: getAccountActivities throwing (broker error, or a StubBroker/non-Alpaca
+    // UnsupportedOperationException) leaves the history intact and reports
+    // cash_flows_available=false with empty flow arrays — the BFF nulls the range number.
+    OptionsBroker broker = mock(OptionsBroker.class);
+    when(broker.getPortfolioHistory(any(), any(), any())).thenReturn(sampleHistory());
+    when(broker.getAccountActivities(anyLong(), anyLong()))
+        .thenThrow(new UnsupportedOperationException("not supported"));
+    PortfolioHistoryExecActivityImpl impl =
+        new PortfolioHistoryExecActivityImpl(new FixedBrokerClientRegistry(broker));
+
+    PortfolioHistoryResult result = impl.portfolioHistory(request());
+
+    // History still surfaced.
+    assertThat(result.getEquity())
+        .containsExactly(new BigDecimal("10000.00"), new BigDecimal("10120.50"));
+    // Degrade signalled.
+    assertThat(result.getCashFlowsAvailable()).isFalse();
+    assertThat(result.getCashFlowTimestamps()).isEmpty();
+    assertThat(result.getCashFlowAmounts()).isEmpty();
   }
 
   @Test

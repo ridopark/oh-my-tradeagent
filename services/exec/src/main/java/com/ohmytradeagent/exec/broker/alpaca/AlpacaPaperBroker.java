@@ -11,6 +11,7 @@ import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
+import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountActivity;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaCalendarDay;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderRequest;
@@ -21,7 +22,9 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
@@ -672,6 +675,85 @@ public class AlpacaPaperBroker implements OptionsBroker {
       return new BigDecimal[0];
     }
     return values.toArray(new BigDecimal[0]);
+  }
+
+  /**
+   * Live-account-view: Alpaca {@code GET
+   * /v2/account/activities?activity_types=CSD,CSW,JNLC&after=&until=} → the account's cash flows
+   * (deposits/withdrawals/journals) over {@code [startEpochSec, endEpochSec]}, so the BFF can
+   * deposit-adjust the range return. READ-ONLY (no order path). Mirrors {@link #tradingDays}'s
+   * query-param + {@link #mapError} pattern and {@link #getPortfolioHistory}'s defensive parsing: a
+   * null body yields an empty list, and an entry with a null/blank/unparseable date is skipped
+   * (activities is an advisory adjustment source, not an order path — a malformed row must not
+   * crash the read).
+   */
+  @Override
+  public List<AccountCashFlow> getAccountActivities(long startEpochSec, long endEpochSec) {
+    String after = Instant.ofEpochSecond(startEpochSec).toString();
+    String until = Instant.ofEpochSecond(endEpochSec).toString();
+    List<AlpacaAccountActivity> raw;
+    try {
+      raw =
+          client
+              .get()
+              .uri(
+                  uriBuilder ->
+                      uriBuilder
+                          .path("/v2/account/activities")
+                          .queryParam("activity_types", "CSD,CSW,JNLC")
+                          .queryParam("after", after)
+                          .queryParam("until", until)
+                          .build())
+              .retrieve()
+              .body(new ParameterizedTypeReference<List<AlpacaAccountActivity>>() {});
+    } catch (HttpStatusCodeException e) {
+      throw mapError(e);
+    }
+    if (raw == null) {
+      return List.of();
+    }
+    List<AccountCashFlow> out = new ArrayList<>(raw.size());
+    for (AlpacaAccountActivity a : raw) {
+      if (a.netAmount() == null) {
+        continue;
+      }
+      Long epoch = epochSecondsOf(a);
+      if (epoch == null) {
+        log.warn(
+            "Alpaca /v2/account/activities returned an entry with no parseable date"
+                + " (activity_type={}); skipping",
+            a.activityType());
+        continue;
+      }
+      out.add(new AccountCashFlow(epoch, a.netAmount()));
+    }
+    return out;
+  }
+
+  /**
+   * Epoch seconds of an activity's date. Non-trade activities (CSD/CSW/JNLC) carry {@code date}
+   * ({@code "YYYY-MM-DD"}, midnight-UTC); {@code transaction_time} (ISO instant) is preferred when
+   * present. Returns null on absent/unparseable dates so the caller skips the row rather than
+   * crashing.
+   */
+  private static Long epochSecondsOf(AlpacaAccountActivity a) {
+    String txn = a.transactionTime();
+    if (txn != null && !txn.isBlank()) {
+      try {
+        return Instant.parse(txn).getEpochSecond();
+      } catch (DateTimeParseException ignored) {
+        // fall through to date
+      }
+    }
+    String date = a.date();
+    if (date != null && !date.isBlank()) {
+      try {
+        return LocalDate.parse(date).atStartOfDay(ZoneOffset.UTC).toEpochSecond();
+      } catch (DateTimeParseException ignored) {
+        return null;
+      }
+    }
+    return null;
   }
 
   /**

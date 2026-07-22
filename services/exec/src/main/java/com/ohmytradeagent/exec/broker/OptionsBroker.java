@@ -204,4 +204,27 @@ public interface OptionsBroker {
       BigDecimal baseValue,
       Long baseValueAsof,
       String timeframe) {}
+
+  /**
+   * Live-account-view: the brokerage account's cash flows (deposits {@code CSD}, withdrawals {@code
+   * CSW}, cash journals {@code JNLC}) over {@code [startEpochSec, endEpochSec]} (Alpaca {@code GET
+   * /v2/account/activities}), so the BFF can compute a deposit-adjusted range return. A READ-ONLY
+   * GET — it places no orders and touches no order path.
+   *
+   * <p>Default throws {@link UnsupportedOperationException} so only brokers that expose the
+   * endpoint (Alpaca) support it; the in-memory {@link
+   * com.ohmytradeagent.exec.broker.stub.StubBroker} and other adapters are unaffected until they
+   * opt in. Because it is {@code default} (not abstract), adding it does not break any existing
+   * adapter's compilation.
+   */
+  default List<AccountCashFlow> getAccountActivities(long startEpochSec, long endEpochSec) {
+    throw new UnsupportedOperationException("getAccountActivities not supported by this broker");
+  }
+
+  /**
+   * One account cash flow: {@code timestamp} (epoch seconds) and {@code amount} (Alpaca {@code
+   * net_amount}; deposit {@code +}, withdrawal {@code −}). Account-level (shared across tenants on
+   * a broker_target) and never a risk-gate input.
+   */
+  record AccountCashFlow(long timestamp, BigDecimal amount) {}
 }

@@ -540,6 +540,60 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void getAccountActivities_mapsSignedCashFlowsAndSendsActivityTypesAfterUntil() throws Exception {
+    // Live-account-view deposit-adjustment: /v2/account/activities returns cash flows we net out of
+    // the range return. A CSD (deposit +), CSW (withdrawal −), and JNLC (cash journal) map to
+    // AccountCashFlow with the net_amount sign preserved and the "YYYY-MM-DD" date parsed to
+    // midnight-UTC epoch seconds. Assert the request carries activity_types=CSD,CSW,JNLC and the
+    // after/until window (ISO-8601 of the two epoch-second bounds).
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"activity_type\":\"CSD\",\"net_amount\":\"41230.00\",\"date\":\"2026-07-15\"},"
+                    + "{\"activity_type\":\"CSW\",\"net_amount\":\"-500.00\",\"date\":\"2026-07-16\"},"
+                    + "{\"activity_type\":\"JNLC\",\"net_amount\":\"25.00\",\"date\":\"2026-07-17\"}]"));
+
+    // 2026-07-01T00:00:00Z .. 2026-07-20T00:00:00Z
+    long start = 1751328000L;
+    long end = 1753142400L;
+    List<OptionsBroker.AccountCashFlow> flows = broker.getAccountActivities(start, end);
+
+    assertThat(flows).hasSize(3);
+    assertThat(flows.get(0).amount()).isEqualByComparingTo(new BigDecimal("41230.00"));
+    assertThat(flows.get(0).timestamp())
+        .isEqualTo(
+            LocalDate.of(2026, 7, 15).atStartOfDay(java.time.ZoneOffset.UTC).toEpochSecond());
+    assertThat(flows.get(1).amount()).isEqualByComparingTo(new BigDecimal("-500.00"));
+    assertThat(flows.get(2).amount()).isEqualByComparingTo(new BigDecimal("25.00"));
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getRequestUrl().encodedPath()).isEqualTo("/v2/account/activities");
+    assertThat(req.getRequestUrl().queryParameter("activity_types")).isEqualTo("CSD,CSW,JNLC");
+    assertThat(req.getRequestUrl().queryParameter("after"))
+        .isEqualTo(java.time.Instant.ofEpochSecond(start).toString());
+    assertThat(req.getRequestUrl().queryParameter("until"))
+        .isEqualTo(java.time.Instant.ofEpochSecond(end).toString());
+    assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
+  }
+
+  @Test
+  void getAccountActivities_serverError_throwsMapErrorFailure() {
+    // A 5xx from the activities read surfaces through mapError (a generic 5xx stays a retryable
+    // HttpStatusCodeException) — the caller degrades to cash_flows_available=false.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(500)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"internal error\"}"));
+
+    assertThatThrownBy(() -> broker.getAccountActivities(1751328000L, 1753142400L))
+        .isInstanceOf(HttpStatusCodeException.class);
+  }
+
+  @Test
   void cancelOrder_422OnFilled_returnsSoftFailureWithReason() {
     server.enqueue(
         new MockResponse()

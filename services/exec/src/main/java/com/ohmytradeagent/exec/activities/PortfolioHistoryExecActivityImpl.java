@@ -55,6 +55,38 @@ public class PortfolioHistoryExecActivityImpl implements PortfolioHistoryActivit
     result.setBaseValue(history.baseValue());
     result.setBaseValueAsof(history.baseValueAsof());
     result.setTimeframe(history.timeframe());
+
+    // Live-account-view deposit-adjustment: fetch the account's cash flows over the same window so
+    // a
+    // later BFF phase can net them out of the range return. This is a SECOND broker call INSIDE the
+    // existing Activity impl — it adds NO new Temporal activity/workflow command, so
+    // PortfolioHistoryWorkflow's command sequence is unchanged and NO Workflow.getVersion gate is
+    // needed. Graceful degrade: any failure (broker error, or a non-Alpaca/StubBroker that throws
+    // UnsupportedOperationException — a RuntimeException) leaves the history intact and reports
+    // cash_flows_available=false so the BFF nulls the range number rather than showing a
+    // deposit-polluted one.
+    long[] ts = history.timestamps();
+    if (ts != null && ts.length > 0) {
+      try {
+        List<OptionsBroker.AccountCashFlow> flows =
+            broker.getAccountActivities(ts[0], ts[ts.length - 1]);
+        List<Long> flowTimestamps = new ArrayList<>(flows.size());
+        List<BigDecimal> flowAmounts = new ArrayList<>(flows.size());
+        for (OptionsBroker.AccountCashFlow f : flows) {
+          flowTimestamps.add(f.timestamp());
+          flowAmounts.add(f.amount());
+        }
+        result.setCashFlowTimestamps(flowTimestamps);
+        result.setCashFlowAmounts(flowAmounts);
+        result.setCashFlowsAvailable(true);
+      } catch (RuntimeException e) {
+        result.setCashFlowTimestamps(List.of());
+        result.setCashFlowAmounts(List.of());
+        result.setCashFlowsAvailable(false);
+      }
+    }
+    // Empty history window → no cash-flow fields set (absent → BFF treats the range as
+    // unavailable).
     return result;
   }
 

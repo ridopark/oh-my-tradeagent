@@ -43,3 +43,15 @@ class PortfolioHistoryResult(BaseModel):
     """
     The resolved Alpaca timeframe (echoes the request).
     """
+    cash_flow_timestamps: list[int] | None = None
+    """
+    Epoch-seconds of each account cash flow (deposit/withdrawal/journal) in the window. Parallel to cash_flow_amounts. Lets the BFF deposit-adjust the range return.
+    """
+    cash_flow_amounts: list[float] | None = None
+    """
+    Alpaca net_amount of each cash flow (deposit +, withdrawal −). Parallel to cash_flow_timestamps.
+    """
+    cash_flows_available: bool | None = None
+    """
+    True when the account-activities read succeeded (even if zero flows); false/absent when it failed, so the BFF can null the range number instead of showing a deposit-polluted one.
+    """
