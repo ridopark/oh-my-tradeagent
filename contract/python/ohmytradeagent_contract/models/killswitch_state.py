@@ -41,3 +41,11 @@ class KillSwitchState(BaseModel):
     """
     Current trading day the auto-trip heartbeat is evaluating (America/New_York).
     """
+    open_positions: conint(ge=0) | None = None
+    """
+    Account-cap open-position count (listed) from the last heartbeat's open-book read. Null for the per-strategy kill switch (only the AccountKillSwitchWorkflow populates it). Advisory/observability only.
+    """
+    open_mtm: float | None = None
+    """
+    Account-cap unrealized open P&L ((liveBid-entry)*qty*100) from the last heartbeat, when the book was fully priceable; null when unpriceable or per-strategy. SIGNED (a gain is positive) - NOT a loss amount and NOT position value.
+    """
