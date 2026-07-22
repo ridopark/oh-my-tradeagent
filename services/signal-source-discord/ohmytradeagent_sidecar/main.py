@@ -218,7 +218,22 @@ async def _amain() -> None:
         # page (tab). A second Chromium would roughly double memory and OOM the
         # homelab sidecar's 1Gi limit (see PLAN-watchlist-mirror).
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
+            # Memory-hardening for the 2-tab Discord Chromium in a limited container
+            # (see 55-signal-source-discord.yaml's 2Gi limit). Discord is a heavy SPA
+            # and two tabs intermittently OOMKilled the old 1Gi pod:
+            #   --disable-dev-shm-usage: write shared memory to /tmp, not the default
+            #       64Mi /dev/shm tmpfs Chromium otherwise exhausts under Discord.
+            #   --disable-gpu: headless has no GPU compositor to feed.
+            #   --js-flags=--max-old-space-size: cap each tab's V8 old-space heap so a
+            #       single tab cannot balloon unbounded.
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--js-flags=--max-old-space-size=384",
+                ],
+            )
             context = await browser.new_context(storage_state=str(storage_state_path))
 
             signal_page = await context.new_page()
