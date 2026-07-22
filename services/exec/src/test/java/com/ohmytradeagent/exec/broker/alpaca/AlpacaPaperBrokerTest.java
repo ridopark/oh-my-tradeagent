@@ -549,11 +549,14 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
-  void getPortfolioHistory_leadingNullTimestamp_isDroppedNotCoercedToZero() throws Exception {
-    // A leading null timestamp (degenerate market-closed slot) must be DROPPED, not coerced to 0L:
-    // a
-    // 0 epoch at the front becomes the BFF's window lower bound and admits every inception cash
-    // flow.
+  void getPortfolioHistory_nullTimestamp_coercedToZeroInPlace_keepsArraysAligned()
+      throws Exception {
+    // timestamp/equity/profit_loss/profit_loss_pct are INDEX-PARALLEL — the calculator and chart
+    // read timestamps[i] against equity[i]. A null timestamp is coerced to 0L IN PLACE (not
+    // dropped),
+    // so every axis keeps the same length and stays aligned. Dropping the null would desync the
+    // arrays (a worse bug); the deposit double-count a leading 0L used to cause is now prevented by
+    // the BFF windowing cash flows on base_value_asof instead of timestamps[0].
     server.enqueue(
         new MockResponse()
             .setResponseCode(200)
@@ -568,8 +571,12 @@ class AlpacaPaperBrokerTest {
 
     OptionsBroker.PortfolioHistory h = broker.getPortfolioHistory("1M", "1D", null);
 
-    // No leading 0L — the null slot is dropped, leaving the two real epochs.
-    assertThat(h.timestamps()).containsExactly(1719446400L, 1719532800L);
+    // Null → 0L in place; all four parallel axes keep the same length (alignment preserved).
+    assertThat(h.timestamps()).containsExactly(0L, 1719446400L, 1719532800L);
+    assertThat(h.timestamps()).hasSize(h.equity().length);
+    assertThat(h.equity().length)
+        .isEqualTo(h.profitLoss().length)
+        .isEqualTo(h.profitLossPct().length);
   }
 
   @Test

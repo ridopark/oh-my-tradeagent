@@ -30,7 +30,6 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import org.slf4j.Logger;
@@ -743,19 +742,18 @@ public class AlpacaPaperBroker implements OptionsBroker {
     if (values == null) {
       return new long[0];
     }
-    // Alpaca can return sparse arrays with a leading null timestamp (a degenerate market-closed
-    // slot). Coercing it to 0L would push a 0 epoch to the front, which the BFF reads as the window
-    // lower bound and admits every inception cash flow. Drop leading nulls instead;
-    // interior/trailing
-    // nulls (should not occur for the timestamp axis) are likewise skipped so no 0L is emitted.
+    // MUST stay index-aligned with equity/profit_loss/profit_loss_pct (toDecimalArray keeps every
+    // slot) — the calculator and chart read timestamps[i] against equity[i]. A null timestamp is
+    // therefore coerced to 0L in place, NOT dropped (dropping desyncs the parallel arrays). A stray
+    // leading 0L no longer causes the deposit double-count: the range calc now windows cash flows
+    // by
+    // base_value_asof (this PR), so timestamps[0] is not the flow-exclusion boundary.
     long[] out = new long[values.size()];
-    int j = 0;
-    for (Long v : values) {
-      if (v != null) {
-        out[j++] = v;
-      }
+    for (int i = 0; i < values.size(); i++) {
+      Long v = values.get(i);
+      out[i] = v == null ? 0L : v;
     }
-    return j == values.size() ? out : Arrays.copyOf(out, j);
+    return out;
   }
 
   private static BigDecimal[] toDecimalArray(List<BigDecimal> values) {
