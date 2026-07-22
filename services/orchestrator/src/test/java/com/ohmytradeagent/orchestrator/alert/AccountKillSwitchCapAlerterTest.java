@@ -216,6 +216,52 @@ class AccountKillSwitchCapAlerterTest {
   }
 
   @Test
+  void mtmDeferredDispatchesYellowEmbedWithTenantAndTickFraction() {
+    // PLAN-2026-07-22: the deferred-fail-close page. YELLOW (fail-safe) — the cap caught a quote
+    // blip and did NOT trip; the page carries the tenant + the n/N unpriceable-tick fraction.
+    WebhookClient webhook = mock(WebhookClient.class);
+    AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("trading_day", "2026-07-21");
+    subject.put("listed", 2);
+    subject.put("failures", 2);
+    subject.put("consecutive_ticks", 1);
+    subject.put("trip_ticks", 2);
+    subject.put("scope", "account");
+    AuditEvent event =
+        event("AccountKillSwitchMtmDeferred", "t-prod_real/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(16705372); // yellow
+    assertThat(embed.title()).contains("deferred a fail-close", "prod_real");
+    assertThat(embed.title()).doesNotContain(":rotating_light:");
+    assertThat(embed.description()).contains("did NOT trip", "2 consecutive ticks");
+    assertThat(field(embed, "tenant_id")).isEqualTo("prod_real");
+    assertThat(field(embed, "trading_day")).isEqualTo("2026-07-21");
+    assertThat(field(embed, "listed")).isEqualTo("2");
+    assertThat(field(embed, "failures")).isEqualTo("2");
+    assertThat(field(embed, "consecutive_ticks")).isEqualTo("1/2");
+    assertThat(embed.footer()).contains("t-prod_real/account/killswitch");
+  }
+
+  @Test
+  void mtmDeferredNullSubjectIsSafe() {
+    // Non-throwing / never-lose contract: a null-subject deferred event still pages (n/a fields).
+    WebhookClient webhook = mock(WebhookClient.class);
+    AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);
+
+    AuditEvent event = event("AccountKillSwitchMtmDeferred", "wf-defer", null);
+    assertThatCode(() -> alerter.onAuditEvent(event)).doesNotThrowAnyException();
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(16705372); // yellow — still fail-safe, never RED
+    assertThat(field(embed, "consecutive_ticks")).isEqualTo("n/a/n/a");
+  }
+
+  @Test
   void otherKindsDoNotDispatch() {
     WebhookClient webhook = mock(WebhookClient.class);
     AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);

@@ -334,6 +334,14 @@ public final class AuditEventKinds {
           // flatten. Pages via AccountKillSwitchCapAlerter. Observability-only — in ALL_KINDS only,
           // not in any *_KINDS lifecycle group.
           "AccountKillSwitchStillHolding",
+          // PLAN-2026-07-22: emitted by AccountKillSwitchWorkflowImpl on the FIRST deferred tick of
+          // a small-book MTM-unavailable blip episode — the cap did NOT trip (a transient quote
+          // blip); it re-fetched in-tick and is now watching for MTM_UNAVAILABLE_TRIP_TICKS
+          // consecutive unpriceable ticks. Pages YELLOW (fail-safe framing) via
+          // AccountKillSwitchCapAlerter so a chronic every-other-tick quote degradation surfaces
+          // instead of hiding in a WARN log until an eventual trip. Observability-only — in
+          // ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "AccountKillSwitchMtmDeferred",
           // Phase 2 (PLAN-2026-06-30 kill-switch realized re-source): emitted by BOTH
           // KillSwitchWorkflowImpl and AccountKillSwitchWorkflowImpl (guardrail G1) when the
           // broker-routed exec realized read has been unavailable for N consecutive heartbeats —

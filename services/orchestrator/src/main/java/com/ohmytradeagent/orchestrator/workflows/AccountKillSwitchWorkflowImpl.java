@@ -84,6 +84,16 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   /** Audit kind emitted (and paged) when a previously-inactive configured pct cap re-arms. */
   private static final String KIND_ACCOUNT_CAP_REARMED = "AccountKillSwitchCapReArmed";
 
+  /**
+   * PLAN-2026-07-22 audit kind emitted (and Discord-paged YELLOW via {@code
+   * AccountKillSwitchCapAlerter}) on the FIRST deferred tick of a small-book MTM-unavailable blip
+   * episode — the cap did NOT trip (a transient quote blip caught by the {@link
+   * #VERSION_ACCOUNT_MTM_DEBOUNCE} debounce). Makes the previously WARN-only defer operator-visible
+   * so a chronic every-other-tick quote degradation surfaces instead of hiding until an eventual
+   * trip. Fail-safe framing (the cap is WORKING — it caught a blip), never RED.
+   */
+  private static final String KIND_ACCOUNT_MTM_DEFERRED = "AccountKillSwitchMtmDeferred";
+
   /** Audit strategy_id sentinel — the account cap is tenant-scoped, not strategy-scoped. */
   static final String ACCOUNT_SCOPE = "__account__";
 
@@ -628,8 +638,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // at
     // v>=1 it re-fetches in-tick and requires MTM_UNAVAILABLE_TRIP_TICKS consecutive unpriceable
     // ticks. All new commands (in-tick re-fetch quotes + timers) are strictly behind v>=1.
+    //
+    // PLAN-2026-07-22 (defer-page): WIDENED to maxSupported=2 for the deferred-tick Discord page
+    // (the audit.log emit in the defer branch is a NEW activity command, strictly behind v>=2). An
+    // in-flight history that recorded this marker at value 1 (a #606 defer) replays as 1 — no new
+    // emit — so the widen is byte-identical for it. Widening the existing change-id (not a second
+    // marker) is the correct pattern; pinned by AccountKillSwitchWorkflowImplLegacyReplayTest.
     int mtmDebounceVersion =
-        Workflow.getVersion(VERSION_ACCOUNT_MTM_DEBOUNCE, Workflow.DEFAULT_VERSION, 1);
+        Workflow.getVersion(VERSION_ACCOUNT_MTM_DEBOUNCE, Workflow.DEFAULT_VERSION, 2);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -734,6 +750,30 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
                   combinedFailures,
                   consecutiveMtmUnavailableTicks,
                   MTM_UNAVAILABLE_TRIP_TICKS);
+          // PLAN-2026-07-22 (defer-page): make the defer operator-visible (YELLOW Discord page)
+          // instead of a silent WARN. Emit ONCE per blip episode — on the FIRST defer tick
+          // (consecutiveMtmUnavailableTicks == 1, the start of each episode since the counter
+          // resets on any cleanly-priced tick) — so a transient blip = one page and a chronic
+          // miss/clean flap = one page per miss-episode. audit.log(...) is a NEW activity command,
+          // so it is strictly behind v>=2 (the widened debounce gate): an in-flight v1 defer
+          // history replays with no emit. Never a trip (still returns false).
+          if (mtmDebounceVersion >= 2 && consecutiveMtmUnavailableTicks == 1) {
+            auditLog(
+                KIND_ACCOUNT_MTM_DEFERRED,
+                subject(
+                    "trading_day",
+                    tradingDay,
+                    "listed",
+                    book.listed(),
+                    "failures",
+                    combinedFailures,
+                    "consecutive_ticks",
+                    consecutiveMtmUnavailableTicks,
+                    "trip_ticks",
+                    MTM_UNAVAILABLE_TRIP_TICKS,
+                    "scope",
+                    "account"));
+          }
           return false; // momentarily-unpriceable small book — defer (not armed), do not trip yet.
         }
       }
