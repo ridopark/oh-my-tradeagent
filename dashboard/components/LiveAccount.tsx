@@ -6,11 +6,13 @@ import { fmtCurrency } from "@/components/Pnl";
 // Type-only import (erased at compile): lib/bff is server-only, only its shape crosses here.
 import type { PortfolioHistory } from "@/lib/bff";
 
-// Structure (a): the chart owns the history fetch and lifts each frame up via onData; the header's
-// "+$X (Y%) for the selected range" reads the SAME profit_loss the chart drew, so the range delta
-// always matches the active tab. The headline TOTAL is the live account snapshot (accountValue,
-// passed in from the server page), NOT the chart's last point — see live/page.tsx for why (Alpaca's
-// portfolio-history lags a cash deposit). The note below explains the resulting headline-vs-chart gap.
+// Structure (a): the chart owns the history fetch and lifts each frame up via onData; the header
+// reads profit_loss[last]/profit_loss_pct[last] from that same frame. Alpaca returns portfolio
+// history with per-day-reset P&L, so the last element is the LATEST TRADING DAY's P&L ("today"),
+// NOT a delta over the active range — it is ~identical across 1D/1W/1M/3M. The headline TOTAL is
+// the live account snapshot (accountValue, passed in from the server page), NOT the chart's last
+// point — see live/page.tsx for why (Alpaca's portfolio-history lags a cash deposit). The note below
+// explains the resulting headline-vs-chart gap.
 export function LiveAccount({
   accountValue,
   accountScope,
@@ -83,7 +85,7 @@ function AccountTotal({
           {arrow} {fmtCurrency(pl)}
           {/* Alpaca returns profit_loss_pct as a decimal fraction (0.0123 = 1.23%) → x100 for display. */}
           {plPct != null && <> ({(plPct * 100).toFixed(2)}%)</>}
-          <span className="ml-1 text-slate-500">for the selected range</span>
+          <span className="ml-1 text-slate-500">today</span>
         </div>
       )}
       <div className="mt-1 text-xs text-slate-500">
