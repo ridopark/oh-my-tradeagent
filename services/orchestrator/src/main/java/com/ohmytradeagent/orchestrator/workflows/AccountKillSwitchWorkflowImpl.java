@@ -418,7 +418,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
-    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 4L) {
+    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 5L) {
       throw new IllegalArgumentException(
           "AccountKillSwitchWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
@@ -448,6 +448,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // mid-debounce does not reset it (null/absent on a pre-v4 or count==0 carry => stays 0).
     if (in.getConsecutiveMtmUnavailableTicks() != null) {
       this.consecutiveMtmUnavailableTicks = in.getConsecutiveMtmUnavailableTicks().intValue();
+    }
+    // v5 carry-forward: restore the reset-banner open-exposure cache so a same-day CAN does not
+    // blank the exposure for up to one heartbeat (null/absent on a pre-v5 carry => stays null).
+    if (in.getLastOpenPositions() != null) {
+      this.lastOpenPositions = in.getLastOpenPositions().intValue();
+    }
+    if (in.getLastOpenMtm() != null) {
+      this.lastOpenMtm = in.getLastOpenMtm();
     }
   }
 
@@ -591,7 +599,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         coolingDownUntil,
         tradingDay,
         sodEquity,
-        consecutiveMtmUnavailableTicks);
+        consecutiveMtmUnavailableTicks,
+        lastOpenPositions,
+        lastOpenMtm);
   }
 
   /**
@@ -600,15 +610,19 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    *
    * <p>Rolling-deploy safety: only bump the schema_version when we actually carry a NEWER field. A
    * pre-v3 worker validates {@code schema_version <= 2} at {@code @WorkflowInit} (pre-v4: {@code <=
-   * 3}) and throws on a too-new input — so an unconditional bump would wedge any execution that
-   * continues-as-new on a new pod and is then picked up by an old pod mid rollout/canary. A
-   * carry-forward WITHOUT a captured SOD equity is byte-identical to the legacy v2 shape (stamp
-   * v2); WITH sod_equity but no active mtm-debounce it is the v3 shape (stamp v3); only a carry
-   * that actually threads a nonzero {@code consecutive_mtm_unavailable_ticks} is stamped v4. An
-   * execution carrying either newer field is already pinned to {@code v>=1} by its getVersion
-   * marker (an old worker cannot replay it anyway), so the bump is correct there. (count>0 ⟹
-   * sodEquity!=null, since the debounce only runs after threshold resolution, so a v4 carry always
-   * also carries sod_equity.)
+   * 3}; pre-v5: {@code <= 4}) and throws on a too-new input — so an unconditional bump would wedge
+   * any execution that continues-as-new on a new pod and is then picked up by an old pod mid
+   * rollout/canary. A carry-forward WITHOUT any captured exposure/equity/debounce state is
+   * byte-identical to the legacy v2 shape (stamp v2); WITH sod_equity but nothing newer it is the
+   * v3 shape (stamp v3); WITH a nonzero {@code consecutive_mtm_unavailable_ticks} but no exposure
+   * it is v4; a carry that threads the {@code last_open_positions}/{@code last_open_mtm} exposure
+   * cache is stamped v5. An execution carrying any newer field is already pinned to {@code v>=1} by
+   * its getVersion marker (an old worker cannot replay it anyway), so the bump is correct there.
+   *
+   * <p>Each newer field is set on the carry ONLY when non-null (mirrors the sod_equity / debounce
+   * discipline): on a single-replica homelab an old pod mid-rollout handed a v5 input it cannot
+   * interpret is fail-LOUD-and-retry (the guard throws, Temporal retries the task until the new pod
+   * picks it up), never silent exposure loss — accepted.
    */
   static AccountKillSwitchWorkflowInput carryForwardInput(
       String tenantId,
@@ -619,9 +633,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       OffsetDateTime coolingDownUntil,
       LocalDate tradingDay,
       BigDecimal sodEquity,
-      int consecutiveMtmUnavailableTicks) {
+      int consecutiveMtmUnavailableTicks,
+      Integer lastOpenPositions,
+      BigDecimal lastOpenMtm) {
     AccountKillSwitchWorkflowInput carry = new AccountKillSwitchWorkflowInput();
-    carry.setSchemaVersion(consecutiveMtmUnavailableTicks > 0 ? 4L : (sodEquity != null ? 3L : 2L));
+    carry.setSchemaVersion(
+        (lastOpenPositions != null || lastOpenMtm != null)
+            ? 5L
+            : (consecutiveMtmUnavailableTicks > 0 ? 4L : (sodEquity != null ? 3L : 2L)));
     carry.setTenantId(tenantId);
     carry.setTripped(tripped);
     if (reason != null && !reason.isEmpty()) {
@@ -643,6 +662,15 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // pod mid-rollout is never handed a v4 it would reject).
     if (consecutiveMtmUnavailableTicks > 0) {
       carry.setConsecutiveMtmUnavailableTicks((long) consecutiveMtmUnavailableTicks);
+    }
+    // Carry the reset-banner open-exposure cache so a same-day CAN does not blank it for up to one
+    // heartbeat. Set each ONLY when non-null (the MTM is null until a fully-priced heartbeat) so a
+    // pre-exposure carry stays the byte-identical v2/v3/v4 shape.
+    if (lastOpenPositions != null) {
+      carry.setLastOpenPositions(lastOpenPositions.longValue());
+    }
+    if (lastOpenMtm != null) {
+      carry.setLastOpenMtm(lastOpenMtm);
     }
     return carry;
   }
@@ -774,6 +802,13 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         // deferring (a blip that clears mid-tick never widens the blind window at all).
         valued = refetchSmallBookQuotes(book, valued);
         combinedFailures = book.valueFailures() + valued.quoteFailures();
+        // PLAN-2026-07-22 (#591, freshness fix): re-cache the exposure with the REFETCHED
+        // valuation.
+        // The top-of-tick cacheOpenBookExposure ran on the pre-refetch (blipped) valuation, so its
+        // MTM was left null; a blip that cleared here now caches the fresh signed MTM, while one
+        // that stays unpriceable leaves the MTM null (cacheOpenBookExposure only sets it when
+        // quoteFailures()==0). Pure field write (no command) — replay-safe.
+        cacheOpenBookExposure(book.listed(), valued);
         // (2) BACKSTOP: still unpriceable after the in-tick re-fetch => cross-tick debounce. Defer
         // this tick LOUDLY (WARN so an operator can eyeball the book / a chronic every-other-tick
         // miss surfaces) and only fail-close after MTM_UNAVAILABLE_TRIP_TICKS CONSECUTIVE

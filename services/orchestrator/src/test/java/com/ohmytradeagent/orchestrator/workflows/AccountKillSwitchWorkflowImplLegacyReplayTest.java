@@ -203,21 +203,24 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   }
 
   /**
-   * PLAN-2026-07-22 (debounce CAN-carry) legacy-carry init coverage. A PRE-v4 continueAsNew carry
-   * input (schema_version 2 or 3, with NO {@code consecutive_mtm_unavailable_ticks} field) must
-   * still be ACCEPTED by the widened {@code @WorkflowInit} guard ({@code > 4L}) and init cleanly —
-   * an old in-flight execution that continues-as-new onto the new build must not be rejected. The
-   * absent field restores as 0 (the getter returns null → the restore guard skips it), so the
-   * debounce starts fresh. Drives the null-threshold opt-out path (the sparse, activity-light
-   * heartbeat) purely to prove init + a few ticks run without a schema throw.
+   * PLAN-2026-07-22 (#591, exposure CAN-carry) legacy-carry init coverage. A PRE-v5 continueAsNew
+   * carry input (schema_version 2, 3, or 4, with NO {@code last_open_positions}/{@code
+   * last_open_mtm} fields) must still be ACCEPTED by the widened {@code @WorkflowInit} guard
+   * ({@code > 5L}) and init cleanly — an old in-flight execution that continues-as-new onto the new
+   * build must not be rejected. The absent exposure fields restore as null (the getter returns null
+   * → the restore guard skips it), so {@code killswitchState()} surfaces null exposure. Drives the
+   * null-threshold opt-out path (the sparse, activity-light heartbeat) purely to prove init + a few
+   * ticks run without a schema throw.
    */
   @Test
-  void preV4CarryInputInitsCleanlyAndCounterTreatedAsZero() {
-    assertPreV4CarryInitsCleanly(2L, null); // v2 carry: neither sod_equity nor the ticks field.
-    assertPreV4CarryInitsCleanly(3L, new BigDecimal("5000")); // v3 carry: sod_equity, no ticks.
+  void preV5CarryInputInitsCleanlyAndExposureTreatedAsNull() {
+    assertPreV5CarryInitsCleanly(2L, null, null); // v2: neither sod_equity nor the ticks field.
+    assertPreV5CarryInitsCleanly(3L, new BigDecimal("5000"), null); // v3: sod_equity, no ticks.
+    assertPreV5CarryInitsCleanly(4L, new BigDecimal("5000"), 1L); // v4: sod_equity + ticks.
   }
 
-  private void assertPreV4CarryInitsCleanly(long schemaVersion, BigDecimal sodEquity) {
+  private void assertPreV5CarryInitsCleanly(
+      long schemaVersion, BigDecimal sodEquity, Long consecutiveMtmUnavailableTicks) {
     TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
     try {
       Worker worker = env.newWorker(CORE_QUEUE);
@@ -242,19 +245,27 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
       if (sodEquity != null) {
         carry.setSodEquity(sodEquity);
       }
+      if (consecutiveMtmUnavailableTicks != null) {
+        carry.setConsecutiveMtmUnavailableTicks(consecutiveMtmUnavailableTicks);
+      }
       AccountKillSwitchWorkflow stub =
           env.getWorkflowClient()
               .newWorkflowStub(
                   AccountKillSwitchWorkflow.class,
                   WorkflowOptions.newBuilder()
                       .setTaskQueue(CORE_QUEUE)
-                      .setWorkflowId("t-dev/account/killswitch-prev4-v" + schemaVersion)
+                      .setWorkflowId("t-dev/account/killswitch-prev5-v" + schemaVersion)
                       .build());
       WorkflowStub.fromTyped(stub).start(carry);
 
-      // A few heartbeats: init accepted the pre-v4 shape and the loop runs without a schema throw.
+      // A few heartbeats: init accepted the pre-v5 shape and the loop runs without a schema throw.
       env.sleep(Duration.ofSeconds(190));
-      assertThat(stub.killswitchState().getTripped()).isFalse();
+      KillSwitchState s = stub.killswitchState();
+      assertThat(s.getTripped()).isFalse();
+      // The absent exposure fields restored as null (never fabricated) — and the opt-out heartbeat
+      // never values the book, so they stay null.
+      assertThat(s.getOpenPositions()).isNull();
+      assertThat(s.getOpenMtm()).isNull();
     } finally {
       env.close();
     }
