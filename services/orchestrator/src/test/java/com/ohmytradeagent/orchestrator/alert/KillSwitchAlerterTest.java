@@ -107,7 +107,54 @@ class KillSwitchAlerterTest {
             "close them manually in Alpaca",
             "trip the kill switch to flatten",
             "Open positions: 3",
-            "Open MTM: -2500");
+            "Unrealized P&L: -$2,500");
+    assertThat(embed.description()).doesNotContain("Open MTM: -2500");
+  }
+
+  @Test
+  void mtmUnavailableTrip_rendersYellowFailSafeFraming_notLoss() {
+    // 2026-07-21: a fail-closed data-availability trip (a transient option-quote miss) on a
+    // profitable day. It must NOT read as a loss-cap breach — YELLOW fail-safe framing, no
+    // "loss"/"breach" wording anywhere in the headline/body.
+    WebhookClient webhook = mock(WebhookClient.class);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("reason", "auto:account_mtm_unavailable");
+    subject.put("actor", "auto:account_mtm_unavailable");
+    subject.put("trading_day", "2026-07-21");
+    AuditEvent event = event("KillSwitchTripped", "t-prod_real/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(16705372); // yellow, not red
+    String rendered =
+        (embed.title() + " " + String.valueOf(embed.description()))
+            .toLowerCase(java.util.Locale.US);
+    assertThat(rendered).contains("fail-safe");
+    assertThat(rendered).contains("temporarily unreadable");
+    assertThat(rendered).doesNotContain("loss");
+    assertThat(rendered).doesNotContain("breach");
+  }
+
+  @Test
+  void dailyLossTrip_rendersRedBreachFraming() {
+    // A real loss-cap breach keeps the existing RED "Kill switch TRIPPED" framing unchanged.
+    WebhookClient webhook = mock(WebhookClient.class);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("reason", "auto:account_daily_loss");
+    subject.put("actor", "auto:account_daily_loss");
+    subject.put("trading_day", "2026-07-21");
+    AuditEvent event = event("KillSwitchTripped", "t-prod_real/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(15548997); // red
+    assertThat(embed.title()).contains("Kill switch TRIPPED", "auto:account_daily_loss");
   }
 
   @Test

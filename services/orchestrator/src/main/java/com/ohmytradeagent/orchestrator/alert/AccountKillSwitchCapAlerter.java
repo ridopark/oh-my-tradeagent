@@ -1,5 +1,7 @@
 package com.ohmytradeagent.orchestrator.alert;
 
+import static com.ohmytradeagent.orchestrator.alert.AlertSubjects.signedUnrealizedPnl;
+
 import com.ohmytradeagent.contract.AuditEvent;
 import java.util.ArrayList;
 import java.util.List;
@@ -125,12 +127,16 @@ public class AccountKillSwitchCapAlerter {
     String openMtm = subjectStr(subject, "open_mtm");
     String minutes = subjectStr(subject, "minutes_since_trip");
 
+    // open_mtm is UNREALIZED P&L ((bid−entry)×qty×100), not a loss amount — render it signed
+    // (+$1,551 gain / -$2,500 loss) so an unsigned number can never be misread as underwater.
+    String pnl = signedUnrealizedPnl(openMtm);
+
     String title = ":rotating_light: Account cap STILL tripped — open positions NOT flattened";
     String description =
         "Account cap STILL tripped — "
             + openPositions
-            + " open positions, MTM "
-            + openMtm
+            + " open positions, unrealized P&L "
+            + pnl
             + ", "
             + minutes
             + " min since trip — flatten manually in Alpaca (or trip-to-flatten), or reset.";
@@ -139,7 +145,7 @@ public class AccountKillSwitchCapAlerter {
     fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
     fields.add(new WebhookEmbed.Field("trading_day", subjectStr(subject, "trading_day"), false));
     fields.add(new WebhookEmbed.Field("open_positions", openPositions, false));
-    fields.add(new WebhookEmbed.Field("open_mtm", openMtm, false));
+    fields.add(new WebhookEmbed.Field("unrealized P&L", pnl, false));
     fields.add(new WebhookEmbed.Field("minutes_since_trip", minutes, false));
 
     String footer = "workflow_id: " + orNa(event.getWorkflowId());
