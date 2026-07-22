@@ -91,11 +91,16 @@ export function AccountGuardBanner({
   reason,
   trippedAt,
   resetEligibleAt,
+  openPositions,
+  openMtm,
 }: {
   state: "tripped" | "healthy";
   reason?: string;
   trippedAt?: string | null;
   resetEligibleAt?: string | null;
+  // Open exposure surfaced at the reset control (#591) — nullable pass-through to the reset island.
+  openPositions?: number | null;
+  openMtm?: number | null;
 }) {
   if (state === "tripped") {
     return (
@@ -123,6 +128,8 @@ export function AccountGuardBanner({
               resettableAt={resetEligibleAt ?? null}
               action={resetKillSwitchAction}
               writeEnabled={RESET_WRITE_ENABLED}
+              openPositions={openPositions ?? null}
+              openMtm={openMtm ?? null}
             />
           </div>
         </div>

@@ -98,6 +98,8 @@ export default async function LivePage() {
         reason={killSwitch?.reason}
         trippedAt={killSwitch?.trippedAt}
         resetEligibleAt={killSwitch?.resettableAt}
+        openPositions={killSwitch?.openPositions ?? null}
+        openMtm={killSwitch?.openMtm ?? null}
       />
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-6">
         <div>
