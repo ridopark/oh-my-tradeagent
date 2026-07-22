@@ -6,13 +6,11 @@ import com.ohmytradeagent.orchestrator.activities.DrawdownVelocitySampler;
 import com.ohmytradeagent.orchestrator.activities.PortfolioSnapshot;
 import com.ohmytradeagent.orchestrator.activities.RiskCollaboratorDefaults;
 import com.ohmytradeagent.orchestrator.activities.RoutablePreTradeCheckActivity;
-import com.ohmytradeagent.orchestrator.activities.ScannerTenantStrategies;
 import com.ohmytradeagent.orchestrator.activities.SectorResolver;
+import com.ohmytradeagent.orchestrator.activities.TenantStrategies;
 import com.ohmytradeagent.orchestrator.activities.VisibilityPortfolioSnapshot;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.client.WorkflowClient;
-import java.nio.file.Path;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -39,13 +37,22 @@ public class RiskCollaboratorsConfig {
   public PortfolioSnapshot visibilityPortfolioSnapshot(
       WorkflowClient workflowClient,
       MeterRegistry meterRegistry,
-      @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir) {
-    // #323: the cap basis is tenant-account-wide — the scanner-backed resolver enumerates the
-    // requesting tenant's full strategy set so the snapshot runs the proven TenantStrategy='...'
-    // equality query once per strategy and unions all of the tenant's running PositionWorkflows on
-    // the shared broker_target.
-    return new VisibilityPortfolioSnapshot(
-        workflowClient, meterRegistry, new ScannerTenantStrategies(Path.of(tenantsDir)));
+      TenantStrategies tenantStrategies) {
+    // #323: the cap basis is tenant-account-wide — the resolver enumerates the requesting tenant's
+    // full strategy set so the snapshot runs the proven TenantStrategy='...' equality query once
+    // per
+    // strategy and unions all of the tenant's running PositionWorkflows on the shared
+    // broker_target.
+    //
+    // Inject the SHARED TenantStrategies bean (DB-backed when strategy.config.source=db, scanner
+    // otherwise; wired in AccountKillSwitchConfig alongside the account-cap consumers) rather than
+    // hard-constructing a ScannerTenantStrategies. This closes the same ConfigMap-tree dependency
+    // the account cap had (PR #604): a DB-onboarded tenant absent from the tenants tree would
+    // otherwise resolve to an empty set here — and since the requesting strategy is always added,
+    // that silently undercounts sum_open_notional to ONLY the requesting strategy for a MULTI-
+    // strategy tenant, loosening notional_cap_pct_of_equity fail-OPEN. One config source now flips
+    // every consumer together.
+    return new VisibilityPortfolioSnapshot(workflowClient, meterRegistry, tenantStrategies);
   }
 
   @Bean
