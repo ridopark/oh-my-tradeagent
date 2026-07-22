@@ -1,6 +1,7 @@
 package com.ohmytradeagent.tdbff.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -18,6 +19,7 @@ import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowStub;
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Map;
@@ -94,22 +96,35 @@ class AccountKillSwitchControllerWebMvcTest {
     // Tripped 16 minutes ago: past the 15-min circuit breaker → resettable=true.
     OffsetDateTime trippedAt = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(16);
     String expectedResettableAt = trippedAt.plusSeconds(900).toString();
-    whenState(state(true, trippedAt));
+    // #591: the open exposure cached by the account cap flows through the GET so the reset UI can
+    // show what the operator is still holding before they resume.
+    KillSwitchState tripped = state(true, trippedAt);
+    tripped.setOpenPositions(2L);
+    tripped.setOpenMtm(new BigDecimal("1496.00"));
+    whenState(tripped);
 
     mvc.perform(get("/api/account-killswitch").header("X-Tenant-Id", "acme"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.tripped").value(true))
         .andExpect(jsonPath("$.trippedAt").value(trippedAt.toString()))
-        .andExpect(jsonPath("$.resettableAt").value(expectedResettableAt));
+        .andExpect(jsonPath("$.resettableAt").value(expectedResettableAt))
+        .andExpect(jsonPath("$.openPositions").value(2))
+        .andExpect(jsonPath("$.openMtm").value(1496.00));
 
     // Tripped 5 minutes ago: still inside the circuit breaker (resettableAt in the future).
+    // Exposure
+    // not cached (null) → the two fields serialize as null (per-strategy switch /
+    // pre-first-heartbeat
+    // account switch) and the reset UI renders no exposure line.
     OffsetDateTime recent = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5);
     whenState(state(true, recent));
 
     mvc.perform(get("/api/account-killswitch").header("X-Tenant-Id", "acme"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.tripped").value(true))
-        .andExpect(jsonPath("$.resettableAt").value(recent.plusSeconds(900).toString()));
+        .andExpect(jsonPath("$.resettableAt").value(recent.plusSeconds(900).toString()))
+        .andExpect(jsonPath("$.openPositions").value(nullValue()))
+        .andExpect(jsonPath("$.openMtm").value(nullValue()));
   }
 
   @Test

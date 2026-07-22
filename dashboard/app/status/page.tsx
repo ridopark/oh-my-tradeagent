@@ -251,6 +251,8 @@ function KillSwitchPanel({ state }: { state: AccountKillSwitch | null }) {
           resettableAt={state.resettableAt}
           action={resetKillSwitchAction}
           writeEnabled={RESET_WRITE_ENABLED}
+          openPositions={state.openPositions ?? null}
+          openMtm={state.openMtm ?? null}
         />
       </div>
     </div>

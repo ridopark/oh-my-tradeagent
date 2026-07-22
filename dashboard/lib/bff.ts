@@ -95,6 +95,12 @@ export interface AccountKillSwitch {
   trippedAt: string | null;
   reason: string;
   resettableAt: string | null;
+  // Open exposure the operator would resume over on reset (last-heartbeat book read). Both nullable:
+  // null for the per-strategy switch / a pre-first-heartbeat account switch; openMtm additionally null
+  // when the book is unpriceable. openMtm is SIGNED unrealized P&L (a gain is positive), NOT a loss or
+  // a position value. Surfaced at the reset control so a reset isn't done blind (#591).
+  openPositions?: number | null;
+  openMtm?: number | null;
 }
 export const getAccountKillSwitch = () =>
   bffGet<AccountKillSwitch>("/api/account-killswitch");
