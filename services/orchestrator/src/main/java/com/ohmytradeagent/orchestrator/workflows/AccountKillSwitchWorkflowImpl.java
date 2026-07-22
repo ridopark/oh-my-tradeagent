@@ -714,47 +714,27 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       // DEFAULT_VERSION the whole block below is skipped and the cap fail-closes on the first miss
       // (byte-identical pre-change command stream).
       if (mtmDebounceVersion >= 1 && book.listed() <= SMALL_BOOK_MAX_POSITIONS) {
-        // (1) PRIMARY defense: a momentary quote blip usually clears within seconds. Re-value the
-        // book a BOUNDED few times WITHIN this heartbeat before deferring — a blip that clears
-        // mid-tick never widens the blind window at all. Mutates valued + combinedFailures.
-        for (int attempt = 1;
-            attempt <= MTM_UNAVAILABLE_INTICK_REFETCHES
-                && failsClosed(book.listed(), combinedFailures);
-            attempt++) {
-          Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
-              .warn(
-                  "account MTM unavailable (tenant={} listed={} failures={}) — in-tick re-fetch"
-                      + " {}/{}",
-                  input.getTenantId(),
-                  book.listed(),
-                  combinedFailures,
-                  attempt,
-                  MTM_UNAVAILABLE_INTICK_REFETCHES);
-          Workflow.sleep(MTM_UNAVAILABLE_INTICK_REFETCH_DELAY);
-          valued = valueOpenBook(book);
-          combinedFailures = book.valueFailures() + valued.quoteFailures();
-        }
+        // (1) PRIMARY defense: shake off a momentary quote blip within THIS heartbeat before
+        // deferring (a blip that clears mid-tick never widens the blind window at all).
+        valued = refetchSmallBookQuotes(book, valued);
+        combinedFailures = book.valueFailures() + valued.quoteFailures();
         // (2) BACKSTOP: still unpriceable after the in-tick re-fetch => cross-tick debounce. Defer
         // this tick LOUDLY (WARN so an operator can eyeball the book / a chronic every-other-tick
         // miss surfaces) and only fail-close after MTM_UNAVAILABLE_TRIP_TICKS CONSECUTIVE
         // unpriceable heartbeats. A single/transient miss never trips; a genuine sustained outage
         // still fail-closes N ticks later.
-        if (failsClosed(book.listed(), combinedFailures)) {
-          consecutiveMtmUnavailableTicks++;
-          if (consecutiveMtmUnavailableTicks < MTM_UNAVAILABLE_TRIP_TICKS) {
-            Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
-                .warn(
-                    "account MTM unavailable (tenant={} listed={} failures={}) — deferring {}/{},"
-                        + " will fail-close after {} consecutive unpriceable ticks",
-                    input.getTenantId(),
-                    book.listed(),
-                    combinedFailures,
-                    consecutiveMtmUnavailableTicks,
-                    MTM_UNAVAILABLE_TRIP_TICKS,
-                    MTM_UNAVAILABLE_TRIP_TICKS);
-            return false; // momentarily-unpriceable small book — defer (not armed), do not trip
-            // yet.
-          }
+        if (failsClosed(book.listed(), combinedFailures)
+            && ++consecutiveMtmUnavailableTicks < MTM_UNAVAILABLE_TRIP_TICKS) {
+          Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
+              .warn(
+                  "account MTM unavailable (tenant={} listed={} failures={}) — deferring ({}/{}"
+                      + " consecutive unpriceable ticks before fail-close)",
+                  input.getTenantId(),
+                  book.listed(),
+                  combinedFailures,
+                  consecutiveMtmUnavailableTicks,
+                  MTM_UNAVAILABLE_TRIP_TICKS);
+          return false; // momentarily-unpriceable small book — defer (not armed), do not trip yet.
         }
       }
       // Fail-closed trip (v0 / large book / debounce satisfied at N) IF still unpriceable: the book
@@ -816,6 +796,39 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
                   .multiply(CONTRACT_MULTIPLIER));
     }
     return new OpenBookMtm(openMtm, quoteFailures);
+  }
+
+  /**
+   * PLAN-2026-07-22 in-tick quote re-fetch (v&gt;=1 primary defense). A momentary option-quote blip
+   * on a SMALL unpriceable book usually clears within seconds; re-value the book up to {@link
+   * #MTM_UNAVAILABLE_INTICK_REFETCHES} times WITHIN the heartbeat (short {@link Workflow#sleep}s)
+   * and return the LAST valuation, so a blip that clears mid-tick never even reaches the cross-tick
+   * debounce (no widened blind window). Only re-fetches while a QUOTE miss is the marginal cause of
+   * the fail-close: a positionState-query failure ({@code valueFailures}) is fixed for the tick
+   * (the book is read once) and can NEVER be cleared by re-quoting, so the loop is skipped when it
+   * alone trips the bound (no futile quote dispatches / timers). The caller gates the call behind
+   * the version marker, so the sleep + quote commands this issues are all behind {@code v>=1}.
+   */
+  private OpenBookMtm refetchSmallBookQuotes(AccountOpenBook book, OpenBookMtm valued) {
+    if (failsClosed(book.listed(), book.valueFailures())) {
+      return valued; // positionState failures alone trip the bound — re-quoting cannot clear them.
+    }
+    for (int attempt = 1;
+        attempt <= MTM_UNAVAILABLE_INTICK_REFETCHES
+            && failsClosed(book.listed(), book.valueFailures() + valued.quoteFailures());
+        attempt++) {
+      Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
+          .warn(
+              "account MTM unavailable (tenant={} listed={} failures={}) — in-tick re-fetch {}/{}",
+              input.getTenantId(),
+              book.listed(),
+              book.valueFailures() + valued.quoteFailures(),
+              attempt,
+              MTM_UNAVAILABLE_INTICK_REFETCHES);
+      Workflow.sleep(MTM_UNAVAILABLE_INTICK_REFETCH_DELAY);
+      valued = valueOpenBook(book);
+    }
+    return valued;
   }
 
   /**
