@@ -4,6 +4,8 @@ import com.ohmytradeagent.contract.PortfolioHistoryResult;
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioHistoryClient;
+import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator;
+import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator.RangeReturn;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -41,16 +43,19 @@ public class PortfolioHistoryController {
   private final PortfolioHistoryClient client;
   private final TenantStrategyResolver strategyResolver;
   private final DbStrategyConfigReader strategyRegistry;
+  private final PortfolioReturnCalculator returnCalculator;
   private final TenantContext ctx;
 
   public PortfolioHistoryController(
       PortfolioHistoryClient client,
       TenantStrategyResolver strategyResolver,
       DbStrategyConfigReader strategyRegistry,
+      PortfolioReturnCalculator returnCalculator,
       TenantContext ctx) {
     this.client = client;
     this.strategyResolver = strategyResolver;
     this.strategyRegistry = strategyRegistry;
+    this.returnCalculator = returnCalculator;
     this.ctx = ctx;
   }
 
@@ -72,6 +77,25 @@ public class PortfolioHistoryController {
     body.put("base_value", history == null ? null : history.getBaseValue());
     body.put("base_value_asof", history == null ? null : history.getBaseValueAsof());
     body.put("timeframe", history == null ? null : history.getTimeframe());
+
+    // Deposit-adjusted range return (additive; "Today" still reads profit_loss[last] above). A
+    // degraded (null) history or unavailable cash flows yield null range figures → UI renders "—".
+    RangeReturn rr =
+        history == null
+            ? new RangeReturn(null, null)
+            : returnCalculator.compute(
+                history.getEquity(),
+                history.getBaseValue(),
+                history.getTimestamps(),
+                history.getCashFlowTimestamps(),
+                history.getCashFlowAmounts(),
+                history.getCashFlowsAvailable());
+    body.put("range_pl", rr.rangePl());
+    body.put("range_pl_pct", rr.rangePlPct());
+    body.put(
+        "cash_flows_available",
+        history != null && Boolean.TRUE.equals(history.getCashFlowsAvailable()));
+
     body.put("account_scope", ACCOUNT_SCOPE);
     return ResponseEntity.ok(body);
   }
