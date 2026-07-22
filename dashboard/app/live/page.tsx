@@ -91,12 +91,15 @@ export default async function LivePage() {
   return (
     <>
       <Nav tenantId={session?.tenantId} />
+      {/* Full-bleed: mounted OUTSIDE <main> so the tripped bar spans the viewport edge-to-edge
+          (inside main's centered max-w-6xl it would be inset and capped — not the prominent bar). */}
+      <AccountGuardBanner
+        state={guardState}
+        reason={killSwitch?.reason}
+        trippedAt={killSwitch?.trippedAt}
+        resetEligibleAt={killSwitch?.resettableAt}
+      />
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-6">
-        <AccountGuardBanner
-          state={guardState}
-          reason={killSwitch?.reason}
-          resetEligibleAt={killSwitch?.resettableAt}
-        />
         <div>
           <h1 className="mb-1 text-xl font-semibold text-slate-100">Live</h1>
           <p className="text-sm text-slate-400">

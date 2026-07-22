@@ -89,10 +89,12 @@ function ShieldCheckIcon({ className }: { className?: string }) {
 export function AccountGuardBanner({
   state,
   reason,
+  trippedAt,
   resetEligibleAt,
 }: {
   state: "tripped" | "healthy";
   reason?: string;
+  trippedAt?: string | null;
   resetEligibleAt?: string | null;
 }) {
   if (state === "tripped") {
@@ -117,7 +119,7 @@ export function AccountGuardBanner({
           </div>
           <div className="ml-auto">
             <AccountKillSwitchReset
-              trippedAt={null}
+              trippedAt={trippedAt ?? null}
               resettableAt={resetEligibleAt ?? null}
               action={resetKillSwitchAction}
               writeEnabled={RESET_WRITE_ENABLED}
@@ -131,13 +133,14 @@ export function AccountGuardBanner({
   // Phase 2 seam: an 'unprotected' branch (amber cap-OFF bar, motion-safe:animate-unprotected-pulse)
   // will slot here once its backend state exists. Not implemented in Phase 1.
 
-  // HEALTHY — a quiet inline line, deliberately NOT a bar: icon + text, no sticky, no motion, no
-  // live region.
+  // HEALTHY — a quiet line, deliberately NOT a bar: icon + text, no sticky, no motion, no live
+  // region. Centered to the page width (max-w-6xl) since the banner now mounts outside <main>.
   return (
-    <div className="inline-flex items-center gap-1.5 text-xs text-emerald-300/80">
-      <ShieldCheckIcon className="size-3.5 shrink-0" />
-      <span>Daily-loss guard active</span>
-      <span className="text-emerald-300/50">· resets 4:00 PM ET</span>
+    <div className="mx-auto w-full max-w-6xl px-4 pt-4">
+      <span className="inline-flex items-center gap-1.5 text-xs text-emerald-300/80">
+        <ShieldCheckIcon className="size-3.5 shrink-0" />
+        Daily-loss guard active
+      </span>
     </div>
   );
 }
