@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.orchestrator.activities.PermissiveDefaultPreTradeCheck;
 import com.ohmytradeagent.orchestrator.activities.RoutablePreTradeCheckActivity;
+import com.ohmytradeagent.orchestrator.activities.TenantStrategies;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.client.WorkflowClient;
@@ -24,6 +25,11 @@ class RiskCollaboratorsConfigPreTradeCheckWiringTest {
       new ApplicationContextRunner()
           .withBean(WorkflowClient.class, () -> mock(WorkflowClient.class))
           .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
+          // visibilityPortfolioSnapshot now injects the shared TenantStrategies bean (provided by
+          // AccountKillSwitchConfig in prod); this slice only exercises the pre-trade-check beans,
+          // so
+          // a stub satisfies the dependency.
+          .withBean(TenantStrategies.class, () -> mock(TenantStrategies.class))
           .withUserConfiguration(RiskCollaboratorsConfig.class);
 
   @Test
