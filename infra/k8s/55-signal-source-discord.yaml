@@ -115,10 +115,16 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 384Mi
+              # Two headless-Chromium Discord tabs (signal + watchlist mirror) are
+              # memory-hungry; 384Mi under-requested the real footprint.
+              memory: 512Mi
             limits:
               cpu: 1000m
-              memory: 1Gi
+              # 1Gi OOMKilled the 2-tab Discord Chromium intermittently (~2.5x/day).
+              # Discord is a heavy SPA; 2Gi gives the startup spike + runtime-growth
+              # headroom. Paired with the --disable-dev-shm-usage / heap-cap launch
+              # args in main.py that lower the high-water mark.
+              memory: 2Gi
       volumes:
         - name: state
           persistentVolumeClaim:
