@@ -385,20 +385,21 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * {@link Workflow#DEFAULT_VERSION} it stays 0 (never consulted) and the cap fail-closes on the
    * first miss (byte-identical legacy command stream).
    *
-   * <p>Like {@link #consecutiveInactiveTicks} / {@link #stillHoldingRepageTicks} this is
-   * intentionally NOT carried across continue-as-new: {@code buildCarryForwardInput} does not
-   * thread it because the {@link AccountKillSwitchWorkflowInput} DTO caps schema_version at 3 and
-   * threading it would force a v4 contract change (forbidden by this PR's scope / ship order). The
-   * CAN watermark ({@link #historyLengthWatermark}) is thousands of ticks, so a CAN landing between
-   * the two consecutive misses of an N=2 debounce is practically impossible, and a reset merely
-   * re-accumulates from zero — the fail-closed posture is preserved (it still trips after N
-   * consecutive misses).
+   * <p>UNLIKE {@link #consecutiveInactiveTicks} / {@link #stillHoldingRepageTicks}, this IS carried
+   * across continue-as-new: {@code buildCarryForwardInput} threads it via the {@link
+   * AccountKillSwitchWorkflowInput} v4 {@code consecutive_mtm_unavailable_ticks} field so a
+   * same-day CAN landing between the two consecutive misses of an N-tick debounce does not reset
+   * the count (the debounce stays exact across a CAN). Rolling-deploy discipline (mirrors {@code
+   * sod_equity} v3): the carry stamps schema_version 4 ONLY when the count is {@code > 0}; a
+   * count==0 carry stays byte-identical to the legacy v2/v3 shape (schema_version 2/3, field
+   * absent) so an old pod mid-rollout is never handed a v4 input it would reject at
+   * {@code @WorkflowInit}. Absent/null on an old pre-v4 carry restores as 0.
    */
   private int consecutiveMtmUnavailableTicks;
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
-    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 3L) {
+    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 4L) {
       throw new IllegalArgumentException(
           "AccountKillSwitchWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
@@ -423,6 +424,11 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     if (in.getSodEquity() != null) {
       this.sodEquity = in.getSodEquity();
+    }
+    // v4 carry-forward: restore the small-book mtm-unavailable debounce count so a same-day CAN
+    // mid-debounce does not reset it (null/absent on a pre-v4 or count==0 carry => stays 0).
+    if (in.getConsecutiveMtmUnavailableTicks() != null) {
+      this.consecutiveMtmUnavailableTicks = in.getConsecutiveMtmUnavailableTicks().intValue();
     }
   }
 
@@ -565,20 +571,25 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         trippedAt,
         coolingDownUntil,
         tradingDay,
-        sodEquity);
+        sodEquity,
+        consecutiveMtmUnavailableTicks);
   }
 
   /**
    * Pure builder for the continue-as-new carry-forward input. Package-private + static so it can be
    * unit-tested for the rolling-deploy schema_version branching without a Temporal context.
    *
-   * <p>Rolling-deploy safety: only stamp v3 when we actually carry sod_equity. A pre-v3 worker
-   * validates {@code schema_version <= 2} at {@code @WorkflowInit} and throws on a v3 input — so an
-   * unconditional v3 bump would wedge any execution that continues-as-new on a new pod and is then
-   * picked up by an old pod mid rollout/canary. A carry-forward WITHOUT a captured SOD equity is
-   * byte-identical to the legacy v2 shape, so stamp v2 and stay old-worker-compatible. An execution
-   * that HAS captured sodEquity is already pinned to {@code v>=1} by the getVersion marker (an old
-   * worker cannot replay it anyway), so v3 is correct there.
+   * <p>Rolling-deploy safety: only bump the schema_version when we actually carry a NEWER field. A
+   * pre-v3 worker validates {@code schema_version <= 2} at {@code @WorkflowInit} (pre-v4: {@code <=
+   * 3}) and throws on a too-new input — so an unconditional bump would wedge any execution that
+   * continues-as-new on a new pod and is then picked up by an old pod mid rollout/canary. A
+   * carry-forward WITHOUT a captured SOD equity is byte-identical to the legacy v2 shape (stamp
+   * v2); WITH sod_equity but no active mtm-debounce it is the v3 shape (stamp v3); only a carry
+   * that actually threads a nonzero {@code consecutive_mtm_unavailable_ticks} is stamped v4. An
+   * execution carrying either newer field is already pinned to {@code v>=1} by its getVersion
+   * marker (an old worker cannot replay it anyway), so the bump is correct there. (count>0 ⟹
+   * sodEquity!=null, since the debounce only runs after threshold resolution, so a v4 carry always
+   * also carries sod_equity.)
    */
   static AccountKillSwitchWorkflowInput carryForwardInput(
       String tenantId,
@@ -588,9 +599,10 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       OffsetDateTime trippedAt,
       OffsetDateTime coolingDownUntil,
       LocalDate tradingDay,
-      BigDecimal sodEquity) {
+      BigDecimal sodEquity,
+      int consecutiveMtmUnavailableTicks) {
     AccountKillSwitchWorkflowInput carry = new AccountKillSwitchWorkflowInput();
-    carry.setSchemaVersion(sodEquity != null ? 3L : 2L);
+    carry.setSchemaVersion(consecutiveMtmUnavailableTicks > 0 ? 4L : (sodEquity != null ? 3L : 2L));
     carry.setTenantId(tenantId);
     carry.setTripped(tripped);
     if (reason != null && !reason.isEmpty()) {
@@ -606,6 +618,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // at the next rollover regardless). Null when not captured.
     if (sodEquity != null) {
       carry.setSodEquity(sodEquity);
+    }
+    // Carry the small-book mtm-unavailable debounce count so a same-day CAN mid-debounce does not
+    // reset it. Set ONLY when > 0 so a count==0 carry stays the byte-identical v2/v3 shape (an old
+    // pod mid-rollout is never handed a v4 it would reject).
+    if (consecutiveMtmUnavailableTicks > 0) {
+      carry.setConsecutiveMtmUnavailableTicks((long) consecutiveMtmUnavailableTicks);
     }
     return carry;
   }
