@@ -990,6 +990,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       return; // book read failed — degrade quietly, retry next window.
     }
     if (book.listed() <= 0) {
+      // PLAN-2026-07-22 (#591, flatten-to-zero freshness): the book was flattened while still
+      // tripped. Clear the cached exposure so the reset banner reads a flat book (0/null) instead
+      // of the stale last-non-zero figure it would otherwise keep until the next reset+heartbeat.
+      // cacheOpenBookExposure(0, null) alone would NOT null the MTM (it only refreshes it from a
+      // present valuation), so zero BOTH fields explicitly. Pure field write (no command) —
+      // replay-safe, no version gate.
+      this.lastOpenPositions = 0;
+      this.lastOpenMtm = null;
       return; // holding -> 0: nothing left to flatten, stop paging.
     }
     OpenBookMtm valued;

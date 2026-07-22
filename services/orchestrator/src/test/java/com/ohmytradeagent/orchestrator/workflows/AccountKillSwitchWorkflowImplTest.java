@@ -1745,9 +1745,11 @@ class AccountKillSwitchWorkflowImplTest {
         .containsKey("minutes_since_trip");
   }
 
-  // Operator flattens (book -> empty): re-paging STOPS (holding -> 0).
+  // Operator flattens (book -> empty): re-paging STOPS (holding -> 0) AND the cached exposure the
+  // reset banner reads clears to a flat book (0/null) rather than staying stuck at the last
+  // non-zero figure (PLAN-2026-07-22 #591 flatten-to-zero freshness).
   @Test
-  void tripped_holdingDropsToZero_stopsRepaging() {
+  void tripped_holdingDropsToZero_stopsRepaging_andClearsCachedExposure() {
     AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 3;
     when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
         .thenReturn(new BigDecimal("-6000"));
@@ -1759,6 +1761,10 @@ class AccountKillSwitchWorkflowImplTest {
     WorkflowStub.fromTyped(stub).start(input());
     env.sleep(Duration.ofSeconds(260));
     assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+    // Precondition: the tripped-holding heartbeat cached the non-zero exposure the banner shows.
+    KillSwitchState held = stub.killswitchState();
+    assertThat(held.getOpenPositions()).isEqualTo(1L);
+    assertThat(held.getOpenMtm()).isNotNull();
 
     // Operator manually flattened -> the book is now empty.
     Mockito.doReturn(new AccountOpenBook(List.of(), 0, 0))
@@ -1767,6 +1773,10 @@ class AccountKillSwitchWorkflowImplTest {
     env.sleep(Duration.ofSeconds(300));
 
     assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+    // The cached exposure must now reflect the flat book, not the stale non-zero figure.
+    KillSwitchState flat = stub.killswitchState();
+    assertThat(flat.getOpenPositions()).isZero();
+    assertThat(flat.getOpenMtm()).isNull();
   }
 
   // Market closes after a trip: re-paging STOPS (no overnight spam).
