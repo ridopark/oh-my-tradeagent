@@ -203,6 +203,64 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * PLAN-2026-07-22 (debounce CAN-carry) legacy-carry init coverage. A PRE-v4 continueAsNew carry
+   * input (schema_version 2 or 3, with NO {@code consecutive_mtm_unavailable_ticks} field) must
+   * still be ACCEPTED by the widened {@code @WorkflowInit} guard ({@code > 4L}) and init cleanly —
+   * an old in-flight execution that continues-as-new onto the new build must not be rejected. The
+   * absent field restores as 0 (the getter returns null → the restore guard skips it), so the
+   * debounce starts fresh. Drives the null-threshold opt-out path (the sparse, activity-light
+   * heartbeat) purely to prove init + a few ticks run without a schema throw.
+   */
+  @Test
+  void preV4CarryInputInitsCleanlyAndCounterTreatedAsZero() {
+    assertPreV4CarryInitsCleanly(2L, null); // v2 carry: neither sod_equity nor the ticks field.
+    assertPreV4CarryInitsCleanly(3L, new BigDecimal("5000")); // v3 carry: sod_equity, no ticks.
+  }
+
+  private void assertPreV4CarryInitsCleanly(long schemaVersion, BigDecimal sodEquity) {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(AccountKillSwitchWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
+      TenantConfigActivities tenantConfig = Mockito.mock(TenantConfigActivities.class);
+      AccountPnlActivities accountPnl = Mockito.mock(AccountPnlActivities.class);
+      when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 6, 14));
+      when(calendar.isMarketOpen()).thenReturn(true);
+      // Null absolute + null pct => the opt-out path returns before any realized/book read.
+      when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+      when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
+      worker.registerActivitiesImplementations(audit, calendar, tenantConfig, accountPnl);
+      env.start();
+
+      AccountKillSwitchWorkflowInput carry = new AccountKillSwitchWorkflowInput();
+      carry.setSchemaVersion(schemaVersion);
+      carry.setTenantId("dev");
+      carry.setTradingDay(LocalDate.of(2026, 6, 14));
+      if (sodEquity != null) {
+        carry.setSodEquity(sodEquity);
+      }
+      AccountKillSwitchWorkflow stub =
+          env.getWorkflowClient()
+              .newWorkflowStub(
+                  AccountKillSwitchWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setTaskQueue(CORE_QUEUE)
+                      .setWorkflowId("t-dev/account/killswitch-prev4-v" + schemaVersion)
+                      .build());
+      WorkflowStub.fromTyped(stub).start(carry);
+
+      // A few heartbeats: init accepted the pre-v4 shape and the loop runs without a schema throw.
+      env.sleep(Duration.ofSeconds(190));
+      assertThat(stub.killswitchState().getTripped()).isFalse();
+    } finally {
+      env.close();
+    }
+  }
+
+  /**
    * THE NO-AUTO-FLATTEN + NO-REPAGE SENTINEL. A pre-change history whose heartbeat AUTO-TRIPPED on
    * {@code auto:account_daily_loss} and recorded the {@code KillSwitchTripped} audit + the {@code
    * cascadeAccountRiskBreach} MARKET-flatten command, then ran several more TRIPPED ticks (each

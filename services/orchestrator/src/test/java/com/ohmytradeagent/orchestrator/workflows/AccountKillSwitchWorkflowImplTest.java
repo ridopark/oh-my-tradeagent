@@ -32,11 +32,13 @@ import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantStrategyBrokerTarget;
+import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateException;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
+import io.temporal.worker.WorkflowImplementationOptions;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDate;
@@ -69,6 +71,7 @@ class AccountKillSwitchWorkflowImplTest {
   private int originalStillHoldingRepageTicks;
   private int originalMtmTripTicks;
   private int originalMtmIntickRefetches;
+  private long originalHistoryLengthWatermark;
 
   @BeforeEach
   void setUp() {
@@ -78,6 +81,9 @@ class AccountKillSwitchWorkflowImplTest {
     // debounce (in-tick re-fetch disabled) can restore them.
     originalMtmTripTicks = AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS;
     originalMtmIntickRefetches = AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES;
+    // PLAN-2026-07-22 (debounce CAN-carry): capture the continue-as-new watermark so the CAN-carry
+    // test can shrink it to force a continueAsNew between two debounce ticks, then restore it.
+    originalHistoryLengthWatermark = AccountKillSwitchWorkflowImpl.historyLengthWatermark;
     env = TestWorkflowEnvironment.newInstance();
     Worker coreWorker = env.newWorker(CORE_QUEUE);
     coreWorker.registerWorkflowImplementationTypes(AccountKillSwitchWorkflowImpl.class);
@@ -132,6 +138,7 @@ class AccountKillSwitchWorkflowImplTest {
     AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = originalStillHoldingRepageTicks;
     AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = originalMtmTripTicks;
     AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = originalMtmIntickRefetches;
+    AccountKillSwitchWorkflowImpl.historyLengthWatermark = originalHistoryLengthWatermark;
     env.close();
   }
 
@@ -681,6 +688,191 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
   }
 
+  // ---------- PLAN-2026-07-22: debounce counter carried across continue-as-new (v4) ----------
+
+  // THE WHOLE POINT. A CAN landing mid-debounce must NOT reset the count. One unpriceable tick
+  // (counter -> 1, deferred, NO trip) → continueAsNew (carries the count as v4) → one MORE
+  // unpriceable tick post-CAN trips auto:account_mtm_unavailable because the count reached 2 (it
+  // SURVIVED the CAN). Pre-fix the CAN would reset the count and this second tick would only defer
+  // (a 3rd tick would be needed) — so a trip on the 2nd (post-CAN) unpriceable tick proves the
+  // carry. Exactly ONE deferred page across the episode (the emit fires on the first defer only).
+  @Test
+  void heartbeat_smallBookDebounce_carriedAcrossCanTripsOnSecondPostCanTick() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    // Force a continueAsNew after the first (dense) heartbeat tick but before the second: a single
+    // debounce tick's history far exceeds 30 events, while a tripped early-return tick does not.
+    AccountKillSwitchWorkflowImpl.historyLengthWatermark = 30L;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                2,
+                0));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+
+    String workflowId = "t-dev/account/killswitch-debounce-can";
+    AccountKillSwitchWorkflow stub = newStub(workflowId);
+    WorkflowStub typed = WorkflowStub.fromTyped(stub);
+    typed.start(input());
+    String runIdBeforeCan = typed.getExecution().getRunId();
+
+    // Tick 1: unpriceable -> DEFER (counter=1), one deferred page, NOT tripped; then the
+    // post-heartbeat watermark check fires continueAsNew, carrying counter=1 as a v4 input.
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(1L);
+
+    // Confirm the workflow actually crossed the continueAsNew boundary (run id rotated) — otherwise
+    // this would not be testing the carry at all.
+    String runIdAfterCan =
+        env.getWorkflowClient()
+            .newUntypedWorkflowStub(workflowId)
+            .describe()
+            .getExecution()
+            .getRunId();
+    assertThat(runIdAfterCan).isNotEqualTo(runIdBeforeCan);
+
+    // Tick 2 (post-CAN): the restored counter (1) increments to 2 == trip_ticks -> fail-close on
+    // the SECOND unpriceable tick. Had the CAN reset the count, this tick would only defer.
+    env.sleep(Duration.ofSeconds(75));
+    AccountKillSwitchWorkflow stubAfter =
+        env.getWorkflowClient().newWorkflowStub(AccountKillSwitchWorkflow.class, workflowId);
+    KillSwitchState s = stubAfter.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
+    // Still exactly one deferred page across the whole episode (tick 2 tripped, it did not defer).
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(1L);
+  }
+
+  // Init restore (independent of the live CAN boundary): a workflow STARTED FROM a v4 carry input
+  // that already carries consecutive_mtm_unavailable_ticks=1 restores the counter at @WorkflowInit,
+  // so the very FIRST post-restore unpriceable tick trips (1 -> 2). Built by hand (NOT via
+  // carryForwardInput) so a builder regression cannot mask itself through this restore fixture.
+  @Test
+  void debounceCounterRestoredFromV4CarryInput_tripsOnFirstUnpriceableTick() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                2,
+                0));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+
+    // v4 carry as continueAsNew would emit it mid-debounce: schema_version 4, counter=1, same day.
+    AccountKillSwitchWorkflowInput carried = new AccountKillSwitchWorkflowInput();
+    carried.setSchemaVersion(4L);
+    carried.setTenantId("dev");
+    carried.setTradingDay(LocalDate.of(2026, 5, 14));
+    carried.setSodEquity(new BigDecimal("5000"));
+    carried.setConsecutiveMtmUnavailableTicks(1L);
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-v4-restore");
+    WorkflowStub.fromTyped(stub).start(carried);
+
+    // ONE tick: the restored counter (1) increments to 2 -> immediate fail-close (a fresh count
+    // would only defer on the first tick).
+    env.sleep(Duration.ofSeconds(75));
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
+  }
+
+  // A NEW trading day still RESETS the carried counter across a CAN: tick 1 defers (counter=1) and
+  // continues-as-new carrying counter=1; the day then rolls forward, so the first day-2 unpriceable
+  // tick resets to 0 then increments to 1 -> DEFER (NOT trip), and only a second day-2 consecutive
+  // tick trips. A v4 carry must never leak a stale mid-outage count into a fresh day.
+  @Test
+  void heartbeat_smallBookDebounce_newDayResetsCarriedCounterAcrossCan() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    AccountKillSwitchWorkflowImpl.historyLengthWatermark = 30L;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                2,
+                0));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+
+    String workflowId = "t-dev/account/killswitch-debounce-can-newday";
+    AccountKillSwitchWorkflow stub = newStub(workflowId);
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Day 1, tick 1: unpriceable -> DEFER (counter=1), then continueAsNew carries counter=1 (v4).
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+
+    // Roll the trading day forward BEFORE the next tick -> the post-CAN rollover must reset the
+    // carried counter to 0.
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+
+    // Day 2, first unpriceable tick: rollover resets to 0 then increments to 1 -> still DEFER, NOT
+    // tripped. Without the reset the carried counter (1) would trip this first day-2 tick.
+    env.sleep(Duration.ofSeconds(75));
+    AccountKillSwitchWorkflow stubDay2 =
+        env.getWorkflowClient().newWorkflowStub(AccountKillSwitchWorkflow.class, workflowId);
+    assertThat(stubDay2.killswitchState().getTripped()).isFalse();
+
+    // Day 2, second consecutive unpriceable tick -> fail-closes (fresh N-tick debounce completed).
+    env.sleep(Duration.ofSeconds(75));
+    AccountKillSwitchWorkflow stubDay2b =
+        env.getWorkflowClient().newWorkflowStub(AccountKillSwitchWorkflow.class, workflowId);
+    KillSwitchState s = stubDay2b.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
+  }
+
+  // The widened schema guard REJECTS a newer-than-build carry (schema_version 5) at @WorkflowInit —
+  // an old build must never silently accept a payload it cannot interpret. Uses a dedicated env
+  // whose worker FAILS the workflow (not just the task) on the guard's IllegalArgumentException so
+  // the rejection surfaces via getResult; v4 acceptance is proven by the restore/carry tests above.
+  @Test
+  void schemaGuard_rejectsSchemaVersionAboveFour() {
+    TestWorkflowEnvironment guardEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      Worker w = guardEnv.newWorker(CORE_QUEUE);
+      w.registerWorkflowImplementationTypes(
+          WorkflowImplementationOptions.newBuilder()
+              .setFailWorkflowExceptionTypes(IllegalArgumentException.class)
+              .build(),
+          AccountKillSwitchWorkflowImpl.class);
+      guardEnv.start();
+
+      AccountKillSwitchWorkflowInput tooNew = new AccountKillSwitchWorkflowInput();
+      tooNew.setSchemaVersion(5L);
+      tooNew.setTenantId("dev");
+      AccountKillSwitchWorkflow stub =
+          guardEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  AccountKillSwitchWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setTaskQueue(CORE_QUEUE)
+                      .setWorkflowId("t-dev/account/killswitch-v5")
+                      .build());
+      WorkflowStub typed = WorkflowStub.fromTyped(stub);
+      typed.start(tooNew);
+
+      assertThatThrownBy(() -> typed.getResult(String.class))
+          .isInstanceOf(WorkflowFailedException.class)
+          .hasStackTraceContaining("schema_version unsupported");
+    } finally {
+      guardEnv.close();
+    }
+  }
+
   // ---------- dual-control trip/reset (mirror per-strategy) ----------
 
   @Test
@@ -949,24 +1141,39 @@ class AccountKillSwitchWorkflowImplTest {
 
   // ---------- continue-as-new sod_equity carry-forward ----------
 
-  // The pure carry-forward builder honors the rolling-deploy schema_version branch: v3 (with
-  // sod_equity populated) ONLY when a SOD equity was captured; otherwise v2 (old-worker-safe) and
-  // sod_equity absent.
+  // The pure carry-forward builder honors the rolling-deploy schema_version branch. Mirrors the
+  // sod_equity discipline extended for the v4 mtm-debounce counter: only bump the version when the
+  // NEWER field is actually carried, so an old pod mid-rollout is never handed a too-new input.
+  //   count>0                -> v4, both sod_equity + consecutive_mtm_unavailable_ticks carried
+  //   count==0 && sod!=null   -> v3, sod_equity carried, ticks absent
+  //   count==0 && sod==null   -> v2, both absent (byte-identical legacy shape)
   @Test
-  void carryForwardInput_bumpsSchemaV3OnlyWhenSodEquityCaptured() {
+  void carryForwardInput_bumpsSchemaVersionOnlyWhenNewerFieldCarried() {
     LocalDate day = LocalDate.of(2026, 5, 14);
 
+    // v4: a nonzero mid-debounce count is carried (with the sod_equity it implies).
+    AccountKillSwitchWorkflowInput withDebounce =
+        AccountKillSwitchWorkflowImpl.carryForwardInput(
+            "dev", false, "", "", null, null, day, new BigDecimal("5000"), 1);
+    assertThat(withDebounce.getSchemaVersion()).isEqualTo(4L);
+    assertThat(withDebounce.getConsecutiveMtmUnavailableTicks()).isEqualTo(1L);
+    assertThat(withDebounce.getSodEquity()).isEqualByComparingTo(new BigDecimal("5000"));
+
+    // v3: sod_equity captured but no active debounce (count==0) -> ticks absent, NOT a v4.
     AccountKillSwitchWorkflowInput withEquity =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", false, "", "", null, null, day, new BigDecimal("5000"));
+            "dev", false, "", "", null, null, day, new BigDecimal("5000"), 0);
     assertThat(withEquity.getSchemaVersion()).isEqualTo(3L);
     assertThat(withEquity.getSodEquity()).isEqualByComparingTo(new BigDecimal("5000"));
+    assertThat(withEquity.getConsecutiveMtmUnavailableTicks()).isNull();
 
+    // v2: neither field carried -> byte-identical legacy shape.
     AccountKillSwitchWorkflowInput noEquity =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", false, "", "", null, null, day, null);
+            "dev", false, "", "", null, null, day, null, 0);
     assertThat(noEquity.getSchemaVersion()).isEqualTo(2L);
     assertThat(noEquity.getSodEquity()).isNull();
+    assertThat(noEquity.getConsecutiveMtmUnavailableTicks()).isNull();
   }
 
   // A workflow STARTED FROM a continue-as-new carry-forward input that already carries sod_equity
