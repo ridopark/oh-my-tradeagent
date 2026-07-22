@@ -1,0 +1,250 @@
+package com.ohmytradeagent.tdbff.portfolio;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
+
+import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator.RangeReturn;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Incident-reproduction unit tests for the deposit-adjusted range return. The live acct 847309116
+ * was funded from $5k with a +$41,230 deposit on 07-15; Alpaca's {@code no_reset} mode reported
+ * +$47,259 / +945% because it counts the deposit as profit. These tests prove the calculator strips
+ * that inflation out and yields a bounded, deposit-free return.
+ */
+class PortfolioReturnCalculatorTest {
+
+  private final PortfolioReturnCalculator calc = new PortfolioReturnCalculator();
+
+  @Test
+  void depositInWindow_stripsDepositInflation() {
+    // BV=5000, EV=52259.56, a +41230 deposit at the mid-range timestamp. The naive no-reset return
+    // is (52259.56-5000)/5000 = 9.4519 (945%); the deposit-adjusted trading-only P&L is
+    // 52259.56-5000-41230 = 6029.56 and the Modified-Dietz % is a bounded low fraction.
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000.00"), new BigDecimal("52259.56")),
+            new BigDecimal("5000.00"),
+            List.of(1000L, 3000L),
+            List.of(2000L),
+            List.of(new BigDecimal("41230")),
+            true);
+
+    // Trading-only $ P&L, deposit removed.
+    assertThat(rr.rangePl()).isEqualByComparingTo("6029.56");
+
+    // Modified-Dietz: denom = 5000 + 0.5*41230 = 25615; 6029.56/25615 = 0.2353918...
+    assertThat(rr.rangePlPct()).isNotNull();
+    assertThat(rr.rangePlPct().doubleValue()).isCloseTo(0.2353918, within(1e-6));
+    // Bounded, deposit-free — NOT the 9.45 (945%) no-reset inflation.
+    assertThat(rr.rangePlPct().compareTo(BigDecimal.ONE)).isLessThan(0);
+    assertThat(rr.rangePlPct().subtract(new BigDecimal("9.45")).abs())
+        .isGreaterThan(new BigDecimal("1"));
+  }
+
+  @Test
+  void rangeDiffersFromToday_whenMidRangeDepositExists() {
+    // profit_loss[last] ("Today") would be +4282, but a mid-range +8000 deposit means the range P&L
+    // is 30000-20000-8000 = 2000, which is NOT 4282 — range != today.
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("20000"), new BigDecimal("30000")),
+            new BigDecimal("20000"),
+            List.of(1000L, 3000L),
+            List.of(2000L),
+            List.of(new BigDecimal("8000")),
+            true);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("2000");
+    assertThat(rr.rangePl()).isNotEqualByComparingTo("4282");
+  }
+
+  @Test
+  void baseValueZero_pctNull_noDivideByZero() {
+    // base_value=0 (seen in the 3M payload) with no weighted flows → denom 0 → pct null; the $ P&L
+    // is still computable.
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("0"), new BigDecimal("1000")),
+            BigDecimal.ZERO,
+            List.of(1000L, 3000L),
+            List.of(),
+            List.of(),
+            true);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("1000");
+    assertThat(rr.rangePlPct()).isNull();
+  }
+
+  @Test
+  void flowsUnavailable_bothNull() {
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000"), new BigDecimal("52259.56")),
+            new BigDecimal("5000"),
+            List.of(1000L, 3000L),
+            List.of(2000L),
+            List.of(new BigDecimal("41230")),
+            false);
+
+    assertThat(rr.rangePl()).isNull();
+    assertThat(rr.rangePlPct()).isNull();
+  }
+
+  @Test
+  void singleTimestampWindow_pctNull() {
+    // T1==T0 → weights undefined → pct null; $ P&L still computable.
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000"), new BigDecimal("6000")),
+            new BigDecimal("5000"),
+            List.of(2000L, 2000L),
+            List.of(),
+            List.of(),
+            true);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("1000");
+    assertThat(rr.rangePlPct()).isNull();
+  }
+
+  @Test
+  void emptyEquity_bothNull() {
+    RangeReturn rr =
+        calc.compute(
+            List.of(), new BigDecimal("5000"), List.of(1000L, 3000L), List.of(), List.of(), true);
+
+    assertThat(rr.rangePl()).isNull();
+    assertThat(rr.rangePlPct()).isNull();
+  }
+
+  @Test
+  void baseValueNull_bothNull() {
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000"), new BigDecimal("6000")),
+            null,
+            List.of(1000L, 3000L),
+            List.of(),
+            List.of(),
+            true);
+
+    assertThat(rr.rangePl()).isNull();
+    assertThat(rr.rangePlPct()).isNull();
+  }
+
+  @Test
+  void outOfWindowFlowsIgnored() {
+    // A flow on a day BEFORE the range and one AFTER T1 are ignored; only the in-window +41230
+    // counts. Uses realistic epochs (equity bars at market time, flows at midnight UTC) because the
+    // window's lower bound is t0's CALENDAR DAY, not the t0 instant — see the first-day-deposit
+    // test above. Synthetic small integers would put every flow inside UTC day 0 and prove nothing.
+    long t0 = Instant.parse("2026-07-15T20:00:00Z").getEpochSecond();
+    long t1 = Instant.parse("2026-07-17T20:00:00Z").getEpochSecond();
+
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000.00"), new BigDecimal("52259.56")),
+            new BigDecimal("5000.00"),
+            List.of(t0, t1),
+            List.of(
+                Instant.parse("2026-07-14T00:00:00Z").getEpochSecond(), // day before the range
+                Instant.parse("2026-07-16T00:00:00Z").getEpochSecond(), // in window
+                Instant.parse("2026-07-18T00:00:00Z").getEpochSecond()), // after T1
+            List.of(new BigDecimal("999"), new BigDecimal("41230"), new BigDecimal("777")),
+            true);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("6029.56");
+  }
+
+  @Test
+  void depositOnTheRangeFirstDay_isStillNettedOutDespiteMidnightVsMarketTimestamps() {
+    // REGRESSION: the two timestamp series have different granularity. Cash flows are parsed from
+    // Alpaca's date-only non-trade activities → MIDNIGHT UTC. Equity bars are MARKET time. So a
+    // deposit made on the range's FIRST day arrives with t < t0 and an exact `t < t0` window filter
+    // silently dropped it — re-inflating the range by the full deposit, i.e. the +945% class of bug
+    // this whole calculator exists to remove, narrowed to ranges that start on a transfer day.
+    // Real epochs: 2026-07-15 20:00Z .. 2026-07-17 20:00Z, deposit dated 2026-07-15 → 00:00Z.
+    long t0 = Instant.parse("2026-07-15T20:00:00Z").getEpochSecond();
+    long t1 = Instant.parse("2026-07-17T20:00:00Z").getEpochSecond();
+    long depositTs = Instant.parse("2026-07-15T00:00:00Z").getEpochSecond();
+    assertThat(depositTs).isLessThan(t0); // the exact condition that used to drop the flow
+
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000.00"), new BigDecimal("52259.56")),
+            new BigDecimal("5000.00"),
+            List.of(t0, t1),
+            List.of(depositTs),
+            List.of(new BigDecimal("41230")),
+            true);
+
+    // Deposit netted out → trading-only P&L, NOT 47259.56.
+    assertThat(rr.rangePl()).isEqualByComparingTo("6029.56");
+    // Weight clamps to 1 (money present for the whole window) → denom = 5000 + 41230 = 46230.
+    assertThat(rr.rangePlPct().doubleValue()).isCloseTo(6029.56 / 46230.0, within(1e-9));
+    // Sanity: nowhere near the 9.45 (945%) inflation the dropped-flow path produced.
+    assertThat(rr.rangePlPct().compareTo(BigDecimal.ONE)).isLessThan(0);
+  }
+
+  @Test
+  void flowOnTheDayBeforeTheRange_isStillExcluded() {
+    // The lower bound is floored to t0's UTC DAY, not widened arbitrarily: a deposit dated the
+    // previous calendar day is already inside base_value and must stay out, or it would be
+    // subtracted twice and understate the return.
+    long t0 = Instant.parse("2026-07-15T20:00:00Z").getEpochSecond();
+    long t1 = Instant.parse("2026-07-17T20:00:00Z").getEpochSecond();
+    long priorDay = Instant.parse("2026-07-14T00:00:00Z").getEpochSecond();
+
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000.00"), new BigDecimal("6000.00")),
+            new BigDecimal("5000.00"),
+            List.of(t0, t1),
+            List.of(priorDay),
+            List.of(new BigDecimal("41230")),
+            true);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("1000.00");
+  }
+
+  @Test
+  void withdrawalInWindow_addsBackToTradingPlAndShrinksDenominator() {
+    // A withdrawal is a NEGATIVE flow: equity fell 20000→17000 but 5000 of that walked out the
+    // door, so trading P&L is 17000-20000-(-5000) = +2000, a GAIN, not a 3000 loss. Modified-Dietz
+    // denom = 20000 + 0.5*(-5000) = 17500 → 2000/17500 = 0.1142857...
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("20000"), new BigDecimal("17000")),
+            new BigDecimal("20000"),
+            List.of(1000L, 3000L),
+            List.of(2000L),
+            List.of(new BigDecimal("-5000")),
+            true);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("2000");
+    assertThat(rr.rangePlPct().doubleValue()).isCloseTo(0.1142857, within(1e-6));
+  }
+
+  @Test
+  void multipleFlowsAtDifferentTimes_weightedByTimeRemaining() {
+    // Two flows at DIFFERENT weights: T0=0, T1=1000. A +1000 deposit at t=250 carries weight
+    // (1000-250)/1000 = 0.75; a −400 withdrawal at t=750 carries weight 0.25. Net flows = +600, so
+    // rangePl = 11000-10000-600 = 400. Denominator = 10000 + (0.75*1000) + (0.25*-400) = 10650 →
+    // 400/10650 = 0.03755868... A naive equal-weighting (0.5 each) would give 10300 → 0.038835,
+    // so this pins the time-weighting, not just the net.
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("10000"), new BigDecimal("11000")),
+            new BigDecimal("10000"),
+            List.of(0L, 1000L),
+            List.of(250L, 750L),
+            List.of(new BigDecimal("1000"), new BigDecimal("-400")),
+            true);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("400");
+    assertThat(rr.rangePlPct().doubleValue()).isCloseTo(0.03755868, within(1e-8));
+  }
+}

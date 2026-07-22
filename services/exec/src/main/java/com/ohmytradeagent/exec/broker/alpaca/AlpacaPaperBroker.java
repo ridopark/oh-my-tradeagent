@@ -11,6 +11,7 @@ import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
+import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountActivity;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaCalendarDay;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderRequest;
@@ -21,8 +22,13 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
+import java.net.http.HttpClient;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -30,6 +36,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
@@ -88,6 +95,13 @@ public class AlpacaPaperBroker implements OptionsBroker {
    */
   public static final String ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE = "AccountOrdersBlockedError";
 
+  /**
+   * Failure type for the read-only {@code /v2/account/activities} cash-flow lookup. Kept distinct
+   * from the order-path classifications in {@link #mapError} so a failed READ is never reported in
+   * order wording ("Alpaca rejected order: ...") for an order that was never placed.
+   */
+  public static final String ACCOUNT_ACTIVITIES_READ_ERROR_TYPE = "AccountActivitiesReadError";
+
   /** Regulatory PDT day-trade limit for sub-$25k margin accounts. */
   private static final int PDT_DAYTRADE_LIMIT = 3;
 
@@ -108,14 +122,69 @@ public class AlpacaPaperBroker implements OptionsBroker {
   static final String DUPLICATE_CID_RETHROW_COUNTER_NAME =
       "alpaca.placeorder.duplicate_cid_rethrow";
 
+  /** Connect timeout for the read-only cash-flow lookup. See {@link #activitiesClient}. */
+  private static final Duration ACTIVITIES_CONNECT_TIMEOUT = Duration.ofSeconds(2);
+
+  /** Read timeout for the read-only cash-flow lookup. See {@link #activitiesClient}. */
+  private static final Duration ACTIVITIES_READ_TIMEOUT = Duration.ofSeconds(5);
+
+  /** Alpaca's max {@code page_size} for {@code /v2/account/activities}. */
+  static final int ACTIVITIES_PAGE_SIZE = 100;
+
+  /**
+   * Page ceiling for the cash-flow walk (100 × 100 = 10k transfers over one chart range — orders of
+   * magnitude beyond any real account). Exhausting it means the cursor isn't advancing, so the read
+   * fails rather than returning a truncated list that would silently understate net flows.
+   */
+  static final int ACTIVITIES_MAX_PAGES = 100;
+
   private final RestClient client;
+
+  /**
+   * Bounded-latency client used ONLY by {@link #getAccountActivities}. The shared {@link #client}
+   * carries no connect/read timeout, which is deliberate on the ORDER path (a read timeout on a
+   * POST that Alpaca actually accepted would turn a placed order into a retry → duplicate). The
+   * cash-flow lookup runs as a SECOND call inside the portfolio-history Activity, which has a
+   * single 15s {@code StartToCloseTimeout} covering BOTH calls: an unbounded slow (not erroring)
+   * {@code /v2/account/activities} would burn the whole budget and make Temporal time out and retry
+   * the entire Activity — taking down the portfolio-history read this lookup was only meant to
+   * augment. Bounding it here keeps a degraded activities endpoint contained: the call fails fast
+   * with a {@code ResourceAccessException}, the caller degrades to {@code
+   * cash_flows_available=false}, and the chart data survives. Safe to bound because this endpoint
+   * is a read — retrying or abandoning it has no side effects.
+   */
+  private final RestClient activitiesClient;
+
   private final ObjectMapper mapper;
   private final Counter duplicateCidResolvedCounter;
   private final Counter duplicateCidRethrowCounter;
 
   public AlpacaPaperBroker(
       RestClient alpacaRestClient, ObjectMapper objectMapper, MeterRegistry meterRegistry) {
+    this(
+        alpacaRestClient,
+        objectMapper,
+        meterRegistry,
+        ACTIVITIES_CONNECT_TIMEOUT,
+        ACTIVITIES_READ_TIMEOUT);
+  }
+
+  /** Timeout-injecting ctor so the bounded cash-flow path is testable without a 5s wall clock. */
+  AlpacaPaperBroker(
+      RestClient alpacaRestClient,
+      ObjectMapper objectMapper,
+      MeterRegistry meterRegistry,
+      Duration activitiesConnectTimeout,
+      Duration activitiesReadTimeout) {
     this.client = alpacaRestClient;
+    JdkClientHttpRequestFactory activitiesRequestFactory =
+        new JdkClientHttpRequestFactory(
+            HttpClient.newBuilder().connectTimeout(activitiesConnectTimeout).build());
+    activitiesRequestFactory.setReadTimeout(activitiesReadTimeout);
+    // mutate() inherits the base URL + auth headers, so the bounded client is byte-identical on
+    // the wire — only its timeouts differ.
+    this.activitiesClient =
+        alpacaRestClient.mutate().requestFactory(activitiesRequestFactory).build();
     this.mapper = objectMapper;
     this.duplicateCidResolvedCounter =
         Counter.builder(DUPLICATE_CID_RESOLVED_COUNTER_NAME)
@@ -672,6 +741,146 @@ public class AlpacaPaperBroker implements OptionsBroker {
       return new BigDecimal[0];
     }
     return values.toArray(new BigDecimal[0]);
+  }
+
+  /**
+   * Live-account-view: Alpaca {@code GET
+   * /v2/account/activities?activity_types=CSD,CSW,JNLC&after=&until=} → the account's cash flows
+   * (deposits/withdrawals/journals) over {@code [startEpochSec, endEpochSec]}, so the BFF can
+   * deposit-adjust the range return. READ-ONLY (no order path). Mirrors {@link #tradingDays}'s
+   * query-param + {@link #mapError} pattern and {@link #getPortfolioHistory}'s defensive parsing: a
+   * null body yields an empty list, and an entry with a null/blank/unparseable date is skipped
+   * (activities is an advisory adjustment source, not an order path — a malformed row must not
+   * crash the read).
+   */
+  @Override
+  public List<AccountCashFlow> getAccountActivities(long startEpochSec, long endEpochSec) {
+    // Query WHOLE UTC DAYS, not the raw equity-bar instants. Non-trade activities (CSD/CSW/JNLC)
+    // are dated to a calendar day, while the caller's bounds are portfolio-history bar timestamps
+    // at MARKET time (~20:00Z). Passing after=<2026-07-15T20:00Z> would make Alpaca omit a deposit
+    // dated 2026-07-15 entirely — the range would then count that deposit as profit, the exact bug
+    // the deposit-adjustment exists to remove. Over-fetching is safe: the BFF calculator applies
+    // the authoritative in-window filter.
+    String after = Instant.ofEpochSecond(startEpochSec).truncatedTo(ChronoUnit.DAYS).toString();
+    String until =
+        Instant.ofEpochSecond(endEpochSec)
+            .truncatedTo(ChronoUnit.DAYS)
+            .plus(1, ChronoUnit.DAYS)
+            .toString();
+    // Alpaca PAGES this endpoint. A single unpaged GET silently truncates at the page size, and a
+    // dropped deposit is indistinguishable from no deposit — it would put that money back into the
+    // range return as profit. Walk the pages instead, and if the walk doesn't terminate within
+    // ACTIVITIES_MAX_PAGES, THROW rather than return a partial list: the caller degrades to
+    // cash_flows_available=false and the UI shows "—", which is honest. Silently understating
+    // netFlows is not.
+    List<AlpacaAccountActivity> raw = new ArrayList<>();
+    String pageToken = null;
+    boolean complete = false;
+    for (int page = 0; page < ACTIVITIES_MAX_PAGES; page++) {
+      List<AlpacaAccountActivity> batch = fetchActivitiesPage(after, until, pageToken);
+      if (batch == null || batch.isEmpty()) {
+        complete = true;
+        break;
+      }
+      raw.addAll(batch);
+      if (batch.size() < ACTIVITIES_PAGE_SIZE) {
+        complete = true;
+        break;
+      }
+      pageToken = batch.get(batch.size() - 1).id();
+      if (pageToken == null || pageToken.isBlank()) {
+        // No cursor to advance on — refuse to loop forever AND refuse to claim the list is whole.
+        break;
+      }
+    }
+    if (!complete) {
+      throw ApplicationFailure.newFailure(
+          "Alpaca /v2/account/activities did not paginate to completion within "
+              + ACTIVITIES_MAX_PAGES
+              + " pages — refusing to report a truncated cash-flow list",
+          ACCOUNT_ACTIVITIES_READ_ERROR_TYPE);
+    }
+    List<AccountCashFlow> out = new ArrayList<>(raw.size());
+    for (AlpacaAccountActivity a : raw) {
+      if (a.netAmount() == null) {
+        continue;
+      }
+      Long epoch = epochSecondsOf(a);
+      if (epoch == null) {
+        log.warn(
+            "Alpaca /v2/account/activities returned an entry with no parseable date"
+                + " (activity_type={}); skipping",
+            a.activityType());
+        continue;
+      }
+      out.add(new AccountCashFlow(epoch, a.netAmount()));
+    }
+    return out;
+  }
+
+  /**
+   * One page of {@code /v2/account/activities}. {@code pageToken} is null for the first page and
+   * the previous page's last {@code id} thereafter. Read-path errors are deliberately NOT routed
+   * through the order-worded {@link #mapError}: that helper's classifications say "Alpaca rejected
+   * order: ..." and would describe an order that was never placed if an activities body happened to
+   * carry one of its tokens. The caller degrades on any RuntimeException either way, so a plainly
+   * worded read failure is strictly more honest in logs.
+   */
+  private List<AlpacaAccountActivity> fetchActivitiesPage(
+      String after, String until, String pageToken) {
+    try {
+      return activitiesClient
+          .get()
+          .uri(
+              uriBuilder -> {
+                uriBuilder
+                    .path("/v2/account/activities")
+                    .queryParam("activity_types", "CSD,CSW,JNLC")
+                    .queryParam("after", after)
+                    .queryParam("until", until)
+                    .queryParam("page_size", ACTIVITIES_PAGE_SIZE);
+                if (pageToken != null) {
+                  uriBuilder.queryParam("page_token", pageToken);
+                }
+                return uriBuilder.build();
+              })
+          .retrieve()
+          .body(new ParameterizedTypeReference<List<AlpacaAccountActivity>>() {});
+    } catch (HttpStatusCodeException e) {
+      throw ApplicationFailure.newFailureWithCause(
+          "Alpaca /v2/account/activities read failed (status="
+              + e.getStatusCode().value()
+              + "): "
+              + extractMessage(tryParse(e.getResponseBodyAsString()), e.getResponseBodyAsString()),
+          ACCOUNT_ACTIVITIES_READ_ERROR_TYPE,
+          e);
+    }
+  }
+
+  /**
+   * Epoch seconds of an activity's date. Non-trade activities (CSD/CSW/JNLC) carry {@code date}
+   * ({@code "YYYY-MM-DD"}, midnight-UTC); {@code transaction_time} (ISO instant) is preferred when
+   * present. Returns null on absent/unparseable dates so the caller skips the row rather than
+   * crashing.
+   */
+  private static Long epochSecondsOf(AlpacaAccountActivity a) {
+    String txn = a.transactionTime();
+    if (txn != null && !txn.isBlank()) {
+      try {
+        return Instant.parse(txn).getEpochSecond();
+      } catch (DateTimeParseException ignored) {
+        // fall through to date
+      }
+    }
+    String date = a.date();
+    if (date != null && !date.isBlank()) {
+      try {
+        return LocalDate.parse(date).atStartOfDay(ZoneOffset.UTC).toEpochSecond();
+      } catch (DateTimeParseException ignored) {
+        return null;
+      }
+    }
+    return null;
   }
 
   /**

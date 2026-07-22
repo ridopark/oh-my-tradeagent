@@ -55,6 +55,24 @@
     "timeframe": {
       "type": "string",
       "description": "The resolved Alpaca timeframe (echoes the request)."
+    },
+    "cash_flow_timestamps": {
+      "type": "array",
+      "description": "Epoch-seconds of each account cash flow (deposit/withdrawal/journal) in the window. Parallel to cash_flow_amounts. Lets the BFF deposit-adjust the range return.",
+      "items": {
+        "type": "integer"
+      }
+    },
+    "cash_flow_amounts": {
+      "type": "array",
+      "description": "Alpaca net_amount of each cash flow (deposit +, withdrawal −). Parallel to cash_flow_timestamps.",
+      "items": {
+        "type": "number"
+      }
+    },
+    "cash_flows_available": {
+      "type": "boolean",
+      "description": "True when the account-activities read succeeded (even if zero flows); false/absent when it failed, so the BFF can null the range number instead of showing a deposit-polluted one."
     }
   }
 }

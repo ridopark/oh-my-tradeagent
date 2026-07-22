@@ -302,6 +302,9 @@ export interface PortfolioHistory {
   base_value_asof: number | null;
   timeframe: string;
   account_scope: string;
+  range_pl: number | null;
+  range_pl_pct: number | null;
+  cash_flows_available: boolean;
 }
 export const getPortfolioHistory = (range: string) =>
   bffGet<PortfolioHistory>(`/api/portfolio-history?range=${range}`);

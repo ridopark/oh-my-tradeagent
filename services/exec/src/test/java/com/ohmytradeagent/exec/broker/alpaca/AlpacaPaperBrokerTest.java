@@ -18,9 +18,12 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.failure.ApplicationFailure;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -47,14 +50,17 @@ class AlpacaPaperBrokerTest {
   void start() throws IOException {
     server = new MockWebServer();
     server.start();
-    RestClient client =
-        RestClient.builder()
-            .baseUrl(server.url("/").toString().replaceAll("/$", ""))
-            .defaultHeader("APCA-API-KEY-ID", "key-id-for-test")
-            .defaultHeader("APCA-API-SECRET-KEY", "key-secret-for-test")
-            .defaultHeader("Accept", "application/json")
-            .build();
-    broker = new AlpacaPaperBroker(client, mapper, meterRegistry);
+    broker = new AlpacaPaperBroker(restClient(), mapper, meterRegistry);
+  }
+
+  /** A RestClient wired to the MockWebServer exactly as the registry wires the real one. */
+  private RestClient restClient() {
+    return RestClient.builder()
+        .baseUrl(server.url("/").toString().replaceAll("/$", ""))
+        .defaultHeader("APCA-API-KEY-ID", "key-id-for-test")
+        .defaultHeader("APCA-API-SECRET-KEY", "key-secret-for-test")
+        .defaultHeader("Accept", "application/json")
+        .build();
   }
 
   @AfterEach
@@ -537,6 +543,190 @@ class AlpacaPaperBrokerTest {
               assertThat(f.getType()).isEqualTo("AuthError");
               assertThat(f.isNonRetryable()).isTrue();
             });
+  }
+
+  @Test
+  void getAccountActivities_mapsSignedCashFlowsAndSendsActivityTypesAfterUntil() throws Exception {
+    // Live-account-view deposit-adjustment: /v2/account/activities returns cash flows we net out of
+    // the range return. A CSD (deposit +), CSW (withdrawal −), and JNLC (cash journal) map to
+    // AccountCashFlow with the net_amount sign preserved and the "YYYY-MM-DD" date parsed to
+    // midnight-UTC epoch seconds. Assert the request carries activity_types=CSD,CSW,JNLC and the
+    // after/until window (ISO-8601 of the two epoch-second bounds).
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"activity_type\":\"CSD\",\"net_amount\":\"41230.00\",\"date\":\"2026-07-15\"},"
+                    + "{\"activity_type\":\"CSW\",\"net_amount\":\"-500.00\",\"date\":\"2026-07-16\"},"
+                    + "{\"activity_type\":\"JNLC\",\"net_amount\":\"25.00\",\"date\":\"2026-07-17\"}]"));
+
+    // 2026-07-01T00:00:00Z .. 2026-07-20T00:00:00Z
+    long start = 1751328000L;
+    long end = 1753142400L;
+    List<OptionsBroker.AccountCashFlow> flows = broker.getAccountActivities(start, end);
+
+    assertThat(flows).hasSize(3);
+    assertThat(flows.get(0).amount()).isEqualByComparingTo(new BigDecimal("41230.00"));
+    assertThat(flows.get(0).timestamp())
+        .isEqualTo(
+            LocalDate.of(2026, 7, 15).atStartOfDay(java.time.ZoneOffset.UTC).toEpochSecond());
+    assertThat(flows.get(1).amount()).isEqualByComparingTo(new BigDecimal("-500.00"));
+    assertThat(flows.get(2).amount()).isEqualByComparingTo(new BigDecimal("25.00"));
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getMethod()).isEqualTo("GET");
+    assertThat(req.getRequestUrl().encodedPath()).isEqualTo("/v2/account/activities");
+    assertThat(req.getRequestUrl().queryParameter("activity_types")).isEqualTo("CSD,CSW,JNLC");
+    // Both bounds are already midnight-UTC here, so `after` is unchanged; `until` is pushed to the
+    // following midnight so the whole end day is in scope (see the day-widening test below).
+    assertThat(req.getRequestUrl().queryParameter("after"))
+        .isEqualTo(Instant.ofEpochSecond(start).toString());
+    assertThat(req.getRequestUrl().queryParameter("until"))
+        .isEqualTo(
+            Instant.ofEpochSecond(end).plus(1, java.time.temporal.ChronoUnit.DAYS).toString());
+    assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
+  }
+
+  @Test
+  void getAccountActivities_widensBoundsToWholeUtcDaysSoAFirstDayDepositIsNotOmitted()
+      throws Exception {
+    // The caller's bounds are portfolio-history bar timestamps at MARKET time (~20:00Z), but
+    // non-trade activities are dated to a calendar DAY. Sending after=2026-07-15T20:00Z would make
+    // Alpaca omit a deposit dated 2026-07-15 — which then reads as profit in the range return.
+    // Assert the query floors `after` to that day's midnight and pushes `until` to the day AFTER
+    // the end bar, so the whole first and last calendar days are in scope.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("[]"));
+
+    long start = Instant.parse("2026-07-15T20:00:00Z").getEpochSecond();
+    long end = Instant.parse("2026-07-17T20:00:00Z").getEpochSecond();
+    broker.getAccountActivities(start, end);
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getRequestUrl().queryParameter("after")).isEqualTo("2026-07-15T00:00:00Z");
+    assertThat(req.getRequestUrl().queryParameter("until")).isEqualTo("2026-07-18T00:00:00Z");
+  }
+
+  @Test
+  void getAccountActivities_walksAllPagesSoOlderCashFlowsAreNotSilentlyDropped() {
+    // Alpaca pages this endpoint. An unpaged read truncates at page_size and a dropped deposit is
+    // indistinguishable from no deposit — it would land back in the range return as profit. Assert
+    // the walk continues while a full page comes back, cursors on the last row's id, and unions.
+    StringBuilder fullPage = new StringBuilder("[");
+    for (int i = 0; i < 100; i++) {
+      fullPage
+          .append(i == 0 ? "" : ",")
+          .append("{\"id\":\"act-")
+          .append(i)
+          .append("\",\"activity_type\":\"CSD\",\"net_amount\":\"1.00\",\"date\":\"2026-07-15\"}");
+    }
+    fullPage.append("]");
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(fullPage.toString()));
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"id\":\"act-100\",\"activity_type\":\"CSD\",\"net_amount\":\"7.00\","
+                    + "\"date\":\"2026-07-16\"}]"));
+
+    List<OptionsBroker.AccountCashFlow> flows =
+        broker.getAccountActivities(1751328000L, 1753142400L);
+
+    assertThat(flows).hasSize(101);
+    assertThat(flows.get(100).amount()).isEqualByComparingTo(new BigDecimal("7.00"));
+    assertThat(server.getRequestCount()).isEqualTo(2);
+  }
+
+  @Test
+  void getAccountActivities_pageCursorMissing_failsRatherThanReturningATruncatedList()
+      throws Exception {
+    // A full page whose last row carries no id leaves no cursor to advance on. Returning what we
+    // have would silently understate net flows (a deposit counted as profit); throwing degrades the
+    // caller to cash_flows_available=false and the UI shows "—", which is honest.
+    StringBuilder fullPageNoIds = new StringBuilder("[");
+    for (int i = 0; i < 100; i++) {
+      fullPageNoIds
+          .append(i == 0 ? "" : ",")
+          .append("{\"activity_type\":\"CSD\",\"net_amount\":\"1.00\",\"date\":\"2026-07-15\"}");
+    }
+    fullPageNoIds.append("]");
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(fullPageNoIds.toString()));
+
+    assertThatThrownBy(() -> broker.getAccountActivities(1751328000L, 1753142400L))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType())
+                  .isEqualTo(AlpacaPaperBroker.ACCOUNT_ACTIVITIES_READ_ERROR_TYPE);
+              assertThat(f.getOriginalMessage()).contains("truncated");
+            });
+
+    // First page requested with page_size, no page_token.
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getRequestUrl().queryParameter("page_size")).isEqualTo("100");
+    assertThat(req.getRequestUrl().queryParameter("page_token")).isNull();
+  }
+
+  @Test
+  void getAccountActivities_serverError_throwsReadWordedFailureNotOrderWorded() {
+    // The activities read must NOT be classified through the order-path mapError: that helper's
+    // branches are order-worded, so an activities body carrying e.g. "insufficient buying power"
+    // would produce "Alpaca rejected order: ..." for an order that was never placed. Assert the
+    // read-specific type + wording instead. The caller degrades to cash_flows_available=false
+    // either way.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(500)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"message\":\"insufficient buying power\"}"));
+
+    assertThatThrownBy(() -> broker.getAccountActivities(1751328000L, 1753142400L))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType())
+                  .isEqualTo(AlpacaPaperBroker.ACCOUNT_ACTIVITIES_READ_ERROR_TYPE);
+              assertThat(f.getOriginalMessage()).contains("/v2/account/activities read failed");
+              assertThat(f.getOriginalMessage()).doesNotContain("rejected order");
+            });
+  }
+
+  @Test
+  void getAccountActivities_slowResponse_failsFastOnReadTimeoutInsteadOfHangingTheActivity() {
+    // The cash-flow lookup is a SECOND call inside the portfolio-history Activity, which has one
+    // 15s StartToCloseTimeout covering both calls. A slow-but-not-erroring activities endpoint
+    // must NOT be able to burn that shared budget (which would make Temporal retry the entire
+    // Activity, including the already-successful portfolio-history read). Assert the call is
+    // bounded by its own read timeout and surfaces a RuntimeException the caller degrades on.
+    AlpacaPaperBroker bounded =
+        new AlpacaPaperBroker(
+            restClient(), mapper, meterRegistry, Duration.ofMillis(200), Duration.ofMillis(200));
+
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("[]")
+            .setBodyDelay(3, TimeUnit.SECONDS));
+
+    long startedAt = System.nanoTime();
+    assertThatThrownBy(() -> bounded.getAccountActivities(1751328000L, 1753142400L))
+        .isInstanceOf(RuntimeException.class);
+    Duration elapsed = Duration.ofNanos(System.nanoTime() - startedAt);
+    assertThat(elapsed).isLessThan(Duration.ofSeconds(3));
   }
 
   @Test

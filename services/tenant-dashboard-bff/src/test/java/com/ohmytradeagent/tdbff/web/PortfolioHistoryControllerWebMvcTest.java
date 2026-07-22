@@ -10,6 +10,7 @@ import com.ohmytradeagent.contract.PortfolioHistoryResult;
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioHistoryClient;
+import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -26,7 +27,7 @@ import org.springframework.test.web.servlet.MockMvc;
  */
 @WebMvcTest(PortfolioHistoryController.class)
 @AutoConfigureMockMvc(addFilters = false)
-@Import(TenantContext.class)
+@Import({TenantContext.class, PortfolioReturnCalculator.class})
 class PortfolioHistoryControllerWebMvcTest {
 
   @Autowired private MockMvc mvc;
@@ -66,7 +67,35 @@ class PortfolioHistoryControllerWebMvcTest {
         .andExpect(jsonPath("$.base_value").value(10000.00))
         .andExpect(jsonPath("$.base_value_asof").value(1719360000L))
         .andExpect(jsonPath("$.timeframe").value("5Min"))
+        // No cash flows on this result → range figures null, cash_flows_available false.
+        .andExpect(jsonPath("$.range_pl").value(org.hamcrest.Matchers.nullValue()))
+        .andExpect(jsonPath("$.range_pl_pct").value(org.hamcrest.Matchers.nullValue()))
+        .andExpect(jsonPath("$.cash_flows_available").value(false))
         .andExpect(jsonPath("$.account_scope").isNotEmpty());
+  }
+
+  @Test
+  void depositAdjustedRangeFieldsAreEmitted() throws Exception {
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-live");
+
+    // Incident frame: funded from $5k, +$41,230 deposit mid-range, equity ends 52259.56.
+    PortfolioHistoryResult result = new PortfolioHistoryResult();
+    result.setSchemaVersion(1L);
+    result.setTimestamps(List.of(1000L, 3000L));
+    result.setEquity(List.of(new BigDecimal("5000.00"), new BigDecimal("52259.56")));
+    result.setBaseValue(new BigDecimal("5000.00"));
+    result.setCashFlowTimestamps(List.of(2000L));
+    result.setCashFlowAmounts(List.of(new BigDecimal("41230")));
+    result.setCashFlowsAvailable(true);
+    when(client.historyFor(eq("acme"), eq("alpaca-live"), eq("1M"))).thenReturn(result);
+
+    mvc.perform(get("/api/portfolio-history?range=1M").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        // Deposit-free trading P&L (52259.56 - 5000 - 41230), NOT the deposit-inflated figure.
+        .andExpect(jsonPath("$.range_pl").value(6029.56))
+        .andExpect(jsonPath("$.range_pl_pct").value(org.hamcrest.Matchers.notNullValue()))
+        .andExpect(jsonPath("$.cash_flows_available").value(true));
   }
 
   @Test
@@ -80,6 +109,9 @@ class PortfolioHistoryControllerWebMvcTest {
         .andExpect(jsonPath("$.timestamps.length()").value(0))
         .andExpect(jsonPath("$.equity.length()").value(0))
         .andExpect(jsonPath("$.base_value").value(org.hamcrest.Matchers.nullValue()))
+        .andExpect(jsonPath("$.range_pl").value(org.hamcrest.Matchers.nullValue()))
+        .andExpect(jsonPath("$.range_pl_pct").value(org.hamcrest.Matchers.nullValue()))
+        .andExpect(jsonPath("$.cash_flows_available").value(false))
         .andExpect(jsonPath("$.account_scope").isNotEmpty());
   }
 }
