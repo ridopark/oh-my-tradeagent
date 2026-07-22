@@ -153,6 +153,18 @@ public final class AuditEventKinds {
           "EntryFilled",
           "ExitRequested",
           "OrphanSTC",
+          // PLAN-2026-07-21-benign-stc-no-position: emitted by CopytradeSignalWorkflowImpl's
+          // handleStc at Sites A (no PositionWorkflow found) and B (found but not RUNNING) — a
+          // copytrade STC that arrived when the position is ALREADY FULLY CLOSED ("no position
+          // left,
+          // nothing to sell"). Distinct from OrphanSTC (which now only covers Site C — a genuine
+          // dispatch failure to a still-RUNNING position): this is a BENIGN informational event
+          // that
+          // must NOT page RED. Rendered as a YELLOW Discord note by StcNoOpenPositionAlerter and
+          // intentionally ABSENT from OrderFailureAlerter's DEFAULT_FAILURE_KINDS, so it does not
+          // page. Pure observability — in ALL_KINDS only, not in any *_KINDS lifecycle group
+          // (mirrors the benign PartialExitAlreadyFlat).
+          "StcNoOpenPosition",
           "AvgSkipped",
           "ChandelierArmRequested",
           "SignalAbortedByRiskBreach",

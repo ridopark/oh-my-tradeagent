@@ -1176,10 +1176,11 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
-  void stcAction_cachedPositionWorkflowNotRunning_emitsOrphanStc() {
+  void stcAction_cachedPositionWorkflowNotRunning_emitsStcNoOpenPosition() {
     // GAP regression: a stale Redis mapping returns a non-null but DEAD (Failed/terminal)
     // PositionWorkflow id. Change point A (preventive guard) must short-circuit BEFORE the
-    // ExitRequested audit and BEFORE signalling the dead workflow, emitting OrphanSTC and letting
+    // ExitRequested audit and BEFORE signalling the dead workflow, emitting StcNoOpenPosition (the
+    // benign "no open position — Site B" kind, NOT the failure OrphanSTC) and letting
     // the CopytradeSignalWorkflow COMPLETE. Without the fix the handler emits ExitRequested then
     // signals a dead id, the SignalExternalWorkflowException propagates, and the workflow FAILS.
     when(strategy.get(anyString(), anyString())).thenReturn(stcConfig());
@@ -1202,16 +1203,18 @@ class CopytradeSignalWorkflowImplTest {
     p.setAction(CopytradeSignalPayload.Action.STC);
     p.setTail("half out");
     p.setSignalId("dead-pos-1");
+    p.setAuthor("edtrader");
     // A FAILED workflow throws WorkflowFailedException out of runWorkflow; reaching this line
     // proves the workflow COMPLETED.
     runWorkflow(p);
 
-    AuditEvent orphan = capture("OrphanSTC");
-    assertThat(orphan.getSubject())
+    AuditEvent benign = capture("StcNoOpenPosition");
+    assertThat(benign.getSubject())
         .containsEntry("signal_id", "dead-pos-1")
         .containsEntry("option_symbol", "NVDA  260516C00140000")
         .containsEntry("position_workflow_id", deadWfId)
-        .containsEntry("reason", "position_workflow_not_running");
+        .containsEntry("reason", "position_workflow_not_running")
+        .containsEntry("author", "edtrader");
 
     ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
     verify(audit, atLeastOnce()).log(all.capture());
@@ -1597,7 +1600,7 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
-  void stcAction_cacheMissAndBufferExpires_emitsOrphanStc() {
+  void stcAction_cacheMissAndBufferExpires_emitsStcNoOpenPosition() {
     StrategyConfig cfg = stcConfig();
     cfg.setPendingTtlPaperSecs(10L); // 1 attempt
     when(strategy.get(anyString(), anyString())).thenReturn(cfg);
@@ -1617,11 +1620,13 @@ class CopytradeSignalWorkflowImplTest {
     p.setAction(CopytradeSignalPayload.Action.STC);
     p.setTail("out");
     p.setSignalId("333:0");
+    p.setAuthor("edtrader");
     runWorkflow(p);
 
-    AuditEvent orphan = capture("OrphanSTC");
-    assertThat(orphan.getSubject()).containsEntry("signal_id", "333:0");
-    assertThat(((Number) orphan.getSubject().get("attempts")).intValue()).isPositive();
+    AuditEvent benign = capture("StcNoOpenPosition");
+    assertThat(benign.getSubject()).containsEntry("signal_id", "333:0");
+    assertThat(benign.getSubject()).containsEntry("author", "edtrader");
+    assertThat(((Number) benign.getSubject().get("attempts")).intValue()).isPositive();
   }
 
   private StrategyConfig stcConfig() {

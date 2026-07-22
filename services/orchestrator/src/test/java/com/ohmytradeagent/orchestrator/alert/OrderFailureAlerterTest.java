@@ -83,6 +83,56 @@ class OrderFailureAlerterTest {
   }
 
   @Test
+  void stcNoOpenPositionDoesNotPage_benignNotInFailureKinds() {
+    // PLAN-2026-07-21-benign-stc-no-position: Sites A/B (STC after the position was already fully
+    // closed) now emit the benign StcNoOpenPosition kind, which is absent from
+    // DEFAULT_FAILURE_KINDS
+    // — so it must NOT page RED here (StcNoOpenPositionAlerter posts a benign YELLOW note instead).
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, PRODUCTION_DEFAULT_ALLOWLIST, false);
+
+    assertThat(alerter.failureKinds()).doesNotContain("StcNoOpenPosition");
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("signal_id", "222:2");
+    subject.put("option_symbol", "NVDA260720P00200000");
+    AuditEvent event = event("StcNoOpenPosition", "wf-stc-flat", subject);
+
+    alerter.onAuditEvent(event);
+
+    verify(webhook, never())
+        .postEmbedToUrl(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+  }
+
+  @Test
+  void orphanStcSiteCDispatchFailure_stillPagesRed() {
+    // PLAN-2026-07-21-benign-stc-no-position: Site C (a genuine partialExit dispatch failure to a
+    // still-RUNNING position, reason=signal_dispatch_failed) keeps emitting OrphanSTC — it must
+    // STILL page the RED STC (exit) embed. OrphanSTC stays in the failure-kinds allowlist.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, PRODUCTION_DEFAULT_ALLOWLIST, false);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("signal_id", "222:3");
+    subject.put("option_symbol", "NVDA260720P00200000");
+    subject.put("position_workflow_id", "pos-9");
+    subject.put("reason", "signal_dispatch_failed");
+    subject.put("error", "SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_FAILED_WORKFLOW_NOT_FOUND");
+    AuditEvent event = event("OrphanSTC", "wf-orphan-sitec", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("order FAILED").contains("STC (exit)");
+    assertThat(embed.color()).isEqualTo(15548997); // red
+    assertThat(field(embed, "symbol")).contains("NVDA260720P00200000");
+    assertThat(field(embed, "signal_id")).isEqualTo("222:3");
+  }
+
+  @Test
   void entryExpiredDispatchesBtoEmbedWithKindAsReason() {
     WebhookClient webhook = mock(WebhookClient.class);
     OrderFailureAlerter alerter =

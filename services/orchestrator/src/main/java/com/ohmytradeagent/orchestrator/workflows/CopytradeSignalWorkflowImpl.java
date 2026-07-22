@@ -69,6 +69,16 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private static final String KIND_ENTRY_FILLED = "EntryFilled";
   private static final String KIND_EXIT_REQUESTED = "ExitRequested";
   private static final String KIND_ORPHAN_STC = "OrphanSTC";
+  // PLAN-2026-07-21-benign-stc-no-position: benign counterpart to OrphanSTC. Emitted at Sites A/B
+  // in
+  // handleStc when the STC arrived after the position was ALREADY FULLY CLOSED (no PositionWorkflow
+  // found, or found-but-not-RUNNING). "No position left, nothing to sell" — a BENIGN informational
+  // event that must NOT page RED. StcNoOpenPositionAlerter posts a YELLOW note; it is absent from
+  // OrderFailureAlerter's failure-kinds. Site C (a genuine dispatch failure to a still-RUNNING
+  // position) keeps emitting KIND_ORPHAN_STC and keeps paging RED. Registered in
+  // AuditEventKinds.ALL_KINDS. No version gate: the KIND is Activity input (logAudit is an activity
+  // call), not a Temporal command shape, so it is not replay-checked on 1.27.
+  private static final String KIND_STC_NO_OPEN_POSITION = "StcNoOpenPosition";
   private static final String KIND_AVG_SKIPPED = "AvgSkipped";
   // Phase 4: distinct from PositionWorkflow's "ChandelierArmed" — this audit is the dispatch
   // (parent-side); the apply (child-side) emits its own ChandelierArmed when the subscribe
@@ -940,11 +950,16 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     if (positionId == null) {
       logAudit(
           payload,
-          KIND_ORPHAN_STC,
+          KIND_STC_NO_OPEN_POSITION,
           subject(
-              "signal_id", payload.getSignalId(),
-              "option_symbol", occ,
-              "attempts", attempts));
+              "signal_id",
+              payload.getSignalId(),
+              "option_symbol",
+              occ,
+              "attempts",
+              attempts,
+              "author",
+              payload.getAuthor()));
       return payload.getSignalId();
     }
 
@@ -958,12 +973,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     if (stcGuardVersion >= 1 && !positionLookup.isPositionWorkflowRunning(positionId)) {
       logAudit(
           payload,
-          KIND_ORPHAN_STC,
+          KIND_STC_NO_OPEN_POSITION,
           subject(
               "signal_id", payload.getSignalId(),
               "option_symbol", occ,
               "position_workflow_id", positionId,
-              "reason", REASON_POSITION_WF_NOT_RUNNING));
+              "reason", REASON_POSITION_WF_NOT_RUNNING,
+              "author", payload.getAuthor()));
       return payload.getSignalId();
     }
 
