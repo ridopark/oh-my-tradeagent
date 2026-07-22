@@ -1,6 +1,9 @@
 package com.ohmytradeagent.tdbff.web;
 
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -92,6 +95,7 @@ class PortfolioHistoryControllerWebMvcTest {
     result.setCashFlowAmounts(List.of(new BigDecimal("41230")));
     result.setCashFlowsAvailable(true);
     when(client.historyFor(eq("acme"), eq("alpaca-live"), eq("1M"))).thenReturn(result);
+    when(client.usesDailyBars("1M")).thenReturn(true); // 1M is a daily-bar range → live EV read
     // Degraded live-equity snapshot → EV falls back to equity[last]=52259.56 (behavior-preserving).
     when(accountEquityClient.snapshotFor(eq("acme"), eq("alpaca-live")))
         .thenReturn(new BrokerAccount(null, null));
@@ -120,6 +124,7 @@ class PortfolioHistoryControllerWebMvcTest {
     result.setCashFlowAmounts(List.of());
     result.setCashFlowsAvailable(true);
     when(client.historyFor(eq("acme"), eq("alpaca-live"), eq("1M"))).thenReturn(result);
+    when(client.usesDailyBars("1M")).thenReturn(true); // 1M is a daily-bar range → live EV read
     when(accountEquityClient.snapshotFor(eq("acme"), eq("alpaca-live")))
         .thenReturn(new BrokerAccount(new BigDecimal("52577.52"), "310056593"));
 
@@ -144,6 +149,7 @@ class PortfolioHistoryControllerWebMvcTest {
     result.setCashFlowAmounts(List.of());
     result.setCashFlowsAvailable(true);
     when(client.historyFor(eq("acme"), eq("alpaca-live"), eq("1M"))).thenReturn(result);
+    when(client.usesDailyBars("1M")).thenReturn(true); // 1M is a daily-bar range → live EV read
     when(accountEquityClient.snapshotFor(eq("acme"), eq("alpaca-live")))
         .thenThrow(new RuntimeException("temporal unavailable"));
 
@@ -151,6 +157,34 @@ class PortfolioHistoryControllerWebMvcTest {
         .andExpect(status().isOk())
         // Fell back to the series' last point (54360.02 - 50000), no 500.
         .andExpect(jsonPath("$.range_pl").value(4360.02));
+  }
+
+  @Test
+  void intradayRange_1D_skipsLiveEquityFetch() throws Exception {
+    // An intraday range (1D/1W) already carries a live last series point, so the controller must
+    // NOT
+    // make the extra live-equity broker read — critically the 1D tab polls ~every 15s. EV falls to
+    // equity[last] (already live). Guards the review fix scoping the read to daily-bar ranges only.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-live");
+    when(client.usesDailyBars("1D")).thenReturn(false);
+
+    PortfolioHistoryResult result = new PortfolioHistoryResult();
+    result.setSchemaVersion(1L);
+    result.setTimestamps(List.of(1000L, 3000L));
+    result.setEquity(List.of(new BigDecimal("50000.00"), new BigDecimal("50477.28")));
+    result.setBaseValue(new BigDecimal("50000.00"));
+    result.setCashFlowTimestamps(List.of());
+    result.setCashFlowAmounts(List.of());
+    result.setCashFlowsAvailable(true);
+    when(client.historyFor(eq("acme"), eq("alpaca-live"), eq("1D"))).thenReturn(result);
+
+    mvc.perform(get("/api/portfolio-history?range=1D").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        // EV = the series' live last point (50477.28 - 50000), computed WITHOUT an equity read.
+        .andExpect(jsonPath("$.range_pl").value(477.28));
+
+    verify(accountEquityClient, never()).snapshotFor(anyString(), anyString());
   }
 
   @Test

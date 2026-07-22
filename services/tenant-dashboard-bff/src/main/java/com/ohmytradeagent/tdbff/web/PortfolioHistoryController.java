@@ -85,9 +85,16 @@ public class PortfolioHistoryController {
 
     // Live account equity — the SAME net-liq figure the /live header total shows — used as EV so a
     // daily-bar range (1M/3M/YTD/1Y) values the book at NOW, not at the series' last COMPLETED
-    // session (yesterday's close). A degraded/failed snapshot → null → the calc falls back to
-    // equity[last]; NEVER fail the chart on an equity-read hiccup.
-    BigDecimal liveEquity = history == null ? null : liveEquityFor(tenant, brokerTarget);
+    // session (yesterday's close). SCOPED to daily-bar ranges ONLY: an intraday range (1D/1W)
+    // already
+    // carries a live last point, so we skip the extra broker read there — critically the 1D tab
+    // polls
+    // every ~15s, and the header already reads equity for the total. A degraded/failed snapshot →
+    // null → the calc falls back to equity[last]; NEVER fail the chart on an equity-read hiccup.
+    BigDecimal liveEquity =
+        (history != null && client.usesDailyBars(range))
+            ? liveEquityFor(tenant, brokerTarget)
+            : null;
 
     // Deposit-adjusted range return (additive; "Today" still reads profit_loss[last] above). A
     // degraded (null) history or unavailable cash flows yield null range figures → UI renders "—".

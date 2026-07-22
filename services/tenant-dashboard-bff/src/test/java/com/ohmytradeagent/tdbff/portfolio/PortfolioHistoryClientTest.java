@@ -141,6 +141,23 @@ class PortfolioHistoryClientTest {
   }
 
   @Test
+  void usesDailyBars_trueForDailyRangesOnly() {
+    WorkflowClient client = mock(WorkflowClient.class);
+    Clock fixed = Clock.fixed(Instant.parse("2026-03-02T12:00:00Z"), ZoneOffset.UTC);
+    PortfolioHistoryClient c = new PortfolioHistoryClient(client, "orchestrator-core", fixed);
+
+    // Daily-bar ranges (last point = last completed session) → need the live-equity EV.
+    assertThat(c.usesDailyBars("1M")).isTrue();
+    assertThat(c.usesDailyBars("3M")).isTrue();
+    assertThat(c.usesDailyBars("YTD")).isTrue();
+    assertThat(c.usesDailyBars("1Y")).isTrue();
+    assertThat(c.usesDailyBars("bogus")).isTrue(); // unknown → 1M (daily)
+    // Intraday ranges already carry a live last point → no extra equity read.
+    assertThat(c.usesDailyBars("1D")).isFalse();
+    assertThat(c.usesDailyBars("1W")).isFalse();
+  }
+
+  @Test
   void exposesExactlyOneAutowiredConstructorForSpring() {
     // @Component with TWO constructors (the @Value production one + a package-private Clock one for
     // tests). Spring cannot choose between multiple constructors unless exactly one is @Autowired —

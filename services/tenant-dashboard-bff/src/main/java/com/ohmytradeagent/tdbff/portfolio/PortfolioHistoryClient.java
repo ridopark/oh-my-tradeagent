@@ -100,6 +100,17 @@ public class PortfolioHistoryClient {
     };
   }
 
+  /**
+   * True when {@code range} resolves to DAILY bars ({@code timeframe=1D}: 1M/3M/YTD/1Y, plus the
+   * unknown→1M fallback) — whose last series point is the last COMPLETED session (yesterday's
+   * close), so the range EV must come from the live account equity. Intraday ranges (1D/1W) already
+   * carry a live last point and need no extra equity read. Delegates to {@link #resolveRange} so
+   * this can never drift from the period/timeframe map.
+   */
+  public boolean usesDailyBars(String range) {
+    return "1D".equals(resolveRange(range).timeframe());
+  }
+
   private long daysSinceJan1() {
     LocalDate today = LocalDate.now(clock.withZone(MARKET_TZ));
     LocalDate jan1 = LocalDate.of(today.getYear(), 1, 1);
