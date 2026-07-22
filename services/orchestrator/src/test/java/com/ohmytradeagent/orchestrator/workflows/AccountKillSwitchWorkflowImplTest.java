@@ -1010,6 +1010,115 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(afterCooldown.getReason()).isEqualTo("auto:account_daily_loss");
   }
 
+  // ---------- PLAN-2026-07-22 (#591, risk C6): cached open exposure on the state query + reset
+  // ----
+
+  // A priceable, below-threshold book: the state query surfaces the listed count AND the SIGNED
+  // unrealized MTM cached from the last heartbeat's open-book valuation. A GAIN (positive MTM)
+  // proves
+  // the sign is preserved (a gain must never read as a loss).
+  @Test
+  void killswitchState_priceableBook_returnsCountAndSignedMtm() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    // entry 3.00, bid 4.00 -> (4-3)*10*100 = +1000 (a gain)
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 10L),
+                    // entry 5.00, bid 6.00 -> (6-5)*5*100 = +500 (a gain)
+                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                2,
+                0));
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  250516C00140000")))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("4.00")));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  250516C00200000")))
+        .thenReturn(okQuote("AAPL  250516C00200000", new BigDecimal("6.00")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-exposure-priceable");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isFalse(); // +1500 gain, nowhere near the -5000 cap
+    assertThat(s.getOpenPositions()).isEqualTo(2L);
+    assertThat(s.getOpenMtm()).isEqualByComparingTo("1500"); // SIGNED positive — a gain, not a loss
+  }
+
+  // An unpriceable book (every quote UNAVAILABLE): the count is still cached, but the MTM is left
+  // null — a partial/absent valuation must never be surfaced as the total. (Debounce/in-tick
+  // refetch
+  // pinned so a single unpriceable tick defers rather than trips, keeping the assert on the cache.)
+  @Test
+  void killswitchState_unpriceableBook_returnsCountNullMtm() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                2,
+                0));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-exposure-unpriceable");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75)); // one unpriceable tick: deferred, not tripped
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isFalse();
+    assertThat(s.getOpenPositions()).isEqualTo(2L); // count still cached
+    assertThat(s.getOpenMtm()).isNull(); // no partial MTM shown as the total
+  }
+
+  // The reset audit subject records the open exposure the operator resumed on (mirrors the trip /
+  // still-holding subjects) so a blind "reset to trade again" over an underwater book is auditable.
+  @Test
+  void reset_auditSubjectCarriesCachedExposure() {
+    // A single deeply-down position: (2.00-12.00)*10*100 = -10000 crosses the 5000 cap -> trip, and
+    // the priced book caches open_positions=1 + a SIGNED-negative open_mtm=-10000.
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation(
+                        "NVDA  250516C00140000", new BigDecimal("12.00"), 10L)),
+                1,
+                0));
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.00")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-exposure-reset");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    stub.reset(resetRequest("alice"));
+
+    AuditEvent reset = captureKind("KillSwitchResetApproved");
+    assertThat(reset.getSubject()).containsEntry("open_positions", 1).containsKey("open_mtm");
+    // The audit subject round-trips through the activity boundary, so the BigDecimal MTM arrives as
+    // a Double; assert its (SIGNED-negative) numeric value.
+    assertThat(((Number) reset.getSubject().get("open_mtm")).doubleValue()).isEqualTo(-10000.0);
+  }
+
+  // A fresh account workflow queried BEFORE its first valued heartbeat: both fields null (nothing
+  // cached yet). This is also the per-strategy KillSwitchWorkflow's steady state — it never caches
+  // these fields, so the shared DTO's fail-closed check_entry consumer keeps reading them as null.
+  @Test
+  void killswitchState_beforeFirstHeartbeat_bothNull() {
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-exposure-fresh");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getOpenPositions()).isNull();
+    assertThat(s.getOpenMtm()).isNull();
+  }
+
   // ---------- pct-of-SOD-equity cap (the change) ----------
 
   // pct=0.40, SOD equity=5000 => effective threshold 2000. A total loss of -2000 trips; -1999

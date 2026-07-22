@@ -328,6 +328,30 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * PLAN-2026-07-22 (#591) SENTINEL for the cached-exposure writes. The {@code
+   * cacheOpenBookExposure} call added right after {@code valueOpenBook(book)} in {@code
+   * heartbeat()} (and in {@code maybeRepageWhileHolding}) is a PURE instance-field write from an
+   * ALREADY-dispatched activity result — it issues NO new command and takes NO {@code getVersion}
+   * marker. Replaying the command-DENSE pre-#591 open-positions history (which drives exactly that
+   * value point) under the new impl must therefore stay byte-identical. This test asserts that: if
+   * the cache write ever accidentally dispatched an activity / added a command, the recorded
+   * history would diverge and this replay would throw {@code NonDeterministicException}. Reuses the
+   * existing dense fixture (no new fixture needed — the pre-#591 and post-#591 command streams are
+   * identical by design).
+   */
+  @Test
+  void exposureCacheAddsNoCommands_denseHistoryReplaysByteIdentical() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(OPEN_POS_FIXTURE_RESOURCE))
+        .as(
+            "Missing dense fixture %s — see regenerateOpenPositionsFixture.",
+            OPEN_POS_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    WorkflowReplayer.replayWorkflowExecutionFromResource(
+        OPEN_POS_FIXTURE_RESOURCE, AccountKillSwitchWorkflowImpl.class);
+  }
+
+  /**
    * The command-DENSE pre-change path: a valid absolute threshold whose heartbeat ran {@code
    * computeTenantRealizedPnl} → {@code accountOpenBook} → per-position {@code getOptionQuote} → no
    * trip, with NO version markers. Replayed under the new impl, both gates resolve to {@code
