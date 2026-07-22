@@ -230,6 +230,42 @@ class AccountKillSwitchWorkflowImplTest {
         .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
   }
 
+  // Honest MTM (#591 review): a positionState VALUE failure (position dropped from the book, so
+  // excluded from the MTM sum) must NOT be cached as a complete open_mtm — the reset banner would
+  // otherwise show a partial figure as the total. openPositions still reflects the whole book
+  // count.
+  @Test
+  void heartbeat_valueFailure_cachesWholeCount_butOmitsPartialMtm() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-1000"));
+    // listed=3 (whole book), valueFailures=1 (one positionState read failed -> excluded from the
+    // valued positions), one priced position that quotes cleanly (quoteFailures=0).
+    // failsClosed(3,1)
+    // is false (1*2 !> 3, and 3 > SMALL_BOOK_MAX_POSITIONS) so the value failure does not
+    // fail-close.
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L)),
+                3,
+                1));
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  250516C00140000")))
+        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.50")));
+    // -1000 + (2.50-3.00)*5*100 = -1250 > -5000 -> no trip.
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-valuefail");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isFalse();
+    // Whole-book count is surfaced honestly ("you still hold 3")...
+    assertThat(s.getOpenPositions()).isEqualTo(3L);
+    // ...but the partial MTM (missing the value-failed position) is NOT cached as the total.
+    assertThat(s.getOpenMtm()).isNull();
+  }
+
   // Unset threshold => cap inert: even a massive loss does not trip (and PnL is never computed).
   @Test
   void heartbeat_unsetThreshold_capInert_noTripOnLargeLoss() {

@@ -783,7 +783,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     OpenBookMtm valued = valueOpenBook(book);
     // PLAN-2026-07-22 (#591): cache the pre-trip exposure so a later reset banner can surface it.
     // book.listed() always; the MTM only when the book priced fully (never a partial as the total).
-    cacheOpenBookExposure(book.listed(), valued);
+    cacheOpenBookExposure(book, valued);
 
     // Fail-CLOSED: a correlated positionState + quote outage that drops too many listed positions
     // must NOT under-count the loss (fail-OPEN). Mirror the #325 relative >50% / small-book bound
@@ -806,9 +806,10 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         // valuation.
         // The top-of-tick cacheOpenBookExposure ran on the pre-refetch (blipped) valuation, so its
         // MTM was left null; a blip that cleared here now caches the fresh signed MTM, while one
-        // that stays unpriceable leaves the MTM null (cacheOpenBookExposure only sets it when
-        // quoteFailures()==0). Pure field write (no command) — replay-safe.
-        cacheOpenBookExposure(book.listed(), valued);
+        // that stays unpriceable leaves the MTM null (cacheOpenBookExposure only sets it when the
+        // whole book priced — valueFailures()==0 AND quoteFailures()==0). Pure field write (no
+        // command) — replay-safe.
+        cacheOpenBookExposure(book, valued);
         // (2) BACKSTOP: still unpriceable after the in-tick re-fetch => cross-tick debounce. Defer
         // this tick LOUDLY (WARN so an operator can eyeball the book / a chronic every-other-tick
         // miss surfaces) and only fail-close after MTM_UNAVAILABLE_TRIP_TICKS CONSECUTIVE
@@ -915,14 +916,19 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
 
   /**
    * PLAN-2026-07-22 (#591): caches the last-heartbeat open-book exposure for the reset banner
-   * query. {@code listed} (the whole book count) is stored ALWAYS; the SIGNED MTM is refreshed ONLY
-   * when the book priced fully ({@code valued.quoteFailures() == 0}) — a partial/thrown valuation
-   * leaves the prior (or null) MTM untouched so the banner never shows a partial number as the
-   * total. Pure instance-field write (no command); safe at any replay version.
+   * query. {@code book.listed()} (the whole book count) is stored ALWAYS; the SIGNED MTM is
+   * refreshed ONLY when the WHOLE book priced — i.e. BOTH failure layers are clean: no {@code
+   * positionState} read failures ({@code book.valueFailures() == 0}) AND no option-quote failures
+   * ({@code valued.quoteFailures() == 0}). A value-failed position is dropped from {@code
+   * book.positions()} and therefore silently missing from the MTM sum, so gating on {@code
+   * quoteFailures} alone would cache a partial as the complete total — the exact "partial shown as
+   * the total" mode this banner must never show. Mirrors the fail-closed trip's {@code
+   * combinedFailures} (valueFailures + quoteFailures). A partial/thrown valuation leaves the prior
+   * (or null) MTM untouched. Pure instance-field write (no command); safe at any replay version.
    */
-  private void cacheOpenBookExposure(int listed, OpenBookMtm valued) {
-    this.lastOpenPositions = listed;
-    if (valued != null && valued.quoteFailures() == 0) {
+  private void cacheOpenBookExposure(AccountOpenBook book, OpenBookMtm valued) {
+    this.lastOpenPositions = book.listed();
+    if (valued != null && book.valueFailures() == 0 && valued.quoteFailures() == 0) {
       this.lastOpenMtm = valued.openMtm();
     }
   }
@@ -1006,12 +1012,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     } catch (RuntimeException e) {
       valued = null; // quote activity threw — page the count/elapsed without an MTM figure.
     }
-    // PLAN-2026-07-22 (#591): cache the still-holding exposure so the reset banner stays fresh
-    // right
-    // up to the operator's reset click (this is the reset-scenario value point — a tripped
-    // heartbeat
-    // never reaches the pre-trip cache above).
-    cacheOpenBookExposure(book.listed(), valued);
+    // PLAN-2026-07-22 (#591): cache the still-holding exposure so the reset banner stays fresh to
+    // within one STILL_HOLDING_REPAGE_TICKS re-page window (this call is throttled to the re-page
+    // cadence, NOT every heartbeat — the figure an operator sees at reset can be up to one window
+    // stale; the Phase-2 UI copy should say "as of last heartbeat/re-page", not "live"). This is
+    // the reset-scenario value point — a tripped heartbeat never reaches the pre-trip cache above.
+    cacheOpenBookExposure(book, valued);
     // Omit the MTM unless EVERY position priced: a partial (or thrown) valuation is unreliable, so
     // page the count + elapsed only rather than a misleading number.
     BigDecimal mtm = (valued != null && valued.quoteFailures() == 0) ? valued.openMtm() : null;
