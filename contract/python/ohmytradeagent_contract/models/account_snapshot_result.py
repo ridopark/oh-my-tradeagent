@@ -27,3 +27,7 @@ class AccountSnapshotResult(BaseModel):
     """
     Informational brokerage account identifier (Alpaca /v2/account 'account_number', e.g. PA3ER05HLHMB). NOT a credential and NOT used by any risk gate — surfaced only for dashboard account verification. Optional/absent for broker adapters or records that predate this field.
     """
+    last_equity: float | None = None
+    """
+    Prior market-close net-liquidation equity in dollars (Alpaca /v2/account 'last_equity'). The dashboard's live intraday 'today' P&L is equity - last_equity. Informational only — NOT a credential and NOT used by any risk gate. Optional/absent for broker adapters or records that predate this field or a response that omits it; a null/absent value leaves the dashboard's 'today' figure to fall back to the last completed daily bar (never fabricated).
+    """

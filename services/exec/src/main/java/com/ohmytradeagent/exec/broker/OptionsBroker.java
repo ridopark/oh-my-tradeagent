@@ -147,11 +147,26 @@ public interface OptionsBroker {
   }
 
   /**
-   * Equity + cash from one account read (issue #323). Both in account-currency dollars. {@code
-   * accountNumber} is informational (brokerage account identity for the tenant dashboard),
-   * nullable, and not used by any gate.
+   * Equity + cash from one account read (issue #323). All figures in account-currency dollars.
+   * {@code accountNumber} is informational (brokerage account identity for the tenant dashboard),
+   * nullable, and not used by any gate. {@code lastEquity} is the prior market-close
+   * net-liquidation equity (Alpaca {@code /v2/account 'last_equity'}); it backs the dashboard's
+   * live intraday "today" figure ({@code equity - lastEquity}). Also informational, nullable, and
+   * not used by any gate — a broker that does not expose it leaves the downstream {@code today_pl}
+   * unavailable.
    */
-  record AccountSummary(BigDecimal equity, BigDecimal cash, String accountNumber) {}
+  record AccountSummary(
+      BigDecimal equity, BigDecimal cash, String accountNumber, BigDecimal lastEquity) {
+
+    /**
+     * Back-compat convenience for brokers/tests that carry no {@code lastEquity} — delegates with a
+     * null prior-close equity (the dashboard's "today" figure then falls back to the last completed
+     * daily bar rather than fabricating an intraday number).
+     */
+    public AccountSummary(BigDecimal equity, BigDecimal cash, String accountNumber) {
+      this(equity, cash, accountNumber, null);
+    }
+  }
 
   /**
    * Trading days in {@code [start, end]} inclusive, per the broker's market calendar. Used by the

@@ -54,11 +54,23 @@ public class AccountEquityClient {
   /**
    * Net-liquidation equity plus the informational brokerage account identity from a SINGLE account
    * snapshot. {@code accountNumber} is the Alpaca {@code /v2/account 'account_number'} — surfaced
-   * only for dashboard account verification, never a credential and never used by any gate. Both
-   * fields are nullable: a degraded/unavailable snapshot yields {@code new BrokerAccount(null,
-   * null)}, and a broker adapter with no real account endpoint may carry a null account number.
+   * only for dashboard account verification, never a credential and never used by any gate. {@code
+   * lastEquity} is the prior market-close net-liquidation equity (Alpaca {@code 'last_equity'});
+   * the live intraday "today" figure is {@code equity - lastEquity}. All fields are nullable: a
+   * degraded/unavailable snapshot yields {@code new BrokerAccount(null, null)}, a broker adapter
+   * with no real account endpoint may carry a null account number, and a snapshot that omits
+   * last_equity leaves the "today" figure to fall back to the last completed daily bar.
    */
-  public record BrokerAccount(BigDecimal equity, String accountNumber) {}
+  public record BrokerAccount(BigDecimal equity, String accountNumber, BigDecimal lastEquity) {
+
+    /**
+     * Back-compat convenience for the degraded/unavailable path (and tests) that carry no {@code
+     * lastEquity} — delegates with a null prior-close equity.
+     */
+    public BrokerAccount(BigDecimal equity, String accountNumber) {
+      this(equity, accountNumber, null);
+    }
+  }
 
   /**
    * Equity + informational account identity for the {@code tenantId}'s OWN account behind {@code
@@ -93,7 +105,8 @@ public class AccountEquityClient {
           stub.getResult(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS, AccountSnapshotResult.class);
       return result == null
           ? new BrokerAccount(null, null)
-          : new BrokerAccount(result.getEquity(), result.getAccountNumber());
+          : new BrokerAccount(
+              result.getEquity(), result.getAccountNumber(), result.getLastEquity());
     } catch (TimeoutException e) {
       // We stopped waiting, but the workflow is still running. Cancel it so it doesn't linger as an
       // orphan — holding an orchestrator worker slot and re-hitting the broker account endpoint —

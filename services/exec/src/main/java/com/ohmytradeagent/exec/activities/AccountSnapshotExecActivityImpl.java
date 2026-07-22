@@ -51,6 +51,10 @@ public class AccountSnapshotExecActivityImpl implements AccountSnapshotActivity 
     OptionsBroker.AccountSummary account = broker.getAccount();
     result.setEquity(account.equity());
     result.setCash(account.cash());
+    // last_equity (prior market close) backs the dashboard's live intraday "today" figure (equity -
+    // last_equity). Informational, not a gate input, and null-safe: a null lastEquity leaves the
+    // optional field absent so the dashboard's "today" falls back to the last completed daily bar.
+    result.setLastEquity(account.lastEquity());
     // Informational account identity for the tenant dashboard (not used by any gate). Null-safe: a
     // null accountNumber simply leaves the optional field absent.
     result.setAccountNumber(account.accountNumber());

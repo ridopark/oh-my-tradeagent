@@ -95,6 +95,53 @@ class PortfolioServiceTest {
 
   @Test
   @SuppressWarnings("unchecked")
+  void emitsIntradayTodayPlFromEquityMinusLastEquity_prodRealLossCase() {
+    // The live-incident shape: equity=50,477.06, last_equity=52,259.56 (prior market close) →
+    // today_pl = equity - last_equity = -1,782.50 (a LOSS). This is the GENUINE intraday "today",
+    // not Alpaca portfolio-history's last completed daily bar. last_equity is surfaced alongside so
+    // the header can aggregate the percentage denominator across broker_targets.
+    when(strategyResolver.strategyIdsForTenant("prod_real")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("prod_real")).thenReturn(List.of());
+    when(realizedPnl.computeRealizedPnl(eq("prod_real"), any(), any(LocalDate.class)))
+        .thenReturn(BigDecimal.ZERO);
+    when(strategyRegistry.brokerTarget("prod_real", "s1")).thenReturn("alpaca-live");
+    when(accountEquity.snapshotFor("prod_real", "alpaca-live"))
+        .thenReturn(
+            new AccountEquityClient.BrokerAccount(
+                new BigDecimal("50477.06"), "847309116", new BigDecimal("52259.56")));
+
+    var equity = (List<Map<String, Object>>) service.portfolio("prod_real").get("account_equity");
+
+    assertThat(equity).hasSize(1);
+    assertThat((BigDecimal) equity.get(0).get("today_pl")).isEqualByComparingTo("-1782.50");
+    assertThat((BigDecimal) equity.get(0).get("last_equity")).isEqualByComparingTo("52259.56");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void todayPlIsNullWhenLastEquityUnavailable() {
+    // last_equity absent (older producer / broker adapter that doesn't expose it, or a degraded
+    // snapshot) → today_pl and today_pl_pct are null (never fabricated); the dashboard falls back
+    // to
+    // the last completed daily bar.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme")).thenReturn(List.of());
+    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(BigDecimal.ZERO);
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    // Two-arg BrokerAccount => lastEquity is null.
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000.00"), null));
+
+    var equity = (List<Map<String, Object>>) service.portfolio("acme").get("account_equity");
+
+    assertThat(equity).hasSize(1);
+    assertThat(equity.get(0)).containsEntry("today_pl", null);
+    assertThat(equity.get(0)).containsEntry("last_equity", null);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
   void distinctBrokerTargetsEachGetTheirOwnEquityEntry() {
     when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1", "s2"));
     when(positionsReader.openPositions("acme")).thenReturn(List.of());

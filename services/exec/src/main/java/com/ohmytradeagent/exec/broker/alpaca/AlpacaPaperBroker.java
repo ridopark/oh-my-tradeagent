@@ -624,7 +624,12 @@ public class AlpacaPaperBroker implements OptionsBroker {
       throw ApplicationFailure.newNonRetryableFailure(
           "Alpaca /v2/account returned null/missing cash", "BrokerProtocolError");
     }
-    return new AccountSummary(resp.equity(), resp.cash(), resp.accountNumber());
+    // last_equity (prior market close) backs the dashboard's live intraday "today" figure (equity -
+    // last_equity). It is informational and NOT a gate input, so — unlike equity/cash above — a
+    // missing value is NOT a fail-closed breach: pass it through as-is (possibly null) and let the
+    // dashboard degrade "today" to the last completed daily bar rather than fabricate an intraday
+    // P&L.
+    return new AccountSummary(resp.equity(), resp.cash(), resp.accountNumber(), resp.lastEquity());
   }
 
   /**

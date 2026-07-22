@@ -40,6 +40,34 @@ class AccountSnapshotExecActivityImplTest {
     assertThat(result.getSchemaVersion()).isEqualTo(1L);
     // A null broker accountNumber simply leaves the optional field absent.
     assertThat(result.getAccountNumber()).isNull();
+    // A null broker lastEquity likewise leaves the optional field absent (never fabricated).
+    assertThat(result.getLastEquity()).isNull();
+  }
+
+  // The activity must surface the broker's lastEquity (prior market close) as the result
+  // last_equity so the dashboard can compute the live intraday "today" figure (equity -
+  // last_equity). Informational carry-over, not a gate input.
+  @Test
+  void accountSnapshot_surfacesBrokerLastEquity() {
+    OptionsBroker broker = mock(OptionsBroker.class);
+    when(broker.getAccount())
+        .thenReturn(
+            new OptionsBroker.AccountSummary(
+                new BigDecimal("50477.06"),
+                new BigDecimal("42000.00"),
+                "PA3ER05HLHMB",
+                new BigDecimal("52259.56")));
+    AccountSnapshotExecActivityImpl impl =
+        new AccountSnapshotExecActivityImpl(
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker));
+
+    AccountSnapshotRequest req = new AccountSnapshotRequest();
+    req.setSchemaVersion(1L);
+    req.setBrokerTarget(AccountSnapshotRequest.BrokerTarget.ALPACA_PAPER);
+
+    AccountSnapshotResult result = impl.accountSnapshot(req);
+
+    assertThat(result.getLastEquity()).isEqualByComparingTo(new BigDecimal("52259.56"));
   }
 
   // Issue #323: the activity must also surface the broker's getAccountCash() as the result `cash`
