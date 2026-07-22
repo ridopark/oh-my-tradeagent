@@ -316,6 +316,25 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private LocalDate tradingDay;
 
   /**
+   * PLAN-2026-07-22 (issue #591, risk C6): last-heartbeat open-book exposure cached into queryable
+   * state so the reset banner (which reads {@code killswitchState()} BEFORE the operator resets the
+   * switch — a Temporal {@code @QueryMethod} cannot dispatch activities to compute it live) can
+   * show what the tenant still holds. {@code lastOpenPositions} is the listed open-position count
+   * from the last heartbeat that valued the book; {@code lastOpenMtm} is the ACCOUNT-CAP-accurate
+   * SIGNED unrealized P&amp;L ({@code (liveBid-entry)*qty*100}) — refreshed ONLY when the book
+   * priced fully ({@code quoteFailures == 0}) so a partial valuation is never shown as the total (a
+   * stale prior / null is honest; a partial number is not). Both {@code null} until the first
+   * valued heartbeat, and {@code null} forever on the per-strategy KillSwitchWorkflow (only this
+   * account workflow writes them). Pure instance-field writes from an already-dispatched activity
+   * result — no new command, so no {@code getVersion} marker (the query is not replayed; the reset
+   * audit subject is activity-input payload). Advisory/observability only — NOT read by any trip
+   * predicate.
+   */
+  private Integer lastOpenPositions;
+
+  private BigDecimal lastOpenMtm;
+
+  /**
    * Start-of-day account equity for {@link #tradingDay}. Captured ONCE per trading day at the
    * rollover (lazily, on the first heartbeat that needs it) and carried across continue-as-new so
    * it survives a CAN within the same day. {@code null} = not yet captured (or capture failed / pct
@@ -399,7 +418,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
-    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 4L) {
+    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 5L) {
       throw new IllegalArgumentException(
           "AccountKillSwitchWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
@@ -429,6 +448,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // mid-debounce does not reset it (null/absent on a pre-v4 or count==0 carry => stays 0).
     if (in.getConsecutiveMtmUnavailableTicks() != null) {
       this.consecutiveMtmUnavailableTicks = in.getConsecutiveMtmUnavailableTicks().intValue();
+    }
+    // v5 carry-forward: restore the reset-banner open-exposure cache so a same-day CAN does not
+    // blank the exposure for up to one heartbeat (null/absent on a pre-v5 carry => stays null).
+    if (in.getLastOpenPositions() != null) {
+      this.lastOpenPositions = in.getLastOpenPositions().intValue();
+    }
+    if (in.getLastOpenMtm() != null) {
+      this.lastOpenMtm = in.getLastOpenMtm();
     }
   }
 
@@ -572,7 +599,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         coolingDownUntil,
         tradingDay,
         sodEquity,
-        consecutiveMtmUnavailableTicks);
+        consecutiveMtmUnavailableTicks,
+        lastOpenPositions,
+        lastOpenMtm);
   }
 
   /**
@@ -581,15 +610,19 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    *
    * <p>Rolling-deploy safety: only bump the schema_version when we actually carry a NEWER field. A
    * pre-v3 worker validates {@code schema_version <= 2} at {@code @WorkflowInit} (pre-v4: {@code <=
-   * 3}) and throws on a too-new input — so an unconditional bump would wedge any execution that
-   * continues-as-new on a new pod and is then picked up by an old pod mid rollout/canary. A
-   * carry-forward WITHOUT a captured SOD equity is byte-identical to the legacy v2 shape (stamp
-   * v2); WITH sod_equity but no active mtm-debounce it is the v3 shape (stamp v3); only a carry
-   * that actually threads a nonzero {@code consecutive_mtm_unavailable_ticks} is stamped v4. An
-   * execution carrying either newer field is already pinned to {@code v>=1} by its getVersion
-   * marker (an old worker cannot replay it anyway), so the bump is correct there. (count>0 ⟹
-   * sodEquity!=null, since the debounce only runs after threshold resolution, so a v4 carry always
-   * also carries sod_equity.)
+   * 3}; pre-v5: {@code <= 4}) and throws on a too-new input — so an unconditional bump would wedge
+   * any execution that continues-as-new on a new pod and is then picked up by an old pod mid
+   * rollout/canary. A carry-forward WITHOUT any captured exposure/equity/debounce state is
+   * byte-identical to the legacy v2 shape (stamp v2); WITH sod_equity but nothing newer it is the
+   * v3 shape (stamp v3); WITH a nonzero {@code consecutive_mtm_unavailable_ticks} but no exposure
+   * it is v4; a carry that threads the {@code last_open_positions}/{@code last_open_mtm} exposure
+   * cache is stamped v5. An execution carrying any newer field is already pinned to {@code v>=1} by
+   * its getVersion marker (an old worker cannot replay it anyway), so the bump is correct there.
+   *
+   * <p>Each newer field is set on the carry ONLY when non-null (mirrors the sod_equity / debounce
+   * discipline): on a single-replica homelab an old pod mid-rollout handed a v5 input it cannot
+   * interpret is fail-LOUD-and-retry (the guard throws, Temporal retries the task until the new pod
+   * picks it up), never silent exposure loss — accepted.
    */
   static AccountKillSwitchWorkflowInput carryForwardInput(
       String tenantId,
@@ -600,9 +633,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       OffsetDateTime coolingDownUntil,
       LocalDate tradingDay,
       BigDecimal sodEquity,
-      int consecutiveMtmUnavailableTicks) {
+      int consecutiveMtmUnavailableTicks,
+      Integer lastOpenPositions,
+      BigDecimal lastOpenMtm) {
     AccountKillSwitchWorkflowInput carry = new AccountKillSwitchWorkflowInput();
-    carry.setSchemaVersion(consecutiveMtmUnavailableTicks > 0 ? 4L : (sodEquity != null ? 3L : 2L));
+    carry.setSchemaVersion(
+        (lastOpenPositions != null || lastOpenMtm != null)
+            ? 5L
+            : (consecutiveMtmUnavailableTicks > 0 ? 4L : (sodEquity != null ? 3L : 2L)));
     carry.setTenantId(tenantId);
     carry.setTripped(tripped);
     if (reason != null && !reason.isEmpty()) {
@@ -624,6 +662,15 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // pod mid-rollout is never handed a v4 it would reject).
     if (consecutiveMtmUnavailableTicks > 0) {
       carry.setConsecutiveMtmUnavailableTicks((long) consecutiveMtmUnavailableTicks);
+    }
+    // Carry the reset-banner open-exposure cache so a same-day CAN does not blank it for up to one
+    // heartbeat. Set each ONLY when non-null (the MTM is null until a fully-priced heartbeat) so a
+    // pre-exposure carry stays the byte-identical v2/v3/v4 shape.
+    if (lastOpenPositions != null) {
+      carry.setLastOpenPositions(lastOpenPositions.longValue());
+    }
+    if (lastOpenMtm != null) {
+      carry.setLastOpenMtm(lastOpenMtm);
     }
     return carry;
   }
@@ -734,6 +781,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     AccountOpenBook book = accountPnl.accountOpenBook(input.getTenantId());
 
     OpenBookMtm valued = valueOpenBook(book);
+    // PLAN-2026-07-22 (#591): cache the pre-trip exposure so a later reset banner can surface it.
+    // book.listed() always; the MTM only when the book priced fully (never a partial as the total).
+    cacheOpenBookExposure(book, valued);
 
     // Fail-CLOSED: a correlated positionState + quote outage that drops too many listed positions
     // must NOT under-count the loss (fail-OPEN). Mirror the #325 relative >50% / small-book bound
@@ -752,6 +802,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         // deferring (a blip that clears mid-tick never widens the blind window at all).
         valued = refetchSmallBookQuotes(book, valued);
         combinedFailures = book.valueFailures() + valued.quoteFailures();
+        // PLAN-2026-07-22 (#591, freshness fix): re-cache the exposure with the REFETCHED
+        // valuation.
+        // The top-of-tick cacheOpenBookExposure ran on the pre-refetch (blipped) valuation, so its
+        // MTM was left null; a blip that cleared here now caches the fresh signed MTM, while one
+        // that stays unpriceable leaves the MTM null (cacheOpenBookExposure only sets it when the
+        // whole book priced — valueFailures()==0 AND quoteFailures()==0). Pure field write (no
+        // command) — replay-safe.
+        cacheOpenBookExposure(book, valued);
         // (2) BACKSTOP: still unpriceable after the in-tick re-fetch => cross-tick debounce. Defer
         // this tick LOUDLY (WARN so an operator can eyeball the book / a chronic every-other-tick
         // miss surfaces) and only fail-close after MTM_UNAVAILABLE_TRIP_TICKS CONSECUTIVE
@@ -857,6 +915,25 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   }
 
   /**
+   * PLAN-2026-07-22 (#591): caches the last-heartbeat open-book exposure for the reset banner
+   * query. {@code book.listed()} (the whole book count) is stored ALWAYS; the SIGNED MTM is
+   * refreshed ONLY when the WHOLE book priced — i.e. BOTH failure layers are clean: no {@code
+   * positionState} read failures ({@code book.valueFailures() == 0}) AND no option-quote failures
+   * ({@code valued.quoteFailures() == 0}). A value-failed position is dropped from {@code
+   * book.positions()} and therefore silently missing from the MTM sum, so gating on {@code
+   * quoteFailures} alone would cache a partial as the complete total — the exact "partial shown as
+   * the total" mode this banner must never show. Mirrors the fail-closed trip's {@code
+   * combinedFailures} (valueFailures + quoteFailures). A partial/thrown valuation leaves the prior
+   * (or null) MTM untouched. Pure instance-field write (no command); safe at any replay version.
+   */
+  private void cacheOpenBookExposure(AccountOpenBook book, OpenBookMtm valued) {
+    this.lastOpenPositions = book.listed();
+    if (valued != null && book.valueFailures() == 0 && valued.quoteFailures() == 0) {
+      this.lastOpenMtm = valued.openMtm();
+    }
+  }
+
+  /**
    * PLAN-2026-07-22 in-tick quote re-fetch (v&gt;=1 primary defense). A momentary option-quote blip
    * on a SMALL unpriceable book usually clears within seconds; re-value the book up to {@link
    * #MTM_UNAVAILABLE_INTICK_REFETCHES} times WITHIN the heartbeat (short {@link Workflow#sleep}s)
@@ -919,6 +996,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       return; // book read failed — degrade quietly, retry next window.
     }
     if (book.listed() <= 0) {
+      // PLAN-2026-07-22 (#591, flatten-to-zero freshness): the book was flattened while still
+      // tripped. Clear the cached exposure so the reset banner reads a flat book (0/null) instead
+      // of the stale last-non-zero figure it would otherwise keep until the next reset+heartbeat.
+      // cacheOpenBookExposure(0, null) alone would NOT null the MTM (it only refreshes it from a
+      // present valuation), so zero BOTH fields explicitly. Pure field write (no command) —
+      // replay-safe, no version gate.
+      this.lastOpenPositions = 0;
+      this.lastOpenMtm = null;
       return; // holding -> 0: nothing left to flatten, stop paging.
     }
     OpenBookMtm valued;
@@ -927,6 +1012,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     } catch (RuntimeException e) {
       valued = null; // quote activity threw — page the count/elapsed without an MTM figure.
     }
+    // PLAN-2026-07-22 (#591): cache the still-holding exposure so the reset banner stays fresh to
+    // within one STILL_HOLDING_REPAGE_TICKS re-page window (this call is throttled to the re-page
+    // cadence, NOT every heartbeat — the figure an operator sees at reset can be up to one window
+    // stale; the Phase-2 UI copy should say "as of last heartbeat/re-page", not "live"). This is
+    // the reset-scenario value point — a tripped heartbeat never reaches the pre-trip cache above.
+    cacheOpenBookExposure(book, valued);
     // Omit the MTM unless EVERY position priced: a partial (or thrown) valuation is unreliable, so
     // page the count + elapsed only rather than a misleading number.
     BigDecimal mtm = (valued != null && valued.quoteFailures() == 0) ? valued.openMtm() : null;
@@ -1249,6 +1340,15 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     if (request.getNote() != null && !request.getNote().isBlank()) {
       subj.put("note", request.getNote());
     }
+    // PLAN-2026-07-22 (#591): enrich the reset audit with the open exposure the operator resumed on
+    // (mirrors the doTrip / still-holding subjects) so a blind "reset to trade again" over an
+    // underwater book is recorded. Cached last-heartbeat values; omitted when null. Payload only.
+    if (lastOpenPositions != null) {
+      subj.put("open_positions", lastOpenPositions);
+    }
+    if (lastOpenMtm != null) {
+      subj.put("open_mtm", lastOpenMtm);
+    }
     auditLog(KIND_KILL_SWITCH_RESET_APPROVED, subj);
   }
 
@@ -1262,6 +1362,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     s.setTrippedAt(trippedAt);
     s.setCoolingDownUntil(coolingDownUntil);
     s.setTradingDay(tradingDay);
+    // PLAN-2026-07-22 (#591): nullable pass-through of the cached last-heartbeat exposure so the
+    // reset banner can show what the tenant still holds. Null on the per-strategy kill switch
+    // (never
+    // cached) and before the first valued heartbeat.
+    s.setOpenPositions(lastOpenPositions == null ? null : lastOpenPositions.longValue());
+    s.setOpenMtm(lastOpenMtm);
     return s;
   }
 

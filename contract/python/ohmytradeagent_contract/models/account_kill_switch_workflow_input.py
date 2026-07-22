@@ -10,15 +10,15 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, confloat, conint, con
 
 class AccountKillSwitchWorkflowInput(BaseModel):
     """
-    Phase 6: input for AccountKillSwitchWorkflow. ONE workflow per tenant_id (NO strategy_id segment — the cap spans every strategy on the tenant's shared broker_target), bootstrapped on orchestrator startup with workflow_id t-<tenant>/account/killswitch. Mirrors KillSwitchWorkflowInput's carry-forward shape for continueAsNew. Fresh bootstrap inputs omit the carry-forward fields; replayed continueAsNew inputs populate them. v3 adds sod_equity so the start-of-day-equity pct cap's per-day equity snapshot survives a same-day continueAsNew. v4 adds consecutive_mtm_unavailable_ticks so the small-book mtm-unavailable fail-close debounce counter survives a same-day continueAsNew.
+    Phase 6: input for AccountKillSwitchWorkflow. ONE workflow per tenant_id (NO strategy_id segment — the cap spans every strategy on the tenant's shared broker_target), bootstrapped on orchestrator startup with workflow_id t-<tenant>/account/killswitch. Mirrors KillSwitchWorkflowInput's carry-forward shape for continueAsNew. Fresh bootstrap inputs omit the carry-forward fields; replayed continueAsNew inputs populate them. v3 adds sod_equity so the start-of-day-equity pct cap's per-day equity snapshot survives a same-day continueAsNew. v4 adds consecutive_mtm_unavailable_ticks so the small-book mtm-unavailable fail-close debounce counter survives a same-day continueAsNew. v5 adds last_open_positions/last_open_mtm so the reset-banner open-exposure cache survives a same-day continueAsNew (else the exposure is blank for up to one heartbeat after a CAN).
     """
 
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1, le=4)
+    schema_version: conint(ge=1, le=5)
     """
-    DTO contract version. v1 = bootstrap-only input; v2 adds optional carry-forward fields produced by continueAsNew; v3 adds the sod_equity carry-forward; v4 adds the consecutive_mtm_unavailable_ticks carry-forward. Workers reject newer-than-build inputs.
+    DTO contract version. v1 = bootstrap-only input; v2 adds optional carry-forward fields produced by continueAsNew; v3 adds the sod_equity carry-forward; v4 adds the consecutive_mtm_unavailable_ticks carry-forward; v5 adds the last_open_positions/last_open_mtm exposure-cache carry-forward. Workers reject newer-than-build inputs.
     """
     tenant_id: constr(min_length=1)
     tripped: bool | None = None
@@ -52,4 +52,12 @@ class AccountKillSwitchWorkflowInput(BaseModel):
     consecutive_mtm_unavailable_ticks: conint(ge=0) | None = None
     """
     Carry-forward count of CONSECUTIVE unpriceable-book heartbeats accumulated toward the small-book mtm-unavailable fail-close debounce (MTM_UNAVAILABLE_TRIP_TICKS). Carried across continueAsNew so a same-day CAN mid-debounce does not reset the count. Absent on fresh bootstrap and when the count is 0. v4+.
+    """
+    last_open_positions: conint(ge=0) | None = None
+    """
+    Carry-forward listed open-position count cached from the last heartbeat that valued the book (the reset-banner exposure). Carried across continueAsNew so the exposure is not blank for up to one heartbeat after a same-day CAN. Absent on fresh bootstrap and until the first valued heartbeat. v5+.
+    """
+    last_open_mtm: float | None = None
+    """
+    Carry-forward SIGNED unrealized P&L ((liveBid-entry)*qty*100) cached from the last heartbeat that priced the book FULLY (quoteFailures==0). SIGNED — a positive value is a gain, not a loss. Carried across continueAsNew so the reset banner is not blank for up to one heartbeat after a same-day CAN; carried ONLY when the last heartbeat priced the book (a partial/absent valuation leaves it absent). Absent on fresh bootstrap and until the first fully-priced heartbeat. v5+.
     """
