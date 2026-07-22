@@ -199,11 +199,10 @@ export interface Portfolio {
     // Live intraday "today" P&L for this broker_target: equity - last_equity (prior market close).
     // The GENUINE today figure the /live header shows, distinct from portfolio-history's last
     // completed daily bar. Null when last_equity is unavailable (then the header falls back to the
-    // daily bar). today_pl_pct = today_pl / last_equity, null when last_equity <= 0. last_equity is
-    // surfaced so the header can aggregate the percentage denominator across broker_targets.
+    // daily bar). last_equity is surfaced so the header can aggregate the percentage denominator
+    // (sum today_pl / sum last_equity) across broker_targets.
     last_equity?: string | number | null;
     today_pl?: string | number | null;
-    today_pl_pct?: string | number | null;
     account_number?: string;
   }[];
   account_equity_scope: string;

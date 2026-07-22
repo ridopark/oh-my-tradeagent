@@ -97,9 +97,9 @@ class PortfolioServiceTest {
   @SuppressWarnings("unchecked")
   void emitsIntradayTodayPlFromEquityMinusLastEquity_prodRealLossCase() {
     // The live-incident shape: equity=50,477.06, last_equity=52,259.56 (prior market close) →
-    // today_pl = equity - last_equity = -1,782.50 (a LOSS), and today_pl_pct = -1782.50/52259.56.
-    // This is the GENUINE intraday "today", not Alpaca portfolio-history's last completed daily
-    // bar.
+    // today_pl = equity - last_equity = -1,782.50 (a LOSS). This is the GENUINE intraday "today",
+    // not Alpaca portfolio-history's last completed daily bar. last_equity is surfaced alongside so
+    // the header can aggregate the percentage denominator across broker_targets.
     when(strategyResolver.strategyIdsForTenant("prod_real")).thenReturn(List.of("s1"));
     when(positionsReader.openPositions("prod_real")).thenReturn(List.of());
     when(realizedPnl.computeRealizedPnl(eq("prod_real"), any(), any(LocalDate.class)))
@@ -115,8 +115,6 @@ class PortfolioServiceTest {
     assertThat(equity).hasSize(1);
     assertThat((BigDecimal) equity.get(0).get("today_pl")).isEqualByComparingTo("-1782.50");
     assertThat((BigDecimal) equity.get(0).get("last_equity")).isEqualByComparingTo("52259.56");
-    // -1782.50 / 52259.56 = -0.03410855... -> -0.034109 (6dp, HALF_UP).
-    assertThat((BigDecimal) equity.get(0).get("today_pl_pct")).isEqualByComparingTo("-0.034109");
   }
 
   @Test
@@ -139,7 +137,6 @@ class PortfolioServiceTest {
 
     assertThat(equity).hasSize(1);
     assertThat(equity.get(0)).containsEntry("today_pl", null);
-    assertThat(equity.get(0)).containsEntry("today_pl_pct", null);
     assertThat(equity.get(0)).containsEntry("last_equity", null);
   }
 
