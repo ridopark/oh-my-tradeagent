@@ -8,6 +8,8 @@ import com.ohmytradeagent.exec.broker.OptionsBroker;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -25,6 +27,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class PortfolioHistoryExecActivityImpl implements PortfolioHistoryActivity {
+
+  private static final Logger log = LoggerFactory.getLogger(PortfolioHistoryExecActivityImpl.class);
 
   private final BrokerClientRegistry brokerRegistry;
 
@@ -61,10 +65,14 @@ public class PortfolioHistoryExecActivityImpl implements PortfolioHistoryActivit
     // later BFF phase can net them out of the range return. This is a SECOND broker call INSIDE the
     // existing Activity impl — it adds NO new Temporal activity/workflow command, so
     // PortfolioHistoryWorkflow's command sequence is unchanged and NO Workflow.getVersion gate is
-    // needed. Graceful degrade: any failure (broker error, or a non-Alpaca/StubBroker that throws
-    // UnsupportedOperationException — a RuntimeException) leaves the history intact and reports
-    // cash_flows_available=false so the BFF nulls the range number rather than showing a
-    // deposit-polluted one.
+    // needed. Graceful degrade: any failure (broker error, a bounded-timeout
+    // ResourceAccessException
+    // from the Alpaca adapter, or a non-Alpaca/StubBroker that throws UnsupportedOperationException
+    // — all RuntimeExceptions) leaves the history intact and reports cash_flows_available=false so
+    // the BFF nulls the range number rather than showing a deposit-polluted one. The adapter bounds
+    // this call's own latency (see AlpacaPaperBroker#activitiesClient) so a slow-but-not-erroring
+    // activities endpoint can't consume the Activity's shared 15s StartToCloseTimeout and force
+    // Temporal to retry the already-successful portfolio-history read along with it.
     long[] ts = history.timestamps();
     if (ts != null && ts.length > 0) {
       try {
@@ -80,6 +88,15 @@ public class PortfolioHistoryExecActivityImpl implements PortfolioHistoryActivit
         result.setCashFlowAmounts(flowAmounts);
         result.setCashFlowsAvailable(true);
       } catch (RuntimeException e) {
+        // Degrading is expected + normal for brokers that don't implement the read, so this is a
+        // warn, not an error. Log it: without this there is no way to tell from production logs
+        // WHY /live shows "—" for the range return (broker error vs. unsupported vs. timeout).
+        log.warn(
+            "Cash-flow lookup failed for tenant={} broker_target={} — degrading to "
+                + "cash_flows_available=false (portfolio history is unaffected)",
+            tenantId,
+            request.getBrokerTarget().value(),
+            e);
         result.setCashFlowTimestamps(List.of());
         result.setCashFlowAmounts(List.of());
         result.setCashFlowsAvailable(false);

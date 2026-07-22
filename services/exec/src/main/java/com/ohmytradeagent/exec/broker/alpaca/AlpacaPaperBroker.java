@@ -22,6 +22,8 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
+import java.net.http.HttpClient;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -33,6 +35,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
@@ -91,6 +94,13 @@ public class AlpacaPaperBroker implements OptionsBroker {
    */
   public static final String ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE = "AccountOrdersBlockedError";
 
+  /**
+   * Failure type for the read-only {@code /v2/account/activities} cash-flow lookup. Kept distinct
+   * from the order-path classifications in {@link #mapError} so a failed READ is never reported in
+   * order wording ("Alpaca rejected order: ...") for an order that was never placed.
+   */
+  public static final String ACCOUNT_ACTIVITIES_READ_ERROR_TYPE = "AccountActivitiesReadError";
+
   /** Regulatory PDT day-trade limit for sub-$25k margin accounts. */
   private static final int PDT_DAYTRADE_LIMIT = 3;
 
@@ -111,14 +121,59 @@ public class AlpacaPaperBroker implements OptionsBroker {
   static final String DUPLICATE_CID_RETHROW_COUNTER_NAME =
       "alpaca.placeorder.duplicate_cid_rethrow";
 
+  /** Connect timeout for the read-only cash-flow lookup. See {@link #activitiesClient}. */
+  private static final Duration ACTIVITIES_CONNECT_TIMEOUT = Duration.ofSeconds(2);
+
+  /** Read timeout for the read-only cash-flow lookup. See {@link #activitiesClient}. */
+  private static final Duration ACTIVITIES_READ_TIMEOUT = Duration.ofSeconds(5);
+
   private final RestClient client;
+
+  /**
+   * Bounded-latency client used ONLY by {@link #getAccountActivities}. The shared {@link #client}
+   * carries no connect/read timeout, which is deliberate on the ORDER path (a read timeout on a
+   * POST that Alpaca actually accepted would turn a placed order into a retry → duplicate). The
+   * cash-flow lookup runs as a SECOND call inside the portfolio-history Activity, which has a
+   * single 15s {@code StartToCloseTimeout} covering BOTH calls: an unbounded slow (not erroring)
+   * {@code /v2/account/activities} would burn the whole budget and make Temporal time out and retry
+   * the entire Activity — taking down the portfolio-history read this lookup was only meant to
+   * augment. Bounding it here keeps a degraded activities endpoint contained: the call fails fast
+   * with a {@code ResourceAccessException}, the caller degrades to {@code
+   * cash_flows_available=false}, and the chart data survives. Safe to bound because this endpoint
+   * is a read — retrying or abandoning it has no side effects.
+   */
+  private final RestClient activitiesClient;
+
   private final ObjectMapper mapper;
   private final Counter duplicateCidResolvedCounter;
   private final Counter duplicateCidRethrowCounter;
 
   public AlpacaPaperBroker(
       RestClient alpacaRestClient, ObjectMapper objectMapper, MeterRegistry meterRegistry) {
+    this(
+        alpacaRestClient,
+        objectMapper,
+        meterRegistry,
+        ACTIVITIES_CONNECT_TIMEOUT,
+        ACTIVITIES_READ_TIMEOUT);
+  }
+
+  /** Timeout-injecting ctor so the bounded cash-flow path is testable without a 5s wall clock. */
+  AlpacaPaperBroker(
+      RestClient alpacaRestClient,
+      ObjectMapper objectMapper,
+      MeterRegistry meterRegistry,
+      Duration activitiesConnectTimeout,
+      Duration activitiesReadTimeout) {
     this.client = alpacaRestClient;
+    JdkClientHttpRequestFactory activitiesRequestFactory =
+        new JdkClientHttpRequestFactory(
+            HttpClient.newBuilder().connectTimeout(activitiesConnectTimeout).build());
+    activitiesRequestFactory.setReadTimeout(activitiesReadTimeout);
+    // mutate() inherits the base URL + auth headers, so the bounded client is byte-identical on
+    // the wire — only its timeouts differ.
+    this.activitiesClient =
+        alpacaRestClient.mutate().requestFactory(activitiesRequestFactory).build();
     this.mapper = objectMapper;
     this.duplicateCidResolvedCounter =
         Counter.builder(DUPLICATE_CID_RESOLVED_COUNTER_NAME)
@@ -694,7 +749,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
     List<AlpacaAccountActivity> raw;
     try {
       raw =
-          client
+          activitiesClient
               .get()
               .uri(
                   uriBuilder ->
@@ -707,7 +762,18 @@ public class AlpacaPaperBroker implements OptionsBroker {
               .retrieve()
               .body(new ParameterizedTypeReference<List<AlpacaAccountActivity>>() {});
     } catch (HttpStatusCodeException e) {
-      throw mapError(e);
+      // Deliberately NOT mapError(e): that helper's classifications are order-worded ("Alpaca
+      // rejected order: ...", InsufficientFundsError, InvalidContractError) and would describe an
+      // order that was never placed if an activities-endpoint body happened to carry one of those
+      // tokens. This is a read; the caller degrades on any RuntimeException either way, so a
+      // plainly-worded read failure is strictly more honest in logs.
+      throw ApplicationFailure.newFailureWithCause(
+          "Alpaca /v2/account/activities read failed (status="
+              + e.getStatusCode().value()
+              + "): "
+              + extractMessage(tryParse(e.getResponseBodyAsString()), e.getResponseBodyAsString()),
+          ACCOUNT_ACTIVITIES_READ_ERROR_TYPE,
+          e);
     }
     if (raw == null) {
       return List.of();

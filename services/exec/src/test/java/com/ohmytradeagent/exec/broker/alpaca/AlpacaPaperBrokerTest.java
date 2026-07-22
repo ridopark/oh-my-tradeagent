@@ -18,9 +18,11 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.failure.ApplicationFailure;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -580,17 +582,59 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
-  void getAccountActivities_serverError_throwsMapErrorFailure() {
-    // A 5xx from the activities read surfaces through mapError (a generic 5xx stays a retryable
-    // HttpStatusCodeException) — the caller degrades to cash_flows_available=false.
+  void getAccountActivities_serverError_throwsReadWordedFailureNotOrderWorded() {
+    // The activities read must NOT be classified through the order-path mapError: that helper's
+    // branches are order-worded, so an activities body carrying e.g. "insufficient buying power"
+    // would produce "Alpaca rejected order: ..." for an order that was never placed. Assert the
+    // read-specific type + wording instead. The caller degrades to cash_flows_available=false
+    // either way.
     server.enqueue(
         new MockResponse()
             .setResponseCode(500)
             .setHeader("Content-Type", "application/json")
-            .setBody("{\"message\":\"internal error\"}"));
+            .setBody("{\"message\":\"insufficient buying power\"}"));
 
     assertThatThrownBy(() -> broker.getAccountActivities(1751328000L, 1753142400L))
-        .isInstanceOf(HttpStatusCodeException.class);
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType())
+                  .isEqualTo(AlpacaPaperBroker.ACCOUNT_ACTIVITIES_READ_ERROR_TYPE);
+              assertThat(f.getOriginalMessage()).contains("/v2/account/activities read failed");
+              assertThat(f.getOriginalMessage()).doesNotContain("rejected order");
+            });
+  }
+
+  @Test
+  void getAccountActivities_slowResponse_failsFastOnReadTimeoutInsteadOfHangingTheActivity() {
+    // The cash-flow lookup is a SECOND call inside the portfolio-history Activity, which has one
+    // 15s StartToCloseTimeout covering both calls. A slow-but-not-erroring activities endpoint
+    // must NOT be able to burn that shared budget (which would make Temporal retry the entire
+    // Activity, including the already-successful portfolio-history read). Assert the call is
+    // bounded by its own read timeout and surfaces a RuntimeException the caller degrades on.
+    RestClient client =
+        RestClient.builder()
+            .baseUrl(server.url("/").toString().replaceAll("/$", ""))
+            .defaultHeader("APCA-API-KEY-ID", "key-id-for-test")
+            .defaultHeader("APCA-API-SECRET-KEY", "key-secret-for-test")
+            .defaultHeader("Accept", "application/json")
+            .build();
+    AlpacaPaperBroker bounded =
+        new AlpacaPaperBroker(
+            client, mapper, meterRegistry, Duration.ofMillis(200), Duration.ofMillis(200));
+
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("[]")
+            .setBodyDelay(3, TimeUnit.SECONDS));
+
+    long startedAt = System.nanoTime();
+    assertThatThrownBy(() -> bounded.getAccountActivities(1751328000L, 1753142400L))
+        .isInstanceOf(RuntimeException.class);
+    Duration elapsed = Duration.ofNanos(System.nanoTime() - startedAt);
+    assertThat(elapsed).isLessThan(Duration.ofSeconds(3));
   }
 
   @Test

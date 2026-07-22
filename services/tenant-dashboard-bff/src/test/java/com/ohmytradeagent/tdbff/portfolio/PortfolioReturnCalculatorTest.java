@@ -148,4 +148,42 @@ class PortfolioReturnCalculatorTest {
 
     assertThat(rr.rangePl()).isEqualByComparingTo("6029.56");
   }
+
+  @Test
+  void withdrawalInWindow_addsBackToTradingPlAndShrinksDenominator() {
+    // A withdrawal is a NEGATIVE flow: equity fell 20000→17000 but 5000 of that walked out the
+    // door, so trading P&L is 17000-20000-(-5000) = +2000, a GAIN, not a 3000 loss. Modified-Dietz
+    // denom = 20000 + 0.5*(-5000) = 17500 → 2000/17500 = 0.1142857...
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("20000"), new BigDecimal("17000")),
+            new BigDecimal("20000"),
+            List.of(1000L, 3000L),
+            List.of(2000L),
+            List.of(new BigDecimal("-5000")),
+            true);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("2000");
+    assertThat(rr.rangePlPct().doubleValue()).isCloseTo(0.1142857, within(1e-6));
+  }
+
+  @Test
+  void multipleFlowsAtDifferentTimes_weightedByTimeRemaining() {
+    // Two flows at DIFFERENT weights: T0=0, T1=1000. A +1000 deposit at t=250 carries weight
+    // (1000-250)/1000 = 0.75; a −400 withdrawal at t=750 carries weight 0.25. Net flows = +600, so
+    // rangePl = 11000-10000-600 = 400. Denominator = 10000 + (0.75*1000) + (0.25*-400) = 10650 →
+    // 400/10650 = 0.03755868... A naive equal-weighting (0.5 each) would give 10300 → 0.038835,
+    // so this pins the time-weighting, not just the net.
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("10000"), new BigDecimal("11000")),
+            new BigDecimal("10000"),
+            List.of(0L, 1000L),
+            List.of(250L, 750L),
+            List.of(new BigDecimal("1000"), new BigDecimal("-400")),
+            true);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("400");
+    assertThat(rr.rangePlPct().doubleValue()).isCloseTo(0.03755868, within(1e-8));
+  }
 }

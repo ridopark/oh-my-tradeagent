@@ -113,6 +113,33 @@ class PortfolioHistoryExecActivityImplTest {
   }
 
   @Test
+  void portfolioHistory_emptyWindow_leavesCashFlowFieldsUnsetAndSkipsTheLookup() {
+    // An empty history window has no [first..last] bounds to query, so the impl skips the second
+    // broker call entirely and never sets cash_flows_available. The BFF treats a null
+    // cash_flows_available exactly like false → the range line renders "—". (The parallel arrays
+    // stay at the generated POJO's initialized-empty default, which is why availability — not
+    // array emptiness — is the discriminator the BFF reads.)
+    OptionsBroker broker = mock(OptionsBroker.class);
+    when(broker.getPortfolioHistory(any(), any(), any()))
+        .thenReturn(
+            new OptionsBroker.PortfolioHistory(
+                new long[] {},
+                new BigDecimal[] {},
+                new BigDecimal[] {},
+                new BigDecimal[] {},
+                null,
+                null,
+                "1D"));
+    PortfolioHistoryExecActivityImpl impl =
+        new PortfolioHistoryExecActivityImpl(new FixedBrokerClientRegistry(broker));
+
+    PortfolioHistoryResult result = impl.portfolioHistory(request());
+
+    assertThat(result.getCashFlowsAvailable()).isNull();
+    verify(broker, org.mockito.Mockito.never()).getAccountActivities(anyLong(), anyLong());
+  }
+
+  @Test
   void portfolioHistory_passesResolvedPeriodAndTimeframeThrough() {
     OptionsBroker broker = mock(OptionsBroker.class);
     when(broker.getPortfolioHistory(any(), any(), any())).thenReturn(sampleHistory());
