@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useTransition } from "react";
 import { ConfigFieldReference } from "@/components/ConfigFieldReference";
+import { CloudflareGateNote } from "@/components/CloudflareGateNote";
 
 // Coarse result both onboarding server actions return. No secret, no detail — just whether the call
 // succeeded, the raw HTTP status, and (for the credential save) the NON-secret authenticated account
@@ -638,6 +639,7 @@ export function OnboardForm({
           {!inviteEnabled && (
             <p className="mt-2 text-xs text-slate-500">User invites not enabled (read-only).</p>
           )}
+          <CloudflareGateNote />
         </form>
         {inviteResult && <Banner r={inviteMsg(inviteResult)} />}
       </section>

@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { EMAIL_RE } from "@/lib/validation";
+import { CloudflareGateNote } from "@/components/CloudflareGateNote";
 
 // Per-tenant "Invite user" affordance for the operator admin list. It reuses the page's server action
 // (passed as a prop): on submit it posts a FormData carrying the tenant id and the operator-typed
@@ -72,6 +73,7 @@ export function InviteUserButton({
               bound to the tenant on first sign-in (member only, never operator). No
               email is sent — tell them to sign in.
             </p>
+            <CloudflareGateNote />
             <p className="mt-3 text-sm text-slate-400">User email:</p>
             <input
               type="email"
