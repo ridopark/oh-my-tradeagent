@@ -252,6 +252,22 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_WATCHLIST_EXIT = "watchlist-exit-v1";
 
   /**
+   * PLAN-2026-07-23 replay gate: scope the no_progress_time_stop to the PRE-take-profit window
+   * only. The {@code no_progress_time_stop_secs} timer is a stalled-breakout guard whose documented
+   * contract applies only "if neither the take-profit nor the hard stop has triggered"; the code
+   * fired it unconditionally, so a post-target time-stop flattened a trailing runner and pre-empted
+   * the chandelier trail (TSLA 2026-07-23). Under v&gt;=1 the main-loop time-stop consumer (and its
+   * matching {@code Workflow.await} wake predicate) is gated on {@code !exitTargetFired} so once
+   * the target arms the trail, the runner is governed only by the chandelier giveback + breakeven
+   * stop + EOD/expiry backstops (Fork A). At DEFAULT_VERSION the consumer stays the CURRENT
+   * unconditional fire so in-flight histories replay byte-identically — the timer arm is unchanged
+   * (still fires into the latch), so the only new command on v=0 is this appended getVersion
+   * marker.
+   */
+  private static final String VERSION_TIMESTOP_PRETARGET_ONLY =
+      "watchlist-timestop-pretarget-only-v1";
+
+  /**
    * Phase 3 bid-based STOP debounce: require N consecutive ticks whose evaluated bid is at/below
    * the stop level before flattening, so a single outlier bid print (bad NBBO, halted side) does
    * not fire the stop. Reset on any tick at/above the stop level. Mirrors the {@code
@@ -997,6 +1013,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // Null force_close_eod_et keeps the legacy 15:55 path even under v>=1.
     int watchlistExitVersion =
         Workflow.getVersion(VERSION_WATCHLIST_EXIT, Workflow.DEFAULT_VERSION, 1);
+    // PLAN-2026-07-23: gate the no_progress_time_stop consumer on the target not having fired. Read
+    // once here (mirroring watchlistExitVersion) and consulted in the main-loop await predicate and
+    // the exit-backstop flatten branch below. DEFAULT_VERSION keeps the current unconditional fire.
+    int timestopPretargetOnlyVersion =
+        Workflow.getVersion(VERSION_TIMESTOP_PRETARGET_ONLY, Workflow.DEFAULT_VERSION, 1);
     String eodCfg = in.getForceCloseEodEt();
     Duration eodIn;
     if (watchlistExitVersion >= 1 && eodCfg != null && !eodCfg.isBlank()) {
@@ -1149,7 +1170,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   // backstop so the run() loop flattens. Predicate-only (these latch only under the
                   // exit-enabled v>=1 path) — replay-neutral for v=0 / copytrade histories.
                   || exitStopFireRequested
-                  || exitTimeStopFired
+                  // PLAN-2026-07-23: post-target the time-stop is ignored (Fork A). Narrowed in
+                  // lock-step with the :flatten branch so a post-target fire does not wake the loop
+                  // to a no-op. At DEFAULT_VERSION this stays the plain exitTimeStopFired term.
+                  || (exitTimeStopFired && !(timestopPretargetOnlyVersion >= 1 && exitTargetFired))
                   || exitFeedStaleFired
                   // Plan-2A R-AA-1: an in-loop flatten (risk_breach/force_close/chandelier) whose
                   // bounded limit rested unfilled leaves the workflow alive; wake on a LATE fill of
@@ -1183,7 +1207,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // flattens the WHOLE remaining lot MARKETABLE (reason stop_loss / time_stop). Handled before
       // the STC pipeline so a bracket exit is not blocked behind a queued STC, and ABOVE
       // risk_breach/force_close is intentionally avoided — operator/kill-switch intent still wins.
-      if (exitStopFireRequested || exitTimeStopFired || exitFeedStaleFired) {
+      if (exitStopFireRequested
+          // PLAN-2026-07-23: the no_progress_time_stop is a PRE-take-profit stalled-breakout guard
+          // (per its documented contract). Once the target fires and the chandelier trail is armed,
+          // the runner is governed by the trail giveback + breakeven stop + EOD/expiry backstops
+          // (Fork A) — the time-stop no longer flattens it. Version-gated: at DEFAULT_VERSION this
+          // stays the current unconditional fire so in-flight histories replay byte-identically.
+          || (exitTimeStopFired && !(timestopPretargetOnlyVersion >= 1 && exitTargetFired))
+          || exitFeedStaleFired) {
         String reason = exitStopFireRequested ? "stop_loss" : "time_stop";
         // Feed-blind failsafe: whenever we reach the time-based backstop (the staleness timer OR a
         // no-progress time-stop) and NO exit tick has ever arrived since arm, the bid-feed went
