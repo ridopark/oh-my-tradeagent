@@ -6,8 +6,11 @@ import {
   LineChart,
   ReferenceLine,
   ResponsiveContainer,
+  Tooltip,
+  XAxis,
   YAxis,
 } from "recharts";
+import type { TooltipContentProps } from "recharts";
 // Type-only import (erased at compile): lib/bff is server-only, so only its shape crosses here. The
 // data itself arrives over the /api/portfolio-history route handler, never a direct BFF call.
 import type { PortfolioHistory } from "@/lib/bff";
@@ -18,6 +21,77 @@ const RANGES = ["1D", "1W", "1M", "3M", "YTD", "1Y"] as const;
 type Range = (typeof RANGES)[number];
 
 const POLL_MS = 15000;
+
+// Axis ticks are drawn in market time, not the browser's: an intraday tick that reads 9:30 AM must
+// mean the open regardless of where the operator is sitting.
+const ET = "America/New_York";
+
+const usdTick = (v: number) => `$${Math.round(v).toLocaleString("en-US")}`;
+
+// 1D is intraday (clock time); the multi-day ranges label the day, and 1Y adds the year because it
+// spans two of them.
+const timeTick = (ms: number) =>
+  new Date(ms).toLocaleTimeString("en-US", {
+    timeZone: ET,
+    hour: "numeric",
+    minute: "2-digit",
+  });
+const dayTick = (ms: number) =>
+  new Date(ms).toLocaleDateString("en-US", {
+    timeZone: ET,
+    month: "short",
+    day: "numeric",
+  });
+const monthTick = (ms: number) =>
+  new Date(ms).toLocaleDateString("en-US", {
+    timeZone: ET,
+    month: "short",
+    year: "2-digit",
+  });
+
+const xTickFor = (range: Range) =>
+  range === "1D" ? timeTick : range === "1Y" ? monthTick : dayTick;
+
+// The tooltip spells the moment out in full (the axis tick is abbreviated to fit): 1D points are
+// intraday so they carry a clock time, the other ranges are one bar per day.
+const tooltipStamp = (range: Range, ms: number) => {
+  const opts: Intl.DateTimeFormatOptions = {
+    timeZone: ET,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  };
+  if (range === "1D") {
+    opts.hour = "numeric";
+    opts.minute = "2-digit";
+    opts.timeZoneName = "short";
+  }
+  return new Date(ms).toLocaleString("en-US", opts);
+};
+
+const usdExact = (v: number) =>
+  v.toLocaleString("en-US", { style: "currency", currency: "USD" });
+
+function ChartTooltip({
+  active,
+  payload,
+  range,
+}: TooltipContentProps & { range: Range }) {
+  const point = payload?.[0]?.payload as
+    | { t: number; equity: number }
+    | undefined;
+  if (!active || !point) return null;
+  return (
+    <div className="rounded border border-slate-700 bg-slate-950/95 px-3 py-2 text-sm shadow-lg">
+      <div className="font-semibold text-slate-100">
+        {usdExact(point.equity)}
+      </div>
+      <div className="text-xs text-slate-400">
+        {tooltipStamp(range, point.t)}
+      </div>
+    </div>
+  );
+}
 
 export function AccountValueChart({
   onData,
@@ -73,8 +147,10 @@ export function AccountValueChart({
   const up = lastPl >= 0;
   const lineColor = up ? "#10b981" : "#f43f5e";
 
+  // Timestamps arrive as epoch SECONDS; the axis formatters take millis.
   const points =
-    data?.timestamps.map((t, i) => ({ t, equity: data.equity[i] })) ?? [];
+    data?.timestamps.map((t, i) => ({ t: t * 1000, equity: data.equity[i] })) ??
+    [];
   const hasData = points.length > 0;
 
   return (
@@ -109,8 +185,31 @@ export function AccountValueChart({
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={points}>
-              <YAxis hide domain={["auto", "auto"]} />
+            <LineChart
+              data={points}
+              margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
+            >
+              <XAxis
+                dataKey="t"
+                tickFormatter={xTickFor(range)}
+                tick={{ fill: "#64748b", fontSize: 11 }}
+                tickLine={false}
+                axisLine={{ stroke: "#334155" }}
+                minTickGap={40}
+              />
+              <YAxis
+                domain={["auto", "auto"]}
+                tickFormatter={usdTick}
+                tick={{ fill: "#64748b", fontSize: 11 }}
+                tickLine={false}
+                axisLine={false}
+                width={72}
+              />
+              <Tooltip
+                content={(props) => <ChartTooltip {...props} range={range} />}
+                cursor={{ stroke: "#64748b", strokeDasharray: "3 3" }}
+                isAnimationActive={false}
+              />
               <ReferenceLine
                 y={data?.base_value}
                 stroke="#64748b"
@@ -122,6 +221,12 @@ export function AccountValueChart({
                 stroke={lineColor}
                 strokeWidth={2}
                 dot={false}
+                activeDot={{
+                  r: 4,
+                  fill: lineColor,
+                  stroke: "#0f172a",
+                  strokeWidth: 2,
+                }}
                 isAnimationActive={false}
               />
             </LineChart>
