@@ -6,6 +6,7 @@ import com.ohmytradeagent.contract.activities.PortfolioHistoryActivity;
 import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
@@ -76,8 +77,17 @@ public class PortfolioHistoryExecActivityImpl implements PortfolioHistoryActivit
     long[] ts = history.timestamps();
     if (ts != null && ts.length > 0) {
       try {
-        List<OptionsBroker.AccountCashFlow> flows =
-            broker.getAccountActivities(ts[0], ts[ts.length - 1]);
+        // Upper bound = max(series-last, NOW). For a DAILY-BAR range (1M/3M/YTD/1Y) the series'
+        // last
+        // point is the last COMPLETED session (yesterday's close), yet the BFF values EV at NOW
+        // (live account equity); a deposit made TODAY lands in that live EV but would fall OUTSIDE
+        // a
+        // [ts0..ts_last] flow window and be counted as PROFIT — the deposit-as-profit error the
+        // range calc exists to strip. Extending the fetch to NOW captures today's flows so the BFF
+        // can net them out. Harmless for intraday ranges (ts_last ≈ now). Wall-clock is fine here:
+        // this is an Activity impl, not workflow code, and it adds NO Temporal command.
+        long upperBound = Math.max(ts[ts.length - 1], Instant.now().getEpochSecond());
+        List<OptionsBroker.AccountCashFlow> flows = broker.getAccountActivities(ts[0], upperBound);
         List<Long> flowTimestamps = new ArrayList<>(flows.size());
         List<BigDecimal> flowAmounts = new ArrayList<>(flows.size());
         for (OptionsBroker.AccountCashFlow f : flows) {

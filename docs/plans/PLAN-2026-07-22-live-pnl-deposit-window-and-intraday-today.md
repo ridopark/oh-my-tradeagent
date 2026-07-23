@@ -95,3 +95,35 @@ Forensics: this session's trace against live Alpaca data + `PortfolioReturnCalcu
 Each: TDD, spotless on every touched Java module, own PR, operator merge gate. No Temporal
 command-shape change (pure read/DTO/calc). No `tenants/*.yaml`/ConfigMap change. Commit trailer:
 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+
+## Phase 3 — range EV = live account equity, not the chart's last daily bar (bff-only)
+**Goal:** the range "excl. deposits" P&L must value the book at NOW (live net-liq equity), the SAME
+figure the header total uses — not the portfolio-history series' last point, which for a daily-bar
+range (1M/3M/YTD/1Y) is the last COMPLETED session (yesterday's close). Confirmed live on prod-kipark
+(acct 310056593, funded a clean $50,000): 1M shows +$4,360.02 (EV=yesterday's close $54,360.02) but
+should show +$2,577.52 = live equity $52,577.52 − $50,000 (= the 1W value, which already uses the live
+intraday EV). Overstated by exactly today's −$1,782.50 move.
+
+**Root cause:** `PortfolioReturnCalculator.compute` uses `equity.get(equity.size()-1)` as EV; the
+header total instead sources live equity from the account snapshot (`page.tsx:86`). The two diverge
+for daily-bar ranges.
+
+**Changes (anchors — implementer re-reads):**
+- `services/tenant-dashboard-bff/.../portfolio/PortfolioReturnCalculator.java` — add a `BigDecimal
+  liveEquity` param to `compute(...)`; use it as EV when non-null, else fall back to
+  `equity[last]` (behavior-preserving when unavailable). Only the EV changes — base, flows, weights,
+  denominator, and the null-guards are unchanged.
+- `services/tenant-dashboard-bff/.../web/PortfolioHistoryController.java` — read the live account
+  equity for the resolved `broker_target` (inject `AccountEquityClient`, call `snapshotFor(tenant,
+  brokerTarget).equity()`) and pass it into `compute(...)`. Degrade to null (→ old behavior) if the
+  snapshot read fails — never fail the chart.
+
+**Tests (TDD):**
+- prod-kipark reproduction: `equity[last]=54360.02` (stale daily bar), `liveEquity=52577.52`,
+  `base=50000`, no in-window flows → `rangePl=2577.52` (NOT 4360.02); `rangePlPct=2577.52/50000`.
+- `liveEquity=null` → falls back to `equity[last]` (existing tests unchanged/passing).
+- controller: the live equity is read and threaded; a degraded snapshot → null EV → old behavior.
+
+**Verify:** `mvn -pl services/tenant-dashboard-bff -am spotless:apply` + `spotless:check` + module
+tests; behavioral: prod-kipark 1M `range_pl` now equals the 1W value (both live-EV) and reconciles
+with total − funded. BFF-only — NO exec change, so NO exec-alpaca-live roll needed to take effect.
