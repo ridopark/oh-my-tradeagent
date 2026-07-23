@@ -203,6 +203,20 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * PLAN-2026-07-23 Phase 1. The change-id must never be renamed: an in-flight heartbeat that
+   * recorded this marker resolves it by NAME on replay, and a rename would silently re-resolve it
+   * to {@code DEFAULT_VERSION} — flipping an expired lot back to a fail-close quote failure and
+   * re-arming the very daily-trip loop the phase removes.
+   */
+  @Test
+  void versionAccountExpiredWorthZeroConstantNameIsStable() throws Exception {
+    Field marker =
+        AccountKillSwitchWorkflowImpl.class.getDeclaredField("VERSION_ACCOUNT_EXPIRED_WORTH_ZERO");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("killswitch-expired-worth-zero-v1");
+  }
+
+  /**
    * PLAN-2026-07-22 (#591, exposure CAN-carry) legacy-carry init coverage. A PRE-v5 continueAsNew
    * carry input (schema_version 2, 3, or 4, with NO {@code last_open_positions}/{@code
    * last_open_mtm} fields) must still be ACCEPTED by the widened {@code @WorkflowInit} guard

@@ -20,6 +20,7 @@ import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantStrategyBrokerTarget;
+import com.ohmytradeagent.orchestrator.domain.OccSymbol;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
@@ -194,6 +195,17 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * command). Pinned by {@code AccountKillSwitchWorkflowImplLegacyReplayTest}.
    */
   static final String VERSION_ACCOUNT_MTM_DEBOUNCE = "account-mtm-debounce-v1";
+
+  /**
+   * PLAN-2026-07-23 Phase 1: value a PHYSICALLY EXPIRED contract at zero instead of counting its
+   * (permanently) unavailable quote as a fail-close-worthy quote failure. Gated because the change
+   * alters the TRIP DECISION: a history that recorded {@code doTrip} commands for {@code
+   * auto:account_mtm_unavailable} on an expired book must replay byte-identically, so at {@link
+   * Workflow#DEFAULT_VERSION} the legacy count-as-failure path is preserved. The quote Activity
+   * itself is still dispatched for every position either way — only the in-memory arithmetic
+   * differs — so no command is added or removed on the valuation path.
+   */
+  static final String VERSION_ACCOUNT_EXPIRED_WORTH_ZERO = "killswitch-expired-worth-zero-v1";
 
   /**
    * Phase 2b (risk C1): emitted (and Discord-paged via {@code AccountKillSwitchCapAlerter}) on the
@@ -415,6 +427,13 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * {@code @WorkflowInit}. Absent/null on an old pre-v4 carry restores as 0.
    */
   private int consecutiveMtmUnavailableTicks;
+
+  /**
+   * PLAN-2026-07-23 Phase 1 gate, resolved once per heartbeat at the same stable scope as the other
+   * version reads and consumed by {@link #valueOpenBook} (which is reached from three call sites in
+   * the tick, so a field keeps the read deterministic and single).
+   */
+  private int expiredWorthZeroVersion;
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
@@ -711,6 +730,10 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // marker) is the correct pattern; pinned by AccountKillSwitchWorkflowImplLegacyReplayTest.
     int mtmDebounceVersion =
         Workflow.getVersion(VERSION_ACCOUNT_MTM_DEBOUNCE, Workflow.DEFAULT_VERSION, 2);
+    // PLAN-2026-07-23 Phase 1: resolve the expired-worth-zero gate at this same stable scope,
+    // BEFORE the book is valued, and stash it for valueOpenBook (see the field's javadoc).
+    this.expiredWorthZeroVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_EXPIRED_WORTH_ZERO, Workflow.DEFAULT_VERSION, 1);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -892,7 +915,8 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * Values the open book by dispatching a per-position live-bid quote and summing the unrealized
    * P&amp;L per the cap definition. Shared by the trip-eval path and the Phase 2b re-page path so
    * the two agree and the quote loop is not duplicated. A missing quote increments {@code
-   * quoteFailures} and is skipped (the caller decides fail-closed vs best-effort).
+   * quoteFailures} and is skipped (the caller decides fail-closed vs best-effort) — UNLESS the
+   * contract has physically expired, see {@link #hasPhysicallyExpired}.
    */
   private OpenBookMtm valueOpenBook(AccountOpenBook book) {
     BigDecimal openMtm = BigDecimal.ZERO;
@@ -900,6 +924,22 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     for (OpenPositionValuation pos : book.positions()) {
       BigDecimal bid = liveBid(pos.contractSymbol());
       if (bid == null) {
+        // PLAN-2026-07-23 Phase 1: an EXPIRED contract's value is KNOWN (zero), not unknown. It is
+        // delisted, so its quote is unavailable FOREVER — counting it as a quote failure
+        // fail-CLOSES
+        // the cap on every heartbeat for as long as the lot is listed (the 2026-07-22 staging_paper
+        // halt: 2 of 3 positions expired days earlier => 2*2 > 3 => trip 47s after the open, every
+        // session). Book the lot's REAL loss (0 - entryPremium) instead: a worthless expiry is a
+        // total loss of the premium paid, so this makes the cap STRICTER, never looser.
+        if (expiredWorthZeroVersion >= 1 && hasPhysicallyExpired(pos.contractSymbol())) {
+          openMtm =
+              openMtm.add(
+                  pos.entryPremium()
+                      .negate()
+                      .multiply(BigDecimal.valueOf(pos.remainingQty()))
+                      .multiply(CONTRACT_MULTIPLIER));
+          continue;
+        }
         quoteFailures++;
         continue;
       }
@@ -912,6 +952,19 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
                   .multiply(CONTRACT_MULTIPLIER));
     }
     return new OpenBookMtm(openMtm, quoteFailures);
+  }
+
+  /**
+   * PLAN-2026-07-23 Phase 1: has this contract physically expired as of the workflow's current
+   * trading day? Compared against {@link #tradingDay} (already refreshed from {@code
+   * calendar.todayEt()} at the top of the heartbeat) rather than a fresh Activity call, so this
+   * adds NO command to the workflow's history. An unparseable OCC yields {@code null} from {@link
+   * OccSymbol#expiryOf} and is treated as NOT expired — fail-safe, keeping the legacy
+   * count-as-quote-failure behavior for anything we cannot positively date.
+   */
+  private boolean hasPhysicallyExpired(String contractSymbol) {
+    LocalDate expiry = OccSymbol.expiryOf(contractSymbol);
+    return expiry != null && tradingDay != null && !expiry.isAfter(tradingDay);
   }
 
   /**
