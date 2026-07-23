@@ -280,6 +280,49 @@ class PortfolioServiceTest {
   }
 
   @Test
+  void crossDayTodayFigureIsFifoLoss_notPhantomProceeds() {
+    // prod_real 2026-07-22: a prior-day AAPL call sold today at a loss. The fixed day-scoped calc
+    // returns the FIFO loss (-121), NOT the raw-proceeds phantom (+2068). This test locks that the
+    // (now concurrent) daily path publishes whatever the calc returns — the FIFO correctness itself
+    // is covered in RealizedPnlCalculatorUnitTest / IT.
+    when(strategyResolver.strategyIdsForTenant("prod_real")).thenReturn(List.of("copytrade-v1"));
+    when(positionsReader.openPositions("prod_real")).thenReturn(List.of());
+    when(realizedPnl.computeRealizedPnl(eq("prod_real"), eq("copytrade-v1"), any(LocalDate.class)))
+        .thenReturn(new BigDecimal("-121.00")); // FIFO loss, not the +2068 phantom
+    when(strategyRegistry.brokerTarget("prod_real", "copytrade-v1")).thenReturn("alpaca-live");
+    when(accountEquity.snapshotFor("prod_real", "alpaca-live"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("50000.00"), null));
+
+    Map<String, Object> body = service.portfolio("prod_real");
+
+    assertThat(body.get("realized_pnl_today")).isEqualTo(new BigDecimal("-121.00"));
+  }
+
+  @Test
+  void dailyScanTimeoutDegradesToNullNotMisleadingZero() throws Exception {
+    // The day-scoped realized calc is now a full-history scan on the sub-read budget. A stalled
+    // scan
+    // must publish realized_pnl_today as NULL (tile renders "—") — NOT BigDecimal.ZERO, which would
+    // show a misleading $0.00 and silently under-count.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme")).thenReturn(List.of());
+    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
+        .thenAnswer(
+            inv -> {
+              Thread.sleep(3000);
+              return new BigDecimal("777.00");
+            });
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
+
+    PortfolioService fast = newService(false, 1);
+    Map<String, Object> body = fast.portfolio("acme");
+
+    assertThat(body).containsEntry("realized_pnl_today", null);
+  }
+
+  @Test
   @SuppressWarnings("unchecked")
   void joinsLiveMarksByNormalizedCompactOcc_padInsensitively() {
     // The tracked position carries the PADDED canonical OCC; the broker marks are keyed COMPACT.
