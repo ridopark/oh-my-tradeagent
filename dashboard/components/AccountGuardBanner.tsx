@@ -1,4 +1,5 @@
 import { auth } from "@/auth";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { resetAccountKillSwitch } from "@/lib/bff";
@@ -93,6 +94,7 @@ export function AccountGuardBanner({
   resetEligibleAt,
   openPositions,
   openMtm,
+  capText,
 }: {
   state: "tripped" | "healthy";
   reason?: string;
@@ -101,6 +103,9 @@ export function AccountGuardBanner({
   // Open exposure surfaced at the reset control (#591) — nullable pass-through to the reset island.
   openPositions?: number | null;
   openMtm?: number | null;
+  // Human-readable account daily-loss cap (e.g. "20% of start-of-day equity"), or null when unset /
+  // the config read degraded. Shown inside the collapsed explainer on the healthy "guard active" line.
+  capText?: string | null;
 }) {
   if (state === "tripped") {
     return (
@@ -140,14 +145,79 @@ export function AccountGuardBanner({
   // Phase 2 seam: an 'unprotected' branch (amber cap-OFF bar, motion-safe:animate-unprotected-pulse)
   // will slot here once its backend state exists. Not implemented in Phase 1.
 
-  // HEALTHY — a quiet line, deliberately NOT a bar: icon + text, no sticky, no motion, no live
-  // region. Centered to the page width (max-w-6xl) since the banner now mounts outside <main>.
+  // HEALTHY — a quiet green "guard active" line that is ALSO the (collapsed-by-default) explainer of
+  // what the daily-loss protection does. Native <details> so it needs no client JS. Centered to the
+  // page width (max-w-6xl) since the banner mounts outside <main>. Deliberately NOT a bar / no motion.
   return (
     <div className="mx-auto w-full max-w-6xl px-4 pt-4">
-      <span className="inline-flex items-center gap-1.5 text-xs text-emerald-300/80">
-        <ShieldCheckIcon className="size-3.5 shrink-0" />
-        Daily-loss guard active
-      </span>
+      <details className="group max-w-2xl">
+        <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-xs text-emerald-300/80 hover:text-emerald-300">
+          <ShieldCheckIcon className="size-3.5 shrink-0" />
+          Daily-loss guard active
+          <span className="text-slate-500 group-open:hidden">— how it works</span>
+          <ChevronDownIcon className="size-3 shrink-0 text-slate-500 transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="mt-2 rounded border border-slate-800 bg-slate-900 px-4 py-3">
+          <p className="text-sm text-slate-400">
+            One account-wide daily-loss cap protects the whole account — total losses across every
+            strategy, counting both realized P&amp;L and open positions (mark-to-market). If the
+            day&apos;s losses reach the cap, the account kill switch trips automatically:
+          </p>
+          <ul className="mt-2 space-y-1 text-sm text-slate-300">
+            <li>
+              <span className="font-medium text-slate-200">Stops all new entries</span> until the
+              switch is reset.
+            </li>
+            <li>
+              <span className="font-medium text-slate-200">Alerts you loudly</span> (Discord) — it
+              does <span className="font-medium text-slate-200">not</span> auto-close your positions.
+              You decide whether to close them in your broker or leave them open.
+            </li>
+          </ul>
+          <div className="mt-3 border-t border-slate-800 pt-3 text-sm">
+            {capText ? (
+              <span className="text-slate-300">
+                Your account daily-loss cap:{" "}
+                <span className="font-semibold text-slate-100">{capText}</span>.
+              </span>
+            ) : (
+              <span className="text-slate-500">
+                No account daily-loss cap is currently set.
+              </span>
+            )}
+          </div>
+          <p className="mt-2 text-sm text-slate-400">
+            Trading stays halted until you reset the switch from the{" "}
+            <Link href="/status" className="text-sky-400 hover:text-white">
+              Status
+            </Link>{" "}
+            page (available after a 15-minute cool-off).
+          </p>
+          <p className="mt-2 text-xs text-slate-500">
+            Outside a daily-loss trip, open positions are normally held overnight (unless a strategy
+            has end-of-day flatten enabled).
+          </p>
+        </div>
+      </details>
     </div>
+  );
+}
+
+// Chevron for the collapsible "guard active" explainer (inline SVG — this dashboard has no icon
+// library; matches the ShieldCheck / OctagonAlert convention above). Rotates 180° when <details> open.
+function ChevronDownIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="m6 9 6 6 6-6" />
+    </svg>
   );
 }

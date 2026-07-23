@@ -176,7 +176,11 @@ export default async function StatusPage({
             value={fmtCurrency(p.sum_open_notional)}
             note="Cost basis at entry — not live mark."
           />
-          <Stat label="Realized P&L today" value={fmtCurrency(p.realized_pnl_today)} />
+          <Stat
+            label="Realized P&L today"
+            value={fmtCurrency(p.realized_pnl_today)}
+            note="Booked P&L on trades closed today, measured vs. your entry cost (FIFO) — not the day's change in account value (see Live)."
+          />
           <PnlStat
             label="Realized P&L (all-time)"
             value={p.realized_pnl_all_time}

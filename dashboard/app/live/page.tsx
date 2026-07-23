@@ -127,6 +127,7 @@ export default async function LivePage() {
         resetEligibleAt={killSwitch?.resettableAt}
         openPositions={killSwitch?.openPositions ?? null}
         openMtm={killSwitch?.openMtm ?? null}
+        capText={accountCapText(tenantConfig)}
       />
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-6">
         <div>
@@ -143,8 +144,6 @@ export default async function LivePage() {
           todayPl={todayPl}
           todayPlPct={todayPlPct}
         />
-
-        <DailyLossProtection accountCap={tenantConfig} />
 
         <section>
           <h2 className="mb-2 text-sm font-semibold text-slate-200">
@@ -210,67 +209,6 @@ function accountCapText(cfg: TenantConfig | null): string | null {
     parts.push(`${fmtCurrency(usd)} (realized + open P&L)`);
   }
   return parts.length > 0 ? parts.join(" or ") : null;
-}
-
-// Informational: explains what a strategy's daily-loss kill switch does (flatten + halt) and how it
-// clears. Read-only. `limits === null` means the config read degraded; render a neutral
-// "unavailable" line rather than implying no protection. `accountCap` is the tenant-wide account cap
-// (null = unset or read degraded) — when present it replaces the vague "when it's configured" phrasing.
-function DailyLossProtection({
-  accountCap,
-}: {
-  accountCap: TenantConfig | null;
-}) {
-  const capText = accountCapText(accountCap);
-  return (
-    <section className="rounded border border-slate-800 bg-slate-900 px-4 py-3">
-      <h2 className="text-sm font-semibold text-slate-200">
-        🛡️ Daily-loss protection
-      </h2>
-      <p className="mt-1 text-sm text-slate-400">
-        One account-wide daily-loss cap protects the whole account — total losses across every
-        strategy, counting both realized P&amp;L and open positions (mark-to-market). If the day&apos;s
-        losses reach the cap, the account kill switch trips automatically:
-      </p>
-      <ul className="mt-2 space-y-1 text-sm text-slate-300">
-        <li>
-          <span className="font-medium text-slate-200">Stops all new entries</span>{" "}
-          until the switch is reset.
-        </li>
-        <li>
-          <span className="font-medium text-slate-200">Alerts you loudly</span> (Discord) — it does{" "}
-          <span className="font-medium text-slate-200">not</span> auto-close your positions. You
-          decide whether to close them in your broker or leave them open.
-        </li>
-      </ul>
-
-      <div className="mt-3 border-t border-slate-800 pt-3 text-sm">
-        {capText ? (
-          <span className="text-slate-300">
-            Your account daily-loss cap:{" "}
-            <span className="font-semibold text-slate-100">{capText}</span>.
-          </span>
-        ) : (
-          <span className="text-slate-500">
-            No account daily-loss cap is currently set.
-          </span>
-        )}
-      </div>
-
-      <p className="mt-2 text-sm text-slate-400">
-        Trading stays halted until you reset the switch from the{" "}
-        <Link href="/status" className="text-sky-400 hover:text-white">
-          Status
-        </Link>{" "}
-        page (available after a 15-minute cool-off).
-      </p>
-
-      <p className="mt-2 text-xs text-slate-500">
-        Outside a daily-loss trip, open positions are normally held overnight (unless a strategy has
-        end-of-day flatten enabled).
-      </p>
-    </section>
-  );
 }
 
 function ActivityStrip({

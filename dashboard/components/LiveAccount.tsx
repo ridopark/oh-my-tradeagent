@@ -139,11 +139,14 @@ function AccountTotal({
         {fmtCurrency(accountValue)}
       </div>
       {pl != null && (
-        <div className={`mt-1 text-sm font-medium ${changeCls}`}>
+        <div
+          className={`mt-1 text-sm font-medium ${changeCls}`}
+          title="Change in your total account value today, vs. yesterday's close (mark-to-market on your whole book). This is NOT 'Realized P&L today' on the Status page — that measures only trades you closed today, vs. your entry cost."
+        >
           {arrow} {fmtCurrency(pl)}
           {/* Alpaca returns profit_loss_pct as a decimal fraction (0.0123 = 1.23%) → x100 for display. */}
           {plPct != null && <> ({(plPct * 100).toFixed(2)}%)</>}
-          <span className="ml-1 text-slate-500">today</span>
+          <span className="ml-1 text-slate-500">today · account value</span>
         </div>
       )}
       <div className="mt-1 text-sm font-medium">
