@@ -204,6 +204,12 @@ class ExecActivitiesImplPlaceOrderValidationTest {
     }
 
     @Override
+    public List<JournaledOrder> findFilledBySide(
+        String tenantId, String strategyId, String side, java.time.LocalDate sinceEtDay) {
+      throw fail();
+    }
+
+    @Override
     public boolean markSubmittedIfRecorded(String intentKey, String brokerOrderId) {
       throw fail();
     }

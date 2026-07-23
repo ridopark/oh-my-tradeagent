@@ -205,6 +205,28 @@ class AccountKillSwitchWorkflowImplTest {
         .containsKey("open_mtm");
   }
 
+  // PLAN-2026-07-22 safety-lock: a prior-day position closed today at a LOSS pre-fix read as a
+  // phantom GAIN (raw exit proceeds credited with zero cost basis), MASKING the breach so the
+  // account daily-loss cap FAILED OPEN. The exec-journal FIFO fix now returns the REAL cross-day
+  // loss, which crosses the 5000 absolute cap and trips auto:account_daily_loss. The harness stubs
+  // the corrected per-strategy figure; the FIFO itself is pinned in DailyPnlExecActivityImplTest.
+  @Test
+  void heartbeat_crossDayLoss_nowTrips_auto_account_daily_loss() {
+    // Corrected cross-day realized loss (pre-fix the phantom read +2068 and masked this). Empty
+    // book (default) so the realized read alone crosses the cap — no MTM/quotes involved.
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-crossday");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+    assertThat(s.getActor()).isEqualTo("auto:account_daily_loss");
+  }
+
   // Below threshold: total loss does not cross the cap -> no trip.
   @Test
   void heartbeat_belowThreshold_doesNotTrip() {

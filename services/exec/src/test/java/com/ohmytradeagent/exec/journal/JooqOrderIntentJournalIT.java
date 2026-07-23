@@ -631,6 +631,77 @@ class JooqOrderIntentJournalIT {
         .hasSize(1);
   }
 
+  // ---------- Cross-day fix (PLAN-2026-07-22): findFilledBySide (lookback-bounded history)
+  // --------
+
+  @Test
+  void findFilledBySide_returnsWithinWindowDaysFifoOrdered_noPerDayPredicate() {
+    // The lookback-bounded sibling drops the per-day EQUALITY predicate (keeping only the lower
+    // bound): a prior-day (D1) entry AND a same-day (D2) exit — both within the window — are
+    // returned, FIFO-ordered, so the exec impl can day-scope in-memory and match the D2 exit
+    // against its REAL D1 basis instead of crediting phantom raw proceeds.
+    String occ = "AAPL  260727C00330000";
+    OffsetDateTime d1 = OffsetDateTime.parse("2026-07-21T14:00:00Z");
+    OffsetDateTime d2 = OffsetDateTime.parse("2026-07-22T14:00:00Z");
+
+    OrderIntent buy = intentWithOcc("buy-d1", "sig-buy", occ);
+    buy.setSide(OrderIntent.Side.BUY);
+    journal.upsertIntent(buy);
+    journal.markSubmittedIfRecorded("buy-d1", "brk-buy");
+    journal.markFilled("buy-d1", 50L, new BigDecimal("1.99"), d1);
+
+    OrderIntent sell = intentWithOcc("sell-d2", "sig-sell", occ);
+    sell.setSide(OrderIntent.Side.SELL);
+    journal.upsertIntent(sell);
+    journal.markSubmittedIfRecorded("sell-d2", "brk-sell");
+    journal.markFilled("sell-d2", 11L, new BigDecimal("1.88"), d2);
+
+    // sinceEtDay well before D1 — both fills are within the window.
+    LocalDate since = LocalDate.of(2026, 4, 23); // D2 − 90d
+    // Within-window BUY: the prior-day entry is returned (the per-day query scoped to D2 would miss
+    // it — that miss was the phantom).
+    var buys = journal.findFilledBySide("dev", "copytrade-v1", "BUY", since);
+    assertThat(buys).extracting(JournaledOrder::intentKey).containsExactly("buy-d1");
+    assertThat(buys.get(0).filledQty()).isEqualTo(50L);
+
+    var sells = journal.findFilledBySide("dev", "copytrade-v1", "SELL", since);
+    assertThat(sells).extracting(JournaledOrder::intentKey).containsExactly("sell-d2");
+    assertThat(sells.get(0).avgFillPrice()).isEqualByComparingTo(new BigDecimal("1.88"));
+
+    // The day-scoped query still excludes the prior-day BUY (contrast that pins the fix's premise).
+    assertThat(
+            journal.findFilledBySideOnDay("dev", "copytrade-v1", "BUY", LocalDate.of(2026, 7, 22)))
+        .isEmpty();
+  }
+
+  @Test
+  void findFilledBySide_excludesRowsOlderThanLookbackWindow() {
+    // Lookback bound (PLAN-2026-07-22 review follow-up): an entry whose ET fill date is BEFORE
+    // sinceEtDay is excluded (the query is bounded, not full-history), while a within-window entry
+    // on/after the boundary is returned. Boundary is inclusive (>=).
+    String occ = "AAPL  260727C00330000";
+    OffsetDateTime old = OffsetDateTime.parse("2026-04-01T14:00:00Z"); // well before the window
+    OffsetDateTime boundaryDay = OffsetDateTime.parse("2026-04-23T14:00:00Z"); // == sinceEtDay ET
+
+    OrderIntent oldBuy = intentWithOcc("buy-old", "sig-old", occ);
+    oldBuy.setSide(OrderIntent.Side.BUY);
+    journal.upsertIntent(oldBuy);
+    journal.markSubmittedIfRecorded("buy-old", "brk-old");
+    journal.markFilled("buy-old", 7L, new BigDecimal("1.11"), old);
+
+    OrderIntent boundaryBuy = intentWithOcc("buy-boundary", "sig-boundary", occ);
+    boundaryBuy.setSide(OrderIntent.Side.BUY);
+    journal.upsertIntent(boundaryBuy);
+    journal.markSubmittedIfRecorded("buy-boundary", "brk-boundary");
+    journal.markFilled("buy-boundary", 3L, new BigDecimal("2.22"), boundaryDay);
+
+    LocalDate since = LocalDate.of(2026, 4, 23); // 14:00Z on this date == 10:00 EDT, same ET day
+    var buys = journal.findFilledBySide("dev", "copytrade-v1", "BUY", since);
+
+    // Only the boundary (inclusive) row survives; the older row is bounded out.
+    assertThat(buys).extracting(JournaledOrder::intentKey).containsExactly("buy-boundary");
+  }
+
   private OrderIntent intent(String key) {
     OrderIntent i = new OrderIntent();
     i.setSchemaVersion(1L);
