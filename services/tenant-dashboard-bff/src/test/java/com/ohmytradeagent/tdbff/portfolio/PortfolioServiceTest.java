@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
@@ -30,8 +32,14 @@ class PortfolioServiceTest {
   PortfolioServiceTest() {
     // Default: no live marks (fail-open empty). Tests that exercise the join override this.
     when(brokerPositions.marksFor(any(), any(), any())).thenReturn(Map.of());
-    // Default since-inception realized P&L to zero; the aggregation test overrides per strategy.
-    when(realizedPnl.computeRealizedPnlAllTime(any(), any())).thenReturn(BigDecimal.ZERO);
+    // Default realized P&L (today + all-time) to zero from the SINGLE consolidated call; the
+    // aggregation test overrides per strategy.
+    when(realizedPnl.computeRealized(any(), any(), any())).thenReturn(rp("0", "0"));
+  }
+
+  // Builds the consolidated {today, all-time} record PortfolioService now reads per strategy.
+  private static RealizedPnlCalculator.RealizedPnl rp(String today, String allTime) {
+    return new RealizedPnlCalculator.RealizedPnl(new BigDecimal(today), new BigDecimal(allTime));
   }
 
   private PortfolioService newService(boolean exposeAccountNumber, long subreadTimeoutSeconds) {
@@ -58,13 +66,11 @@ class PortfolioServiceTest {
                     "wf1", "s1", "SYM1", 2, new BigDecimal("1.50"), new BigDecimal("300.00")),
                 new OpenPosition(
                     "wf2", "s2", "SYM2", 1, new BigDecimal("2.00"), new BigDecimal("200.00"))));
-    when(realizedPnl.computeRealizedPnl(eq("acme"), eq("s1"), any(LocalDate.class)))
-        .thenReturn(new BigDecimal("100.00"));
-    when(realizedPnl.computeRealizedPnl(eq("acme"), eq("s2"), any(LocalDate.class)))
-        .thenReturn(new BigDecimal("50.00"));
-    // Since-inception realized P&L is summed across strategies the same way as today's.
-    when(realizedPnl.computeRealizedPnlAllTime("acme", "s1")).thenReturn(new BigDecimal("250.00"));
-    when(realizedPnl.computeRealizedPnlAllTime("acme", "s2")).thenReturn(new BigDecimal("-30.00"));
+    // One consolidated call per strategy carries BOTH today and all-time.
+    when(realizedPnl.computeRealized(eq("acme"), eq("s1"), any(LocalDate.class)))
+        .thenReturn(rp("100.00", "250.00"));
+    when(realizedPnl.computeRealized(eq("acme"), eq("s2"), any(LocalDate.class)))
+        .thenReturn(rp("50.00", "-30.00"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(strategyRegistry.brokerTarget("acme", "s2")).thenReturn("alpaca-paper"); // same -> union
     when(accountEquity.snapshotFor("acme", "alpaca-paper"))
@@ -91,6 +97,13 @@ class PortfolioServiceTest {
     // Honest-labeling fields are always present.
     assertThat(body).containsEntry("unrealized_pnl", null);
     assertThat(body.get("account_equity_scope")).asString().contains("NOT this tenant's");
+
+    // ONE full-history fetch per strategy: the consolidated call runs once each and the old
+    // two-pass methods are never invoked from PortfolioService.
+    verify(realizedPnl).computeRealized(eq("acme"), eq("s1"), any(LocalDate.class));
+    verify(realizedPnl).computeRealized(eq("acme"), eq("s2"), any(LocalDate.class));
+    verify(realizedPnl, never()).computeRealizedPnl(any(), any(), any());
+    verify(realizedPnl, never()).computeRealizedPnlAllTime(any(), any());
   }
 
   @Test
@@ -102,8 +115,8 @@ class PortfolioServiceTest {
     // the header can aggregate the percentage denominator across broker_targets.
     when(strategyResolver.strategyIdsForTenant("prod_real")).thenReturn(List.of("s1"));
     when(positionsReader.openPositions("prod_real")).thenReturn(List.of());
-    when(realizedPnl.computeRealizedPnl(eq("prod_real"), any(), any(LocalDate.class)))
-        .thenReturn(BigDecimal.ZERO);
+    when(realizedPnl.computeRealized(eq("prod_real"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
     when(strategyRegistry.brokerTarget("prod_real", "s1")).thenReturn("alpaca-live");
     when(accountEquity.snapshotFor("prod_real", "alpaca-live"))
         .thenReturn(
@@ -126,8 +139,8 @@ class PortfolioServiceTest {
     // the last completed daily bar.
     when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
     when(positionsReader.openPositions("acme")).thenReturn(List.of());
-    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
-        .thenReturn(BigDecimal.ZERO);
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     // Two-arg BrokerAccount => lastEquity is null.
     when(accountEquity.snapshotFor("acme", "alpaca-paper"))
@@ -145,8 +158,8 @@ class PortfolioServiceTest {
   void distinctBrokerTargetsEachGetTheirOwnEquityEntry() {
     when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1", "s2"));
     when(positionsReader.openPositions("acme")).thenReturn(List.of());
-    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
-        .thenReturn(BigDecimal.ZERO);
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(strategyRegistry.brokerTarget("acme", "s2")).thenReturn("tradier-paper");
     when(accountEquity.snapshotFor("acme", "alpaca-paper"))
@@ -169,8 +182,8 @@ class PortfolioServiceTest {
     // Same fixture, two flag states: FALSE omits account_number; TRUE includes it.
     when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
     when(positionsReader.openPositions("acme")).thenReturn(List.of());
-    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
-        .thenReturn(BigDecimal.ZERO);
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(
@@ -200,8 +213,8 @@ class PortfolioServiceTest {
               Thread.sleep(3000);
               return List.of();
             });
-    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
-        .thenReturn(BigDecimal.ZERO);
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
@@ -230,8 +243,8 @@ class PortfolioServiceTest {
             List.of(
                 new OpenPosition(
                     "wf1", "s1", "SYM1", 1, new BigDecimal("2.00"), new BigDecimal("200.00"))));
-    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
-        .thenReturn(BigDecimal.ZERO);
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenAnswer(
@@ -252,19 +265,18 @@ class PortfolioServiceTest {
   }
 
   @Test
-  void allTimeScanTimeoutDegradesToNullNotMisleadingZero() throws Exception {
-    // A stalled full-history all-time scan must publish realized_pnl_all_time as NULL (so the tile
-    // renders "—", unavailable) — NOT BigDecimal.ZERO, which would show a misleading $0.00 and
-    // silently under-count. The day-scoped realized_pnl_today is fast and unaffected.
+  void realizedScanTimeoutDegradesBothTodayAndAllTimeToNull() throws Exception {
+    // The realized calc is now a SINGLE full-history scan per strategy that yields today AND
+    // all-time. A stalled scan degrades that ONE contribution to null, so BOTH aggregates publish
+    // as NULL (each tile renders "—", unavailable) — NOT BigDecimal.ZERO, which would show a
+    // misleading $0.00 and silently under-count.
     when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
     when(positionsReader.openPositions("acme")).thenReturn(List.of());
-    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
-        .thenReturn(new BigDecimal("42.00"));
-    when(realizedPnl.computeRealizedPnlAllTime("acme", "s1"))
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
         .thenAnswer(
             inv -> {
               Thread.sleep(3000);
-              return new BigDecimal("999.00");
+              return rp("777.00", "999.00");
             });
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(accountEquity.snapshotFor("acme", "alpaca-paper"))
@@ -273,10 +285,9 @@ class PortfolioServiceTest {
     PortfolioService fast = newService(false, 1);
     Map<String, Object> body = fast.portfolio("acme");
 
-    // Degraded all-time -> null (renders "—"), not a misleading 0.
+    // A single degraded strategy null-seeds BOTH aggregates (renders "—"), not a misleading 0.
+    assertThat(body).containsEntry("realized_pnl_today", null);
     assertThat(body).containsEntry("realized_pnl_all_time", null);
-    // The fast day-scoped figure is unaffected.
-    assertThat(body.get("realized_pnl_today")).isEqualTo(new BigDecimal("42.00"));
   }
 
   @Test
@@ -287,8 +298,8 @@ class PortfolioServiceTest {
     // is covered in RealizedPnlCalculatorUnitTest / IT.
     when(strategyResolver.strategyIdsForTenant("prod_real")).thenReturn(List.of("copytrade-v1"));
     when(positionsReader.openPositions("prod_real")).thenReturn(List.of());
-    when(realizedPnl.computeRealizedPnl(eq("prod_real"), eq("copytrade-v1"), any(LocalDate.class)))
-        .thenReturn(new BigDecimal("-121.00")); // FIFO loss, not the +2068 phantom
+    when(realizedPnl.computeRealized(eq("prod_real"), eq("copytrade-v1"), any(LocalDate.class)))
+        .thenReturn(rp("-121.00", "-121.00")); // today = FIFO loss, not the +2068 phantom
     when(strategyRegistry.brokerTarget("prod_real", "copytrade-v1")).thenReturn("alpaca-live");
     when(accountEquity.snapshotFor("prod_real", "alpaca-live"))
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("50000.00"), null));
@@ -296,30 +307,6 @@ class PortfolioServiceTest {
     Map<String, Object> body = service.portfolio("prod_real");
 
     assertThat(body.get("realized_pnl_today")).isEqualTo(new BigDecimal("-121.00"));
-  }
-
-  @Test
-  void dailyScanTimeoutDegradesToNullNotMisleadingZero() throws Exception {
-    // The day-scoped realized calc is now a full-history scan on the sub-read budget. A stalled
-    // scan
-    // must publish realized_pnl_today as NULL (tile renders "—") — NOT BigDecimal.ZERO, which would
-    // show a misleading $0.00 and silently under-count.
-    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
-    when(positionsReader.openPositions("acme")).thenReturn(List.of());
-    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
-        .thenAnswer(
-            inv -> {
-              Thread.sleep(3000);
-              return new BigDecimal("777.00");
-            });
-    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
-    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
-        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("100"), null));
-
-    PortfolioService fast = newService(false, 1);
-    Map<String, Object> body = fast.portfolio("acme");
-
-    assertThat(body).containsEntry("realized_pnl_today", null);
   }
 
   @Test
@@ -335,8 +322,8 @@ class PortfolioServiceTest {
             List.of(
                 new OpenPosition(
                     "wf1", "s1", paddedOcc, 5, new BigDecimal("0.84"), new BigDecimal("420.00"))));
-    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
-        .thenReturn(BigDecimal.ZERO);
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
@@ -376,8 +363,8 @@ class PortfolioServiceTest {
                     1,
                     new BigDecimal("2.00"),
                     new BigDecimal("200.00"))));
-    when(realizedPnl.computeRealizedPnl(eq("acme"), any(), any(LocalDate.class)))
-        .thenReturn(BigDecimal.ZERO);
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
     when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
     when(accountEquity.snapshotFor("acme", "alpaca-paper"))
         .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));

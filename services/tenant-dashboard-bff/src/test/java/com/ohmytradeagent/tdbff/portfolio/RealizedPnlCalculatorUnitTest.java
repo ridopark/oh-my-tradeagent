@@ -3,11 +3,13 @@ package com.ohmytradeagent.tdbff.portfolio;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ohmytradeagent.tdbff.portfolio.RealizedPnlCalculator.Lot;
+import com.ohmytradeagent.tdbff.portfolio.RealizedPnlCalculator.RealizedPnl;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -125,6 +127,44 @@ class RealizedPnlCalculatorUnitTest {
     var exits = lots(exit("1.50", 2, D2));
     assertThat(RealizedPnlCalculator.realizePerSymbol(entries, exits, D2))
         .isEqualByComparingTo("-1.00"); // (1.50 - 2.00) * 2
+  }
+
+  @Test
+  void realizeBoth_yieldsTodayAndAllTimeFromOnePass_matchingSeparateCalls() {
+    // The consolidated single-pass (RealizedPnlCalculator#computeRealized delegates to realizeBoth)
+    // returns BOTH figures from ONE fetch + ONE FIFO walk. Same incident fixture as the day-scoped
+    // test above (AAPL 260727C00330000): today (D2) = (1.88 - 1.99) * 11 = -1.21 ×100 -> -$121;
+    // all-time = every exit = 25.04 ×100 -> $2,504. realizeBoth applies the ×100 multiplier, so the
+    // record carries dollars (unlike the per-contract realizePerSymbol above).
+    Map<String, Deque<Lot>> entries = Map.of("AAPL260727C00330000", lots(entry("1.99", 50)));
+    Map<String, Deque<Lot>> exits =
+        Map.of(
+            "AAPL260727C00330000",
+            lots(
+                exit("2.25", 15, D1),
+                exit("2.46", 11, D1),
+                exit("2.8875", 8, D1),
+                exit("3.99", 5, D1),
+                exit("1.88", 11, D2)));
+
+    RealizedPnl both = RealizedPnlCalculator.realizeBoth(entries, exits, D2);
+
+    assertThat(both.today()).isEqualByComparingTo("-121"); // FIFO loss, NOT the +2068 phantom
+    assertThat(both.allTime()).isEqualByComparingTo("2504"); // 25.04 ×100, the full sum
+    // Consistent with driving the day-scoped and all-time static walks separately (pre-×100).
+    assertThat(RealizedPnlCalculator.realizePerSymbol(lots(entry("1.99", 50)), exits2(), D2))
+        .isEqualByComparingTo("-1.21");
+    assertThat(RealizedPnlCalculator.realizePerSymbol(lots(entry("1.99", 50)), exits2(), null))
+        .isEqualByComparingTo("25.04");
+  }
+
+  private static Deque<Lot> exits2() {
+    return lots(
+        exit("2.25", 15, D1),
+        exit("2.46", 11, D1),
+        exit("2.8875", 8, D1),
+        exit("3.99", 5, D1),
+        exit("1.88", 11, D2));
   }
 
   @Test

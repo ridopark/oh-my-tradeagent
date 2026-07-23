@@ -54,29 +54,23 @@ public class RealizedPnlCalculator {
     this.strategyRegistry = strategyRegistry;
   }
 
-  /** Realized P&L for one (tenant, strategy) on {@code tradingDay} (America/New_York). */
-  public BigDecimal computeRealizedPnl(String tenantId, String strategyId, LocalDate tradingDay) {
-    return realize(tenantId, strategyId, tradingDay);
-  }
+  /** Today's realized P&L and since-inception realized P&L for one (tenant, strategy). */
+  public record RealizedPnl(BigDecimal today, BigDecimal allTime) {}
 
   /**
-   * Since-inception (all-time) realized P&L for one (tenant, strategy). Same FIFO logic as {@link
-   * #computeRealizedPnl}, but sums EVERY exit regardless of day ({@code tradingDay == null}). Two
-   * limitations remain: (1) an exit with no matching entry anywhere (entry pre-dates journal
-   * retention, or its option_symbol bucket never matches) still credits raw proceeds; (2) lots are
-   * pooled per option_symbol with no position-episode/expiry boundary, so if the SAME option_symbol
-   * string is reused across separate closed-and-reopened episodes (or an OCC is recycled across
-   * expiries) a later exit can FIFO-match an unrelated older entry basis.
+   * Realized P&L for one (tenant, strategy) computed in a SINGLE full-history fetch + FIFO pass:
+   * {@code today()} counts only exits whose ET date equals {@code tradingDay} (America/New_York);
+   * {@code allTime()} counts EVERY exit. Consolidating both into one pass avoids two full-history
+   * journal scans per strategy per page load.
+   *
+   * <p>Both figures share the same FIFO limitations: (1) an exit with no matching entry anywhere
+   * (entry pre-dates journal retention, or its option_symbol bucket never matches) still credits
+   * raw proceeds; (2) lots are pooled per option_symbol with no position-episode/expiry boundary,
+   * so if the SAME option_symbol string is reused across separate closed-and-reopened episodes (or
+   * an OCC is recycled across expiries) a later exit can FIFO-match an unrelated older entry basis.
+   * Resolves the strategy's broker_target -> exec DSLContext; fail-soft to ZERO when unconfigured.
    */
-  public BigDecimal computeRealizedPnlAllTime(String tenantId, String strategyId) {
-    return realize(tenantId, strategyId, null);
-  }
-
-  // Shared FIFO realization. ALWAYS fetches full BUY/SELL history; {@code tradingDay} scopes only
-  // which exits COUNT toward the total (null = all-time). Prior-day exits still consume entry lots
-  // so FIFO reaches the correct remaining basis for a target-day exit.
-  // Resolves the strategy's broker_target -> exec DSLContext; fail-soft to ZERO when unconfigured.
-  private BigDecimal realize(String tenantId, String strategyId, LocalDate tradingDay) {
+  public RealizedPnl computeRealized(String tenantId, String strategyId, LocalDate tradingDay) {
     String brokerTarget = strategyRegistry.brokerTarget(tenantId, strategyId);
     // brokerTarget reads fail-soft (null = unconfigured / missing config row). A null target must
     // NOT flow to router.dslFor — that would throw BrokerNotConfiguredException. Degrade this
@@ -87,19 +81,42 @@ public class RealizedPnlCalculator {
           "realized P&L: no broker_target for {}/{} in strategy_config; contributing 0",
           tenantId,
           strategyId);
-      return BigDecimal.ZERO;
+      return new RealizedPnl(BigDecimal.ZERO, BigDecimal.ZERO);
     }
     DSLContext dsl = router.dslFor(brokerTarget);
 
     Map<String, Deque<Lot>> entriesBySymbol = fetchLots(dsl, tenantId, strategyId, "BUY");
     Map<String, Deque<Lot>> exitsBySymbol = fetchLots(dsl, tenantId, strategyId, "SELL");
+    return realizeBoth(entriesBySymbol, exitsBySymbol, tradingDay);
+  }
 
-    BigDecimal realized = BigDecimal.ZERO;
+  /** Today's realized P&L for one (tenant, strategy). Thin delegate to {@link #computeRealized}. */
+  public BigDecimal computeRealizedPnl(String tenantId, String strategyId, LocalDate tradingDay) {
+    return computeRealized(tenantId, strategyId, tradingDay).today();
+  }
+
+  /**
+   * Since-inception (all-time) realized P&L for one (tenant, strategy). Thin delegate to {@link
+   * #computeRealized}; the all-time figure is independent of the trading day, so a {@code null} day
+   * is passed to scope out the today bucket.
+   */
+  public BigDecimal computeRealizedPnlAllTime(String tenantId, String strategyId) {
+    return computeRealized(tenantId, strategyId, null).allTime();
+  }
+
+  // Single FIFO pass over the full BUY/SELL history that accumulates BOTH totals at once: {@code
+  // today} sums exits whose ET date equals {@code tradingDay}; {@code allTime} sums every exit.
+  // Package-private for direct unit testing without Postgres. The ×100 multiplier is applied here.
+  static RealizedPnl realizeBoth(
+      Map<String, Deque<Lot>> entriesBySymbol,
+      Map<String, Deque<Lot>> exitsBySymbol,
+      LocalDate tradingDay) {
+    Acc acc = new Acc();
     for (Map.Entry<String, Deque<Lot>> e : exitsBySymbol.entrySet()) {
       Deque<Lot> entries = entriesBySymbol.getOrDefault(e.getKey(), new ArrayDeque<>());
-      realized = realized.add(realizePerSymbol(entries, e.getValue(), tradingDay));
+      accumulate(entries, e.getValue(), tradingDay, acc);
     }
-    return realized.multiply(MULTIPLIER);
+    return new RealizedPnl(acc.today.multiply(MULTIPLIER), acc.allTime.multiply(MULTIPLIER));
   }
 
   // Package-private for direct unit testing of the FIFO match (no Postgres needed). Consumes ALL
@@ -110,25 +127,50 @@ public class RealizedPnlCalculator {
   // toward a non-null target day. This attributes a cross-day exit's realized (matched legs AND the
   // residual raw-proceeds fallback) to its own exit day instead of crediting phantom raw proceeds.
   static BigDecimal realizePerSymbol(Deque<Lot> entries, Deque<Lot> exits, LocalDate targetDay) {
-    BigDecimal realized = BigDecimal.ZERO;
+    Acc acc = new Acc();
+    accumulate(entries, exits, targetDay, acc);
+    // targetDay == null => all-time (every exit counts); else => only the target-day bucket.
+    return targetDay == null ? acc.allTime : acc.today;
+  }
+
+  // Core per-symbol FIFO walk shared by every entry point. Consumes ALL exits chronologically so
+  // FIFO reaches each exit's true remaining basis, accumulating BOTH buckets in a single pass:
+  // every exit's realized (matched legs AND the residual raw-proceeds fallback) adds to {@code
+  // allTime}; an exit adds to {@code today} only when {@code tradingDay != null} and the exit's ET
+  // date equals it. A prior-day exit still advances the entry FIFO; it just does not count toward
+  // {@code today}. Attributes a cross-day exit's realized to its own exit day, never phantom raw
+  // proceeds.
+  private static void accumulate(
+      Deque<Lot> entries, Deque<Lot> exits, LocalDate tradingDay, Acc acc) {
     Lot entry = entries.poll();
     for (Lot exit : exits) {
-      boolean count = targetDay == null || targetDay.equals(exit.day);
+      boolean countToday = tradingDay != null && tradingDay.equals(exit.day);
       long remainingExitQty = exit.qty;
       while (remainingExitQty > 0 && entry != null) {
         long matched = Math.min(remainingExitQty, entry.qty);
-        if (count) {
-          BigDecimal perContractPnl = exit.price.subtract(entry.price);
-          realized = realized.add(perContractPnl.multiply(BigDecimal.valueOf(matched)));
+        BigDecimal perContractPnl = exit.price.subtract(entry.price);
+        BigDecimal leg = perContractPnl.multiply(BigDecimal.valueOf(matched));
+        acc.allTime = acc.allTime.add(leg);
+        if (countToday) {
+          acc.today = acc.today.add(leg);
         }
         remainingExitQty -= matched;
         entry = entry.qty == matched ? entries.poll() : entry.consume(matched);
       }
-      if (remainingExitQty > 0 && count) {
-        realized = realized.add(exit.price.multiply(BigDecimal.valueOf(remainingExitQty)));
+      if (remainingExitQty > 0) {
+        BigDecimal residual = exit.price.multiply(BigDecimal.valueOf(remainingExitQty));
+        acc.allTime = acc.allTime.add(residual);
+        if (countToday) {
+          acc.today = acc.today.add(residual);
+        }
       }
     }
-    return realized;
+  }
+
+  // Mutable two-bucket accumulator for the single FIFO walk (today + all-time), pre-×100.
+  private static final class Acc {
+    private BigDecimal today = BigDecimal.ZERO;
+    private BigDecimal allTime = BigDecimal.ZERO;
   }
 
   // {@code day} is the fill's ET date; populated for exits (drives day-scoping), null/unused for
