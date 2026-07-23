@@ -50,17 +50,20 @@ import org.springframework.stereotype.Component;
  * by grouping all keyless rows into a single no-symbol bucket that FIFO-matches among itself
  * exactly as before (no data migration; never NPE, never cross-attribute against keyed rows).
  *
- * <p>Limitation (issue #276 §4, documented only, out of scope here): a position entered on a prior
- * day and closed today credits raw exit proceeds with no same-day cost basis (phantom gain), so a
- * genuine prior-day loss closed intraday does not count toward today's daily-loss figure — the
- * switch can fail-open. The proper fix is wiring Alpaca account P&amp;L ({@code equity −
- * last_equity} / {@code unrealized_pl + realized_pl}) as the kill-switch source of truth; tracked
- * separately, not attempted in this change.
+ * <p>Cross-day fix (PLAN-2026-07-22, issue #276 §4): a position entered on a prior day and closed
+ * today no longer credits raw exit proceeds with no cost basis (the phantom that ALWAYS inflated
+ * realized and let a genuine cross-day LOSS fail-open the daily-loss cap). Full {@code audit_log}
+ * history is now fetched and every exit FIFO-matches its REAL (possibly prior-day) entry basis; the
+ * day-scoped total counts only the exits whose ET date ({@code occurred_at} in America/New_York)
+ * equals the trading day, while still consuming entry lots for prior-day exits so FIFO reaches the
+ * correct remaining basis. A cross-day exit's realized is thus attributed to its own exit day
+ * against its real entry basis — mirroring the exec-journal and BFF {@code RealizedPnlCalculator}
+ * transforms. Remaining limitation: an exit whose entry pre-dates retained history (no matching
+ * entry lot anywhere) still falls to raw proceeds, counted only on its exit day.
  *
- * <p>Rows are already scoped to the trading day and (tenant, strategy), so orphaned / {@code
- * RECORDED}-but-unfilled (no {@code EntryFilled} audit is emitted until a fill lands) and prior-day
- * positions are excluded by construction. EOD/expiry force-flatten audits do not carry a fill price
- * and so do not credit here — those positions remain open for PnL until {@link
+ * <p>Orphaned / {@code RECORDED}-but-unfilled rows (no {@code EntryFilled} audit is emitted until a
+ * fill lands) are excluded by construction. EOD/expiry force-flatten audits do not carry a fill
+ * price and so do not credit here — those positions remain open for PnL until {@link
  * com.ohmytradeagent.orchestrator.workflows.PositionWorkflow} grows fill-event-driven flattens.
  *
  * <p>Multiplier is 100 (US equity options standard contract).
@@ -94,52 +97,68 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
     // OWN symbol's entry basis (pooling across symbols let an exit FIFO-match a foreign symbol's
     // cost basis). Pre-change rows lacking option_symbol fall into a single no-symbol bucket ("")
     // and FIFO-match among themselves exactly as before.
+    // Cross-day fix (PLAN-2026-07-22): fetch FULL history (no per-day predicate) so a cross-day
+    // exit
+    // FIFO-matches its REAL prior-day entry basis; the target day scopes only which exits COUNT.
     Map<String, Deque<Lot>> entriesBySymbol =
-        fetchLots(tenantId, strategyId, tradingDay, "EntryFilled", "filled_qty");
+        fetchLots(tenantId, strategyId, "EntryFilled", "filled_qty");
     Map<String, Deque<Lot>> exitsBySymbol =
-        fetchLots(tenantId, strategyId, tradingDay, "PartialExitFilled", "qty_filled");
+        fetchLots(tenantId, strategyId, "PartialExitFilled", "qty_filled");
 
     BigDecimal realized = BigDecimal.ZERO;
     for (Map.Entry<String, Deque<Lot>> e : exitsBySymbol.entrySet()) {
       Deque<Lot> entries = entriesBySymbol.getOrDefault(e.getKey(), new ArrayDeque<>());
-      realized = realized.add(realizePerSymbol(entries, e.getValue()));
+      realized = realized.add(realizePerSymbol(entries, e.getValue(), tradingDay));
     }
     return realized.multiply(MULTIPLIER);
   }
 
   /**
-   * FIFO-matches one symbol's exits against that symbol's entry cost basis. Realizes P&L only for
-   * contracts that have actually been exited today: {@code realized = (exit_price − entry_basis)}
-   * per matched contract (multiplier applied by the caller). Un-exited entry contracts contribute
-   * nothing — their debit is excluded until they exit (issue #273), so an open long never
-   * fabricates a loss.
+   * FIFO-matches one symbol's exits against that symbol's entry cost basis: {@code realized =
+   * (exit_price − entry_basis)} per matched contract (multiplier applied by the caller). Un-exited
+   * entry contracts contribute nothing — their debit is excluded until they exit (issue #273), so
+   * an open long never fabricates a loss.
+   *
+   * <p>Consumes ALL exits chronologically so FIFO reaches each exit's true remaining basis, but
+   * adds an exit's realized (matched legs AND the residual raw-proceeds fallback) to the total ONLY
+   * when {@code targetDay == null} (all-time) or equals the exit's ET date. A prior-day exit still
+   * advances the entry FIFO; it just does not count toward a non-null target day. This attributes a
+   * cross-day exit's realized to its own exit day against its real prior-day basis instead of
+   * crediting phantom raw proceeds (issue #276 §4).
    */
-  private static BigDecimal realizePerSymbol(Deque<Lot> entries, Deque<Lot> exits) {
+  private static BigDecimal realizePerSymbol(
+      Deque<Lot> entries, Deque<Lot> exits, LocalDate targetDay) {
     BigDecimal realized = BigDecimal.ZERO;
     Lot entry = entries.poll();
     for (Lot exit : exits) {
+      boolean count = targetDay == null || targetDay.equals(exit.day);
       long remainingExitQty = exit.qty;
       while (remainingExitQty > 0 && entry != null) {
         long matched = Math.min(remainingExitQty, entry.qty);
-        BigDecimal perContractPnl = exit.price.subtract(entry.price);
-        realized = realized.add(perContractPnl.multiply(BigDecimal.valueOf(matched)));
+        if (count) {
+          BigDecimal perContractPnl = exit.price.subtract(entry.price);
+          realized = realized.add(perContractPnl.multiply(BigDecimal.valueOf(matched)));
+        }
         remainingExitQty -= matched;
         entry = entry.qty == matched ? entries.poll() : entry.consume(matched);
       }
-      // A residual exit qty with no remaining entry basis (e.g. a prior-day entry exited today, or
-      // an exit audit without a matching same-day entry) realizes the exit credit alone; there is
-      // no same-day cost basis to net against.
-      if (remainingExitQty > 0) {
+      // A residual exit qty with no remaining entry basis (an exit whose entry pre-dates retained
+      // history) realizes the exit credit alone — counted only on its own exit day.
+      if (remainingExitQty > 0 && count) {
         realized = realized.add(exit.price.multiply(BigDecimal.valueOf(remainingExitQty)));
       }
     }
     return realized;
   }
 
-  /** A fill lot: per-contract {@code avg_fill_price} and the (mutable-remaining) contract count. */
-  private record Lot(BigDecimal price, long qty) {
+  /**
+   * A fill lot: per-contract {@code avg_fill_price}, the (mutable-remaining) contract count, and
+   * the fill's ET date ({@code day}; populated for exits to drive day-scoping, null/unused for
+   * entries).
+   */
+  private record Lot(BigDecimal price, long qty, LocalDate day) {
     Lot consume(long n) {
-      return new Lot(price, qty - n);
+      return new Lot(price, qty - n, day);
     }
   }
 
@@ -155,15 +174,17 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
   private static final String NO_SYMBOL_BUCKET = "";
 
   /**
-   * Fetches fill lots for the given audit kind on the trading day, ordered by {@code occurred_at}
-   * (FIFO), grouped by {@code option_symbol} (issue #276). Each lot is {@code (avg_fill_price,
-   * <qtyKey>)}. Rows missing either field, with a non-positive quantity, or with a fractional
-   * quantity (issue #276 [minor]) are skipped — a malformed audit row never moves the figure and
-   * never crashes the activity. Rows lacking {@code option_symbol} (pre-change history) are grouped
-   * under the {@link #NO_SYMBOL_BUCKET} key.
+   * Fetches fill lots for the given audit kind across ALL history (cross-day fix: the per-day
+   * predicate is dropped so a cross-day exit FIFO-matches its real prior-day basis), ordered by
+   * {@code occurred_at} (FIFO), grouped by {@code option_symbol} (issue #276). Each lot carries
+   * {@code (avg_fill_price, <qtyKey>)} and the row's ET date so the caller can day-scope in-memory.
+   * Rows missing a price/qty field, with a non-positive quantity, or with a fractional quantity
+   * (issue #276 [minor]) are skipped — a malformed audit row never moves the figure and never
+   * crashes the activity. Rows lacking {@code option_symbol} (pre-change history) are grouped under
+   * the {@link #NO_SYMBOL_BUCKET} key.
    */
   private Map<String, Deque<Lot>> fetchLots(
-      String tenantId, String strategyId, LocalDate tradingDay, String kind, String qtyKey) {
+      String tenantId, String strategyId, String kind, String qtyKey) {
     if (!ALLOWED_QTY_KEYS.contains(qtyKey)) {
       throw new IllegalArgumentException("unsupported qtyKey: " + qtyKey);
     }
@@ -172,16 +193,16 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
             + "(subject->>'"
             + qtyKey
             + "')::numeric AS qty, "
-            + "subject->>'option_symbol' AS option_symbol "
+            + "subject->>'option_symbol' AS option_symbol, "
+            + "(occurred_at AT TIME ZONE 'America/New_York')::date AS et_date "
             + "FROM audit_log "
             + "WHERE tenant_id = ? AND strategy_id = ? AND kind = ? "
-            + "AND (occurred_at AT TIME ZONE 'America/New_York')::date = ? "
             + "AND subject->>'avg_fill_price' IS NOT NULL "
             + "AND subject->>'"
             + qtyKey
             + "' IS NOT NULL "
             + "ORDER BY occurred_at ASC, event_id ASC";
-    Result<Record> rows = dsl.fetch(sql, tenantId, strategyId, kind, tradingDay);
+    Result<Record> rows = dsl.fetch(sql, tenantId, strategyId, kind);
     Map<String, Deque<Lot>> lotsBySymbol = new LinkedHashMap<>();
     for (Record r : rows) {
       BigDecimal price = r.get("price", BigDecimal.class);
@@ -207,7 +228,10 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
       }
       String symbol = r.get("option_symbol", String.class);
       String bucket = symbol == null ? NO_SYMBOL_BUCKET : symbol;
-      lotsBySymbol.computeIfAbsent(bucket, k -> new ArrayDeque<>()).add(new Lot(price, qtyLong));
+      LocalDate etDate = r.get("et_date", LocalDate.class);
+      lotsBySymbol
+          .computeIfAbsent(bucket, k -> new ArrayDeque<>())
+          .add(new Lot(price, qtyLong, etDate));
     }
     return lotsBySymbol;
   }
