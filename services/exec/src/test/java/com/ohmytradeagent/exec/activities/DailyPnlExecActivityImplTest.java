@@ -1,8 +1,10 @@
 package com.ohmytradeagent.exec.activities;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.exec.activities.DailyPnlExecActivityImpl.Lot;
@@ -69,7 +71,9 @@ class DailyPnlExecActivityImplTest {
   }
 
   private void stub(String side, JournaledOrder... rows) {
-    when(journal.findFilledBySide(eq("dev"), eq("copytrade-v1"), eq(side)))
+    // The 4th arg (sinceEtDay lower bound) is matched with any() — the FIFO/day-scoping behavior
+    // under test is independent of the exact bound; a dedicated test pins the bound value itself.
+    when(journal.findFilledBySide(eq("dev"), eq("copytrade-v1"), eq(side), any()))
         .thenReturn(List.of(rows));
   }
 
@@ -122,6 +126,21 @@ class DailyPnlExecActivityImplTest {
     stub("SELL");
     assertThat(activity.computeRealizedPnl("dev", "copytrade-v1", DAY))
         .isEqualByComparingTo(BigDecimal.ZERO);
+  }
+
+  // Lookback bound (PLAN-2026-07-22 review follow-up): the fetch is bounded to tradingDay −
+  // REALIZED_LOOKBACK_DAYS (heartbeat-path perf), not unbounded full history. Pins that the named
+  // constant is actually applied to the journal query's lower bound for BOTH sides.
+  @Test
+  void computeRealizedPnl_boundsFetchToLookbackWindow() {
+    stub("BUY");
+    stub("SELL");
+
+    activity.computeRealizedPnl("dev", "copytrade-v1", D2);
+
+    LocalDate expectedSince = D2.minusDays(DailyPnlExecActivityImpl.REALIZED_LOOKBACK_DAYS);
+    verify(journal).findFilledBySide("dev", "copytrade-v1", "BUY", expectedSince);
+    verify(journal).findFilledBySide("dev", "copytrade-v1", "SELL", expectedSince);
   }
 
   // ---------- Cross-day phantom-proceeds fix (PLAN-2026-07-22) ----------

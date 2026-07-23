@@ -52,14 +52,17 @@ import org.springframework.stereotype.Component;
  *
  * <p>Cross-day fix (PLAN-2026-07-22, issue #276 §4): a position entered on a prior day and closed
  * today no longer credits raw exit proceeds with no cost basis (the phantom that ALWAYS inflated
- * realized and let a genuine cross-day LOSS fail-open the daily-loss cap). Full {@code audit_log}
- * history is now fetched and every exit FIFO-matches its REAL (possibly prior-day) entry basis; the
- * day-scoped total counts only the exits whose ET date ({@code occurred_at} in America/New_York)
- * equals the trading day, while still consuming entry lots for prior-day exits so FIFO reaches the
- * correct remaining basis. A cross-day exit's realized is thus attributed to its own exit day
- * against its real entry basis — mirroring the exec-journal and BFF {@code RealizedPnlCalculator}
- * transforms. Remaining limitation: an exit whose entry pre-dates retained history (no matching
- * entry lot anywhere) still falls to raw proceeds, counted only on its exit day.
+ * realized and let a genuine cross-day LOSS fail-open the daily-loss cap). Lookback-bounded {@code
+ * audit_log} history is now fetched ({@code [tradingDay − REALIZED_LOOKBACK_DAYS, tradingDay]},
+ * since this runs on the ~60s kill-switch heartbeat and an unbounded scan would grow without limit)
+ * and every exit FIFO-matches its REAL (possibly prior-day) entry basis; the day-scoped total
+ * counts only the exits whose ET date ({@code occurred_at} in America/New_York) equals the trading
+ * day, while still consuming entry lots for prior-day exits so FIFO reaches the correct remaining
+ * basis. A cross-day exit's realized is thus attributed to its own exit day against its real entry
+ * basis — mirroring the exec-journal and BFF {@code RealizedPnlCalculator} transforms. Remaining
+ * limitation: an exit whose entry pre-dates the lookback window (or retained history) — no matching
+ * entry lot in-window — still falls to raw proceeds, counted only on its exit day; the window is
+ * chosen well beyond the option tenor so this is unreachable for a still-open expiring position.
  *
  * <p>Orphaned / {@code RECORDED}-but-unfilled rows (no {@code EntryFilled} audit is emitted until a
  * fill lands) are excluded by construction. EOD/expiry force-flatten audits do not carry a fill
@@ -74,6 +77,29 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
   private static final Logger log = LoggerFactory.getLogger(DailyPnlActivitiesImpl.class);
 
   static final BigDecimal MULTIPLIER = new BigDecimal("100");
+
+  /**
+   * Realized-history lookback (PLAN-2026-07-22 review follow-up). {@code computeRealizedPnl} runs
+   * on the account kill-switch HEARTBEAT (~every 60s), so the cross-day fix's full-history fetch is
+   * bounded to {@code [tradingDay − REALIZED_LOOKBACK_DAYS, tradingDay]} to keep the {@code
+   * audit_log} scan from growing without limit toward the Activity StartToCloseTimeout on an
+   * active/long-history tenant.
+   *
+   * <p><b>Safety rationale for 90:</b> the window MUST exceed the strategies' maximum option tenor
+   * so a still-openable position's entry is always in-window and its cross-day exit FIFO-matches
+   * the real basis (never a reintroduced phantom fail-open). These strategies trade short-dated
+   * (weekly) options; even a monthly would be ~30-45 DTE, so 90 days is generously beyond any
+   * realistic hold. Options expire, so no realistic hold reaches this window. A position entered
+   * MORE than the window ago (and exited today) falls to the documented raw-proceeds residual — the
+   * SAME limitation as pre-history retention, now bounded. Erring long: this is a real-money safety
+   * mechanism, so the window is chosen well beyond the tenor rather than tight to it. Kept in
+   * lockstep with {@code DailyPnlExecActivityImpl.REALIZED_LOOKBACK_DAYS}.
+   *
+   * <p>Intentional divergence from the BFF {@code RealizedPnlCalculator} (#617), which stays
+   * full-history: that is a per-page-load display path, not a ~60s heartbeat, so it does not need
+   * the bound. Only the heartbeat-driven kill-switch fetch is windowed.
+   */
+  static final int REALIZED_LOOKBACK_DAYS = 90;
 
   private final DSLContext dsl;
 
@@ -97,13 +123,16 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
     // OWN symbol's entry basis (pooling across symbols let an exit FIFO-match a foreign symbol's
     // cost basis). Pre-change rows lacking option_symbol fall into a single no-symbol bucket ("")
     // and FIFO-match among themselves exactly as before.
-    // Cross-day fix (PLAN-2026-07-22): fetch FULL history (no per-day predicate) so a cross-day
-    // exit
-    // FIFO-matches its REAL prior-day entry basis; the target day scopes only which exits COUNT.
+    // Cross-day fix (PLAN-2026-07-22): fetch LOOKBACK-BOUNDED history (no per-day equality, only an
+    // ET-date lower bound) so a cross-day exit FIFO-matches its REAL prior-day entry basis; the
+    // target day scopes only which exits COUNT. The bound keeps this heartbeat-path scan from
+    // growing without limit (see REALIZED_LOOKBACK_DAYS). Anchored to tradingDay (the Activity
+    // input, ~= today on the heartbeat), so the window is deterministic and replay-stable.
+    LocalDate sinceEtDay = tradingDay.minusDays(REALIZED_LOOKBACK_DAYS);
     Map<String, Deque<Lot>> entriesBySymbol =
-        fetchLots(tenantId, strategyId, "EntryFilled", "filled_qty");
+        fetchLots(tenantId, strategyId, "EntryFilled", "filled_qty", sinceEtDay);
     Map<String, Deque<Lot>> exitsBySymbol =
-        fetchLots(tenantId, strategyId, "PartialExitFilled", "qty_filled");
+        fetchLots(tenantId, strategyId, "PartialExitFilled", "qty_filled", sinceEtDay);
 
     BigDecimal realized = BigDecimal.ZERO;
     for (Map.Entry<String, Deque<Lot>> e : exitsBySymbol.entrySet()) {
@@ -174,17 +203,18 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
   private static final String NO_SYMBOL_BUCKET = "";
 
   /**
-   * Fetches fill lots for the given audit kind across ALL history (cross-day fix: the per-day
-   * predicate is dropped so a cross-day exit FIFO-matches its real prior-day basis), ordered by
-   * {@code occurred_at} (FIFO), grouped by {@code option_symbol} (issue #276). Each lot carries
-   * {@code (avg_fill_price, <qtyKey>)} and the row's ET date so the caller can day-scope in-memory.
-   * Rows missing a price/qty field, with a non-positive quantity, or with a fractional quantity
-   * (issue #276 [minor]) are skipped — a malformed audit row never moves the figure and never
-   * crashes the activity. Rows lacking {@code option_symbol} (pre-change history) are grouped under
-   * the {@link #NO_SYMBOL_BUCKET} key.
+   * Fetches fill lots for the given audit kind across LOOKBACK-BOUNDED history (cross-day fix: the
+   * per-day equality predicate is replaced by an ET-date lower bound {@code >= sinceEtDay} so a
+   * cross-day exit FIFO-matches its real prior-day basis while the heartbeat-path scan stays
+   * bounded), ordered by {@code occurred_at} (FIFO), grouped by {@code option_symbol} (issue #276).
+   * Each lot carries {@code (avg_fill_price, <qtyKey>)} and the row's ET date so the caller can
+   * day-scope in-memory. Rows missing a price/qty field, with a non-positive quantity, or with a
+   * fractional quantity (issue #276 [minor]) are skipped — a malformed audit row never moves the
+   * figure and never crashes the activity. Rows lacking {@code option_symbol} (pre-change history)
+   * are grouped under the {@link #NO_SYMBOL_BUCKET} key.
    */
   private Map<String, Deque<Lot>> fetchLots(
-      String tenantId, String strategyId, String kind, String qtyKey) {
+      String tenantId, String strategyId, String kind, String qtyKey, LocalDate sinceEtDay) {
     if (!ALLOWED_QTY_KEYS.contains(qtyKey)) {
       throw new IllegalArgumentException("unsupported qtyKey: " + qtyKey);
     }
@@ -201,8 +231,13 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
             + "AND subject->>'"
             + qtyKey
             + "' IS NOT NULL "
+            // Lookback lower bound (PLAN-2026-07-22 review follow-up): bound the heartbeat-path
+            // scan
+            // while still covering any realistic still-open options position. Mirrors the ET-date
+            // boundary used for et_date above.
+            + "AND (occurred_at AT TIME ZONE 'America/New_York')::date >= ? "
             + "ORDER BY occurred_at ASC, event_id ASC";
-    Result<Record> rows = dsl.fetch(sql, tenantId, strategyId, kind);
+    Result<Record> rows = dsl.fetch(sql, tenantId, strategyId, kind, sinceEtDay);
     Map<String, Deque<Lot>> lotsBySymbol = new LinkedHashMap<>();
     for (Record r : rows) {
       BigDecimal price = r.get("price", BigDecimal.class);

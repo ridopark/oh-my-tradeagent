@@ -204,7 +204,8 @@ class ExecActivitiesImplPlaceOrderValidationTest {
     }
 
     @Override
-    public List<JournaledOrder> findFilledBySide(String tenantId, String strategyId, String side) {
+    public List<JournaledOrder> findFilledBySide(
+        String tenantId, String strategyId, String side, java.time.LocalDate sinceEtDay) {
       throw fail();
     }
 

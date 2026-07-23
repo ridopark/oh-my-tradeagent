@@ -406,6 +406,62 @@ class DailyPnlActivitiesImplIT {
   }
 
   @Test
+  void computeRealizedPnl_entryOlderThanLookback_isExcluded_exitFallsToRawProceeds() {
+    // Lookback bound (PLAN-2026-07-22 review follow-up): computeRealizedPnl runs on the ~60s
+    // kill-switch heartbeat, so the fetch is bounded to [tradingDay − REALIZED_LOOKBACK_DAYS,
+    // tradingDay]. An entry whose ET date pre-dates that window is EXCLUDED from the scan, so the
+    // exit on the trading day finds no in-window basis and falls to the documented raw-proceeds
+    // residual — demonstrating the query is bounded (not full-history). This is unreachable for a
+    // real still-open expiring option (the window is chosen well beyond the tenor).
+    String occ = "AAPL  260727C00330000";
+    LocalDate tradingDay = LocalDate.of(2026, 7, 22);
+    // Entry 100+ days before the trading day → outside the 90d lookback window.
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-03-01T14:00:00Z",
+        "{\"avg_fill_price\":\"1.00\",\"filled_qty\":10,\"option_symbol\":\"" + occ + "\"}");
+    // Cross-day exit on the trading day (within window).
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-07-22T14:00:00Z",
+        "{\"avg_fill_price\":\"1.50\",\"qty_filled\":10,\"option_symbol\":\"" + occ + "\"}");
+
+    // Entry bounded out → raw proceeds 1.50*10*100 = +1500, NOT the matched
+    // (1.50-1.00)*10*100=+500.
+    assertThat(svc.computeRealizedPnl("dev", "copytrade-v1", tradingDay))
+        .isEqualByComparingTo("1500.00");
+  }
+
+  @Test
+  void computeRealizedPnl_crossDayExit_withinLookbackWindow_matchesRealBasis() {
+    // Contrast to the older-than-lookback case: an entry that IS within the window (prior day, well
+    // inside 90d) FIFO-matches the cross-day exit's REAL basis — the common case the #618 fix
+    // targets, preserved under the bound.
+    String occ = "AAPL  260727C00330000";
+    LocalDate tradingDay = LocalDate.of(2026, 7, 22);
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-07-21T14:00:00Z", // prior day, within the 90d window
+        "{\"avg_fill_price\":\"1.00\",\"filled_qty\":10,\"option_symbol\":\"" + occ + "\"}");
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-07-22T14:00:00Z",
+        "{\"avg_fill_price\":\"1.50\",\"qty_filled\":10,\"option_symbol\":\"" + occ + "\"}");
+
+    // In-window entry → matched (1.50-1.00)*10*100 = +500, NOT the +1500 raw proceeds.
+    assertThat(svc.computeRealizedPnl("dev", "copytrade-v1", tradingDay))
+        .isEqualByComparingTo("500.00");
+  }
+
+  @Test
   void computeRealizedPnl_exitWithNoEntry_creditsRawProceeds_onlyOnExitDay_issue276() {
     // Pre-history residual preserved: an exit whose entry pre-dates retained history still falls to
     // raw proceeds, counted ONLY on its exit day (D2), not on a different target day (D1).

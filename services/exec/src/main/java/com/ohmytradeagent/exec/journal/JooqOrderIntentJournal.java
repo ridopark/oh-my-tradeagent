@@ -200,11 +200,16 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
-  public List<JournaledOrder> findFilledBySide(String tenantId, String strategyId, String side) {
-    // Cross-day realized fix (PLAN-2026-07-22): FULL-HISTORY sibling of findFilledBySideOnDay — the
-    // per-day predicate is dropped so a cross-day exit FIFO-matches its REAL prior-day entry basis;
-    // the exec impl day-scopes the total in-memory from each fill's ET date (filled_at). Same
-    // FIFO ordering; side is validated at the exec impl boundary before this call.
+  public List<JournaledOrder> findFilledBySide(
+      String tenantId, String strategyId, String side, java.time.LocalDate sinceEtDay) {
+    // Cross-day realized fix (PLAN-2026-07-22): LOOKBACK-BOUNDED sibling of findFilledBySideOnDay —
+    // the per-day equality predicate is replaced by an ET-date LOWER BOUND so a cross-day exit
+    // FIFO-matches its REAL prior-day entry basis while the scan stays bounded (this runs on the
+    // account kill-switch heartbeat ~every 60s; an unbounded full-history scan would grow without
+    // limit). The exec impl day-scopes the total in-memory from each fill's ET date (filled_at) and
+    // passes tradingDay − REALIZED_LOOKBACK_DAYS as sinceEtDay. The lower bound mirrors the on-day
+    // predicate's ET boundary: (filled_at AT TIME ZONE 'America/New_York')::date >= sinceEtDay.
+    // Same FIFO ordering; side is validated at the exec impl boundary before this call.
     Result<?> rows =
         dsl.selectFrom(TABLE)
             .where(field("tenant_id", String.class).eq(tenantId))
@@ -213,6 +218,9 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
             .and(field("side", String.class).eq(side))
             .and(field("filled_qty").isNotNull())
             .and(field("avg_fill_price").isNotNull())
+            .and(
+                org.jooq.impl.DSL.condition(
+                    "(filled_at AT TIME ZONE 'America/New_York')::date >= {0}", sinceEtDay))
             .orderBy(
                 field("filled_at", OffsetDateTime.class).asc(),
                 field("recorded_at", OffsetDateTime.class).asc())

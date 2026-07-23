@@ -88,17 +88,31 @@ public interface OrderIntentJournal {
       String tenantId, String strategyId, String side, java.time.LocalDate tradingDay);
 
   /**
-   * Cross-day realized fix (PLAN-2026-07-22, kill-switch phantom): FULL-HISTORY sibling of {@link
-   * #findFilledBySideOnDay} — ALL FILLED rows for one {@code side} ({@code BUY} = entries, {@code
-   * SELL} = exits) for ({@code tenantId}, {@code strategyId}) across every trading day, ordered
-   * {@code filled_at ASC, recorded_at ASC} (FIFO). Rows with a null {@code filled_qty} / {@code
-   * avg_fill_price} are excluded. Backs {@code DailyPnlExecActivity.computeRealizedPnl}: the caller
-   * FIFO-matches every exit against its REAL (possibly prior-day) entry basis and day-scopes the
-   * total in-memory from each fill's ET date ({@code filledAt}), so a position entered on a prior
-   * day and exited today no longer credits phantom raw proceeds against the daily-loss cap. The
-   * per-day predicate is dropped from the query and applied at attribution time instead.
+   * Cross-day realized fix (PLAN-2026-07-22, kill-switch phantom): LOOKBACK-BOUNDED sibling of
+   * {@link #findFilledBySideOnDay} — FILLED rows for one {@code side} ({@code BUY} = entries,
+   * {@code SELL} = exits) for ({@code tenantId}, {@code strategyId}) whose ET fill date is on/after
+   * {@code sinceEtDay}, ordered {@code filled_at ASC, recorded_at ASC} (FIFO). Rows with a null
+   * {@code filled_qty} / {@code avg_fill_price} are excluded. Backs {@code
+   * DailyPnlExecActivity.computeRealizedPnl}: the caller FIFO-matches every exit against its REAL
+   * (possibly prior-day) entry basis and day-scopes the total in-memory from each fill's ET date
+   * ({@code filledAt}), so a position entered on a prior day and exited today no longer credits
+   * phantom raw proceeds against the daily-loss cap. The per-day predicate is dropped (only the
+   * lower bound remains) and day-attribution is applied in-memory instead.
+   *
+   * <p><b>Why a lower bound (PLAN-2026-07-22 review follow-up).</b> {@code computeRealizedPnl} runs
+   * on the account kill-switch HEARTBEAT (~every 60s), so an unbounded full-history scan would grow
+   * without limit for an active/long-history tenant and creep toward the Activity timeout. {@code
+   * sinceEtDay} (the caller passes {@code tradingDay − REALIZED_LOOKBACK_DAYS}) bounds the scan
+   * while still covering any realistic still-open options position — options expire, so no
+   * realistic hold reaches the window. An entry older than the window falls to the documented
+   * raw-proceeds residual (the same pre-history limitation, now bounded), never a reintroduced
+   * fail-open.
+   *
+   * <p>The ET-date lower bound mirrors {@link #findFilledBySideOnDay}: {@code (filled_at AT TIME
+   * ZONE 'America/New_York')::date >= sinceEtDay}.
    */
-  List<JournaledOrder> findFilledBySide(String tenantId, String strategyId, String side);
+  List<JournaledOrder> findFilledBySide(
+      String tenantId, String strategyId, String side, java.time.LocalDate sinceEtDay);
 
   /**
    * Conditional state-machine transition: flips RECORDED → SUBMITTED only if the current state is
