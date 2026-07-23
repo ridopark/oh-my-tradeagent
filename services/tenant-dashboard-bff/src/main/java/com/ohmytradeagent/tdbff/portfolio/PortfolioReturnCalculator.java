@@ -59,6 +59,13 @@ public class PortfolioReturnCalculator {
    *     values the book at NOW, not at the series' last point (the last COMPLETED session =
    *     yesterday's close), which otherwise overstates the range by today's move. Null → fall back
    *     to {@code equity[last]} (behavior-preserving when the live snapshot is unavailable).
+   * @param evAsOfEpochSecond epoch-seconds the EV is valued AS-OF — passed only when {@code
+   *     liveEquity} is a live NOW snapshot (daily-bar ranges). When both are present the cash-flow
+   *     window's UPPER bound is this as-of time (not {@code timestamps[last]}), so a deposit made
+   *     TODAY — which is baked into the live EV but dated AFTER the series' last point — is netted
+   *     out instead of counted as profit; the Modified-Dietz span and weights use it too. Null (or
+   *     {@code liveEquity} null) → the upper bound stays {@code timestamps[last]}
+   *     (behavior-preserving).
    */
   public RangeReturn compute(
       List<BigDecimal> equity,
@@ -68,7 +75,8 @@ public class PortfolioReturnCalculator {
       List<BigDecimal> flowAmounts,
       Boolean flowsAvailable,
       Long baseValueAsof,
-      BigDecimal liveEquity) {
+      BigDecimal liveEquity,
+      Long evAsOfEpochSecond) {
     if (!Boolean.TRUE.equals(flowsAvailable)) {
       return NULL;
     }
@@ -88,9 +96,18 @@ public class PortfolioReturnCalculator {
     }
 
     long t0 = timestamps.get(0);
-    long t1 = timestamps.get(timestamps.size() - 1);
-    boolean spanPositive = t1 > t0;
-    BigDecimal span = spanPositive ? BigDecimal.valueOf(t1 - t0) : null;
+    // The EV's as-of time is the flow window's upper bound whenever EV is the live NOW snapshot
+    // (liveEquity + evAsOf both present). Otherwise EV is the series' last point, so the window
+    // ends
+    // exactly there — behavior-preserving. This keeps the flow window coupled to the EV valuation:
+    // a today-dated deposit that sits inside the live EV is admitted (and netted) rather than being
+    // dropped as "after the series" and re-inflating the range by the deposit.
+    long t1Effective =
+        (liveEquity != null && evAsOfEpochSecond != null)
+            ? evAsOfEpochSecond
+            : timestamps.get(timestamps.size() - 1);
+    boolean spanPositive = t1Effective > t0;
+    BigDecimal span = spanPositive ? BigDecimal.valueOf(t1Effective - t0) : null;
 
     // The two timestamp series have DIFFERENT granularity, and comparing them exactly is a bug.
     // Cash flows come from Alpaca's non-trade activities, which carry only a "date" — the exec
@@ -100,9 +117,9 @@ public class PortfolioReturnCalculator {
     // deposit straight back into EV − BV as if it were profit. That is precisely the +945%
     // inflation this class exists to remove, just narrowed to ranges that begin on a transfer day.
     // Fix: admit any flow dated on t0's calendar day by flooring the lower bound to that day's UTC
-    // midnight. The UPPER bound stays exactly t1 — a same-day flow parses to midnight and is
-    // therefore always <= t1, so no widening is needed there, and widening it would wrongly pull in
-    // flows from days the equity series doesn't cover.
+    // midnight. The UPPER bound is t1Effective (above): the series' last point by default, or the
+    // EV's live as-of time when EV is valued at NOW — so a TODAY-dated flow baked into the live EV
+    // is admitted rather than dropped as "after the series" and re-counted as profit.
     //
     // When base_value_asof is present, it is the AUTHORITATIVE lower bound: base_value already
     // bakes
@@ -124,7 +141,7 @@ public class PortfolioReturnCalculator {
           baseValueAsof != null
               ? t != null && t <= baseValueAsof
               : t != null && t < fallbackWindowStart;
-      if (t == null || amount == null || beforeWindow || t > t1) {
+      if (t == null || amount == null || beforeWindow || t > t1Effective) {
         // Defensively ignore out-of-window / malformed / already-in-base flows.
         continue;
       }
@@ -134,7 +151,8 @@ public class PortfolioReturnCalculator {
         // so the raw ratio exceeds 1 and would over-weight the deposit in the denominator
         // (understating the return). Capping at 1 states the truth for that case: the money was in
         // the account for the whole window.
-        BigDecimal weight = BigDecimal.valueOf(t1 - t).divide(span, MC).min(BigDecimal.ONE);
+        BigDecimal weight =
+            BigDecimal.valueOf(t1Effective - t).divide(span, MC).min(BigDecimal.ONE);
         weightedFlows = weightedFlows.add(weight.multiply(amount));
       }
     }

@@ -33,6 +33,7 @@ class PortfolioReturnCalculatorTest {
             List.of(new BigDecimal("41230")),
             true,
             null,
+            null,
             null);
 
     // Trading-only $ P&L, deposit removed.
@@ -60,6 +61,7 @@ class PortfolioReturnCalculatorTest {
             List.of(new BigDecimal("8000")),
             true,
             null,
+            null,
             null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("2000");
@@ -79,6 +81,7 @@ class PortfolioReturnCalculatorTest {
             List.of(),
             true,
             null,
+            null,
             null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("1000");
@@ -95,6 +98,7 @@ class PortfolioReturnCalculatorTest {
             List.of(2000L),
             List.of(new BigDecimal("41230")),
             false,
+            null,
             null,
             null);
 
@@ -114,6 +118,7 @@ class PortfolioReturnCalculatorTest {
             List.of(),
             true,
             null,
+            null,
             null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("1000");
@@ -131,6 +136,7 @@ class PortfolioReturnCalculatorTest {
             List.of(),
             true,
             null,
+            null,
             null);
 
     assertThat(rr.rangePl()).isNull();
@@ -147,6 +153,7 @@ class PortfolioReturnCalculatorTest {
             List.of(),
             List.of(),
             true,
+            null,
             null,
             null);
 
@@ -175,6 +182,7 @@ class PortfolioReturnCalculatorTest {
             List.of(new BigDecimal("999"), new BigDecimal("41230"), new BigDecimal("777")),
             true,
             null,
+            null,
             null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("6029.56");
@@ -201,6 +209,7 @@ class PortfolioReturnCalculatorTest {
             List.of(depositTs),
             List.of(new BigDecimal("41230")),
             true,
+            null,
             null,
             null);
 
@@ -230,6 +239,7 @@ class PortfolioReturnCalculatorTest {
             List.of(new BigDecimal("41230")),
             true,
             null,
+            null,
             null);
 
     assertThat(rr.rangePl()).isEqualByComparingTo("1000.00");
@@ -248,6 +258,7 @@ class PortfolioReturnCalculatorTest {
             List.of(2000L),
             List.of(new BigDecimal("-5000")),
             true,
+            null,
             null,
             null);
 
@@ -270,6 +281,7 @@ class PortfolioReturnCalculatorTest {
             List.of(250L, 750L),
             List.of(new BigDecimal("1000"), new BigDecimal("-400")),
             true,
+            null,
             null,
             null);
 
@@ -306,13 +318,13 @@ class PortfolioReturnCalculatorTest {
     // →
     // 52259.56 - 5000 - 49000 = -1740.44, a FAKE LOSS. This is the shipped bug.
     RangeReturn buggy =
-        calc.compute(equity, baseValue, timestamps, flowTs, flowAmt, true, null, null);
+        calc.compute(equity, baseValue, timestamps, flowTs, flowAmt, true, null, null, null);
     assertThat(buggy.rangePl()).isEqualByComparingTo("-1740.44");
 
     // AFTER (baseValueAsof=2026-06-18): the 06-12 funding is at/before the as-of and is excluded
     // (already in base_value) → 52259.56 - 5000 - 44000 = +3259.56, the TRUE profit.
     RangeReturn fixed =
-        calc.compute(equity, baseValue, timestamps, flowTs, flowAmt, true, asof, null);
+        calc.compute(equity, baseValue, timestamps, flowTs, flowAmt, true, asof, null, null);
     assertThat(fixed.rangePl()).isEqualByComparingTo("3259.56");
     assertThat(fixed.rangePlPct()).isNotNull();
   }
@@ -337,6 +349,7 @@ class PortfolioReturnCalculatorTest {
             List.of(new BigDecimal("2000")),
             true,
             asof,
+            null,
             null);
     assertThat(onAsof.rangePl()).isEqualByComparingTo("5000.00");
 
@@ -351,6 +364,7 @@ class PortfolioReturnCalculatorTest {
             List.of(new BigDecimal("2000")),
             true,
             asof,
+            null,
             null);
     assertThat(nextDayFlow.rangePl()).isEqualByComparingTo("3000.00");
   }
@@ -365,6 +379,7 @@ class PortfolioReturnCalculatorTest {
     // since 1W's intraday last bar IS the live EV). The stale-bar EV would wrongly show +4360.02.
     long asof = Instant.parse("2026-07-20T00:00:00Z").getEpochSecond();
     long t1 = Instant.parse("2026-07-22T20:00:00Z").getEpochSecond();
+    long evAsOf = Instant.parse("2026-07-22T21:00:00Z").getEpochSecond(); // NOW, after t1
     List<BigDecimal> equity = List.of(new BigDecimal("50000.00"), new BigDecimal("54360.02"));
     BigDecimal baseValue = new BigDecimal("50000.00");
     List<Long> timestamps = List.of(0L, t1);
@@ -372,11 +387,12 @@ class PortfolioReturnCalculatorTest {
     // BEFORE (liveEquity=null): EV = equity[last] = 54360.02 (yesterday's close) → 54360.02 - 50000
     // = +4360.02, overstated by today's -1782.50 move.
     RangeReturn staleBar =
-        calc.compute(equity, baseValue, timestamps, List.of(), List.of(), true, asof, null);
+        calc.compute(equity, baseValue, timestamps, List.of(), List.of(), true, asof, null, null);
     assertThat(staleBar.rangePl()).isEqualByComparingTo("4360.02");
 
     // AFTER (liveEquity=52577.52): EV = live equity → 52577.52 - 50000 = +2577.52, the TRUE range,
-    // matching 1W and reconciling with total − funded.
+    // matching 1W and reconciling with total − funded. The flow window is empty so the NOW evAsOf
+    // upper bound is inert here — rangePl is UNCHANGED at 2577.52.
     RangeReturn live =
         calc.compute(
             equity,
@@ -386,10 +402,64 @@ class PortfolioReturnCalculatorTest {
             List.of(),
             true,
             asof,
-            new BigDecimal("52577.52"));
+            new BigDecimal("52577.52"),
+            evAsOf);
     assertThat(live.rangePl()).isEqualByComparingTo("2577.52");
     // Modified-Dietz % over a flow-free window = rangePl / base_value = 2577.52 / 50000.
     assertThat(live.rangePlPct().doubleValue()).isCloseTo(2577.52 / 50000.0, within(1e-9));
+  }
+
+  @Test
+  void sameDayFlowWithLiveEquity_subtractedNotCountedAsProfit() {
+    // SAME-DAY DEPOSIT reconciliation (the #615 correctness gap). Daily-bar 1M range:
+    // base_value=50000 asof before the series, equity[last]=54360.02 is YESTERDAY's close, and a
+    // $10,000 deposit lands TODAY (timestamp AFTER timestamps[last]). Live equity = 64360.02
+    // INCLUDES that deposit. Correct rangePl = liveEquity − base − netFlows = 64360.02 − 50000 −
+    // 10000 = 4360.02 = total(64360.02) − funded(60000). The coupling: the flow window's upper
+    // bound must follow the EV's as-of time (NOW), or the today-dated deposit is dropped as
+    // "after the series" and rides into EV − BV as fake profit.
+    long asof = Instant.parse("2026-07-19T00:00:00Z").getEpochSecond();
+    long t1 = Instant.parse("2026-07-21T20:00:00Z").getEpochSecond(); // yesterday's close
+    long todayDeposit = Instant.parse("2026-07-22T14:00:00Z").getEpochSecond(); // after t1
+    long evAsOf = Instant.parse("2026-07-22T20:00:00Z").getEpochSecond(); // NOW, after the deposit
+    assertThat(todayDeposit).isGreaterThan(t1);
+    assertThat(evAsOf).isGreaterThan(todayDeposit);
+
+    List<BigDecimal> equity = List.of(new BigDecimal("50000.00"), new BigDecimal("54360.02"));
+    BigDecimal baseValue = new BigDecimal("50000.00");
+    List<Long> timestamps = List.of(0L, t1);
+    List<Long> flowTs = List.of(todayDeposit);
+    List<BigDecimal> flowAmt = List.of(new BigDecimal("10000"));
+
+    // WITHOUT the coupling (evAsOf = the old timestamps[last]=t1): the today-flow is > t1 → dropped
+    // as out-of-window, so the $10k deposit rides in the live EV as FAKE PROFIT → 14360.02.
+    RangeReturn uncoupled =
+        calc.compute(
+            equity,
+            baseValue,
+            timestamps,
+            flowTs,
+            flowAmt,
+            true,
+            asof,
+            new BigDecimal("64360.02"),
+            t1);
+    assertThat(uncoupled.rangePl()).isEqualByComparingTo("14360.02");
+
+    // WITH the fix (evAsOf after the today-flow): the window extends to the EV's as-of time → the
+    // deposit is netted out → 64360.02 − 50000 − 10000 = 4360.02 = total − funded.
+    RangeReturn fixed =
+        calc.compute(
+            equity,
+            baseValue,
+            timestamps,
+            flowTs,
+            flowAmt,
+            true,
+            asof,
+            new BigDecimal("64360.02"),
+            evAsOf);
+    assertThat(fixed.rangePl()).isEqualByComparingTo("4360.02");
   }
 
   @Test
@@ -406,6 +476,7 @@ class PortfolioReturnCalculatorTest {
             List.of(),
             true,
             asof,
+            null,
             null);
     assertThat(rr.rangePl()).isEqualByComparingTo("4360.02");
   }

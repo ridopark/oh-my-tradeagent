@@ -17,6 +17,7 @@ import com.ohmytradeagent.tdbff.portfolio.AccountEquityClient.BrokerAccount;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioHistoryClient;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -132,6 +133,37 @@ class PortfolioHistoryControllerWebMvcTest {
         .andExpect(status().isOk())
         // Live EV, NOT the stale daily bar's 4360.02.
         .andExpect(jsonPath("$.range_pl").value(2577.52));
+  }
+
+  @Test
+  void liveEquityEv_todayDatedCashFlow_isNettedOutNotCountedAsProfit() throws Exception {
+    // SAME-DAY DEPOSIT (#615 correctness gap): the daily-bar series ends YESTERDAY (54360.02); a
+    // $10k deposit lands TODAY (timestamp AFTER the series' last point) and is baked into live
+    // equity (64360.02). Because the controller passes a NOW evAsOf, the flow window extends to NOW
+    // so the deposit is NETTED OUT (64360.02 - 50000 - 10000 = 4360.02) rather than counted as
+    // profit (14360.02). Proves the controller couples the flow window to the live-EV as-of time.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-live");
+
+    long todayFlowTs =
+        Instant.now().getEpochSecond() - 3600; // after the series, before evAsOf(now)
+    PortfolioHistoryResult result = new PortfolioHistoryResult();
+    result.setSchemaVersion(1L);
+    result.setTimestamps(List.of(1000L, 3000L));
+    result.setEquity(List.of(new BigDecimal("50000.00"), new BigDecimal("54360.02")));
+    result.setBaseValue(new BigDecimal("50000.00"));
+    result.setCashFlowTimestamps(List.of(todayFlowTs));
+    result.setCashFlowAmounts(List.of(new BigDecimal("10000")));
+    result.setCashFlowsAvailable(true);
+    when(client.historyFor(eq("acme"), eq("alpaca-live"), eq("1M"))).thenReturn(result);
+    when(client.usesDailyBars("1M")).thenReturn(true); // 1M is a daily-bar range → live EV read
+    when(accountEquityClient.snapshotFor(eq("acme"), eq("alpaca-live")))
+        .thenReturn(new BrokerAccount(new BigDecimal("64360.02"), "310056593"));
+
+    mvc.perform(get("/api/portfolio-history?range=1M").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        // Today's deposit netted (64360.02 - 50000 - 10000), NOT counted as profit (14360.02).
+        .andExpect(jsonPath("$.range_pl").value(4360.02));
   }
 
   @Test

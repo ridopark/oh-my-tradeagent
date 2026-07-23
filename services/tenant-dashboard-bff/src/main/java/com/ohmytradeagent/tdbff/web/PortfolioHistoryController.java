@@ -9,6 +9,7 @@ import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator.RangeReturn;
 import jakarta.servlet.http.HttpServletRequest;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -111,15 +112,23 @@ public class PortfolioHistoryController {
     // no reads (empty chart, client never called).
     PortfolioHistoryResult history = null;
     BigDecimal liveEquity = null;
+    Long evAsOf = null;
     if (brokerTarget != null) {
       final String bt = brokerTarget;
       Future<PortfolioHistoryResult> historyFuture =
           subreadPool.submit(() -> client.historyFor(tenant, bt, range));
+      boolean dailyBars = client.usesDailyBars(range);
       Future<BigDecimal> equityFuture =
-          client.usesDailyBars(range) ? subreadPool.submit(() -> liveEquityFor(tenant, bt)) : null;
+          dailyBars ? subreadPool.submit(() -> liveEquityFor(tenant, bt)) : null;
       history = await(historyFuture, null, "portfolio-history range=" + range);
       liveEquity =
           equityFuture == null ? null : await(equityFuture, null, "live-equity range=" + range);
+      // For a daily-bar range the live-equity EV is valued at NOW, so the range calc must window
+      // cash flows through NOW too — otherwise a deposit made TODAY (in the live EV, but dated
+      // after
+      // the series' last COMPLETED session) is counted as profit. Pair the EV's as-of time with the
+      // EV. Intraday ranges (no live-equity read) pass null → window stays the series' last point.
+      evAsOf = dailyBars ? Instant.now().getEpochSecond() : null;
     }
 
     Map<String, Object> body = new LinkedHashMap<>();
@@ -145,7 +154,8 @@ public class PortfolioHistoryController {
                 history.getCashFlowAmounts(),
                 history.getCashFlowsAvailable(),
                 history.getBaseValueAsof(),
-                liveEquity);
+                liveEquity,
+                evAsOf);
     body.put("range_pl", rr.rangePl());
     body.put("range_pl_pct", rr.rangePlPct());
     body.put(
