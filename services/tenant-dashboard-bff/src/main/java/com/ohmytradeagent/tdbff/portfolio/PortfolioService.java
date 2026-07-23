@@ -35,8 +35,9 @@ import org.springframework.stereotype.Service;
  *       joined by normalized-compact OCC from {@link BrokerPositionsClient}. These are
  *       broker-ACCOUNT-level truth (shared across tenants on a broker_target), fail-open (a
  *       degraded snapshot omits them, the row still renders), and never a risk-gate input.
- *   <li>{@code realized_pnl_today} — FIFO match of today's fills (America/New_York); see {@code
- *       RealizedPnlCalculator} for the documented intraday-match limitation.
+ *   <li>{@code realized_pnl_today} — FIFO-matched realized P&L attributed to today's exits
+ *       (America/New_York), including cross-day exits matched to their real prior-day basis; see
+ *       {@code RealizedPnlCalculator} for the remaining pre-history limitation.
  *   <li>{@code account_equity} — net-liquidation equity of THIS tenant's OWN brokerage account (the
  *       tenant_id is forwarded so exec resolves the tenant's own broker credentials); account-level
  *       truth for that account, NOT this tenant's per-strategy portfolio value. {@code
@@ -142,45 +143,46 @@ public class PortfolioService {
           subreadPool.submit(() -> brokerPositions.marksFor(brokerTarget, tenantId, repStrategy)));
     }
 
-    // Since-inception realized P&L, per strategy. Unlike the day-scoped read below, the all-time
-    // calc drops the date predicate and scans the strategy's ENTIRE audit_log history, so it grows
-    // unbounded over time — dispatch it concurrently and await it under the same sub-read budget as
-    // the other slow reads so a slow scan can't stack past the page budget. The all-time figure
-    // lets the Status page reconcile to starting capital (start + realized_all_time + unrealized ≈
-    // equity) and is strictly MORE correct than the daily calc (resolves the #276 §4 cross-day
-    // phantom gain).
-    Map<String, Future<BigDecimal>> allTimeFutures = new LinkedHashMap<>();
+    // Realized P&L per strategy — today AND since-inception from a SINGLE full-history fetch + FIFO
+    // pass (RealizedPnlCalculator#computeRealized), so we scan the strategy's ENTIRE journal
+    // history
+    // ONCE per strategy per page load rather than twice. The day-scoped calc FIFO-matches cross-day
+    // exits against their real prior-day basis (#276 §4 fix), so it too needs full history — the
+    // single pass yields both the today figure and the all-time figure (which lets the Status page
+    // reconcile to starting capital: start + realized_all_time + unrealized ≈ equity). The scan
+    // grows unbounded over time, so dispatch it concurrently and await it under the sub-read budget
+    // so a slow scan can't stack past the page budget.
+    Map<String, Future<RealizedPnlCalculator.RealizedPnl>> realizedFutures = new LinkedHashMap<>();
     for (String strategyId : strategyIds) {
-      allTimeFutures.put(
+      realizedFutures.put(
           strategyId,
-          subreadPool.submit(() -> realizedPnl.computeRealizedPnlAllTime(tenantId, strategyId)));
+          subreadPool.submit(() -> realizedPnl.computeRealized(tenantId, strategyId, tradingDay)));
     }
 
-    // Realized P&L today, summed across strategies. The day-scoped read is date-bounded (small and
-    // fast) and not gated on the orchestrator worker, so it stays inline and cheap.
+    // Sum both figures under the sub-read budget with the same null-seeded degrade convention: a
+    // stalled scan degrades to a NULL contribution (the await fallback is null, not ZERO), and if
+    // ANY strategy degraded the whole figure is published as null so the tile renders "—"
+    // (unavailable), NOT a misleading $0.00 or a silently under-counted total. Both aggregates are
+    // seeded independently; because a single fetch now backs both, a degraded strategy nulls both.
+    // This follows the null-seeding convention the rest of the page uses for degraded aggregates
+    // (see account equity / unrealized marks).
     BigDecimal realizedToday = BigDecimal.ZERO;
-    for (String strategyId : strategyIds) {
-      realizedToday =
-          realizedToday.add(realizedPnl.computeRealizedPnl(tenantId, strategyId, tradingDay));
-    }
-
-    // Sum the since-inception figures under the sub-read budget. A stalled scan degrades to a NULL
-    // contribution (the await fallback is null, not ZERO) — and if ANY strategy degraded, the whole
-    // figure is published as null so the tile renders "—" (unavailable), NOT a misleading $0.00 or
-    // a silently under-counted total. This follows the same null-seeding convention the rest of the
-    // page uses for degraded aggregates (see account equity / unrealized marks).
+    boolean realizedTodayDegraded = false;
     BigDecimal realizedAllTime = BigDecimal.ZERO;
     boolean realizedAllTimeDegraded = false;
-    for (Map.Entry<String, Future<BigDecimal>> entry : allTimeFutures.entrySet()) {
-      BigDecimal contribution =
+    for (Map.Entry<String, Future<RealizedPnlCalculator.RealizedPnl>> entry :
+        realizedFutures.entrySet()) {
+      RealizedPnlCalculator.RealizedPnl contribution =
           await(
               entry.getValue(),
               null,
-              "realized_all_time tenant=" + tenantId + " strategy=" + entry.getKey());
+              "realized tenant=" + tenantId + " strategy=" + entry.getKey());
       if (contribution == null) {
+        realizedTodayDegraded = true;
         realizedAllTimeDegraded = true;
       } else {
-        realizedAllTime = realizedAllTime.add(contribution);
+        realizedToday = realizedToday.add(contribution.today());
+        realizedAllTime = realizedAllTime.add(contribution.allTime());
       }
     }
 
@@ -253,7 +255,7 @@ public class PortfolioService {
     body.put("open_positions_count", positionItems.size());
     body.put("sum_open_notional", sumOpenNotional);
     body.put("sum_open_notional_basis", "cost_basis_at_entry"); // NOT live mark
-    body.put("realized_pnl_today", realizedToday);
+    body.put("realized_pnl_today", realizedTodayDegraded ? null : realizedToday);
     body.put("realized_pnl_all_time", realizedAllTimeDegraded ? null : realizedAllTime);
     body.put("account_equity", equityByBroker);
     body.put(
