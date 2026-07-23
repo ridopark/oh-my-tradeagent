@@ -101,6 +101,11 @@ class AccountKillSwitchWorkflowImplTest {
     // suite is unchanged), no pct, no realized loss, empty book, no quotes.
     when(calendar.isMarketOpen()).thenReturn(true);
     when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 14));
+    // OCC fixture convention (PLAN-2026-07-23 Phase 1): expiry is now behavioral, because a
+    // PHYSICALLY EXPIRED contract is valued at zero instead of counting as a quote failure. So
+    // ...261218... = LIVE (expires 2026-12-18, after the todayEt above) — use it whenever a test
+    // means "a real open position", including "...whose quote is unavailable". ...240119... =
+    // EXPIRED (2024-01-19) — only the Phase 1 tests that deliberately hold a dead contract.
     when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
     when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
     when(tenantConfig.tenantBrokerTarget(anyString())).thenReturn(BROKER_TARGET);
@@ -170,16 +175,16 @@ class AccountKillSwitchWorkflowImplTest {
             new AccountOpenBook(
                 List.of(
                     // s1 position: entry 3.00, bid 2.00 -> -1.00 * 10 * 100 = -1000
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 10L),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 10L),
                     // s2 position: entry 5.00, bid 4.00 -> -1.00 * 15 * 100 = -1500
                     new OpenPositionValuation(
-                        "AAPL  250516C00200000", new BigDecimal("5.00"), 15L)),
+                        "AAPL  261218C00200000", new BigDecimal("5.00"), 15L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(quoteFor("NVDA  250516C00140000")))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.00")));
-    when(optionQuote.getOptionQuote(quoteFor("AAPL  250516C00200000")))
-        .thenReturn(okQuote("AAPL  250516C00200000", new BigDecimal("4.00")));
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  261218C00140000")))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.00")));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  261218C00200000")))
+        .thenReturn(okQuote("AAPL  261218C00200000", new BigDecimal("4.00")));
 
     // Total = -3000 + (-1000) + (-1500) = -5500 <= -5000 -> trip.
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-drill");
@@ -236,11 +241,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L)),
                 1,
                 0));
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.50")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.50")));
     // -1000 + (2.50-3.00)*5*100 = -1000 - 250 = -1250 > -5000 -> no trip.
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-below");
@@ -269,11 +274,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L)),
                 3,
                 1));
-    when(optionQuote.getOptionQuote(quoteFor("NVDA  250516C00140000")))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.50")));
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  261218C00140000")))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.50")));
     // -1000 + (2.50-3.00)*5*100 = -1250 > -5000 -> no trip.
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-valuefail");
@@ -326,11 +331,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-debounce");
     WorkflowStub.fromTyped(stub).start(input());
@@ -370,11 +375,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-defer-blip");
     WorkflowStub.fromTyped(stub).start(input());
@@ -407,11 +412,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-defer-then-trip");
     WorkflowStub.fromTyped(stub).start(input());
@@ -437,11 +442,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 1L)),
                 1,
                 0));
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-defer-clean");
     WorkflowStub.fromTyped(stub).start(input());
@@ -460,11 +465,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 1L)),
                 1,
                 0));
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-defer-realloss");
     WorkflowStub.fromTyped(stub).start(input());
@@ -490,13 +495,13 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 1L)),
                 1,
                 0));
     // Tick 1 quote UNAVAILABLE (a blip); every later tick priced (benign -10 MTM, no loss trip).
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(unavailableQuote("NVDA  250516C00140000"))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+        .thenReturn(unavailableQuote("NVDA  261218C00140000"))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-debounce-blip");
     WorkflowStub.fromTyped(stub).start(input());
@@ -518,18 +523,18 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 1L)),
                 1,
                 0));
     // Alternate unavailable / ok on every tick (one call/tick with in-tick re-fetch disabled).
     when(optionQuote.getOptionQuote(any()))
         .thenReturn(
-            unavailableQuote("NVDA  250516C00140000"),
-            okQuote("NVDA  250516C00140000", new BigDecimal("2.90")),
-            unavailableQuote("NVDA  250516C00140000"),
-            okQuote("NVDA  250516C00140000", new BigDecimal("2.90")),
-            unavailableQuote("NVDA  250516C00140000"),
-            okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+            unavailableQuote("NVDA  261218C00140000"),
+            okQuote("NVDA  261218C00140000", new BigDecimal("2.90")),
+            unavailableQuote("NVDA  261218C00140000"),
+            okQuote("NVDA  261218C00140000", new BigDecimal("2.90")),
+            unavailableQuote("NVDA  261218C00140000"),
+            okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-interleaved");
     WorkflowStub.fromTyped(stub).start(input());
@@ -552,14 +557,14 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 1L)),
                 1,
                 0));
     // First quote (initial valuation) UNAVAILABLE; the in-tick re-fetch call returns OK — the blip
     // cleared mid-tick.
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(unavailableQuote("NVDA  250516C00140000"))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+        .thenReturn(unavailableQuote("NVDA  261218C00140000"))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-intick-blip");
     WorkflowStub.fromTyped(stub).start(input());
@@ -579,18 +584,18 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L),
-                    new OpenPositionValuation("TSLA  250516C00300000", new BigDecimal("4.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L),
+                    new OpenPositionValuation("TSLA  261218C00300000", new BigDecimal("4.00"), 5L)),
                 3,
                 0));
     // Two of three unpriceable (66% > 50%), one priced.
-    when(optionQuote.getOptionQuote(quoteFor("NVDA  250516C00140000")))
-        .thenReturn(unavailableQuote("NVDA  250516C00140000"));
-    when(optionQuote.getOptionQuote(quoteFor("AAPL  250516C00200000")))
-        .thenReturn(unavailableQuote("AAPL  250516C00200000"));
-    when(optionQuote.getOptionQuote(quoteFor("TSLA  250516C00300000")))
-        .thenReturn(okQuote("TSLA  250516C00300000", new BigDecimal("3.90")));
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  261218C00140000")))
+        .thenReturn(unavailableQuote("NVDA  261218C00140000"));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  261218C00200000")))
+        .thenReturn(unavailableQuote("AAPL  261218C00200000"));
+    when(optionQuote.getOptionQuote(quoteFor("TSLA  261218C00300000")))
+        .thenReturn(okQuote("TSLA  261218C00300000", new BigDecimal("3.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-largebook");
     WorkflowStub.fromTyped(stub).start(input());
@@ -613,11 +618,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 1L)),
                 1,
                 0));
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-realloss-first");
     WorkflowStub.fromTyped(stub).start(input());
@@ -641,20 +646,20 @@ class AccountKillSwitchWorkflowImplTest {
             new AccountOpenBook(
                 List.of(
                     new OpenPositionValuation(
-                        "NVDA  250516C00140000", new BigDecimal("12.00"), 10L),
+                        "NVDA  261218C00140000", new BigDecimal("12.00"), 10L),
                     new OpenPositionValuation(
-                        "AAPL  250516C00200000", new BigDecimal("12.00"), 10L),
-                    new OpenPositionValuation("TSLA  250516C00300000", new BigDecimal("4.00"), 1L)),
+                        "AAPL  261218C00200000", new BigDecimal("12.00"), 10L),
+                    new OpenPositionValuation("TSLA  261218C00300000", new BigDecimal("4.00"), 1L)),
                 3,
                 0));
     // 1 of 3 unpriceable (33% < 50% => NOT fail-closed on a 3-book); the two priced positions carry
     // a large loss that crosses the cap: (2-12)*10*100 = -10000 each = -20000.
-    when(optionQuote.getOptionQuote(quoteFor("NVDA  250516C00140000")))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.00")));
-    when(optionQuote.getOptionQuote(quoteFor("AAPL  250516C00200000")))
-        .thenReturn(okQuote("AAPL  250516C00200000", new BigDecimal("2.00")));
-    when(optionQuote.getOptionQuote(quoteFor("TSLA  250516C00300000")))
-        .thenReturn(unavailableQuote("TSLA  250516C00300000")); // the partial miss
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  261218C00140000")))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.00")));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  261218C00200000")))
+        .thenReturn(okQuote("AAPL  261218C00200000", new BigDecimal("2.00")));
+    when(optionQuote.getOptionQuote(quoteFor("TSLA  261218C00300000")))
+        .thenReturn(unavailableQuote("TSLA  261218C00300000")); // the partial miss
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-loss-partialmiss");
     WorkflowStub.fromTyped(stub).start(input());
@@ -676,11 +681,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-debounce-reset");
     WorkflowStub.fromTyped(stub).start(input());
@@ -718,11 +723,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-debounce-newday");
     WorkflowStub.fromTyped(stub).start(input());
@@ -766,11 +771,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
 
     String workflowId = "t-dev/account/killswitch-debounce-can";
     AccountKillSwitchWorkflow stub = newStub(workflowId);
@@ -819,11 +824,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
 
     // v4 carry as continueAsNew would emit it mid-debounce: schema_version 4, counter=1, same day.
     AccountKillSwitchWorkflowInput carried = new AccountKillSwitchWorkflowInput();
@@ -858,11 +863,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
 
     String workflowId = "t-dev/account/killswitch-debounce-can-newday";
     AccountKillSwitchWorkflow stub = newStub(workflowId);
@@ -944,6 +949,106 @@ class AccountKillSwitchWorkflowImplTest {
     WorkflowStub.fromTyped(stub).start(v5);
     env.sleep(Duration.ofSeconds(75));
     assertThat(stub.killswitchState().getTripped()).isFalse();
+  }
+
+  // ---------- PLAN-2026-07-23 Phase 1: a PHYSICALLY EXPIRED contract is worth zero, not unknown
+  // ----------
+
+  // THE 2026-07-22 INCIDENT, reproduced. staging_paper's book was 3 running positions, 2 of them
+  // holding contracts that had EXPIRED days earlier (delisted => quote unavailable FOREVER). The
+  // old code counted both as quote failures: failsClosed(listed=3, failures=2) => 2*2 > 3 => an
+  // auto:account_mtm_unavailable trip 47 SECONDS after the open, every single session, with no
+  // debounce (the small-book grace is gated on listed <= 2). An expired contract's value is KNOWN
+  // (zero), so it must not be a "failure" at all.
+  @Test
+  void heartbeat_expiredContractsUnpriceable_valuedAtZero_noMtmUnavailableTrip() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    // Expired 2025-05-16, ~1y before the mocked todayEt (2026-05-14).
+                    new OpenPositionValuation("NVDA  240119C00140000", new BigDecimal("1.00"), 5L),
+                    new OpenPositionValuation("TSLA  240119C00300000", new BigDecimal("1.00"), 5L),
+                    // Live: expires 2026-12-18, well after todayEt.
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("3.00"), 5L)),
+                3,
+                0));
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  240119C00140000")))
+        .thenReturn(unavailableQuote("NVDA  240119C00140000"));
+    when(optionQuote.getOptionQuote(quoteFor("TSLA  240119C00300000")))
+        .thenReturn(unavailableQuote("TSLA  240119C00300000"));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  261218C00200000")))
+        .thenReturn(okQuote("AAPL  261218C00200000", new BigDecimal("3.00")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-expired-zero");
+    WorkflowStub.fromTyped(stub).start(input());
+    // Several ticks: the old behavior tripped on the FIRST one and stayed tripped.
+    env.sleep(Duration.ofSeconds(200));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("KillSwitchTripped")).isEqualTo(0L);
+    // Booked loss is 2 x (0 - 1.00) x 5 x 100 = -1000, inside the 5000 cap => no loss trip either.
+    verify(cascade, never())
+        .cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString());
+  }
+
+  // Fork 2 of the plan: the expired lot BOOKS ITS REAL LOSS (0 - entryPremium) rather than being
+  // skipped. A worthless expiry is a total loss of the premium paid, so the cap must SEE it — this
+  // makes the cap stricter, never looser. Here the expired lot alone crosses the 5000 threshold:
+  // (0 - 12.00) x 50 x 100 = -60000 => a DAILY-LOSS trip, not an mtm-unavailable one.
+  @Test
+  void heartbeat_expiredContract_booksTotalPremiumLoss_tripsDailyLoss() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation(
+                        "NVDA  240119C00140000", new BigDecimal("12.00"), 50L)),
+                1,
+                0));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  240119C00140000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-expired-books-loss");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75)); // ONE tick
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    // The distinction that matters: the cap engaged on the REAL LOSS, not on an unpriceable book.
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+  }
+
+  // Regression guard: the fail-closed protection for a GENUINE market-data outage is untouched. The
+  // same 2-of-3 unpriceable shape as the incident, but on contracts that have NOT expired, still
+  // fail-closes immediately (listed=3 gets no small-book debounce).
+  @Test
+  void heartbeat_unexpiredContractsUnpriceable_stillFailsClosed() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("1.00"), 5L),
+                    new OpenPositionValuation("TSLA  261218C00300000", new BigDecimal("1.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("3.00"), 5L)),
+                3,
+                0));
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  261218C00140000")))
+        .thenReturn(unavailableQuote("NVDA  261218C00140000"));
+    when(optionQuote.getOptionQuote(quoteFor("TSLA  261218C00300000")))
+        .thenReturn(unavailableQuote("TSLA  261218C00300000"));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  261218C00200000")))
+        .thenReturn(okQuote("AAPL  261218C00200000", new BigDecimal("3.00")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-unexpired-failsclosed");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75)); // ONE tick
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
   }
 
   // ---------- dual-control trip/reset (mirror per-strategy) ----------
@@ -1052,11 +1157,11 @@ class AccountKillSwitchWorkflowImplTest {
             new AccountOpenBook(
                 List.of(
                     new OpenPositionValuation(
-                        "NVDA  250516C00140000", new BigDecimal("12.00"), 10L)),
+                        "NVDA  261218C00140000", new BigDecimal("12.00"), 10L)),
                 1,
                 0));
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.00")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.00")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-cooldown");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1098,15 +1203,15 @@ class AccountKillSwitchWorkflowImplTest {
             new AccountOpenBook(
                 List.of(
                     // entry 3.00, bid 4.00 -> (4-3)*10*100 = +1000 (a gain)
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 10L),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 10L),
                     // entry 5.00, bid 6.00 -> (6-5)*5*100 = +500 (a gain)
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(quoteFor("NVDA  250516C00140000")))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("4.00")));
-    when(optionQuote.getOptionQuote(quoteFor("AAPL  250516C00200000")))
-        .thenReturn(okQuote("AAPL  250516C00200000", new BigDecimal("6.00")));
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  261218C00140000")))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("4.00")));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  261218C00200000")))
+        .thenReturn(okQuote("AAPL  261218C00200000", new BigDecimal("6.00")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-exposure-priceable");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1131,11 +1236,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-exposure-unpriceable");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1163,13 +1268,13 @@ class AccountKillSwitchWorkflowImplTest {
                 // entry 3.00, refetched bid 4.00 -> (4-3)*10*100 = +1000 (a gain)
                 List.of(
                     new OpenPositionValuation(
-                        "NVDA  250516C00140000", new BigDecimal("3.00"), 10L)),
+                        "NVDA  261218C00140000", new BigDecimal("3.00"), 10L)),
                 1,
                 0));
     // First quote UNAVAILABLE (the blip), then it clears to a good bid on the in-tick re-fetch.
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(unavailableQuote("NVDA  250516C00140000"))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("4.00")));
+        .thenReturn(unavailableQuote("NVDA  261218C00140000"))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("4.00")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-blip-recache");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1193,11 +1298,11 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(
             new AccountOpenBook(
                 List.of(
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 5L)),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L)),
                 1,
                 0));
     // Never clears — every valuation (initial + both re-fetch attempts) sees UNAVAILABLE.
-    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  250516C00140000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-blip-nopclear");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1221,11 +1326,11 @@ class AccountKillSwitchWorkflowImplTest {
             new AccountOpenBook(
                 List.of(
                     new OpenPositionValuation(
-                        "NVDA  250516C00140000", new BigDecimal("12.00"), 10L)),
+                        "NVDA  261218C00140000", new BigDecimal("12.00"), 10L)),
                 1,
                 0));
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.00")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.00")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-exposure-reset");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1546,15 +1651,15 @@ class AccountKillSwitchWorkflowImplTest {
             new AccountOpenBook(
                 List.of(
                     // entry 3.00, bid 4.00 -> (4-3)*10*100 = +1000
-                    new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 10L),
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 10L),
                     // entry 5.00, bid 6.00 -> (6-5)*5*100 = +500 ; total +1500
-                    new OpenPositionValuation("AAPL  250516C00200000", new BigDecimal("5.00"), 5L)),
+                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L)),
                 2,
                 0));
-    when(optionQuote.getOptionQuote(quoteFor("NVDA  250516C00140000")))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("4.00")));
-    when(optionQuote.getOptionQuote(quoteFor("AAPL  250516C00200000")))
-        .thenReturn(okQuote("AAPL  250516C00200000", new BigDecimal("6.00")));
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  261218C00140000")))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("4.00")));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  261218C00200000")))
+        .thenReturn(okQuote("AAPL  261218C00200000", new BigDecimal("6.00")));
 
     String workflowId = "t-dev/account/killswitch-exposure-can";
     AccountKillSwitchWorkflow stub = newStub(workflowId);
@@ -1776,7 +1881,7 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(new BigDecimal("-6000")); // crosses the 5000 absolute cap -> auto trip
     when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1813,7 +1918,7 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(new BigDecimal("-6000"));
     when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-flat");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1845,7 +1950,7 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(new BigDecimal("-6000"));
     when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-closed");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1867,7 +1972,7 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(new BigDecimal("-6000"));
     when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-reset");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1897,7 +2002,7 @@ class AccountKillSwitchWorkflowImplTest {
         .thenReturn(new BigDecimal("-6000"));
     when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
     when(optionQuote.getOptionQuote(any()))
-        .thenReturn(okQuote("NVDA  250516C00140000", new BigDecimal("2.90")));
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-repage-noquote");
     WorkflowStub.fromTyped(stub).start(input());
@@ -1905,7 +2010,7 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(stub.killswitchState().getTripped()).isTrue();
 
     // Quotes go dark before the first re-page boundary.
-    Mockito.doReturn(unavailableQuote("NVDA  250516C00140000"))
+    Mockito.doReturn(unavailableQuote("NVDA  261218C00140000"))
         .when(optionQuote)
         .getOptionQuote(any());
     env.sleep(Duration.ofSeconds(200)); // past the ~t=240s boundary
@@ -1922,7 +2027,7 @@ class AccountKillSwitchWorkflowImplTest {
 
   private static AccountOpenBook holdingBook() {
     return new AccountOpenBook(
-        List.of(new OpenPositionValuation("NVDA  250516C00140000", new BigDecimal("3.00"), 1L)),
+        List.of(new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 1L)),
         1,
         0);
   }
