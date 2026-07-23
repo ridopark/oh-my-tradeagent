@@ -14,7 +14,9 @@ import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import java.math.BigDecimal;
+import java.time.Instant;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
  * Live-account-view: unit-pins the thin portfolio-history Activity wrapper. It must surface the
@@ -71,7 +73,7 @@ class PortfolioHistoryExecActivityImplTest {
     // history window and surfaces the flows as the parallel arrays + cash_flows_available=true.
     OptionsBroker broker = mock(OptionsBroker.class);
     when(broker.getPortfolioHistory(any(), any(), any())).thenReturn(sampleHistory());
-    when(broker.getAccountActivities(1719446400L, 1719532800L))
+    when(broker.getAccountActivities(eq(1719446400L), anyLong()))
         .thenReturn(
             java.util.List.of(
                 new OptionsBroker.AccountCashFlow(1719450000L, new BigDecimal("41230.00")),
@@ -85,8 +87,19 @@ class PortfolioHistoryExecActivityImplTest {
     assertThat(result.getCashFlowTimestamps()).containsExactly(1719450000L, 1719460000L);
     assertThat(result.getCashFlowAmounts())
         .containsExactly(new BigDecimal("41230.00"), new BigDecimal("-500.00"));
-    // Window is the first..last history timestamp.
-    verify(broker).getAccountActivities(1719446400L, 1719532800L);
+    // Lower bound is the first history timestamp; the UPPER bound is extended to max(series-last,
+    // NOW) so a TODAY-dated flow (dated after the last COMPLETED daily bar but inside the live EV)
+    // is captured for the BFF to net out — the sample's historical ts_last (2024-06) is superseded
+    // by NOW.
+    ArgumentCaptor<Long> from = ArgumentCaptor.forClass(Long.class);
+    ArgumentCaptor<Long> to = ArgumentCaptor.forClass(Long.class);
+    verify(broker).getAccountActivities(from.capture(), to.capture());
+    assertThat(from.getValue()).isEqualTo(1719446400L);
+    long now = Instant.now().getEpochSecond();
+    assertThat(to.getValue()).isEqualTo(Math.max(1719532800L, now));
+    // NOW (>= 2026) dominates the historical series-last (2024-06), proving the extension.
+    assertThat(to.getValue()).isGreaterThan(1719532800L);
+    assertThat(to.getValue()).isGreaterThanOrEqualTo(now - 5);
   }
 
   @Test
