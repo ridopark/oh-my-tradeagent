@@ -67,8 +67,11 @@ ACCOUNT_ID="${CF_ACCOUNT_ID:-2f62bd9e9327a53fefa8e593a2201c26}"
 APP_ID="${CF_ACCESS_APP_ID:-254ba4d3-efb7-4e66-946f-952049b958c1}"   # Homelab Trade Dashboard
 POLICY_ID="${CF_ACCESS_POLICY_ID:-416eabe6-a044-41ee-8f8b-0d336a5a2a23}" # "Allow operators"
 
+# Print the whole leading comment banner as the help text. Driven by the banner's
+# own shape (every line up to the first non-comment) rather than a hardcoded line
+# range, so editing the header above can't silently truncate --help.
 usage() {
-  sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
+  awk 'NR==1 {next} /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0"
   exit "${1:-0}"
 }
 
