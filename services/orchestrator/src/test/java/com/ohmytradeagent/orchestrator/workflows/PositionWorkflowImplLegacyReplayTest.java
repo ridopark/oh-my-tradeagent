@@ -235,6 +235,25 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * PLAN-2026-07-23: pins the no_progress-time-stop pre-target-only gate literal. This getVersion
+   * change-point keys the WHEN of a {@code flattenRemaining("time_stop")} command on a running
+   * PositionWorkflow (post-target the runner is no longer flattened by the time-stop); a renamed
+   * string re-resolves to DEFAULT_VERSION for legacy histories, silently reverting the guard on
+   * in-flight watchlist runners (back to the trail-pre-empting behaviour — the TSLA 2026-07-23
+   * incident). The pre-#276 legacy history above (recorded with NO {@code
+   * watchlist-timestop-pretarget-only-v1} marker) doubles as the v=0 replay regression in {@link
+   * #legacyPre276HistoryReplaysAgainstCurrentImplWithoutNonDeterminism}: on replay this gate
+   * resolves to DEFAULT_VERSION so the current impl keeps the CURRENT unconditional time-stop fire
+   * and reproduces the recorded command stream byte-identically.
+   */
+  @Test
+  void versionTimestopPretargetOnlyConstantNameIsStable() throws Exception {
+    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_TIMESTOP_PRETARGET_ONLY");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("watchlist-timestop-pretarget-only-v1");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#276 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The recorded {@code PartialExitFilled} subject has no
    * {@code option_symbol} key; the current impl's v=DEFAULT_VERSION branch must reproduce that

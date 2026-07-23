@@ -356,6 +356,143 @@ class PositionWorkflowImplWatchlistExitTest {
     assertThat(flatten.getLimitPrice()).as("time_stop routes MARKET").isNull();
   }
 
+  // ---------- PLAN-2026-07-23: time-stop scoped to the PRE-take-profit window ----------
+
+  /**
+   * PLAN-2026-07-23 (reproduces the TSLA 2026-07-23 incident): once the +2R target fires and arms
+   * the chandelier trail, the no_progress_time_stop timer MUST NOT flatten the runner. The
+   * time-stop is a PRE-take-profit stalled-breakout guard (per its documented contract);
+   * post-target the runner is governed only by the chandelier giveback + breakeven stop +
+   * EOD/expiry backstops (Fork A). Arm the exit, drive a bid >= target (fires the partial + arms
+   * the trail), then let the 30s time-stop elapse -> the runner stays open (no time_stop flatten),
+   * then exits via the trail.
+   *
+   * <p>TestWorkflowEnvironment resolves getVersion(VERSION_TIMESTOP_PRETARGET_ONLY) to the max (1),
+   * so this exercises the v>=1 guarded behavior. Pre-fix this test flattened the runner on
+   * time_stop.
+   */
+  @Test
+  void watchlistTimeStop_afterTargetFired_doesNotFlattenRunner() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-wl-timestop-post-target");
+    PositionWorkflowInput in = exitInput(5);
+    in.setNoProgressTimeStopSecs(30L);
+    in.setTrailGivebackPct(new BigDecimal("0.10"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L, new BigDecimal("2.00"));
+
+    // Bid hits the +2R target (3.00) -> partial of 0.5 (ceil(2.5)=3) sold; chandelier armed peak=3.
+    stub.chandelierTick(bidTick(new BigDecimal("3.00")));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-target-partial", 3L, new BigDecimal("3.00")));
+    waitForKind("ChandelierArmed");
+
+    // Advance past the 30s no_progress_time_stop. Pre-fix this flattened the runner on time_stop.
+    env.sleep(Duration.ofSeconds(45));
+
+    // The runner is NOT flattened: still exactly the one (target-partial) placeOrder, no time_stop
+    // flatten audited, and the runner's trail is still armed.
+    verify(exec, times(1)).placeOrder(any());
+    assertThat(
+            captureAll("EodForceFlattenRequested").stream().map(e -> e.getSubject().get("reason")))
+        .doesNotContain("time_stop");
+    ExitProximityView view = stub.exitProximity();
+    assertThat(view.trailingArmed()).as("runner still on the chandelier trail").isTrue();
+
+    // Terminate cleanly: the chandelier (peak 3.00, giveback 0.10 -> 2.70) governs the runner exit.
+    stub.chandelierTick(bidTick(new BigDecimal("2.70")));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-trail", 2L, new BigDecimal("2.70")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // No time_stop leg was ever measured; the runner exited on the chandelier trail.
+    assertThat(
+            captureAll("WatchlistExitMeasured").stream().map(e -> e.getSubject().get("exit_rule")))
+        .doesNotContain("time_stop")
+        .contains("chandelier_trail");
+  }
+
+  /**
+   * PLAN-2026-07-23: the intended stalled-breakout guard is preserved. A position that never
+   * reaches the +2R target still time-stops at the no_progress window (reason time_stop, MARKET).
+   * Mirrors {@link #noProgressTimeStop_elapses_flattensMarketable_reasonTimeStop} but names the
+   * pre-target invariant explicitly.
+   */
+  @Test
+  void watchlistTimeStop_beforeTargetFired_stillFlattens() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-wl-timestop-pre-target");
+    PositionWorkflowInput in = exitInput(5);
+    in.setNoProgressTimeStopSecs(30L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L, new BigDecimal("2.00"));
+
+    // A benign mid-range bid (below the 3.00 target, above the 1.50 stop): the target never fires.
+    stub.chandelierTick(bidTick(new BigDecimal("2.10")));
+
+    env.sleep(Duration.ofSeconds(45));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-timestop", 5L, new BigDecimal("2.05")));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-wl-timestop-pre-target");
+
+    AuditEvent req = captureKind("EodForceFlattenRequested");
+    assertThat(req.getSubject()).containsEntry("reason", "time_stop");
+    OrderIntent flatten = lastSell();
+    assertThat(flatten.getLimitPrice()).as("time_stop routes MARKET").isNull();
+  }
+
+  /**
+   * PLAN-2026-07-23: proves the chandelier trail GOVERNS the runner post-target. After the +2R
+   * target fires, the runner rides to a NEW peak, the no_progress time-stop elapses (now ignored),
+   * then the runner gives back trail_giveback_pct from that peak and exits with
+   * exit_rule=chandelier_trail — the trail, not the timer, took the exit.
+   */
+  @Test
+  void watchlistTimeStop_afterTarget_runnerExitsViaChandelier() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-wl-timestop-trail-governs");
+    PositionWorkflowInput in = exitInput(5);
+    in.setSlPct(new BigDecimal("0.30")); // R = 0.60; target = 2.00*(1+2*0.30) = 3.20
+    in.setNoProgressTimeStopSecs(30L);
+    in.setTrailGivebackPct(new BigDecimal("0.10"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L, new BigDecimal("2.00"));
+
+    // +2R target (3.20) -> partial (3 of 5) sold; chandelier armed peak=3.20.
+    stub.chandelierTick(bidTick(new BigDecimal("3.20")));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-target-partial", 3L, new BigDecimal("3.20")));
+    waitForKind("ChandelierArmed");
+
+    // The runner rides HIGHER to a new peak (4.00), then the time-stop elapses -- but post-target
+    // it
+    // is ignored, so the trail (not the timer) governs the exit.
+    stub.chandelierTick(bidTick(new BigDecimal("4.00"))); // new peak 4.00 -> threshold 3.60
+    env.sleep(Duration.ofSeconds(45));
+    verify(exec, times(1)).placeOrder(any()); // the time-stop did NOT flatten the runner
+
+    // Give back trail_giveback_pct from the 4.00 peak (0.10 -> 3.60): the chandelier fires.
+    stub.chandelierTick(bidTick(new BigDecimal("3.60")));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-trail", 2L, new BigDecimal("3.60")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    List<AuditEvent> measured = captureAll("WatchlistExitMeasured");
+    AuditEvent trailLeg =
+        measured.stream()
+            .filter(e -> "chandelier_trail".equals(e.getSubject().get("exit_rule")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no chandelier_trail leg measured"));
+    assertThat(((Number) trailLeg.getSubject().get("exit_premium")).doubleValue()).isEqualTo(3.60);
+    assertThat(measured.stream().map(e -> e.getSubject().get("exit_rule")))
+        .doesNotContain("time_stop");
+  }
+
   // ---------- (e) premium feed goes stale ----------
 
   /**
