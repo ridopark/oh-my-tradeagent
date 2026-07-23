@@ -277,6 +277,35 @@ class KillSwitchWorkflowImplTest {
   }
 
   @Test
+  void heartbeat_crossDayLoss_nowTrips_auto_daily_loss() {
+    // PLAN-2026-07-22 safety-lock: a prior-day position closed today at a LOSS pre-fix read as a
+    // phantom GAIN (raw exit proceeds credited with zero cost basis), MASKING the breach so the
+    // per-strategy daily-loss cap FAILED OPEN. The exec-journal FIFO fix now returns the REAL
+    // cross-day loss, which crosses the 2500 cap and trips auto:daily_loss. The harness stubs the
+    // corrected figure; the FIFO itself is pinned in DailyPnlExecActivityImplTest.
+    when(calendar.isMarketOpen()).thenReturn(true);
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-3000")); // corrected cross-day realized; pre-fix was +2068
+
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-crossday");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:daily_loss");
+    assertThat(s.getActor()).isEqualTo("auto:daily_loss");
+    verify(cascade, timeout(2000).atLeastOnce())
+        .cascadeRiskBreach(
+            eq("dev"),
+            eq("copytrade-v1"),
+            anyString(),
+            eq("auto:daily_loss"),
+            eq("auto:daily_loss"));
+  }
+
+  @Test
   void heartbeat_execReadFailure_doesNotTrip_thenAlertsAfterThreshold()
       throws InterruptedException {
     // Phase 2 (C6 / G1): an exec-activity failure on v>=1 must NOT doTrip that tick (a missing P&L
