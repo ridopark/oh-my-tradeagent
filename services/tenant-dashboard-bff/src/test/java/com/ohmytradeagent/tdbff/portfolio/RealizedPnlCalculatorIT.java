@@ -97,11 +97,11 @@ class RealizedPnlCalculatorIT {
     // All-time: the 2 sold FIFO-match the 2.3533 basis -> 2 * (1.84 - 2.3533) * 100 = -102.66.
     assertThat(svc.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("-102.66");
 
-    // Day-scoped on the exit day (6/29 America/New_York = 18:00Z). Here the buy was a PRIOR day, so
-    // the day-scoped calc sees ONLY the exit -> documented #276 §4 phantom raw proceeds:
-    // 2 * 1.84 * 100 = 368.
+    // Day-scoped on the exit day (6/29 America/New_York = 18:00Z). The buy was a PRIOR day, but the
+    // day-scoped calc now fetches full history and FIFO-matches the cross-day exit against the real
+    // 2.3533 basis (#276 §4 phantom fix): 2 * (1.84 - 2.3533) * 100 = -102.66 — attributed to 6/29.
     assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 6, 29)))
-        .isEqualByComparingTo("368.00");
+        .isEqualByComparingTo("-102.66");
 
     // Day-scoped on an unrelated day -> no fills in scope -> 0.
     assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 6, 30)))
@@ -121,17 +121,20 @@ class RealizedPnlCalculatorIT {
   }
 
   @Test
-  void crossDay_allTimeMatchesRealBasis_dayScopedIsPhantomProceeds() {
-    // Entry day-1, exit day-2 (both FILLED). All-time matches the real cross-day basis; day-scoped
-    // on day-2 credits raw proceeds (the documented limitation). Lock BOTH.
+  void crossDay_dayScopedMatchesRealBasis_notPhantomProceeds() {
+    // Entry day-1, exit day-2 (both FILLED). Both all-time AND day-scoped-on-day-2 now FIFO-match
+    // the real cross-day basis (#276 §4 phantom fix) — the exit's realized is attributed to day-2.
     insert("BUY", null, 2, "FILLED", 2, "2.30", "2026-05-14T14:00:00Z");
     insert("SELL", null, 2, "FILLED", 2, "3.10", "2026-05-15T17:30:00Z");
 
     // All-time: 2 * (3.10 - 2.30) * 100 = 160.
     assertThat(svc.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("160.00");
-    // Day-scoped on day-2: phantom raw proceeds 2 * 3.10 * 100 = 620 (#276 §4).
+    // Day-scoped on day-2: real basis 2 * (3.10 - 2.30) * 100 = 160 (was phantom 620 pre-fix).
     assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 5, 15)))
-        .isEqualByComparingTo("620.00");
+        .isEqualByComparingTo("160.00");
+    // Day-scoped on day-1 (entry day, no exit): 0 — the loss/gain lands on the exit day only.
+    assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 5, 14)))
+        .isEqualByComparingTo("0");
   }
 
   @Test
