@@ -88,6 +88,19 @@ public interface OrderIntentJournal {
       String tenantId, String strategyId, String side, java.time.LocalDate tradingDay);
 
   /**
+   * Cross-day realized fix (PLAN-2026-07-22, kill-switch phantom): FULL-HISTORY sibling of {@link
+   * #findFilledBySideOnDay} — ALL FILLED rows for one {@code side} ({@code BUY} = entries, {@code
+   * SELL} = exits) for ({@code tenantId}, {@code strategyId}) across every trading day, ordered
+   * {@code filled_at ASC, recorded_at ASC} (FIFO). Rows with a null {@code filled_qty} / {@code
+   * avg_fill_price} are excluded. Backs {@code DailyPnlExecActivity.computeRealizedPnl}: the caller
+   * FIFO-matches every exit against its REAL (possibly prior-day) entry basis and day-scopes the
+   * total in-memory from each fill's ET date ({@code filledAt}), so a position entered on a prior
+   * day and exited today no longer credits phantom raw proceeds against the daily-loss cap. The
+   * per-day predicate is dropped from the query and applied at attribution time instead.
+   */
+  List<JournaledOrder> findFilledBySide(String tenantId, String strategyId, String side);
+
+  /**
    * Conditional state-machine transition: flips RECORDED → SUBMITTED only if the current state is
    * still RECORDED. Returns true iff the row was updated; a false return means another concurrent
    * attempt already set SUBMITTED (or the row is in a terminal state) — caller short-circuits.

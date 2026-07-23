@@ -200,6 +200,27 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public List<JournaledOrder> findFilledBySide(String tenantId, String strategyId, String side) {
+    // Cross-day realized fix (PLAN-2026-07-22): FULL-HISTORY sibling of findFilledBySideOnDay — the
+    // per-day predicate is dropped so a cross-day exit FIFO-matches its REAL prior-day entry basis;
+    // the exec impl day-scopes the total in-memory from each fill's ET date (filled_at). Same
+    // FIFO ordering; side is validated at the exec impl boundary before this call.
+    Result<?> rows =
+        dsl.selectFrom(TABLE)
+            .where(field("tenant_id", String.class).eq(tenantId))
+            .and(field("strategy_id", String.class).eq(strategyId))
+            .and(field("state", String.class).eq(OrderState.FILLED.name()))
+            .and(field("side", String.class).eq(side))
+            .and(field("filled_qty").isNotNull())
+            .and(field("avg_fill_price").isNotNull())
+            .orderBy(
+                field("filled_at", OffsetDateTime.class).asc(),
+                field("recorded_at", OffsetDateTime.class).asc())
+            .fetch();
+    return rows.stream().map(JooqOrderIntentJournal::mapRow).toList();
+  }
+
+  @Override
   public boolean markSubmittedIfRecorded(String intentKey, String brokerOrderId) {
     OffsetDateTime now = OffsetDateTime.now();
     int updated =

@@ -631,6 +631,45 @@ class JooqOrderIntentJournalIT {
         .hasSize(1);
   }
 
+  // ---------- Cross-day fix (PLAN-2026-07-22): findFilledBySide (FULL history) ----------
+
+  @Test
+  void findFilledBySide_returnsAllDaysFifoOrdered_noPerDayPredicate() {
+    // The full-history sibling drops the per-day predicate: a prior-day (D1) entry AND a same-day
+    // (D2) exit are both returned, FIFO-ordered, so the exec impl can day-scope in-memory and match
+    // the D2 exit against its REAL D1 basis instead of crediting phantom raw proceeds.
+    String occ = "AAPL  260727C00330000";
+    OffsetDateTime d1 = OffsetDateTime.parse("2026-07-21T14:00:00Z");
+    OffsetDateTime d2 = OffsetDateTime.parse("2026-07-22T14:00:00Z");
+
+    OrderIntent buy = intentWithOcc("buy-d1", "sig-buy", occ);
+    buy.setSide(OrderIntent.Side.BUY);
+    journal.upsertIntent(buy);
+    journal.markSubmittedIfRecorded("buy-d1", "brk-buy");
+    journal.markFilled("buy-d1", 50L, new BigDecimal("1.99"), d1);
+
+    OrderIntent sell = intentWithOcc("sell-d2", "sig-sell", occ);
+    sell.setSide(OrderIntent.Side.SELL);
+    journal.upsertIntent(sell);
+    journal.markSubmittedIfRecorded("sell-d2", "brk-sell");
+    journal.markFilled("sell-d2", 11L, new BigDecimal("1.88"), d2);
+
+    // Full-history BUY: the prior-day entry is returned (the per-day query scoped to D2 would miss
+    // it — that miss was the phantom).
+    var buys = journal.findFilledBySide("dev", "copytrade-v1", "BUY");
+    assertThat(buys).extracting(JournaledOrder::intentKey).containsExactly("buy-d1");
+    assertThat(buys.get(0).filledQty()).isEqualTo(50L);
+
+    var sells = journal.findFilledBySide("dev", "copytrade-v1", "SELL");
+    assertThat(sells).extracting(JournaledOrder::intentKey).containsExactly("sell-d2");
+    assertThat(sells.get(0).avgFillPrice()).isEqualByComparingTo(new BigDecimal("1.88"));
+
+    // The day-scoped query still excludes the prior-day BUY (contrast that pins the fix's premise).
+    assertThat(
+            journal.findFilledBySideOnDay("dev", "copytrade-v1", "BUY", LocalDate.of(2026, 7, 22)))
+        .isEmpty();
+  }
+
   private OrderIntent intent(String key) {
     OrderIntent i = new OrderIntent();
     i.setSchemaVersion(1L);
