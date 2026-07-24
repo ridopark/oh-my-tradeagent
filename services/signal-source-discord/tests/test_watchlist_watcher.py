@@ -301,6 +301,87 @@ async def test_deduped_primary_does_not_fan_out(tmp_path: pathlib.Path) -> None:
     assert w._state.already_mirrored_today("2026-06-04") is False  # type: ignore[attr-defined]
 
 
+# --------------------------------------------------------------------------- #
+# Phase 2: DB-driven fan-out via update_targets + the registry refresher       #
+# --------------------------------------------------------------------------- #
+def test_update_targets_rebinds_and_dedupes(tmp_path: pathlib.Path) -> None:
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(
+        tmp_path,
+        emitter,
+        tenant_id="prod-kipark",
+        additional_targets=[("old", "watchlist-trigger-v1")],
+    )
+    w.update_targets(
+        [
+            ("a", "watchlist-trigger-v1"),
+            ("b", "watchlist-trigger-v1"),
+            ("a", "watchlist-trigger-v1"),  # dupe dropped, order-stable
+        ]
+    )
+    assert w._additional_targets == [  # type: ignore[attr-defined]
+        ("a", "watchlist-trigger-v1"),
+        ("b", "watchlist-trigger-v1"),
+    ]
+
+
+def test_update_targets_excludes_primary(tmp_path: pathlib.Path) -> None:
+    # The primary (prod-kipark, copytrade-v1) is emitted separately and is not a valid watchlist
+    # target — never fan it out via update_targets even if the registry ever returned it.
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(tmp_path, emitter, tenant_id="prod-kipark")  # primary strategy copytrade-v1
+    w.update_targets(
+        [("prod-kipark", "copytrade-v1"), ("staging_paper", "watchlist-trigger-v1")]
+    )
+    assert w._additional_targets == [  # type: ignore[attr-defined]
+        ("staging_paper", "watchlist-trigger-v1")
+    ]
+
+
+async def test_registry_refresh_applies_to_watchlist_watcher(tmp_path: pathlib.Path) -> None:
+    # An enabled watchlist row surfaced by the registry routes without a restart: the refresher
+    # applies the fetched targets to the watcher's update_targets.
+    import httpx
+
+    from ohmytradeagent_sidecar.fanout_registry import (
+        WATCHLIST_FANOUT_TARGETS_PATH,
+        FanoutRefresher,
+        FanoutRegistryClient,
+    )
+
+    emitter = InMemoryWatchlistEmitter()
+    w = _make_watcher(tmp_path, emitter, tenant_id="prod-kipark", additional_targets=[])
+    ac = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                json={
+                    "targets": [
+                        {"tenant_id": "staging_paper", "strategy_id": "watchlist-trigger-v1"}
+                    ]
+                },
+            )
+        ),
+        base_url="http://gw:8082",
+    )
+    client = FanoutRegistryClient(
+        base_url="http://gw:8082", token="tok", client=ac, path=WATCHLIST_FANOUT_TARGETS_PATH
+    )
+    refresher = FanoutRefresher(
+        client=client,
+        apply_targets=w.update_targets,
+        log=logging.getLogger("test"),
+        refresh_secs=60,
+    )
+    ok = await refresher.refresh_once()
+    await client.aclose()
+
+    assert ok is True
+    assert w._additional_targets == [  # type: ignore[attr-defined]
+        ("staging_paper", "watchlist-trigger-v1")
+    ]
+
+
 async def test_missing_timestamp_is_skipped(
     tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
 ) -> None:

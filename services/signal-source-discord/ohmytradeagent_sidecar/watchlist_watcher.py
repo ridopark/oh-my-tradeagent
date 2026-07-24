@@ -123,6 +123,7 @@ class WatchlistWatcher:
         # Each target gets its own tenant-scoped WatchlistMirrorWorkflow id, so Temporal
         # REJECT_DUPLICATE dedupes per tenant and a re-find never double-posts.
         self._additional_targets: list[tuple[str, str]] = list(additional_targets or [])
+        self._primary = (tenant_id, strategy_id)
         self._author = author
         self._log = log
         self._poll_interval = poll_interval_secs
@@ -136,6 +137,25 @@ class WatchlistWatcher:
         # (e.g. after the midnight gate opens but before today's post lands) is
         # emitted at most once, not every poll tick.
         self._seen = _BoundedSeenLRU(200)
+
+    def update_targets(self, additional_targets: list[tuple[str, str]]) -> None:
+        """Atomically rebind the watchlist fan-out targets (Phase 2, DB-driven).
+
+        Used by the registry refresher to pick up newly-enabled watchlist tenants without a
+        sidecar restart — the DB-driven replacement for WATCHLIST_MIRROR_ADDITIONAL_TARGETS.
+        The swap is a single reference REBIND, not an in-place mutation: an in-flight emit loop
+        (``for ... in self._additional_targets``) holds the OLD list reference for the rest of its
+        iteration, so a mid-emit refresh can never tear it.
+
+        Unlike the signal watcher, the primary (tenant_id, strategy_id) is NOT unioned in — the
+        watchlist watcher emits its primary separately, and the sidecar's primary strategy is
+        copytrade (not watchlist-trigger-v1), so it is never a valid watchlist target. The registry
+        already returns the full enabled watchlist-trigger set, which is dropped in verbatim
+        (order-stable dedupe; the primary is defensively excluded in case a future sidecar runs a
+        watchlist primary).
+        """
+        deduped = list(dict.fromkeys(additional_targets))
+        self._additional_targets = [t for t in deduped if t != self._primary]
 
     def _already_mirrored_today(self, et_date: str) -> bool:
         if self._mirrored_date == et_date:

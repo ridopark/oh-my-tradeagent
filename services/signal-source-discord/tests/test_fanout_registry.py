@@ -18,6 +18,7 @@ import pytest
 
 from ohmytradeagent_sidecar.emitter import InMemoryEmitter
 from ohmytradeagent_sidecar.fanout_registry import (
+    WATCHLIST_FANOUT_TARGETS_PATH,
     FanoutRefresher,
     FanoutRegistryClient,
     parse_targets,
@@ -98,6 +99,29 @@ async def test_client_non_2xx_raises() -> None:
     with pytest.raises(httpx.HTTPStatusError):
         await c.fetch_targets()
     await c.aclose()
+
+
+async def test_client_custom_path_hits_watchlist_endpoint() -> None:
+    # Phase 2: the same client reads the watchlist registry when given its path.
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(
+            200,
+            json={"targets": [{"tenant_id": "kip", "strategy_id": "watchlist-trigger-v1"}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    ac = httpx.AsyncClient(transport=transport, base_url="http://gw:8082")
+    c = FanoutRegistryClient(
+        base_url="http://gw:8082", token="tok", client=ac, path=WATCHLIST_FANOUT_TARGETS_PATH
+    )
+    targets = await c.fetch_targets()
+    await c.aclose()
+
+    assert seen["path"] == "/internal/watchlist-fanout-targets"
+    assert targets == [("kip", "watchlist-trigger-v1")]
 
 
 # --------------------------------------------------------------------------- #
@@ -244,6 +268,34 @@ async def test_empty_response_retains_last_good(tmp_path: pathlib.Path) -> None:
 
     assert ok is False
     assert w.targets == good
+
+
+async def test_allow_empty_applies_empty_without_error(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Phase 2 watchlist: an empty registry is a legitimate 'none opted in' state — apply it as a
+    normal success (no failure escalation, no ERROR spam), the fix for the rollout-first-step noise.
+    """
+    applied: list[list[tuple[str, str]]] = []
+    c = _client(lambda req: httpx.Response(200, json={"targets": []}))
+    r = FanoutRefresher(
+        client=c,
+        apply_targets=applied.append,
+        log=LOG,
+        refresh_secs=60,
+        allow_empty=True,
+        error_threshold=3,
+    )
+    caplog.set_level(logging.ERROR, logger=LOG.name)
+    ok1 = await r.refresh_once()
+    ok2 = await r.refresh_once()
+    ok3 = await r.refresh_once()  # would be the ERROR-escalation poll if empty were a failure
+    await c.aclose()
+
+    assert [ok1, ok2, ok3] == [True, True, True]
+    assert applied == [[], [], []]  # empty set applied each time
+    assert r._consecutive_failures == 0  # type: ignore[attr-defined] — never counted a failure
+    assert caplog.records == []  # no ERROR (nor WARNING) noise
 
 
 async def test_startup_endpoint_down_falls_back_to_primary(
