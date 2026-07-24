@@ -480,10 +480,12 @@ export function OnboardForm({
           />
           {strategy === "watchlist-trigger-v1" && (
             <p className="mt-2 rounded border border-amber-700/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
-              Creates a <strong>disabled</strong> watchlist row. Watchlist also needs the Discord
-              sidecar <code>WATCHLIST_MIRROR_ADDITIONAL_TARGETS={tenant || "<tenant>"}:watchlist-trigger-v1</code>{" "}
-              (+ a sidecar restart) and a real-time stock feed before it can arm — both are out-of-band,
-              not done by this form.
+              Creates a <strong>disabled</strong> watchlist row. Two things outside this form gate it
+              arming: (1) <strong>route the watchlist to this tenant</strong> — add{" "}
+              <code>{tenant || "<tenant>"}:watchlist-trigger-v1</code> to the sidecar&apos;s{" "}
+              <code>WATCHLIST_MIRROR_ADDITIONAL_TARGETS</code> + restart it (the only per-tenant step —
+              a candidate to make DB-driven); (2) the <strong>real-time stock feed</strong> must be on
+              — a one-time cluster toggle on market-data, not per-tenant. Then enable the strategy.
             </p>
           )}
           <div className="mt-3">
