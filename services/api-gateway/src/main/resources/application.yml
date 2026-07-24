@@ -103,6 +103,17 @@ copytrade:
     # The copytrade strategy id the registry query scopes to (bind parameter, not a query literal).
     strategy-id: ${COPYTRADE_FANOUT_STRATEGY_ID:copytrade-v1}
 
+# Phase 1 (Fork A) watchlist fan-out registry. DARK by default: with fanout.enabled unset/false the
+# WatchlistFanoutController bean does not exist and GET /internal/watchlist-fanout-targets 404s.
+# When enabled, ServiceTokenFilter bearer-gates the route (the sidecar is a SERVICE caller, not an
+# operator). The cutover is a manual per-cluster operator action (Phase 2+) — NO repo manifest sets
+# this true.
+watchlist:
+  fanout:
+    enabled: ${WATCHLIST_FANOUT_ENABLED:false}
+    # The watchlist strategy id the registry query scopes to (bind parameter, not a query literal).
+    strategy-id: ${WATCHLIST_FANOUT_STRATEGY_ID:watchlist-trigger-v1}
+
 # Exec internal base URL the credential forward targets (in-cluster service name).
 exec:
   base-url: ${EXEC_BASE_URL:http://exec:8080}
