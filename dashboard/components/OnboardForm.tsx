@@ -17,6 +17,14 @@ export interface OnboardActionResult {
   expiresAt?: string;
 }
 
+// An existing tenant for the identity dropdowns: the strategies it already has (subtracted from the
+// catalog to offer only UNUSED ones) + its live/paper mode (to default the Mode toggle).
+export interface ExistingTenant {
+  tenantId: string;
+  strategies: string[];
+  mode: "live" | "paper";
+}
+
 type Action = (formData: FormData) => Promise<OnboardActionResult>;
 
 const inputCls =
@@ -180,6 +188,9 @@ export function OnboardForm({
   liveConfig,
   liveBaseUrl,
   liveWsUrl,
+  existingTenants,
+  strategyTemplates,
+  catalogStrategyIds,
   createAction,
   addCredentialAction,
   enableAction,
@@ -197,6 +208,13 @@ export function OnboardForm({
   liveConfig: string;
   liveBaseUrl: string;
   liveWsUrl: string;
+  // Existing (tenant → its strategies + mode), for the identity dropdowns. null ⇒ the admin read is
+  // dark/failed ⇒ the form degrades to the prior free-text identity inputs.
+  existingTenants: ExistingTenant[] | null;
+  // Per-strategy config templates keyed by strategy id, then paper/live. Drives the textarea swap.
+  strategyTemplates: Record<string, { paper: string; live: string }>;
+  // The assignable strategy catalog (ids). "Unused for tenant" = this minus the tenant's strategies.
+  catalogStrategyIds: string[];
   createAction: Action;
   addCredentialAction: Action;
   enableAction: Action;
@@ -247,6 +265,30 @@ export function OnboardForm({
     setDeclaredAccount("");
     setAlertWebhook("");
   }, [tenant, strategy, mode]);
+
+  // Identity dropdowns (Phase 1). When the admin listing is available, the tenant is a pick-or-type
+  // combo-box and the strategy is a <select> of the tenant's UNUSED catalog strategies. When null
+  // (admin read dark / errored) both degrade to the prior free-text inputs.
+  const useDropdowns = existingTenants !== null;
+  const selectedTenant = existingTenants?.find((t) => t.tenantId === tenant) ?? null;
+  const usedStrategies = selectedTenant?.strategies ?? [];
+  const availableStrategies = catalogStrategyIds.filter((s) => !usedStrategies.includes(s));
+
+  // When the tenant changes to a KNOWN existing tenant, default the Mode toggle to its mode (so a new
+  // strategy on a live tenant is not accidentally paper-targeted) and, if the current strategy is one
+  // that tenant already has, switch to the first still-available one. Keyed on `tenant` only so it
+  // never fights the strategy <select>; inert for a new/typed tenant.
+  useEffect(() => {
+    if (!useDropdowns) return;
+    if (selectedTenant) setMode(selectedTenant.mode);
+    // Keep the strategy state in sync with what the <select> can actually offer for this tenant —
+    // covers both switching to a tenant that already has the current strategy AND leaving a
+    // fully-used tenant (strategy left "") for a new one (reset to the first catalog entry).
+    if (!availableStrategies.includes(strategy)) {
+      setStrategy(availableStrategies[0] ?? "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenant]);
 
   function submitCreate(formData: FormData) {
     formData.set("tenant_id", tenant);
@@ -302,33 +344,68 @@ export function OnboardForm({
             <label className={labelCls} htmlFor="ob-tenant">
               Tenant id
             </label>
+            {/* Combo-box: pick an existing tenant OR type a new one (a typed id not in the list is a
+                new tenant — the prior create-new flow). Free-text when the admin list is unavailable. */}
             <input
               id="ob-tenant"
+              list={useDropdowns ? "ob-tenant-list" : undefined}
               className={inputCls}
               value={tenant}
               onChange={(e) => setTenant(e.target.value)}
               placeholder="acme"
               autoComplete="off"
             />
+            {useDropdowns && (
+              <datalist id="ob-tenant-list">
+                {existingTenants!.map((t) => (
+                  <option key={t.tenantId} value={t.tenantId} />
+                ))}
+              </datalist>
+            )}
           </div>
           <div>
             <label className={labelCls} htmlFor="ob-strategy">
               Strategy id
             </label>
-            <input
-              id="ob-strategy"
-              className={inputCls}
-              value={strategy}
-              onChange={(e) => setStrategy(e.target.value)}
-              placeholder="copytrade-v1"
-              autoComplete="off"
-            />
+            {/* Select of the strategies this tenant does NOT already have (a new tenant → whole
+                catalog). Free-text when the admin list is unavailable. */}
+            {useDropdowns ? (
+              <select
+                id="ob-strategy"
+                className={inputCls}
+                value={strategy}
+                onChange={(e) => setStrategy(e.target.value)}
+              >
+                {availableStrategies.length === 0 && <option value="">— none available —</option>}
+                {availableStrategies.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                id="ob-strategy"
+                className={inputCls}
+                value={strategy}
+                onChange={(e) => setStrategy(e.target.value)}
+                placeholder="copytrade-v1"
+                autoComplete="off"
+              />
+            )}
           </div>
         </div>
         <p className="mt-2 text-xs text-slate-500">
-          Allowed characters: letters, digits, <code>_</code> and <code>-</code>. These are injected
-          into the config and bind the keys below — both steps use this pair.
+          {useDropdowns
+            ? "Pick an existing tenant or type a new id; the strategy list shows only the ones the tenant doesn't already have."
+            : "Allowed characters: letters, digits, _ and -."}{" "}
+          These are injected into the config and bind the keys below — both steps use this pair.
         </p>
+        {selectedTenant && availableStrategies.length === 0 && (
+          <p className="mt-1 text-xs text-amber-400">
+            {tenant} already has every catalog strategy — nothing to add.
+          </p>
+        )}
 
         {/* Paper/live selector — always shown. Switching to live retargets the templates below and
             reveals the activate-live step (real money). Real money stays gated at the backend and
@@ -389,15 +466,26 @@ export function OnboardForm({
           <label className={labelCls} htmlFor="ob-config">
             Strategy config (JSON)
           </label>
+          {/* Remount (via key) whenever strategy or mode changes so defaultValue re-applies the right
+              template. Falls back to the copytrade paper/live config for a strategy without a template
+              (e.g. a free-typed id in degraded mode). */}
           <textarea
-            key={live ? "live" : "paper"}
+            key={`${strategy}:${mode}`}
             id="ob-config"
             name="config"
             className={`${inputCls} h-56 font-mono`}
-            defaultValue={live ? liveConfig : defaultConfig}
+            defaultValue={strategyTemplates[strategy]?.[mode] ?? (live ? liveConfig : defaultConfig)}
             disabled={!createEnabled}
             spellCheck={false}
           />
+          {strategy === "watchlist-trigger-v1" && (
+            <p className="mt-2 rounded border border-amber-700/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
+              Creates a <strong>disabled</strong> watchlist row. Watchlist also needs the Discord
+              sidecar <code>WATCHLIST_MIRROR_ADDITIONAL_TARGETS={tenant || "<tenant>"}:watchlist-trigger-v1</code>{" "}
+              (+ a sidecar restart) and a real-time stock feed before it can arm — both are out-of-band,
+              not done by this form.
+            </p>
+          )}
           <div className="mt-3">
             <label className={labelCls} htmlFor="ob-alert-webhook">
               Alert webhook URL (Discord)

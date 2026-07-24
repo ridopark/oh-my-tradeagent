@@ -7,7 +7,8 @@ import {
   enableStrategy,
   postOperatorBrokerCredential,
 } from "@/lib/adminOnboarding";
-import { createTenantInvite } from "@/lib/adminBff";
+import { createTenantInvite, getAdminTenants } from "@/lib/adminBff";
+import type { ExistingTenant } from "@/components/OnboardForm";
 import { postActivation } from "@/lib/adminActivation";
 import { EMAIL_RE, ID_RE } from "@/lib/validation";
 
@@ -47,7 +48,7 @@ const LIVE_WS_URL = "wss://api.alpaca.markets/stream";
 // never live in source), and tenant_id/strategy_id (the form injects these). The live variant already
 // carries the activate-live gate's required invariants (daily_loss_threshold>0,
 // notional_cap_pct_of_capital_base set, capital_source=account_cash) so later activation passes.
-const prodConfig = (brokerTarget: string) =>
+const copytradeConfig = (brokerTarget: string) =>
   JSON.stringify(
     {
       schema_version: 1,
@@ -111,11 +112,95 @@ const prodConfig = (brokerTarget: string) =>
     null,
     2,
   );
-const DEFAULT_CONFIG = prodConfig("alpaca-paper");
-const LIVE_CONFIG = prodConfig("alpaca-live");
+
+// Watchlist-trigger StrategyConfig template. Mirrors tenants/dev/strategies/watchlist-trigger-v1.yaml
+// (the shipped-disabled reference) — the 2:1 breakout bracket with the chandelier trail. Same safe
+// omissions as copytradeConfig (broker_account_id / alert_webhook_url / tenant_id / strategy_id are
+// injected or supplied per-tenant), enabled:false so the row is created dormant. NOTE: a watchlist
+// row alone does NOT arm the strategy — it also needs the Discord sidecar WATCHLIST_MIRROR_ADDITIONAL_
+// TARGETS mapping + a real-time stock feed, both out-of-band. The form surfaces that advisory.
+const watchlistConfig = (brokerTarget: string) =>
+  JSON.stringify(
+    {
+      schema_version: 1,
+      broker_target: brokerTarget,
+      capital_source: "account_cash",
+      capital_weight: 0.05,
+      min_contracts: 1,
+      max_contracts: 5,
+      notional_cap_pct_of_capital_base: 0.1,
+      max_positions: 3,
+      entry_mode: "BREAKOUT",
+      watchlist_expiry_rule: "NEAREST_WEEKLY",
+      gap_tolerance_pct: 0.005,
+      equity_emit_delta_pct: 0.0005,
+      sl_pct: 0.3,
+      tp_ratio: 2.0,
+      tp_partial_fraction: 0.5,
+      trail_giveback_pct: 0.3,
+      no_progress_time_stop_secs: 1500,
+      force_close_eod_et: "15:30",
+      no_entry_within_close_minutes: 30,
+      eod_force_flatten: true,
+      exit_floor_abs: 0.05,
+      exit_floor_pct: 0.5,
+      expiry_day_floor: 0.01,
+      max_signal_age_bto_secs: 30,
+      max_signal_age_stc_secs: 60,
+      enabled: false,
+    },
+    null,
+    2,
+  );
+
+// The strategy catalog: the assignable strategy ids + their per-mode config templates. The onboard
+// form offers, per tenant, the catalog strategies the tenant does NOT already have, and loads the
+// matching template on selection. Two static strategies today (Fork B of the plan — a hardcoded
+// catalog beats a BFF endpoint for a closed set); add a row here when a third strategy type lands.
+const STRATEGY_TEMPLATES: Record<string, { paper: string; live: string }> = {
+  "copytrade-v1": { paper: copytradeConfig("alpaca-paper"), live: copytradeConfig("alpaca-live") },
+  "watchlist-trigger-v1": {
+    paper: watchlistConfig("alpaca-paper"),
+    live: watchlistConfig("alpaca-live"),
+  },
+};
+const CATALOG_STRATEGY_IDS = Object.keys(STRATEGY_TEMPLATES);
+
+const DEFAULT_CONFIG = STRATEGY_TEMPLATES["copytrade-v1"].paper;
+const LIVE_CONFIG = STRATEGY_TEMPLATES["copytrade-v1"].live;
+
+// Group the flat (tenant, strategy) admin listing into per-tenant entries: the strategies the tenant
+// already has (to subtract from the catalog) + its live/paper mode (to default the Mode toggle for a
+// live tenant). Returns null when the admin read is dark/errors so the form degrades to free-text.
+async function loadExistingTenants(): Promise<ExistingTenant[] | null> {
+  try {
+    const { items } = await getAdminTenants();
+    const byTenant = new Map<string, ExistingTenant>();
+    for (const it of items) {
+      const g = byTenant.get(it.tenant_id) ?? {
+        tenantId: it.tenant_id,
+        strategies: [],
+        mode: it.mode,
+      };
+      if (!g.strategies.includes(it.strategy_id)) {
+        g.strategies.push(it.strategy_id);
+      }
+      // A tenant is "live" if ANY of its strategies is live (so a new strategy defaults to live too).
+      if (it.mode === "live") {
+        g.mode = "live";
+      }
+      byTenant.set(it.tenant_id, g);
+    }
+    return [...byTenant.values()];
+  } catch {
+    // AdminReadDisabledError (BFF dark) or any transient failure → degrade to free-text identity.
+    return null;
+  }
+}
 
 export default async function OnboardPage() {
   const session = await auth();
+  const existingTenants = await loadExistingTenants();
 
   // Server action: create the tenant. Re-verifies operator, parses the config, force-binds the
   // tenant/strategy ids onto it (so the writer's identity check passes), forwards to the api-gateway.
@@ -268,6 +353,9 @@ export default async function OnboardPage() {
           liveConfig={LIVE_CONFIG}
           liveBaseUrl={LIVE_BASE_URL}
           liveWsUrl={LIVE_WS_URL}
+          existingTenants={existingTenants}
+          strategyTemplates={STRATEGY_TEMPLATES}
+          catalogStrategyIds={CATALOG_STRATEGY_IDS}
           createAction={createTenantAction}
           addCredentialAction={addCredentialAction}
           enableAction={enableStrategyAction}
