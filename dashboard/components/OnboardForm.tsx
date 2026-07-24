@@ -332,6 +332,12 @@ export function OnboardForm({
 
   // Step 1 (create) needs both ids; step 2 (keys) binds only the tenant.
   const idsMissing = !tenant.trim() || !strategy.trim();
+  // In dropdown mode the strategy to create MUST be one the tenant does NOT already have. A
+  // fully-used existing tenant offers none (availableStrategies empty), and a stale/used value can
+  // linger in `strategy` — either way Create must be blocked, since submitting an already-present
+  // (tenant, strategy) would 409. Inert in degraded free-text mode (availableStrategies is the whole
+  // catalog there, so any typed catalog id passes).
+  const strategyUnavailableForTenant = useDropdowns && !availableStrategies.includes(strategy);
   const tenantMissing = !tenant.trim();
   // Step 2 (keys) in LIVE mode additionally REQUIRES the account number (it becomes the pinned
   // expected_account_id and drives the read-back check). Paper mode leaves it optional as before.
@@ -519,7 +525,7 @@ export function OnboardForm({
           </div>
           <button
             type="submit"
-            disabled={!createEnabled || creating || idsMissing}
+            disabled={!createEnabled || creating || idsMissing || strategyUnavailableForTenant}
             className="mt-3 rounded border border-emerald-500/60 bg-emerald-600/20 px-3 py-1.5 text-sm font-medium text-emerald-300 transition-colors hover:bg-emerald-600/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {creating ? "Creating…" : "Create tenant"}
