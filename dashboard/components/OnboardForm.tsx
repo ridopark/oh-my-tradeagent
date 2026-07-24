@@ -23,10 +23,12 @@ export interface ExistingTenant {
   tenantId: string;
   strategies: string[];
   mode: "live" | "paper";
-  // Whether the tenant already has a verified broker account (a broker_credentials row). Distinct
-  // from merely existing: a tenant can have a strategy_config row but be mid-onboarding with NO keys
-  // yet — in that case the keys step MUST still show (this form is the only surface for it).
-  hasBrokerAccount: boolean;
+  // Whether the tenant already has a verified broker account, PER MODE — paper and live are separate
+  // broker_credentials rows (separate DBs), so a mixed tenant can have one and not the other. The
+  // keys step is keyed on the account for the mode being added, not any account: hiding it off an
+  // aggregate would strand an operator adding a live strategy to a paper-only tenant (no live keys).
+  hasPaperAccount: boolean;
+  hasLiveAccount: boolean;
 }
 
 type Action = (formData: FormData) => Promise<OnboardActionResult>;
@@ -292,7 +294,14 @@ export function OnboardForm({
   // merely "tenant exists". A tenant can have a strategy_config row but be mid-onboarding with no keys
   // (hasBrokerAccount=false), and this form is the only surface to add them. A new/typed tenant also
   // has no keys. So show the keys step whenever the tenant lacks a verified account.
-  const tenantHasKeys = selectedTenant?.hasBrokerAccount ?? false;
+  // Mode-aware: does the tenant have a verified account for the mode being added (the live/paper
+  // toggle)? A paper-only tenant returns false here once the operator switches to Live, so the keys
+  // step reappears to add the missing live keys.
+  const tenantHasKeys = selectedTenant
+    ? live
+      ? selectedTenant.hasLiveAccount
+      : selectedTenant.hasPaperAccount
+    : false;
   const showKeysStep = !tenantHasKeys;
   // Enable/activate numbering shifts by whether the keys step is present (2 · Enable when collapsed).
   const enableStepNo = showKeysStep ? 3 : 2;

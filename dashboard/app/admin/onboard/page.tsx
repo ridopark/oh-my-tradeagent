@@ -186,7 +186,8 @@ async function loadExistingTenants(): Promise<ExistingTenant[] | null> {
         tenantId: it.tenant_id,
         strategies: [],
         mode: it.mode,
-        hasBrokerAccount: false,
+        hasPaperAccount: false,
+        hasLiveAccount: false,
       };
       if (!g.strategies.includes(it.strategy_id)) {
         g.strategies.push(it.strategy_id);
@@ -195,11 +196,16 @@ async function loadExistingTenants(): Promise<ExistingTenant[] | null> {
       if (it.mode === "live") {
         g.mode = "live";
       }
-      // Has a verified broker account when account_masked carries a real last-4 suffix. The BFF masks
-      // a MISSING credential to bare bullets ("••••") and a present one to "••••XXXX", so any
-      // non-bullet char means a broker_credentials row exists for the tenant.
+      // Verified broker account for THIS item's mode: account_masked carries a real last-4 suffix
+      // (the BFF masks a MISSING credential to bare bullets "••••", a present one to "••••XXXX", so
+      // any non-bullet char = a broker_credentials row). Tracked per mode — paper and live are
+      // separate credentials, so a tenant can have one and not the other.
       if (/[^•]/.test(it.account_masked ?? "")) {
-        g.hasBrokerAccount = true;
+        if (it.mode === "live") {
+          g.hasLiveAccount = true;
+        } else {
+          g.hasPaperAccount = true;
+        }
       }
       byTenant.set(it.tenant_id, g);
     }
