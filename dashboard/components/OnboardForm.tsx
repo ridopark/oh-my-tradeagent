@@ -23,6 +23,12 @@ export interface ExistingTenant {
   tenantId: string;
   strategies: string[];
   mode: "live" | "paper";
+  // Whether the tenant already has a verified broker account, PER MODE — paper and live are separate
+  // broker_credentials rows (separate DBs), so a mixed tenant can have one and not the other. The
+  // keys step is keyed on the account for the mode being added, not any account: hiding it off an
+  // aggregate would strand an operator adding a live strategy to a paper-only tenant (no live keys).
+  hasPaperAccount: boolean;
+  hasLiveAccount: boolean;
 }
 
 type Action = (formData: FormData) => Promise<OnboardActionResult>;
@@ -33,11 +39,16 @@ const labelCls = "mb-1 block text-xs font-medium text-slate-400";
 
 // Map a coarse {ok,status} to an operator-facing banner. Distinct per step where the status carries
 // meaning (409 already-exists on create; 422 credential-rejected on the keys probe).
-function createMsg(r: OnboardActionResult): { tone: "ok" | "err"; msg: string } {
+function createMsg(
+  r: OnboardActionResult,
+  addingToExisting: boolean,
+): { tone: "ok" | "err"; msg: string } {
   if (r.ok) {
     return {
       tone: "ok",
-      msg: `Tenant created (version ${r.createdVersion ?? 1}). Now add its broker keys below.`,
+      msg: addingToExisting
+        ? `Strategy added (version ${r.createdVersion ?? 1}). Complete the steps below to enable it.`
+        : `Tenant created (version ${r.createdVersion ?? 1}). Now add its broker keys below.`,
     };
   }
   switch (r.status) {
@@ -273,6 +284,27 @@ export function OnboardForm({
   const selectedTenant = existingTenants?.find((t) => t.tenantId === tenant) ?? null;
   const usedStrategies = selectedTenant?.strategies ?? [];
   const availableStrategies = catalogStrategyIds.filter((s) => !usedStrategies.includes(s));
+  // Adding a strategy to an EXISTING tenant (selected from the dropdown) vs onboarding a NEW one.
+  // An existing tenant already has broker keys and members, and its account is verified server-side —
+  // so the keys step, the invite step, and the "verify keys first" enable gate don't apply. The form
+  // collapses to: add the strategy row → enable it (→ activate if live). null selectedTenant (a typed
+  // new tenant, or degraded free-text mode) keeps the full new-tenant onboarding flow.
+  const addingToExisting = selectedTenant !== null;
+  // "Has verified broker keys" is the REAL signal for hiding the keys step + unlocking Enable — NOT
+  // merely "tenant exists". A tenant can have a strategy_config row but be mid-onboarding with no keys
+  // (hasBrokerAccount=false), and this form is the only surface to add them. A new/typed tenant also
+  // has no keys. So show the keys step whenever the tenant lacks a verified account.
+  // Mode-aware: does the tenant have a verified account for the mode being added (the live/paper
+  // toggle)? A paper-only tenant returns false here once the operator switches to Live, so the keys
+  // step reappears to add the missing live keys.
+  const tenantHasKeys = selectedTenant
+    ? live
+      ? selectedTenant.hasLiveAccount
+      : selectedTenant.hasPaperAccount
+    : false;
+  const showKeysStep = !tenantHasKeys;
+  // Enable/activate numbering shifts by whether the keys step is present (2 · Enable when collapsed).
+  const enableStepNo = showKeysStep ? 3 : 2;
 
   // Reconcile mode/strategy ONLY on a real transition ONTO a known existing tenant — never on an
   // intermediate keystroke or a typed NEW tenant. The tenant field is a free-text combo-box, so its
@@ -467,10 +499,15 @@ export function OnboardForm({
 
       {/* Step 1 — Create tenant */}
       <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-        <h2 className="mb-1 text-sm font-semibold text-slate-200">1 · Create tenant</h2>
+        <h2 className="mb-1 text-sm font-semibold text-slate-200">
+          {addingToExisting ? "1 · Add strategy" : "1 · Create tenant"}
+        </h2>
         <p className="mb-3 text-xs text-slate-500">
-          Inserts the first strategy_config row at version 1. <code>tenant_id</code> and{" "}
-          <code>strategy_id</code> are set automatically from above. Edit the rest for your strategy.
+          {addingToExisting
+            ? "Inserts a new strategy_config row for this existing tenant, at version 1 and disabled. "
+            : "Inserts the first strategy_config row at version 1. "}
+          <code>tenant_id</code> and <code>strategy_id</code> are set automatically from above. Edit
+          the rest for your strategy.
           {live
             ? " Live template pre-fills the required loss gates (daily_loss_threshold, notional cap) and capital_source=account_cash so activation passes."
             : " Paper target — live arming is a separate mode."}
@@ -504,6 +541,7 @@ export function OnboardForm({
               — a one-time cluster toggle on market-data, not per-tenant. Then enable the strategy.
             </p>
           )}
+          {!addingToExisting && (
           <div className="mt-3">
             <label className={labelCls} htmlFor="ob-alert-webhook">
               Alert webhook URL (Discord)
@@ -523,22 +561,31 @@ export function OnboardForm({
               digest post. Leave blank to fall back to the global/default alert channel. Optional.
             </p>
           </div>
+          )}
           <button
             type="submit"
             disabled={!createEnabled || creating || idsMissing || strategyUnavailableForTenant}
             className="mt-3 rounded border border-emerald-500/60 bg-emerald-600/20 px-3 py-1.5 text-sm font-medium text-emerald-300 transition-colors hover:bg-emerald-600/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {creating ? "Creating…" : "Create tenant"}
+            {creating
+              ? addingToExisting
+                ? "Adding…"
+                : "Creating…"
+              : addingToExisting
+                ? "Add strategy"
+                : "Create tenant"}
           </button>
           {!createEnabled && (
             <p className="mt-2 text-xs text-slate-500">Tenant creation not enabled (read-only).</p>
           )}
         </form>
-        {createResult && <Banner r={createMsg(createResult)} />}
+        {createResult && <Banner r={createMsg(createResult, addingToExisting)} />}
         <ConfigFieldReference />
       </section>
 
-      {/* Step 2 — Broker credentials */}
+      {/* Step 2 — Broker credentials. Shown for a new tenant AND an existing tenant that has no
+          verified account yet (mid-onboarding); hidden only once keys are verified. */}
+      {showKeysStep && (
       <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
         <h2 className="mb-1 text-sm font-semibold text-slate-200">2 · Broker keys</h2>
         <p className="mb-3 text-xs text-slate-500">
@@ -656,18 +703,26 @@ export function OnboardForm({
         </form>
         {credResult && <Banner r={credentialMsg(credResult)} />}
       </section>
+      )}
 
       {/* Step 3 — Enable strategy */}
       <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-        <h2 className="mb-1 text-sm font-semibold text-slate-200">3 · Enable strategy</h2>
+        <h2 className="mb-1 text-sm font-semibold text-slate-200">
+          {enableStepNo} · Enable strategy
+        </h2>
         <p className="mb-3 text-xs text-slate-500">
           Arms the tenant (<code>enabled=true</code>) via the operator enable route, which itself
-          re-checks that a verified broker account exists. Only unlocks once the keys above verify.
+          re-checks that a verified broker account exists.
+          {tenantHasKeys
+            ? " This tenant's broker account is already verified, so this is available now."
+            : " Only unlocks once the keys above verify."}
         </p>
         <form action={submitEnable} onSubmit={() => setEnableResult(null)}>
           <button
             type="submit"
-            disabled={!enableEnabled || enabling || idsMissing || !accountVerified}
+            disabled={
+              !enableEnabled || enabling || idsMissing || (!tenantHasKeys && !accountVerified)
+            }
             className="rounded border border-emerald-500/60 bg-emerald-600/20 px-3 py-1.5 text-sm font-medium text-emerald-300 transition-colors hover:bg-emerald-600/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {enabling ? "Enabling…" : "Enable strategy"}
@@ -675,7 +730,7 @@ export function OnboardForm({
           {!enableEnabled && (
             <p className="mt-2 text-xs text-slate-500">Strategy enable not enabled (read-only).</p>
           )}
-          {enableEnabled && !accountVerified && (
+          {enableEnabled && !tenantHasKeys && !accountVerified && (
             <p className="mt-2 text-xs text-slate-500">Verify broker keys first (step 2).</p>
           )}
         </form>
@@ -686,7 +741,8 @@ export function OnboardForm({
       {live && (
         <section className="rounded-lg border border-amber-600/40 bg-amber-950/20 p-4">
           <h2 className="mb-1 text-sm font-semibold text-amber-200">
-            3b · Activate live <span className="text-amber-400">(real money)</span>
+            {enableStepNo}b · Activate live{" "}
+            <span className="text-amber-400">(real money)</span>
           </h2>
           <p className="mb-3 text-xs text-amber-300/70">
             Promotes the armed strategy to real trading via the live-activation route, which re-runs
@@ -713,7 +769,8 @@ export function OnboardForm({
         </section>
       )}
 
-      {/* Step 4 — Invite user (optional, independent) */}
+      {/* Step 4 — Invite user (NEW tenant only; an existing tenant already has its members) */}
+      {!addingToExisting && (
       <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
         <h2 className="mb-1 text-sm font-semibold text-slate-200">4 · Invite user (email)</h2>
         <p className="mb-3 text-xs text-slate-500">
@@ -749,6 +806,7 @@ export function OnboardForm({
         </form>
         {inviteResult && <Banner r={inviteMsg(inviteResult)} />}
       </section>
+      )}
     </div>
   );
 }
