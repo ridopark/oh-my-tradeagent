@@ -28,9 +28,12 @@ import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,7 +51,19 @@ import org.mockito.Mockito;
 class PositionWorkflowImplWatchlistExitTest {
 
   private static final String CORE_QUEUE = "orchestrator-core";
-  private static final String SYMBOL = "NVDA  260516C00140000";
+
+  // PLAN-2026-07-23 Phase 2: these tests exercise the LIVE watchlist-exit bracket (target / stop /
+  // trail / no-progress time-stop), never physical expiry — so the contract must NOT be physically
+  // expired, or the new expire-worthless-no-timer guard self-closes the position at entry (it holds
+  // no terminal timer here) and the driven exit ticks hit a completed workflow. Self-renewing
+  // future OCC (now+2yr ET), mirroring PositionWorkflowImplTest#FUTURE_OCC_SYMBOL. (Wall-clock
+  // LocalDate.now is fine in a TEST fixture — the no-LocalDate.now rule guards workflow code.)
+  private static final String SYMBOL =
+      "NVDA  "
+          + LocalDate.now(ZoneId.of("America/New_York"))
+              .plusYears(2)
+              .format(DateTimeFormatter.ofPattern("yyMMdd"))
+          + "C00140000";
 
   private TestWorkflowEnvironment env;
   private AuditActivities audit;

@@ -218,7 +218,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(placed);
 
     PositionWorkflow stub = newStub("pos-happy");
-    WorkflowExecution exec1 = WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowExecution exec1 = WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     // Signal half-out
@@ -245,8 +245,8 @@ class PositionWorkflowImplTest {
     assertThat(asLong(partialFills.get(1).getSubject().get("qty_filled"))).isEqualTo(2L);
     // Issue #276: new executions (TestWorkflowEnvironment reports getVersion==1) carry the
     // per-symbol correlation key so DailyPnl can group FIFO by option_symbol.
-    assertThat(partialFills.get(0).getSubject()).containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
-    assertThat(partialFills.get(1).getSubject()).containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
+    assertThat(partialFills.get(0).getSubject()).containsEntry("option_symbol", FUTURE_OCC_SYMBOL);
+    assertThat(partialFills.get(1).getSubject()).containsEntry("option_symbol", FUTURE_OCC_SYMBOL);
   }
 
   /**
@@ -262,7 +262,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-exit-round");
-    WorkflowStub.fromTyped(stub).start(input(4));
+    WorkflowStub.fromTyped(stub).start(futureInput(4));
     confirmEntry(stub, 4L);
 
     // STC with a 3-dp refPremium that must round HALF_UP to a broker-accepted penny tick.
@@ -303,7 +303,7 @@ class PositionWorkflowImplTest {
 
     // Models the adopted-position input: brokerTarget resolved by AdoptionWorkflowImpl.buildInput
     // from StrategyConfig.broker_target and threaded onto PositionWorkflowInput.
-    PositionWorkflowInput in = input(4);
+    PositionWorkflowInput in = futureInput(4);
     in.setBrokerTarget(PositionWorkflowInput.BrokerTarget.ALPACA_PAPER);
 
     PositionWorkflow stub = newStub("pos-exit-broker-target");
@@ -377,7 +377,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-dup");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     stub.partialExit(partialExitRequest("sig-dup", "pos-dup", 1.0));
@@ -398,7 +398,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-queue");
-    WorkflowStub.fromTyped(stub).start(input(4));
+    WorkflowStub.fromTyped(stub).start(futureInput(4));
     confirmEntry(stub, 4L);
 
     // Signal both before any fill arrives
@@ -532,6 +532,111 @@ class PositionWorkflowImplTest {
     // No worthless-expiry exit credit: PositionExpired is P&L-neutral (no PartialExitFilled for the
     // flatten, since nothing filled).
     assertThat(captureAll("PartialExitFilled")).isEmpty();
+  }
+
+  // ---------- PLAN-2026-07-23 Phase 2: expiry-day adoption zombie self-close guard ----------
+
+  /**
+   * PLAN-2026-07-23 Phase 2 — REPRODUCES THE INCIDENT. A lot ADOPTED after its own OCC has
+   * physically expired, with NOT ONE terminal-flatten timer armed (default calendar: every {@code
+   * durationUntil*} is ZERO and {@code eodForceFlatten} unset), used to have no fired-flag that
+   * could ever latch: run() blocked ALIVE forever on a delisted contract, fail-closing the account
+   * cap. Under {@code VERSION_EXPIRE_WORTHLESS_NO_TIMER} v&gt;=1 (TestWorkflowEnvironment resolves
+   * getVersion to the max, 1) the guard self-closes it worthless at entry: a terminal {@code
+   * PositionExpired} ({@code reason=worthless_expiry}, P&amp;L-neutral) and run() COMPLETES instead
+   * of hanging.
+   */
+  @Test
+  void startedAfterExpiryInstantsOnExpiryDay_closesWorthlessImmediately() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    // Default EXPIRED_OCC_SYMBOL (NVDA 260516, physically expired) + DEFAULT calendar: no eod, no
+    // expiry-close, no expiry-lead timer armed. This is the recon-forwarded expiry-day adoption.
+    PositionWorkflow stub = newStub("pos-expiry-zombie");
+    WorkflowStub.fromTyped(stub).start(input(6));
+    confirmEntry(stub, 6L); // the adoption fill forwarded by recon
+
+    // run() COMPLETES (does NOT hang ALIVE) — the zombie that used to block forever.
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-expiry-zombie");
+
+    // Self-closed worthless at entry: a terminal PositionExpired carrying the pre-close qty.
+    AuditEvent expired = captureKind("PositionExpired");
+    assertThat(asLong(expired.getSubject().get("remaining_qty_before"))).isEqualTo(6L);
+    assertThat(expired.getSubject())
+        .containsEntry("reason", "worthless_expiry")
+        .containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
+
+    // P&L-neutral: no exit order filled, so no PartialExitFilled credit.
+    assertThat(captureAll("PartialExitFilled")).isEmpty();
+  }
+
+  /**
+   * PLAN-2026-07-23 Phase 2 — the guard is scoped to the no-timer case. Same physically-expired
+   * OCC, but the workflow was started BEFORE its expiry instants so a terminal timer arms (here the
+   * expiry-close timer, via a FUTURE {@code durationUntilExpiryCloseEt}). {@code expiryTimerArmed}
+   * is true, so the guard does NOT fire: the position stays ALIVE until the expiry timer fires and
+   * drives the normal bounded flatten — unchanged behavior.
+   */
+  @Test
+  void startedBeforeExpiryInstants_armsTimersUnchanged() throws Exception {
+    // A FUTURE expiry-close instant arms the expiry timer -> the guard's no-timer precondition is
+    // false.
+    when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ofMillis(200));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-timer-armed");
+    PositionWorkflowInput in = input(3);
+    in.setExpiryDayFloor(new BigDecimal("0.05"));
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 3L);
+
+    // The expiry timer fires and drives the normal flatten (SELL placed) — proving the guard did
+    // NOT
+    // short-circuit at entry.
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 3L, new BigDecimal("2.50")));
+
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // The normal expiry path ran...
+    captureKind("ExpiryForceFlattenRequested");
+    captureKind("ExpiryForceFlattened");
+    // ...and the no-timer worthless-close guard never fired.
+    assertThat(
+            captureAll("PositionExpired").stream()
+                .filter(e -> "worthless_expiry".equals(e.getSubject().get("reason"))))
+        .isEmpty();
+  }
+
+  /**
+   * PLAN-2026-07-23 Phase 2 — the guard is scoped to PHYSICALLY-expired contracts only. A
+   * NON-expired OCC ({@link #FUTURE_OCC_SYMBOL}) with the default no-timer setup must NOT trip the
+   * guard: {@code expiryDateFromOcc(...).isAfter(currentEtDate())} is true, so the physical-expiry
+   * precondition is false. The position stays ALIVE and drives to a normal STC close, unchanged.
+   */
+  @Test
+  void startedAfterEodOnNonExpiryDay_staysAliveUnchanged() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-not-expired");
+    // FUTURE contract + default no-timer setup: guard's physical-expiry precondition is false.
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    // The position is alive and manageable: a full-close STC drives it to a normal PositionClosed.
+    stub.partialExit(partialExitRequest("sig-close", "pos-not-expired", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-exit", 5L, new BigDecimal("3.10")));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-not-expired");
+
+    // Normal close, and the worthless-close guard never fired.
+    AuditEvent closed = captureKind("PositionClosed");
+    assertThat(asLong(closed.getSubject().get("remaining_qty"))).isEqualTo(0L);
+    assertThat(captureAll("PositionExpired")).isEmpty();
   }
 
   // ---------- Phase 2 (PLAN-2026-07-12, B1): broaden worthless-close to eod / expiry_lead
@@ -1416,7 +1521,7 @@ class PositionWorkflowImplTest {
   void chandelierFlatten_isBoundedLimit_notMarket() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-chandelier-bounded");
-    PositionWorkflowInput in = input(5);
+    PositionWorkflowInput in = futureInput(5);
     in.setExitFloorAbs(new BigDecimal("0.50"));
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
@@ -1581,7 +1686,7 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-exit-timeout");
-    PositionWorkflowInput in = input(5);
+    PositionWorkflowInput in = futureInput(5);
     in.setExitRepriceSteps(1L); // R-AB-2: cap at 1 retry → 2 timeouts then drop (legacy shape).
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
@@ -1642,7 +1747,7 @@ class PositionWorkflowImplTest {
                 "broker rejected cancel — already filled", "BrokerCancelRejected"));
 
     PositionWorkflow stub = newStub("pos-exit-timeout-cancelfail");
-    PositionWorkflowInput in = input(3);
+    PositionWorkflowInput in = futureInput(3);
     in.setExitRepriceSteps(1L); // R-AB-2: cap at 1 retry → 2 timeouts then drop (legacy shape).
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
@@ -1698,7 +1803,7 @@ class PositionWorkflowImplTest {
         .thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-partial-retry");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     // Partial target STC: first placeOrder throws -> PartialExitPlaceFailed page, lot intact.
@@ -1756,7 +1861,7 @@ class PositionWorkflowImplTest {
         .thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-partial-exhaust");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     // Original partial fails (place #1) -> page + schedule re-drive.
@@ -1782,7 +1887,7 @@ class PositionWorkflowImplTest {
     assertThat(exhausted.getSubject())
         .containsEntry("signal_id", "sig-qqq")
         .containsEntry("attempts", 1)
-        .containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
+        .containsEntry("option_symbol", FUTURE_OCC_SYMBOL);
 
     // Bounded: no third placeOrder for the partial. Sleep generously to prove no further re-drive.
     env.sleep(Duration.ofMinutes(30));
@@ -1824,7 +1929,7 @@ class PositionWorkflowImplTest {
         .thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-exit-place-fail");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     // First STC: placeOrder throws. The catch must audit + release the latch + return — NOT crash.
@@ -1835,7 +1940,7 @@ class PositionWorkflowImplTest {
     // is still managed at the UNCHANGED qty (nothing was sold).
     PositionState afterFailure = stub.positionState();
     assertThat(afterFailure.remainingQty()).isEqualTo(5L);
-    assertThat(afterFailure.contractSymbol()).isEqualTo(EXPIRED_OCC_SYMBOL);
+    assertThat(afterFailure.contractSymbol()).isEqualTo(FUTURE_OCC_SYMBOL);
 
     // Follow-up STC drains (proving the in-flight latch was released) and fills normally.
     stub.partialExit(partialExitRequest("sig-ok", "pos-exit-place-fail", 1.0));
@@ -1850,7 +1955,7 @@ class PositionWorkflowImplTest {
     AuditEvent placeFailed = captureKind("PartialExitPlaceFailed");
     assertThat(placeFailed.getSubject())
         .containsEntry("signal_id", "sig-fail")
-        .containsEntry("option_symbol", EXPIRED_OCC_SYMBOL);
+        .containsEntry("option_symbol", FUTURE_OCC_SYMBOL);
     assertThat(asLong(placeFailed.getSubject().get("qty"))).isEqualTo(3L);
     assertThat(placeFailed.getSubject())
         .containsEntry("intent_key", "pos-exit-place-fail:exit:sig-fail");
@@ -1879,7 +1984,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(alreadyClosedResult());
 
     PositionWorkflow stub = newStub("pos-over-exit-flat");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     stub.partialExit(partialExitRequest("sig-flat", "pos-over-exit-flat", 0.5));
@@ -1894,7 +1999,7 @@ class PositionWorkflowImplTest {
     AuditEvent alreadyFlat = captureKind("PartialExitAlreadyFlat");
     assertThat(alreadyFlat.getSubject())
         .containsEntry("signal_id", "sig-flat")
-        .containsEntry("option_symbol", EXPIRED_OCC_SYMBOL)
+        .containsEntry("option_symbol", FUTURE_OCC_SYMBOL)
         .containsEntry("intent_key", "pos-over-exit-flat:exit:sig-flat");
     // remaining_qty_before>0 → the divergence WARN+metric branch fired (same gate as this value).
     assertThat(asLong(alreadyFlat.getSubject().get("remaining_qty_before"))).isEqualTo(5L);
@@ -1918,7 +2023,7 @@ class PositionWorkflowImplTest {
                 "Alpaca rejected order (422, non-duplicate): bad request", "InvalidRequestError"));
 
     PositionWorkflow stub = newStub("pos-genuine-422");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     stub.partialExit(partialExitRequest("sig-422", "pos-genuine-422", 0.5));
@@ -1967,7 +2072,7 @@ class PositionWorkflowImplTest {
   void armChandelier_validInput_armsAndAuditsChandelierArmed() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-arm-valid");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     stub.armChandelier(
@@ -1991,7 +2096,7 @@ class PositionWorkflowImplTest {
   void armChandelier_invalidPeak_rejectsAndAuditsArmRejected() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-arm-bad-peak");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
     confirmEntry(stub, 3L);
 
     stub.armChandelier(armPayload("pos-arm-bad-peak", "src-sig-bp", null, new BigDecimal("0.15")));
@@ -2009,7 +2114,7 @@ class PositionWorkflowImplTest {
   void armChandelier_invalidGiveback_rejectsAndAuditsArmRejected() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-arm-bad-gb");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
     confirmEntry(stub, 3L);
 
     stub.armChandelier(
@@ -2030,7 +2135,7 @@ class PositionWorkflowImplTest {
     when(marketData.subscribePremium(any())).thenReturn(failedSubscription("upstream down"));
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-arm-subfail");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
     confirmEntry(stub, 3L);
 
     stub.armChandelier(
@@ -2058,7 +2163,7 @@ class PositionWorkflowImplTest {
   void armChandelier_secondArm_isNoOp() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-arm-second");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
     confirmEntry(stub, 3L);
 
     stub.armChandelier(
@@ -2079,7 +2184,7 @@ class PositionWorkflowImplTest {
   void chandelierTick_beforeArm_ignored() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-tick-before-arm");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
     confirmEntry(stub, 3L);
 
     stub.chandelierTick(tick(new BigDecimal("1.00")));
@@ -2096,7 +2201,7 @@ class PositionWorkflowImplTest {
   void chandelierTick_belowPeakAboveThreshold_noFire() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-tick-near-no-fire");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     // peak=3.00, gb=0.15 -> threshold = 3.00 * 0.85 = 2.55
@@ -2118,7 +2223,7 @@ class PositionWorkflowImplTest {
   void chandelierTick_tickAtExactThreshold_fires() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-tick-exact-threshold");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     // peak=3.00, gb=0.10 -> threshold = 2.70
@@ -2146,7 +2251,7 @@ class PositionWorkflowImplTest {
   void chandelierTick_risingThenGivebackBreach_firesFlattenRemaining() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-tick-rising");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     stub.armChandelier(
@@ -2171,7 +2276,7 @@ class PositionWorkflowImplTest {
   void chandelierUnarmedByExit_normalStcCompletes_emitsAuditWhenArmed() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     PositionWorkflow stub = newStub("pos-unarmed-stc");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
     confirmEntry(stub, 3L);
 
     stub.armChandelier(
@@ -2194,7 +2299,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-force-healthy");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     ForceCloseResult result = stub.forceClose(forceCloseRequest("ops-1", "manual intervention"));
@@ -2230,7 +2335,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-force-blank-op");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
     confirmEntry(stub, 3L);
 
     assertThatThrownBy(() -> stub.forceClose(forceCloseRequest("", "reason ok")))
@@ -2249,7 +2354,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-force-blank-reason");
-    WorkflowStub.fromTyped(stub).start(input(3));
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
     confirmEntry(stub, 3L);
 
     assertThatThrownBy(() -> stub.forceClose(forceCloseRequest("ops-2", "")))
@@ -2267,7 +2372,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-risk-breach");
-    WorkflowStub.fromTyped(stub).start(input(4));
+    WorkflowStub.fromTyped(stub).start(futureInput(4));
     confirmEntry(stub, 4L);
 
     stub.riskBreach(riskBreachPayload("auto:daily_loss", "auto:daily_loss"));
@@ -2300,7 +2405,7 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-risk-breach-inflight");
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     // Queue an STC that won't be filled — exit is in flight when risk_breach arrives.
@@ -2325,7 +2430,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-bt-alpaca");
-    PositionWorkflowInput in = input(3);
+    PositionWorkflowInput in = futureInput(3);
     in.setBrokerTarget(PositionWorkflowInput.BrokerTarget.ALPACA_PAPER);
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
@@ -2349,7 +2454,7 @@ class PositionWorkflowImplTest {
     PositionWorkflow stub = newStub("pos-bt-default");
     // input() helper does not set broker_target — exercises the pre-2c.2 replay path that
     // falls back to DEFAULT_BROKER_TARGET = "alpaca-paper".
-    WorkflowStub.fromTyped(stub).start(input(2));
+    WorkflowStub.fromTyped(stub).start(futureInput(2));
     confirmEntry(stub, 2L);
 
     stub.partialExit(partialExitRequest("sig-bt-default", "pos-bt-default", 1.0));
@@ -2377,7 +2482,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-no-eod-flatten");
-    PositionWorkflowInput in = input(5);
+    PositionWorkflowInput in = futureInput(5);
     in.setEodForceFlatten(Boolean.FALSE);
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
@@ -2417,7 +2522,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-null-eod-flatten");
-    PositionWorkflowInput in = input(3);
+    PositionWorkflowInput in = futureInput(3);
     // eod_force_flatten left null — must be treated as "do not arm" (fail-closed).
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
@@ -2525,7 +2630,7 @@ class PositionWorkflowImplTest {
     PositionWorkflow stub = newStub("pos-partial-fill");
     // Input requests 5 contracts, but the BTO only partial-fills 3 — PositionEntered must reflect
     // the 3 actually held, not the 5 requested.
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     stub.onFill(fill("brk-entry", 3L, new BigDecimal("2.40")));
 
     // Drain via a full close so the workflow terminates cleanly.
@@ -2563,7 +2668,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-min-qty-skip");
-    PositionWorkflowInput in = input(1);
+    PositionWorkflowInput in = futureInput(1);
     in.setMinPartialQtyBehavior(PositionWorkflowInput.MinPartialQtyBehavior.SKIP);
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 1L);
@@ -2610,7 +2715,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-min-qty-full-close");
-    PositionWorkflowInput in = input(1);
+    PositionWorkflowInput in = futureInput(1);
     in.setMinPartialQtyBehavior(PositionWorkflowInput.MinPartialQtyBehavior.FULL_CLOSE);
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 1L);
@@ -2722,7 +2827,7 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-exit-fill-ttl-20");
-    PositionWorkflowInput in = input(5);
+    PositionWorkflowInput in = futureInput(5);
     in.setExitFillTtlSecs(20L);
     // Plan-2B R-AB-2: cap the stepped reprice at 1 so this #212 TTL test keeps its "one retry then
     // drop" (2-timeout) shape under the redesigned loop.
@@ -2781,7 +2886,7 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-retry-fills");
-    PositionWorkflowInput in = input(4);
+    PositionWorkflowInput in = futureInput(4);
     in.setExitRepriceSteps(1L); // R-AB-2: 1 reprice step → mirrors the legacy single-retry shape.
     // exit_floor configured so the reprice produces a bounded LIMIT from the live quote
     // (source_premium=live_quote_stepped); without a floor the reprice would fail-safe to
@@ -2852,7 +2957,7 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-retry-caps");
-    PositionWorkflowInput in = input(5);
+    PositionWorkflowInput in = futureInput(5);
     in.setExitRepriceSteps(1L); // R-AB-2: cap the stepped reprice at 1 → 2 timeouts then drop.
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 5L);
@@ -2908,7 +3013,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
-    PositionWorkflowInput in = input(3);
+    PositionWorkflowInput in = futureInput(3);
     in.setExitRepriceSteps(1L);
     in.setExitRepriceTick(new BigDecimal("0.05"));
     in.setExitFloorAbs(new BigDecimal("0.05"));
@@ -2960,7 +3065,7 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
     when(optionQuote.getOptionQuote(any())).thenReturn(quoteFailed("md outage"));
 
-    PositionWorkflowInput in = input(3);
+    PositionWorkflowInput in = futureInput(3);
     in.setExitRepriceSteps(1L);
     in.setExitFloorAbs(new BigDecimal("0.05"));
     in.setExitFloorPct(new BigDecimal("0.5"));
@@ -3013,7 +3118,7 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     // exit_floor_abs=5.00 sits ABOVE the live bid 2.50 → floor-above-bid fail-safe → marketable.
-    PositionWorkflowInput in = input(3);
+    PositionWorkflowInput in = futureInput(3);
     in.setExitRepriceSteps(1L);
     in.setExitFloorAbs(new BigDecimal("5.00"));
 
@@ -3065,7 +3170,7 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
     PositionWorkflow stub = newStub("pos-retry-gate-doc");
-    PositionWorkflowInput in = input(4);
+    PositionWorkflowInput in = futureInput(4);
     // Keep TTLs short so the test runs quickly under virtual time.
     in.setExitFillTtlSecs(2L);
     in.setExitRepriceSteps(1L); // R-AB-2: cap at 1 reprice → 2 timeouts then drop (legacy shape).
@@ -3199,7 +3304,7 @@ class PositionWorkflowImplTest {
               return cancelledResult();
             });
 
-    WorkflowStub.fromTyped(stub).start(input(5));
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     // STC fraction=0.5 on remaining=5 → qtyToClose=ceil(2.5)=3, targetRemaining=2.
@@ -3269,7 +3374,7 @@ class PositionWorkflowImplTest {
               return cancelledResult();
             });
 
-    PositionWorkflowInput in = input(6);
+    PositionWorkflowInput in = futureInput(6);
     in.setExitRepriceSteps(1L); // R-AB-2: single reprice step → key is :reprice-1.
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 6L);
@@ -3350,7 +3455,7 @@ class PositionWorkflowImplTest {
     when(exec.cancelOrder(anyString())).thenReturn(filledCancelResult(2L, new BigDecimal("1.84")));
 
     PositionWorkflow stub = newStub("pos-cancel-filled");
-    PositionWorkflowInput in = input(3);
+    PositionWorkflowInput in = futureInput(3);
     in.setExitFillTtlSecs(2L); // short TTL so the unfilled await elapses fast under virtual time
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
@@ -3415,7 +3520,7 @@ class PositionWorkflowImplTest {
         .thenReturn(filledCancelResult(2L, new BigDecimal("1.84")));
 
     PositionWorkflow stub = newStub("pos-status-filled");
-    PositionWorkflowInput in = input(3);
+    PositionWorkflowInput in = futureInput(3);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
@@ -3469,7 +3574,7 @@ class PositionWorkflowImplTest {
     when(exec.getOrderStatus(anyString())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-genuine-timeout");
-    PositionWorkflowInput in = input(4);
+    PositionWorkflowInput in = futureInput(4);
     in.setExitRepriceSteps(1L); // single reprice step → key is :reprice-1
     in.setExitFloorAbs(new BigDecimal("0.05"));
     in.setExitFloorPct(new BigDecimal("0.5"));
@@ -3534,7 +3639,7 @@ class PositionWorkflowImplTest {
               return filledCancelResult(2L, new BigDecimal("1.84"));
             });
 
-    PositionWorkflowInput in = input(3);
+    PositionWorkflowInput in = futureInput(3);
     in.setExitFillTtlSecs(2L);
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 3L);
@@ -3694,7 +3799,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
     // exit_reprice_steps=2, tick=0.05; default quote bid=2.50.
-    PositionWorkflowInput in = input(4);
+    PositionWorkflowInput in = futureInput(4);
     in.setExitRepriceSteps(2L);
     in.setExitRepriceTick(new BigDecimal("0.05"));
     in.setExitFloorAbs(new BigDecimal("0.05"));
@@ -3762,7 +3867,7 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
 
-    PositionWorkflowInput in = input(5);
+    PositionWorkflowInput in = futureInput(5);
     in.setExitRepriceSteps(2L);
     in.setExitRepriceTick(new BigDecimal("0.05"));
     in.setExitFloorAbs(new BigDecimal("0.05"));
@@ -3831,6 +3936,19 @@ class PositionWorkflowImplTest {
     in.setContractSymbol(EXPIRED_OCC_SYMBOL);
     in.setQty(qty);
     in.setEntryPremium(new BigDecimal("2.30"));
+    return in;
+  }
+
+  /**
+   * Same as {@link #input(long)} but on a NON-expired (future) contract. Use for any test that
+   * drives a LIVE position lifecycle (confirms entry then signals STC / partial-exit / chandelier /
+   * manual flatten / force-close) WITHOUT arming an eod/expiry/expiry-lead terminal timer: post
+   * PLAN-2026-07-23 Phase 2 the expiry-day self-close guard closes a physically-expired lot that
+   * has no terminal timer armed at entry, so such a lifecycle test must hold a future-dated OCC.
+   */
+  private PositionWorkflowInput futureInput(long qty) {
+    PositionWorkflowInput in = input(qty);
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
     return in;
   }
 
