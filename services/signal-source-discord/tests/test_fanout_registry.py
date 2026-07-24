@@ -18,6 +18,7 @@ import pytest
 
 from ohmytradeagent_sidecar.emitter import InMemoryEmitter
 from ohmytradeagent_sidecar.fanout_registry import (
+    WATCHLIST_FANOUT_TARGETS_PATH,
     FanoutRefresher,
     FanoutRegistryClient,
     parse_targets,
@@ -98,6 +99,29 @@ async def test_client_non_2xx_raises() -> None:
     with pytest.raises(httpx.HTTPStatusError):
         await c.fetch_targets()
     await c.aclose()
+
+
+async def test_client_custom_path_hits_watchlist_endpoint() -> None:
+    # Phase 2: the same client reads the watchlist registry when given its path.
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(
+            200,
+            json={"targets": [{"tenant_id": "kip", "strategy_id": "watchlist-trigger-v1"}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    ac = httpx.AsyncClient(transport=transport, base_url="http://gw:8082")
+    c = FanoutRegistryClient(
+        base_url="http://gw:8082", token="tok", client=ac, path=WATCHLIST_FANOUT_TARGETS_PATH
+    )
+    targets = await c.fetch_targets()
+    await c.aclose()
+
+    assert seen["path"] == "/internal/watchlist-fanout-targets"
+    assert targets == [("kip", "watchlist-trigger-v1")]
 
 
 # --------------------------------------------------------------------------- #

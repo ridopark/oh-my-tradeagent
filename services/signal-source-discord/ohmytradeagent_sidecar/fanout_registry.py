@@ -26,6 +26,9 @@ from typing import Any, Callable
 import httpx
 
 FANOUT_TARGETS_PATH = "/internal/copytrade-fanout-targets"
+# Phase 2 (watchlist fan-out): the sibling registry endpoint the watchlist mirror polls. Same
+# response shape + auth as the copytrade one; the client's `path` selects which registry to read.
+WATCHLIST_FANOUT_TARGETS_PATH = "/internal/watchlist-fanout-targets"
 
 _Target = tuple[str, str]
 
@@ -70,8 +73,10 @@ class FanoutRegistryClient:
         token: str,
         client: httpx.AsyncClient | None = None,
         timeout: float = 10.0,
+        path: str = FANOUT_TARGETS_PATH,
     ) -> None:
         self._token = token
+        self._path = path
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"), timeout=timeout
@@ -79,7 +84,7 @@ class FanoutRegistryClient:
 
     async def fetch_targets(self) -> list[_Target]:
         resp = await self._client.get(
-            FANOUT_TARGETS_PATH,
+            self._path,
             headers={"Authorization": f"Bearer {self._token}"},
         )
         resp.raise_for_status()

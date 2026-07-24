@@ -102,6 +102,10 @@ async def _amain() -> None:
     fanout_source = os.getenv("SIGNAL_FANOUT_SOURCE", "env").strip().lower()
     if fanout_source not in ("env", "registry"):
         raise SystemExit("SIGNAL_FANOUT_SOURCE must be 'env' or 'registry'")
+    # Phase 2: the watchlist mirror's fan-out source, independent of the signal one.
+    watchlist_fanout_source = os.getenv("WATCHLIST_FANOUT_SOURCE", "env").strip().lower()
+    if watchlist_fanout_source not in ("env", "registry"):
+        raise SystemExit("WATCHLIST_FANOUT_SOURCE must be 'env' or 'registry'")
     # In registry mode the watcher starts primary-only (never empty) and the
     # refresher populates it; in env mode it gets the parsed env list as today.
     signal_additional_targets = [] if fanout_source == "registry" else additional_targets
@@ -145,7 +149,7 @@ async def _amain() -> None:
     # unclosed (same discipline as the storage_state check above).
     gw_base_url = None
     gw_token = None
-    if fanout_source == "registry":
+    if fanout_source == "registry" or watchlist_fanout_source == "registry":
         gw_base_url = _required("API_GATEWAY_BASE_URL")
         gw_token = _required("API_GATEWAY_SHARED_TOKEN")
 
@@ -213,6 +217,35 @@ async def _amain() -> None:
         log.info("watchlist mirror enabled (channel=%s author=%s)",
                  watchlist_channel_url, watchlist_author)
 
+    # Phase 2 (watchlist fan-out DB-driven): a SECOND registry refresher, pointed at the watchlist
+    # endpoint + the watchlist watcher's update_targets, so an enabled watchlist strategy_config row
+    # routes without editing WATCHLIST_MIRROR_ADDITIONAL_TARGETS + restarting. Independent of the
+    # signal fan-out source (its own WATCHLIST_FANOUT_SOURCE flag); env mode is unchanged. Isolated +
+    # non-fatal like the signal refresher — the last good set (initially the env list) survives a
+    # failed poll.
+    watchlist_fanout_refresher = None
+    if watchlist_watcher is not None and watchlist_fanout_source == "registry":
+        from .fanout_registry import (
+            WATCHLIST_FANOUT_TARGETS_PATH,
+            FanoutRefresher,
+            FanoutRegistryClient,
+        )
+
+        wl_refresh_secs = float(os.getenv("WATCHLIST_FANOUT_REFRESH_SECS", "60"))
+        watchlist_fanout_refresher = FanoutRefresher(
+            client=FanoutRegistryClient(
+                base_url=gw_base_url, token=gw_token, path=WATCHLIST_FANOUT_TARGETS_PATH
+            ),
+            apply_targets=watchlist_watcher.update_targets,
+            log=log,
+            refresh_secs=wl_refresh_secs,
+        )
+        log.info(
+            "watchlist fan-out source=registry (endpoint=%s refresh=%ss)",
+            gw_base_url,
+            wl_refresh_secs,
+        )
+
     try:
         # ONE browser + context shared by both watchers — each gets its own
         # page (tab). A second Chromium would roughly double memory and OOM the
@@ -264,6 +297,18 @@ async def _amain() -> None:
                 # it — never let it take down the process.
                 watchlist_task.add_done_callback(_log_if_failed(log, "watchlist watcher"))
 
+            watchlist_fanout_task: asyncio.Task[None] | None = None
+            if watchlist_fanout_refresher is not None:
+                # ISOLATION: best-effort sibling, same as the signal fan-out refresher — a crash
+                # here leaves the last good watchlist fan-out set in place, never touches the
+                # trading-critical signal watcher.
+                watchlist_fanout_task = asyncio.create_task(
+                    watchlist_fanout_refresher.run(), name="watchlist-fanout-refresher"
+                )
+                watchlist_fanout_task.add_done_callback(
+                    _log_if_failed(log, "watchlist fan-out refresher")
+                )
+
             try:
                 # The signal watcher is trading-critical: await IT directly so a
                 # crash propagates immediately and the process exits non-zero for
@@ -272,7 +317,7 @@ async def _amain() -> None:
                 # otherwise mask a signal-watcher crash indefinitely.
                 await signal_task
             finally:
-                for task in (watchlist_task, fanout_task):
+                for task in (watchlist_task, fanout_task, watchlist_fanout_task):
                     if task is not None:
                         task.cancel()
                         try:
