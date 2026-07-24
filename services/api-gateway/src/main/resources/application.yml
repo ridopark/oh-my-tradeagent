@@ -95,8 +95,9 @@ operator:
 # Phase B1 copytrade fan-out registry. DARK by default: with fanout.enabled unset/false the
 # CopytradeFanoutController bean does not exist and GET /internal/copytrade-fanout-targets 404s.
 # When enabled, ServiceTokenFilter bearer-gates the route (the sidecar is a SERVICE caller, not an
-# operator). The cutover is a manual per-cluster operator action (Phase B3) — NO repo manifest sets
-# this true.
+# operator). The DEFAULT stays dark (false) so any deployment that does not set the env is safe; the
+# HOMELAB deployment manifest (infra/k8s/54-api-gateway.yaml) sets COPYTRADE_FANOUT_ENABLED=true to
+# codify its validated cutover. Other clusters remain dark unless they opt in the same way.
 copytrade:
   fanout:
     enabled: ${COPYTRADE_FANOUT_ENABLED:false}
@@ -106,8 +107,9 @@ copytrade:
 # Phase 1 (Fork A) watchlist fan-out registry. DARK by default: with fanout.enabled unset/false the
 # WatchlistFanoutController bean does not exist and GET /internal/watchlist-fanout-targets 404s.
 # When enabled, ServiceTokenFilter bearer-gates the route (the sidecar is a SERVICE caller, not an
-# operator). The cutover is a manual per-cluster operator action (Phase 2+) — NO repo manifest sets
-# this true.
+# operator). The DEFAULT stays dark (false) so any deployment that does not set the env is safe; the
+# HOMELAB deployment manifest (infra/k8s/54-api-gateway.yaml) sets WATCHLIST_FANOUT_ENABLED=true to
+# codify its validated 2026-07-24 cutover. Other clusters remain dark unless they opt in the same way.
 watchlist:
   fanout:
     enabled: ${WATCHLIST_FANOUT_ENABLED:false}
