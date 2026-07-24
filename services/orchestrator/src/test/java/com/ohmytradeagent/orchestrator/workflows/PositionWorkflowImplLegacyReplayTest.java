@@ -197,6 +197,20 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * PLAN-2026-07-23 Phase 2: pins the no-timer expiry-day self-close gate literal. This getVersion
+   * change-point keys the entry-time worthless-close of a physically-expired lot that armed NO
+   * terminal-flatten timer; a renamed string re-resolves to DEFAULT_VERSION for legacy histories,
+   * silently reverting the zombie self-close on in-flight workflows (back to blocking ALIVE
+   * forever).
+   */
+  @Test
+  void versionExpireWorthlessNoTimerConstantNameIsStable() throws Exception {
+    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_EXPIRE_WORTHLESS_NO_TIMER");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("expire-worthless-no-timer-v1");
+  }
+
+  /**
    * Phase 1 (PLAN-2026-06-25-trading-remediation): pins the partial-place-retry-next-session gate
    * literal. This getVersion change-point keys the return-vs-re-drive fork in processOne's
    * place-failure catch; a renamed string re-resolves to DEFAULT_VERSION for legacy histories (the

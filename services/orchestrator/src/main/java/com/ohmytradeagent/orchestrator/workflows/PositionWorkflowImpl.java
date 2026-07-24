@@ -518,6 +518,22 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_EXPIRY_LEAD_FLATTEN = "expiry-lead-flatten";
 
   /**
+   * PLAN-2026-07-23 Phase 2 replay gate. A PositionWorkflow can be started — via recon adoption —
+   * on a contract's OWN expiry day AFTER every scheduled-flatten instant has already passed (the
+   * 2026-07-22 staging_paper zombie: adopted 14:45 ET, its expiry-close/expiry-lead instants
+   * seconds behind). Every {@code durationUntil*} then computes a &le;0 duration and NO timer arms,
+   * so {@code eodFired}/{@code expiryFired}/{@code expiryLeadFired} can never latch and {@code
+   * run()} blocks forever in the main loop on a signal that never comes — an immortal workflow
+   * holding a delisted, unpriceable contract that fail-closes the account cap every heartbeat. When
+   * the contract has PHYSICALLY EXPIRED and NOT ONE terminal timer armed, close it worthless now
+   * (the P&amp;L-neutral {@link #maybeCloseWorthlessAtExpiry} path) instead of hanging. Gated
+   * because it appends an audit + early return to a workflow whose in-flight histories must replay
+   * byte-identically; at {@code DEFAULT_VERSION} the guard is skipped (the only new v=0 command is
+   * this appended getVersion marker).
+   */
+  private static final String VERSION_EXPIRE_WORTHLESS_NO_TIMER = "expire-worthless-no-timer-v1";
+
+  /**
    * Plan-2B R-AB-2 replay gate (a second gate layered over 2A's single-shot exit machinery).
    * Redesigns {@link #processOne(PartialExitRequest)}'s exit retry from a single attempt (the #216
    * {@code maxRetries=1} path) into a BOUNDED STEPPED reprice: up to {@code exit_reprice_steps}
@@ -1037,6 +1053,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       expiryIn = calendar.durationUntilExpiryCloseEt(expiryDate, closeTime);
     }
 
+    // PLAN-2026-07-23 Phase 2: track whether each terminal-flatten timer actually armed. A timer is
+    // NOT armed when its computed duration is <=0 (its instant already passed) — the condition the
+    // expiry-day zombie hits on every one of them. Read once below to decide the worthless-close.
+    boolean eodTimerArmed = false;
+    boolean expiryTimerArmed = false;
+    boolean expiryLeadTimerArmed = false;
+
     if (armEodTimer && !eodIn.isZero() && !eodIn.isNegative()) {
       Promise<Void> eodTimer = Workflow.newTimer(eodIn);
       eodTimer.thenApply(
@@ -1044,6 +1067,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             eodFired = true;
             return null;
           });
+      eodTimerArmed = true;
     }
     if (!expiryIn.isZero() && !expiryIn.isNegative()) {
       Promise<Void> expiryTimer = Workflow.newTimer(expiryIn);
@@ -1052,6 +1076,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             expiryFired = true;
             return null;
           });
+      expiryTimerArmed = true;
     }
 
     // Plan-2B R-AB-1: arm a GUARANTEED bounded flatten timer at (expiry_close -
@@ -1078,6 +1103,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               expiryLeadFired = true;
               return null;
             });
+        expiryLeadTimerArmed = true;
       }
     }
 
@@ -1143,6 +1169,26 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       if (watchlistExitVersion >= 1 && in.getTpRatio() != null) {
         armWatchlistExit(firstFillPrice);
       }
+    }
+
+    // PLAN-2026-07-23 Phase 2: guard against the immortal expiry-day zombie. If the contract has
+    // PHYSICALLY EXPIRED and NOT ONE terminal-flatten timer armed (every durationUntil* was <=0
+    // because the workflow was adopted after its own expiry instants), the loop below has no fired
+    // flag that can ever latch and would block forever, leaving a delisted lot that fail-closes the
+    // account cap. Close it worthless now (P&L-neutral, reason=worthless_expiry) and terminate.
+    // Read the gate once at this stable scope (reached on every path that would enter the loop); at
+    // DEFAULT_VERSION the whole guard is skipped so in-flight histories replay byte-identically.
+    int expireWorthlessNoTimerVersion =
+        Workflow.getVersion(VERSION_EXPIRE_WORTHLESS_NO_TIMER, Workflow.DEFAULT_VERSION, 1);
+    if (expireWorthlessNoTimerVersion >= 1
+        && remainingQty > 0
+        && !eodTimerArmed
+        && !expiryTimerArmed
+        && !expiryLeadTimerArmed
+        && expiryDate != null
+        && !expiryDate.isAfter(currentEtDate())
+        && maybeCloseWorthlessAtExpiry("expiry")) {
+      return Workflow.getInfo().getWorkflowId();
     }
 
     while (remainingQty > 0 && !eodFired && !expiryFired && !expiryLeadFired) {

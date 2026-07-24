@@ -96,7 +96,16 @@ class CopytradeSignalWorkflowImplTest {
     calendar = Mockito.mock(MarketCalendarActivities.class);
     marketData = Mockito.mock(SubscribePremiumActivity.class);
     when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
-    when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
+    // PLAN-2026-07-23 Phase 2: give every spawned child PositionWorkflow a FUTURE expiry-close so
+    // its expiry timer ARMS. These tests use expired-dated OCC literals as a live-position
+    // stand-in;
+    // with a >0 expiry-close the new expire-worthless-no-timer guard is skipped (a live position
+    // has
+    // a terminal timer), so a spawned+confirmed child does not self-close at entry and can still
+    // receive its STC. Inert for the assertions here — an 8h timer never fires in these
+    // minute-scale
+    // tests. (Was ZERO = no expiry timer, which now trips the guard on the expired OCC.)
+    when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ofHours(8));
     SubscribePremiumResult ok = new SubscribePremiumResult();
     ok.setSchemaVersion(1L);
     ok.setSubscriptionId("sub-test");
