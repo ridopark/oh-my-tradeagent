@@ -81,6 +81,12 @@ public class AdminTenantsController {
     m.put("tenant_id", s.tenantId());
     m.put("strategy_id", s.strategyId());
     m.put("broker_target", brokerTarget);
+    // The RUNTIME arm state (strategy_config.enabled) — distinct from activation_state, which is
+    // the
+    // live-promotion gate. A strategy can be activated (promotion VALID) but still disabled, so it
+    // does not trade; surface enabled explicitly so the UI can show the truth (not just
+    // "activated").
+    m.put("enabled", s.enabled());
     m.put("account_masked", mask(accountReader.accountId(s.tenantId(), brokerTarget)));
     m.put("mode", live ? "live" : "paper");
 

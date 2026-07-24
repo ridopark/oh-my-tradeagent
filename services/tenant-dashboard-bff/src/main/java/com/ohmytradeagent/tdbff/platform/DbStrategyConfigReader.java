@@ -55,11 +55,21 @@ public class DbStrategyConfigReader {
         .select(
             DSL.field("tenant_id", String.class),
             DSL.field("strategy_id", String.class),
-            DSL.field("config->>'broker_target'", String.class))
+            DSL.field("config->>'broker_target'", String.class),
+            DSL.field("config->>'enabled'", String.class))
         .from(DSL.table("strategy_config"))
         .orderBy(DSL.field("tenant_id"), DSL.field("strategy_id"))
         .fetch()
-        .map(r -> new TenantStrategyBrokerTarget(r.value1(), r.value2(), r.value3()));
+        .map(
+            r ->
+                new TenantStrategyBrokerTarget(
+                    r.value1(),
+                    r.value2(),
+                    r.value3(),
+                    // "enabled" = true OR absent (only an explicit "false" disables) — mirrors the
+                    // orchestrator runtime gate + the fan-out registry predicate, so the operator
+                    // sees the SAME truth the trading path uses.
+                    !"false".equals(r.value4())));
   }
 
   /**
@@ -74,7 +84,11 @@ public class DbStrategyConfigReader {
             .where(DSL.field("tenant_id", String.class).eq(tenantId)));
   }
 
-  /** One enumerated strategy and its configured {@code broker_target} (may be {@code null}). */
+  /**
+   * One enumerated strategy: its configured {@code broker_target} (may be {@code null}) and its
+   * runtime {@code enabled} flag (true unless the config carries an explicit {@code "false"}) — the
+   * actual arm state the trading path reads, so the operator UI can show real enabled/disabled.
+   */
   public record TenantStrategyBrokerTarget(
-      String tenantId, String strategyId, String brokerTarget) {}
+      String tenantId, String strategyId, String brokerTarget, boolean enabled) {}
 }
