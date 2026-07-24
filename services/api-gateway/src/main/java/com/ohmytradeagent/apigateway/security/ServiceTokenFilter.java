@@ -29,13 +29,15 @@ import org.springframework.web.filter.OncePerRequestFilter;
  *
  * <p><b>Dark by default.</b> Active when ANY of {@code broker.credentials.write.enabled=true},
  * {@code operator.activation.enabled=true}, {@code operator.tenant-create.enabled=true}, {@code
- * operator.credential-write.enabled=true}, or {@code copytrade.fanout.enabled=true}; with all unset
- * the filter bean does not exist (just like the controllers). When present it bearer-gates ALL
- * three route prefixes. The {@code /admin/tenants/} prefix covers the Phase F activation routes,
- * the Phase I-1b create-tenant route, AND the Phase I-1c operator credential-write route; the
- * {@code /internal/copytrade-fanout-targets} prefix covers the Phase B1 fan-out registry (a
- * SERVICE-token route, not operator-scoped) — so EVERY flag that activates ANY of these gated
- * controllers MUST also be in this expression, or that route would be reachable unauthenticated.
+ * operator.credential-write.enabled=true}, {@code copytrade.fanout.enabled=true}, or {@code
+ * watchlist.fanout.enabled=true}; with all unset the filter bean does not exist (just like the
+ * controllers). When present it bearer-gates ALL four route prefixes. The {@code /admin/tenants/}
+ * prefix covers the Phase F activation routes, the Phase I-1b create-tenant route, AND the Phase
+ * I-1c operator credential-write route; the {@code /internal/copytrade-fanout-targets} and {@code
+ * /internal/watchlist-fanout-targets} prefixes cover the copytrade (Phase B1) and watchlist (Phase
+ * 1, Fork A) fan-out registries (both SERVICE-token routes, not operator-scoped) — so EVERY flag
+ * that activates ANY of these gated controllers MUST also be in this expression, or that route
+ * would be reachable unauthenticated.
  *
  * <p>Mirrors the tenant-dashboard-bff filter: constant-time token compare (no timing side-channel)
  * and a prod fail-fast on the well-known default token (a pod started under the {@code prod}
@@ -49,7 +51,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
         + " or ${operator.credential-write.enabled:false}"
         + " or ${operator.strategy-enable.enabled:false}"
         + " or ${operator.tenant-delete.enabled:false}"
-        + " or ${copytrade.fanout.enabled:false}")
+        + " or ${copytrade.fanout.enabled:false}"
+        + " or ${watchlist.fanout.enabled:false}")
 public class ServiceTokenFilter extends OncePerRequestFilter {
 
   private static final String BEARER_PREFIX = "Bearer ";
@@ -61,6 +64,10 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   // activates this route MUST also be in the @ConditionalOnExpression above, or the route would be
   // reachable unauthenticated.
   static final String INTERNAL_FANOUT_ROUTE_PREFIX = "/internal/copytrade-fanout-targets";
+  // Phase 1 (Fork A): the watchlist fan-out registry route the sidecar polls — the sibling of the
+  // copytrade fan-out route. Same SERVICE-token bearer gate; watchlist.fanout.enabled is in the
+  // @ConditionalOnExpression above so turning ON only that flag still brings up this gate.
+  static final String INTERNAL_WATCHLIST_FANOUT_ROUTE_PREFIX = "/internal/watchlist-fanout-targets";
   // The application.yml fallback used for local dev. Accepting it under prod would silently trust a
   // value anyone can read from this repo.
   private static final String INSECURE_DEFAULT_TOKEN = "dev-shared-token";
@@ -88,7 +95,8 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
     return path == null
         || !(path.startsWith(ROUTE_PREFIX)
             || path.startsWith(ADMIN_ROUTE_PREFIX)
-            || path.startsWith(INTERNAL_FANOUT_ROUTE_PREFIX));
+            || path.startsWith(INTERNAL_FANOUT_ROUTE_PREFIX)
+            || path.startsWith(INTERNAL_WATCHLIST_FANOUT_ROUTE_PREFIX));
   }
 
   @Override
