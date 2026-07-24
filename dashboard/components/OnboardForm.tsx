@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { ConfigFieldReference } from "@/components/ConfigFieldReference";
 import { CloudflareGateNote } from "@/components/CloudflareGateNote";
 
@@ -274,21 +274,28 @@ export function OnboardForm({
   const usedStrategies = selectedTenant?.strategies ?? [];
   const availableStrategies = catalogStrategyIds.filter((s) => !usedStrategies.includes(s));
 
-  // When the tenant changes to a KNOWN existing tenant, default the Mode toggle to its mode (so a new
-  // strategy on a live tenant is not accidentally paper-targeted) and, if the current strategy is one
-  // that tenant already has, switch to the first still-available one. Keyed on `tenant` only so it
-  // never fights the strategy <select>; inert for a new/typed tenant.
+  // Reconcile mode/strategy ONLY on a real transition ONTO a known existing tenant — never on an
+  // intermediate keystroke or a typed NEW tenant. The tenant field is a free-text combo-box, so its
+  // onChange fires per keystroke; without this guard a manually-picked Mode (and, via the config
+  // textarea's key-remount, in-progress config edits) would be silently reverted while typing. A
+  // new/typed tenant keeps whatever the operator has set — they manage paper/live explicitly (the
+  // prominent Live indicator + the separate activate-live gate protect real money).
+  const lastReconciledTenant = useRef<string | null>(null);
   useEffect(() => {
     if (!useDropdowns) return;
-    // Default the Mode toggle: an existing tenant → its own live/paper mode; a NEW/typed tenant →
-    // paper (the safe default). Resetting for a new tenant matters — otherwise, after viewing a LIVE
-    // tenant, typing a brand-new id would silently inherit "live" and target real endpoints.
-    setMode(selectedTenant ? selectedTenant.mode : "paper");
-    // Keep the strategy state in sync with what the <select> can actually offer for this tenant —
-    // covers both switching to a tenant that already has the current strategy AND leaving a
-    // fully-used tenant (strategy left "") for a new one (reset to the first catalog entry).
-    if (!availableStrategies.includes(strategy)) {
-      setStrategy(availableStrategies[0] ?? "");
+    if (!selectedTenant) {
+      lastReconciledTenant.current = null;
+      return;
+    }
+    if (selectedTenant.tenantId === lastReconciledTenant.current) return;
+    lastReconciledTenant.current = selectedTenant.tenantId;
+    // Landed on a known tenant: load its live/paper mode (a new strategy on a live tenant is never
+    // accidentally paper-targeted) and, if the current strategy is one it already has, move to the
+    // first still-available one. Leave strategy untouched for a fully-used tenant (nothing to offer)
+    // so it stays valid when the operator moves on to another tenant.
+    setMode(selectedTenant.mode);
+    if (availableStrategies.length > 0 && !availableStrategies.includes(strategy)) {
+      setStrategy(availableStrategies[0]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
