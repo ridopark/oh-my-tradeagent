@@ -144,7 +144,29 @@ entry 2.19, `eod_force_flatten=false`, start 18:45:01Z) yields a completed workf
 `PositionExpired`, not a 43-event history ending in silence. `KIND_POSITION_EXPIRED` is already
 registered — no `AuditEventKinds` change.
 
-### Phase 3 — Refuse same-day adoption once the lot's own terminal instants have passed (orchestrator) — SHIP LAST, needs the Fork decision below
+### Phase 3 — Refuse same-day adoption once the lot's own terminal instants have passed (orchestrator) — DECLINED 2026-07-23 (not shipping; see the update below)
+
+> **STATUS UPDATE 2026-07-23 — Phase 3 DECLINED after implementation scoping.** During Phase 3
+> setup two facts emerged that reversed the Fork-1 "ship it" decision:
+> 1. **It's fully redundant.** Phase 2 (#624, merged) makes an adopted expired-past-instant lot
+>    self-close worthless at entry, so the zombie can no longer exist regardless of recon. Phase 3
+>    only prevents *creating* a position that now self-terminates anyway.
+> 2. **The anchor below is not implementable as a one-line gate swap.** The live zombie history
+>    proves the flatten instant had already passed at adoption (14:45 ET): its `DurationUntilExpiryCloseEt`
+>    and `DurationUntilExpiryFlattenEt` Activities both returned `0.0`, i.e. `force_close_0dte_et`
+>    for that position was configured EARLY (≤14:45), not the default 15:30. But
+>    `ReconciliationWorkflowImpl` has **no `MarketCalendarActivities` handle and no per-strategy
+>    config** — it derives time solely from its deterministic clock plus a hardcoded
+>    `ET_MARKET_CLOSE = 16:00` constant. To refuse *this* 14:45 adoption, recon would need the
+>    strategy's actual `force_close_0dte_et` + `flatten_lead_minutes` (a fixed constant can't catch a
+>    14:45 flatten instant without wrongly refusing legitimate mid-day 0DTE orphans). That means a
+>    new calendar-Activity call (new command, replay-gated) PLUS plumbing per-strategy config into
+>    the recon workflow — non-trivial new machinery for a redundant belt-and-braces layer.
+>
+> Operator decision 2026-07-23: **skip Phase 3.** The zombie is closed by Phase 2; the residual
+> value (avoiding the momentary create-then-self-close churn) does not justify the recon config +
+> Activity plumbing. Reopen only if adoption→self-close churn shows up in metrics. The original
+> anchor sketch is retained below for the record.
 
 **Goal:** stop creating a position the system knows it cannot manage. Narrows the shipped Fork-2B
 window from "before 16:00 ET" to "before this contract's own expiry-flatten instant."
@@ -176,11 +198,12 @@ Behavioral assertion: the 2026-07-20 14:45 ET remnant is refused instead of adop
 
 ## 4. Forks — DECIDED 2026-07-23 (operator)
 
-**Fork 1 — is Phase 3 wanted at all? → SHIP IT.** Operator decision 2026-07-23: keep Phase 3 for
-defense in depth, overriding the plan's original "skip it, Phase 2 makes it redundant"
-recommendation. Rationale: Phases 1 + 2 both close the hole *after* a position the system cannot
-manage has already been created; Phase 3 stops it being created at all, and the three layers fail
-independently. All three phases ship.
+**Fork 1 — is Phase 3 wanted at all? → SHIP IT, then REVERSED to DECLINED 2026-07-23.** The initial
+operator decision was to keep Phase 3 for defense in depth. It was reversed during Phase 3 scoping
+once two facts emerged: Phase 3 is fully redundant with the shipped Phase 2, and it is not the
+one-line gate swap the anchor assumed — it needs a calendar Activity + per-strategy config plumbed
+into `ReconciliationWorkflowImpl` (which has neither). See the STATUS UPDATE under Phase 3. Final:
+Phases 1 + 2 ship; Phase 3 is dropped.
 
 **Fork 2 — should Phase 1 book the expired lot's loss, or just skip it? → BOOK THE LOSS.**
 Phase 1 contributes `(0 - entryPremium) × qty × 100` to open MTM for a physically-expired lot rather
@@ -189,9 +212,9 @@ to the cap instead of invisible), which is the correct direction for a safety me
 
 ## 5. Ship order & gating
 
-1. **Phase 1** (kill switch — stops the halt class immediately, smallest blast radius)
-2. **Phase 2** (position lifecycle — the core fix; version-gated workflow change)
-3. **Phase 3** (adoption policy — retained per Fork 1; riskiest history change, ships last)
+1. **Phase 1** (kill switch — stops the halt class immediately, smallest blast radius) — SHIPPED #622 (merged)
+2. **Phase 2** (position lifecycle — the core fix; version-gated workflow change) — SHIPPED #624
+3. **Phase 3** (adoption policy) — **DECLINED** 2026-07-23 (redundant with Phase 2 + needs recon config/Activity plumbing; see Phase 3 STATUS UPDATE)
 
 Each phase: TDD-first, `spotless:apply` on `services/orchestrator` before commit, its own PR,
 operator merge gate (trading-critical path). No `.github/workflows/*.yml` edits. Set the PR body at
