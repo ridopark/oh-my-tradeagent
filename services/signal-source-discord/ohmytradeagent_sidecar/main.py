@@ -239,6 +239,9 @@ async def _amain() -> None:
             apply_targets=watchlist_watcher.update_targets,
             log=log,
             refresh_secs=wl_refresh_secs,
+            # An empty watchlist registry is legitimate (no tenants opted in — the first rollout
+            # step), so apply it as a normal poll instead of ERROR-spamming a false failure.
+            allow_empty=True,
         )
         log.info(
             "watchlist fan-out source=registry (endpoint=%s refresh=%ss)",

@@ -111,12 +111,18 @@ class FanoutRefresher:
         log: logging.Logger,
         refresh_secs: float,
         error_threshold: int = 3,
+        allow_empty: bool = False,
     ) -> None:
         self._client = client
         self._apply = apply_targets
         self._log = log
         self._refresh_secs = refresh_secs
         self._error_threshold = error_threshold
+        # allow_empty=False (copytrade): an empty poll is a blip — a healthy registry always has the
+        # primary's own enabled row — so retain last good and escalate to ERROR. allow_empty=True
+        # (watchlist): an empty registry is a LEGITIMATE state (no tenants opted in — e.g. the very
+        # first step of the rollout), so apply the empty set as a normal success, no error noise.
+        self._allow_empty = allow_empty
         self._consecutive_failures = 0
 
     async def refresh_once(self) -> bool:
@@ -128,15 +134,20 @@ class FanoutRefresher:
         except Exception as exc:  # noqa: BLE001 — non-fatal by design
             return self._on_failure(f"fan-out poll failed: {exc!r}")
 
-        if not targets:
-            # A healthy registry always includes the primary's own enabled row;
+        if not targets and not self._allow_empty:
+            # A healthy copytrade registry always includes the primary's own enabled row;
             # an empty list means a blip/bad query — retain last good rather than
             # collapse the fan-out.
             return self._on_failure("fan-out poll returned an empty target set")
 
         self._consecutive_failures = 0
         self._apply(targets)
-        self._log.info("fan-out targets refreshed (%d from registry)", len(targets))
+        # An empty apply under allow_empty is normal (no tenants opted in) — log it plainly, not as
+        # the "N from registry" success line, so it does not read as a mistake.
+        if not targets:
+            self._log.info("fan-out targets refreshed (0 from registry — none opted in)")
+        else:
+            self._log.info("fan-out targets refreshed (%d from registry)", len(targets))
         return True
 
     def _on_failure(self, msg: str) -> bool:
