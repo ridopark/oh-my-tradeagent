@@ -280,7 +280,10 @@ export function OnboardForm({
   // never fights the strategy <select>; inert for a new/typed tenant.
   useEffect(() => {
     if (!useDropdowns) return;
-    if (selectedTenant) setMode(selectedTenant.mode);
+    // Default the Mode toggle: an existing tenant → its own live/paper mode; a NEW/typed tenant →
+    // paper (the safe default). Resetting for a new tenant matters — otherwise, after viewing a LIVE
+    // tenant, typing a brand-new id would silently inherit "live" and target real endpoints.
+    setMode(selectedTenant ? selectedTenant.mode : "paper");
     // Keep the strategy state in sync with what the <select> can actually offer for this tenant —
     // covers both switching to a tenant that already has the current strategy AND leaving a
     // fully-used tenant (strategy left "") for a new one (reset to the first catalog entry).
