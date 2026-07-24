@@ -23,6 +23,10 @@ export interface ExistingTenant {
   tenantId: string;
   strategies: string[];
   mode: "live" | "paper";
+  // Whether the tenant already has a verified broker account (a broker_credentials row). Distinct
+  // from merely existing: a tenant can have a strategy_config row but be mid-onboarding with NO keys
+  // yet — in that case the keys step MUST still show (this form is the only surface for it).
+  hasBrokerAccount: boolean;
 }
 
 type Action = (formData: FormData) => Promise<OnboardActionResult>;
@@ -41,7 +45,7 @@ function createMsg(
     return {
       tone: "ok",
       msg: addingToExisting
-        ? `Strategy added (version ${r.createdVersion ?? 1}). Enable it below.`
+        ? `Strategy added (version ${r.createdVersion ?? 1}). Complete the steps below to enable it.`
         : `Tenant created (version ${r.createdVersion ?? 1}). Now add its broker keys below.`,
     };
   }
@@ -284,6 +288,14 @@ export function OnboardForm({
   // collapses to: add the strategy row → enable it (→ activate if live). null selectedTenant (a typed
   // new tenant, or degraded free-text mode) keeps the full new-tenant onboarding flow.
   const addingToExisting = selectedTenant !== null;
+  // "Has verified broker keys" is the REAL signal for hiding the keys step + unlocking Enable — NOT
+  // merely "tenant exists". A tenant can have a strategy_config row but be mid-onboarding with no keys
+  // (hasBrokerAccount=false), and this form is the only surface to add them. A new/typed tenant also
+  // has no keys. So show the keys step whenever the tenant lacks a verified account.
+  const tenantHasKeys = selectedTenant?.hasBrokerAccount ?? false;
+  const showKeysStep = !tenantHasKeys;
+  // Enable/activate numbering shifts by whether the keys step is present (2 · Enable when collapsed).
+  const enableStepNo = showKeysStep ? 3 : 2;
 
   // Reconcile mode/strategy ONLY on a real transition ONTO a known existing tenant — never on an
   // intermediate keystroke or a typed NEW tenant. The tenant field is a free-text combo-box, so its
@@ -562,8 +574,9 @@ export function OnboardForm({
         <ConfigFieldReference />
       </section>
 
-      {/* Step 2 — Broker credentials (NEW tenant only; an existing tenant already has verified keys) */}
-      {!addingToExisting && (
+      {/* Step 2 — Broker credentials. Shown for a new tenant AND an existing tenant that has no
+          verified account yet (mid-onboarding); hidden only once keys are verified. */}
+      {showKeysStep && (
       <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
         <h2 className="mb-1 text-sm font-semibold text-slate-200">2 · Broker keys</h2>
         <p className="mb-3 text-xs text-slate-500">
@@ -686,12 +699,12 @@ export function OnboardForm({
       {/* Step 3 — Enable strategy */}
       <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
         <h2 className="mb-1 text-sm font-semibold text-slate-200">
-          {addingToExisting ? "2 · Enable strategy" : "3 · Enable strategy"}
+          {enableStepNo} · Enable strategy
         </h2>
         <p className="mb-3 text-xs text-slate-500">
           Arms the tenant (<code>enabled=true</code>) via the operator enable route, which itself
           re-checks that a verified broker account exists.
-          {addingToExisting
+          {tenantHasKeys
             ? " This tenant's broker account is already verified, so this is available now."
             : " Only unlocks once the keys above verify."}
         </p>
@@ -699,7 +712,7 @@ export function OnboardForm({
           <button
             type="submit"
             disabled={
-              !enableEnabled || enabling || idsMissing || (!addingToExisting && !accountVerified)
+              !enableEnabled || enabling || idsMissing || (!tenantHasKeys && !accountVerified)
             }
             className="rounded border border-emerald-500/60 bg-emerald-600/20 px-3 py-1.5 text-sm font-medium text-emerald-300 transition-colors hover:bg-emerald-600/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -708,7 +721,7 @@ export function OnboardForm({
           {!enableEnabled && (
             <p className="mt-2 text-xs text-slate-500">Strategy enable not enabled (read-only).</p>
           )}
-          {enableEnabled && !addingToExisting && !accountVerified && (
+          {enableEnabled && !tenantHasKeys && !accountVerified && (
             <p className="mt-2 text-xs text-slate-500">Verify broker keys first (step 2).</p>
           )}
         </form>
@@ -719,7 +732,7 @@ export function OnboardForm({
       {live && (
         <section className="rounded-lg border border-amber-600/40 bg-amber-950/20 p-4">
           <h2 className="mb-1 text-sm font-semibold text-amber-200">
-            {addingToExisting ? "2b" : "3b"} · Activate live{" "}
+            {enableStepNo}b · Activate live{" "}
             <span className="text-amber-400">(real money)</span>
           </h2>
           <p className="mb-3 text-xs text-amber-300/70">

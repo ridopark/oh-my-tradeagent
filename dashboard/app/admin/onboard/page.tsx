@@ -182,10 +182,11 @@ async function loadExistingTenants(): Promise<ExistingTenant[] | null> {
     const { items } = await getAdminTenants();
     const byTenant = new Map<string, ExistingTenant>();
     for (const it of items) {
-      const g = byTenant.get(it.tenant_id) ?? {
+      const g: ExistingTenant = byTenant.get(it.tenant_id) ?? {
         tenantId: it.tenant_id,
         strategies: [],
         mode: it.mode,
+        hasBrokerAccount: false,
       };
       if (!g.strategies.includes(it.strategy_id)) {
         g.strategies.push(it.strategy_id);
@@ -193,6 +194,12 @@ async function loadExistingTenants(): Promise<ExistingTenant[] | null> {
       // A tenant is "live" if ANY of its strategies is live (so a new strategy defaults to live too).
       if (it.mode === "live") {
         g.mode = "live";
+      }
+      // Has a verified broker account when account_masked carries a real last-4 suffix. The BFF masks
+      // a MISSING credential to bare bullets ("••••") and a present one to "••••XXXX", so any
+      // non-bullet char means a broker_credentials row exists for the tenant.
+      if (/[^•]/.test(it.account_masked ?? "")) {
+        g.hasBrokerAccount = true;
       }
       byTenant.set(it.tenant_id, g);
     }
