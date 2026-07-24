@@ -21,6 +21,10 @@ export interface AdminTenantItem {
   broker_target: string | null;
   account_masked: string;
   mode: "live" | "paper";
+  // The RUNTIME arm state (strategy_config.enabled). DISTINCT from activation_state: a strategy can
+  // be activated (live-promotion VALID) yet enabled=false, so it does NOT trade. Surfaced so the UI
+  // shows the real armed/disabled truth, not just the activation badge.
+  enabled: boolean;
   // For live: the gate's classification — VALID | STALE | DEACTIVATED | CONFIG_CHANGED | ABSENT.
   // For paper: "n/a" (paper never hits the live-promotion gate).
   activation_state: string;

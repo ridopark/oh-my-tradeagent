@@ -501,6 +501,18 @@ export default async function AdminTenantsPage({
                           >
                             <td className="py-2 pl-8 pr-3 text-slate-200">
                               {item.strategy_id}
+                              {/* The RUNTIME arm state — the truth of whether it trades. Shown next
+                                  to the name so a DISABLED strategy reads clearly even when its
+                                  activation badge (a separate, promotion-only state) says VALID. */}
+                              {item.enabled === false ? (
+                                <span className="ml-2 rounded border border-red-600/50 bg-red-950/40 px-1.5 py-0.5 text-xs text-red-300">
+                                  disabled
+                                </span>
+                              ) : (
+                                <span className="ml-2 rounded border border-emerald-600/50 bg-emerald-950/40 px-1.5 py-0.5 text-xs text-emerald-300">
+                                  enabled
+                                </span>
+                              )}
                             </td>
                             <td className="px-3 py-2 text-slate-200">
                               {item.broker_target ?? "—"}

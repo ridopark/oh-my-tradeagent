@@ -70,8 +70,10 @@ class AdminTenantsControllerWebMvcTest {
     when(strategyConfigReader.listAll())
         .thenReturn(
             List.of(
-                new TenantStrategyBrokerTarget("acme", "s-paper", "alpaca-paper"),
-                new TenantStrategyBrokerTarget("acme", "s-live", "alpaca-live")));
+                new TenantStrategyBrokerTarget("acme", "s-paper", "alpaca-paper", true),
+                // s-live is ACTIVATED (promotion VALID below) but DISABLED — the "looks live but
+                // isn't armed" case; enabled must surface false so the UI shows the truth.
+                new TenantStrategyBrokerTarget("acme", "s-live", "alpaca-live", false)));
     when(accountReader.accountId("acme", "alpaca-paper")).thenReturn("PA000PAPER1234");
     when(accountReader.accountId("acme", "alpaca-live")).thenReturn("847309116");
 
@@ -92,6 +94,7 @@ class AdminTenantsControllerWebMvcTest {
         .andExpect(jsonPath("$.items[0].strategy_id").value("s-paper"))
         .andExpect(jsonPath("$.items[0].broker_target").value("alpaca-paper"))
         .andExpect(jsonPath("$.items[0].mode").value("paper"))
+        .andExpect(jsonPath("$.items[0].enabled").value(true))
         .andExpect(jsonPath("$.items[0].account_masked").value("••••1234"))
         .andExpect(jsonPath("$.items[0].activation_state").value("n/a"))
         .andExpect(jsonPath("$.items[0].expires_at").doesNotExist())
@@ -99,6 +102,9 @@ class AdminTenantsControllerWebMvcTest {
         // live item
         .andExpect(jsonPath("$.items[1].strategy_id").value("s-live"))
         .andExpect(jsonPath("$.items[1].mode").value("live"))
+        // Activated (VALID) yet DISABLED — the truth the UI must not hide behind the activation
+        // badge.
+        .andExpect(jsonPath("$.items[1].enabled").value(false))
         .andExpect(jsonPath("$.items[1].account_masked").value("••••9116"))
         .andExpect(jsonPath("$.items[1].activation_state").value("VALID"))
         .andExpect(jsonPath("$.items[1].expires_at").value("2026-07-28T14:30:15Z"))
@@ -108,7 +114,7 @@ class AdminTenantsControllerWebMvcTest {
   @Test
   void liveStaleItemHasStateButNoExpiresAt() throws Exception {
     when(strategyConfigReader.listAll())
-        .thenReturn(List.of(new TenantStrategyBrokerTarget("acme", "s-live", "alpaca-live")));
+        .thenReturn(List.of(new TenantStrategyBrokerTarget("acme", "s-live", "alpaca-live", true)));
     when(accountReader.accountId("acme", "alpaca-live")).thenReturn("847309116");
     when(livePromotionStateReader.stateOf(
             ArgumentMatchers.anyString(),
@@ -131,8 +137,8 @@ class AdminTenantsControllerWebMvcTest {
     when(strategyConfigReader.listAll())
         .thenReturn(
             List.of(
-                new TenantStrategyBrokerTarget("acme", "s-short", "alpaca-paper"),
-                new TenantStrategyBrokerTarget("acme", "s-null", "alpaca-paper")));
+                new TenantStrategyBrokerTarget("acme", "s-short", "alpaca-paper", true),
+                new TenantStrategyBrokerTarget("acme", "s-null", "alpaca-paper", true)));
     when(accountReader.accountId("acme", "alpaca-paper")).thenReturn("12", null);
 
     mvc.perform(get("/api/admin/tenants").header("X-Operator-Id", "ridopark"))
@@ -144,7 +150,7 @@ class AdminTenantsControllerWebMvcTest {
   @Test
   void responseNeverContainsSecretColumnNamesOrFullAccount() throws Exception {
     when(strategyConfigReader.listAll())
-        .thenReturn(List.of(new TenantStrategyBrokerTarget("acme", "s-live", "alpaca-live")));
+        .thenReturn(List.of(new TenantStrategyBrokerTarget("acme", "s-live", "alpaca-live", true)));
     when(accountReader.accountId("acme", "alpaca-live")).thenReturn("847309116");
     when(livePromotionStateReader.stateOf(
             ArgumentMatchers.anyString(),
