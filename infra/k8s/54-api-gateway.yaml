@@ -120,6 +120,21 @@ spec:
               value: http://exec-alpaca-live:8080
             - name: EXEC_ALPACA_PAPER_BASE_URL
               value: http://exec-alpaca-paper:8080
+            # Fan-out registry (PLAN-2026-07-24). Codifies the homelab live cutover so it
+            # survives a manifest re-apply. The shared token bearer-gates the /internal/*
+            # fan-out routes (ServiceTokenFilter) — the same token the sidecar sends. Enabling
+            # a *_FANOUT_ENABLED flag brings up its controller + wires the auth filter; with
+            # both unset the app default stays dark (application.yml *:false), which is why
+            # the DEFAULT is safe and only THIS (homelab) deployment turns it on.
+            - name: API_GATEWAY_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: API_GATEWAY_SHARED_TOKEN
+            - name: COPYTRADE_FANOUT_ENABLED
+              value: "true"
+            - name: WATCHLIST_FANOUT_ENABLED
+              value: "true"
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness

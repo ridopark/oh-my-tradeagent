@@ -97,6 +97,33 @@ spec:
                   # trading-critical). WATCHLIST_MIRROR_ENABLED gates _required(),
                   # so the feature never runs with an empty URL.
                   optional: true
+            # DB-driven fan-out registry (PLAN-2026-07-24). Codifies the homelab live
+            # cutover — was set via `kubectl set env`, now durable so a manifest re-apply
+            # (or a cluster rebuild) keeps it. registry mode reads fan-out targets from the
+            # api-gateway registry endpoints instead of the *_ADDITIONAL_TARGETS env below;
+            # it REQUIRES the gateway creds (base URL + shared token), so the two are a
+            # coherent bundle. The api-gateway must have COPYTRADE_FANOUT_ENABLED /
+            # WATCHLIST_FANOUT_ENABLED (see 54-api-gateway.yaml) for the endpoints to be up.
+            - name: API_GATEWAY_BASE_URL
+              value: http://api-gateway:8082
+            - name: API_GATEWAY_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: API_GATEWAY_SHARED_TOKEN
+            - name: SIGNAL_FANOUT_SOURCE
+              value: registry
+            - name: WATCHLIST_FANOUT_SOURCE
+              value: registry
+            # Env-mode fallback seeds: used only before the first registry poll (~1s) or if
+            # the operator flips a *_FANOUT_SOURCE back to "env". The registry is authoritative
+            # in the config above. WATCHLIST_MIRROR_ADDITIONAL_TARGETS is slated for retirement
+            # (PLAN-2026-07-24, later cleanup) now that routing is DB-driven; prod_real here is
+            # already refused downstream (its watchlist row is disabled).
+            - name: SIGNAL_EMIT_ADDITIONAL_TARGETS
+              value: "staging_paper:copytrade-v1,staging_paper:watchlist-trigger-v1"
+            - name: WATCHLIST_MIRROR_ADDITIONAL_TARGETS
+              value: "staging_paper:watchlist-trigger-v1,prod_real:watchlist-trigger-v1"
           volumeMounts:
             - name: state
               mountPath: /app/state
