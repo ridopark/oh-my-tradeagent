@@ -25,6 +25,7 @@ from ohmytradeagent_contract.models.broker_credential_audit_request import (
 )
 from ohmytradeagent_contract.models.copytrade_signal_payload import (
     Action,
+    CloseIntent,
     CopytradeSignalPayload,
     Right,
 )
@@ -78,7 +79,9 @@ def test_copytrade_signal_payload_round_trips() -> None:
     assert model.ticker == "NVDA"
     assert model.right == Right.c
 
-    serialized = json.loads(model.model_dump_json(by_alias=True))
+    # close_intent/close_confidence are optional (absent in the BTO fixture) → drop None
+    # values before comparing to the fixture, mirroring the strategy_config round-trip.
+    serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
     assert serialized == original
 
 
@@ -348,6 +351,45 @@ def test_strategy_config_broker_account_id_round_trip() -> None:
     # Absent case (the existing copytrade-v1 fixture) must still validate cleanly.
     absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
     assert absent.broker_account_id is None
+
+
+def test_copytrade_signal_payload_close_intent_round_trip() -> None:
+    """PLAN-2026-07-25: optional close_intent/close_confidence parse, round-trip, absent → None."""
+    base = _load("copytrade-signal-payload-bto.json")
+    enriched = {**base, "action": "STC", "close_intent": "full", "close_confidence": 0.92}
+    model = CopytradeSignalPayload.model_validate(enriched)
+    assert model.close_intent == CloseIntent.full
+    assert model.close_confidence == 0.92
+    reloaded = CopytradeSignalPayload.model_validate_json(
+        model.model_dump_json(by_alias=True, exclude_none=True)
+    )
+    assert reloaded.close_intent == CloseIntent.full
+    assert reloaded.close_confidence == 0.92
+
+    # Absent case (the existing BTO fixture) validates cleanly and defaults to None.
+    absent = CopytradeSignalPayload.model_validate(base)
+    assert absent.close_intent is None
+    assert absent.close_confidence is None
+
+    # close_intent is a constrained enum; close_confidence is bounded [0, 1].
+    with pytest.raises(ValidationError):
+        CopytradeSignalPayload.model_validate({**base, "close_intent": "scale"})
+    with pytest.raises(ValidationError):
+        CopytradeSignalPayload.model_validate({**base, "close_confidence": 1.5})
+
+
+def test_strategy_config_stc_intent_enforce_round_trip() -> None:
+    """PLAN-2026-07-25: optional stc_intent_enforce parses, round-trips, absent → None (disabled)."""
+    model = StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, "stc_intent_enforce": True})
+    assert model.stc_intent_enforce is True
+    reloaded = StrategyConfig.model_validate_json(
+        model.model_dump_json(by_alias=True, exclude_none=True)
+    )
+    assert reloaded.stc_intent_enforce is True
+
+    # Absent → None (feature disabled, behavior-neutral).
+    absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
+    assert absent.stc_intent_enforce is None
 
 
 def test_strategy_config_force_close_bad_format_rejected() -> None:
