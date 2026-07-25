@@ -230,6 +230,10 @@ export default async function LivePage() {
             empty="No open positions."
             columns={holdingsColumns}
             rows={portfolio.open_positions}
+            // Key rows by the stable workflow_id: the Holdings cells hold the stateful
+            // ForceExitButton island, so an index key would bleed a closed row's terminal state
+            // onto the position that shifts into its index after a revalidate. See DataTable.rowKey.
+            rowKey={(row, i) => (row.workflow_id ? String(row.workflow_id) : i)}
           />
         </section>
 
