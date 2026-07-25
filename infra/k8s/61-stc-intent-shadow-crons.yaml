@@ -39,19 +39,23 @@ data:
       FROM audit_log
       WHERE kind='ExitRequested' AND subject->>'close_intent' IS NOT NULL
         AND occurred_at > now() - interval '6 minutes'
-    )
-    SELECT json_build_object('embeds', json_build_array(json_build_object(
-      'title', '🔎 STC classified (shadow): '||count(*),
-      'description', string_agg(
+    ),
+    -- Cap the rendered lines (a burst could otherwise blow Discord's 4096-char
+    -- description limit → 400 → dropped alert). The title carries the true count.
+    lines AS (
+      SELECT occurred_at,
         tenant_id||'  intent=**'||intent||'** conf='||conf||' kw='||kwf||
         CASE WHEN intent='full'    AND kwfn < 1.0  THEN '  🟢 would-promote'
              WHEN intent='partial' AND kwfn >= 1.0 THEN '  🟡 vs full-keyword'
              ELSE '' END||
-        E'\n> '||tail,
-        E'\n' ORDER BY occurred_at DESC),
+        E'\n> '||tail AS line
+      FROM e ORDER BY occurred_at DESC LIMIT 20
+    )
+    SELECT json_build_object('embeds', json_build_array(json_build_object(
+      'title', '🔎 STC classified (shadow): '||(SELECT count(*) FROM e),
+      'description', left((SELECT string_agg(line, E'\n' ORDER BY occurred_at DESC) FROM lines), 3900),
       'color', 3447003)))::text
-    FROM e
-    HAVING count(*) > 0;
+    WHERE EXISTS (SELECT 1 FROM e);
   # Daily 24h summary — always emits one row (a "0 classified" digest is useful signal
   # that the pipeline is alive). Appends a detail list of the notable (promote/disagree)
   # events when there are any.
@@ -67,21 +71,31 @@ data:
       WHERE kind='ExitRequested' AND subject->>'close_intent' IS NOT NULL
         AND occurred_at > now() - interval '24 hours'
     ),
-    detail AS (
-      SELECT string_agg(
-               to_char(occurred_at,'MM-DD HH24:MI')||' '||tenant_id||' '||intent||'('||conf||') kw='||kwf||' '||tail,
-               E'\n' ORDER BY occurred_at DESC)
-             FILTER (WHERE (intent='full' AND kwf < 1.0) OR (intent='partial' AND kwf >= 1.0)) AS lines
-      FROM s
+    notable AS (
+      SELECT * FROM s WHERE (intent='full' AND kwf < 1.0) OR (intent='partial' AND kwf >= 1.0)
+    ),
+    -- Cap the detail list to the 15 most recent notable events so the description
+    -- stays under Discord's 4096-char limit (a busy day would otherwise 400 the POST
+    -- → dropped digest, the worst case for this unmonitored backstop). "… +N more"
+    -- degrades gracefully; the summary counts are always complete.
+    top AS (
+      SELECT to_char(occurred_at,'MM-DD HH24:MI')||' '||tenant_id||' '||intent||'('||conf||') kw='||kwf||' '||tail AS line,
+             occurred_at
+      FROM notable ORDER BY occurred_at DESC LIMIT 15
     )
     SELECT json_build_object('embeds', json_build_array(json_build_object(
       'title', 'STC close-intent — daily shadow digest (24h)',
-      'description',
+      'description', left(
         'Classified: '||(SELECT count(*) FROM s)||
         E'\n🟢 would-promote (full, kw<1.0): '||(SELECT count(*) FROM s WHERE intent='full'    AND kwf < 1.0)||
         E'\n🟡 disagree (partial vs full-kw): '||(SELECT count(*) FROM s WHERE intent='partial' AND kwf >= 1.0)||
         E'\n✅ agree: '||(SELECT count(*) FROM s WHERE (intent='full' AND kwf >= 1.0) OR (intent='partial' AND kwf < 1.0))||
-        coalesce(E'\n\n```\n'||(SELECT lines FROM detail)||E'\n```',''),
+        coalesce(
+          E'\n\n```\n'||(SELECT string_agg(line, E'\n' ORDER BY occurred_at DESC) FROM top)||
+          CASE WHEN (SELECT count(*) FROM notable) > 15
+               THEN E'\n… +'||((SELECT count(*) FROM notable) - 15)||' more' ELSE '' END||
+          E'\n```', ''),
+        3900),
       'color', 3447003)))::text;
 ---
 apiVersion: batch/v1
