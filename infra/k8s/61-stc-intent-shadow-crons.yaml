@@ -1,0 +1,218 @@
+# STC close-intent SHADOW visibility → Discord (PLAN-2026-07-25-stc-intent-classifier).
+# Two read-only CronJobs that surface the classifier's shadow verdicts (which the
+# orchestrator writes into audit_log ExitRequested) to Discord:
+#   - stc-intent-alert  : near-real-time, every 5 min during market hours — one embed
+#                         per batch of newly-classified STCs (tail, intent/confidence,
+#                         keyword vs classifier, would-promote flag).
+#   - stc-intent-digest : daily 24h roll-up summary (the authoritative/backstop view).
+#
+# Read-only: uses the orchestrator_runtime role (SELECT on audit_log, same as the
+# audit-completeness cron). No trading capability. Posts to ALERT_DISCORD_WEBHOOK_URL.
+# The SQL lives in a ConfigMap as .sql files so there is zero shell-quoting of the
+# JSON-building queries (psql -f). Discord POST via the image's built-in busybox
+# wget (no package install → runs non-root + read-only rootfs). Not auto-applied by
+# deploy.yml (not a service) → `kubectl apply -f infra/k8s/61-stc-intent-shadow-crons.yaml`.
+#
+# UNMONITORED best-effort: nothing pages if these crons themselves fail (a "0
+# classified" digest is indistinguishable from a broken pipeline). Acceptable while
+# this is shadow-only; revisit before it gates any enforce decision. Scaling note:
+# the queries filter (kind, occurred_at) with no tenant predicate, so they seq-scan
+# audit_log — fine at current volume; add a partial index if the table grows large.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stc-intent-shadow-sql
+  namespace: copytrade
+data:
+  # Per-STC alert: emit the Discord payload ONLY when ≥1 STC was classified in the
+  # window (HAVING count>0 → empty output → the wrapper skips posting). 6-min lookback
+  # for a 5-min cron biases toward no-miss (a rare duplicate is harmless; the daily
+  # digest is the complete backstop).
+  alert.sql: |
+    WITH e AS (
+      SELECT occurred_at, tenant_id,
+             subject->>'close_intent'                        AS intent,
+             round((subject->>'close_confidence')::numeric,2) AS conf,
+             subject->>'keyword_fraction'                    AS kwf,
+             (subject->>'keyword_fraction')::numeric         AS kwfn,
+             left(regexp_replace(coalesce(subject->>'tail',''),'[\n|]',' ','g'),70) AS tail
+      FROM audit_log
+      WHERE kind='ExitRequested' AND subject->>'close_intent' IS NOT NULL
+        AND occurred_at > now() - interval '6 minutes'
+    ),
+    -- Cap the rendered lines (a burst could otherwise blow Discord's 4096-char
+    -- description limit → 400 → dropped alert). The title carries the true count.
+    lines AS (
+      SELECT occurred_at,
+        tenant_id||'  intent=**'||intent||'** conf='||conf||' kw='||kwf||
+        CASE WHEN intent='full'    AND kwfn < 1.0  THEN '  🟢 would-promote'
+             WHEN intent='partial' AND kwfn >= 1.0 THEN '  🟡 vs full-keyword'
+             ELSE '' END||
+        E'\n> '||tail AS line
+      FROM e ORDER BY occurred_at DESC LIMIT 20
+    )
+    SELECT json_build_object('embeds', json_build_array(json_build_object(
+      'title', '🔎 STC classified (shadow): '||(SELECT count(*) FROM e),
+      'description', left((SELECT string_agg(line, E'\n' ORDER BY occurred_at DESC) FROM lines), 3900),
+      'color', 3447003)))::text
+    WHERE EXISTS (SELECT 1 FROM e);
+  # Daily 24h summary — always emits one row (a "0 classified" digest is useful signal
+  # that the pipeline is alive). Appends a detail list of the notable (promote/disagree)
+  # events when there are any.
+  digest.sql: |
+    WITH s AS (
+      SELECT tenant_id,
+             subject->>'close_intent'                        AS intent,
+             round((subject->>'close_confidence')::numeric,2) AS conf,
+             (subject->>'keyword_fraction')::numeric         AS kwf,
+             left(regexp_replace(coalesce(subject->>'tail',''),'[\n|]',' ','g'),60) AS tail,
+             occurred_at
+      FROM audit_log
+      WHERE kind='ExitRequested' AND subject->>'close_intent' IS NOT NULL
+        AND occurred_at > now() - interval '24 hours'
+    ),
+    notable AS (
+      SELECT * FROM s WHERE (intent='full' AND kwf < 1.0) OR (intent='partial' AND kwf >= 1.0)
+    ),
+    -- Cap the detail list to the 15 most recent notable events so the description
+    -- stays under Discord's 4096-char limit (a busy day would otherwise 400 the POST
+    -- → dropped digest, the worst case for this unmonitored backstop). "… +N more"
+    -- degrades gracefully; the summary counts are always complete.
+    top AS (
+      SELECT to_char(occurred_at,'MM-DD HH24:MI')||' '||tenant_id||' '||intent||'('||conf||') kw='||kwf||' '||tail AS line,
+             occurred_at
+      FROM notable ORDER BY occurred_at DESC LIMIT 15
+    )
+    SELECT json_build_object('embeds', json_build_array(json_build_object(
+      'title', 'STC close-intent — daily shadow digest (24h)',
+      -- Cap the LIST content (left inside the fences) — never the whole description —
+      -- so a truncation can't clip the closing ``` and break the code block. The
+      -- summary is small+fixed, so total stays well under Discord's 4096 cap.
+      'description',
+        'Classified: '||(SELECT count(*) FROM s)||
+        E'\n🟢 would-promote (full, kw<1.0): '||(SELECT count(*) FROM s WHERE intent='full'    AND kwf < 1.0)||
+        E'\n🟡 disagree (partial vs full-kw): '||(SELECT count(*) FROM s WHERE intent='partial' AND kwf >= 1.0)||
+        E'\n✅ agree: '||(SELECT count(*) FROM s WHERE (intent='full' AND kwf >= 1.0) OR (intent='partial' AND kwf < 1.0))||
+        coalesce(
+          E'\n\n```\n'||left((SELECT string_agg(line, E'\n' ORDER BY occurred_at DESC) FROM top), 3600)||
+          CASE WHEN (SELECT count(*) FROM notable) > 15
+               THEN E'\n… +'||((SELECT count(*) FROM notable) - 15)||' more' ELSE '' END||
+          E'\n```', ''),
+      'color', 3447003)))::text;
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stc-intent-alert
+  namespace: copytrade
+  labels: {app: stc-intent-alert}
+spec:
+  # Every 5 min, ~market hours (13:00–22:59 UTC ≈ 09:00–18:59 ET), weekdays. Off-hours
+  # STCs still surface in the daily digest.
+  schedule: "*/5 13-22 * * 1-5"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      template:
+        metadata: {labels: {app: stc-intent-alert}}
+        spec:
+          restartPolicy: Never
+          securityContext: {runAsNonRoot: true, runAsUser: 65534}
+          volumes:
+            - name: sql
+              configMap: {name: stc-intent-shadow-sql}
+            - {name: tmp, emptyDir: {}}
+          containers:
+            - name: stc-intent-alert
+              image: postgres:16-alpine
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  PAYLOAD=$(psql -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" -tA -f /sql/alert.sql)
+                  if [ -z "$PAYLOAD" ]; then echo "no newly-classified STCs"; exit 0; fi
+                  wget -q -O /dev/null --header='Content-Type: application/json' --post-data="$PAYLOAD" "$WEBHOOK"
+                  echo "posted alert"
+              volumeMounts:
+                - {name: sql, mountPath: /sql, readOnly: true}
+                - {name: tmp, mountPath: /tmp}
+              env:
+                - {name: HOME, value: /tmp}
+                - {name: PGHOST, value: postgres}
+                - {name: PGDATABASE, value: orchestrator}
+                - name: PGUSER
+                  valueFrom: {secretKeyRef: {name: postgres-credentials, key: ORCHESTRATOR_RUNTIME_USER}}
+                - name: PGPASSWORD
+                  valueFrom: {secretKeyRef: {name: postgres-credentials, key: ORCHESTRATOR_RUNTIME_PASSWORD}}
+                - name: WEBHOOK
+                  valueFrom: {secretKeyRef: {name: discord-alert-credentials, key: ALERT_DISCORD_WEBHOOK_URL}}
+              resources:
+                requests: {cpu: 50m, memory: 64Mi}
+                limits: {cpu: 250m, memory: 128Mi}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stc-intent-digest
+  namespace: copytrade
+  labels: {app: stc-intent-digest}
+spec:
+  # 21:00 UTC daily (~17:00 ET), after US market close + EOD processing.
+  schedule: "0 21 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    spec:
+      # One retry: the digest runs once/day, so a transient Discord 429/5xx would
+      # otherwise silently lose the whole day's backstop. (The alert keeps 0 — it
+      # self-heals on the next 5-min tick.)
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      template:
+        metadata: {labels: {app: stc-intent-digest}}
+        spec:
+          restartPolicy: Never
+          securityContext: {runAsNonRoot: true, runAsUser: 65534}
+          volumes:
+            - name: sql
+              configMap: {name: stc-intent-shadow-sql}
+            - {name: tmp, emptyDir: {}}
+          containers:
+            - name: stc-intent-digest
+              image: postgres:16-alpine
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  PAYLOAD=$(psql -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" -tA -f /sql/digest.sql)
+                  wget -q -O /dev/null --header='Content-Type: application/json' --post-data="$PAYLOAD" "$WEBHOOK"
+                  echo "posted digest"
+              volumeMounts:
+                - {name: sql, mountPath: /sql, readOnly: true}
+                - {name: tmp, mountPath: /tmp}
+              env:
+                - {name: HOME, value: /tmp}
+                - {name: PGHOST, value: postgres}
+                - {name: PGDATABASE, value: orchestrator}
+                - name: PGUSER
+                  valueFrom: {secretKeyRef: {name: postgres-credentials, key: ORCHESTRATOR_RUNTIME_USER}}
+                - name: PGPASSWORD
+                  valueFrom: {secretKeyRef: {name: postgres-credentials, key: ORCHESTRATOR_RUNTIME_PASSWORD}}
+                - name: WEBHOOK
+                  valueFrom: {secretKeyRef: {name: discord-alert-credentials, key: ALERT_DISCORD_WEBHOOK_URL}}
+              resources:
+                requests: {cpu: 50m, memory: 64Mi}
+                limits: {cpu: 250m, memory: 128Mi}
