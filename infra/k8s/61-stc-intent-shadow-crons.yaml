@@ -85,17 +85,19 @@ data:
     )
     SELECT json_build_object('embeds', json_build_array(json_build_object(
       'title', 'STC close-intent — daily shadow digest (24h)',
-      'description', left(
+      -- Cap the LIST content (left inside the fences) — never the whole description —
+      -- so a truncation can't clip the closing ``` and break the code block. The
+      -- summary is small+fixed, so total stays well under Discord's 4096 cap.
+      'description',
         'Classified: '||(SELECT count(*) FROM s)||
         E'\n🟢 would-promote (full, kw<1.0): '||(SELECT count(*) FROM s WHERE intent='full'    AND kwf < 1.0)||
         E'\n🟡 disagree (partial vs full-kw): '||(SELECT count(*) FROM s WHERE intent='partial' AND kwf >= 1.0)||
         E'\n✅ agree: '||(SELECT count(*) FROM s WHERE (intent='full' AND kwf >= 1.0) OR (intent='partial' AND kwf < 1.0))||
         coalesce(
-          E'\n\n```\n'||(SELECT string_agg(line, E'\n' ORDER BY occurred_at DESC) FROM top)||
+          E'\n\n```\n'||left((SELECT string_agg(line, E'\n' ORDER BY occurred_at DESC) FROM top), 3600)||
           CASE WHEN (SELECT count(*) FROM notable) > 15
                THEN E'\n… +'||((SELECT count(*) FROM notable) - 15)||' more' ELSE '' END||
           E'\n```', ''),
-        3900),
       'color', 3447003)))::text;
 ---
 apiVersion: batch/v1
@@ -170,7 +172,10 @@ spec:
   failedJobsHistoryLimit: 7
   jobTemplate:
     spec:
-      backoffLimit: 0
+      # One retry: the digest runs once/day, so a transient Discord 429/5xx would
+      # otherwise silently lose the whole day's backstop. (The alert keeps 0 — it
+      # self-heals on the next 5-min tick.)
+      backoffLimit: 1
       activeDeadlineSeconds: 120
       template:
         metadata: {labels: {app: stc-intent-digest}}
