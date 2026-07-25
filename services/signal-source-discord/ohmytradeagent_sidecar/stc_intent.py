@@ -32,7 +32,9 @@ import httpx
 
 from ohmytradeagent_contract.models.copytrade_signal_payload import CloseIntent
 
-_VALID_INTENTS = {"full", "partial"}
+# Derive the accepted intents from the enum itself — no second source of truth to hand-sync if a
+# third variant is ever added to CloseIntent.
+_VALID_INTENTS = {member.value for member in CloseIntent}
 
 
 class StcIntentClassifier:
