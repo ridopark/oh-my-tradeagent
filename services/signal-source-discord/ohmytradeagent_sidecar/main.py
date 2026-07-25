@@ -153,22 +153,13 @@ async def _amain() -> None:
         gw_base_url = _required("API_GATEWAY_BASE_URL")
         gw_token = _required("API_GATEWAY_SHARED_TOKEN")
 
-    log.info(
-        "starting sidecar (tenant=%s strategy=%s additional_targets=%s target=%s task_queue=%s)",
-        tenant_id,
-        strategy_id,
-        additional_targets,
-        temporal_target,
-        task_queue,
-    )
-    emitter = await TemporalEmitter.connect(
-        target=temporal_target, namespace=temporal_namespace, task_queue=task_queue
-    )
-    # STC close-intent enrichment (Phase 2, dark by default). Built ONLY when enabled; the lazy
-    # import keeps disabled deployments from constructing the httpx client. Fail-fast on a missing
-    # URL (same discipline as the gateway config above). Passed into the Watcher; None => disabled,
-    # signals emit exactly as today. min_confidence defaults to 0.0 so shadow mode captures EVERY
-    # classification for evaluation — operators raise the floor when a later phase enforces per-tenant.
+    # STC close-intent enrichment (Phase 2, dark by default). Built BEFORE dialing Temporal so an
+    # enabled-but-unconfigured classifier (missing STC_INTENT_URL) fails fast WITHOUT leaving a
+    # connected emitter unclosed — same discipline as the storage_state + gateway-config checks
+    # above. Built ONLY when enabled; the lazy import keeps disabled deployments from constructing
+    # the httpx client. Passed into the Watcher; None => disabled, signals emit exactly as today.
+    # min_confidence defaults to 0.0 so shadow mode captures EVERY classification for evaluation —
+    # operators raise the floor when a later phase enforces per-tenant.
     stc_intent_enabled = (
         os.getenv("STC_INTENT_ENRICH_ENABLED", "false").strip().lower() == "true"
     )
@@ -183,6 +174,17 @@ async def _amain() -> None:
             log=log,
         )
 
+    log.info(
+        "starting sidecar (tenant=%s strategy=%s additional_targets=%s target=%s task_queue=%s)",
+        tenant_id,
+        strategy_id,
+        additional_targets,
+        temporal_target,
+        task_queue,
+    )
+    emitter = await TemporalEmitter.connect(
+        target=temporal_target, namespace=temporal_namespace, task_queue=task_queue
+    )
     watcher = Watcher(
         channel_url=channel_url,
         state_dir=state_dir,
