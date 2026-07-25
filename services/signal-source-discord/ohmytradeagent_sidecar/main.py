@@ -153,6 +153,27 @@ async def _amain() -> None:
         gw_base_url = _required("API_GATEWAY_BASE_URL")
         gw_token = _required("API_GATEWAY_SHARED_TOKEN")
 
+    # STC close-intent enrichment (Phase 2, dark by default). Built BEFORE dialing Temporal so an
+    # enabled-but-unconfigured classifier (missing STC_INTENT_URL) fails fast WITHOUT leaving a
+    # connected emitter unclosed — same discipline as the storage_state + gateway-config checks
+    # above. Built ONLY when enabled; the lazy import keeps disabled deployments from constructing
+    # the httpx client. Passed into the Watcher; None => disabled, signals emit exactly as today.
+    # min_confidence defaults to 0.0 so shadow mode captures EVERY classification for evaluation —
+    # operators raise the floor when a later phase enforces per-tenant.
+    stc_intent_enabled = (
+        os.getenv("STC_INTENT_ENRICH_ENABLED", "false").strip().lower() == "true"
+    )
+    intent_classifier = None
+    if stc_intent_enabled:
+        from .stc_intent import StcIntentClassifier
+
+        intent_classifier = StcIntentClassifier(
+            url=_required("STC_INTENT_URL"),
+            timeout_ms=float(os.getenv("STC_INTENT_TIMEOUT_MS", "300")),
+            min_confidence=float(os.getenv("STC_INTENT_MIN_CONFIDENCE", "0.0")),
+            log=log,
+        )
+
     log.info(
         "starting sidecar (tenant=%s strategy=%s additional_targets=%s target=%s task_queue=%s)",
         tenant_id,
@@ -173,6 +194,7 @@ async def _amain() -> None:
         additional_targets=signal_additional_targets,
         log=log,
         poll_interval_secs=poll_interval,
+        intent_classifier=intent_classifier,
     )
 
     # Phase B2 registry refresher — built only in registry mode, isolated in its
@@ -329,6 +351,8 @@ async def _amain() -> None:
                             pass
     finally:
         await emitter.close()
+        if intent_classifier is not None:
+            await intent_classifier.aclose()
 
 
 def main() -> None:
