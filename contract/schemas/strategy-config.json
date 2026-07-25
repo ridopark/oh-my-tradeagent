@@ -372,6 +372,10 @@
     "alert_webhook_url": {
       "type": "string",
       "description": "Per-strategy Discord alert webhook URL (order-execution/fill/broker-rejection alerts + daily digest). SAFE field class (plaintext, non-secret, operator-editable). Read by orchestrator TenantWebhookResolver via config->>'alert_webhook_url'; null/absent => falls back to the ALERT_DISCORD_WEBHOOK_URLS env map then the global default."
+    },
+    "stc_intent_enforce": {
+      "type": "boolean",
+      "description": "Opt-in gate for STC close-intent enforcement (PLAN-2026-07-25-stc-intent-classifier). When true, a later phase consults copytrade-signal-payload.close_intent to arbitrate full-vs-partial STC sizing, with the keyword matcher as fallback. Null/absent = disabled (behavior-neutral). Spec-only field in this PR; runtime wiring lands separately, gated per-tenant."
     }
   }
 }

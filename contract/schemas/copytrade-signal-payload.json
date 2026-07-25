@@ -92,6 +92,17 @@
       "type": "string",
       "description": "Raw trailing text after the parsed grammar (e.g., 'half out', 'partial'). Empty string if none."
     },
+    "close_intent": {
+      "type": "string",
+      "enum": ["full", "partial"],
+      "description": "Optional classifier hint for STC lines: whether the author intends a full exit or a partial. Null/absent = unclassified. Spec-only in Phase 1 (PLAN-2026-07-25-stc-intent-classifier); no consumer yet — the orchestrator STC-intent enforcement lands in a later phase, gated per-tenant."
+    },
+    "close_confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Optional confidence score in [0,1] for close_intent. Null/absent = no score. Bounded [0,1] (inclusive) so a legitimate 0.0 is representable. Spec-only in Phase 1; no consumer yet."
+    },
     "raw_line": {
       "type": "string",
       "minLength": 1,

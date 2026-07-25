@@ -9,7 +9,15 @@ from typing import Annotated
 from datetime import date
 from enum import StrEnum
 
-from pydantic import Field, AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    confloat,
+    conint,
+    constr,
+)
 
 
 class Action(StrEnum):
@@ -29,6 +37,15 @@ class Right(StrEnum):
 
     c = "C"
     p = "P"
+
+
+class CloseIntent(StrEnum):
+    """
+    Optional classifier hint for STC lines: whether the author intends a full exit or a partial. Null/absent = unclassified. Spec-only in Phase 1 (PLAN-2026-07-25-stc-intent-classifier); no consumer yet — the orchestrator STC-intent enforcement lands in a later phase, gated per-tenant.
+    """
+
+    full = "full"
+    partial = "partial"
 
 
 class CopytradeSignalPayload(BaseModel):
@@ -95,6 +112,14 @@ class CopytradeSignalPayload(BaseModel):
     tail: str | None = None
     """
     Raw trailing text after the parsed grammar (e.g., 'half out', 'partial'). Empty string if none.
+    """
+    close_intent: CloseIntent | None = None
+    """
+    Optional classifier hint for STC lines: whether the author intends a full exit or a partial. Null/absent = unclassified. Spec-only in Phase 1 (PLAN-2026-07-25-stc-intent-classifier); no consumer yet — the orchestrator STC-intent enforcement lands in a later phase, gated per-tenant.
+    """
+    close_confidence: confloat(ge=0.0, le=1.0) | None = None
+    """
+    Optional confidence score in [0,1] for close_intent. Null/absent = no score. Bounded [0,1] (inclusive) so a legitimate 0.0 is representable. Spec-only in Phase 1; no consumer yet.
     """
     raw_line: constr(min_length=1)
     """
