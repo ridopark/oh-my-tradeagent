@@ -242,3 +242,34 @@ jobs:
 
       - name: pytest
         run: uv run pytest -q
+
+  stc-intent-service:
+    name: Python stc-intent-service (classifier)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/stc-intent-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Install package (editable)
+        run: uv pip install -e .
+
+      - name: ruff
+        run: uv run ruff check .
+
+      # pytest downloads the ~90MB all-MiniLM-L6-v2 ONNX weights on first run (network
+      # available in CI) to exercise the real classifier — incl. the incident-tail assertion.
+      - name: pytest
+        run: uv run pytest -q
