@@ -993,7 +993,36 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             payload.getTail(),
             toDoubleMap(config.getPartialFractions()),
             defaultStcFraction(config));
-    double fraction = matchResult.fraction();
+    double keywordFraction = matchResult.fraction();
+
+    // PLAN-2026-07-25-stc-intent-classifier: the close-intent classifier arbitrates full-vs-partial
+    // ONLY behind the per-tenant stc_intent_enforce flag; the keyword matcher above stays the
+    // permanent fallback AND the partial sizer. Shadow-mode when enforce is off: close_intent is
+    // still recorded in the audit subject below, but effectiveFraction == keywordFraction.
+    //
+    // Replay safety — NO Workflow.getVersion gate (same precedent as the two audit enrichments at
+    // the ExitRequested subject below, PLAN-2026-07-01 / PLAN-2026-07-20): effectiveFraction feeds
+    // the SAME single stub.signal("partialExit", req) command with a different payload VALUE, and
+    // signal/activity-input payloads are NOT replay-checked on Temporal 1.27. Old histories carry
+    // no close_intent → intent == null → effectiveFraction == keywordFraction → byte-identical
+    // replay. The audit change is subject-only (activity input). No new command, no version gate.
+    // PROMOTE-ONLY classifier (quant + risk review 2026-07-25): the classifier may only PROMOTE a
+    // keyword-missed FULL close; it NEVER sizes an exit smaller than the keyword value. A keyword
+    // fraction of exactly 1.0 ALWAYS means an explicit full-close keyword matched (the default is
+    // never 1.0), so a PARTIAL classifier verdict must NOT demote it — that would silently override
+    // an explicit author "out"/"all out"/"dumped" on a possibly-wrong classifier verdict and
+    // reintroduce the money-losing under-close. #600's smallest-fraction-wins already resolves the
+    // "partial. taking profit" collision at the keyword layer, so PARTIAL simply defers to keyword.
+    // Net property: effectiveFraction >= keywordFraction always; the PARTIAL verdict is still
+    // recorded in the audit subject (close_intent) for shadow review even though it defers.
+    boolean enforce = Boolean.TRUE.equals(config.getStcIntentEnforce());
+    CopytradeSignalPayload.CloseIntent intent = payload.getCloseIntent();
+    // Promote a keyword-missed full exit to a full close (fixes the under-close incident) ONLY when
+    // enforce is on and the classifier says FULL; otherwise PARTIAL (defer to keyword — no
+    // demotion), no verdict, or shadow-mode all size it from the keyword fraction. intentApplied
+    // still drives intent_source in the audit subject below.
+    boolean intentApplied = enforce && intent == CopytradeSignalPayload.CloseIntent.FULL;
+    double effectiveFraction = intentApplied ? 1.0 : keywordFraction;
 
     PartialExitRequest req = new PartialExitRequest();
     req.setSchemaVersion(1L);
@@ -1001,7 +1030,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     req.setStrategyId(strategyId);
     req.setSignalId(payload.getSignalId());
     req.setPositionWorkflowId(positionId);
-    req.setFraction(BigDecimal.valueOf(fraction));
+    req.setFraction(BigDecimal.valueOf(effectiveFraction));
     req.setRefPremium(payload.getPrice());
     req.setReason("stc_signal");
     req.setAuthor(payload.getAuthor());
@@ -1014,24 +1043,55 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         payload,
         KIND_EXIT_REQUESTED,
         subject(
-            "signal_id", payload.getSignalId(),
-            "option_symbol", occ,
-            "position_workflow_id", positionId,
-            "fraction", fraction,
+            "signal_id",
+            payload.getSignalId(),
+            "option_symbol",
+            occ,
+            "position_workflow_id",
+            positionId,
+            // "fraction" = the exit fraction we DISPATCHED (legacy key; correct ExitRequested
+            // semantics). keyword_fraction = the keyword/default-resolved value (what a
+            // no-keyword-match tail fell back to). The classifier shadow fields below
+            // (close_intent/intent_source/intent_enforced) explain any divergence between them.
+            "fraction",
+            effectiveFraction,
+            // PLAN-2026-07-25-stc-intent-classifier: subject-only shadow enrichment (same
+            // replay-safety rationale — no new command, no version gate). close_intent/
+            // close_confidence are the classifier's verdict on EVERY STC; keyword_fraction is the
+            // matcher's value; intent_source is "classifier" only when the enforce override
+            // actually
+            // arbitrated the fraction, else "keyword"; intent_enforced is the per-tenant flag. This
+            // gives the shadow comparison (classifier vs keyword) for free on every STC.
+            "close_intent",
+            intent != null ? intent.value() : null,
+            "close_confidence",
+            payload.getCloseConfidence(),
+            "keyword_fraction",
+            keywordFraction,
+            "intent_source",
+            intentApplied ? "classifier" : "keyword",
+            "intent_enforced",
+            enforce,
             // PLAN-2026-07-01-unrecognized-stc-tail-alert: subject-only enrichment (no new command,
             // no version gate — activity-input payloads are ignored on Temporal 1.27 replay). The
             // out-of-workflow UnrecognizedStcTailAlerter reads these to page when a non-empty tail
             // matched no keyword. matched_keyword is null when the default fraction was applied.
-            "matched_keyword", matchResult.matchedKey().orElse(null),
-            "tail", payload.getTail(),
-            "author", payload.getAuthor(),
-            "raw_line", payload.getRawLine(),
+            "matched_keyword",
+            matchResult.matchedKey().orElse(null),
+            "tail",
+            payload.getTail(),
+            "author",
+            payload.getAuthor(),
+            "raw_line",
+            payload.getRawLine(),
             // PLAN-2026-07-20-stc-fraction-keyword-collision: subject-only enrichment (same
             // replay-safety rationale — no new command, no version gate). fraction_collision flags
             // a tail that matched ≥2 keywords with DIFFERENT fractions (auto-resolved to the
             // smallest); matched_keywords lists every phrase that fired so the alerter can page.
-            "fraction_collision", matchResult.fractionCollision(),
-            "matched_keywords", String.join(",", matchResult.matchedKeys())));
+            "fraction_collision",
+            matchResult.fractionCollision(),
+            "matched_keywords",
+            String.join(",", matchResult.matchedKeys())));
 
     ExternalWorkflowStub stub = Workflow.newUntypedExternalWorkflowStub(positionId);
     // Change point B (defense-in-depth): even past the running-guard the target can die between the

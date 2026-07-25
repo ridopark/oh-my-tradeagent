@@ -144,7 +144,7 @@ public class UnrecognizedStcTailAlerter {
     fields.add(new WebhookEmbed.Field("tail", tail, false));
     fields.add(new WebhookEmbed.Field("raw line", subjectStr(subject, "raw_line"), false));
     fields.add(
-        new WebhookEmbed.Field("applied default fraction", subjectStr(subject, "fraction"), false));
+        new WebhookEmbed.Field("applied default fraction", keywordFractionStr(subject), false));
     fields.add(
         new WebhookEmbed.Field(
             "hint",
@@ -163,7 +163,7 @@ public class UnrecognizedStcTailAlerter {
   private WebhookEmbed buildCollisionEmbed(AuditEvent event) {
     Map<String, Object> subject = event.getSubject();
     String symbolRaw = rawSubject(subject, "option_symbol");
-    String resolvedFraction = subjectStr(subject, "fraction");
+    String resolvedFraction = keywordFractionStr(subject);
 
     String title = ":warning: STC tail matched multiple fractions — auto-resolved conservatively";
 
@@ -195,6 +195,20 @@ public class UnrecognizedStcTailAlerter {
   /** True only when the raw subject value is the string {@code "true"} (case-insensitive). */
   private static boolean isTrue(String value) {
     return "true".equalsIgnoreCase(value);
+  }
+
+  /**
+   * The keyword/default-resolved fraction the tail fell back to, for operator display. Reads {@code
+   * keyword_fraction} (PLAN-2026-07-25) — the matcher's value, unaffected by a classifier promotion
+   * to a full close — and falls back to the legacy {@code fraction} key for pre-P3 {@code
+   * ExitRequested} events that predate {@code keyword_fraction} (for those, {@code fraction} equals
+   * the keyword value, so the fallback is correct).
+   */
+  private static String keywordFractionStr(Map<String, Object> subject) {
+    if (subject != null && subject.get("keyword_fraction") != null) {
+      return subjectStr(subject, "keyword_fraction");
+    }
+    return subjectStr(subject, "fraction");
   }
 
   private static String subjectStr(Map<String, Object> subject, String key) {

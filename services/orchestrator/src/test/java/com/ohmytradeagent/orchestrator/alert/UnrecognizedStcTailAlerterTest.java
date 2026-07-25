@@ -56,9 +56,34 @@ class UnrecognizedStcTailAlerterTest {
     assertThat(field(embed, "author")).isEqualTo("dram_trader");
     assertThat(field(embed, "tail")).isEqualTo("yolo it, gg");
     assertThat(field(embed, "raw line")).isEqualTo("STC DRAM 7/17 60p @ 1.90 yolo it, gg");
+    // No keyword_fraction key (pre-P3 event) → falls back to the legacy "fraction" value.
     assertThat(field(embed, "applied default fraction")).isEqualTo("0.3");
     assertThat(field(embed, "symbol")).contains("DRAM260717P00060000");
     assertThat(embed.fields()).allMatch(f -> !f.inline());
+  }
+
+  @Test
+  void appliedDefaultFractionReadsKeywordFraction_notClassifierPromotedFraction() {
+    // PLAN-2026-07-25: the classifier promoted a keyword-missed full close, so "fraction"
+    // (dispatched) == 1.0 while "keyword_fraction" (the default the tail fell back to) == 0.3. The
+    // alert must report the KEYWORD/default fraction, not the promoted 1.0.
+    WebhookClient webhook = mock(WebhookClient.class);
+    UnrecognizedStcTailAlerter alerter = new UnrecognizedStcTailAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("option_symbol", "DRAM260717P00060000");
+    subject.put("fraction", 1.0); // dispatched: promoted to full close
+    subject.put("keyword_fraction", 0.3); // the default the tail actually fell back to
+    subject.put("matched_keyword", null); // no keyword matched
+    subject.put("tail", "all out, done");
+    subject.put("author", "dram_trader");
+    subject.put("raw_line", "STC DRAM 7/17 60p @ 1.90 all out, done");
+    AuditEvent event = event("ExitRequested", "wf-stc-promoted", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(field(embed, "applied default fraction")).isEqualTo("0.3");
   }
 
   @Test
