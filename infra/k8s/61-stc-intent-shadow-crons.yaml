@@ -9,8 +9,15 @@
 # Read-only: uses the orchestrator_runtime role (SELECT on audit_log, same as the
 # audit-completeness cron). No trading capability. Posts to ALERT_DISCORD_WEBHOOK_URL.
 # The SQL lives in a ConfigMap as .sql files so there is zero shell-quoting of the
-# JSON-building queries (psql -f). Not auto-applied by deploy.yml (not a service) →
-# apply with `kubectl apply -f infra/k8s/61-stc-intent-shadow-crons.yaml`.
+# JSON-building queries (psql -f). Discord POST via the image's built-in busybox
+# wget (no package install → runs non-root + read-only rootfs). Not auto-applied by
+# deploy.yml (not a service) → `kubectl apply -f infra/k8s/61-stc-intent-shadow-crons.yaml`.
+#
+# UNMONITORED best-effort: nothing pages if these crons themselves fail (a "0
+# classified" digest is indistinguishable from a broken pipeline). Acceptable while
+# this is shadow-only; revisit before it gates any enforce decision. Scaling note:
+# the queries filter (kind, occurred_at) with no tenant predicate, so they seq-scan
+# audit_log — fine at current volume; add a partial index if the table grows large.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -98,24 +105,31 @@ spec:
         metadata: {labels: {app: stc-intent-alert}}
         spec:
           restartPolicy: Never
+          securityContext: {runAsNonRoot: true, runAsUser: 65534}
           volumes:
             - name: sql
               configMap: {name: stc-intent-shadow-sql}
+            - {name: tmp, emptyDir: {}}
           containers:
             - name: stc-intent-alert
               image: postgres:16-alpine
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
               command: ["/bin/sh", "-c"]
               args:
                 - |
                   set -eu
-                  command -v curl >/dev/null 2>&1 || apk add --no-cache curl >/dev/null 2>&1
-                  PAYLOAD=$(PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" -tA -f /sql/alert.sql)
+                  PAYLOAD=$(psql -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" -tA -f /sql/alert.sql)
                   if [ -z "$PAYLOAD" ]; then echo "no newly-classified STCs"; exit 0; fi
-                  curl -sS -H 'Content-Type: application/json' -d "$PAYLOAD" "$WEBHOOK" >/dev/null
+                  wget -q -O /dev/null --header='Content-Type: application/json' --post-data="$PAYLOAD" "$WEBHOOK"
                   echo "posted alert"
               volumeMounts:
                 - {name: sql, mountPath: /sql, readOnly: true}
+                - {name: tmp, mountPath: /tmp}
               env:
+                - {name: HOME, value: /tmp}
                 - {name: PGHOST, value: postgres}
                 - {name: PGDATABASE, value: orchestrator}
                 - name: PGUSER
@@ -148,23 +162,30 @@ spec:
         metadata: {labels: {app: stc-intent-digest}}
         spec:
           restartPolicy: Never
+          securityContext: {runAsNonRoot: true, runAsUser: 65534}
           volumes:
             - name: sql
               configMap: {name: stc-intent-shadow-sql}
+            - {name: tmp, emptyDir: {}}
           containers:
             - name: stc-intent-digest
               image: postgres:16-alpine
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
               command: ["/bin/sh", "-c"]
               args:
                 - |
                   set -eu
-                  command -v curl >/dev/null 2>&1 || apk add --no-cache curl >/dev/null 2>&1
-                  PAYLOAD=$(PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" -tA -f /sql/digest.sql)
-                  curl -sS -H 'Content-Type: application/json' -d "$PAYLOAD" "$WEBHOOK" >/dev/null
+                  PAYLOAD=$(psql -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" -tA -f /sql/digest.sql)
+                  wget -q -O /dev/null --header='Content-Type: application/json' --post-data="$PAYLOAD" "$WEBHOOK"
                   echo "posted digest"
               volumeMounts:
                 - {name: sql, mountPath: /sql, readOnly: true}
+                - {name: tmp, mountPath: /tmp}
               env:
+                - {name: HOME, value: /tmp}
                 - {name: PGHOST, value: postgres}
                 - {name: PGDATABASE, value: orchestrator}
                 - name: PGUSER
