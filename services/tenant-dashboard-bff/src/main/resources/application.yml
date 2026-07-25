@@ -159,6 +159,15 @@ account-killswitch:
   reset:
     write-enabled: ${ACCOUNT_KILLSWITCH_RESET_WRITE_ENABLED:false}
 
+# Tenant self-service per-position force-close (POST /api/positions/force-close), which drives the
+# existing PositionWorkflow.force_close Update (marketable SELL for the remaining qty / phantom
+# clear). REAL-MONEY capable, so it is dark by default: while off, the write surface 404s server-side
+# (the GET /api/positions read stays available). Flip to true (alongside the dashboard's
+# FORCE_EXIT_WRITE_ENABLED) to enable the force-close button.
+positions:
+  force-close:
+    write-enabled: ${POSITIONS_FORCE_CLOSE_WRITE_ENABLED:false}
+
 management:
   endpoints:
     web:
