@@ -81,7 +81,10 @@ public class PositionsController {
   public ResponseEntity<Map<String, Object>> forceClose(
       HttpServletRequest req, @RequestBody(required = false) ForceClosePayload body) {
     if (!forceCloseWriteEnabled) {
-      return ResponseEntity.status(HttpStatus.NOT_FOUND).build(); // dark-launch: write surface off
+      // dark-launch: write surface off. Return JSON like every other response (the Phase-2 client
+      // parses the body) so the disabled state is self-describing rather than a bodiless 404.
+      return ResponseEntity.status(HttpStatus.NOT_FOUND)
+          .body(Map.of("error", "force_close_disabled"));
     }
     String tenant = ctx.tenantId(req); // fail-closed 401 — the tenant is NEVER a client parameter
 
@@ -106,12 +109,7 @@ public class PositionsController {
     // positions ("t-acme2/..." does not start with "t-acme/"). Rejected BEFORE any Temporal call.
     String requiredPrefix = "t-" + tenant + "/";
     if (!workflowId.startsWith(requiredPrefix)) {
-      log.warn(
-          "force-close refused: cross_tenant_workflow_id tenant={} workflow_id={}",
-          tenant,
-          workflowId);
-      return ResponseEntity.status(HttpStatus.FORBIDDEN)
-          .body(Map.of("error", "cross_tenant_workflow_id"));
+      return refuseForbidden("cross_tenant_workflow_id", tenant, workflowId);
     }
 
     // Only PositionWorkflows are force-closable. The tenant-prefix guard above also accepts the
@@ -120,12 +118,7 @@ public class PositionsController {
     // "t-<tenant>/s-<strategy>/pos/<occ>/<entrySignalId>" (WorkflowIds.position), so additionally
     // require the "/pos/" segment. Rejected BEFORE any Temporal call.
     if (!workflowId.contains("/pos/")) {
-      log.warn(
-          "force-close refused: not_a_position_workflow_id tenant={} workflow_id={}",
-          tenant,
-          workflowId);
-      return ResponseEntity.status(HttpStatus.FORBIDDEN)
-          .body(Map.of("error", "not_a_position_workflow_id"));
+      return refuseForbidden("not_a_position_workflow_id", tenant, workflowId);
     }
 
     // The tenant path attributes the action to the tenant itself (same convention as the account
@@ -134,7 +127,7 @@ public class PositionsController {
     // verified session email) into the audit subject for per-human attribution on multi-user
     // tenants. NOTE: X-Operator-Id here is attribution-only (recorded in ForceCloseRequested),
     // authorization is the tenant-prefix guard + dark flag.
-    String actor = sanitizeActor(req.getHeader("X-Operator-Id"));
+    String actor = sanitizeActor(req.getHeader(TenantContext.HEADER_OPERATOR));
     String operatorId = actor.isEmpty() ? "tenant:" + tenant : "tenant:" + tenant + ":" + actor;
 
     ForceCloseRequest fr = new ForceCloseRequest();
@@ -153,6 +146,17 @@ public class PositionsController {
     respBody.put("status", result.getStatus());
     respBody.put("exit_signal_id", result.getExitSignalId());
     return ResponseEntity.status(status).body(respBody);
+  }
+
+  /**
+   * Refuse a force-close BEFORE any Temporal call: log the reason and return a 403 whose body names
+   * the guard that rejected it. Shared by the cross-tenant and not-a-position guards (identical
+   * shape, differing only by {@code code}).
+   */
+  private ResponseEntity<Map<String, Object>> refuseForbidden(
+      String code, String tenant, String workflowId) {
+    log.warn("force-close refused: {} tenant={} workflow_id={}", code, tenant, workflowId);
+    return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", code));
   }
 
   /**

@@ -14,7 +14,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -91,6 +93,28 @@ class PositionsForceCloseControllerWebMvcTest {
     assertThat(sent.getReason()).isEqualTo("operator manual exit");
     // The addressed workflow id is exactly the caller-supplied own-tenant id.
     org.mockito.Mockito.verify(client).newUntypedWorkflowStub(eq(ownWorkflowId));
+  }
+
+  @Test
+  void forceClose_alreadyTerminatedWorkflow_returns409NotFound() throws Exception {
+    // The headline race: the PositionWorkflow completed/terminated between the /live render and the
+    // click (self-heal, EOD flatten, or an already-cleared phantom). Temporal's stub.update then
+    // throws WorkflowNotFoundException. It must surface as a friendly 409
+    // "position_already_closed",
+    // NOT a 500 through the catch-all.
+    String ownWorkflowId =
+        WorkflowIds.position("acme", "copytrade-v1", "AAPL260727C00330000", "sig1");
+    WorkflowExecution exec = WorkflowExecution.newBuilder().setWorkflowId(ownWorkflowId).build();
+    when(stub.update(eq("force_close"), eq(ForceCloseResult.class), any()))
+        .thenThrow(new WorkflowNotFoundException(exec, "PositionWorkflow", null));
+
+    mvc.perform(
+            post("/api/positions/force-close")
+                .header("X-Tenant-Id", "acme")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"workflow_id\":\"" + ownWorkflowId + "\",\"reason\":\"manual exit\"}"))
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.error").value("position_already_closed"));
   }
 
   @Test

@@ -6,6 +6,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.ohmytradeagent.contract.identity.WorkflowIds;
@@ -53,7 +54,9 @@ class PositionsForceCloseDarkLaunchTest {
                     "{\"workflow_id\":\""
                         + ownWorkflowId
                         + "\",\"reason\":\"operator manual exit\"}"))
-        .andExpect(status().isNotFound());
+        .andExpect(status().isNotFound())
+        // The disabled state is self-describing JSON (the Phase-2 client parses the body).
+        .andExpect(jsonPath("$.error").value("force_close_disabled"));
 
     // Gated BEFORE any tenant resolution / workflow addressing.
     verify(client, never()).newUntypedWorkflowStub(anyString());
