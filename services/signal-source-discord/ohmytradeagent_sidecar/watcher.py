@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 
 from ohmytradeagent_contract.models.copytrade_signal_payload import (
     Action,
+    CloseIntent,
     CopytradeSignalPayload,
     Right,
 )
@@ -30,6 +31,7 @@ from playwright.async_api import Page
 
 from .discord_dom import MESSAGES_LI_SELECTOR, extract_recent
 from .emitter import Emitter
+from .stc_intent import StcIntentClassifier
 from .parser import ParsedSignal, parse_message
 
 
@@ -84,12 +86,18 @@ class Watcher:
         poll_interval_secs: float,
         additional_targets: list[tuple[str, str]] | None = None,
         lru_capacity: int = DEFAULT_LRU_CAPACITY,
+        intent_classifier: StcIntentClassifier | None = None,
     ) -> None:
         self._channel_url = channel_url
         self._state_dir = state_dir
         self._emitter = emitter
         self._tenant_id = tenant_id
         self._strategy_id = strategy_id
+        # STC close-intent enrichment (Phase 2, dark by default). None => disabled: signals are
+        # emitted exactly as before. When present, an STC tail is classified ONCE per signal (below,
+        # before the fan-out loop) and the result rides on every target's payload. The classifier is
+        # fail-safe: any failure yields None, i.e. an absent close_intent = today's behavior.
+        self._intent_classifier = intent_classifier
         # Fan-out targets: the primary (tenant_id, strategy_id) plus any additional ones, so ONE
         # browser/Discord session feeds several tenants watching the same channel (e.g. a live tenant
         # and a paper shadow). Each parsed signal is emitted once per target; the per-target workflow
@@ -180,6 +188,16 @@ class Watcher:
         sig: ParsedSignal,
     ) -> None:
         """Fan one parsed signal out to every configured (tenant, strategy) target."""
+        # Classify the STC close-intent ONCE per signal, before the fan-out loop — the same tail
+        # goes to every target, and _build_payload runs once per target, so classifying here (not in
+        # _build_payload) fires a single /classify call instead of one per target. Only STC lines are
+        # classified; the classifier is fail-safe (any failure -> None -> unchanged behavior).
+        close_intent: CloseIntent | None = None
+        close_confidence: float | None = None
+        if self._intent_classifier is not None and sig.action == "STC":
+            result = await self._intent_classifier.classify(sig.tail)
+            if result is not None:
+                close_intent, close_confidence = result
         # Snapshot the target list reference once, so a concurrent registry
         # refresh (which atomically REBINDS self._targets) can't tear this
         # fan-out's iteration mid-signal.
@@ -193,6 +211,8 @@ class Watcher:
                 sig=sig,
                 tenant_id=tenant_id,
                 strategy_id=strategy_id,
+                close_intent=close_intent,
+                close_confidence=close_confidence,
             )
             await self._emit_one(payload)
 
@@ -206,6 +226,8 @@ class Watcher:
         sig: ParsedSignal,
         tenant_id: str | None = None,
         strategy_id: str | None = None,
+        close_intent: CloseIntent | None = None,
+        close_confidence: float | None = None,
     ) -> CopytradeSignalPayload:
         posted_at = (
             datetime.fromisoformat(posted_at_iso)
@@ -228,6 +250,8 @@ class Watcher:
             price=sig.price,
             tail=sig.tail,
             raw_line=sig.raw_line,
+            close_intent=close_intent,
+            close_confidence=close_confidence,
         )
 
     async def _emit_one(self, payload: CopytradeSignalPayload) -> None:

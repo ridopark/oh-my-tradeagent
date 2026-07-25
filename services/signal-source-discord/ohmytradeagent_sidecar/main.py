@@ -164,6 +164,25 @@ async def _amain() -> None:
     emitter = await TemporalEmitter.connect(
         target=temporal_target, namespace=temporal_namespace, task_queue=task_queue
     )
+    # STC close-intent enrichment (Phase 2, dark by default). Built ONLY when enabled; the lazy
+    # import keeps disabled deployments from constructing the httpx client. Fail-fast on a missing
+    # URL (same discipline as the gateway config above). Passed into the Watcher; None => disabled,
+    # signals emit exactly as today. min_confidence defaults to 0.0 so shadow mode captures EVERY
+    # classification for evaluation — operators raise the floor when a later phase enforces per-tenant.
+    stc_intent_enabled = (
+        os.getenv("STC_INTENT_ENRICH_ENABLED", "false").strip().lower() == "true"
+    )
+    intent_classifier = None
+    if stc_intent_enabled:
+        from .stc_intent import StcIntentClassifier
+
+        intent_classifier = StcIntentClassifier(
+            url=_required("STC_INTENT_URL"),
+            timeout_ms=float(os.getenv("STC_INTENT_TIMEOUT_MS", "300")),
+            min_confidence=float(os.getenv("STC_INTENT_MIN_CONFIDENCE", "0.0")),
+            log=log,
+        )
+
     watcher = Watcher(
         channel_url=channel_url,
         state_dir=state_dir,
@@ -173,6 +192,7 @@ async def _amain() -> None:
         additional_targets=signal_additional_targets,
         log=log,
         poll_interval_secs=poll_interval,
+        intent_classifier=intent_classifier,
     )
 
     # Phase B2 registry refresher — built only in registry mode, isolated in its
@@ -329,6 +349,8 @@ async def _amain() -> None:
                             pass
     finally:
         await emitter.close()
+        if intent_classifier is not None:
+            await intent_classifier.aclose()
 
 
 def main() -> None:
