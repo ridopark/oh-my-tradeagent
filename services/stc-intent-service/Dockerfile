@@ -21,17 +21,18 @@ WORKDIR /app/services/stc-intent-service
 COPY services/stc-intent-service/pyproject.toml services/stc-intent-service/uv.lock ./
 RUN uv sync --frozen --no-dev
 
-# Application source.
-COPY services/stc-intent-service/ohmytradeagent_stc_intent ./ohmytradeagent_stc_intent
-
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# Warm the model cache: construct a Classifier so fastembed downloads + caches the
-# ONNX weights into FASTEMBED_CACHE_PATH. Make the cache world-readable so the
-# non-root user can mmap it at runtime.
+# Warm the model cache in its OWN layer, BEFORE the app-source COPY, so a source
+# edit doesn't bust it and re-download the ~90MB ONNX weights — this layer is keyed
+# only to the pinned deps. Download via fastembed directly (name matches
+# classifier.MODEL_NAME). World-readable so the non-root user can mmap it at runtime.
 RUN mkdir -p "$FASTEMBED_CACHE_PATH" \
-    && python -c "from ohmytradeagent_stc_intent.classifier import Classifier; Classifier()" \
+    && python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2')" \
     && chmod -R a+rX "$FASTEMBED_CACHE_PATH"
+
+# Application source last — layer ordering keeps deps + model cached across edits.
+COPY services/stc-intent-service/ohmytradeagent_stc_intent ./ohmytradeagent_stc_intent
 
 # Non-root runtime user.
 RUN useradd --create-home --uid 10001 appuser

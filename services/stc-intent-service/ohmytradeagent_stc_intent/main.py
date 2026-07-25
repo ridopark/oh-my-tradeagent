@@ -10,6 +10,7 @@ The model + centroids are built once at startup (lifespan) and reused per reques
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI
@@ -23,19 +24,15 @@ class ClassifyRequest(BaseModel):
 
 
 class ClassifyResponse(BaseModel):
-    intent: str
+    intent: Literal["full", "partial"]
     confidence: float
-
-
-# Populated once at startup; a single Classifier is shared across requests.
-_state: dict[str, Classifier] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _state["classifier"] = Classifier()
+    # One shared Classifier for the process; app.state is FastAPI's idiomatic slot.
+    app.state.classifier = Classifier()
     yield
-    _state.clear()
 
 
 app = FastAPI(title="stc-intent-service", lifespan=lifespan)
@@ -48,7 +45,7 @@ async def health() -> dict[str, str]:
 
 @app.post("/classify", response_model=ClassifyResponse)
 async def classify(req: ClassifyRequest) -> ClassifyResponse:
-    intent, confidence = _state["classifier"].classify(req.text)
+    intent, confidence = app.state.classifier.classify(req.text)
     return ClassifyResponse(intent=intent, confidence=confidence)
 
 

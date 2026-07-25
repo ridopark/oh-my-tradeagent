@@ -57,8 +57,10 @@ SEED_TAILS: dict[str, list[str]] = {
     ],
 }
 
-# Fixed intent order so softmax indices are stable and deterministic.
-_INTENTS: tuple[str, ...] = ("full", "partial")
+# Fixed intent order (softmax indices stable/deterministic) DERIVED from the seed
+# dict's keys — one source of truth, so adding a class to SEED_TAILS can't drift
+# from a separately-maintained tuple.
+_INTENTS: tuple[str, ...] = tuple(SEED_TAILS)
 
 
 def _l2_normalize(mat: np.ndarray) -> np.ndarray:
@@ -72,13 +74,12 @@ class Classifier:
     """Loads the fastembed model once and builds per-class centroids from the
     seed tails. ``classify`` is pure/deterministic given a fixed model."""
 
-    def __init__(self, seed_tails: dict[str, list[str]] | None = None) -> None:
-        seeds = seed_tails if seed_tails is not None else SEED_TAILS
+    def __init__(self) -> None:
         self._model = TextEmbedding(model_name=MODEL_NAME)
         # Build one centroid per intent, in the fixed _INTENTS order.
         centroids = []
         for intent in _INTENTS:
-            vecs = self._embed(seeds[intent])
+            vecs = self._embed(SEED_TAILS[intent])
             centroid = vecs.mean(axis=0, keepdims=True)
             centroids.append(centroid)
         # Stack to (n_intents, dim) and normalize so cosine == dot product.
