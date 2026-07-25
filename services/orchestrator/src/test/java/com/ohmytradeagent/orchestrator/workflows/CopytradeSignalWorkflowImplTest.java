@@ -1095,6 +1095,136 @@ class CopytradeSignalWorkflowImplTest {
         .findPositionWorkflowId("dev", "copytrade-v1", "NVDA  260516C00140000");
   }
 
+  // PLAN-2026-07-25-stc-intent-classifier Phase 3: the workflow shadow-audits the classifier's
+  // close_intent on EVERY STC and, ONLY when the tenant's stc_intent_enforce is true, lets it
+  // arbitrate full-vs-partial (keyword matcher stays fallback + partial-sizer).
+
+  // The 2026-07-24 incident tail: matched NO keyword → fell through to default_stc_fraction (0.3),
+  // under-closing a clear full-exit. Kept as a literal so the tests reproduce the exact miss.
+  private static final String INCIDENT_TAIL =
+      "bears can't finish taking the W. Don't want to see it go red again";
+
+  @Test
+  void stc_enforceOff_usesKeywordFraction_unchanged() {
+    // enforce absent (null) → keyword path unchanged (fraction == default 0.3) even though the
+    // classifier said "full"; the verdict is still shadow-recorded in the audit subject.
+    StrategyConfig cfg = intentConfig(new BigDecimal("0.3"), null); // enforce absent
+    AuditEvent exit = runStcWithIntent(cfg, INCIDENT_TAIL, CopytradeSignalPayload.CloseIntent.FULL);
+
+    assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(0.3);
+    assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(0.3);
+    assertThat(((Number) exit.getSubject().get("effective_fraction")).doubleValue()).isEqualTo(0.3);
+    assertThat(exit.getSubject()).containsEntry("close_intent", "full");
+    assertThat(exit.getSubject()).containsEntry("intent_source", "keyword");
+    assertThat(exit.getSubject()).containsEntry("intent_enforced", false);
+  }
+
+  @Test
+  void stc_enforceOn_fullIntent_promotesToFullClose() {
+    // INCIDENT REPRODUCTION: same tail, close_intent=full, enforce on → the classifier promotes the
+    // under-close (keyword 0.3) to a full exit (1.0).
+    StrategyConfig cfg = intentConfig(new BigDecimal("0.3"), Boolean.TRUE);
+    AuditEvent exit = runStcWithIntent(cfg, INCIDENT_TAIL, CopytradeSignalPayload.CloseIntent.FULL);
+
+    assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(1.0);
+    assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(0.3);
+    assertThat(((Number) exit.getSubject().get("effective_fraction")).doubleValue()).isEqualTo(1.0);
+    assertThat(exit.getSubject()).containsEntry("intent_source", "classifier");
+    assertThat(exit.getSubject()).containsEntry("intent_enforced", true);
+  }
+
+  @Test
+  void stc_intentAbsent_replaySafe_keywordPath() {
+    // Old-history shape: close_intent null (absent). Even with enforce on, effectiveFraction ==
+    // keywordFraction → byte-identical to today's behavior (replay-safe, no version gate needed).
+    StrategyConfig cfg = intentConfig(new BigDecimal("0.3"), Boolean.TRUE);
+    AuditEvent exit = runStcWithIntent(cfg, "half out", null); // keyword "half out" → 0.5
+
+    assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
+    assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(0.5);
+    assertThat(((Number) exit.getSubject().get("effective_fraction")).doubleValue()).isEqualTo(0.5);
+    assertThat(exit.getSubject()).containsEntry("intent_source", "keyword");
+    assertThat(exit.getSubject().get("close_intent")).isNull();
+  }
+
+  @Test
+  void stc_enforceOn_partialIntent_explicitFullKeyword_defersToKeyword() {
+    // PROMOTE-ONLY rule (quant + risk review 2026-07-25): a keyword_fraction of exactly 1.0 ALWAYS
+    // means an explicit full-close keyword matched (the default is never 1.0). Even with a PARTIAL
+    // classifier verdict + enforce on, the classifier must NOT demote it — it may only PROMOTE a
+    // keyword-missed full close, never size an exit smaller than the keyword value. Tail "out"
+    // matches ONLY the stcConfig "out" → 1.0 keyword (not "half"/"half out", neither of which is a
+    // substring of "out"), resolving to 1.0 with no collision. So the explicit full-close keyword
+    // wins (1.0) and the PARTIAL verdict is recorded (deferred), NOT enforced.
+    StrategyConfig cfg = intentConfig(new BigDecimal("0.3"), Boolean.TRUE);
+    AuditEvent exit = runStcWithIntent(cfg, "out", CopytradeSignalPayload.CloseIntent.PARTIAL);
+
+    assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(1.0);
+    assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(1.0);
+    assertThat(((Number) exit.getSubject().get("effective_fraction")).doubleValue()).isEqualTo(1.0);
+    // Verdict noted for shadow review, but deferred — keyword sizes it.
+    assertThat(exit.getSubject()).containsEntry("close_intent", "partial");
+    assertThat(exit.getSubject()).containsEntry("intent_source", "keyword");
+  }
+
+  @Test
+  void stc_enforceOn_partialIntent_keepsKeywordSizing() {
+    // "half out": keyword → 0.5, a legitimate partial. close_intent=partial + enforce on keeps the
+    // keyword-sized partial untouched (0.5 < 1.0, so no demotion).
+    StrategyConfig cfg = intentConfig(new BigDecimal("0.3"), Boolean.TRUE);
+    AuditEvent exit = runStcWithIntent(cfg, "half out", CopytradeSignalPayload.CloseIntent.PARTIAL);
+
+    assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
+    assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(0.5);
+    assertThat(((Number) exit.getSubject().get("effective_fraction")).doubleValue()).isEqualTo(0.5);
+  }
+
+  /** stcConfig()-shaped config with an explicit default_stc_fraction and stc_intent_enforce. */
+  private StrategyConfig intentConfig(BigDecimal defaultFraction, Boolean enforce) {
+    StrategyConfig c = stcConfig();
+    c.setDefaultStcFraction(defaultFraction);
+    c.setStcIntentEnforce(enforce);
+    return c;
+  }
+
+  /** Drives the STC dispatch path (real target PositionWorkflow) and returns the ExitRequested. */
+  private AuditEvent runStcWithIntent(
+      StrategyConfig cfg, String tail, CopytradeSignalPayload.CloseIntent intent) {
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+
+    String posWfId = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-intent";
+    PositionWorkflow posStub =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                PositionWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId(posWfId)
+                    .build());
+    io.temporal.client.WorkflowStub.fromTyped(posStub).start(positionInput());
+
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(posWfId);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setAction(CopytradeSignalPayload.Action.STC);
+    p.setTail(tail);
+    p.setSignalId("stc-intent");
+    p.setCloseIntent(intent);
+    runWorkflow(p);
+    return capture("ExitRequested");
+  }
+
   @Test
   void stcAction_trailOnPartialTrue_emitsChandelierArmRequested() {
     StrategyConfig cfg = stcConfig();
