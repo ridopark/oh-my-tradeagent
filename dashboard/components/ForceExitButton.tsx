@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // Client island for the per-position "Force exit" button on /live. Modeled on AccountKillSwitchReset
 // (useTransition + a server-action prop), but this is a per-ROW real-money control, so it uses an
@@ -15,7 +15,7 @@ import { useEffect, useRef, useState, useTransition } from "react";
 // (unreachable when the paired UI flag gates the button, handled for completeness); `error` is any
 // other failure.
 export type ForceExitActionResult =
-  | { ok: true; exitSignalId?: string }
+  | { ok: true }
   | { ok: false; kind: "already-closed" | "disabled" | "error" };
 
 // How long an armed confirm stays primed before auto-disarming (ms).
@@ -36,7 +36,11 @@ export function ForceExitButton({
   hasBrokerMark: boolean;
   action: (workflowId: string) => Promise<ForceExitActionResult>;
 }) {
-  const [pending, startTransition] = useTransition();
+  // Explicit in-flight lock. React 18.3.1's startTransition closes its scope at the first `await`,
+  // so `pending` would drop to false during the BFF→Temporal round trip and re-expose a clickable
+  // Force-exit button — an operator could arm+confirm a SECOND real-money at-market sell mid-flight.
+  // A plain state flag stays true for the whole async action.
+  const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState<ForceExitActionResult | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -63,10 +67,10 @@ export function ForceExitButton({
   const fire = () => {
     clearTimer();
     setConfirming(false);
-    startTransition(async () => {
-      const r = await action(workflowId);
-      setResult(r);
-    });
+    setSubmitting(true);
+    action(workflowId)
+      .then(setResult)
+      .finally(() => setSubmitting(false));
   };
 
   // Terminal result — a brief inline note in place of the button (the row itself disappears on the
@@ -102,7 +106,9 @@ export function ForceExitButton({
     );
   }
 
-  if (pending) {
+  // In-flight lock: shown while the real-money sell is running so no clickable Force-exit/Confirm
+  // button is ever reachable mid-flight. Placed before the confirming/idle branches.
+  if (submitting) {
     return (
       <span
         className="text-xs font-medium text-slate-300"

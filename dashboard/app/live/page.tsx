@@ -51,15 +51,17 @@ async function forceExitAction(
   if (!s?.tenantId) {
     return { ok: false, kind: "error" };
   }
-  const email = s.user?.email ?? undefined;
+  // Fall back to name when the session carries no email (dev / AUTH_DEV_TENANT path) so the BFF
+  // records something as the actor rather than an empty "tenant:<t>:".
+  const operator = s.user?.email ?? s.user?.name ?? undefined;
   const r = await forcePositionExit(
     workflowId,
     "operator force-exit via /live",
-    email,
+    operator,
   );
   if (r.ok) {
     revalidatePath("/live");
-    return { ok: true, exitSignalId: r.exitSignalId };
+    return { ok: true };
   }
   if (r.alreadyClosed) {
     revalidatePath("/live");

@@ -74,11 +74,13 @@ async function bffPost(
   }
   const res = await fetch(`${BFF_URL}${path}`, {
     method: "POST",
+    // extraHeaders is spread FIRST so the injected Authorization / X-Tenant-Id / Content-Type always
+    // win — a caller's attribution headers can never override the fail-closed tenant boundary.
     headers: {
+      ...extraHeaders,
       Authorization: `Bearer ${BFF_TOKEN}`,
       "X-Tenant-Id": tenantId,
       "Content-Type": "application/json",
-      ...extraHeaders,
     },
     body: JSON.stringify(body),
     cache: "no-store",
@@ -146,17 +148,14 @@ export async function resetAccountKillSwitch(): Promise<ResetAccountKillSwitchRe
 
 // Typed result of a per-position force-exit (POST /api/positions/force-close). Like the kill-switch
 // reset it never throws on the expected non-2xx — the /live button needs to SHOW the outcome:
-//   ok            — 202 ACCEPTED (exit placed) or 200 (benign no-op / phantom cleared); exitSignalId
-//                   carries the workflow's exit_signal_id when the update returned one.
+//   ok            — 202 ACCEPTED (exit placed) or 200 (benign no-op / phantom cleared).
 //   disabled      — 404 {"error":"force_close_disabled"}: the BFF dark flag is off (should be
 //                   unreachable when the paired UI flag gates the button, but handled defensively).
 //   alreadyClosed — 409 {"error":"position_already_closed"}: the workflow terminated between render
 //                   and click (self-heal / EOD flatten / already-cleared phantom).
-// Any other status (403 cross-tenant, 401, 400) falls through as ok:false with the raw status.
+// Any other status (403 cross-tenant, 401, 400) falls through as ok:false with no branch flag.
 export type ForcePositionExitResult = {
   ok: boolean;
-  status: number;
-  exitSignalId?: string;
   disabled?: boolean;
   alreadyClosed?: boolean;
 };
@@ -177,16 +176,15 @@ export async function forcePositionExit(
   );
   const err = (body as { error?: string } | null)?.error;
   if (status === 404 && err === "force_close_disabled") {
-    return { ok: false, status, disabled: true };
+    return { ok: false, disabled: true };
   }
   if (status === 409 && err === "position_already_closed") {
-    return { ok: false, status, alreadyClosed: true };
+    return { ok: false, alreadyClosed: true };
   }
   if (status === 200 || status === 202) {
-    const exitSignalId = (body as { exit_signal_id?: string } | null)?.exit_signal_id;
-    return { ok: true, status, exitSignalId: exitSignalId ?? undefined };
+    return { ok: true };
   }
-  return { ok: false, status };
+  return { ok: false };
 }
 
 export interface Position {
