@@ -101,7 +101,7 @@
       "type": "number",
       "minimum": 0,
       "maximum": 1,
-      "description": "Optional confidence score in [0,1] for close_intent. Null/absent = no score. Bounded [0,1] (inclusive) so a legitimate 0.0 is representable. Spec-only in Phase 1; no consumer yet."
+      "description": "Optional confidence score in [0,1] for close_intent. Null/absent = no score. Spec-only in Phase 1; no consumer yet."
     },
     "raw_line": {
       "type": "string",

@@ -119,7 +119,7 @@ class CopytradeSignalPayload(BaseModel):
     """
     close_confidence: confloat(ge=0.0, le=1.0) | None = None
     """
-    Optional confidence score in [0,1] for close_intent. Null/absent = no score. Bounded [0,1] (inclusive) so a legitimate 0.0 is representable. Spec-only in Phase 1; no consumer yet.
+    Optional confidence score in [0,1] for close_intent. Null/absent = no score. Spec-only in Phase 1; no consumer yet.
     """
     raw_line: constr(min_length=1)
     """
