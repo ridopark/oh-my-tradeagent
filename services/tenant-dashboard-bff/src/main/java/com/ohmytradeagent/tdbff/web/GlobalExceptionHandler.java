@@ -1,6 +1,7 @@
 package com.ohmytradeagent.tdbff.web;
 
 import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter.BrokerNotConfiguredException;
+import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowUpdateException;
 import java.time.format.DateTimeParseException;
 import java.util.Map;
@@ -57,6 +58,21 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     String detail = cause == null ? e.getMessage() : cause.getMessage();
     return ResponseEntity.status(HttpStatus.CONFLICT)
         .body(Map.of("error", "update_rejected", "detail", String.valueOf(detail)));
+  }
+
+  /**
+   * The addressed PositionWorkflow no longer exists — it completed/terminated between the /live
+   * render and the operator's "Force exit" click (self-heal, EOD flatten, or an already-cleared
+   * phantom — the exact stale-row case this feature targets). Temporal's {@code stub.update} throws
+   * {@link WorkflowNotFoundException} for this; without this handler it falls through to the
+   * catch-all → 500. Map it to a friendly 409 CONFLICT: the target is already in the closed state,
+   * the operator did nothing wrong. (The api-gateway's identical {@code force_close} update relies
+   * on the same bare {@code WorkflowNotFoundException}.)
+   */
+  @ExceptionHandler(WorkflowNotFoundException.class)
+  public ResponseEntity<Map<String, Object>> positionAlreadyClosed(WorkflowNotFoundException e) {
+    return ResponseEntity.status(HttpStatus.CONFLICT)
+        .body(Map.of("error", "position_already_closed"));
   }
 
   @ExceptionHandler(BrokerNotConfiguredException.class)
