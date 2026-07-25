@@ -96,7 +96,7 @@ env:
   # `oh-my-tradeagent-exec` image which the `exec-alpaca-paper` Deployment
   # pulls. Build-name ≠ Deployment-name is intentional — see
   # `infra/k8s/52-exec-alpaca-paper.yaml`.
-  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord tenant-dashboard-bff dashboard"
+  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord tenant-dashboard-bff dashboard stc-intent-service"
 
 jobs:
   preflight:
@@ -176,6 +176,7 @@ jobs:
               services/market-data/*)                   want[market-data]=1 ;;
               services/api-gateway/*)                   want[api-gateway]=1 ;;
               services/signal-source-discord/*)         want[signal-source-discord]=1 ;;
+              services/stc-intent-service/*)            want[stc-intent-service]=1 ;;
               services/tenant-dashboard-bff/*)          want[tenant-dashboard-bff]=1 ;;
               services/audit/*)                         : ;;   # no rolled Deployment
               dashboard/*)                              want[dashboard]=1 ;;
@@ -189,6 +190,7 @@ jobs:
               infra/k8s/53-market-data.yaml)            want[market-data]=1 ;;
               infra/k8s/54-api-gateway.yaml)            want[api-gateway]=1 ;;
               infra/k8s/55-signal-source-discord.yaml)  want[signal-source-discord]=1 ;;
+              infra/k8s/60-stc-intent-service.yaml)     want[stc-intent-service]=1 ;;
               infra/k8s/58-tenant-dashboard-bff.yaml)   want[tenant-dashboard-bff]=1 ;;
               infra/k8s/59-dashboard.yaml)              want[dashboard]=1 ;;
               *) : ;;   # docs, .github, tenants/, other infra/k8s -> no rollout

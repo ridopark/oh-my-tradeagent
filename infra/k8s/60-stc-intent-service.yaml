@@ -1,0 +1,78 @@
+# STC close-intent /classify service (PLAN-2026-07-25-stc-intent-classifier, P0).
+# A small torch-free ONNX encoder (fastembed / all-MiniLM-L6-v2) that the
+# signal-source-discord sidecar calls to classify an STC tail full-vs-partial.
+# Dark by default: nothing calls it until the sidecar's STC_INTENT_ENRICH_ENABLED
+# is set and STC_INTENT_URL points here. No secrets, no Temporal, no DB.
+#
+# Memory-conscious on purpose — the homelab node runs the real-money trading
+# services and is already ~87% on limits, so this pod carries a firm cap it
+# cannot exceed. The ONNX weights are baked into the image, so the root fs is
+# read-only and no volume is needed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: stc-intent-service
+  namespace: copytrade
+spec:
+  selector:
+    app: stc-intent-service
+  ports:
+    - port: 8000
+      targetPort: http
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stc-intent-service
+  namespace: copytrade
+  labels:
+    app: stc-intent-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stc-intent-service
+  template:
+    metadata:
+      labels:
+        app: stc-intent-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: stc-intent-service
+          image: ghcr.io/ridopark/oh-my-tradeagent-stc-intent-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            # ~400-500MB steady (onnxruntime + the mmapped 87MB model). Firm limit
+            # so a leak can never starve exec/orchestrator on the shared node.
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 25
+            periodSeconds: 20
+            timeoutSeconds: 3
