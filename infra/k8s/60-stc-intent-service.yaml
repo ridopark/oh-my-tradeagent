@@ -1,0 +1,105 @@
+# STC close-intent /classify service (PLAN-2026-07-25-stc-intent-classifier, P0).
+# A small torch-free ONNX encoder (fastembed / all-MiniLM-L6-v2) that the
+# signal-source-discord sidecar calls to classify an STC tail full-vs-partial.
+# Dark by default: nothing calls it until the sidecar's STC_INTENT_ENRICH_ENABLED
+# is set and STC_INTENT_URL points here. No secrets, no Temporal, no DB.
+#
+# Memory-conscious on purpose — the homelab node runs the real-money trading
+# services and is already ~87% on limits, so this pod carries a firm cap it
+# cannot exceed. The ONNX weights are baked into the image, so the root fs is
+# read-only and no volume is needed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: stc-intent-service
+  namespace: copytrade
+spec:
+  selector:
+    app: stc-intent-service
+  ports:
+    - port: 8000
+      targetPort: http
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stc-intent-service
+  namespace: copytrade
+  labels:
+    app: stc-intent-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stc-intent-service
+  template:
+    metadata:
+      labels:
+        app: stc-intent-service
+    spec:
+      # No k8s API access needed (no secrets/Temporal/DB) — don't mount the SA token.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      volumes:
+        # readOnlyRootFilesystem below → a writable /tmp for onnxruntime / tokenizers
+        # scratch (the baked model at /opt/fastembed_cache is read-only, mmap'd).
+        - name: tmp
+          emptyDir: {}
+      containers:
+        - name: stc-intent-service
+          image: ghcr.io/ridopark/oh-my-tradeagent-stc-intent-service:latest
+          imagePullPolicy: Always
+          env:
+            # Redirect all scratch/cache writes to the writable /tmp emptyDir, since
+            # the root fs is read-only. The model itself is already baked + read-only.
+            - name: TMPDIR
+              value: /tmp
+            - name: XDG_CACHE_HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/hf
+          ports:
+            - containerPort: 8000
+              name: http
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            # ~400-500MB steady (onnxruntime + the mmapped 87MB model). Firm limit
+            # so a leak can never starve exec/orchestrator on the shared node.
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Model load runs in the FastAPI lifespan on a CPU-only node after a cold
+          # pull of a ~600MB image — startupProbe gives slow-but-healthy boots up to
+          # 150s (30×5s) before liveness can act, decoupling slow-start from steady state.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 25
+            periodSeconds: 20
+            timeoutSeconds: 3

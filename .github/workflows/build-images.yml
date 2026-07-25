@@ -131,6 +131,12 @@ jobs:
             module: ""
             dockerfile: dashboard/Dockerfile
             cache_scope: dashboard
+          # STC close-intent /classify service — torch-free ONNX encoder (fastembed).
+          # Own cache scope (unrelated layer set, like the sidecar/dashboard rows).
+          - service: stc-intent-service
+            module: ""
+            dockerfile: services/stc-intent-service/Dockerfile
+            cache_scope: stc-intent-service
     steps:
       - uses: actions/checkout@v4
 
