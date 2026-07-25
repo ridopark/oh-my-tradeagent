@@ -1017,17 +1017,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // recorded in the audit subject (close_intent) for shadow review even though it defers.
     boolean enforce = Boolean.TRUE.equals(config.getStcIntentEnforce());
     CopytradeSignalPayload.CloseIntent intent = payload.getCloseIntent();
-    double effectiveFraction;
-    boolean intentApplied;
-    if (enforce && intent == CopytradeSignalPayload.CloseIntent.FULL) {
-      // Promote a keyword-missed full exit to a full close (fixes the under-close incident).
-      effectiveFraction = 1.0;
-      intentApplied = true;
-    } else {
-      // PARTIAL (defer to keyword — no demotion) OR no verdict OR shadow-mode: keyword sizes it.
-      effectiveFraction = keywordFraction;
-      intentApplied = false;
-    }
+    // Promote a keyword-missed full exit to a full close (fixes the under-close incident) ONLY when
+    // enforce is on and the classifier says FULL; otherwise PARTIAL (defer to keyword — no
+    // demotion), no verdict, or shadow-mode all size it from the keyword fraction. intentApplied
+    // still drives intent_source in the audit subject below.
+    boolean intentApplied = enforce && intent == CopytradeSignalPayload.CloseIntent.FULL;
+    double effectiveFraction = intentApplied ? 1.0 : keywordFraction;
 
     PartialExitRequest req = new PartialExitRequest();
     req.setSchemaVersion(1L);
@@ -1054,23 +1049,25 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             occ,
             "position_workflow_id",
             positionId,
+            // "fraction" = the exit fraction we DISPATCHED (legacy key; correct ExitRequested
+            // semantics). keyword_fraction = the keyword/default-resolved value (what a
+            // no-keyword-match tail fell back to). The classifier shadow fields below
+            // (close_intent/intent_source/intent_enforced) explain any divergence between them.
             "fraction",
             effectiveFraction,
             // PLAN-2026-07-25-stc-intent-classifier: subject-only shadow enrichment (same
             // replay-safety rationale — no new command, no version gate). close_intent/
             // close_confidence are the classifier's verdict on EVERY STC; keyword_fraction is the
-            // matcher's value; effective_fraction is what was dispatched; intent_source is
-            // "classifier" only when the enforce override actually arbitrated the fraction, else
-            // "keyword"; intent_enforced is the per-tenant flag. This gives the shadow comparison
-            // (classifier vs keyword) for free on every STC.
+            // matcher's value; intent_source is "classifier" only when the enforce override
+            // actually
+            // arbitrated the fraction, else "keyword"; intent_enforced is the per-tenant flag. This
+            // gives the shadow comparison (classifier vs keyword) for free on every STC.
             "close_intent",
             intent != null ? intent.value() : null,
             "close_confidence",
             payload.getCloseConfidence(),
             "keyword_fraction",
             keywordFraction,
-            "effective_fraction",
-            effectiveFraction,
             "intent_source",
             intentApplied ? "classifier" : "keyword",
             "intent_enforced",

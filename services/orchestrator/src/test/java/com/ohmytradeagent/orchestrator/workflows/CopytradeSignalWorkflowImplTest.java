@@ -1113,7 +1113,6 @@ class CopytradeSignalWorkflowImplTest {
 
     assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(0.3);
     assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(0.3);
-    assertThat(((Number) exit.getSubject().get("effective_fraction")).doubleValue()).isEqualTo(0.3);
     assertThat(exit.getSubject()).containsEntry("close_intent", "full");
     assertThat(exit.getSubject()).containsEntry("intent_source", "keyword");
     assertThat(exit.getSubject()).containsEntry("intent_enforced", false);
@@ -1128,7 +1127,6 @@ class CopytradeSignalWorkflowImplTest {
 
     assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(1.0);
     assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(0.3);
-    assertThat(((Number) exit.getSubject().get("effective_fraction")).doubleValue()).isEqualTo(1.0);
     assertThat(exit.getSubject()).containsEntry("intent_source", "classifier");
     assertThat(exit.getSubject()).containsEntry("intent_enforced", true);
   }
@@ -1142,7 +1140,6 @@ class CopytradeSignalWorkflowImplTest {
 
     assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
     assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(0.5);
-    assertThat(((Number) exit.getSubject().get("effective_fraction")).doubleValue()).isEqualTo(0.5);
     assertThat(exit.getSubject()).containsEntry("intent_source", "keyword");
     assertThat(exit.getSubject().get("close_intent")).isNull();
   }
@@ -1161,7 +1158,6 @@ class CopytradeSignalWorkflowImplTest {
 
     assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(1.0);
     assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(1.0);
-    assertThat(((Number) exit.getSubject().get("effective_fraction")).doubleValue()).isEqualTo(1.0);
     // Verdict noted for shadow review, but deferred — keyword sizes it.
     assertThat(exit.getSubject()).containsEntry("close_intent", "partial");
     assertThat(exit.getSubject()).containsEntry("intent_source", "keyword");
@@ -1176,7 +1172,6 @@ class CopytradeSignalWorkflowImplTest {
 
     assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
     assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(0.5);
-    assertThat(((Number) exit.getSubject().get("effective_fraction")).doubleValue()).isEqualTo(0.5);
   }
 
   /** stcConfig()-shaped config with an explicit default_stc_fraction and stc_intent_enforce. */
