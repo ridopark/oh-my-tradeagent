@@ -273,3 +273,28 @@ jobs:
       # available in CI) to exercise the real classifier — incl. the incident-tail assertion.
       - name: pytest
         run: uv run pytest -q
+
+  config-fields-manifest:
+    name: Config fields manifest drift
+    runs-on: ubuntu-latest
+    # The /config strategy editor derives its field universe + input types from
+    # dashboard/lib/strategyConfigFields.generated.ts, codegen'd from
+    # contract/schemas/strategy-config.json. A hand-edited (or stale-after-schema-edit)
+    # manifest silently drops or mis-types a config field in the editor, so re-run the
+    # generator here and fail if it drifts — the schema stays the single source of truth.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Regenerate + assert no drift
+        run: |
+          python3 scripts/gen-config-field-manifest.py
+          if ! git diff --quiet dashboard/lib/strategyConfigFields.generated.ts; then
+            echo "::error::strategyConfigFields.generated.ts is stale — run scripts/gen-config-field-manifest.py and commit."
+            git diff dashboard/lib/strategyConfigFields.generated.ts
+            exit 1
+          fi
