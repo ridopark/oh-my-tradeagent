@@ -7,7 +7,10 @@ import { StrategySwitch } from "@/components/StrategySwitch";
 import { getStrategyConfig, getTenantConfig } from "@/lib/bff";
 import { postStrategyConfig, postTenantConfig } from "@/lib/apiGateway";
 import type { StrategyConfigResponse, TenantConfig } from "@/lib/bff";
-import { CONFIG_FIELD_INFO } from "@/components/ConfigFieldReference";
+import {
+  CONFIG_FIELD_INFO,
+  type ConfigField,
+} from "@/components/ConfigFieldReference";
 import { fmtCurrency } from "@/components/Pnl";
 
 export const dynamic = "force-dynamic";
@@ -84,8 +87,9 @@ function isEditableField(klass: FieldClass, kind: ScalarKind | null): boolean {
 // the UI. A field qualifies when: it's a known addable field (its CONFIG_FIELD_INFO entry carries a
 // `kind` — complex array/object fields have none), it's absent from the stored config, it isn't the
 // dedicated on/off switch or a deprecated-hidden field, and its class is neither IDENTITY nor
-// DANGEROUS (those can't be UI-added). Sorted alphabetically. Computed the SAME way in the render and
-// in the save action so the two never drift (the save path re-derives it as defense-in-depth).
+// DANGEROUS (those can't be UI-added). Sorted alphabetically. This is the SINGLE authority for the
+// addable-missing set — the render and the save action both derive from it (the save path re-derives
+// from the fresh stored config), so a field's identity is always server-decided, never client-supplied.
 function missingFieldsFor(
   config: Record<string, unknown>,
   fieldClasses: StrategyConfigResponse["field_classes"],
@@ -93,12 +97,12 @@ function missingFieldsFor(
   return Object.keys(CONFIG_FIELD_INFO)
     .filter((field) => {
       const info = CONFIG_FIELD_INFO[field];
-      if (!info.kind) return false; // complex (array/object) field — not addable from the UI
       if (field in config) return false; // already present → rendered as a stored row
       if (field === ENABLED_FIELD) return false; // the dedicated Switch owns `enabled`
       if (DEPRECATED_HIDDEN_FIELDS.has(field)) return false;
-      const klass = classOf(field, fieldClasses);
-      return klass !== "IDENTITY" && klass !== "DANGEROUS";
+      // Same "scalar + not IDENTITY/DANGEROUS" rule the stored-field editor uses (a complex
+      // array/object field has no `kind` → not addable).
+      return isEditableField(classOf(field, fieldClasses), info.kind ?? null);
     })
     .sort((a, b) => a.localeCompare(b));
 }
@@ -121,6 +125,11 @@ const CLASS_BADGE: Record<
   },
 };
 
+// Shared editable-input styling (stored-field inputs, missing-field inputs, and the account-cap
+// input all use it) — one literal so they can't drift.
+const INPUT_CLASS =
+  "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
+
 // Renders one field's value cell. Editable scalars become inputs (boolean → select, number →
 // number input, string → text input); everything else is read-only (a scalar span, or pretty-
 // printed JSON for arrays/objects/null).
@@ -142,8 +151,7 @@ function FieldValue({
   options?: { value: string; label: string }[];
   control?: "time";
 }) {
-  const inputClass =
-    "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
+  const inputClass = INPUT_CLASS;
 
   if (editable && kind === "boolean") {
     return (
@@ -224,6 +232,7 @@ function FieldValue({
 // when there's no short leading value (e.g. prose examples) so we never stuff a paragraph into a
 // placeholder.
 function exampleHint(example: string): string {
+  if (!example.includes("—")) return ""; // prose example, no leading value → no hint
   const lead = example.split("—")[0].trim();
   return lead && lead.length <= 24 ? `e.g. ${lead}` : "";
 }
@@ -247,8 +256,7 @@ function MissingFieldInput({
   control?: "time";
   placeholder?: string;
 }) {
-  const inputClass =
-    "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
+  const inputClass = INPUT_CLASS;
 
   if (kind === "boolean") {
     return (
@@ -284,6 +292,27 @@ function MissingFieldInput({
       spellCheck={false}
       className={inputClass}
     />
+  );
+}
+
+// Grounded What/Effect/Example help for one field — rendered identically below a stored-field row and
+// a missing ("not set") row.
+function FieldHelp({ info }: { info: ConfigField }) {
+  return (
+    <dl className="space-y-0.5 text-xs text-slate-400">
+      <div>
+        <span className="font-medium text-slate-300">What: </span>
+        {info.what}
+      </div>
+      <div>
+        <span className="font-medium text-slate-300">Effect: </span>
+        {info.effect}
+      </div>
+      <div>
+        <span className="font-medium text-slate-300">Example: </span>
+        <span className="text-slate-500">{info.example}</span>
+      </div>
+    </dl>
   );
 }
 
@@ -339,8 +368,7 @@ function AccountCapSection({
     },
   ];
   const badge = CLASS_BADGE.EXPOSURE;
-  const inputClass =
-    "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
+  const inputClass = INPUT_CLASS;
 
   // The cap is a single loss rule expressed as EITHER a fraction (pct) OR an absolute USD threshold.
   // Show only the form(s) actually set; if none is set, show a single "not set" line (the pct form)
@@ -531,20 +559,15 @@ export default async function ConfigPage({
       nextConfig[ENABLED_FIELD] = String(enabledRaw) === "true";
     }
 
-    // INSERT any ABSENT fields the operator filled in. Recompute the missing set the SAME way as the
-    // render, but from the FRESH stored config (never trust the client). A blank input = "leave it
-    // absent" (skip). Otherwise coerce by the field's declared `kind` and add it to nextConfig. The
-    // per-field guards mirror the overlay loop above as defense-in-depth so a crafted POST can't slip
-    // an IDENTITY/DANGEROUS/deprecated/enabled field in through this path.
+    // INSERT any ABSENT fields the operator filled in. The field SET is re-derived server-side by
+    // missingFieldsFor (from the FRESH stored config), so field identity is never client-supplied —
+    // the only client input consumed here is the VALUE. No per-field re-guard is needed (unlike the
+    // overlay loop above, which iterates arbitrary stored keys): missingFieldsFor already excludes
+    // enabled / deprecated / IDENTITY / DANGEROUS / complex fields. A blank input = "leave it absent"
+    // (skip); otherwise coerce by the field's declared `kind` and add it to nextConfig.
     for (const field of missingFieldsFor(item.config, current.field_classes)) {
-      if (field === ENABLED_FIELD) continue;
-      if (DEPRECATED_HIDDEN_FIELDS.has(field)) continue;
-      const klass = classOf(field, current.field_classes);
-      if (klass === "IDENTITY" || klass === "DANGEROUS") continue;
       const info = CONFIG_FIELD_INFO[field];
-      if (!info.kind) continue;
       const raw = formData.get(inputName(strategyId, field));
-      // null (no such input) or blank = operator left it unset → don't add the field.
       if (raw === null || String(raw).trim() === "") continue;
       if (info.kind === "number") {
         const n = Number(raw);
@@ -783,30 +806,7 @@ export default async function ConfigPage({
                               </div>
                             </div>
 
-                            {info && (
-                              <dl className="space-y-0.5 text-xs text-slate-400">
-                                <div>
-                                  <span className="font-medium text-slate-300">
-                                    What:{" "}
-                                  </span>
-                                  {info.what}
-                                </div>
-                                <div>
-                                  <span className="font-medium text-slate-300">
-                                    Effect:{" "}
-                                  </span>
-                                  {info.effect}
-                                </div>
-                                <div>
-                                  <span className="font-medium text-slate-300">
-                                    Example:{" "}
-                                  </span>
-                                  <span className="text-slate-500">
-                                    {info.example}
-                                  </span>
-                                </div>
-                              </dl>
-                            )}
+                            {info && <FieldHelp info={info} />}
                           </li>
                         );
                       })}
@@ -855,28 +855,7 @@ export default async function ConfigPage({
                               </div>
                             </div>
 
-                            <dl className="space-y-0.5 text-xs text-slate-400">
-                              <div>
-                                <span className="font-medium text-slate-300">
-                                  What:{" "}
-                                </span>
-                                {info.what}
-                              </div>
-                              <div>
-                                <span className="font-medium text-slate-300">
-                                  Effect:{" "}
-                                </span>
-                                {info.effect}
-                              </div>
-                              <div>
-                                <span className="font-medium text-slate-300">
-                                  Example:{" "}
-                                </span>
-                                <span className="text-slate-500">
-                                  {info.example}
-                                </span>
-                              </div>
-                            </dl>
+                            <FieldHelp info={info} />
                           </li>
                         );
                       })}
