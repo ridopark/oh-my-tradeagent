@@ -7,10 +7,11 @@ import { StrategySwitch } from "@/components/StrategySwitch";
 import { getStrategyConfig, getTenantConfig } from "@/lib/bff";
 import { postStrategyConfig, postTenantConfig } from "@/lib/apiGateway";
 import type { StrategyConfigResponse, TenantConfig } from "@/lib/bff";
+import { CONFIG_FIELD_INFO } from "@/components/ConfigFieldReference";
 import {
-  CONFIG_FIELD_INFO,
-  type ConfigField,
-} from "@/components/ConfigFieldReference";
+  STRATEGY_CONFIG_FIELDS,
+  STRATEGY_CONFIG_FIELD_BY_NAME,
+} from "@/lib/strategyConfigFields.generated";
 import { fmtCurrency } from "@/components/Pnl";
 
 export const dynamic = "force-dynamic";
@@ -83,27 +84,31 @@ function isEditableField(klass: FieldClass, kind: ScalarKind | null): boolean {
   return kind !== null && klass !== "IDENTITY" && klass !== "DANGEROUS";
 }
 
-// The known scalar fields that a strategy's stored config is MISSING and the operator could ADD from
-// the UI. A field qualifies when: it's a known addable field (its CONFIG_FIELD_INFO entry carries a
-// `kind` — complex array/object fields have none), it's absent from the stored config, it isn't the
-// dedicated on/off switch or a deprecated-hidden field, and its class is neither IDENTITY nor
-// DANGEROUS (those can't be UI-added). Sorted alphabetically. This is the SINGLE authority for the
-// addable-missing set — the render and the save action both derive from it (the save path re-derives
-// from the fresh stored config), so a field's identity is always server-decided, never client-supplied.
+// The scalar fields that a strategy's stored config is MISSING and the operator could ADD from the
+// UI. The field UNIVERSE is the schema-derived generated manifest (STRATEGY_CONFIG_FIELDS), NOT a
+// hand-maintained list — a field added to contract/schemas/strategy-config.json auto-surfaces here
+// and a removed one auto-disappears. A field qualifies when: it's a scalar/addable schema field (its
+// generated entry carries a `kind` — complex array/object fields have none), it's absent from the
+// stored config, it isn't the dedicated on/off switch or a deprecated-hidden field, and its class is
+// neither IDENTITY nor DANGEROUS (those can't be UI-added). Sorted alphabetically. This is the SINGLE
+// authority for the addable-missing set — the render and the save action both derive from it (the
+// save path re-derives from the fresh stored config), so a field's identity is always server-decided,
+// never client-supplied.
 function missingFieldsFor(
   config: Record<string, unknown>,
   fieldClasses: StrategyConfigResponse["field_classes"],
 ): string[] {
-  return Object.keys(CONFIG_FIELD_INFO)
-    .filter((field) => {
-      const info = CONFIG_FIELD_INFO[field];
-      if (field in config) return false; // already present → rendered as a stored row
-      if (field === ENABLED_FIELD) return false; // the dedicated Switch owns `enabled`
-      if (DEPRECATED_HIDDEN_FIELDS.has(field)) return false;
-      // Same "scalar + not IDENTITY/DANGEROUS" rule the stored-field editor uses (a complex
-      // array/object field has no `kind` → not addable).
-      return isEditableField(classOf(field, fieldClasses), info.kind ?? null);
-    })
+  return STRATEGY_CONFIG_FIELDS.filter((gen) => {
+    const field = gen.field;
+    if (!gen.kind) return false; // non-scalar (array/object) schema field → not addable
+    if (field in config) return false; // already present → rendered as a stored row
+    if (field === ENABLED_FIELD) return false; // the dedicated Switch owns `enabled`
+    if (DEPRECATED_HIDDEN_FIELDS.has(field)) return false;
+    // Same "scalar + not IDENTITY/DANGEROUS" rule the stored-field editor uses; class still comes
+    // from the BFF field_classes (a complex array/object field was already excluded by !gen.kind).
+    return isEditableField(classOf(field, fieldClasses), gen.kind ?? null);
+  })
+    .map((gen) => gen.field)
     .sort((a, b) => a.localeCompare(b));
 }
 
@@ -295,25 +300,45 @@ function MissingFieldInput({
   );
 }
 
-// Grounded What/Effect/Example help for one field — rendered identically below a stored-field row and
-// a missing ("not set") row.
-function FieldHelp({ info }: { info: ConfigField }) {
-  return (
-    <dl className="space-y-0.5 text-xs text-slate-400">
-      <div>
-        <span className="font-medium text-slate-300">What: </span>
-        {info.what}
-      </div>
-      <div>
-        <span className="font-medium text-slate-300">Effect: </span>
-        {info.effect}
-      </div>
-      <div>
-        <span className="font-medium text-slate-300">Example: </span>
-        <span className="text-slate-500">{info.example}</span>
-      </div>
-    </dl>
-  );
+// Help for one field — rendered identically below a stored-field row and a missing ("not set") row.
+// Unified fallback keyed by field NAME so an un-catalogued schema field still shows help:
+//   1. rich hand-authored What/Effect/Example from CONFIG_FIELD_INFO when the field is catalogued;
+//   2. else a single "What:" line from the generated manifest's schema `description`;
+//   3. else nothing (returns null).
+function FieldHelp({ field }: { field: string }) {
+  const info = CONFIG_FIELD_INFO[field];
+  if (info) {
+    return (
+      <dl className="space-y-0.5 text-xs text-slate-400">
+        <div>
+          <span className="font-medium text-slate-300">What: </span>
+          {info.what}
+        </div>
+        <div>
+          <span className="font-medium text-slate-300">Effect: </span>
+          {info.effect}
+        </div>
+        <div>
+          <span className="font-medium text-slate-300">Example: </span>
+          <span className="text-slate-500">{info.example}</span>
+        </div>
+      </dl>
+    );
+  }
+  // No rich catalog entry: fall back to the schema description (one line) so a newly-added schema
+  // field is self-documenting in the editor until someone authors a richer CONFIG_FIELD_INFO entry.
+  const description = STRATEGY_CONFIG_FIELD_BY_NAME[field]?.description;
+  if (description) {
+    return (
+      <dl className="space-y-0.5 text-xs text-slate-400">
+        <div>
+          <span className="font-medium text-slate-300">What: </span>
+          {description}
+        </div>
+      </dl>
+    );
+  }
+  return null;
 }
 
 // Account-level daily-loss cap (tenant-wide, realized + open P&L) — distinct from the per-strategy
@@ -566,16 +591,18 @@ export default async function ConfigPage({
     // enabled / deprecated / IDENTITY / DANGEROUS / complex fields. A blank input = "leave it absent"
     // (skip); otherwise coerce by the field's declared `kind` and add it to nextConfig.
     for (const field of missingFieldsFor(item.config, current.field_classes)) {
-      const info = CONFIG_FIELD_INFO[field];
+      // Coerce by the GENERATED (schema-derived) entry's kind — the same universe missingFieldsFor
+      // drew this field from — so the insert type always tracks the schema, not a hand list.
+      const gen = STRATEGY_CONFIG_FIELD_BY_NAME[field];
       const raw = formData.get(inputName(strategyId, field));
       if (raw === null || String(raw).trim() === "") continue;
-      if (info.kind === "number") {
+      if (gen.kind === "number") {
         const n = Number(raw);
         if (!Number.isFinite(n)) {
           redirect("/config?error=400");
         }
         nextConfig[field] = n;
-      } else if (info.kind === "boolean") {
+      } else if (gen.kind === "boolean") {
         nextConfig[field] = String(raw) === "true";
       } else {
         nextConfig[field] = String(raw);
@@ -806,7 +833,9 @@ export default async function ConfigPage({
                               </div>
                             </div>
 
-                            {info && <FieldHelp info={info} />}
+                            {/* Unified help: rich catalog entry if present, else the schema
+                                description for an un-catalogued field, else nothing. */}
+                            <FieldHelp field={field} />
                           </li>
                         );
                       })}
@@ -815,10 +844,14 @@ export default async function ConfigPage({
                           write is enabled each carries an EMPTY input (blank ⇒ stays absent on save);
                           otherwise a read-only "not set". Same What/Effect/Example help as stored rows. */}
                       {missingFields.map((field) => {
-                        const info = CONFIG_FIELD_INFO[field];
-                        const kind = info.kind;
-                        // Unreachable — missingFieldsFor only returns fields whose info has a `kind`.
+                        // Input type (kind/options/control) comes from the schema-derived generated
+                        // manifest — the same universe missingFieldsFor drew this field from.
+                        const gen = STRATEGY_CONFIG_FIELD_BY_NAME[field];
+                        const kind = gen.kind;
+                        // Unreachable — missingFieldsFor only returns fields whose generated entry has a `kind`.
                         if (!kind) return null;
+                        // Optional rich catalog entry — used only to derive a placeholder hint here.
+                        const info = CONFIG_FIELD_INFO[field];
                         const name = inputName(item.strategy_id, field);
                         // Carry the field's class badge onto the "not set" row too (only EXPOSURE
                         // survives — IDENTITY/DANGEROUS are excluded from the addable set) so its
@@ -858,9 +891,11 @@ export default async function ConfigPage({
                                   <MissingFieldInput
                                     name={name}
                                     kind={kind}
-                                    options={info.options}
-                                    control={info.control}
-                                    placeholder={exampleHint(info.example)}
+                                    options={gen.options}
+                                    control={gen.control}
+                                    placeholder={
+                                      info ? exampleHint(info.example) : undefined
+                                    }
                                   />
                                 ) : (
                                   <span className="block text-red-300 sm:text-right">
@@ -870,7 +905,9 @@ export default async function ConfigPage({
                               </div>
                             </div>
 
-                            <FieldHelp info={info} />
+                            {/* Unified help: rich catalog entry if present, else the schema
+                                description for an un-catalogued field. */}
+                            <FieldHelp field={field} />
                           </li>
                         );
                       })}
