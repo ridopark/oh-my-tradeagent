@@ -778,7 +778,9 @@ export default async function ConfigPage({
                         Fields marked{" "}
                         <span className="text-red-300">not set</span> are absent
                         from the stored config. Enter a value and Save to add one;
-                        leave it blank to keep it absent.
+                        leave it blank to keep it absent. These are every field in
+                        the strategy schema — a newly-added one may not affect
+                        trading until its backend support ships.
                       </p>
                     )}
 
