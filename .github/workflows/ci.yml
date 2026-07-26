@@ -217,6 +217,21 @@ jobs:
       - name: pytest
         run: uv run pytest -q
 
+  config-catalog-parity:
+    name: Config catalog parity (schema ↔ dashboard)
+    runs-on: ubuntu-latest
+    # Fails when a scalar strategy-config schema field has no CONFIG_FIELD_INFO entry (with a `kind`)
+    # and isn't on the script's exclusion/pending allowlist — so a new config field can't silently
+    # skip the /config "not set" surfacing. Stdlib-only; no deps.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Schema ↔ CONFIG_FIELD_INFO parity
+        run: python3 scripts/check-config-catalog-parity.py
+
   sidecar:
     name: Python sidecar (parser + emitter + watcher)
     runs-on: ubuntu-latest
