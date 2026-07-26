@@ -25,6 +25,9 @@ class PositionsControllerWebMvcTest {
 
   @Autowired private MockMvc mvc;
   @MockitoBean private PositionsReader reader;
+  // Added when the controller grew the force-close write path (needs a WorkflowClient); the GET
+  // tests below never touch it, but the bean must exist for the context to load.
+  @MockitoBean private io.temporal.client.WorkflowClient client;
 
   @Test
   void missingTenantHeaderIs401() throws Exception {
