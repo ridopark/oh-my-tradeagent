@@ -62,6 +62,10 @@ export interface Envelope<T> {
 async function bffPost(
   path: string,
   body: unknown,
+  // Optional attribution-only headers threaded onto the request (e.g. X-Operator-Id carrying the
+  // verified session email for per-human audit). NEVER an auth boundary — the BFF authorizes on the
+  // injected X-Tenant-Id + its own dark flags; these are recorded, not trusted for access.
+  extraHeaders?: Record<string, string>,
 ): Promise<{ status: number; body: unknown }> {
   const session = await auth();
   const tenantId = session?.tenantId;
@@ -70,7 +74,10 @@ async function bffPost(
   }
   const res = await fetch(`${BFF_URL}${path}`, {
     method: "POST",
+    // extraHeaders is spread FIRST so the injected Authorization / X-Tenant-Id / Content-Type always
+    // win — a caller's attribution headers can never override the fail-closed tenant boundary.
     headers: {
+      ...extraHeaders,
       Authorization: `Bearer ${BFF_TOKEN}`,
       "X-Tenant-Id": tenantId,
       "Content-Type": "application/json",
@@ -137,6 +144,47 @@ export async function resetAccountKillSwitch(): Promise<ResetAccountKillSwitchRe
     return { ok: false, error: "unauthorized" };
   }
   return { ok: false, error: "unknown", status };
+}
+
+// Typed result of a per-position force-exit (POST /api/positions/force-close). Like the kill-switch
+// reset it never throws on the expected non-2xx — the /live button needs to SHOW the outcome:
+//   ok            — 202 ACCEPTED (exit placed) or 200 (benign no-op / phantom cleared).
+//   disabled      — 404 {"error":"force_close_disabled"}: the BFF dark flag is off (should be
+//                   unreachable when the paired UI flag gates the button, but handled defensively).
+//   alreadyClosed — 409 {"error":"position_already_closed"}: the workflow terminated between render
+//                   and click (self-heal / EOD flatten / already-cleared phantom).
+// Any other status (403 cross-tenant, 401, 400) falls through as ok:false with no branch flag.
+export type ForcePositionExitResult = {
+  ok: boolean;
+  disabled?: boolean;
+  alreadyClosed?: boolean;
+};
+
+// Drive the EXISTING PositionWorkflow.force_close Update via the dark-gated BFF endpoint. `operatorId`
+// (the verified session email) is threaded as X-Operator-Id for per-human audit attribution — the BFF
+// records operator_id = "tenant:<tenant>:<email>"; it is attribution-only, never an authz principal
+// (the BFF authorizes on the injected X-Tenant-Id + the tenant-prefix guard + its own dark flag).
+export async function forcePositionExit(
+  workflowId: string,
+  reason: string,
+  operatorId?: string,
+): Promise<ForcePositionExitResult> {
+  const { status, body } = await bffPost(
+    "/api/positions/force-close",
+    { workflow_id: workflowId, reason },
+    operatorId ? { "X-Operator-Id": operatorId } : undefined,
+  );
+  const err = (body as { error?: string } | null)?.error;
+  if (status === 404 && err === "force_close_disabled") {
+    return { ok: false, disabled: true };
+  }
+  if (status === 409 && err === "position_already_closed") {
+    return { ok: false, alreadyClosed: true };
+  }
+  if (status === 200 || status === 202) {
+    return { ok: true };
+  }
+  return { ok: false };
 }
 
 export interface Position {

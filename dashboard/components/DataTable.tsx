@@ -13,12 +13,19 @@ export function DataTable({
   columns,
   rows,
   empty = "No data.",
+  rowKey,
 }: {
   columns: Column[];
   // Accepts any array of row objects (typed BFF interfaces lack an index signature); each cell is
   // read by key via an internal cast.
   rows: readonly unknown[];
   empty?: string;
+  // Stable React key per row. Defaults to the array index (fine for static tables), but a table
+  // whose cells hold STATEFUL client islands (e.g. /live's ForceExitButton) MUST pass a stable id:
+  // when a row is removed (a position closes → revalidate drops it), index keys make React reuse
+  // the island instance at that index for a DIFFERENT row, bleeding stale state (e.g. a terminal
+  // "Exit placed") onto the wrong position. A stable key unmounts the removed row's island instead.
+  rowKey?: (row: Record<string, unknown>, index: number) => string | number;
 }) {
   if (rows.length === 0) {
     return <p className="text-sm text-slate-400">{empty}</p>;
@@ -42,7 +49,7 @@ export function DataTable({
           {rows.map((row, i) => {
             const r = row as Record<string, unknown>;
             return (
-              <tr key={i} className="hover:bg-slate-800/50">
+              <tr key={rowKey ? rowKey(r, i) : i} className="hover:bg-slate-800/50">
                 {columns.map((c) => (
                   <td key={c.key} className="px-3 py-2 text-slate-200">
                     {c.render ? c.render(r[c.key], r) : format(r[c.key])}

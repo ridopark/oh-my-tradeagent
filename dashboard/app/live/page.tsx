@@ -1,10 +1,15 @@
 import { auth } from "@/auth";
+import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
-import { DataTable } from "@/components/DataTable";
+import { DataTable, type Column } from "@/components/DataTable";
 import { LiveAccount } from "@/components/LiveAccount";
 import { AccountGuardBanner } from "@/components/AccountGuardBanner";
 import { contractCell } from "@/components/ContractLink";
 import { pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
+import {
+  ForceExitButton,
+  type ForceExitActionResult,
+} from "@/components/ForceExitButton";
 import Link from "next/link";
 import {
   getOrders,
@@ -12,6 +17,7 @@ import {
   getTrades,
   getTenantConfig,
   getAccountKillSwitch,
+  forcePositionExit,
   NotAuthenticatedError,
   type Order,
   type Portfolio,
@@ -23,6 +29,49 @@ import {
 export const dynamic = "force-dynamic";
 
 const ACTIVITY_LIMIT = 5;
+
+// Dark-by-default: the per-position Force-exit button only renders when this flag is explicitly
+// "true". Unset/anything-else => /live is byte-identical to today (no actions column). Paired with
+// the BFF's own `positions.force-close.write-enabled` server flag (which 404s the route when off),
+// so BOTH must be enabled for a force-exit to actually reach Temporal.
+const FORCE_EXIT_WRITE_ENABLED =
+  process.env.FORCE_EXIT_WRITE_ENABLED === "true";
+
+// Inline server action: re-verifies the session, threads the verified operator email into the BFF
+// force-close call (X-Operator-Id → audit attribution), and revalidates /live so a placed/cleared
+// position drops out of the holdings table. Returns a typed result to the client island so the row
+// can show a terminal outcome inline; only revalidates when the position should now be gone (an
+// error leaves the row so the failure note persists). Co-located with the page so it captures nothing
+// but the request-scoped session.
+async function forceExitAction(
+  workflowId: string,
+): Promise<ForceExitActionResult> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return { ok: false, kind: "error" };
+  }
+  // Fall back to name when the session carries no email (dev / AUTH_DEV_TENANT path) so the BFF
+  // records something as the actor rather than an empty "tenant:<t>:".
+  const operator = s.user?.email ?? s.user?.name ?? undefined;
+  const r = await forcePositionExit(
+    workflowId,
+    "operator force-exit via /live",
+    operator,
+  );
+  if (r.ok) {
+    revalidatePath("/live");
+    return { ok: true };
+  }
+  if (r.alreadyClosed) {
+    revalidatePath("/live");
+    return { ok: false, kind: "already-closed" };
+  }
+  if (r.disabled) {
+    return { ok: false, kind: "disabled" };
+  }
+  return { ok: false, kind: "error" };
+}
 
 // Robinhood-style account view: account-total header + range-aware +$X (Y%) and the equity chart
 // (both client-side, sharing one history fetch via LiveAccount), then the open holdings and a recent
@@ -115,6 +164,34 @@ export default async function LivePage() {
       ? todayPl / today.base
       : null;
 
+  // Holdings columns. The trailing per-row "Force exit" action column is appended ONLY when the dark
+  // flag is on — with it off the array is identical to the pre-existing six columns, so /live renders
+  // byte-for-byte as before. current_price is the broker mark; null ⇒ likely phantom (the button
+  // surfaces a "clears the tracking" hint).
+  const holdingsColumns: Column[] = [
+    { key: "contract_symbol", label: "Contract", render: contractCell },
+    { key: "remaining_qty", label: "Qty" },
+    { key: "entry_premium", label: "Entry premium" },
+    { key: "current_price", label: "Current mark", render: priceCell },
+    { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
+    { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
+  ];
+  if (FORCE_EXIT_WRITE_ENABLED) {
+    holdingsColumns.push({
+      key: "actions",
+      label: "",
+      render: (_v, row) => (
+        <ForceExitButton
+          workflowId={String(row.workflow_id)}
+          symbol={String(row.contract_symbol)}
+          qty={Number(row.remaining_qty)}
+          hasBrokerMark={row.current_price != null}
+          action={forceExitAction}
+        />
+      ),
+    });
+  }
+
   return (
     <>
       <Nav tenantId={session?.tenantId} />
@@ -151,15 +228,12 @@ export default async function LivePage() {
           </h2>
           <DataTable
             empty="No open positions."
-            columns={[
-              { key: "contract_symbol", label: "Contract", render: contractCell },
-              { key: "remaining_qty", label: "Qty" },
-              { key: "entry_premium", label: "Entry premium" },
-              { key: "current_price", label: "Current mark", render: priceCell },
-              { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
-              { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
-            ]}
+            columns={holdingsColumns}
             rows={portfolio.open_positions}
+            // Key rows by the stable workflow_id: the Holdings cells hold the stateful
+            // ForceExitButton island, so an index key would bleed a closed row's terminal state
+            // onto the position that shifts into its index after a revalidate. See DataTable.rowKey.
+            rowKey={(row, i) => (row.workflow_id ? String(row.workflow_id) : i)}
           />
         </section>
 
