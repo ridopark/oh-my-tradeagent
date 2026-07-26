@@ -820,6 +820,14 @@ export default async function ConfigPage({
                         // Unreachable — missingFieldsFor only returns fields whose info has a `kind`.
                         if (!kind) return null;
                         const name = inputName(item.strategy_id, field);
+                        // Carry the field's class badge onto the "not set" row too (only EXPOSURE
+                        // survives — IDENTITY/DANGEROUS are excluded from the addable set) so its
+                        // tighten-only semantics are visible before the operator adds it. Adding an
+                        // EXPOSURE cap where none existed IS permitted server-side (a null prior cap
+                        // can't be an "increase" — StrategyConfigWriter.requireNotIncreased), so this
+                        // is an honest hint, not a block.
+                        const klass = classOf(field, cfg.field_classes);
+                        const classBadge = klass === "SAFE" ? null : CLASS_BADGE[klass];
                         return (
                           <li
                             key={`missing-${field}`}
@@ -836,6 +844,13 @@ export default async function ConfigPage({
                                 <span className="rounded border px-1.5 py-0.5 text-xs border-red-500/40 bg-red-500/10 text-red-300">
                                   not set
                                 </span>
+                                {classBadge && (
+                                  <span
+                                    className={`rounded border px-1.5 py-0.5 text-xs ${classBadge.className}`}
+                                  >
+                                    {classBadge.label}
+                                  </span>
+                                )}
                               </div>
 
                               <div className="sm:w-1/2 sm:max-w-md">
