@@ -143,7 +143,7 @@ const watchlistConfig = (brokerTarget: string) =>
       tp_ratio: 2.0,
       tp_partial_fraction: 0.5,
       trail_giveback_pct: 0.3,
-      no_progress_time_stop_secs: 1500,
+      no_progress_time_stop_secs: 2700,
       force_close_eod_et: "15:30",
       no_entry_within_close_minutes: 30,
       eod_force_flatten: true,
