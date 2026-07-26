@@ -7,7 +7,10 @@ import { StrategySwitch } from "@/components/StrategySwitch";
 import { getStrategyConfig, getTenantConfig } from "@/lib/bff";
 import { postStrategyConfig, postTenantConfig } from "@/lib/apiGateway";
 import type { StrategyConfigResponse, TenantConfig } from "@/lib/bff";
-import { CONFIG_FIELD_INFO } from "@/components/ConfigFieldReference";
+import {
+  CONFIG_FIELD_INFO,
+  type ConfigField,
+} from "@/components/ConfigFieldReference";
 import { fmtCurrency } from "@/components/Pnl";
 
 export const dynamic = "force-dynamic";
@@ -80,6 +83,30 @@ function isEditableField(klass: FieldClass, kind: ScalarKind | null): boolean {
   return kind !== null && klass !== "IDENTITY" && klass !== "DANGEROUS";
 }
 
+// The known scalar fields that a strategy's stored config is MISSING and the operator could ADD from
+// the UI. A field qualifies when: it's a known addable field (its CONFIG_FIELD_INFO entry carries a
+// `kind` — complex array/object fields have none), it's absent from the stored config, it isn't the
+// dedicated on/off switch or a deprecated-hidden field, and its class is neither IDENTITY nor
+// DANGEROUS (those can't be UI-added). Sorted alphabetically. This is the SINGLE authority for the
+// addable-missing set — the render and the save action both derive from it (the save path re-derives
+// from the fresh stored config), so a field's identity is always server-decided, never client-supplied.
+function missingFieldsFor(
+  config: Record<string, unknown>,
+  fieldClasses: StrategyConfigResponse["field_classes"],
+): string[] {
+  return Object.keys(CONFIG_FIELD_INFO)
+    .filter((field) => {
+      const info = CONFIG_FIELD_INFO[field];
+      if (field in config) return false; // already present → rendered as a stored row
+      if (field === ENABLED_FIELD) return false; // the dedicated Switch owns `enabled`
+      if (DEPRECATED_HIDDEN_FIELDS.has(field)) return false;
+      // Same "scalar + not IDENTITY/DANGEROUS" rule the stored-field editor uses (a complex
+      // array/object field has no `kind` → not addable).
+      return isEditableField(classOf(field, fieldClasses), info.kind ?? null);
+    })
+    .sort((a, b) => a.localeCompare(b));
+}
+
 const CLASS_BADGE: Record<
   Exclude<FieldClass, "SAFE">,
   { label: string; className: string }
@@ -97,6 +124,11 @@ const CLASS_BADGE: Record<
     className: "border-sky-500/40 bg-sky-500/10 text-sky-300",
   },
 };
+
+// Shared editable-input styling (stored-field inputs, missing-field inputs, and the account-cap
+// input all use it) — one literal so they can't drift.
+const INPUT_CLASS =
+  "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
 
 // Renders one field's value cell. Editable scalars become inputs (boolean → select, number →
 // number input, string → text input); everything else is read-only (a scalar span, or pretty-
@@ -119,8 +151,7 @@ function FieldValue({
   options?: { value: string; label: string }[];
   control?: "time";
 }) {
-  const inputClass =
-    "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
+  const inputClass = INPUT_CLASS;
 
   if (editable && kind === "boolean") {
     return (
@@ -196,6 +227,95 @@ function FieldValue({
   );
 }
 
+// A short input placeholder derived from a field's verbose example. The examples lead with the value
+// ("2700 — flatten…", "0.30 — stop out…"), so the text before the first em-dash is the hint. Drop it
+// when there's no short leading value (e.g. prose examples) so we never stuff a paragraph into a
+// placeholder.
+function exampleHint(example: string): string {
+  if (!example.includes("—")) return ""; // prose example, no leading value → no hint
+  const lead = example.split("—")[0].trim();
+  return lead && lead.length <= 24 ? `e.g. ${lead}` : "";
+}
+
+// Renders an EMPTY editable input for a field ABSENT from the stored config (a red "not set" row).
+// Unlike FieldValue it carries NO defaultValue — the input starts blank with a placeholder hint — so
+// leaving it untouched means "don't add this field" (the save action skips blank inputs). Mirrors
+// FieldValue's control selection (enum <select> / time input / boolean select / number|text), but the
+// selects lead with an empty "— select —" option so "unset" is the default. `kind` comes from the
+// field's CONFIG_FIELD_INFO metadata (an absent field has no value to infer a type from).
+function MissingFieldInput({
+  name,
+  kind,
+  options,
+  control,
+  placeholder,
+}: {
+  name: string;
+  kind: ScalarKind;
+  options?: { value: string; label: string }[];
+  control?: "time";
+  placeholder?: string;
+}) {
+  const inputClass = INPUT_CLASS;
+
+  if (kind === "boolean") {
+    return (
+      <select id={name} name={name} defaultValue="" className={inputClass}>
+        <option value="">— select —</option>
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    );
+  }
+  if (kind === "string" && options) {
+    return (
+      <select id={name} name={name} defaultValue="" className={inputClass}>
+        <option value="">— select —</option>
+        {options.map((opt) => (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (kind === "string" && control === "time") {
+    return <input id={name} name={name} type="time" className={inputClass} />;
+  }
+  return (
+    <input
+      id={name}
+      name={name}
+      type={kind === "number" ? "number" : "text"}
+      step={kind === "number" ? "any" : undefined}
+      placeholder={placeholder}
+      spellCheck={false}
+      className={inputClass}
+    />
+  );
+}
+
+// Grounded What/Effect/Example help for one field — rendered identically below a stored-field row and
+// a missing ("not set") row.
+function FieldHelp({ info }: { info: ConfigField }) {
+  return (
+    <dl className="space-y-0.5 text-xs text-slate-400">
+      <div>
+        <span className="font-medium text-slate-300">What: </span>
+        {info.what}
+      </div>
+      <div>
+        <span className="font-medium text-slate-300">Effect: </span>
+        {info.effect}
+      </div>
+      <div>
+        <span className="font-medium text-slate-300">Example: </span>
+        <span className="text-slate-500">{info.example}</span>
+      </div>
+    </dl>
+  );
+}
+
 // Account-level daily-loss cap (tenant-wide, realized + open P&L) — distinct from the per-strategy
 // `daily_loss_threshold` rendered above. Read-only unless `writeEnabled` (account-loss-cap-db Phase
 // 3), in which case a SET cap becomes a tighten-only number input (a null cap stays read-only — the
@@ -248,8 +368,7 @@ function AccountCapSection({
     },
   ];
   const badge = CLASS_BADGE.EXPOSURE;
-  const inputClass =
-    "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100";
+  const inputClass = INPUT_CLASS;
 
   // The cap is a single loss rule expressed as EITHER a fraction (pct) OR an absolute USD threshold.
   // Show only the form(s) actually set; if none is set, show a single "not set" line (the pct form)
@@ -440,6 +559,29 @@ export default async function ConfigPage({
       nextConfig[ENABLED_FIELD] = String(enabledRaw) === "true";
     }
 
+    // INSERT any ABSENT fields the operator filled in. The field SET is re-derived server-side by
+    // missingFieldsFor (from the FRESH stored config), so field identity is never client-supplied —
+    // the only client input consumed here is the VALUE. No per-field re-guard is needed (unlike the
+    // overlay loop above, which iterates arbitrary stored keys): missingFieldsFor already excludes
+    // enabled / deprecated / IDENTITY / DANGEROUS / complex fields. A blank input = "leave it absent"
+    // (skip); otherwise coerce by the field's declared `kind` and add it to nextConfig.
+    for (const field of missingFieldsFor(item.config, current.field_classes)) {
+      const info = CONFIG_FIELD_INFO[field];
+      const raw = formData.get(inputName(strategyId, field));
+      if (raw === null || String(raw).trim() === "") continue;
+      if (info.kind === "number") {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) {
+          redirect("/config?error=400");
+        }
+        nextConfig[field] = n;
+      } else if (info.kind === "boolean") {
+        nextConfig[field] = String(raw) === "true";
+      } else {
+        nextConfig[field] = String(raw);
+      }
+    }
+
     const result = await postStrategyConfig({
       strategy_id: strategyId,
       config: nextConfig,
@@ -563,6 +705,10 @@ export default async function ConfigPage({
                 )
                 .sort(([a], [b]) => a.localeCompare(b));
               const enabled = resolveEnabled(item.config);
+              // Fields ABSENT from this strategy's stored config that the operator could add — shown
+              // as red "not set" rows after the stored fields. Copytrade strategies will surface the
+              // watchlist-only premium-exit/entry fields here (intended per the product decision).
+              const missingFields = missingFieldsFor(item.config, cfg.field_classes);
               return (
                 // Collapsible so the page stays short — the summary (name + version + on/off) shows
                 // when collapsed; expand to see/edit fields. Native <details>: no client JS needed.
@@ -599,6 +745,15 @@ export default async function ConfigPage({
                       name="strategy_id"
                       value={item.strategy_id}
                     />
+
+                    {WRITE_ENABLED && missingFields.length > 0 && (
+                      <p className="text-xs text-slate-500">
+                        Fields marked{" "}
+                        <span className="text-red-300">not set</span> are absent
+                        from the stored config. Enter a value and Save to add one;
+                        leave it blank to keep it absent.
+                      </p>
+                    )}
 
                     <ul className="flex flex-col divide-y divide-slate-800 rounded border border-slate-800 bg-slate-900">
                       {fields.map(([field, value]) => {
@@ -651,30 +806,71 @@ export default async function ConfigPage({
                               </div>
                             </div>
 
-                            {info && (
-                              <dl className="space-y-0.5 text-xs text-slate-400">
-                                <div>
-                                  <span className="font-medium text-slate-300">
-                                    What:{" "}
+                            {info && <FieldHelp info={info} />}
+                          </li>
+                        );
+                      })}
+
+                      {/* Absent addable fields as red "not set" rows, AFTER the stored fields. When
+                          write is enabled each carries an EMPTY input (blank ⇒ stays absent on save);
+                          otherwise a read-only "not set". Same What/Effect/Example help as stored rows. */}
+                      {missingFields.map((field) => {
+                        const info = CONFIG_FIELD_INFO[field];
+                        const kind = info.kind;
+                        // Unreachable — missingFieldsFor only returns fields whose info has a `kind`.
+                        if (!kind) return null;
+                        const name = inputName(item.strategy_id, field);
+                        // Carry the field's class badge onto the "not set" row too (only EXPOSURE
+                        // survives — IDENTITY/DANGEROUS are excluded from the addable set) so its
+                        // tighten-only semantics are visible before the operator adds it. Adding an
+                        // EXPOSURE cap where none existed IS permitted server-side (a null prior cap
+                        // can't be an "increase" — StrategyConfigWriter.requireNotIncreased), so this
+                        // is an honest hint, not a block.
+                        const klass = classOf(field, cfg.field_classes);
+                        const classBadge = klass === "SAFE" ? null : CLASS_BADGE[klass];
+                        return (
+                          <li
+                            key={`missing-${field}`}
+                            className="flex flex-col gap-2 px-3 py-2 text-sm"
+                          >
+                            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <label
+                                  htmlFor={WRITE_ENABLED ? name : undefined}
+                                  className="font-mono text-red-300"
+                                >
+                                  {field}
+                                </label>
+                                <span className="rounded border px-1.5 py-0.5 text-xs border-red-500/40 bg-red-500/10 text-red-300">
+                                  not set
+                                </span>
+                                {classBadge && (
+                                  <span
+                                    className={`rounded border px-1.5 py-0.5 text-xs ${classBadge.className}`}
+                                  >
+                                    {classBadge.label}
                                   </span>
-                                  {info.what}
-                                </div>
-                                <div>
-                                  <span className="font-medium text-slate-300">
-                                    Effect:{" "}
+                                )}
+                              </div>
+
+                              <div className="sm:w-1/2 sm:max-w-md">
+                                {WRITE_ENABLED ? (
+                                  <MissingFieldInput
+                                    name={name}
+                                    kind={kind}
+                                    options={info.options}
+                                    control={info.control}
+                                    placeholder={exampleHint(info.example)}
+                                  />
+                                ) : (
+                                  <span className="block text-red-300 sm:text-right">
+                                    not set
                                   </span>
-                                  {info.effect}
-                                </div>
-                                <div>
-                                  <span className="font-medium text-slate-300">
-                                    Example:{" "}
-                                  </span>
-                                  <span className="text-slate-500">
-                                    {info.example}
-                                  </span>
-                                </div>
-                              </dl>
-                            )}
+                                )}
+                              </div>
+                            </div>
+
+                            <FieldHelp info={info} />
                           </li>
                         );
                       })}
