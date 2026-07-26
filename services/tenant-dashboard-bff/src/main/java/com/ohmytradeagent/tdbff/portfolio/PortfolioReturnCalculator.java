@@ -106,8 +106,28 @@ public class PortfolioReturnCalculator {
         (liveEquity != null && evAsOfEpochSecond != null)
             ? evAsOfEpochSecond
             : timestamps.get(timestamps.size() - 1);
-    boolean spanPositive = t1Effective > t0;
-    BigDecimal span = spanPositive ? BigDecimal.valueOf(t1Effective - t0) : null;
+
+    // Modified-Dietz money-weighting anchor (T0). base_value_asof is the AUTHORITATIVE baseline
+    // instant: base_value is valued as-of that date and every flow at/before it is already baked in
+    // (excluded from netFlows below). The weighting window MUST start there too — the
+    // flow-exclusion
+    // lower bound and the weighting lower bound have to be the SAME anchor or they contradict.
+    //
+    // Using timestamps.get(0) here instead is the divergent-% bug: for a range longer than the
+    // account's funded history (e.g. 1Y on a ~1-month-old account) Alpaca pads the equity series
+    // BACK before the account was funded, so the series' first timestamp sits in a pre-capital dead
+    // zone. That stretches the span, shrinking every in-window deposit's weight w_i =
+    // (T1−t_i)/(T1−T0)
+    // and thus the denominator (BV + Σ w_i·F_i), inflating the % — WITHOUT changing the $ (which is
+    // EV−BV−netFlows). The visible tell: 1M/3M/YTD/1Y show the SAME dollars but a % that climbs
+    // with
+    // range length. Anchoring T0 to base_value_asof makes the weighting independent of how far
+    // Alpaca
+    // padded the series, so ranges sharing an inception baseline yield the SAME %, matching the $.
+    // Fall back to the series' first point only when base_value_asof is absent (legacy path).
+    long windowStart = baseValueAsof != null ? baseValueAsof : t0;
+    boolean spanPositive = t1Effective > windowStart;
+    BigDecimal span = spanPositive ? BigDecimal.valueOf(t1Effective - windowStart) : null;
 
     // The two timestamp series have DIFFERENT granularity, and comparing them exactly is a bug.
     // Cash flows come from Alpaca's non-trade activities, which carry only a "date" — the exec
