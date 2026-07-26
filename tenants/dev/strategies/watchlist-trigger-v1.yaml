@@ -36,7 +36,7 @@ equity_emit_delta_pct: 0.0005
 #   tp_ratio 2.0                    — first take-profit at +2R = +60% premium.
 #   tp_partial_fraction 0.5         — book half at the target; remainder moves to breakeven + trails.
 #   trail_giveback_pct 0.30         — chandelier giveback on the runner (off the premium peak).
-#   no_progress_time_stop_secs 1500 — flatten a stalled breakout after 25m (theta defense).
+#   no_progress_time_stop_secs 2700 — flatten a stalled breakout after 45m (theta defense).
 #   force_close_eod_et 15:30        — hard EOD flatten 30m before the 16:00 ET close (flat by EOD).
 #   eod_force_flatten true          — arm the blanket EOD timer (watchlist is not an author-mirror).
 #   no_entry_within_close_minutes 30 — refuse a new entry within 30m of force_close_eod_et (root-cause
@@ -46,7 +46,7 @@ sl_pct: 0.30
 tp_ratio: 2.0
 tp_partial_fraction: 0.5
 trail_giveback_pct: 0.30
-no_progress_time_stop_secs: 1500
+no_progress_time_stop_secs: 2700
 force_close_eod_et: "15:30"
 no_entry_within_close_minutes: 30
 eod_force_flatten: true
