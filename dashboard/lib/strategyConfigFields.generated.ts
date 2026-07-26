@@ -17,7 +17,7 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   },
   {
     field: "author_whitelist",
-    description: "Discord author IDs whose signals are admitted. Risk gate AUTHOR_NOT_WHITELISTED on miss.",
+    description: "Discord author IDs whose signals are admitted. Risk gate AUTHOR_NOT_WHITELISTED on miss. Required — always present (identity/routing/whitelist).",
   },
   {
     field: "broker_account_id",
@@ -39,7 +39,7 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
       { value: "schwab-paper", label: "Schwab-paper" },
       { value: "schwab-live", label: "Schwab-live" },
     ],
-    description: "Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; configuring an active strategy with them produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.",
+    description: "Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; configuring an active strategy with them produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live. Required — always present (identity/routing/whitelist).",
   },
   {
     field: "bto_price_move_reject_pct",
@@ -58,12 +58,12 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "capital_weight",
     kind: "number",
-    description: "Fraction of strategy capital allocated per signal. allocation = capital_base * capital_weight, where capital_base is selected by capital_source.",
+    description: "Fraction of strategy capital allocated per signal. allocation = capital_base * capital_weight, where capital_base is selected by capital_source. Required — always present (core sizing / position bounds).",
   },
   {
     field: "daily_loss_threshold",
     kind: "number",
-    description: "Phase 5: KillSwitchWorkflow auto-trip threshold (absolute dollars) on realized cumulative daily loss for (tenant, strategy). Auto-trip fires when realizedPnL <= -daily_loss_threshold. Phase 5 ships realized-only PnL composition (sum of EntryFilled/ExitFilled premia from audit_log); MTM on open positions lands in Phase 5b.",
+    description: "Phase 5: KillSwitchWorkflow auto-trip threshold (absolute dollars) on realized cumulative daily loss for (tenant, strategy). Auto-trip fires when realizedPnL <= -daily_loss_threshold. Phase 5 ships realized-only PnL composition (sum of EntryFilled/ExitFilled premia from audit_log); MTM on open positions lands in Phase 5b. Deprecated/dead field: the tenant account-wide daily-loss cap is now the sole daily-loss breaker, so a null/≤0 value here never trips a kill switch.",
   },
   {
     field: "daily_trade_count",
@@ -164,7 +164,7 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "max_contracts",
     kind: "number",
-    description: "Upper clamp on computed quantity. min<=max enforced by application validator (cross-field constraint not expressible in JSON Schema).",
+    description: "Upper clamp on computed quantity. min<=max enforced by application validator (cross-field constraint not expressible in JSON Schema). Required — always present (core sizing / position bounds).",
   },
   {
     field: "max_daily_notional_deployed",
@@ -179,7 +179,7 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "max_positions",
     kind: "number",
-    description: "Max concurrent open PositionWorkflows per (tenant, strategy). Counted via listWorkflowExecutions(TenantStrategy=..., WorkflowType='PositionWorkflow', ExecutionStatus='Running').",
+    description: "Max concurrent open PositionWorkflows per (tenant, strategy). Counted via listWorkflowExecutions(TenantStrategy=..., WorkflowType='PositionWorkflow', ExecutionStatus='Running'). Required — always present (core sizing / position bounds).",
   },
   {
     field: "max_signal_age_bto_secs",
@@ -189,7 +189,7 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "max_signal_age_secs",
     kind: "number",
-    description: "DEPRECATED (Issue #3): replaced by max_signal_age_bto_secs + max_signal_age_stc_secs. Retained as optional for backward-compatible deserialization of older audit/journal records only; do not set on new strategies. The per-side defaults always take precedence in RiskActivities.",
+    description: "DEPRECATED (Issue #3): replaced by max_signal_age_bto_secs + max_signal_age_stc_secs. Retained as optional for backward-compatible deserialization of older audit/journal records only; do not set on new strategies. The per-side defaults always take precedence in RiskActivities. Deprecated legacy fallback: the required per-side max_signal_age_bto_secs/_stc_secs take precedence; unset here has no effect when those are set, and only if all are unset does it default to 30s.",
   },
   {
     field: "max_signal_age_stc_secs",
@@ -199,12 +199,12 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "max_slippage_abs",
     kind: "number",
-    description: "Issue #4: Absolute slippage cap (dollars per contract premium) added to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_pct via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation.",
+    description: "Issue #4: Absolute slippage cap (dollars per contract premium) added to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_pct via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation. Unset (null or 0): the absolute term drops from the BTO entry-limit; with max_slippage_pct also unset the limit mirrors the signal price.",
   },
   {
     field: "max_slippage_pct",
     kind: "number",
-    description: "Issue #4: Fractional slippage cap (e.g. 0.05 = 5%) applied to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_abs via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation.",
+    description: "Issue #4: Fractional slippage cap (e.g. 0.05 = 5%) applied to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_abs via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation. Unset (null or 0): the percentage term drops from the BTO entry-limit; with max_slippage_abs also unset the limit mirrors the signal price.",
   },
   {
     field: "max_spread_pct",
@@ -214,7 +214,7 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "min_contracts",
     kind: "number",
-    description: "Lower clamp on computed quantity.",
+    description: "Lower clamp on computed quantity. Required — always present (core sizing / position bounds).",
   },
   {
     field: "min_partial_qty_behavior",
@@ -243,21 +243,21 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "notional_cap_pct_of_equity",
     kind: "number",
-    description: "DEPRECATED (Issue #336): alias for notional_cap_pct_of_capital_base; retained only so additionalProperties:false still accepts configs that set the old name. Will be removed after the deprecation window (tracked in #338). The denominator was already the cost-basis capital base (cash + sum_open_notional) post-#323 despite the misleading '_of_equity' name; the canonical field name fixes that. If BOTH this and notional_cap_pct_of_capital_base are set to DIFFERENT values the entry is rejected (fail-closed, NOTIONAL_CAP_EXCEEDED detail ambiguous_cap_config). Migrate to notional_cap_pct_of_capital_base.",
+    description: "DEPRECATED (Issue #336): alias for notional_cap_pct_of_capital_base; retained only so additionalProperties:false still accepts configs that set the old name. Will be removed after the deprecation window (tracked in #338). The denominator was already the cost-basis capital base (cash + sum_open_notional) post-#323 despite the misleading '_of_equity' name; the canonical field name fixes that. If BOTH this and notional_cap_pct_of_capital_base are set to DIFFERENT values the entry is rejected (fail-closed, NOTIONAL_CAP_EXCEEDED detail ambiguous_cap_config). Migrate to notional_cap_pct_of_capital_base. Deprecated alias of notional_cap_pct_of_capital_base, consulted only when that canonical field is null; setting both to different values fails the entry closed (ambiguous_cap_config), and both null disables the notional-cap gate.",
   },
   {
     field: "partial_fractions",
-    description: "Phase 3: keyword -> fraction mapping for KeywordPartialMatcher (e.g. {\"half\": 0.5, \"third\": 0.33, \"out\": 1.0}).",
+    description: "Phase 3: keyword -> fraction mapping for KeywordPartialMatcher (e.g. {\"half\": 0.5, \"third\": 0.33, \"out\": 1.0}). Unset (null/empty map): the STC keyword matcher has no keywords, so every STC falls back to default_stc_fraction (which itself defaults to 0.5).",
   },
   {
     field: "pending_ttl_live_secs",
     kind: "number",
-    description: "Phase 2b/3: BTO entry order TTL for live broker target.",
+    description: "Phase 2b/3: BTO entry order TTL for live broker target. Unset: falls back to a 90-second entry-order TTL.",
   },
   {
     field: "pending_ttl_paper_secs",
     kind: "number",
-    description: "Phase 2b/3: BTO entry order TTL for paper broker target.",
+    description: "Phase 2b/3: BTO entry order TTL for paper broker target. Unset: falls back to a 90-second entry-order TTL.",
   },
   {
     field: "pre_trade_check_enabled",
@@ -267,12 +267,12 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "repeg_after_ms",
     kind: "number",
-    description: "Issue #4: Milliseconds the BTO limit sits at its initial price before a single re-peg toward the slippage-capped ceiling, after which the order is cancelled if still unfilled. Symmetric STC behavior: re-peg aggressively toward bid as the BTO-TTL window elapses. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation.",
+    description: "Issue #4: Milliseconds the BTO limit sits at its initial price before a single re-peg toward the slippage-capped ceiling, after which the order is cancelled if still unfilled. Symmetric STC behavior: re-peg aggressively toward bid as the BTO-TTL window elapses. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation. Spec-only: no orchestrator/exec code consumes this field — it has no runtime effect regardless of value.",
   },
   {
     field: "reset_cooldown_secs",
     kind: "number",
-    description: "Phase 5: cool-down window (seconds) blocking new entries after a kill-switch reset. risk.check_entry rejects with KILL_SWITCH_COOLING_DOWN until cooling_down_until elapses. Closes the post-reset signal-backlog stampede vector.",
+    description: "Phase 5: cool-down window (seconds) blocking new entries after a kill-switch reset. risk.check_entry rejects with KILL_SWITCH_COOLING_DOWN until cooling_down_until elapses. Closes the post-reset signal-backlog stampede vector. Unset (null/≤0): falls back to a 60-second post-kill-switch-reset cooldown during which new entries are rejected (KILL_SWITCH_COOLING_DOWN).",
   },
   {
     field: "same_underlying_count",
@@ -282,7 +282,7 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "schema_version",
     kind: "number",
-    description: "DTO contract version. Workers reject newer-than-build inputs to force orchestrator-svc rollback. See CopytradeSignalPayload.schema_version.",
+    description: "DTO contract version. Workers reject newer-than-build inputs to force orchestrator-svc rollback. See CopytradeSignalPayload.schema_version. Required — always present (identity/routing/whitelist).",
   },
   {
     field: "sector_concentration_cap",
@@ -311,10 +311,12 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "strategy_id",
     kind: "string",
+    description: "Required — always present (identity/routing/whitelist).",
   },
   {
     field: "tenant_id",
     kind: "string",
+    description: "Required — always present (identity/routing/whitelist).",
   },
   {
     field: "tp_partial_fraction",
@@ -339,12 +341,12 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "trail_giveback_pct",
     kind: "number",
-    description: "Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured.",
+    description: "Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured. Unset (null/≤0): the chandelier/runner trail arm is rejected (invalid_giveback), so the trailing stop never arms.",
   },
   {
     field: "trail_on_partial",
     kind: "boolean",
-    description: "Phase 4: arm CHANDELIER_TRAIL on first partial exit.",
+    description: "Phase 4: arm CHANDELIER_TRAIL on first partial exit. Unset: treated as false — the chandelier trail is NOT armed on the first partial exit.",
   },
   {
     field: "watchlist_expiry_rule",

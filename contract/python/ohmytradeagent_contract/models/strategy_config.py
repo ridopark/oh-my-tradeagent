@@ -67,13 +67,19 @@ class StrategyConfig(BaseModel):
     )
     schema_version: conint(ge=1)
     """
-    DTO contract version. Workers reject newer-than-build inputs to force orchestrator-svc rollback. See CopytradeSignalPayload.schema_version.
+    DTO contract version. Workers reject newer-than-build inputs to force orchestrator-svc rollback. See CopytradeSignalPayload.schema_version. Required — always present (identity/routing/whitelist).
     """
     tenant_id: constr(min_length=1)
+    """
+    Required — always present (identity/routing/whitelist).
+    """
     strategy_id: constr(min_length=1)
+    """
+    Required — always present (identity/routing/whitelist).
+    """
     broker_target: BrokerTarget
     """
-    Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; configuring an active strategy with them produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.
+    Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; configuring an active strategy with them produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live. Required — always present (identity/routing/whitelist).
     """
     broker_account_id: constr(min_length=1) | None = None
     """
@@ -81,7 +87,7 @@ class StrategyConfig(BaseModel):
     """
     author_whitelist: list[constr(min_length=1)] = Field(..., min_length=1)
     """
-    Discord author IDs whose signals are admitted. Risk gate AUTHOR_NOT_WHITELISTED on miss.
+    Discord author IDs whose signals are admitted. Risk gate AUTHOR_NOT_WHITELISTED on miss. Required — always present (identity/routing/whitelist).
     """
     max_signal_age_bto_secs: conint(ge=1, le=3600)
     """
@@ -97,15 +103,15 @@ class StrategyConfig(BaseModel):
     """
     max_signal_age_secs: conint(ge=1, le=3600) | None = None
     """
-    DEPRECATED (Issue #3): replaced by max_signal_age_bto_secs + max_signal_age_stc_secs. Retained as optional for backward-compatible deserialization of older audit/journal records only; do not set on new strategies. The per-side defaults always take precedence in RiskActivities.
+    DEPRECATED (Issue #3): replaced by max_signal_age_bto_secs + max_signal_age_stc_secs. Retained as optional for backward-compatible deserialization of older audit/journal records only; do not set on new strategies. The per-side defaults always take precedence in RiskActivities. Deprecated legacy fallback: the required per-side max_signal_age_bto_secs/_stc_secs take precedence; unset here has no effect when those are set, and only if all are unset does it default to 30s.
     """
     max_positions: conint(ge=1, le=100)
     """
-    Max concurrent open PositionWorkflows per (tenant, strategy). Counted via listWorkflowExecutions(TenantStrategy=..., WorkflowType='PositionWorkflow', ExecutionStatus='Running').
+    Max concurrent open PositionWorkflows per (tenant, strategy). Counted via listWorkflowExecutions(TenantStrategy=..., WorkflowType='PositionWorkflow', ExecutionStatus='Running'). Required — always present (core sizing / position bounds).
     """
     capital_weight: confloat(le=1.0, gt=0.0)
     """
-    Fraction of strategy capital allocated per signal. allocation = capital_base * capital_weight, where capital_base is selected by capital_source.
+    Fraction of strategy capital allocated per signal. allocation = capital_base * capital_weight, where capital_base is selected by capital_source. Required — always present (core sizing / position bounds).
     """
     capital_source: CapitalSource | None = CapitalSource.static
     """
@@ -113,11 +119,11 @@ class StrategyConfig(BaseModel):
     """
     min_contracts: conint(ge=1)
     """
-    Lower clamp on computed quantity.
+    Lower clamp on computed quantity. Required — always present (core sizing / position bounds).
     """
     max_contracts: conint(ge=1, le=1000)
     """
-    Upper clamp on computed quantity. min<=max enforced by application validator (cross-field constraint not expressible in JSON Schema).
+    Upper clamp on computed quantity. min<=max enforced by application validator (cross-field constraint not expressible in JSON Schema). Required — always present (core sizing / position bounds).
     """
     skip_avg: bool | None = None
     """
@@ -129,35 +135,35 @@ class StrategyConfig(BaseModel):
     """
     partial_fractions: dict[str, confloat(le=1.0, gt=0.0)] | None = None
     """
-    Phase 3: keyword -> fraction mapping for KeywordPartialMatcher (e.g. {"half": 0.5, "third": 0.33, "out": 1.0}).
+    Phase 3: keyword -> fraction mapping for KeywordPartialMatcher (e.g. {"half": 0.5, "third": 0.33, "out": 1.0}). Unset (null/empty map): the STC keyword matcher has no keywords, so every STC falls back to default_stc_fraction (which itself defaults to 0.5).
     """
     pending_ttl_paper_secs: conint(ge=1) | None = None
     """
-    Phase 2b/3: BTO entry order TTL for paper broker target.
+    Phase 2b/3: BTO entry order TTL for paper broker target. Unset: falls back to a 90-second entry-order TTL.
     """
     pending_ttl_live_secs: conint(ge=1) | None = None
     """
-    Phase 2b/3: BTO entry order TTL for live broker target.
+    Phase 2b/3: BTO entry order TTL for live broker target. Unset: falls back to a 90-second entry-order TTL.
     """
     max_slippage_abs: Annotated[Decimal, Field(gt=0)] | None = None
     """
-    Issue #4: Absolute slippage cap (dollars per contract premium) added to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_pct via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation.
+    Issue #4: Absolute slippage cap (dollars per contract premium) added to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_pct via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation. Unset (null or 0): the absolute term drops from the BTO entry-limit; with max_slippage_pct also unset the limit mirrors the signal price.
     """
     max_slippage_pct: confloat(le=1.0, gt=0.0) | None = None
     """
-    Issue #4: Fractional slippage cap (e.g. 0.05 = 5%) applied to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_abs via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation.
+    Issue #4: Fractional slippage cap (e.g. 0.05 = 5%) applied to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_abs via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation. Unset (null or 0): the percentage term drops from the BTO entry-limit; with max_slippage_abs also unset the limit mirrors the signal price.
     """
     repeg_after_ms: conint(ge=1) | None = None
     """
-    Issue #4: Milliseconds the BTO limit sits at its initial price before a single re-peg toward the slippage-capped ceiling, after which the order is cancelled if still unfilled. Symmetric STC behavior: re-peg aggressively toward bid as the BTO-TTL window elapses. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation.
+    Issue #4: Milliseconds the BTO limit sits at its initial price before a single re-peg toward the slippage-capped ceiling, after which the order is cancelled if still unfilled. Symmetric STC behavior: re-peg aggressively toward bid as the BTO-TTL window elapses. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation. Spec-only: no orchestrator/exec code consumes this field — it has no runtime effect regardless of value.
     """
     trail_on_partial: bool | None = None
     """
-    Phase 4: arm CHANDELIER_TRAIL on first partial exit.
+    Phase 4: arm CHANDELIER_TRAIL on first partial exit. Unset: treated as false — the chandelier trail is NOT armed on the first partial exit.
     """
     trail_giveback_pct: confloat(le=0.5, gt=0.0) | None = None
     """
-    Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured.
+    Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured. Unset (null/≤0): the chandelier/runner trail arm is rejected (invalid_giveback), so the trailing stop never arms.
     """
     trail_debounce_ticks: conint(ge=1) | None = None
     """
@@ -169,11 +175,11 @@ class StrategyConfig(BaseModel):
     """
     daily_loss_threshold: Annotated[Decimal, Field(gt=0)] | None = None
     """
-    Phase 5: KillSwitchWorkflow auto-trip threshold (absolute dollars) on realized cumulative daily loss for (tenant, strategy). Auto-trip fires when realizedPnL <= -daily_loss_threshold. Phase 5 ships realized-only PnL composition (sum of EntryFilled/ExitFilled premia from audit_log); MTM on open positions lands in Phase 5b.
+    Phase 5: KillSwitchWorkflow auto-trip threshold (absolute dollars) on realized cumulative daily loss for (tenant, strategy). Auto-trip fires when realizedPnL <= -daily_loss_threshold. Phase 5 ships realized-only PnL composition (sum of EntryFilled/ExitFilled premia from audit_log); MTM on open positions lands in Phase 5b. Deprecated/dead field: the tenant account-wide daily-loss cap is now the sole daily-loss breaker, so a null/≤0 value here never trips a kill switch.
     """
     reset_cooldown_secs: conint(ge=0) | None = None
     """
-    Phase 5: cool-down window (seconds) blocking new entries after a kill-switch reset. risk.check_entry rejects with KILL_SWITCH_COOLING_DOWN until cooling_down_until elapses. Closes the post-reset signal-backlog stampede vector.
+    Phase 5: cool-down window (seconds) blocking new entries after a kill-switch reset. risk.check_entry rejects with KILL_SWITCH_COOLING_DOWN until cooling_down_until elapses. Closes the post-reset signal-backlog stampede vector. Unset (null/≤0): falls back to a 60-second post-kill-switch-reset cooldown during which new entries are rejected (KILL_SWITCH_COOLING_DOWN).
     """
     notional_cap_pct_of_capital_base: confloat(le=1.0, gt=0.0) | None = None
     """
@@ -181,7 +187,7 @@ class StrategyConfig(BaseModel):
     """
     notional_cap_pct_of_equity: confloat(le=1.0, gt=0.0) | None = None
     """
-    DEPRECATED (Issue #336): alias for notional_cap_pct_of_capital_base; retained only so additionalProperties:false still accepts configs that set the old name. Will be removed after the deprecation window (tracked in #338). The denominator was already the cost-basis capital base (cash + sum_open_notional) post-#323 despite the misleading '_of_equity' name; the canonical field name fixes that. If BOTH this and notional_cap_pct_of_capital_base are set to DIFFERENT values the entry is rejected (fail-closed, NOTIONAL_CAP_EXCEEDED detail ambiguous_cap_config). Migrate to notional_cap_pct_of_capital_base.
+    DEPRECATED (Issue #336): alias for notional_cap_pct_of_capital_base; retained only so additionalProperties:false still accepts configs that set the old name. Will be removed after the deprecation window (tracked in #338). The denominator was already the cost-basis capital base (cash + sum_open_notional) post-#323 despite the misleading '_of_equity' name; the canonical field name fixes that. If BOTH this and notional_cap_pct_of_capital_base are set to DIFFERENT values the entry is rejected (fail-closed, NOTIONAL_CAP_EXCEEDED detail ambiguous_cap_config). Migrate to notional_cap_pct_of_capital_base. Deprecated alias of notional_cap_pct_of_capital_base, consulted only when that canonical field is null; setting both to different values fails the entry closed (ambiguous_cap_config), and both null disables the notional-cap gate.
     """
     same_underlying_count: conint(ge=1) | None = None
     """
