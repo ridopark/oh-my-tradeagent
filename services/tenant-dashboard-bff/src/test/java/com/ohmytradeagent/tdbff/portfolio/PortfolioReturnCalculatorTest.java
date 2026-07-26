@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.within;
 
 import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator.RangeReturn;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -479,5 +480,219 @@ class PortfolioReturnCalculatorTest {
             null,
             null);
     assertThat(rr.rangePl()).isEqualByComparingTo("4360.02");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Modified-Dietz weighting anchor (the divergent-% fix). The money-weighting window start (T0)
+  // must be base_value_asof — the SAME anchor the flow-exclusion uses — not the padded series
+  // start.
+  // ---------------------------------------------------------------------------------------------
+
+  // Shared inputs for the anchor tests: a $44k deposit 10 days before the series end, base_value
+  // 5000 valued at inception, EV 51,439.49 → trading-only $ P&L = 51439.49 − 5000 − 44000 =
+  // 2439.49.
+  private static final long INCEPTION = Instant.parse("2026-06-25T00:00:00Z").getEpochSecond();
+  private static final long SERIES_END = Instant.parse("2026-07-25T20:00:00Z").getEpochSecond();
+  private static final long DEPOSIT_TS = Instant.parse("2026-07-15T00:00:00Z").getEpochSecond();
+  private static final List<BigDecimal> EQUITY_2439 =
+      List.of(new BigDecimal("5000.00"), new BigDecimal("51439.49"));
+  private static final BigDecimal BV_5000 = new BigDecimal("5000.00");
+  private static final List<Long> DEP_TS = List.of(DEPOSIT_TS);
+  private static final List<BigDecimal> DEP_AMT = List.of(new BigDecimal("44000"));
+
+  @Test
+  void anchoredToBaseValueAsof_pctIndependentOfHowFarAlpacaPaddedTheSeries() {
+    // THE FIX. Two ranges, identical in everything a return should depend on (same baseline as-of,
+    // same BV, same EV, same deposit, same window END) — differing ONLY in how far back Alpaca
+    // padded
+    // the equity series' FIRST timestamp: one starts at inception, one is padded ~11 months earlier
+    // (the 1Y-on-a-1-month-old-account shape). With T0 anchored to base_value_asof, the padded
+    // start
+    // is irrelevant → identical $ AND identical %.
+    long paddedStart = Instant.parse("2025-08-01T00:00:00Z").getEpochSecond();
+
+    RangeReturn atInception =
+        calc.compute(
+            EQUITY_2439,
+            BV_5000,
+            List.of(INCEPTION, SERIES_END),
+            DEP_TS,
+            DEP_AMT,
+            true,
+            INCEPTION,
+            null,
+            null);
+    RangeReturn paddedBack =
+        calc.compute(
+            EQUITY_2439,
+            BV_5000,
+            List.of(paddedStart, SERIES_END), // series padded ~11 months before funding
+            DEP_TS,
+            DEP_AMT,
+            true,
+            INCEPTION,
+            null,
+            null);
+
+    assertThat(atInception.rangePl()).isEqualByComparingTo("2439.49");
+    assertThat(paddedBack.rangePl()).isEqualByComparingTo("2439.49");
+    // The point of the fix: the % does NOT move when the series start is padded further back.
+    assertThat(paddedBack.rangePlPct()).isEqualByComparingTo(atInception.rangePlPct());
+    // And it is a bounded, sane trading return — nowhere near the inflated legacy value below.
+    assertThat(atInception.rangePlPct().doubleValue()).isBetween(0.10, 0.15);
+  }
+
+  @Test
+  void legacyPath_noBaseValueAsof_paddedSeriesStartDistortsPct_whyTheAnchorIsNeeded() {
+    // REGRESSION DOC: on the base_value_asof-absent fallback path, T0 = timestamps[0], so padding
+    // the
+    // series start further back DOES distort the % (shrinks the deposit weight → shrinks the
+    // denominator → inflates the %) even though the $ is unchanged. This is the exact bug the
+    // anchor
+    // above removes; kept as a guard so nobody "simplifies" the anchor away without noticing.
+    long paddedStart = Instant.parse("2025-08-01T00:00:00Z").getEpochSecond();
+
+    RangeReturn nearStart =
+        calc.compute(
+            EQUITY_2439,
+            BV_5000,
+            List.of(INCEPTION, SERIES_END),
+            DEP_TS,
+            DEP_AMT,
+            true,
+            null,
+            null,
+            null);
+    RangeReturn paddedStartRr =
+        calc.compute(
+            EQUITY_2439,
+            BV_5000,
+            List.of(paddedStart, SERIES_END),
+            DEP_TS,
+            DEP_AMT,
+            true,
+            null,
+            null,
+            null);
+
+    // Same dollars…
+    assertThat(nearStart.rangePl()).isEqualByComparingTo("2439.49");
+    assertThat(paddedStartRr.rangePl()).isEqualByComparingTo("2439.49");
+    // …but a padded start inflates the % on this legacy path (the bug): padded > near.
+    assertThat(paddedStartRr.rangePlPct()).isGreaterThan(nearStart.rangePlPct());
+  }
+
+  @Test
+  void rangesSharingInceptionBaseline_sameDollarsAndSamePct_userIncidentReproduction() {
+    // USER INCIDENT (2026-07-25): 1M/3M/YTD/1Y all showed the SAME $ but a % that climbed with
+    // range
+    // length (6.80 → 13.85 → 19.38 → 22.66%). Reproduces the daily-bar shape: EV is the live
+    // account
+    // snapshot valued at NOW (evAsOf), base_value clamps to the inception baseline for every range
+    // ≥
+    // account age, and the ranges differ only in the padded series start. Post-fix: identical $ AND
+    // identical % across all of them.
+    long now = Instant.parse("2026-07-25T21:00:00Z").getEpochSecond();
+    BigDecimal liveEquity = new BigDecimal("51439.49");
+    // 1M/3M/1Y series each start progressively earlier; base_value_asof is the shared inception.
+    List<Long> oneMonthStart = List.of(INCEPTION, SERIES_END);
+    List<Long> threeMonthStart = List.of(INCEPTION - Duration.ofDays(60).getSeconds(), SERIES_END);
+    List<Long> oneYearStart = List.of(INCEPTION - Duration.ofDays(335).getSeconds(), SERIES_END);
+
+    RangeReturn m1 =
+        calc.compute(
+            EQUITY_2439, BV_5000, oneMonthStart, DEP_TS, DEP_AMT, true, INCEPTION, liveEquity, now);
+    RangeReturn m3 =
+        calc.compute(
+            EQUITY_2439,
+            BV_5000,
+            threeMonthStart,
+            DEP_TS,
+            DEP_AMT,
+            true,
+            INCEPTION,
+            liveEquity,
+            now);
+    RangeReturn y1 =
+        calc.compute(
+            EQUITY_2439, BV_5000, oneYearStart, DEP_TS, DEP_AMT, true, INCEPTION, liveEquity, now);
+
+    // Same dollars (already true before the fix)…
+    assertThat(m1.rangePl()).isEqualByComparingTo("2439.49");
+    assertThat(m3.rangePl()).isEqualByComparingTo("2439.49");
+    assertThat(y1.rangePl()).isEqualByComparingTo("2439.49");
+    // …and now the SAME percentage too — the divergence is gone.
+    assertThat(m3.rangePlPct()).isEqualByComparingTo(m1.rangePlPct());
+    assertThat(y1.rangePlPct()).isEqualByComparingTo(m1.rangePlPct());
+  }
+
+  @Test
+  void depositJustAfterAsof_weightNearOne_denominatorIsFullInvestedCapital() {
+    // A deposit dated one day after base_value_asof, over a 40-day window, was in the account for
+    // 39/40 of the window → weight 0.975, so the denominator is essentially BV + the full deposit
+    // (the money's real average presence), NOT a tiny weighted sliver. Pins the intended semantics.
+    long asof = Instant.parse("2026-06-15T00:00:00Z").getEpochSecond();
+    long t1 = Instant.parse("2026-07-25T00:00:00Z").getEpochSecond(); // 40 days after asof
+    long deposit = Instant.parse("2026-06-16T00:00:00Z").getEpochSecond(); // 1 day after asof
+    // EV 50,439.49 − BV 5000 − deposit 44000 = 1439.49.
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000.00"), new BigDecimal("50439.49")),
+            BV_5000,
+            List.of(asof, t1),
+            List.of(deposit),
+            List.of(new BigDecimal("44000")),
+            true,
+            asof,
+            null,
+            null);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("1439.49");
+    // denominator = 5000 + (39/40)*44000; expected computed from the same formula (no magic
+    // decimal).
+    double expected = 1439.49 / (5000.0 + (39.0 / 40.0) * 44000.0);
+    assertThat(rr.rangePlPct().doubleValue()).isCloseTo(expected, within(1e-9));
+  }
+
+  @Test
+  void baseValueAsofAfterSeriesEnd_spanNonPositive_pctNull_dollarsStillComputed() {
+    // Degenerate: base_value_asof dated AFTER the window end → no positive span → pct null (never a
+    // divide-by-zero or a bogus number), while the $ P&L stays computable.
+    long t1 = Instant.parse("2026-07-25T20:00:00Z").getEpochSecond();
+    long asofAfter = Instant.parse("2026-08-01T00:00:00Z").getEpochSecond();
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000.00"), new BigDecimal("6000.00")),
+            BV_5000,
+            List.of(INCEPTION, t1),
+            List.of(),
+            List.of(),
+            true,
+            asofAfter,
+            null,
+            null);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("1000.00");
+    assertThat(rr.rangePlPct()).isNull();
+  }
+
+  @Test
+  void baseValueAsofEqualsSeriesEnd_spanZero_pctNull() {
+    // base_value_asof exactly at the window end → span 0 → pct null; $ still computed.
+    long t1 = Instant.parse("2026-07-25T20:00:00Z").getEpochSecond();
+    RangeReturn rr =
+        calc.compute(
+            List.of(new BigDecimal("5000.00"), new BigDecimal("6000.00")),
+            BV_5000,
+            List.of(INCEPTION, t1),
+            List.of(),
+            List.of(),
+            true,
+            t1,
+            null,
+            null);
+
+    assertThat(rr.rangePl()).isEqualByComparingTo("1000.00");
+    assertThat(rr.rangePlPct()).isNull();
   }
 }
