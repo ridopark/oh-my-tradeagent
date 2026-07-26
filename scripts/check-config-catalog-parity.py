@@ -59,21 +59,18 @@ PENDING_CATALOG = {
 }
 
 
-def scalar_schema_fields() -> set[str]:
+def schema_fields() -> tuple[set[str], set[str]]:
+    """Return (all property names, scalar property names) from one parse of the schema."""
     props = json.loads(SCHEMA.read_text()).get("properties", {})
-    out = set()
+    scalar = set()
     for name, spec in props.items():
         t = spec.get("type")
         if isinstance(t, list):
             non_null = [x for x in t if x != "null"]
             t = non_null[0] if non_null else None
         if t in SCALAR_TYPES:
-            out.add(name)
-    return out
-
-
-def all_schema_fields() -> set[str]:
-    return set(json.loads(SCHEMA.read_text()).get("properties", {}).keys())
+            scalar.add(name)
+    return set(props.keys()), scalar
 
 
 def catalogued_with_kind() -> tuple[set[str], set[str]]:
@@ -96,8 +93,7 @@ def catalogued_with_kind() -> tuple[set[str], set[str]]:
 
 
 def main() -> int:
-    scalar = scalar_schema_fields()
-    schema_all = all_schema_fields()
+    schema_all, scalar = schema_fields()
     catalogued, with_kind = catalogued_with_kind()
     errors: list[str] = []
 
