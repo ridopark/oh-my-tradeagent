@@ -79,16 +79,11 @@ export default async function LivePage() {
 
   const count = portfolio.open_positions_count;
 
-  // Holdings total value = Σ (remaining_qty × current_mark × 100) over positions the broker prices.
-  // Null-aware (seed null) so all-unpriced → "—"; positions with no broker mark (phantoms) are skipped
-  // rather than counted as 0, matching the per-row "—" in the Value column.
-  const holdingsValue = portfolio.open_positions.reduce<number | null>((sum, p) => {
-    const mark = p.current_price == null ? NaN : Number(p.current_price);
-    const qty = Number(p.remaining_qty);
-    return Number.isNaN(mark) || Number.isNaN(qty)
-      ? sum
-      : (sum ?? 0) + qty * mark * OPTIONS_MULTIPLIER;
-  }, null);
+  // Holdings totals — Σ (qty × price × 100) at entry (Cost) and at the current mark (Value). Both
+  // null-aware (seed null) so all-unpriced → "—"; a position the broker doesn't price (a phantom) is
+  // skipped from Value rather than counted as 0, matching the per-row "—".
+  const holdingsCost = sumPositionTotal(portfolio.open_positions, "entry_premium");
+  const holdingsValue = sumPositionTotal(portfolio.open_positions, "current_price");
 
   // Total account value = live net-liquidation equity (GET /v2/account), summed across the tenant's
   // broker_targets — the SAME real-time source /status uses. The chart below draws Alpaca's
@@ -162,9 +157,13 @@ export default async function LivePage() {
             <h2 className="text-sm font-semibold text-slate-200">
               Holdings ({count})
             </h2>
-            {holdingsValue != null && (
+            {(holdingsCost != null || holdingsValue != null) && (
               <span className="text-xs text-slate-400">
-                Total value{" "}
+                Cost{" "}
+                <span className="font-medium text-slate-200">
+                  {fmtCurrency(holdingsCost)}
+                </span>
+                {" · "}Value{" "}
                 <span className="font-medium text-slate-200">
                   {fmtCurrency(holdingsValue)}
                 </span>
@@ -177,8 +176,9 @@ export default async function LivePage() {
               { key: "contract_symbol", label: "Contract", render: contractCell },
               { key: "remaining_qty", label: "Qty" },
               { key: "entry_premium", label: "Entry premium" },
+              { key: "cost_basis", label: "Cost", render: costCell },
               { key: "current_price", label: "Current mark", render: priceCell },
-              { key: "position_value", label: "Value", render: positionValueCell },
+              { key: "position_value", label: "Value", render: valueCell },
               { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
               { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
             ]}
@@ -214,20 +214,43 @@ export default async function LivePage() {
 }
 
 // The equity-options contract multiplier: a premium quote is per-share, and one contract covers 100
-// shares. Total position value = remaining_qty × current_mark × 100 (same multiplier the unrealized
-// P&L math uses).
+// shares. A position's dollar total = remaining_qty × price × 100 (same multiplier the unrealized
+// P&L math uses) — priced at entry_premium it's Cost, at current_price it's Value.
 const OPTIONS_MULTIPLIER = 100;
 
-// DataTable cell renderer for the total position value column. Reads qty + mark off the row; "—" when
-// the broker carries no mark (a likely phantom — matching the Current-mark column's blank).
-function positionValueCell(_value: unknown, row: Record<string, unknown>): ReactNode {
-  const mark = row.current_price == null ? NaN : Number(row.current_price);
-  const qty = Number(row.remaining_qty);
-  if (Number.isNaN(mark) || Number.isNaN(qty)) {
-    return <span className="text-slate-500">—</span>;
-  }
-  return <span className="text-slate-200">{fmtCurrency(qty * mark * OPTIONS_MULTIPLIER)}</span>;
+// remaining_qty × price × 100, or null when either is missing (an unpriced position → a "—" cell / a
+// skip from the total). `price` is the per-share premium at the chosen leg (entry or current mark).
+function positionTotal(qty: unknown, price: unknown): number | null {
+  const p = price == null ? NaN : Number(price);
+  const q = Number(qty);
+  return Number.isNaN(p) || Number.isNaN(q) ? null : q * p * OPTIONS_MULTIPLIER;
 }
+
+// Σ positionTotal over positions for one price field; null (→ "—") when none are priced.
+function sumPositionTotal(
+  positions: Portfolio["open_positions"],
+  field: "entry_premium" | "current_price",
+): number | null {
+  return positions.reduce<number | null>((sum, p) => {
+    const t = positionTotal(p.remaining_qty, p[field]);
+    return t == null ? sum : (sum ?? 0) + t;
+  }, null);
+}
+
+// DataTable cell renderer for a per-position dollar-total column, priced at the given field. "—" when
+// the leg is unpriced (e.g. a phantom carries no current mark — matching the Current-mark blank).
+function totalCell(field: "entry_premium" | "current_price") {
+  return (_value: unknown, row: Record<string, unknown>): ReactNode => {
+    const t = positionTotal(row.remaining_qty, row[field]);
+    return t == null ? (
+      <span className="text-slate-500">—</span>
+    ) : (
+      <span className="text-slate-200">{fmtCurrency(t)}</span>
+    );
+  };
+}
+const costCell = totalCell("entry_premium");
+const valueCell = totalCell("current_price");
 
 // A strategy's per-day realized-loss limit (`daily_loss_threshold`, absolute USD) read from its
 // strategy config. When a strategy's realized losses for the day reach it, that strategy's kill
