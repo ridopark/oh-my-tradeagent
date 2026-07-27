@@ -300,45 +300,39 @@ function MissingFieldInput({
   );
 }
 
-// Help for one field — rendered identically below a stored-field row and a missing ("not set") row.
-// Unified fallback keyed by field NAME so an un-catalogued schema field still shows help:
-//   1. rich hand-authored What/Effect/Example from CONFIG_FIELD_INFO when the field is catalogued;
-//   2. else a single "What:" line from the generated manifest's schema `description`;
-//   3. else nothing (returns null).
+// Help for one field, keyed by field NAME. The schema `description` (from the generated manifest) is
+// the SINGLE source for "what this is" + its not-set/default behavior, so it shows for EVERY field
+// (catalogued or not) — that's where the "Unset: …" clauses live. When the field is also catalogued,
+// the hand-authored Effect + Example enrich it. The rich What is intentionally NOT shown here (it
+// duplicates the schema description); the onboard "Config field reference" still renders the full
+// hand-authored entry. Returns null only if a field has neither (shouldn't happen — all schema fields
+// carry a description).
 function FieldHelp({ field }: { field: string }) {
-  const info = CONFIG_FIELD_INFO[field];
-  if (info) {
-    return (
-      <dl className="space-y-0.5 text-xs text-slate-400">
-        <div>
-          <span className="font-medium text-slate-300">What: </span>
-          {info.what}
-        </div>
-        <div>
-          <span className="font-medium text-slate-300">Effect: </span>
-          {info.effect}
-        </div>
-        <div>
-          <span className="font-medium text-slate-300">Example: </span>
-          <span className="text-slate-500">{info.example}</span>
-        </div>
-      </dl>
-    );
-  }
-  // No rich catalog entry: fall back to the schema description (one line) so a newly-added schema
-  // field is self-documenting in the editor until someone authors a richer CONFIG_FIELD_INFO entry.
   const description = STRATEGY_CONFIG_FIELD_BY_NAME[field]?.description;
-  if (description) {
-    return (
-      <dl className="space-y-0.5 text-xs text-slate-400">
+  const info = CONFIG_FIELD_INFO[field];
+  if (!description && !info) return null;
+  return (
+    <dl className="space-y-0.5 text-xs text-slate-400">
+      {description && (
         <div>
           <span className="font-medium text-slate-300">What: </span>
           {description}
         </div>
-      </dl>
-    );
-  }
-  return null;
+      )}
+      {info && (
+        <>
+          <div>
+            <span className="font-medium text-slate-300">Effect: </span>
+            {info.effect}
+          </div>
+          <div>
+            <span className="font-medium text-slate-300">Example: </span>
+            <span className="text-slate-500">{info.example}</span>
+          </div>
+        </>
+      )}
+    </dl>
+  );
 }
 
 // Account-level daily-loss cap (tenant-wide, realized + open P&L) — distinct from the per-strategy
