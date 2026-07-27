@@ -44,7 +44,7 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "bto_price_move_reject_pct",
     kind: "number",
-    description: "Issue #3 (Phase 2a hardening): BTO secondary price-move gate. Reject BTO when bid/ask (mid) has moved more than this fraction from payload.price since posted_at, regardless of signal age. Default 0.10 (10%). Documented gate spec: actual quote fetch + rejection wiring lands with market-data integration; this field is the configuration surface for the gate and the corresponding RejectionReason is BTO_PRICE_MOVED.",
+    description: "Issue #3 (Phase 2a hardening): BTO secondary price-move gate. Reject BTO when bid/ask (mid) has moved more than this fraction from payload.price since posted_at, regardless of signal age. Default 0.10 (10%). Documented gate spec: actual quote fetch + rejection wiring lands with market-data integration; this field is the configuration surface for the gate and the corresponding RejectionReason is BTO_PRICE_MOVED. NOT WIRED (2026-07-27): no code reads this field — the price-move gate is unimplemented; the field is inert (config surface only).",
   },
   {
     field: "capital_source",
@@ -331,12 +331,12 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "trail_debounce_ticks",
     kind: "number",
-    description: "Issue #14 (Phase 4 chandelier-trail debounce): require N consecutive ticks with mid below `peak_premium * (1 - trail_giveback_pct)` before firing the trail exit. A single sub-threshold print (bad NBBO, halted side) MUST NOT trigger an exit on options where premium can flicker tens of percent between adjacent ticks. Default 2 when null. PositionWorkflow.chandelier_tick handler resets the streak on any tick at-or-above the threshold.",
+    description: "Issue #14 (Phase 4 chandelier-trail debounce): require N consecutive ticks with mid below `peak_premium * (1 - trail_giveback_pct)` before firing the trail exit. A single sub-threshold print (bad NBBO, halted side) MUST NOT trigger an exit on options where premium can flicker tens of percent between adjacent ticks. Default 2 when null. PositionWorkflow.chandelier_tick handler resets the streak on any tick at-or-above the threshold. NOT WIRED (2026-07-27): despite the above, no runtime consumer reads this field — the chandelier debounce uses a hardcoded tick count; the field is inert.",
   },
   {
     field: "trail_disarm_minutes_before_close",
     kind: "number",
-    description: "Issue #14 (Phase 4 chandelier-trail EOD disarm): disarm the trail in the final N minutes before market close so the EOD timer handles the exit instead. Past this disarm window theta giveback dominates real momentum and the trail becomes a noise-driven flush. Default 30 when null. PositionWorkflow.chandelier_tick checks `now >= market_close - trail_disarm_minutes_before_close minutes` on every tick.",
+    description: "Issue #14 (Phase 4 chandelier-trail EOD disarm): disarm the trail in the final N minutes before market close so the EOD timer handles the exit instead. Past this disarm window theta giveback dominates real momentum and the trail becomes a noise-driven flush. Default 30 when null. PositionWorkflow.chandelier_tick checks `now >= market_close - trail_disarm_minutes_before_close minutes` on every tick. NOT WIRED (2026-07-27): despite the above, no runtime consumer reads this field — the trail disarm is not driven by it; the field is inert.",
   },
   {
     field: "trail_giveback_pct",
