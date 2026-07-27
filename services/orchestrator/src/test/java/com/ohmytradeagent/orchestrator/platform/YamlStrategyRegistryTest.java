@@ -26,7 +26,6 @@ class YamlStrategyRegistryTest {
           - acme_trader
         max_signal_age_bto_secs: 30
         max_signal_age_stc_secs: 60
-        bto_price_move_reject_pct: 0.10
         max_positions: 5
         capital_weight: 0.2
         min_contracts: 1
@@ -41,7 +40,6 @@ class YamlStrategyRegistryTest {
     // Issue #3: per-side signal-age defaults.
     assertThat(cfg.getMaxSignalAgeBtoSecs()).isEqualTo(30L);
     assertThat(cfg.getMaxSignalAgeStcSecs()).isEqualTo(60L);
-    assertThat(cfg.getBtoPriceMoveRejectPct().compareTo(new java.math.BigDecimal("0.10"))).isZero();
     assertThat(cfg.getMaxPositions()).isEqualTo(5L);
     assertThat(cfg.getCapitalWeight().compareTo(new java.math.BigDecimal("0.2"))).isZero();
     assertThat(cfg.getSkipAvg()).isTrue();
@@ -95,12 +93,12 @@ class YamlStrategyRegistryTest {
   }
 
   @Test
-  void loadsIssue4SlippageAndRepegFields(@TempDir Path tenantsDir) throws Exception {
+  void loadsIssue4SlippageFields(@TempDir Path tenantsDir) throws Exception {
     // Issue #4: BTO/STC pricing ladder configuration surface.
-    // The three new optional fields (max_slippage_abs, max_slippage_pct,
-    // repeg_after_ms) must round-trip through YAML loading without breaking
-    // the pre-existing required-field schema. Defaults (omitted) are tested
-    // in loadsConfigFromTenantsDir above: the loader must not reject configs
+    // The two new optional fields (max_slippage_abs, max_slippage_pct) must
+    // round-trip through YAML loading without breaking the pre-existing
+    // required-field schema. Defaults (omitted) are tested in
+    // loadsConfigFromTenantsDir above: the loader must not reject configs
     // that lack these fields.
     Path file = tenantsDir.resolve("dev/strategies/copytrade-v1.yaml");
     Files.createDirectories(file.getParent());
@@ -121,7 +119,6 @@ class YamlStrategyRegistryTest {
         max_contracts: 5
         max_slippage_abs: 0.05
         max_slippage_pct: 0.03
-        repeg_after_ms: 500
         """);
 
     YamlStrategyRegistry registry = new YamlStrategyRegistry(tenantsDir.toString());
@@ -129,7 +126,6 @@ class YamlStrategyRegistryTest {
 
     assertThat(cfg.getMaxSlippageAbs()).isEqualByComparingTo(new java.math.BigDecimal("0.05"));
     assertThat(cfg.getMaxSlippagePct()).isEqualByComparingTo(new java.math.BigDecimal("0.03"));
-    assertThat(cfg.getRepegAfterMs()).isEqualTo(500L);
   }
 
   @Test
@@ -162,7 +158,6 @@ class YamlStrategyRegistryTest {
 
     assertThat(cfg.getMaxSlippageAbs()).isNull();
     assertThat(cfg.getMaxSlippagePct()).isNull();
-    assertThat(cfg.getRepegAfterMs()).isNull();
   }
 
   @Test

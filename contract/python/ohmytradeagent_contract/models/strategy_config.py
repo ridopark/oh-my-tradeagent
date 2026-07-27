@@ -97,10 +97,6 @@ class StrategyConfig(BaseModel):
     """
     Reject STC signals older than this. Risk gate SIGNAL_TOO_OLD on exceed. Issue #3 (Phase 2a hardening): STC tolerates a larger window than BTO because exiting late is generally safer than entering late, but a 1800s default still permits adverse selection on partial fills. Defaults: 60s for STC. Any value above 120s is an explicit per-strategy override.
     """
-    bto_price_move_reject_pct: confloat(le=1.0, gt=0.0) | None = None
-    """
-    Issue #3 (Phase 2a hardening): BTO secondary price-move gate. Reject BTO when bid/ask (mid) has moved more than this fraction from payload.price since posted_at, regardless of signal age. Default 0.10 (10%). Documented gate spec: actual quote fetch + rejection wiring lands with market-data integration; this field is the configuration surface for the gate and the corresponding RejectionReason is BTO_PRICE_MOVED.
-    """
     max_signal_age_secs: conint(ge=1, le=3600) | None = None
     """
     DEPRECATED (Issue #3): replaced by max_signal_age_bto_secs + max_signal_age_stc_secs. Retained as optional for backward-compatible deserialization of older audit/journal records only; do not set on new strategies. The per-side defaults always take precedence in RiskActivities. Deprecated legacy fallback: the required per-side max_signal_age_bto_secs/_stc_secs take precedence; unset here has no effect when those are set, and only if all are unset does it default to 30s.
@@ -153,10 +149,6 @@ class StrategyConfig(BaseModel):
     """
     Issue #4: Fractional slippage cap (e.g. 0.05 = 5%) applied to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_abs via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation. Unset (null or 0): the percentage term drops from the BTO entry-limit; with max_slippage_abs also unset the limit mirrors the signal price.
     """
-    repeg_after_ms: conint(ge=1) | None = None
-    """
-    Issue #4: Milliseconds the BTO limit sits at its initial price before a single re-peg toward the slippage-capped ceiling, after which the order is cancelled if still unfilled. Symmetric STC behavior: re-peg aggressively toward bid as the BTO-TTL window elapses. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation. Spec-only: no orchestrator/exec code consumes this field — it has no runtime effect regardless of value.
-    """
     trail_on_partial: bool | None = None
     """
     Phase 4: arm CHANDELIER_TRAIL on first partial exit. Unset: treated as false — the chandelier trail is NOT armed on the first partial exit.
@@ -164,14 +156,6 @@ class StrategyConfig(BaseModel):
     trail_giveback_pct: confloat(le=0.5, gt=0.0) | None = None
     """
     Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured. Unset (null/≤0): the chandelier/runner trail arm is rejected (invalid_giveback), so the trailing stop never arms.
-    """
-    trail_debounce_ticks: conint(ge=1) | None = None
-    """
-    Issue #14 (Phase 4 chandelier-trail debounce): require N consecutive ticks with mid below `peak_premium * (1 - trail_giveback_pct)` before firing the trail exit. A single sub-threshold print (bad NBBO, halted side) MUST NOT trigger an exit on options where premium can flicker tens of percent between adjacent ticks. Default 2 when null. PositionWorkflow.chandelier_tick handler resets the streak on any tick at-or-above the threshold.
-    """
-    trail_disarm_minutes_before_close: conint(ge=0) | None = None
-    """
-    Issue #14 (Phase 4 chandelier-trail EOD disarm): disarm the trail in the final N minutes before market close so the EOD timer handles the exit instead. Past this disarm window theta giveback dominates real momentum and the trail becomes a noise-driven flush. Default 30 when null. PositionWorkflow.chandelier_tick checks `now >= market_close - trail_disarm_minutes_before_close minutes` on every tick.
     """
     daily_loss_threshold: Annotated[Decimal, Field(gt=0)] | None = None
     """
@@ -230,18 +214,6 @@ class StrategyConfig(BaseModel):
     max_daily_notional_deployed: Annotated[Decimal, Field(gt=0)] | None = None
     """
     Issue #17 (quant-analyst review): hard per-day dollar cap on cumulative entry notional deployed (sum of qty * fill_premium * 100 for SignalAccepted BTO entries today, UTC trading day). Reject new BTO entries with DAILY_NOTIONAL_DEPLOYED_EXCEEDED when today_deployed + new_notional > max_daily_notional_deployed. Complements max_notional_per_signal (per-signal bound) by capping total daily capital at risk against premium-spike over-leverage across many signals. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.
-    """
-    max_spread_pct: confloat(le=1.0, gt=0.0) | None = None
-    """
-    Issue #19 (quant-analyst review): max admissible bid/ask spread as a fraction of mid at BTO submit time, enforced at contract-resolver-svc against the freshly-fetched NBBO quote. Reject BTO with BTO_SPREAD_TOO_WIDE when (ask - bid) / mid > max_spread_pct (where mid = (ask + bid) / 2). The companion BTO_BID_ZERO rejection always fires unconditionally when bid == 0 regardless of this threshold — a no-bid option cannot be exited except by exercise and must never be entered. Opt-in: null disables the spread gate (BTO_BID_ZERO still enforced). Spec-only field in this PR; runtime wiring lands separately.
-    """
-    earnings_window_hours: conint(ge=0) | None = None
-    """
-    Issue #19 (quant-analyst review): veto entries whose holding window straddles an earnings release within N hours of payload.posted_at (lookahead) or payload.expiry (lookback). Reject BTO with EARNINGS_WINDOW_BLOCKED when the underlying has a scheduled earnings event inside [now, now + earnings_window_hours] OR inside [expiry - earnings_window_hours, expiry]. Closes the IV-crush failure mode between BTO and STC. Opt-in: null/0 disables the gate. Spec-only field in this PR; runtime wiring (earnings calendar source, exec-svc lookup) lands separately.
-    """
-    halt_check_enabled: bool | None = None
-    """
-    Issue #19 (quant-analyst review): if true, gates the future market-data-svc underlying-halt subscription that PositionWorkflow consumes to force-flat affected positions. When the underlying enters an LULD pause the option bid collapses to zero and the position becomes unexitable except by exercise; PositionWorkflow will force-flat with UNDERLYING_HALTED on receipt of the halt signal so the position closes the moment the halt clears. Opt-in: null/false disables the subscription. Spec-only field in this PR; market-data-svc halt subscription + PositionWorkflow handler land separately.
     """
     eod_force_flatten: bool | None = None
     """

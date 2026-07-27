@@ -43,7 +43,6 @@ data:
     # max_signal_age_secs (1800s) that produced adverse selection on options.
     max_signal_age_bto_secs: 30
     max_signal_age_stc_secs: 60
-    bto_price_move_reject_pct: 0.10
     max_positions: 5
     capital_weight: 0.2
     # dynamic-account-cash-sizing: capital base for capital-weight sizing. static = global

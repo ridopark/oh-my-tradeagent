@@ -310,13 +310,6 @@ const CONFIG_FIELDS: ConfigField[] = [
       'full_close — with 1 contract left, a "sell half" signal closes that last contract instead of skipping it.',
   },
   {
-    field: "bto_price_move_reject_pct",
-    what: "Reject a BTO when the option's mid has moved more than this fraction from the signal price since it was posted.",
-    effect:
-      "BTO_PRICE_MOVED rejection regardless of signal age — blocks entering after a large move. Default 0.10 (10%).",
-    example: "0.10 — if the price moved more than 10% from the author's posted price, the entry is rejected.",
-  },
-  {
     field: "notional_cap_pct_of_capital_base",
     what: "Caps total open notional (existing open positions + this new one) at a fraction of the capital base (cash + sum of open notional).",
     effect:

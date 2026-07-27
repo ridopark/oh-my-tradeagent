@@ -79,7 +79,6 @@ const copytradeConfig = (brokerTarget: string) =>
       max_signal_age_bto_secs: 30,
       max_signal_age_stc_secs: 60,
       min_partial_qty_behavior: "skip",
-      bto_price_move_reject_pct: 0.1,
       notional_cap_pct_of_capital_base: 0.8,
       // Arm the pre-trade affordability gate for new tenants (deliberately ON, unlike prod_real's
       // current config which leaves it off). The gate verifies the account can afford the entry

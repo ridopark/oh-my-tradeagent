@@ -270,10 +270,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   /**
    * Phase 3 bid-based STOP debounce: require N consecutive ticks whose evaluated bid is at/below
    * the stop level before flattening, so a single outlier bid print (bad NBBO, halted side) does
-   * not fire the stop. Reset on any tick at/above the stop level. Mirrors the {@code
-   * trail_debounce_ticks} default (2) documented in {@code contract/schemas/strategy-config.json};
-   * that StrategyConfig key is not yet plumbed onto PositionWorkflowInput, so the default is
-   * applied as a constant here rather than inventing a new input field.
+   * not fire the stop. Reset on any tick at/above the stop level. The debounce is a fixed
+   * N-consecutive-tick count hardcoded as the constant below; it is not configurable per strategy.
    */
   private static final int EXIT_STOP_DEBOUNCE_TICKS = 2;
 
