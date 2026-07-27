@@ -152,16 +152,6 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     description: "Upper clamp on computed quantity. min<=max enforced by application validator (cross-field constraint not expressible in JSON Schema). Required — always present (core sizing / position bounds).",
   },
   {
-    field: "max_daily_notional_deployed",
-    kind: "number",
-    description: "Issue #17 (quant-analyst review): hard per-day dollar cap on cumulative entry notional deployed (sum of qty * fill_premium * 100 for SignalAccepted BTO entries today, UTC trading day). Reject new BTO entries with DAILY_NOTIONAL_DEPLOYED_EXCEEDED when today_deployed + new_notional > max_daily_notional_deployed. Complements max_notional_per_signal (per-signal bound) by capping total daily capital at risk against premium-spike over-leverage across many signals. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.",
-  },
-  {
-    field: "max_notional_per_signal",
-    kind: "number",
-    description: "Issue #17 (quant-analyst review): hard per-signal dollar cap on entry notional. The sizing formula sources price from the contract-resolver's freshly-fetched ask (or mid clamped to ask) instead of payload.price (which is 5-30s stale). After computing qty = clamp(floor(allocation / (price * 100)), min_contracts, max_contracts), reject the signal with NOTIONAL_PER_SIGNAL_EXCEEDED when clamp(floor(...), min, max) == min AND min * price * 100 > max_notional_per_signal — silently over-sizing on a high-IV ticker is the failure mode this gate prevents. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.",
-  },
-  {
     field: "max_positions",
     kind: "number",
     description: "Max concurrent open PositionWorkflows per (tenant, strategy). Counted via listWorkflowExecutions(TenantStrategy=..., WorkflowType='PositionWorkflow', ExecutionStatus='Running'). Required — always present (core sizing / position bounds).",
@@ -312,14 +302,6 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     field: "trail_on_partial",
     kind: "boolean",
     description: "Phase 4: arm CHANDELIER_TRAIL on first partial exit. Unset: treated as false — the chandelier trail is NOT armed on the first partial exit.",
-  },
-  {
-    field: "watchlist_expiry_rule",
-    kind: "string",
-    options: [
-      { value: "NEAREST_WEEKLY", label: "Nearest weekly" },
-    ],
-    description: "Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY picks the nearest weekly expiry on/after et_date. Optional and null-when-absent; the watchlist consumer resolves the nearest weekly expiry unconditionally, so an unset value is spec-only and never leaks into non-watchlist configs.",
   },
 ];
 

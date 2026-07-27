@@ -42,8 +42,7 @@ import org.springframework.stereotype.Component;
  *       {@code account_daily_loss_pct} is the sole daily-loss breaker — so it is no longer
  *       DANGEROUS; it falls through to SAFE and is freely writable.)
  *   <li><b>EXPOSURE / tighten-only</b> ({@code max_contracts}, {@code min_contracts}, {@code
- *       max_positions}, {@code capital_weight}, {@code max_notional_per_signal}, {@code
- *       max_daily_notional_deployed}) — must not increase vs stored.
+ *       max_positions}, {@code capital_weight}) — must not increase vs stored.
  *   <li><b>SAFE</b> — every other field is freely writable.
  * </ul>
  *
@@ -488,14 +487,6 @@ public class StrategyConfigWriter {
     requireNotIncreased("min_contracts", stored.getMinContracts(), next.getMinContracts());
     requireNotIncreased("max_positions", stored.getMaxPositions(), next.getMaxPositions());
     requireNotIncreased("capital_weight", stored.getCapitalWeight(), next.getCapitalWeight());
-    requireNotIncreased(
-        "max_notional_per_signal",
-        stored.getMaxNotionalPerSignal(),
-        next.getMaxNotionalPerSignal());
-    requireNotIncreased(
-        "max_daily_notional_deployed",
-        stored.getMaxDailyNotionalDeployed(),
-        next.getMaxDailyNotionalDeployed());
   }
 
   private static void requireIdentity(String field, Object stored, Object next) {

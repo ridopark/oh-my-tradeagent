@@ -203,7 +203,6 @@ def test_strategy_config_round_trips() -> None:
     assert model.max_slippage_pct == 0.05
     # Phase 0 watchlist-trigger fields: the fixture carries their defaults explicitly.
     assert model.entry_mode == "BREAKOUT"
-    assert model.watchlist_expiry_rule == "NEAREST_WEEKLY"
     assert model.gap_tolerance_pct == 0.005
     assert model.equity_emit_delta_pct == 0.0005
     assert model.enabled is True
@@ -417,35 +416,6 @@ def test_position_workflow_input_force_close_0dte_bad_format_rejected() -> None:
         assert "force_close_0dte_et" in str(exc_info.value)
 
 
-def test_strategy_config_notional_cap_fields_round_trip() -> None:
-    """Issue #17: both per-signal and per-day notional caps parse, round-trip, and absent is fine."""
-    data = {
-        **_STRATEGY_CONFIG_BASE,
-        "max_notional_per_signal": 2500.0,
-        "max_daily_notional_deployed": 25000.0,
-    }
-    model = StrategyConfig.model_validate(data)
-    assert model.max_notional_per_signal == Decimal("2500.0")
-    assert model.max_daily_notional_deployed == Decimal("25000.0")
-    reloaded = StrategyConfig.model_validate_json(model.model_dump_json(by_alias=True, exclude_none=True))
-    assert reloaded.max_notional_per_signal == Decimal("2500.0")
-    assert reloaded.max_daily_notional_deployed == Decimal("25000.0")
-
-    # Absent case (the existing copytrade-v1 fixture) must still validate cleanly — both fields are opt-in.
-    absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
-    assert absent.max_notional_per_signal is None
-    assert absent.max_daily_notional_deployed is None
-
-
-def test_strategy_config_notional_cap_non_positive_rejected() -> None:
-    """Issue #17: both caps require exclusiveMinimum 0 — zero and negative must be rejected."""
-    for field in ("max_notional_per_signal", "max_daily_notional_deployed"):
-        for bad in (0, -1, -1000.0):
-            with pytest.raises(ValidationError) as exc_info:
-                StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, field: bad})
-            assert field in str(exc_info.value)
-
-
 def _fill_signal_json(avg_fill_price: str, broker_order_id: str = "order-abc") -> bytes:
     """JSON-shape FillSignalPayload payload as Jackson would emit it from the Java side.
 
@@ -563,11 +533,10 @@ def test_arm_context_round_trips() -> None:
 
 
 def test_strategy_config_watchlist_only_fields_null_when_absent() -> None:
-    """The four watchlist-only fields are opt-in: null when a config omits them, so
+    """The watchlist-only fields are opt-in: null when a config omits them, so
     copytrade never carries them. Only enabled (universal) keeps its default."""
     model = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
     assert model.entry_mode is None
-    assert model.watchlist_expiry_rule is None
     assert model.gap_tolerance_pct is None
     assert model.equity_emit_delta_pct is None
     assert model.enabled is True

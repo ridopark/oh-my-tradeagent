@@ -40,8 +40,7 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
    *       daily_loss_threshold} is a dead field — the account cap is the sole daily-loss breaker —
    *       so it is no longer risk-relevant and a change to it no longer voids a live promotion.)
    *   <li>EXPOSURE (tighten-only): {@code max_contracts}, {@code min_contracts}, {@code
-   *       max_positions}, {@code capital_weight}, {@code max_notional_per_signal}, {@code
-   *       max_daily_notional_deployed}.
+   *       max_positions}, {@code capital_weight}.
    * </ul>
    *
    * <p>risk-manager-suggested additions, verified against {@code
@@ -63,8 +62,6 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
           "min_contracts",
           "max_positions",
           "capital_weight",
-          "max_notional_per_signal",
-          "max_daily_notional_deployed",
           // risk-manager additions (all verified present in strategy-config.json)
           "notional_cap_pct_of_equity",
           "same_underlying_count",

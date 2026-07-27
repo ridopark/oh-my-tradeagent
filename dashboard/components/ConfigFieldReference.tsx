@@ -219,14 +219,6 @@ const CONFIG_FIELDS: ConfigField[] = [
       "BREAKOUT — a long setup enters the moment price trades through the trigger, without waiting for a pullback.",
   },
   {
-    field: "watchlist_expiry_rule",
-    what: "The rule that selects which option expiry a watchlist-trigger entry buys.",
-    effect:
-      "NEAREST_WEEKLY (default; unset treated as NEAREST_WEEKLY) picks the nearest weekly expiry on or after the trigger's et_date.",
-    example:
-      "NEAREST_WEEKLY — a trigger firing today buys the nearest weekly expiry on or after today.",
-  },
-  {
     field: "gap_tolerance_pct",
     what: "Watchlist-trigger entry: the chase-cap band around the trigger level, as a fraction of the trigger.",
     effect:

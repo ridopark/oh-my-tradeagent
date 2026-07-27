@@ -135,7 +135,6 @@ const watchlistConfig = (brokerTarget: string) =>
       notional_cap_pct_of_capital_base: 0.1,
       max_positions: 3,
       entry_mode: "BREAKOUT",
-      watchlist_expiry_rule: "NEAREST_WEEKLY",
       gap_tolerance_pct: 0.005,
       equity_emit_delta_pct: 0.0005,
       sl_pct: 0.3,

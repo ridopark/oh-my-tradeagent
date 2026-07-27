@@ -293,17 +293,6 @@ class StrategyConfigWriterTest {
   }
 
   @Test
-  void rejectsMaxNotionalPerSignalIncrease() {
-    StrategyConfig stored = liveSafeStored();
-    stored.setMaxNotionalPerSignal(new BigDecimal("1000"));
-    StrategyConfig next = copy(stored);
-    next.setMaxNotionalPerSignal(new BigDecimal("5000"));
-    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
-        .isInstanceOf(DangerousFieldChangeRejected.class)
-        .hasMessageContaining("max_notional_per_signal");
-  }
-
-  @Test
   void allowsExposureDecrease() {
     StrategyConfig stored = liveSafeStored(); // max_contracts = 5, max_positions = 5
     StrategyConfig next = copy(stored);
@@ -314,17 +303,6 @@ class StrategyConfigWriterTest {
 
     assertThat(newVersion).isEqualTo(2L);
     verify(audit).log(any());
-  }
-
-  @Test
-  void rejectsNullReplacingNonNullCap() {
-    StrategyConfig stored = liveSafeStored();
-    stored.setMaxNotionalPerSignal(new BigDecimal("1000"));
-    StrategyConfig next = copy(stored);
-    next.setMaxNotionalPerSignal(null); // removing a cap is NOT a tightening
-    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
-        .isInstanceOf(DangerousFieldChangeRejected.class)
-        .hasMessageContaining("max_notional_per_signal");
   }
 
   // --- audit factory shape ---

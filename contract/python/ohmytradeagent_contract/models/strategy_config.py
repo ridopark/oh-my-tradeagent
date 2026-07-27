@@ -48,14 +48,6 @@ class EntryMode(StrEnum):
     retest = "RETEST"
 
 
-class WatchlistExpiryRule(StrEnum):
-    """
-    Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY picks the nearest weekly expiry on/after et_date. Optional and null-when-absent; the watchlist consumer resolves the nearest weekly expiry unconditionally, so an unset value is spec-only and never leaks into non-watchlist configs.
-    """
-
-    nearest_weekly = "NEAREST_WEEKLY"
-
-
 class StrategyConfig(BaseModel):
     """
     Per-strategy configuration loaded from tenants/<tenant>/strategies/<strategy>.yaml. Drives risk gates, sizing, and exit logic in CopytradeSignalWorkflow + PositionWorkflow. Phase 2a consumes a minimal required subset (author whitelist, signal-age, max-positions, capital-weight sizing); fields used only in later phases are optional and documented inline.
@@ -207,14 +199,6 @@ class StrategyConfig(BaseModel):
     """
     Issue #15 (quant-analyst review): wall-clock time (HH:MM in US/Eastern) at which PositionWorkflow force-flats non-0DTE positions for the EOD sweep. Default 15:45 ET when null. The prior 15:55 ET default left only 5 minutes of book depth before close for liquidation; 15:45 ET preserves a 15-minute window of reasonable spreads. Spec-only field in this PR; PositionWorkflow timer wiring lands separately.
     """
-    max_notional_per_signal: Annotated[Decimal, Field(gt=0)] | None = None
-    """
-    Issue #17 (quant-analyst review): hard per-signal dollar cap on entry notional. The sizing formula sources price from the contract-resolver's freshly-fetched ask (or mid clamped to ask) instead of payload.price (which is 5-30s stale). After computing qty = clamp(floor(allocation / (price * 100)), min_contracts, max_contracts), reject the signal with NOTIONAL_PER_SIGNAL_EXCEEDED when clamp(floor(...), min, max) == min AND min * price * 100 > max_notional_per_signal — silently over-sizing on a high-IV ticker is the failure mode this gate prevents. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.
-    """
-    max_daily_notional_deployed: Annotated[Decimal, Field(gt=0)] | None = None
-    """
-    Issue #17 (quant-analyst review): hard per-day dollar cap on cumulative entry notional deployed (sum of qty * fill_premium * 100 for SignalAccepted BTO entries today, UTC trading day). Reject new BTO entries with DAILY_NOTIONAL_DEPLOYED_EXCEEDED when today_deployed + new_notional > max_daily_notional_deployed. Complements max_notional_per_signal (per-signal bound) by capping total daily capital at risk against premium-spike over-leverage across many signals. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.
-    """
     eod_force_flatten: bool | None = None
     """
     Issue #202: gate the EOD force-flatten timer (15:55 ET) in PositionWorkflow. Default true (null treated as true) preserves the pre-issue-202 behavior for every strategy that doesn't explicitly opt out. Copytrade strategies that mirror an external Discord author MUST set this to false — the only normal exit for an author-mirror position is an STC message from the author; force-flattening at EOD diverges from the author's actual position and breaks mirror fidelity. The expiry-close timer (0DTE physical-expiry handling), chandelier trail (when armed), risk-breach, and operator force_close remain available as emergency exits regardless of this flag.
@@ -250,10 +234,6 @@ class StrategyConfig(BaseModel):
     entry_mode: EntryMode | None = None
     """
     Watchlist-trigger entry style. BREAKOUT enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional and null-when-absent; the watchlist consumer applies the BREAKOUT code default when unset, so copytrade configs that never set it carry no inert value.
-    """
-    watchlist_expiry_rule: WatchlistExpiryRule | None = None
-    """
-    Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY picks the nearest weekly expiry on/after et_date. Optional and null-when-absent; the watchlist consumer resolves the nearest weekly expiry unconditionally, so an unset value is spec-only and never leaks into non-watchlist configs.
     """
     gap_tolerance_pct: confloat(ge=0.0) | None = None
     """
