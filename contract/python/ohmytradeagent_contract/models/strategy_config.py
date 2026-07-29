@@ -125,6 +125,10 @@ class StrategyConfig(BaseModel):
     """
     Upper clamp on computed quantity. min<=max enforced by application validator (cross-field constraint not expressible in JSON Schema). Required — always present (core sizing / position bounds).
     """
+    entry_scale_in_fraction: confloat(le=1.0, gt=0.0) | None = None
+    """
+    Copytrade BTO entry-sizing reduction for scale-in signals. When the signal tail contains a scale-in cue ('scaling in' / 'scale in' / 'starter' / 'small size' / 'half size') the capital-weight-sized contract count is multiplied by this fraction and re-clamped UP to min_contracts, so the initial entry is smaller — the author is entering small and will add later (which skip_avg already ignores, so we never chase the adds). Applied in Sizing.computeContracts by reading the payload tail; because the tail is an activity-input VALUE (only Temporal command type/ordering is replay-checked, not activity-input values) the sizing change alters the place-order qty value only and needs NO getVersion replay gate. Opt-in: null/absent DISABLES it (full size, byte-identical to the pre-change path).
+    """
     skip_avg: bool | None = None
     """
     If true, AVG (average-down) actions are skipped by the workflow. Default true per PLAN.md Open Question #10.

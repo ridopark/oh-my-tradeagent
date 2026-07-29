@@ -29,7 +29,26 @@ public final class Sizing {
    */
   public static long computeContracts(
       CopytradeSignalPayload payload, StrategyConfig config, BigDecimal capital, BigDecimal limit) {
-    return computeContracts(config, capital, limit);
+    long base = computeContracts(config, capital, limit);
+    // Scale-in entry-size reduction: when entry_scale_in_fraction is configured AND the BTO tail
+    // carries a scale-in cue ("scaling in" / "scale in" / "starter" / "small size" / "half size"),
+    // the author is entering small and will add later — so we take a smaller initial entry:
+    // floor(base * fraction), re-clamped UP to min_contracts (a sub-minimum entry still floors to
+    // min, never zero). Opt-in: null fraction / no cue → byte-identical to base (full size).
+    //
+    // This reads payload.getTail(), an activity-input VALUE. Only Temporal command type/ordering is
+    // replay-checked, not activity-input values, so altering the place-order qty here introduces no
+    // new/reordered command and needs NO Workflow.getVersion replay gate.
+    BigDecimal fraction = config.getEntryScaleInFraction();
+    if (fraction != null && ScaleInMatcher.match(payload.getTail()).isPresent()) {
+      long scaled =
+          BigDecimal.valueOf(base)
+              .multiply(fraction)
+              .setScale(0, RoundingMode.FLOOR)
+              .longValueExact();
+      return Math.max(config.getMinContracts(), scaled);
+    }
+    return base;
   }
 
   /**

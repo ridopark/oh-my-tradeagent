@@ -33,6 +33,7 @@ import com.ohmytradeagent.orchestrator.domain.ContractResolveInput;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
 import com.ohmytradeagent.orchestrator.domain.KeywordPartialMatcher;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
+import com.ohmytradeagent.orchestrator.domain.ScaleInMatcher;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import com.ohmytradeagent.orchestrator.domain.StrategyConfigs;
 import io.temporal.activity.ActivityOptions;
@@ -530,7 +531,17 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     } else {
       capital = strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
     }
+    // Base (pre-scale-in) sizing for the audit trail: the payload-free overload never applies the
+    // scale-in reduction, so it is exactly the count before any scale-in cut. `contracts` uses the
+    // payload overload, which halves (per entry_scale_in_fraction) when the BTO tail carries a
+    // scale-in cue. Both reads are pure; the phrase is recomputed for the audit subject.
+    long baseContracts = Sizing.computeContracts(config, capital, priced.limit());
     long contracts = Sizing.computeContracts(payload, config, capital, priced.limit());
+    boolean scaleInApplied =
+        config.getEntryScaleInFraction() != null
+            && ScaleInMatcher.match(payload.getTail()).isPresent();
+    String scaleInPhrase =
+        scaleInApplied ? ScaleInMatcher.match(payload.getTail()).orElse(null) : null;
 
     // Phase F4B (clamp-to-fit headroom): instead of letting checkNotionalCap reject an over-cap
     // entry, SIZE IT DOWN to the largest qty that fits the remaining notional-cap headroom. The
@@ -577,10 +588,22 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         payload,
         KIND_SIGNAL_ACCEPTED,
         subject(
-            "signal_id", payload.getSignalId(),
-            "option_symbol", resolved.optionSymbol(),
-            "contracts", contracts,
-            "ref_premium", payload.getPrice()));
+            "signal_id",
+            payload.getSignalId(),
+            "option_symbol",
+            resolved.optionSymbol(),
+            "contracts",
+            contracts,
+            "contracts_pre_scale_in",
+            baseContracts,
+            "scale_in_applied",
+            scaleInApplied,
+            "scale_in_phrase",
+            scaleInPhrase,
+            "scale_in_fraction",
+            config.getEntryScaleInFraction(),
+            "ref_premium",
+            payload.getPrice()));
 
     // Edited-signal supersede (F1): when this corrected BTO matches a prior just-filled leg on
     // tenant+strategy+underlying+strike+right but a DIFFERENT expiry, and the prior leg's entry is
