@@ -530,7 +530,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     } else {
       capital = strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
     }
-    long contracts = Sizing.computeContracts(payload, config, capital, priced.limit());
+    // Cash-weight sizing + scale-in reduction in one pass. The EntrySizing outcome carries the
+    // pre-scale-in base and the matched cue, so the audit below reads them from Sizing's actual
+    // decision rather than re-deriving (which could drift). scale-in reduces the qty by
+    // entry_scale_in_fraction when the BTO tail carries a scale-in cue (see Sizing#computeEntry).
+    Sizing.EntrySizing sized = Sizing.computeEntry(payload, config, capital, priced.limit());
+    long contracts = sized.contracts();
 
     // Phase F4B (clamp-to-fit headroom): instead of letting checkNotionalCap reject an over-cap
     // entry, SIZE IT DOWN to the largest qty that fits the remaining notional-cap headroom. The
@@ -577,10 +582,22 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         payload,
         KIND_SIGNAL_ACCEPTED,
         subject(
-            "signal_id", payload.getSignalId(),
-            "option_symbol", resolved.optionSymbol(),
-            "contracts", contracts,
-            "ref_premium", payload.getPrice()));
+            "signal_id",
+            payload.getSignalId(),
+            "option_symbol",
+            resolved.optionSymbol(),
+            "contracts",
+            contracts,
+            "contracts_pre_scale_in",
+            sized.base(),
+            "scale_in_applied",
+            sized.scaleInApplied(),
+            "scale_in_phrase",
+            sized.scaleInPhrase(),
+            "scale_in_fraction",
+            config.getEntryScaleInFraction(),
+            "ref_premium",
+            payload.getPrice()));
 
     // Edited-signal supersede (F1): when this corrected BTO matches a prior just-filled leg on
     // tenant+strategy+underlying+strike+right but a DIFFERENT expiry, and the prior leg's entry is

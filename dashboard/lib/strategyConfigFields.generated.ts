@@ -100,6 +100,11 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     description: "Watchlist-trigger entry style. BREAKOUT enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional and null-when-absent; the watchlist consumer applies the BREAKOUT code default when unset, so copytrade configs that never set it carry no inert value.",
   },
   {
+    field: "entry_scale_in_fraction",
+    kind: "number",
+    description: "Copytrade BTO entry-sizing reduction for scale-in signals. When the signal tail contains a scale-in cue ('scaling in' / 'scale in' / 'starter' / 'small size' / 'half size') the capital-weight-sized contract count is multiplied by this fraction and re-clamped UP to min_contracts, so the initial entry is smaller — the author is entering small and will add later (which skip_avg already ignores, so we never chase the adds). Applied in Sizing.computeContracts by reading the payload tail; because the tail is an activity-input VALUE (only Temporal command type/ordering is replay-checked, not activity-input values) the sizing change alters the place-order qty value only and needs NO getVersion replay gate. Opt-in: null/absent DISABLES it (full size, byte-identical to the pre-change path).",
+  },
+  {
     field: "eod_force_flatten",
     kind: "boolean",
     description: "Issue #202: gate the EOD force-flatten timer (15:55 ET) in PositionWorkflow. Default true (null treated as true) preserves the pre-issue-202 behavior for every strategy that doesn't explicitly opt out. Copytrade strategies that mirror an external Discord author MUST set this to false — the only normal exit for an author-mirror position is an STC message from the author; force-flattening at EOD diverges from the author's actual position and breaks mirror fidelity. The expiry-close timer (0DTE physical-expiry handling), chandelier trail (when armed), risk-breach, and operator force_close remain available as emergency exits regardless of this flag.",

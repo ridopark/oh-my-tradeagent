@@ -76,6 +76,79 @@ class SizingTest {
     assertThat(qty).isEqualTo(63);
   }
 
+  // ---------------------------------------------------------------------------
+  // Scale-in entry-size reduction (PLAN-2026-07-28): when the BTO tail contains a
+  // scale-in cue AND entry_scale_in_fraction is set, the sized count is multiplied
+  // by the fraction and re-clamped up to min_contracts. Null fraction / no-cue tail
+  // = full size. Only the payload-carrying overload applies it.
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void scaleInCue_withFraction_halvesTheSizedCount_incidentRepro() {
+    // Incident: "BTO SPY 8/04 725p @ 3.09 risky, scaling in." entered FULL size.
+    // capital=115_000, weight=1.0, limit=23.00 -> raw=115_000/2300=50 -> base=50.
+    // fraction 0.5 -> floor(50*0.5)=25.
+    CopytradeSignalPayload p = payloadWithTail(new BigDecimal("23.00"), "risky, scaling in");
+    StrategyConfig cfg = configWithWeights(new BigDecimal("1.0"), 1L, 100L);
+    cfg.setEntryScaleInFraction(new BigDecimal("0.5"));
+
+    long qty = Sizing.computeContracts(p, cfg, new BigDecimal("115000"), new BigDecimal("23.00"));
+
+    assertThat(qty).isEqualTo(25);
+  }
+
+  @Test
+  void nullFraction_fullSize_evenWithScaleInCue() {
+    CopytradeSignalPayload p = payloadWithTail(new BigDecimal("23.00"), "risky, scaling in");
+    StrategyConfig cfg = configWithWeights(new BigDecimal("1.0"), 1L, 100L);
+    // entry_scale_in_fraction left null (default OFF).
+
+    long qty = Sizing.computeContracts(p, cfg, new BigDecimal("115000"), new BigDecimal("23.00"));
+
+    assertThat(qty).isEqualTo(50);
+  }
+
+  @Test
+  void tailWithoutCue_fullSize_evenWithFractionSet() {
+    CopytradeSignalPayload p = payloadWithTail(new BigDecimal("23.00"), "risky, sending it");
+    StrategyConfig cfg = configWithWeights(new BigDecimal("1.0"), 1L, 100L);
+    cfg.setEntryScaleInFraction(new BigDecimal("0.5"));
+
+    long qty = Sizing.computeContracts(p, cfg, new BigDecimal("115000"), new BigDecimal("23.00"));
+
+    assertThat(qty).isEqualTo(50);
+  }
+
+  @Test
+  void scaleInBelowMin_clampsUpToMinContracts() {
+    // base=1, fraction 0.5 -> floor(0.5)=0 -> clamped up to min_contracts=1.
+    // capital=10_000, weight=0.5 -> allocation=5000; limit=50 -> per contract=5000 -> raw=1.
+    CopytradeSignalPayload p = payloadWithTail(new BigDecimal("50.00"), "starter");
+    StrategyConfig cfg = configWithWeights(new BigDecimal("0.5"), 1L, 100L);
+    cfg.setEntryScaleInFraction(new BigDecimal("0.5"));
+
+    long qty = Sizing.computeContracts(p, cfg, new BigDecimal("10000"), new BigDecimal("50.00"));
+
+    assertThat(qty).isEqualTo(1);
+  }
+
+  @Test
+  void payloadFreeOverload_unchanged_ignoresScaleIn() {
+    StrategyConfig cfg = configWithWeights(new BigDecimal("1.0"), 1L, 100L);
+    cfg.setEntryScaleInFraction(new BigDecimal("0.5"));
+
+    // The payload-free overload never reads a tail, so scale-in never applies: full 50.
+    long qty = Sizing.computeContracts(cfg, new BigDecimal("115000"), new BigDecimal("23.00"));
+
+    assertThat(qty).isEqualTo(50);
+  }
+
+  private CopytradeSignalPayload payloadWithTail(BigDecimal price, String tail) {
+    CopytradeSignalPayload p = payloadWithPrice(price);
+    p.setTail(tail);
+    return p;
+  }
+
   private CopytradeSignalPayload payloadWithPrice(BigDecimal price) {
     CopytradeSignalPayload p = new CopytradeSignalPayload();
     p.setPrice(price);
