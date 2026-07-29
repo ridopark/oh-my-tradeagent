@@ -4,6 +4,7 @@ import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.Optional;
 
 /**
  * Pure capital-weight sizing math. Determinism-safe — callable from workflow code without I/O.
@@ -29,26 +30,41 @@ public final class Sizing {
    */
   public static long computeContracts(
       CopytradeSignalPayload payload, StrategyConfig config, BigDecimal capital, BigDecimal limit) {
+    return computeEntry(payload, config, capital, limit).contracts();
+  }
+
+  /**
+   * Cash-weight sizing WITH the scale-in reduction, returning the full {@link EntrySizing} outcome
+   * (pre-scale-in base, final contracts, and the matched cue) so the caller audits from one source
+   * of truth instead of re-deriving the base/applied/phrase.
+   *
+   * <p>Scale-in: when {@code entry_scale_in_fraction} is configured AND the BTO tail carries a
+   * scale-in cue ("scaling in" / "scale in" / "starter" / "small size" / "half size"), the author
+   * is entering small and will add later — so the initial entry is {@code floor(base * fraction)},
+   * re-clamped UP to {@code min_contracts} (a sub-minimum entry still floors to min, never zero).
+   * Opt-in: null fraction / no cue → the count is byte-identical to {@code base} (full size).
+   *
+   * <p>Reads {@code payload.getTail()}, an activity-input VALUE. Because scale-in floors UP to min,
+   * {@code contracts >= min_contracts} always, so it can never flip an accept into a reject — it
+   * adds no new/reordered command, only changes the place-order qty argument. Only Temporal command
+   * type/ordering is replay-checked (not activity-input values), so NO Workflow.getVersion gate is
+   * needed.
+   */
+  public static EntrySizing computeEntry(
+      CopytradeSignalPayload payload, StrategyConfig config, BigDecimal capital, BigDecimal limit) {
     long base = computeContracts(config, capital, limit);
-    // Scale-in entry-size reduction: when entry_scale_in_fraction is configured AND the BTO tail
-    // carries a scale-in cue ("scaling in" / "scale in" / "starter" / "small size" / "half size"),
-    // the author is entering small and will add later — so we take a smaller initial entry:
-    // floor(base * fraction), re-clamped UP to min_contracts (a sub-minimum entry still floors to
-    // min, never zero). Opt-in: null fraction / no cue → byte-identical to base (full size).
-    //
-    // This reads payload.getTail(), an activity-input VALUE. Only Temporal command type/ordering is
-    // replay-checked, not activity-input values, so altering the place-order qty here introduces no
-    // new/reordered command and needs NO Workflow.getVersion replay gate.
     BigDecimal fraction = config.getEntryScaleInFraction();
-    if (fraction != null && ScaleInMatcher.match(payload.getTail()).isPresent()) {
-      long scaled =
-          BigDecimal.valueOf(base)
-              .multiply(fraction)
-              .setScale(0, RoundingMode.FLOOR)
-              .longValueExact();
-      return Math.max(config.getMinContracts(), scaled);
+    Optional<String> cue =
+        fraction != null ? ScaleInMatcher.match(payload.getTail()) : Optional.empty();
+    if (cue.isEmpty()) {
+      return new EntrySizing(base, base, false, null);
     }
-    return base;
+    long scaled =
+        BigDecimal.valueOf(base)
+            .multiply(fraction)
+            .setScale(0, RoundingMode.FLOOR)
+            .longValueExact();
+    return new EntrySizing(base, Math.max(config.getMinContracts(), scaled), true, cue.get());
   }
 
   /**
@@ -96,4 +112,14 @@ public final class Sizing {
 
   /** Result of decider-aware sizing: either SKIP (with reason) or a positive contract count. */
   public record SizingOutcome(boolean skip, long contracts, String reason) {}
+
+  /**
+   * Copytrade entry-sizing outcome from {@link #computeEntry}: the pre-scale-in cash-weight {@code
+   * base} count, the {@code contracts} to place after any scale-in reduction, and whether a
+   * scale-in cue fired ({@code scaleInApplied} + the matched {@code scaleInPhrase}, null when
+   * none). Lets the workflow audit the pre/post counts and the cue from one computation rather than
+   * re-deriving them.
+   */
+  public record EntrySizing(
+      long base, long contracts, boolean scaleInApplied, String scaleInPhrase) {}
 }
