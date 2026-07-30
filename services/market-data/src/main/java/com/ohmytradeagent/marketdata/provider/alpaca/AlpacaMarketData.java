@@ -426,7 +426,8 @@ public class AlpacaMarketData implements MarketDataProvider {
       acceptEquity(ticker, price);
       return true;
     }
-    if (deviation(price, ref).compareTo(MAX_DEVIATION_PCT) <= 0) {
+    BigDecimal devFromRef = deviation(price, ref);
+    if (devFromRef.compareTo(MAX_DEVIATION_PCT) <= 0) {
       acceptEquity(ticker, price);
       return true;
     }
@@ -441,7 +442,7 @@ public class AlpacaMarketData implements MarketDataProvider {
         ticker,
         price,
         ref,
-        deviation(price, ref).movePointRight(2).setScale(4, java.math.RoundingMode.HALF_UP));
+        devFromRef.movePointRight(2).setScale(4, java.math.RoundingMode.HALF_UP));
     return false;
   }
 
