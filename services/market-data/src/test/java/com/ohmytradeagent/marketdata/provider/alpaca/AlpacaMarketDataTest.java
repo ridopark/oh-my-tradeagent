@@ -2,6 +2,9 @@ package com.ohmytradeagent.marketdata.provider.alpaca;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.marketdata.provider.Quote;
 import com.ohmytradeagent.marketdata.provider.Subscription;
@@ -573,6 +576,124 @@ class AlpacaMarketDataTest {
   @Test
   void effectiveStockDataWsUrl_blankFeed_staysGated() {
     assertThat(propsWithFeed("").effectiveStockDataWsUrl()).isEmpty();
+  }
+
+  // --- Phase 1 (F1): single-tick gross/phantom outlier guard on the equity trigger feed ---
+
+  private JsonNode tradeRec(String price) throws Exception {
+    return mapper.readTree(
+        "{\"T\":\"t\",\"S\":\"NVDA\",\"p\":" + price + ",\"t\":\"2026-07-30T13:31:00Z\"}");
+  }
+
+  @Test
+  void recordToEquityTick_rejectsGrossOutlierPrint() throws Exception {
+    // INCIDENT REPRO: seed ~196, then a lone 201.00 (2.55% > 2%) is a gross/phantom print.
+    assertThat(provider.recordToEquityTick(tradeRec("196.00"))).isNotNull();
+    assertThat(provider.recordToEquityTick(tradeRec("201.00"))).isNull();
+
+    // The phantom reverted: a following ~196 print is in-band vs the UNCHANGED reference (196),
+    // so it is accepted — proving the outlier never advanced lastAccepted.
+    Tick revert = provider.recordToEquityTick(tradeRec("196.10"));
+    assertThat(revert).isNotNull();
+    assertThat(revert.premium()).isEqualByComparingTo("196.10");
+  }
+
+  @Test
+  void recordToEquityTick_acceptsInBandMove() throws Exception {
+    assertThat(provider.recordToEquityTick(tradeRec("196.00"))).isNotNull();
+
+    Tick moved = provider.recordToEquityTick(tradeRec("199.00")); // 1.53% < 2%
+    assertThat(moved).isNotNull();
+    assertThat(moved.premium()).isEqualByComparingTo("199.00");
+
+    // Reference advanced to 199: 200.50 is >2% vs the original 196 but in-band vs 199 -> accepted.
+    Tick next = provider.recordToEquityTick(tradeRec("200.50"));
+    assertThat(next).isNotNull();
+    assertThat(next.premium()).isEqualByComparingTo("200.50");
+  }
+
+  @Test
+  void recordToEquityTick_firstPrintSeedsReference() throws Exception {
+    Tick first = provider.recordToEquityTick(tradeRec("196.00"));
+    assertThat(first).isNotNull();
+    assertThat(first.premium()).isEqualByComparingTo("196.00");
+
+    // Seeded: a subsequent in-band print is accepted against the seeded reference.
+    assertThat(provider.recordToEquityTick(tradeRec("196.50"))).isNotNull();
+  }
+
+  @Test
+  void recordToEquityTick_rejectsNonPositivePrice() throws Exception {
+    // A non-positive equity print is aberrant: dropped and NEVER seeded as the reference (seeding 0
+    // would make deviation() divide-by-zero and silently blind the ticker's feed).
+    assertThat(provider.recordToEquityTick(tradeRec("0.00"))).isNull();
+    assertThat(provider.recordToEquityTick(tradeRec("-5.00"))).isNull();
+
+    // The bad prints never became the reference: the first positive print still seeds and is
+    // accepted, and subsequent in-band prints keep flowing (no divide-by-zero, feed not poisoned).
+    Tick seed = provider.recordToEquityTick(tradeRec("196.00"));
+    assertThat(seed).isNotNull();
+    assertThat(seed.premium()).isEqualByComparingTo("196.00");
+    assertThat(provider.recordToEquityTick(tradeRec("196.50"))).isNotNull();
+  }
+
+  @Test
+  void recordToEquityTick_corroboratedGapAccepted() throws Exception {
+    assertThat(provider.recordToEquityTick(tradeRec("196.00"))).isNotNull();
+    // 201 is >2% vs 196 -> dropped and held as the pending candidate.
+    assertThat(provider.recordToEquityTick(tradeRec("201.00"))).isNull();
+
+    // 202 corroborates the pending 201 (within 2% of it) -> accepted, reference advances to 202.
+    Tick corroborated = provider.recordToEquityTick(tradeRec("202.00"));
+    assertThat(corroborated).isNotNull();
+    assertThat(corroborated.premium()).isEqualByComparingTo("202.00");
+
+    // No deadlock: a print in-band vs the advanced reference (202) is accepted.
+    Tick next = provider.recordToEquityTick(tradeRec("203.00"));
+    assertThat(next).isNotNull();
+    assertThat(next.premium()).isEqualByComparingTo("203.00");
+  }
+
+  @Test
+  void recordToEquityTick_rejectionEmitsObservabilityLog() throws Exception {
+    ch.qos.logback.classic.Logger logbackLogger =
+        (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AlpacaMarketData.class);
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    logbackLogger.addAppender(appender);
+    try {
+      provider.recordToEquityTick(tradeRec("196.00"));
+      provider.recordToEquityTick(tradeRec("201.00")); // rejected outlier
+    } finally {
+      logbackLogger.detachAppender(appender);
+    }
+
+    assertThat(appender.list)
+        .anySatisfy(
+            e -> {
+              String msg = e.getFormattedMessage();
+              assertThat(msg).contains("AUDIT stock-tick-outlier-rejected");
+              assertThat(msg).contains("ticker=NVDA");
+              assertThat(msg).contains("last=201");
+              assertThat(msg).contains("ref=196");
+              assertThat(msg).contains("devPct=");
+            });
+  }
+
+  @Test
+  void dispatchStockWsMessage_outlierNotFannedOut() {
+    AlpacaMarketData eq = equityProvider();
+    CopyOnWriteArrayList<Tick> received = new CopyOnWriteArrayList<>();
+    eq.subscribeEquity("NVDA", received::add);
+
+    eq.dispatchStockWsMessage(
+        "[{\"T\":\"t\",\"S\":\"NVDA\",\"p\":196.00,\"t\":\"2026-07-30T13:31:00Z\"}]");
+    // A lone >2% jump (phantom) must reach no subscriber.
+    eq.dispatchStockWsMessage(
+        "[{\"T\":\"t\",\"S\":\"NVDA\",\"p\":201.00,\"t\":\"2026-07-30T13:31:01Z\"}]");
+
+    assertThat(received).hasSize(1);
+    assertThat(received.get(0).premium()).isEqualByComparingTo("196.00");
   }
 
   private static AlpacaMarketDataProperties propsWithFeed(String feed) {
