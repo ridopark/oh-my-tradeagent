@@ -421,6 +421,17 @@ public class AlpacaMarketData implements MarketDataProvider {
    * Returns true to accept (and emit), false to drop.
    */
   private boolean acceptEquityPrice(String ticker, BigDecimal price) {
+    // A non-positive equity price is itself aberrant: drop it and never let it seed the reference
+    // (a zero reference would make every subsequent deviation() divide by zero and silently blind
+    // the ticker's feed).
+    if (price.signum() <= 0) {
+      log.warn(
+          "AUDIT stock-tick-outlier-rejected: ticker={} last={} ref={} devPct=non-positive",
+          ticker,
+          price,
+          lastAcceptedPrice.get(ticker));
+      return false;
+    }
     BigDecimal ref = lastAcceptedPrice.get(ticker);
     if (ref == null) {
       acceptEquity(ticker, price);

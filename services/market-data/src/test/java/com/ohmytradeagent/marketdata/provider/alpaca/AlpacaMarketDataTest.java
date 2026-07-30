@@ -623,6 +623,21 @@ class AlpacaMarketDataTest {
   }
 
   @Test
+  void recordToEquityTick_rejectsNonPositivePrice() throws Exception {
+    // A non-positive equity print is aberrant: dropped and NEVER seeded as the reference (seeding 0
+    // would make deviation() divide-by-zero and silently blind the ticker's feed).
+    assertThat(provider.recordToEquityTick(tradeRec("0.00"))).isNull();
+    assertThat(provider.recordToEquityTick(tradeRec("-5.00"))).isNull();
+
+    // The bad prints never became the reference: the first positive print still seeds and is
+    // accepted, and subsequent in-band prints keep flowing (no divide-by-zero, feed not poisoned).
+    Tick seed = provider.recordToEquityTick(tradeRec("196.00"));
+    assertThat(seed).isNotNull();
+    assertThat(seed.premium()).isEqualByComparingTo("196.00");
+    assertThat(provider.recordToEquityTick(tradeRec("196.50"))).isNotNull();
+  }
+
+  @Test
   void recordToEquityTick_corroboratedGapAccepted() throws Exception {
     assertThat(provider.recordToEquityTick(tradeRec("196.00"))).isNotNull();
     // 201 is >2% vs 196 -> dropped and held as the pending candidate.
