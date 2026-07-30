@@ -92,6 +92,14 @@ public class AlpacaMarketData implements MarketDataProvider {
   private final ConcurrentHashMap<String, List<Consumer<Tick>>> byTicker =
       new ConcurrentHashMap<>();
 
+  // Single-tick outlier guard state (mirrors byTicker). A gross/phantom equity print — the
+  // NVDA-type ~2%+ single-tick jump that reverts — must never fan out to a trigger subscriber,
+  // while a GENUINE sustained fast move (two agreeing prints) is not false-rejected. Feed-layer
+  // only: this drops at the source; it does not touch evaluation/EntryStateMachine.
+  private final ConcurrentHashMap<String, BigDecimal> lastAcceptedPrice = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, BigDecimal> pendingCandidate = new ConcurrentHashMap<>();
+  private static final BigDecimal MAX_DEVIATION_PCT = new BigDecimal("0.02");
+
   private final Object stockWsLock = new Object();
 
   // CONNECTION-LIMIT CAVEAT: this stock stream is the ONLY market-data WS now (the options premium
@@ -397,7 +405,53 @@ public class AlpacaMarketData implements MarketDataProvider {
     if (!price.isNumber()) {
       return null;
     }
-    return new Tick(sym, price.decimalValue(), parseTimestamp(rec.path("t").asText("")));
+    BigDecimal p = price.decimalValue();
+    if (!acceptEquityPrice(sym, p)) {
+      return null;
+    }
+    return new Tick(sym, p, parseTimestamp(rec.path("t").asText("")));
+  }
+
+  /**
+   * Single-tick outlier guard for the equity trigger feed. A first print seeds the reference; an
+   * in-band print ({@code <=2%} vs the last accepted price) is accepted and advances the reference;
+   * an out-of-band print is DROPPED and held as a candidate, and only accepted once a SECOND print
+   * corroborates it (two agreeing prints = a real sustained move). This keeps a lone gross/phantom
+   * spike that reverts from ever fanning out, without false-rejecting a genuine fast breakout.
+   * Returns true to accept (and emit), false to drop.
+   */
+  private boolean acceptEquityPrice(String ticker, BigDecimal price) {
+    BigDecimal ref = lastAcceptedPrice.get(ticker);
+    if (ref == null) {
+      acceptEquity(ticker, price);
+      return true;
+    }
+    if (deviation(price, ref).compareTo(MAX_DEVIATION_PCT) <= 0) {
+      acceptEquity(ticker, price);
+      return true;
+    }
+    BigDecimal pending = pendingCandidate.get(ticker);
+    if (pending != null && deviation(price, pending).compareTo(MAX_DEVIATION_PCT) <= 0) {
+      acceptEquity(ticker, price);
+      return true;
+    }
+    pendingCandidate.put(ticker, price);
+    log.warn(
+        "AUDIT stock-tick-outlier-rejected: ticker={} last={} ref={} devPct={}",
+        ticker,
+        price,
+        ref,
+        deviation(price, ref).movePointRight(2).setScale(4, java.math.RoundingMode.HALF_UP));
+    return false;
+  }
+
+  private void acceptEquity(String ticker, BigDecimal price) {
+    lastAcceptedPrice.put(ticker, price);
+    pendingCandidate.remove(ticker);
+  }
+
+  private static BigDecimal deviation(BigDecimal price, BigDecimal ref) {
+    return price.subtract(ref).abs().divide(ref, 10, java.math.RoundingMode.HALF_UP);
   }
 
   /**
