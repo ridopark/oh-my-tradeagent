@@ -78,3 +78,52 @@ async def test_different_signal_ids_both_emit() -> None:
         "t-dev/s-copytrade-v1/sig/1234567890123456789:0",
         "t-dev/s-copytrade-v1/sig/1234567890123456789:1",
     }
+
+
+# ---- de-risk emitter (PLAN-2026-08-04-copytrade-derisk-followup-cue) ----
+
+
+def _derisk_payload(signal_id: str = "cue-msg-1:derisk"):
+    from ohmytradeagent_contract.models.copytrade_derisk_payload import (
+        CopytradeDeriskPayload,
+        Right as DeriskRight,
+    )
+
+    return CopytradeDeriskPayload(
+        schema_version=1,
+        tenant_id="dev",
+        strategy_id="copytrade-v1",
+        signal_id=signal_id,
+        message_id="cue-msg-1",
+        author="TradingTheTrend",
+        posted_at=datetime(2026, 7, 31, 17, 56, 0, tzinfo=timezone.utc),
+        ticker="INTC",
+        expiry=date(2026, 8, 3),
+        strike=95.0,
+        right=DeriskRight.c,
+        target_bto_signal_id="bto-1:0",
+        target_entry_premium=1.34,
+        matched_cue="0 or hero",
+        raw_line="0 or hero on these, use your own stop",
+    )
+
+
+def test_workflow_id_for_derisk_shape() -> None:
+    from ohmytradeagent_sidecar.emitter import workflow_id_for_derisk
+
+    wf_id = workflow_id_for_derisk(_derisk_payload())
+    assert wf_id == "t-dev/s-copytrade-v1/derisk/cue-msg-1:derisk"
+
+
+@pytest.mark.asyncio
+async def test_inmemory_derisk_emitter_dedupes() -> None:
+    from ohmytradeagent_sidecar.emitter import InMemoryDeriskEmitter
+
+    em = InMemoryDeriskEmitter()
+    first = await em.emit(_derisk_payload())
+    second = await em.emit(_derisk_payload())
+
+    assert first.deduped is False
+    assert second.deduped is True
+    assert len(em.emitted) == 1
+    assert em.emitted[0].ticker == "INTC"

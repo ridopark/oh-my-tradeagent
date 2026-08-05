@@ -425,7 +425,43 @@ class SubscribeEquityActivityImplTest {
     }
   }
 
+  // --- Phase 2 (F4): equity-tick staleness guard ---
+  // Incident 2026-07-29: a QQQ 680 tag arrived ~20 min stale and tripped the trigger. The activity
+  // must mark such a late/out-of-sequence print stale so the already-deployed workflow drop bites.
+  // Age is measured against the injected clock (RTH_CLOCK == 2026-06-23T14:30:00Z) so it's
+  // deterministic; MAX_TICK_AGE is 15s.
+
+  @Test
+  void toEquityTick_marksStaleWhenRetrievedAtOlderThanMaxAge() {
+    SubscribeEquityActivityImpl activity = newBareActivity();
+    // 20 minutes before the clock => far past the 15s bound.
+    EquityTick out = activity.toEquityTick(tickAt("680.00", "2026-06-23T14:10:00Z"));
+    assertThat(out.getStale()).isTrue();
+  }
+
+  @Test
+  void toEquityTick_freshTickNotStale() {
+    SubscribeEquityActivityImpl activity = newBareActivity();
+    // 10s before the clock => below the 15s bound.
+    EquityTick out = activity.toEquityTick(tickAt("680.00", "2026-06-23T14:29:50Z"));
+    assertThat(out.getStale()).isFalse();
+  }
+
+  @Test
+  void toEquityTick_boundaryTickDropsPastMaxAge() {
+    SubscribeEquityActivityImpl activity = newBareActivity();
+    // 20s before the clock => above the 15s bound.
+    EquityTick out = activity.toEquityTick(tickAt("680.00", "2026-06-23T14:29:40Z"));
+    assertThat(out.getStale()).isTrue();
+  }
+
   // --- helpers ---
+
+  private static com.ohmytradeagent.marketdata.provider.Tick tickAt(
+      String last, String retrievedAtIso) {
+    return new com.ohmytradeagent.marketdata.provider.Tick(
+        "QQQ", new BigDecimal(last), OffsetDateTime.parse(retrievedAtIso));
+  }
 
   private SubscribeEquityActivityImpl newBareActivity() {
     return newActivityWithClock(RTH_CLOCK);

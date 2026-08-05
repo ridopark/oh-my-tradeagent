@@ -30,6 +30,7 @@ import com.ohmytradeagent.orchestrator.workflows.AccountSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AuditEmitWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.CopytradeDeriskWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.LiveActivationWorkflowImpl;
@@ -140,6 +141,13 @@ public class TemporalWorkerConfig {
     // — no in-process exec bean / throwing placeholder is needed.
     worker.registerWorkflowImplementationTypes(
         CopytradeSignalWorkflowImpl.class,
+        // PLAN-2026-08-04-copytrade-derisk-followup-cue (Phase 2): the isolated de-risk-on-follow-
+        // up-cue workflow. Started by the signal-source-discord sidecar (Phase 3, behind an env
+        // flag) per subscribing tenant; reuses the pre-existing partialExit + armChandelier signals
+        // on PositionWorkflow, so it adds no command shape to any running workflow (no replay
+        // gate).
+        // Deployable now but receives no traffic until the sidecar + per-tenant config are enabled.
+        CopytradeDeriskWorkflowImpl.class,
         PositionWorkflowImpl.class,
         KillSwitchWorkflowImpl.class,
         // Phase 6: account-level (tenant-wide) loss cap. One per tenant, started by

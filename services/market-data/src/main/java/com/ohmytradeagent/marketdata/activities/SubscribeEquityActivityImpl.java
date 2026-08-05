@@ -14,6 +14,7 @@ import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
@@ -67,6 +68,13 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
   private static final ZoneId ET = ZoneId.of("America/New_York");
   private static final LocalTime RTH_OPEN = LocalTime.of(9, 30);
   private static final LocalTime RTH_CLOSE = LocalTime.of(16, 0);
+
+  /**
+   * Max age of an equity print before it is marked stale. A late/out-of-sequence tag (e.g. the
+   * 2026-07-29 QQQ 680 print that arrived ~20 min stale) is dropped by the workflow's feed-stale
+   * guard so the evaluator never transitions on it.
+   */
+  private static final Duration MAX_TICK_AGE = Duration.ofSeconds(15);
 
   private final MarketDataProvider provider;
   private final WorkflowClient workflowClient;
@@ -307,13 +315,18 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
     return !t.isBefore(RTH_OPEN) && t.isBefore(RTH_CLOSE);
   }
 
-  private static EquityTick toEquityTick(Tick t) {
+  EquityTick toEquityTick(Tick t) {
     EquityTick out = new EquityTick();
     out.setSchemaVersion(1L);
     out.setTicker(t.occSymbol());
     out.setLast(t.premium());
     out.setRetrievedAt(t.retrievedAt());
-    out.setStale(false);
+    // Wall-clock age check (activity thread, NOT workflow code): a print older than MAX_TICK_AGE is
+    // marked stale so the workflow's feed-stale guard drops it. Uses the injected clock so the
+    // measure is deterministic under test and real wall time in production.
+    out.setStale(
+        Duration.between(t.retrievedAt().toInstant(), Instant.now(clock)).compareTo(MAX_TICK_AGE)
+            > 0);
     return out;
   }
 

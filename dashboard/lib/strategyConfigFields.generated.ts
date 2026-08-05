@@ -76,6 +76,16 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     description: "Phase 3: default fraction closed when an STC line has no recognized partial keyword.",
   },
   {
+    field: "derisk_keep_fraction",
+    kind: "number",
+    description: "PLAN-2026-08-04-copytrade-derisk-followup-cue: fraction of the current remaining position to KEEP when a de-risk cue fires (the rest is trimmed via the existing fraction-based partialExit as 1 - keep). Only consulted when derisk_on_followup_cue is true; when enabled but this field is null/absent the workflow defaults to 0.25 (keep 25%, trim 75%). Because the trim fraction feeds the SAME pre-existing partialExit signal as an activity-input VALUE (not a Temporal command shape), it needs NO getVersion replay gate.",
+  },
+  {
+    field: "derisk_on_followup_cue",
+    kind: "boolean",
+    description: "PLAN-2026-08-04-copytrade-derisk-followup-cue: per-tenant enable for the de-risk-on-follow-up-cue workflow. When true, a CopytradeDeriskWorkflow (started by the sidecar when a signal author follows a BTO with a separate '0-or-hero' / 'use-your-own-stop' escalation message) trims the attributed open position to derisk_keep_fraction and arms the chandelier trail on the remainder. Opt-in: null/absent/false DISABLES it — the workflow no-ops with a DeriskSkippedDisabled audit and issues NO signals (byte-identical to the pre-change path).",
+  },
+  {
     field: "drawdown_velocity_threshold",
     kind: "number",
     description: "Issue #6 portfolio-level gate: per-minute MTM loss rate (absolute dollars/minute) at which new entries are blocked. Reject with DRAWDOWN_VELOCITY_EXCEEDED when sampled loss rate over the trailing minute >= drawdown_velocity_threshold. Opt-in: null disables the gate. Intraday rate-of-loss circuit breaker complementing daily_loss_threshold (which is a cumulative bound).",
