@@ -21,6 +21,7 @@ import pathlib
 from collections import OrderedDict
 from datetime import datetime, timezone
 
+from ohmytradeagent_contract.models.copytrade_derisk_payload import CopytradeDeriskPayload
 from ohmytradeagent_contract.models.copytrade_signal_payload import (
     Action,
     CloseIntent,
@@ -29,10 +30,20 @@ from ohmytradeagent_contract.models.copytrade_signal_payload import (
 )
 from playwright.async_api import Page
 
+from .derisk_tracker import RecentBto, RecentBtoTracker
 from .discord_dom import MESSAGES_LI_SELECTOR, extract_recent
-from .emitter import Emitter
+from .emitter import DeriskEmitter, Emitter
 from .stc_intent import StcIntentClassifier
-from .parser import ParsedSignal, parse_message
+from .parser import DeriskCue, ParsedSignal, classify_derisk, parse_message
+
+
+def _parse_posted_at(posted_at_iso: str | None) -> datetime:
+    """Message timestamp as an aware datetime, falling back to now(UTC)."""
+    return (
+        datetime.fromisoformat(posted_at_iso)
+        if posted_at_iso
+        else datetime.now(timezone.utc)
+    )
 
 
 class _BoundedSeenLRU:
@@ -73,6 +84,10 @@ class Watcher:
     INITIAL_SCRAPE_LIMIT = 50
     TICK_SCRAPE_LIMIT = 25
     DOM_READY_TIMEOUT_MS = 30_000
+    # De-risk attribution look-back (PLAN-2026-08-04): a cue can only attach to a
+    # BTO from the same author within this window, so it never grabs a stale entry.
+    DERISK_WINDOW_SECS = 3600.0
+    DERISK_PER_AUTHOR_CAP = 20
 
     def __init__(
         self,
@@ -87,6 +102,7 @@ class Watcher:
         additional_targets: list[tuple[str, str]] | None = None,
         lru_capacity: int = DEFAULT_LRU_CAPACITY,
         intent_classifier: StcIntentClassifier | None = None,
+        derisk_emitter: DeriskEmitter | None = None,
     ) -> None:
         self._channel_url = channel_url
         self._state_dir = state_dir
@@ -98,6 +114,19 @@ class Watcher:
         # before the fan-out loop) and the result rides on every target's payload. The classifier is
         # fail-safe: any failure yields None, i.e. an absent close_intent = today's behavior.
         self._intent_classifier = intent_classifier
+        # De-risk-on-follow-up-cue (PLAN-2026-08-04, dark by default). None => disabled: non-grammar
+        # messages are ignored exactly as before, and no per-author BTO history is kept. When
+        # present, each parsed BTO is recorded per author and a later "0-or-hero"/"use-your-own-stop"
+        # message trims + arms the attributed open position via a CopytradeDeriskWorkflow start.
+        self._derisk_emitter = derisk_emitter
+        self._tracker: RecentBtoTracker | None = (
+            RecentBtoTracker(
+                window_secs=self.DERISK_WINDOW_SECS,
+                per_author_cap=self.DERISK_PER_AUTHOR_CAP,
+            )
+            if derisk_emitter is not None
+            else None
+        )
         # Fan-out targets: the primary (tenant_id, strategy_id) plus any additional ones, so ONE
         # browser/Discord session feeds several tenants watching the same channel (e.g. a live tenant
         # and a paper shadow). Each parsed signal is emitted once per target; the per-target workflow
@@ -167,8 +196,26 @@ class Watcher:
                 continue
             parsed = parse_message(m.content)
             if not parsed:
-                self._log.debug("no signal in message %s", m.message_id)
+                # No BTO/STC/AVG grammar. When de-risk is enabled, a non-grammar message may be a
+                # "0-or-hero"/"use-your-own-stop" escalation attributable to a preceding BTO.
+                if self._derisk_emitter is not None:
+                    await self._handle_derisk_cue(
+                        message_id=m.message_id,
+                        author=m.author,
+                        posted_at_iso=m.timestamp_iso,
+                        content=m.content,
+                    )
+                else:
+                    self._log.debug("no signal in message %s", m.message_id)
                 continue
+            # Record BTOs per author BEFORE emitting, so a de-risk cue in a later poll can attribute
+            # to them (no-op when de-risk is disabled — self._tracker is None).
+            self._record_btos(
+                author=m.author,
+                message_id=m.message_id,
+                posted_at_iso=m.timestamp_iso,
+                parsed=parsed,
+            )
             for i, sig in enumerate(parsed):
                 await self._emit_signal(
                     message_id=m.message_id,
@@ -177,6 +224,124 @@ class Watcher:
                     posted_at_iso=m.timestamp_iso,
                     sig=sig,
                 )
+
+    def _record_btos(
+        self,
+        *,
+        author: str,
+        message_id: str,
+        posted_at_iso: str | None,
+        parsed: list[ParsedSignal],
+    ) -> None:
+        """Record each BTO line under its author for later de-risk attribution."""
+        if self._tracker is None:
+            return
+        posted_at = _parse_posted_at(posted_at_iso)
+        for i, sig in enumerate(parsed):
+            if sig.action != "BTO":
+                continue
+            self._tracker.record(
+                author,
+                RecentBto(
+                    ticker=sig.ticker,
+                    expiry=sig.expiry,
+                    strike=sig.strike,
+                    right=sig.right,
+                    price=sig.price,
+                    signal_id=f"{message_id}:{i}",
+                    posted_at=posted_at,
+                ),
+            )
+
+    async def _handle_derisk_cue(
+        self,
+        *,
+        message_id: str,
+        author: str,
+        posted_at_iso: str | None,
+        content: str,
+    ) -> bool:
+        """Classify a non-grammar message as a de-risk cue, attribute it to the same author's
+        preceding BTO, and fan a CopytradeDeriskPayload out to every target. Returns True iff a cue
+        was recognized AND attributed (a start was attempted for each target)."""
+        if self._derisk_emitter is None or self._tracker is None:
+            return False
+        cue = classify_derisk(content)
+        if cue is None:
+            return False
+        now = _parse_posted_at(posted_at_iso)
+        target = self._tracker.resolve(author, cue.tickers, now)
+        if target is None:
+            self._log.info(
+                "de-risk cue from %s unattributed (cue=%r tickers=%s) — no matching open BTO in "
+                "window; ignored",
+                author,
+                cue.matched_cue,
+                cue.tickers,
+            )
+            return False
+        # Snapshot the target list reference once (a concurrent registry refresh REBINDS it).
+        targets = self._targets
+        for tenant_id, strategy_id in targets:
+            payload = self._build_derisk_payload(
+                message_id=message_id,
+                author=author,
+                posted_at_iso=posted_at_iso,
+                content=content,
+                cue=cue,
+                target=target,
+                tenant_id=tenant_id,
+                strategy_id=strategy_id,
+            )
+            await self._emit_one_derisk(payload)
+        return True
+
+    def _build_derisk_payload(
+        self,
+        *,
+        message_id: str,
+        author: str,
+        posted_at_iso: str | None,
+        content: str,
+        cue: DeriskCue,
+        target: RecentBto,
+        tenant_id: str,
+        strategy_id: str,
+    ) -> CopytradeDeriskPayload:
+        return CopytradeDeriskPayload(
+            schema_version=1,
+            tenant_id=tenant_id,
+            strategy_id=strategy_id,
+            signal_id=f"{message_id}:derisk",
+            message_id=message_id,
+            author=author,
+            posted_at=_parse_posted_at(posted_at_iso),
+            ticker=target.ticker,
+            expiry=target.expiry,
+            strike=target.strike,
+            right=target.right,
+            target_bto_signal_id=target.signal_id,
+            target_entry_premium=target.price,
+            matched_cue=cue.matched_cue,
+            raw_line=content,
+        )
+
+    async def _emit_one_derisk(self, payload: CopytradeDeriskPayload) -> None:
+        assert self._derisk_emitter is not None  # guarded by caller
+        result = await self._derisk_emitter.emit(payload)
+        if result.deduped:
+            self._log.info(
+                "deduped de-risk %s (workflow_id=%s)", payload.signal_id, result.workflow_id
+            )
+            return
+        self._log.info(
+            "emitted de-risk %s -> trim+trail %s (target_bto=%s cue=%r workflow_id=%s)",
+            payload.signal_id,
+            payload.ticker,
+            payload.target_bto_signal_id,
+            payload.matched_cue,
+            result.workflow_id,
+        )
 
     async def _emit_signal(
         self,
