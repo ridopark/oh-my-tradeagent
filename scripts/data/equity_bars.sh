@@ -29,6 +29,11 @@ FEED="${6:-iex}"
 [[ "$DAY" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "equity_bars: bad day: $DAY" >&2; exit 2; }
 [[ "$TF"  =~ ^[0-9]+(Min|Hour|Day)$ ]]       || { echo "equity_bars: bad timeframe: $TF" >&2; exit 2; }
 [[ "$FEED" =~ ^(iex|sip|otc)$ ]]             || { echo "equity_bars: bad feed: $FEED" >&2; exit 2; }
+# START/END and NS are interpolated into the ssh-evaluated remote command, so validate them the same
+# way as every other parameter — otherwise e.g. END='x;id' would run on the homelab host.
+[[ "$START" =~ ^[0-2][0-9]:[0-5][0-9]$ ]]    || { echo "equity_bars: bad start (hh:mm utc): $START" >&2; exit 2; }
+[[ "$END"   =~ ^[0-2][0-9]:[0-5][0-9]$ ]]    || { echo "equity_bars: bad end (hh:mm utc): $END" >&2; exit 2; }
+[[ "$NS"    =~ ^[a-z0-9-]+$ ]]               || { echo "equity_bars: bad namespace: $NS" >&2; exit 2; }
 
 # Credentials are read and consumed on the homelab host; only JSON returns to the caller.
 exec ssh "$HOST" NS="$NS" bash -s -- "$TICKER" "$DAY" "$TF" "$START" "$END" "$FEED" <<'REMOTE'

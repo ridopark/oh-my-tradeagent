@@ -24,6 +24,10 @@ PGUSER="${PG_USER:-temporal}"
 
 DB="${1:?usage: homelab_psql.sh <db>   (SQL on stdin)}"
 [[ "$DB" =~ ^[A-Za-z0-9_]+$ ]] || { echo "homelab_psql: bad db name: $DB" >&2; exit 2; }
+# NS and PGUSER are interpolated into the ssh-evaluated remote command below, so validate them the
+# same way as $DB — otherwise e.g. PG_USER='x;id' or COPYTRADE_NS='x;id' would run on the homelab host.
+[[ "$NS"     =~ ^[a-z0-9-]+$ ]]    || { echo "homelab_psql: bad namespace: $NS" >&2; exit 2; }
+[[ "$PGUSER" =~ ^[A-Za-z0-9_]+$ ]] || { echo "homelab_psql: bad pg user: $PGUSER" >&2; exit 2; }
 
 # Default: machine-parseable pipe-separated tuples. HOMELAB_PSQL_ALIGNED=1: aligned + headers.
 if [[ "${HOMELAB_PSQL_ALIGNED:-}" == "1" ]]; then
