@@ -442,6 +442,34 @@ def test_strategy_config_stc_intent_enforce_round_trip() -> None:
     assert absent.stc_intent_enforce is None
 
 
+def test_strategy_config_derisk_fields_round_trip() -> None:
+    """PLAN-2026-08-04: optional derisk_on_followup_cue / derisk_keep_fraction parse, round-trip, absent -> None."""
+    data = {
+        **_STRATEGY_CONFIG_BASE,
+        "derisk_on_followup_cue": True,
+        "derisk_keep_fraction": 0.25,
+    }
+    model = StrategyConfig.model_validate(data)
+    assert model.derisk_on_followup_cue is True
+    assert model.derisk_keep_fraction == 0.25
+    reloaded = StrategyConfig.model_validate_json(
+        model.model_dump_json(by_alias=True, exclude_none=True)
+    )
+    assert reloaded.derisk_on_followup_cue is True
+    assert reloaded.derisk_keep_fraction == 0.25
+
+    # Absent -> None (feature disabled, behavior-neutral).
+    absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
+    assert absent.derisk_on_followup_cue is None
+    assert absent.derisk_keep_fraction is None
+
+    # derisk_keep_fraction is bounded (0, 1].
+    with pytest.raises(ValidationError):
+        StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, "derisk_keep_fraction": 0})
+    with pytest.raises(ValidationError):
+        StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, "derisk_keep_fraction": 1.5})
+
+
 def test_strategy_config_force_close_bad_format_rejected() -> None:
     """Issue #15: HH:MM regex rejects malformed times (no second-component, no 25:00)."""
     for bad in ("15:0", "25:00", "15:60", "1500", "noon"):

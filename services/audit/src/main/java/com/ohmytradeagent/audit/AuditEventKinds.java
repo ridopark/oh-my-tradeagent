@@ -185,6 +185,28 @@ public final class AuditEventKinds {
           // OrderFailureAlerter.DEFAULT_FAILURE_KINDS + application.yml's failure-kinds so it
           // pages.
           "EntryWorkflowFailed",
+          // CopytradeDeriskWorkflowImpl (PLAN-2026-08-04-copytrade-derisk-followup-cue): the new
+          // isolated de-risk-on-follow-up-cue workflow. All FIVE kinds are NEUTRAL observability
+          // events on the cue's correlation chain — none opens or closes a POSITION lifecycle in
+          // the ledger sense: the trim's realized P&L still rides the target PositionWorkflow's
+          // existing PartialExitFilled fill events, its terminal close still reuses the
+          // Eod*/PositionClosed terminal kinds, and the arm rides the child's own ChandelierArmed.
+          // DeriskTrimRequested / DeriskArmRequested are the parent-side dispatch audits (mirrors
+          // ExitRequested / ChandelierArmRequested on the STC path). DeriskArmSkipped records a
+          // trim-only outcome when the arm could not be issued (reason=arm_skipped_no_peak when the
+          // seed premium is absent, reason=invalid_giveback when trail_giveback_pct is unset).
+          // DeriskNoOpenPosition is the benign catch-path event when the attributed target position
+          // was already closed/absent (Friday's QQQ / INTC-195c case) — like StcNoOpenPosition it
+          // must NOT page RED. DeriskSkippedDisabled records the dark-ship no-op when the
+          // per-tenant
+          // derisk_on_followup_cue flag is unset. Intentionally registered in ALL_KINDS only, not
+          // in
+          // any *_KINDS lifecycle group.
+          "DeriskTrimRequested",
+          "DeriskArmRequested",
+          "DeriskArmSkipped",
+          "DeriskNoOpenPosition",
+          "DeriskSkippedDisabled",
           // PositionWorkflowImpl
           "PositionEntered",
           "PositionNeverFilled",

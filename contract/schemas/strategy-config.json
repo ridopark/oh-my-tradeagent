@@ -125,6 +125,16 @@
       "maximum": 1,
       "description": "Copytrade BTO entry-sizing reduction for scale-in signals. When the signal tail contains a scale-in cue ('scaling in' / 'scale in' / 'starter' / 'small size' / 'half size') the capital-weight-sized contract count is multiplied by this fraction and re-clamped UP to min_contracts, so the initial entry is smaller — the author is entering small and will add later (which skip_avg already ignores, so we never chase the adds). Applied in Sizing.computeContracts by reading the payload tail; because the tail is an activity-input VALUE (only Temporal command type/ordering is replay-checked, not activity-input values) the sizing change alters the place-order qty value only and needs NO getVersion replay gate. Opt-in: null/absent DISABLES it (full size, byte-identical to the pre-change path)."
     },
+    "derisk_on_followup_cue": {
+      "type": "boolean",
+      "description": "PLAN-2026-08-04-copytrade-derisk-followup-cue: per-tenant enable for the de-risk-on-follow-up-cue workflow. When true, a CopytradeDeriskWorkflow (started by the sidecar when a signal author follows a BTO with a separate '0-or-hero' / 'use-your-own-stop' escalation message) trims the attributed open position to derisk_keep_fraction and arms the chandelier trail on the remainder. Opt-in: null/absent/false DISABLES it — the workflow no-ops with a DeriskSkippedDisabled audit and issues NO signals (byte-identical to the pre-change path)."
+    },
+    "derisk_keep_fraction": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "PLAN-2026-08-04-copytrade-derisk-followup-cue: fraction of the current remaining position to KEEP when a de-risk cue fires (the rest is trimmed via the existing fraction-based partialExit as 1 - keep). Only consulted when derisk_on_followup_cue is true; when enabled but this field is null/absent the workflow defaults to 0.25 (keep 25%, trim 75%). Because the trim fraction feeds the SAME pre-existing partialExit signal as an activity-input VALUE (not a Temporal command shape), it needs NO getVersion replay gate."
+    },
     "skip_avg": {
       "type": "boolean",
       "description": "If true, AVG (average-down) actions are skipped by the workflow. Default true per PLAN.md Open Question #10."
