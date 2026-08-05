@@ -56,8 +56,11 @@ existing partial-exit signal.
 
 **Changes** (anchors):
 - `contract/schemas/partial-close-request.json` (NEW) — `PartialCloseRequest{schema_version,
-  operator_id, reason, fraction}`. `fraction` is `exclusiveMinimum: 0` **and `exclusiveMaximum: 1`**:
-  a trim is reduce-only BY CONSTRUCTION, so a full close can only be a `force_close`.
+  operator_id, reason, fraction}`. `fraction` is `exclusiveMinimum: 0` **and `exclusiveMaximum: 1`**.
+  **That bound alone does NOT make a trim reduce-only** — `qtyToClose` is `ceil`-ed, so 0.75 of a
+  3-lot is 3. The reduce-only guarantee is the Phase-2 server-side clamp; see the REDUCE-ONLY CLAMP
+  note below. (Caught in review: the original implementation asserted reduce-only in the schema, the
+  javadoc and the commit message while enforcing it only in the React component.)
 - `contract/schemas/partial-close-result.json` (NEW) — `PartialCloseResult{schema_version, status,
   exit_signal_id}`, `status ∈ {ACCEPTED, NOOP_ALREADY_CLOSED}`. Mirrors `ForceCloseResult`.
 - `contract/schemas/partial-exit-request.json` — add optional `market` boolean (MARKET placement vs
@@ -101,6 +104,15 @@ partial-exit pipeline end to end.
     `pendingExits` drain (no `continue`: a trim is a normal FIFO partial, unlike
     force_close/risk_breach which pre-empt because they flatten the whole lot); add
     `|| !pendingPartialCloses.isEmpty()` to the `Workflow.await` predicate.
+  - `processOne` — **REDUCE-ONLY CLAMP (trading-critical).** After `qtyToClose` is computed, an
+    operator trim (`market==true`) whose resolved qty would take the WHOLE lot is cut to
+    `remainingQty - 1` and audited `OperatorTrimClamped`; on a 1-lot (clamp → 0) it places NO order.
+    Required because `ceil()` makes `fraction < 1` reach the full lot at 2-3 contracts, and the
+    dashboard's preset filter runs against the qty it RENDERED — a partial fill between render and
+    click shrinks the real remainder underneath it. A real-money invariant cannot be guarded by the
+    client. This also deliberately overrides `min_partial_qty_behavior=full_close` for trims: that
+    config expresses how to read an AUTHOR's STC, not a mandate to flatten on a discretionary
+    operator click.
   - `processOne` — `boolean marketNow = Boolean.TRUE.equals(req.getMarket())` gates `limitPrice=null`
     at all THREE placement sites: the first placement, the stepped-reprice retry (also skipping its
     quote Activity), and the legacy `freshLimit` chain (reachable for a multi-day lot whose
@@ -198,10 +210,49 @@ build. **Dark by default** ⇒ unreachable until the operator flips both flags.
 Each phase: spotless (Java) / tsc+build (dashboard), single-concern PR, dark-launch flag so nothing
 is reachable until the operator flips it.
 
+## Review findings folded in (2026-08-05)
+
+`java-architect`, `quant-analyst`, `risk-manager` and `qa-inspector` reviewed the implementation
+independently. Three converged on the same **blocker** and two more MAJORs; all are fixed above and
+covered by tests:
+
+1. **BLOCKER — `ceil()` broke reduce-only.** Fixed by the server-side clamp (Phase 2). Tests:
+   `partialClose_fractionThatWouldFlatten_isClampedToLeaveOneContract` (75% of a 3-lot sells 2, not
+   3) and `partialClose_singleContract_placesNoOrderEvenUnderFullCloseBehavior`.
+2. **MAJOR — duplicate `exit_signal_id`.** `Workflow.currentTimeMillis()` is the workflow-TASK start
+   time, so two `partial_close` Updates batched into one task minted the SAME id → same exit
+   `intent_key` → duplicate broker `client_order_id` (422 → zombie journal row → a next-session
+   re-drive selling MORE contracts). `force_close` gets away with this because its duplicate no-ops
+   on `remainingQty == 0`; a trim leaves the position open, so its duplicate executes. Fixed:
+   `Workflow.randomUUID()` (replay-deterministic) + registering the synthetic id in
+   `processedSignalIds`, the dedupe backstop the direct-enqueue had bypassed.
+3. **MAJOR — after-hours trim fired unattended at the next open.** A market SELL placed outside RTH
+   fails to place and was re-armed to the next RTH open, so a 21:00 click became a market-on-open
+   sell into the gap that the operator never re-authorized (and /live is reachable 24/7). Fixed:
+   operator trims are never re-driven — `PartialExitRetryExhausted{note=operator_trim_not_redriven}`.
+4. **MINOR — `NOOP_ALREADY_CLOSED` (HTTP 200) rendered as a green "Trim placed".** Fixed: the client
+   branches on 202 vs 200.
+5. **MINOR — the error state's Retry button was not idempotent** (a timeout AFTER the workflow
+   accepted the trim meant Retry = a second independent sell). Fixed: no retry affordance on the
+   trim; the operator refreshes and re-reads the qty.
+
+Accepted, NOT fixed (documented so review is not re-litigated):
+- **A trim does not pre-empt an in-flight STC.** It queues FIFO, so a trim landing mid-STC-ladder
+  can wait up to `exit_fill_ttl_secs × (1 + exit_reprice_steps)` (~6 min at current config) before
+  reaching the broker, while the UI already says "Trim placed". Correct by design — a trim is a
+  normal partial, not an emergency — but the operator-visible latency is real. Revisit only if it
+  bites in practice; the fix would be a cancel-then-trim pre-emption like `force_close`.
+- **MARKET placement forgoes the `exit_floor` bounded-limit guard** that scheduled flattens use, so
+  a trim pays the spread on a thin book. This is the operator's explicit decision (see the locked
+  decisions above), not an oversight.
+- **A trim buffered but not yet drained is dropped without an audit** if EOD/expiry/chandelier
+  flattens the lot first — `OperatorTrimRequested` with no resolution. Observability only.
+
 ## Known edge (accepted, not a blocker)
 
-If a position drains to a single contract between the /live render and the click, the pre-existing
-runner-quantum rule in `processOne` applies: `floor(1 × fraction) == 0` ⇒ default `SKIP` (nothing
-sells, `PartialExitSkippedMinQty` audited) or a full close where a tenant has set
-`min_partial_qty_behavior=full_close` ([[project_min_partial_qty_full_close]]). That is existing
-configured behavior on ONE contract, not new risk. The UI already hides Trim for a rendered 1-lot.
+A position that drains to a single contract between the /live render and the click can no longer be
+flattened by a trim: the clamp resolves to 0 and NO order is placed (`OperatorTrimClamped` with
+`qty_clamped=0`). This deliberately overrides `min_partial_qty_behavior=full_close`
+([[project_min_partial_qty_full_close]], whose prod_real flip is pending) — flattening the last
+contract is Force exit's job. The UI already hides Trim for a rendered 1-lot, so this is the
+render-vs-click race only.

@@ -222,8 +222,15 @@ export async function trimPosition(
   if (status === 409 && err === "position_already_closed") {
     return { ok: false, alreadyClosed: true };
   }
-  if (status === 200 || status === 202) {
+  // 202 ⟺ ACCEPTED (a sell is queued); 200 ⟺ NOOP_ALREADY_CLOSED (the position drained before the
+  // Update landed — nothing was enqueued). Branch on the STATUS, not "any 2xx": collapsing them
+  // would paint a green "Trim placed" over a trim that sold nothing, and the operator would
+  // reasonably click again.
+  if (status === 202) {
     return { ok: true };
+  }
+  if (status === 200) {
+    return { ok: false, alreadyClosed: true };
   }
   return { ok: false };
 }

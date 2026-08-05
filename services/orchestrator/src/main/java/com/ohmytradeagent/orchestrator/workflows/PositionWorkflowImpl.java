@@ -104,6 +104,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // these record WHO asked for it and WHY, which the synthetic PartialExitRequest cannot.
   private static final String KIND_OPERATOR_TRIM_REQUESTED = "OperatorTrimRequested";
   private static final String KIND_OPERATOR_TRIM_NOOP = "OperatorTrimNoop";
+  // The reduce-only clamp bit: the requested fraction ceil()-ed up to the WHOLE remaining lot (the
+  // position drained between the /live render and the click), so the trim was cut to leave one
+  // contract — or skipped entirely on a 1-lot. Records both quantities so an operator who expected
+  // N sold and saw N-1 can see exactly why.
+  private static final String KIND_OPERATOR_TRIM_CLAMPED = "OperatorTrimClamped";
 
   /** {@code reason} stamped on the synthetic operator-trim PartialExitRequest. */
   private static final String REASON_OPERATOR_TRIM = "operator_trim";
@@ -1395,7 +1400,18 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // normal partial, so it drains through the FIFO pendingExits pipeline below — unlike
       // force_close/risk_breach, which pre-empt it because they flatten the whole lot.
       while (!pendingPartialCloses.isEmpty()) {
-        pendingExits.add(operatorTrimRequest(pendingPartialCloses.poll()));
+        PartialExitRequest trim = operatorTrimRequest(pendingPartialCloses.poll());
+        // Register the synthetic id with the SAME dedupe set the partialExit signal handler uses.
+        // Enqueuing here bypasses that handler, so without this the trim would have no duplicate
+        // backstop at all behind the id-uniqueness assumption. add() returning false means an
+        // identical id already ran — drop it rather than place a second broker order.
+        if (!processedSignalIds.add(trim.getSignalId())) {
+          auditLog(
+              KIND_EXIT_DUPLICATE_SUPPRESSED,
+              subject("signal_id", trim.getSignalId(), "note", "duplicate_operator_trim"));
+          continue;
+        }
+        pendingExits.add(trim);
       }
       if (!pendingExits.isEmpty()) {
         PartialExitRequest req = pendingExits.poll();
@@ -1858,7 +1874,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // partial_close invocation, so replaying a legacy history never reaches this handler and its
     // command stream is unchanged. (Same reasoning as CopytradeDeriskWorkflowImpl's reuse of the
     // partialExit signal; a gate here would be an inert marker.)
-    String exitSignalId = "trim:" + request.getOperatorId() + ":" + Workflow.currentTimeMillis();
+    // UUID, NOT currentTimeMillis(): Workflow.currentTimeMillis() is the workflow-TASK start time,
+    // so two partial_close Updates batched into one workflow task (double submit, two tabs, two
+    // users on a multi-user tenant) would mint the SAME id — hence the same exit intent_key — and
+    // the second placeOrder would hit the broker with a duplicate client_order_id (422 → zombie
+    // journal row → next-session re-drive selling MORE contracts). force_close can share an id
+    // harmlessly because its duplicate no-ops on remainingQty==0; a trim leaves the position open,
+    // so its duplicate executes. Workflow.randomUUID() is deterministic under replay.
+    String exitSignalId = "trim:" + request.getOperatorId() + ":" + Workflow.randomUUID();
     PartialCloseResult result = new PartialCloseResult();
     result.setSchemaVersion(1L);
     result.setExitSignalId(exitSignalId);
@@ -2442,6 +2465,40 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // identical branch and needs no getVersion marker.
     boolean marketNow = Boolean.TRUE.equals(req.getMarket());
 
+    // REDUCE-ONLY CLAMP for the operator trim. `fraction < 1` does NOT imply `qty < remaining`:
+    // qtyToClose is ceil()-ed, so 75% of a 3-lot is 3 and 75% of a 2-lot is 2 — a "trim" that
+    // FLATTENS. The dashboard hides such presets, but it filters against the RENDERED qty, and a
+    // partial fill between render and click shrinks the real remainder underneath it (the same
+    // race the runner-quantum branch above handles for a 1-lot). The client cannot be the guard
+    // for a real-money invariant, so enforce it here where remainingQty is authoritative: an
+    // operator trim NEVER sells the last contract. Flattening stays force_close's job — it is the
+    // control whose confirm names the whole position.
+    //
+    // Also intentionally overrides the FULL_CLOSE runner-quantum behavior above: that config
+    // governs an author-driven STC, where flushing the runner is the intended reading of the
+    // author's exit. It is not a mandate to flatten on a discretionary operator trim.
+    //
+    // Replay-safe with no getVersion marker on the same argument as marketNow: the clamp is
+    // reachable ONLY when `market == true`, and no recorded PartialExitRequest carries that field.
+    if (marketNow && qtyToClose >= remainingQty) {
+      long clamped = remainingQty - 1;
+      auditLog(
+          KIND_OPERATOR_TRIM_CLAMPED,
+          subject(
+              "signal_id", req.getSignalId(),
+              "fraction", req.getFraction(),
+              "qty_requested", qtyToClose,
+              "qty_clamped", clamped,
+              "remaining_qty", remainingQty));
+      if (clamped <= 0) {
+        // A 1-lot has nothing to trim — every fraction resolves to the whole position. Place no
+        // order and release the latch so pendingExits drains (mirrors the SKIP branch above).
+        exitInFlight = false;
+        return;
+      }
+      qtyToClose = clamped;
+    }
+
     // Exit target captured BEFORE any fill mutates remainingQty (pure local, no command — unused on
     // VERSION_EXIT_RETRY_LATE_FILL_RECONCILE v=0). The retry under v>=1 drives remainingQty back
     // down to this target rather than re-sending the full qtyToClose; on v=0 retryQty stays ==
@@ -2665,7 +2722,22 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               Workflow.getVersion(
                   VERSION_PARTIAL_PLACE_RETRY_NEXT_SESSION, Workflow.DEFAULT_VERSION, 1);
           if (partialRetryVersion >= 1) {
-            if (partialPlaceRetrySessions >= MAX_PARTIAL_PLACE_RETRY_SESSIONS) {
+            if (marketNow) {
+              // An operator trim is DISCRETIONARY and time-sensitive: the operator clicked "sell
+              // this fraction now, at market". Re-driving it at the next RTH open would fire an
+              // unattended market-on-open sell, into an overnight gap, that they never
+              // re-authorized — and /live is reachable 24/7, so an out-of-hours click reaches this
+              // path routinely. Fail the trim loudly instead; the operator can click again when
+              // the market is open. Reachable only when `market == true`, so no getVersion marker
+              // is needed (same argument as the marketNow placement branches).
+              auditLog(
+                  KIND_PARTIAL_EXIT_RETRY_EXHAUSTED,
+                  subject(
+                      "signal_id", req.getSignalId(),
+                      "option_symbol", input.getContractSymbol(),
+                      "qty", intent.getQty(),
+                      "note", "operator_trim_not_redriven"));
+            } else if (partialPlaceRetrySessions >= MAX_PARTIAL_PLACE_RETRY_SESSIONS) {
               // Budget spent: the partial failed to place across all allotted sessions. Page the
               // terminal exhausted audit and give the discretionary partial up — the lot stays
               // managed and free for a later STC / chandelier / EOD flatten.

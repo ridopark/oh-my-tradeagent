@@ -112,8 +112,14 @@ public interface PositionWorkflow {
    * Operator-initiated PARTIAL close ("Trim" on the dashboard /live holdings table): sell {@code
    * fraction} of the remaining qty at MARKET and leave the rest of the position running with all of
    * its existing exits intact. The sibling of {@link #forceClose(ForceCloseRequest)} — same
-   * operator-intent priority in the main loop, same exit-NOW pricing — but reduce-only: the
-   * validator rejects {@code fraction >= 1} so a full close can only be a force_close.
+   * exit-NOW pricing — but reduce-only: the validator rejects {@code fraction >= 1}, AND the
+   * handler clamps the resolved qty to {@code remainingQty - 1}, so a full close can only ever be a
+   * force_close. The clamp is the load-bearing half: {@code fraction < 1} alone does not bound the
+   * qty below the lot, because {@code qtyToClose} is {@code ceil}-ed (0.75 of a 3-lot is 3).
+   *
+   * <p>Priority: a trim drains through the normal FIFO exit queue, BELOW {@code force_close} and
+   * {@code risk_breach} (which pre-empt because they flatten everything). A trim behind a queued
+   * STC therefore waits for it.
    *
    * <p>The handler adds NO new exit machinery: it synthesizes a {@link PartialExitRequest} ({@code
    * market=true}) onto the SAME {@code pendingExits} deque the STC path feeds, so the trim inherits

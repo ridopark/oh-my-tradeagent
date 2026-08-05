@@ -328,6 +328,10 @@ public final class AuditEventKinds {
           // fill ride the existing PartialExit* events. Pure attribution — in ALL_KINDS only.
           "OperatorTrimRequested",
           "OperatorTrimNoop",
+          // The trim's reduce-only clamp bit — the requested fraction would have flattened the lot
+          // (ceil against a remainder that shrank after the /live render), so it was cut to leave
+          // one contract, or skipped on a 1-lot. Observability — in ALL_KINDS only.
+          "OperatorTrimClamped",
           // Edited-signal supersede (F1): child-side audit emitted by PositionWorkflowImpl's
           // processSupersede when the parent's supersede signal lands on a confirmed, just-filled,
           // not-partially-exited wrong-expiry leg. Records the corrected leg's identifiers, then

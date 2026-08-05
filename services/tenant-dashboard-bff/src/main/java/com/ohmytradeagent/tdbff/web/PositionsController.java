@@ -251,7 +251,9 @@ public class PositionsController {
    */
   private ResponseEntity<Map<String, Object>> refuseForbidden(
       String code, String tenant, String workflowId) {
-    log.warn("force-close refused: {} tenant={} workflow_id={}", code, tenant, workflowId);
+    // Endpoint-neutral wording: this guard is shared by force-close and partial-close, so naming
+    // one of them would mis-attribute the other's refusals during a cross-tenant probe triage.
+    log.warn("position write refused: {} tenant={} workflow_id={}", code, tenant, workflowId);
     return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", code));
   }
 

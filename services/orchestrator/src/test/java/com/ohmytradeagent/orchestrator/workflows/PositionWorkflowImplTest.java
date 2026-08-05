@@ -2417,6 +2417,85 @@ class PositionWorkflowImplTest {
     WorkflowStub.fromTyped(stub).getResult(String.class);
   }
 
+  /**
+   * Reduce-only clamp: {@code ceil()} makes 75% of a 3-lot equal 3 — i.e. a "trim" that would
+   * FLATTEN the position. The dashboard hides such a preset, but it filters against the qty it
+   * RENDERED, so a partial fill between render and click reaches this. The workflow must cut the
+   * trim to leave one contract rather than liquidate the lot.
+   */
+  @Test
+  void partialClose_fractionThatWouldFlatten_isClampedToLeaveOneContract() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-trim-clamp");
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
+    confirmEntry(stub, 3L);
+
+    // ceil(3 * 0.75) == 3 == the whole lot.
+    assertThat(stub.partialClose(partialCloseRequest("ops-1", "trim 75%", 0.75)).getStatus())
+        .isEqualTo(PartialCloseResult.Status.ACCEPTED);
+
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-trim", 2L, new BigDecimal("4.60")));
+    waitForAuditKind("PartialExitFilled");
+
+    AuditEvent clamped = captureKind("OperatorTrimClamped");
+    assertThat(asLong(clamped.getSubject().get("qty_requested"))).isEqualTo(3L);
+    assertThat(asLong(clamped.getSubject().get("qty_clamped"))).isEqualTo(2L);
+
+    // 2 sold, NOT 3 — and the position is still open with its runner.
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent sell =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow();
+    assertThat(sell.getQty()).isEqualTo(2L);
+    assertThat(stub.positionState().remainingQty()).isEqualTo(1L);
+
+    stub.partialExit(partialExitRequest("sig-drain", "pos-trim-clamp", 1.0));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-drain", 1L, new BigDecimal("4.50")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+  }
+
+  /**
+   * A 1-lot has nothing to trim — every fraction resolves to the whole position — so the trim must
+   * place NO order at all. Guards the drained-to-1 race, and overrides {@code
+   * min_partial_qty_behavior=full_close}, which flushes the runner for an author-driven STC but
+   * must not flatten on a discretionary operator trim.
+   */
+  @Test
+  void partialClose_singleContract_placesNoOrderEvenUnderFullCloseBehavior() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflowInput in = futureInput(1);
+    in.setMinPartialQtyBehavior(PositionWorkflowInput.MinPartialQtyBehavior.FULL_CLOSE);
+    PositionWorkflow stub = newStub("pos-trim-one-lot");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 1L);
+
+    assertThat(stub.partialClose(partialCloseRequest("ops-1", "trim 50%", 0.5)).getStatus())
+        .isEqualTo(PartialCloseResult.Status.ACCEPTED);
+
+    // The Update returns as soon as the directive is BUFFERED; the clamp happens in the main loop.
+    // Sync on the audit, or the assertions below race ahead of processOne (and never-placeOrder
+    // would pass vacuously).
+    waitForAuditKind("OperatorTrimClamped");
+    AuditEvent clamped = captureKind("OperatorTrimClamped");
+    assertThat(asLong(clamped.getSubject().get("qty_clamped"))).isEqualTo(0L);
+
+    // The single contract is untouched: no SELL reached the broker.
+    verify(exec, never()).placeOrder(any());
+    assertThat(stub.positionState().remainingQty()).isEqualTo(1L);
+
+    stub.partialExit(partialExitRequest("sig-drain", "pos-trim-one-lot", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-drain", 1L, new BigDecimal("4.50")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+  }
+
   @Test
   void partialCloseValidator_fullFraction_rejects() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());

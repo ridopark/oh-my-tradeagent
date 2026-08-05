@@ -30,7 +30,7 @@
       "type": "number",
       "exclusiveMinimum": 0,
       "exclusiveMaximum": 1,
-      "description": "Fraction of the remaining qty to sell. The workflow closes min(remainingQty, ceil(remainingQty * fraction)) contracts, matching the STC partial math exactly. Strictly < 1 so a trim can never be a full close."
+      "description": "Fraction of the remaining qty to sell. The workflow closes min(remainingQty, ceil(remainingQty * fraction)) contracts, matching the STC partial math exactly. Bounded strictly below 1, but note that the < 1 bound ALONE does not make a trim reduce-only: ceil() means 0.75 of a 3-lot is 3. The reduce-only guarantee comes from the workflow clamping an operator trim to remainingQty - 1 (auditing OperatorTrimClamped, and placing no order at all on a 1-lot), so a trim can never flatten a position however stale the caller's view of the remaining qty is."
     }
   }
 }

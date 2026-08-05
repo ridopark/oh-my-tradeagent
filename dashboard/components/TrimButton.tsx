@@ -139,19 +139,15 @@ export function TrimButton({
         </span>
       );
     }
+    // NO retry affordance here, deliberately — unlike ForceExitButton. A failure can mean the
+    // request timed out AFTER the workflow accepted it, and a retried trim is a SECOND independent
+    // sell of a fraction of what is left (retrying a force exit is harmless: the second flatten
+    // no-ops). The operator must re-read the refreshed qty and decide again, so the recovery path
+    // is a page refresh, not a one-click repeat.
     return (
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-medium text-rose-300" role="alert">
-          {result.kind === "disabled" ? "Not enabled" : "Failed"}
-        </span>
-        <button
-          type="button"
-          onClick={() => setResult(null)}
-          className="rounded border border-slate-600/60 px-2 py-0.5 text-xs text-slate-300 hover:bg-slate-700/30"
-        >
-          Retry
-        </button>
-      </div>
+      <span className="text-xs font-medium text-rose-300" role="alert">
+        {result.kind === "disabled" ? "Not enabled" : "Failed — refresh to retry"}
+      </span>
     );
   }
 
