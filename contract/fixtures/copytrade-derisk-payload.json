@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "tenant_id": "dev",
+  "strategy_id": "copytrade-v1",
+  "signal_id": "1234567890123456799:derisk",
+  "message_id": "1234567890123456799",
+  "author": "TradingTheTrend",
+  "posted_at": "2026-07-31T17:56:00Z",
+  "ticker": "INTC",
+  "expiry": "2026-08-03",
+  "strike": 95.0,
+  "right": "C",
+  "target_bto_signal_id": "1234567890123456789:0",
+  "target_entry_premium": 1.34,
+  "matched_cue": "0 or hero",
+  "raw_line": "I'm cool with going 0 or hero on these. Feel free to use your own stop"
+}

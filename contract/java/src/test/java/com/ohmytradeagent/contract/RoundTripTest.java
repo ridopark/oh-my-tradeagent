@@ -50,6 +50,49 @@ class RoundTripTest {
   }
 
   @Test
+  void copytradeDeriskPayload_roundTrips() throws Exception {
+    String json = Files.readString(FIXTURES.resolve("copytrade-derisk-payload.json"));
+
+    CopytradeDeriskPayload deserialized = mapper.readValue(json, CopytradeDeriskPayload.class);
+
+    assertThat(deserialized.getSchemaVersion()).isEqualTo(1L);
+    assertThat(deserialized.getTenantId()).isEqualTo("dev");
+    assertThat(deserialized.getStrategyId()).isEqualTo("copytrade-v1");
+    assertThat(deserialized.getAuthor()).isEqualTo("TradingTheTrend");
+    assertThat(deserialized.getTicker()).isEqualTo("INTC");
+    assertThat(deserialized.getRight()).isEqualTo(CopytradeDeriskPayload.Right.C);
+    assertThat(deserialized.getTargetBtoSignalId()).isEqualTo("1234567890123456789:0");
+    assertThat(deserialized.getTargetEntryPremium().doubleValue()).isEqualTo(1.34);
+    assertThat(deserialized.getMatchedCue()).isEqualTo("0 or hero");
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode original = mapper.readTree(json);
+    JsonNode roundTripped = mapper.readTree(reserialized);
+
+    assertThat(roundTripped).isEqualTo(original);
+  }
+
+  @Test
+  void copytradeDeriskPayload_requiredOnly_optionalsAbsent() throws Exception {
+    // Attribution can resolve a target without a peak seed or matched-cue label, so the optional
+    // target_entry_premium / matched_cue must be omissible and default to null.
+    String json =
+        "{\"schema_version\":1,\"tenant_id\":\"dev\",\"strategy_id\":\"copytrade-v1\","
+            + "\"signal_id\":\"m2:derisk\",\"message_id\":\"m2\",\"author\":\"TradingTheTrend\","
+            + "\"posted_at\":\"2026-07-31T17:56:00Z\",\"ticker\":\"INTC\",\"expiry\":\"2026-08-03\","
+            + "\"strike\":95.0,\"right\":\"C\",\"target_bto_signal_id\":\"m1:0\","
+            + "\"raw_line\":\"0 or hero\"}";
+
+    CopytradeDeriskPayload deserialized = mapper.readValue(json, CopytradeDeriskPayload.class);
+
+    assertThat(deserialized.getTargetEntryPremium()).isNull();
+    assertThat(deserialized.getMatchedCue()).isNull();
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    assertThat(mapper.readTree(reserialized)).isEqualTo(mapper.readTree(json));
+  }
+
+  @Test
   void auditEvent_roundTrips() throws Exception {
     String json = Files.readString(FIXTURES.resolve("audit-event.json"));
 

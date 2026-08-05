@@ -23,6 +23,10 @@ from ohmytradeagent_contract.models.broker_credential_audit_request import (
     ChangeType,
     Outcome,
 )
+from ohmytradeagent_contract.models.copytrade_derisk_payload import (
+    CopytradeDeriskPayload,
+    Right as DeriskRight,
+)
 from ohmytradeagent_contract.models.copytrade_signal_payload import (
     Action,
     CloseIntent,
@@ -83,6 +87,52 @@ def test_copytrade_signal_payload_round_trips() -> None:
     # values before comparing to the fixture, mirroring the strategy_config round-trip.
     serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
     assert serialized == original
+
+
+def test_copytrade_derisk_payload_round_trips() -> None:
+    original = _load("copytrade-derisk-payload.json")
+
+    model = CopytradeDeriskPayload.model_validate(original)
+
+    assert model.schema_version == 1
+    assert model.tenant_id == "dev"
+    assert model.strategy_id == "copytrade-v1"
+    assert model.author == "TradingTheTrend"
+    assert model.ticker == "INTC"
+    assert model.right == DeriskRight.c
+    assert model.target_bto_signal_id == "1234567890123456789:0"
+    assert model.target_entry_premium == Decimal("1.34")
+    assert model.matched_cue == "0 or hero"
+
+    serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert serialized == original
+
+
+def test_copytrade_derisk_payload_required_only() -> None:
+    """Optional target_entry_premium / matched_cue are omissible → default to None."""
+    base = {
+        "schema_version": 1,
+        "tenant_id": "dev",
+        "strategy_id": "copytrade-v1",
+        "signal_id": "m2:derisk",
+        "message_id": "m2",
+        "author": "TradingTheTrend",
+        "posted_at": "2026-07-31T17:56:00Z",
+        "ticker": "INTC",
+        "expiry": "2026-08-03",
+        "strike": 95.0,
+        "right": "C",
+        "target_bto_signal_id": "m1:0",
+        "raw_line": "0 or hero",
+    }
+    model = CopytradeDeriskPayload.model_validate(base)
+    assert model.target_entry_premium is None
+    assert model.matched_cue is None
+    reloaded = CopytradeDeriskPayload.model_validate_json(
+        model.model_dump_json(by_alias=True, exclude_none=True)
+    )
+    assert reloaded.target_entry_premium is None
+    assert reloaded.matched_cue is None
 
 
 def test_watchlist_mirror_payload_round_trips() -> None:
