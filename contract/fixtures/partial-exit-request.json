@@ -6,6 +6,7 @@
   "position_workflow_id": "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/1234567890123456789:0",
   "fraction": 0.5,
   "ref_premium": 2.85,
+  "market": false,
   "reason": "stc_signal",
   "author": "acme_trader",
   "raw_line": "STC NVDA 5/16 140C @ 2.85 half out",

@@ -44,9 +44,13 @@ class PartialExitRequest(BaseModel):
     """
     Fraction of remaining qty to close. Resolved from KeywordPartialMatcher.match(tail, cfg.partial_fractions, cfg.default_stc_fraction).
     """
-    ref_premium: Annotated[Decimal, Field(gt=0)]
+    ref_premium: Annotated[Decimal, Field(gt=0)] | None = None
     """
-    Author-posted exit premium (for audit; not source-of-truth for fill price).
+    Author-posted exit premium (for audit; not source-of-truth for fill price). Also SEEDS the exit LIMIT price in PositionWorkflowImpl.exitIntent. OPTIONAL: null/absent places the exit marketable (the de-risk-cue dispatcher already passes a null target_entry_premium), and it is unused entirely when market=true.
+    """
+    market: bool | None = None
+    """
+    Place the partial SELL as a MARKET order (limit_price=null) instead of the ref_premium-seeded bounded limit + reprice ladder. Set by the operator-initiated PositionWorkflow.partial_close Update (the /live 'Trim' button), whose contract is exit-NOW like force_close. Null/absent/false keeps the bounded-limit STC behavior — every pre-existing dispatcher (STC, de-risk cue) omits it, so their placement is unchanged.
     """
     reason: constr(min_length=1)
     """
