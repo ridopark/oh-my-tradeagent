@@ -13,7 +13,12 @@ from datetime import date
 
 import pytest
 
-from ohmytradeagent_sidecar.parser import ParsedSignal, parse_message
+from ohmytradeagent_sidecar.parser import (
+    DeriskCue,
+    ParsedSignal,
+    classify_derisk,
+    parse_message,
+)
 
 
 REF_DATE = date(2026, 4, 23)
@@ -266,3 +271,72 @@ def test_mixed_signal_and_noise():
     assert len(sigs) == 2
     assert sigs[0].action == "BTO"
     assert sigs[1].action == "STC"
+
+
+# ---- de-risk cue classification (PLAN-2026-08-04-copytrade-derisk-followup-cue) ----
+
+
+def test_classify_derisk_friday_message() -> None:
+    # The exact 2026-07-31 escalation that followed the INTC 95c BTO.
+    cue = classify_derisk(
+        "I'm cool with going 0 or hero on these. Feel free to use your own stop"
+    )
+    assert isinstance(cue, DeriskCue)
+    # "0 or hero" wins precedence over the "use your own stop" secondary cue.
+    assert cue.matched_cue == "0 or hero"
+    # No explicit ticker named ("on these") → generic attribution downstream.
+    assert cue.tickers == ()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "0 or hero",
+        "zero or hero",
+        "0-or-hero",
+        "go 0 or hero on this one",
+        "ZERO OR HERO",
+        "use your own stop",
+        "your own stop",
+        "feel free to use your own stop",
+    ],
+)
+def test_classify_derisk_variants_match(text: str) -> None:
+    assert classify_derisk(text) is not None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "risky",                     # too common — explicitly NOT a cue
+        "this one is risky af",
+        "half out",
+        "taking profit here",
+        "adding more here",
+        "0 contracts left",          # "0" alone must not trip it
+        "hero of the day",           # "hero" alone must not trip it
+        "",
+        "   ",
+    ],
+)
+def test_classify_derisk_non_cues(text: str) -> None:
+    assert classify_derisk(text) is None
+
+
+def test_classify_derisk_extracts_named_ticker() -> None:
+    cue = classify_derisk("0 or hero on INTC")
+    assert cue is not None
+    assert "INTC" in cue.tickers
+
+
+def test_classify_derisk_extracts_multiple_tickers() -> None:
+    cue = classify_derisk("zero or hero on INTC and SPY, use your own stop")
+    assert cue is not None
+    assert set(cue.tickers) >= {"INTC", "SPY"}
+
+
+def test_classify_derisk_allcaps_cue_has_no_bogus_tickers() -> None:
+    # An ALL-CAPS cue must read as generic ("on these"), not three ticker mentions.
+    cue = classify_derisk("ZERO OR HERO")
+    assert cue is not None
+    assert cue.tickers == ()
