@@ -11,6 +11,7 @@ import {
   ForceExitButton,
   type ForceExitActionResult,
 } from "@/components/ForceExitButton";
+import { TrimButton, type TrimActionResult } from "@/components/TrimButton";
 import Link from "next/link";
 import {
   getOrders,
@@ -19,6 +20,7 @@ import {
   getTenantConfig,
   getAccountKillSwitch,
   forcePositionExit,
+  trimPosition,
   NotAuthenticatedError,
   type Order,
   type Portfolio,
@@ -37,6 +39,13 @@ const ACTIVITY_LIMIT = 5;
 // so BOTH must be enabled for a force-exit to actually reach Temporal.
 const FORCE_EXIT_WRITE_ENABLED =
   process.env.FORCE_EXIT_WRITE_ENABLED === "true";
+
+// Dark-by-default gate for the per-position "Trim" button, paired with the BFF's own
+// `positions.partial-close.write-enabled` server flag. Deliberately SEPARATE from the force-exit
+// flag: trimming (reduce-only) and flattening are independent capabilities, so either can be armed
+// without the other. With both off the actions column is absent and /live is byte-identical to
+// before this feature.
+const TRIM_WRITE_ENABLED = process.env.TRIM_WRITE_ENABLED === "true";
 
 // Inline server action: re-verifies the session, threads the verified operator email into the BFF
 // force-close call (X-Operator-Id → audit attribution), and revalidates /live so a placed/cleared
@@ -58,6 +67,41 @@ async function forceExitAction(
   const r = await forcePositionExit(
     workflowId,
     "operator force-exit via /live",
+    operator,
+  );
+  if (r.ok) {
+    revalidatePath("/live");
+    return { ok: true };
+  }
+  if (r.alreadyClosed) {
+    revalidatePath("/live");
+    return { ok: false, kind: "already-closed" };
+  }
+  if (r.disabled) {
+    return { ok: false, kind: "disabled" };
+  }
+  return { ok: false, kind: "error" };
+}
+
+// Inline server action for the per-position "Trim": same session re-verification and operator
+// attribution as forceExitAction, but reduce-only — it sells `fraction` of the remaining qty and
+// leaves the position open. Always revalidates on a placed trim so the Qty/Value cells re-render
+// with the smaller lot (the row itself stays; only an error leaves the page untouched so the
+// failure note survives).
+async function trimAction(
+  workflowId: string,
+  fraction: number,
+): Promise<TrimActionResult> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return { ok: false, kind: "error" };
+  }
+  const operator = s.user?.email ?? s.user?.name ?? undefined;
+  const r = await trimPosition(
+    workflowId,
+    fraction,
+    `operator trim ${Math.round(fraction * 100)}% via /live`,
     operator,
   );
   if (r.ok) {
@@ -190,18 +234,34 @@ export default async function LivePage() {
     { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
     { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
   ];
-  if (FORCE_EXIT_WRITE_ENABLED) {
+  if (FORCE_EXIT_WRITE_ENABLED || TRIM_WRITE_ENABLED) {
     holdingsColumns.push({
       key: "actions",
       label: "",
+      // Trim sits to the LEFT of Force exit: the reduce-only action reads first, and the
+      // destructive full exit stays the rightmost (unchanged) control. Each button is gated by its
+      // OWN flag, so enabling one never surfaces the other. TrimButton renders nothing for a 1-lot
+      // (no fraction can trim it), in which case only Force exit shows.
       render: (_v, row) => (
-        <ForceExitButton
-          workflowId={String(row.workflow_id)}
-          symbol={String(row.contract_symbol)}
-          qty={Number(row.remaining_qty)}
-          hasBrokerMark={row.current_price != null}
-          action={forceExitAction}
-        />
+        <div className="flex items-center justify-end gap-2">
+          {TRIM_WRITE_ENABLED && (
+            <TrimButton
+              workflowId={String(row.workflow_id)}
+              symbol={String(row.contract_symbol)}
+              qty={Number(row.remaining_qty)}
+              action={trimAction}
+            />
+          )}
+          {FORCE_EXIT_WRITE_ENABLED && (
+            <ForceExitButton
+              workflowId={String(row.workflow_id)}
+              symbol={String(row.contract_symbol)}
+              qty={Number(row.remaining_qty)}
+              hasBrokerMark={row.current_price != null}
+              action={forceExitAction}
+            />
+          )}
+        </div>
       ),
     });
   }
