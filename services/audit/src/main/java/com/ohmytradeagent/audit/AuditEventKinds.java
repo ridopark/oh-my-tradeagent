@@ -323,6 +323,11 @@ public final class AuditEventKinds {
           "RiskBreachActed",
           "ForceCloseRequested",
           "ForceCloseNoop",
+          // Operator "Trim" (PositionWorkflow.partial_close Update, driven by the /live Trim
+          // button): who asked for the partial close and why. The trim's qty math, placement and
+          // fill ride the existing PartialExit* events. Pure attribution — in ALL_KINDS only.
+          "OperatorTrimRequested",
+          "OperatorTrimNoop",
           // Edited-signal supersede (F1): child-side audit emitted by PositionWorkflowImpl's
           // processSupersede when the parent's supersede signal lands on a confirmed, just-filled,
           // not-partially-exited wrong-expiry leg. Records the corrected leg's identifiers, then

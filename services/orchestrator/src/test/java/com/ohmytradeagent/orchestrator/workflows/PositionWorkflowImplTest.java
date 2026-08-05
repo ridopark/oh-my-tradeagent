@@ -21,6 +21,8 @@ import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
+import com.ohmytradeagent.contract.PartialCloseRequest;
+import com.ohmytradeagent.contract.PartialCloseResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.PremiumTick;
@@ -2367,6 +2369,93 @@ class PositionWorkflowImplTest {
     WorkflowStub.fromTyped(stub).getResult(String.class);
   }
 
+  // ---------- Operator "Trim" (partial_close Update) ----------
+
+  @Test
+  void partialClose_healthyPosition_sellsFractionAtMarketAndKeepsRunner() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-trim-market");
+    WorkflowStub.fromTyped(stub).start(futureInput(8));
+    confirmEntry(stub, 8L);
+
+    PartialCloseResult result =
+        stub.partialClose(partialCloseRequest("ops-1", "trim via /live", 0.25));
+    assertThat(result.getStatus()).isEqualTo(PartialCloseResult.Status.ACCEPTED);
+    assertThat(result.getExitSignalId()).startsWith("trim:ops-1:");
+
+    // ceil(8 * 0.25) = 2 contracts sold; the other 6 keep running.
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-trim", 2L, new BigDecimal("4.60")));
+    waitForAuditKind("PartialExitFilled");
+
+    AuditEvent trim = captureKind("OperatorTrimRequested");
+    assertThat(trim.getSubject())
+        .containsEntry("operator_id", "ops-1")
+        .containsEntry("reason", "trim via /live");
+    AuditEvent partial = captureKind("PartialExitRequested");
+    assertThat(asLong(partial.getSubject().get("qty_to_close"))).isEqualTo(2L);
+
+    // The trim is exit-NOW like force_close: the SELL carries NO limit price (MARKET).
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    OrderIntent sell =
+        intent.getAllValues().stream()
+            .filter(i -> i.getSide() == OrderIntent.Side.SELL)
+            .reduce((a, b) -> b)
+            .orElseThrow(() -> new AssertionError("no SELL OrderIntent placed"));
+    assertThat(sell.getLimitPrice()).isNull();
+    assertThat(sell.getQty()).isEqualTo(2L);
+
+    // Reduce-only: the position is STILL open with the untouched remainder (never a full close).
+    assertThat(stub.positionState().remainingQty()).isEqualTo(6L);
+
+    // Drain to a clean shutdown.
+    stub.partialExit(partialExitRequest("sig-drain", "pos-trim-market", 1.0));
+    waitForPlaceOrderCount(2);
+    stub.onFill(fill("brk-drain", 6L, new BigDecimal("4.50")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+  }
+
+  @Test
+  void partialCloseValidator_fullFraction_rejects() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-trim-full-fraction");
+    WorkflowStub.fromTyped(stub).start(futureInput(4));
+    confirmEntry(stub, 4L);
+
+    // fraction == 1.0 is a FULL close — force_close's job, not the trim's.
+    assertThatThrownBy(() -> stub.partialClose(partialCloseRequest("ops-1", "reason ok", 1.0)))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("fraction");
+
+    // Rejected in the validator, so nothing was enqueued: the drain below still sells the FULL 4
+    // contracts and completes the workflow, which it could not do had a trim been applied.
+    stub.partialExit(partialExitRequest("sig-drain", "pos-trim-full-fraction", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-drain", 4L, new BigDecimal("3.10")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+  }
+
+  @Test
+  void partialCloseValidator_blankOperatorId_rejects() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-trim-blank-op");
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
+    confirmEntry(stub, 3L);
+
+    assertThatThrownBy(() -> stub.partialClose(partialCloseRequest("", "reason ok", 0.5)))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("operator_id");
+
+    stub.partialExit(partialExitRequest("sig-drain", "pos-trim-blank-op", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-drain", 3L, new BigDecimal("3.10")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+  }
+
   @Test
   void riskBreach_healthyPosition_flattens() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
@@ -3957,6 +4046,16 @@ class PositionWorkflowImplTest {
     r.setSchemaVersion(1L);
     r.setOperatorId(operatorId);
     r.setReason(reason);
+    return r;
+  }
+
+  private PartialCloseRequest partialCloseRequest(
+      String operatorId, String reason, double fraction) {
+    PartialCloseRequest r = new PartialCloseRequest();
+    r.setSchemaVersion(1L);
+    r.setOperatorId(operatorId);
+    r.setReason(reason);
+    r.setFraction(BigDecimal.valueOf(fraction));
     return r;
   }
 
