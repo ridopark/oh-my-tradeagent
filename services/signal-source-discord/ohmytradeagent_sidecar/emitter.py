@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ohmytradeagent_contract.models.copytrade_derisk_payload import CopytradeDeriskPayload
 from ohmytradeagent_contract.models.copytrade_signal_payload import CopytradeSignalPayload
 from ohmytradeagent_contract.models.watchlist_mirror_payload import WatchlistMirrorPayload
 from ohmytradeagent_contract.search_attributes import TENANT_STRATEGY_KEY
@@ -32,6 +33,9 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 WORKFLOW_TYPE = "CopytradeSignalWorkflow"
 # Must match the Java workflow interface name exactly.
 WATCHLIST_WORKFLOW_TYPE = "WatchlistMirrorWorkflow"
+# PLAN-2026-08-04-copytrade-derisk-followup-cue: must match the Java
+# CopytradeDeriskWorkflow @WorkflowInterface name exactly.
+DERISK_WORKFLOW_TYPE = "CopytradeDeriskWorkflow"
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,13 @@ def watchlist_workflow_id_for(payload: WatchlistMirrorPayload) -> str:
     source_message_id so REJECT_DUPLICATE dedupes re-reads of the same message.
     """
     return f"t-{payload.tenant_id}/s-{payload.strategy_id}/watchlist/{payload.source_message_id}"
+
+
+def workflow_id_for_derisk(payload: CopytradeDeriskPayload) -> str:
+    """Deterministic workflow ID for a de-risk cue. Keyed on the cue's signal_id
+    ('<cue_message_id>:derisk') so REJECT_DUPLICATE dedupes re-reads / replicas.
+    """
+    return f"t-{payload.tenant_id}/s-{payload.strategy_id}/derisk/{payload.signal_id}"
 
 
 async def _start_workflow_deduped(
@@ -225,6 +236,60 @@ class InMemoryWatchlistEmitter:
 
     async def emit(self, payload: WatchlistMirrorPayload) -> EmitResult:
         wf_id = watchlist_workflow_id_for(payload)
+        if wf_id in self._seen:
+            return EmitResult(workflow_id=wf_id, deduped=True)
+        self._seen.add(wf_id)
+        self.emitted.append(payload)
+        return EmitResult(workflow_id=wf_id, deduped=False)
+
+    async def close(self) -> None:
+        return None
+
+
+class DeriskEmitter(Protocol):
+    """De-risk watcher's only outbound dependency. Single-method Protocol (ISP)."""
+
+    async def emit(self, payload: CopytradeDeriskPayload) -> EmitResult: ...
+
+    async def close(self) -> None: ...
+
+
+class TemporalDeriskEmitter:
+    """Production emitter: starts a CopytradeDeriskWorkflow per de-risk cue.
+
+    Reuses an already-connected ``Client`` + task queue (constructed from
+    ``TemporalEmitter.client``) so no second Temporal connection is opened —
+    same pattern as ``TemporalWatchlistEmitter``.
+    """
+
+    def __init__(self, client: Client, task_queue: str) -> None:
+        self._client = client
+        self._task_queue = task_queue
+
+    async def emit(self, payload: CopytradeDeriskPayload) -> EmitResult:
+        return await _start_workflow_deduped(
+            self._client,
+            self._task_queue,
+            DERISK_WORKFLOW_TYPE,
+            workflow_id_for_derisk(payload),
+            tenant_strategy_sa(payload),
+            payload,
+        )
+
+    async def close(self) -> None:
+        # gRPC channel owned by the shared TemporalEmitter connection.
+        return None
+
+
+class InMemoryDeriskEmitter:
+    """Test double: records emits and replays dedupe semantics in-process."""
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+        self.emitted: list[CopytradeDeriskPayload] = []
+
+    async def emit(self, payload: CopytradeDeriskPayload) -> EmitResult:
+        wf_id = workflow_id_for_derisk(payload)
         if wf_id in self._seen:
             return EmitResult(workflow_id=wf_id, deduped=True)
         self._seen.add(wf_id)

@@ -61,6 +61,70 @@ def _resolve_expiry(md: str, today: date) -> date:
     return candidate
 
 
+@dataclass(frozen=True)
+class DeriskCue:
+    """A recognized de-risk escalation in a free-form (non-grammar) message.
+
+    ``matched_cue`` is the normalized phrase that fired (precedence order below).
+    ``tickers`` are the uppercase tokens found in the message, candidates for
+    ticker-aware attribution — the caller intersects them with the same author's
+    recently-opened BTOs, so a non-ticker token (e.g. "OR") that matches no held
+    position is harmlessly ignored.
+    """
+
+    matched_cue: str
+    tickers: tuple[str, ...]
+
+
+# The "0-or-hero" family + the "use your own stop" invitation. Precedence order:
+# the first phrase present is the one reported. Deliberately NOT "risky" — most
+# BTOs carry it, so it is far too common to be a de-risk trigger.
+_DERISK_CUE_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    ("0 or hero", re.compile(r"\b0 or hero\b")),
+    ("use your own stop", re.compile(r"\buse your own stop\b")),
+    ("your own stop", re.compile(r"\byour own stop\b")),
+]
+
+# Uppercase tokens are candidate tickers. 2–6 chars avoids single-letter noise
+# ("I", "A"); the caller's intersection with held BTO tickers is the real guard.
+_TICKER_RE = re.compile(r"\b[A-Z]{2,6}\b")
+
+# The cue's own words, so an ALL-CAPS cue ("ZERO OR HERO") is read as generic
+# ("on these") rather than as three bogus ticker mentions. Deliberately tiny and
+# cue-specific — a broad English stopword list would strip real tickers (ON, ET,
+# PM, IT are all listed symbols).
+_CUE_STOPWORDS = frozenset({"ZERO", "OR", "HERO", "USE", "YOUR", "OWN", "STOP"})
+
+
+def _normalize_for_cue(text: str) -> str:
+    """Lower-case, map the word 'zero'→'0', and collapse every non-alphanumeric
+    run to a single space so 'Zero-or-Hero!' and '0 or hero' compare equal."""
+    lowered = re.sub(r"\bzero\b", "0", text.lower())
+    return re.sub(r"[^a-z0-9]+", " ", lowered).strip()
+
+
+def classify_derisk(text: str) -> DeriskCue | None:
+    """Classify a free-form message as a de-risk cue, or return None.
+
+    Only meaningful for messages that carry NO BTO/STC/AVG grammar (the caller
+    invokes this exactly when :func:`parse_message` returns empty).
+    """
+    if not text or not text.strip():
+        return None
+    norm = _normalize_for_cue(text)
+    matched: str | None = None
+    for phrase, pattern in _DERISK_CUE_PATTERNS:
+        if pattern.search(norm):
+            matched = phrase
+            break
+    if matched is None:
+        return None
+    tickers = tuple(
+        t for t in dict.fromkeys(_TICKER_RE.findall(text)) if t not in _CUE_STOPWORDS
+    )
+    return DeriskCue(matched_cue=matched, tickers=tickers)
+
+
 def parse_message(text: str, today: date | None = None) -> list[ParsedSignal]:
     """Parse a (potentially multi-line) Discord message body.
 

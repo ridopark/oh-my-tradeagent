@@ -11,7 +11,7 @@ import sys
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
-from .emitter import TemporalEmitter, TemporalWatchlistEmitter
+from .emitter import TemporalDeriskEmitter, TemporalEmitter, TemporalWatchlistEmitter
 from .watcher import Watcher
 from .watchlist_watcher import WatchlistWatcher
 
@@ -185,6 +185,23 @@ async def _amain() -> None:
     emitter = await TemporalEmitter.connect(
         target=temporal_target, namespace=temporal_namespace, task_queue=task_queue
     )
+
+    # De-risk-on-follow-up-cue (PLAN-2026-08-04, dark by default). When enabled, a "0-or-hero" /
+    # "use-your-own-stop" message following a BTO starts a CopytradeDeriskWorkflow that trims + arms
+    # the attributed open position. Reuses the SAME connected Temporal client + task queue (no second
+    # dial), like the watchlist emitter. None => disabled: non-grammar messages are ignored exactly
+    # as today, and no per-author BTO history is kept.
+    derisk_enabled = (
+        os.getenv("DERISK_CUE_ENABLED", "false").strip().lower() == "true"
+    )
+    derisk_emitter = (
+        TemporalDeriskEmitter(emitter.client, emitter.task_queue)
+        if derisk_enabled
+        else None
+    )
+    if derisk_enabled:
+        log.info("de-risk-on-follow-up-cue enabled (workflow=CopytradeDeriskWorkflow)")
+
     watcher = Watcher(
         channel_url=channel_url,
         state_dir=state_dir,
@@ -195,6 +212,7 @@ async def _amain() -> None:
         log=log,
         poll_interval_secs=poll_interval,
         intent_classifier=intent_classifier,
+        derisk_emitter=derisk_emitter,
     )
 
     # Phase B2 registry refresher — built only in registry mode, isolated in its
