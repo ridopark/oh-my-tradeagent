@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
@@ -27,6 +28,30 @@ class RoundTripTest {
           .registerModule(new JavaTimeModule())
           .findAndRegisterModules()
           .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+
+  @Test
+  void strategyConfigCreateRequest_accountCap_roundTrips() throws Exception {
+    // PLAN-2026-08-05: optional account_daily_loss_pct on the create request round-trips + is opt.
+    StrategyConfigCreateRequest req = new StrategyConfigCreateRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId("new_tenant");
+    req.setStrategyId("copytrade-v1");
+    req.setOperatorId("op");
+    req.setConfig(new StrategyConfig());
+    req.setAccountDailyLossPct(new BigDecimal("0.20"));
+
+    StrategyConfigCreateRequest back =
+        mapper.readValue(mapper.writeValueAsString(req), StrategyConfigCreateRequest.class);
+    assertThat(back.getAccountDailyLossPct()).isEqualByComparingTo("0.20");
+
+    // Absent → null (optional).
+    StrategyConfigCreateRequest noCap =
+        mapper.readValue(
+            "{\"schema_version\":1,\"tenant_id\":\"t\",\"strategy_id\":\"s\","
+                + "\"operator_id\":\"op\",\"config\":{}}",
+            StrategyConfigCreateRequest.class);
+    assertThat(noCap.getAccountDailyLossPct()).isNull();
+  }
 
   @Test
   void copytradeSignalPayload_roundTrips() throws Exception {
