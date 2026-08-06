@@ -11,6 +11,8 @@ import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
+import com.ohmytradeagent.contract.PartialCloseRequest;
+import com.ohmytradeagent.contract.PartialCloseResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.PremiumTick;
@@ -570,6 +572,14 @@ class PositionWorkflowImplLegacyReplayTest {
       r.setStatus(ForceCloseResult.Status.NOOP_ALREADY_CLOSED);
       r.setExitSignalId("force:noop:legacy");
       return r;
+    }
+
+    @Override
+    public void partialCloseValidator(PartialCloseRequest request) {}
+
+    @Override
+    public PartialCloseResult partialClose(PartialCloseRequest request) {
+      return null;
     }
 
     private OrderIntent exitIntent(PartialExitRequest req, long qty, String intentKey) {

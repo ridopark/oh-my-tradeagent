@@ -167,6 +167,13 @@ account-killswitch:
 positions:
   force-close:
     write-enabled: ${POSITIONS_FORCE_CLOSE_WRITE_ENABLED:false}
+  # Tenant self-service per-position partial close / "Trim" (POST /api/positions/partial-close),
+  # which drives PositionWorkflow.partial_close (MARKET SELL of a fraction of the remaining qty;
+  # the rest of the position keeps running). REAL-MONEY capable, so it is dark by default and
+  # flagged SEPARATELY from force-close — trimming and flattening are independent capabilities.
+  # Flip to true (alongside the dashboard's TRIM_WRITE_ENABLED) to enable the Trim button.
+  partial-close:
+    write-enabled: ${POSITIONS_PARTIAL_CLOSE_WRITE_ENABLED:false}
 
 management:
   endpoints:

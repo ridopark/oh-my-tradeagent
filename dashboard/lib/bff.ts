@@ -187,6 +187,54 @@ export async function forcePositionExit(
   return { ok: false };
 }
 
+// Typed result of a per-position partial close / "Trim" (POST /api/positions/partial-close). Same
+// shape and non-throwing contract as forcePositionExit — the /live button needs to SHOW the outcome:
+//   ok            — 202 ACCEPTED (trim placed) or 200 (benign no-op on an already-drained position).
+//   disabled      — 404 {"error":"partial_close_disabled"}: the BFF dark flag is off (unreachable
+//                   when the paired UI flag gates the button, but handled defensively).
+//   alreadyClosed — 409 {"error":"position_already_closed"}: the workflow terminated between render
+//                   and click.
+export type TrimPositionResult = {
+  ok: boolean;
+  disabled?: boolean;
+  alreadyClosed?: boolean;
+};
+
+// Drive PositionWorkflow.partial_close via the dark-gated BFF endpoint: sell `fraction` of the
+// position's REMAINING qty at market and leave the rest running. `fraction` must be in (0,1)
+// exclusive — the BFF and the workflow validator both reject 1.0, since a full close is
+// forcePositionExit's job. `operatorId` is threaded as X-Operator-Id for audit attribution only.
+export async function trimPosition(
+  workflowId: string,
+  fraction: number,
+  reason: string,
+  operatorId?: string,
+): Promise<TrimPositionResult> {
+  const { status, body } = await bffPost(
+    "/api/positions/partial-close",
+    { workflow_id: workflowId, reason, fraction },
+    operatorId ? { "X-Operator-Id": operatorId } : undefined,
+  );
+  const err = (body as { error?: string } | null)?.error;
+  if (status === 404 && err === "partial_close_disabled") {
+    return { ok: false, disabled: true };
+  }
+  if (status === 409 && err === "position_already_closed") {
+    return { ok: false, alreadyClosed: true };
+  }
+  // 202 ⟺ ACCEPTED (a sell is queued); 200 ⟺ NOOP_ALREADY_CLOSED (the position drained before the
+  // Update landed — nothing was enqueued). Branch on the STATUS, not "any 2xx": collapsing them
+  // would paint a green "Trim placed" over a trim that sold nothing, and the operator would
+  // reasonably click again.
+  if (status === 202) {
+    return { ok: true };
+  }
+  if (status === 200) {
+    return { ok: false, alreadyClosed: true };
+  }
+  return { ok: false };
+}
+
 export interface Position {
   workflow_id: string;
   strategy_id: string;

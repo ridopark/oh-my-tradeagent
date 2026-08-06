@@ -16,6 +16,8 @@ import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.JournalEntry;
+import com.ohmytradeagent.contract.PartialCloseRequest;
+import com.ohmytradeagent.contract.PartialCloseResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.PremiumTick;
@@ -465,6 +467,14 @@ class AdoptionWorkflowImplLegacyReplayTest {
 
     @Override
     public ForceCloseResult forceClose(ForceCloseRequest request) {
+      return null;
+    }
+
+    @Override
+    public void partialCloseValidator(PartialCloseRequest request) {}
+
+    @Override
+    public PartialCloseResult partialClose(PartialCloseRequest request) {
       return null;
     }
   }

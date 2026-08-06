@@ -197,6 +197,9 @@ def test_partial_exit_request_round_trips() -> None:
     assert model.strategy_id == "copytrade-v1"
     assert model.fraction == 0.5
     assert model.reason == "stc_signal"
+    # An STC partial rests a bounded limit seeded from ref_premium — market is the opt-in
+    # operator-trim placement, never the STC default.
+    assert model.market is False
 
     serialized = json.loads(model.model_dump_json(by_alias=True))
     assert serialized == original

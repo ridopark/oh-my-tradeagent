@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/partial-close-result.json",
+  "title": "PartialCloseResult",
+  "description": "Synchronous return value of PositionWorkflow.partial_close (WaitPolicy=Accepted). Mirrors ForceCloseResult: exit_signal_id is the dedupe key inside the workflow's exit machinery, returned in the 202 response so the operator can correlate the eventual fill.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.PartialCloseResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "exit_signal_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ACCEPTED",
+        "NOOP_ALREADY_CLOSED"
+      ],
+      "description": "ACCEPTED: the trim was enqueued (the SELL is placed by the main loop). NOOP_ALREADY_CLOSED: the position was already drained (remainingQty == 0 on a confirmed position) — nothing was enqueued."
+    },
+    "exit_signal_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Dedupe key of the synthesized partial exit inside the position ('trim:<operator_id>:<workflow_millis>')."
+    }
+  }
+}

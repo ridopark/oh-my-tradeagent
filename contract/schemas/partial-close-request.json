@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/partial-close-request.json",
+  "title": "PartialCloseRequest",
+  "description": "Update payload for PositionWorkflow.partial_close — the operator-initiated partial exit ('Trim') from the dashboard /live holdings table. Validator checks operator_id and reason are non-empty and that fraction is in (0,1) EXCLUSIVE: a trim is reduce-only by construction, so a full close must go through force_close instead. The handler enqueues a synthetic PartialExitRequest (market=true) onto the SAME pendingExits deque the STC path uses, so the trim inherits every existing partial-exit safeguard (qty ceil against live remainingQty, min-partial-qty behavior, dedupe, fill booking into realized P&L). WaitPolicy=Accepted: HTTP 202 returns immediately with the new exit_signal_id.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.PartialCloseRequest",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operator_id",
+    "reason",
+    "fraction"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "operator_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-form operator-supplied reason recorded on the OperatorTrimRequested audit event."
+    },
+    "fraction": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1,
+      "description": "Fraction of the remaining qty to sell. The workflow closes min(remainingQty, ceil(remainingQty * fraction)) contracts, matching the STC partial math exactly. Bounded strictly below 1, but note that the < 1 bound ALONE does not make a trim reduce-only: ceil() means 0.75 of a 3-lot is 3. The reduce-only guarantee comes from the workflow clamping an operator trim to remainingQty - 1 (auditing OperatorTrimClamped, and placing no order at all on a 1-lot), so a trim can never flatten a position however stale the caller's view of the remaining qty is."
+    }
+  }
+}
