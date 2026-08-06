@@ -33,6 +33,10 @@ export async function createTenant(
   tenant: string,
   strategy: string,
   config: Record<string, unknown>,
+  // Optional account-level daily-loss cap (fraction of SOD equity). Supplied ONLY for a live create
+  // (the backend arms the tenant_config cap row from it and rejects a live create with no cap). When
+  // undefined (paper) the `account_daily_loss_pct` key is omitted from the body entirely.
+  accountDailyLossPct?: number,
 ): Promise<CreateTenantResult> {
   const session = await auth();
   if (!session?.isOperator || !session.operatorId) {
@@ -47,7 +51,14 @@ export async function createTenant(
         "X-Operator-Id": session.operatorId,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ config, correlation_id: crypto.randomUUID() }),
+      body: JSON.stringify({
+        config,
+        correlation_id: crypto.randomUUID(),
+        // Backend key MUST be exactly account_daily_loss_pct (a number). Omitted for paper.
+        ...(accountDailyLossPct !== undefined
+          ? { account_daily_loss_pct: accountDailyLossPct }
+          : {}),
+      }),
       cache: "no-store",
       signal: AbortSignal.timeout(API_GATEWAY_TIMEOUT_MS),
     });

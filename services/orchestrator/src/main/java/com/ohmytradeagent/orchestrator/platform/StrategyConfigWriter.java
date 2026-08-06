@@ -64,6 +64,17 @@ public class StrategyConfigWriter {
   // TenantDeleted tombstone is the durable record that a strategy_config row was torn down.
   static final String DELETE_SOURCE = "tenant-delete";
   static final String KIND_TENANT_DELETED = "TenantDeleted";
+  // PLAN-2026-08-05-direct-live-tenant-onboarding: the neutral observability kind emitted when a
+  // LIVE create arms the tenant's account-level loss cap in-transaction (an INSERT into
+  // tenant_config BEFORE the strategy_config INSERT) so the live-required gate passes in one
+  // operator action. Registered in AuditEventKinds.ALL_KINDS only (a create-time provisioning
+  // event, not a lifecycle/paging kind); the KindRegistryGuardTest enforces the registration.
+  static final String KIND_ACCOUNT_CAP_ARMED_ON_CREATE = "AccountCapArmedOnCreate";
+  // Audit `source` for the arm-on-create tenant_config INSERT (distinguishes it from the
+  // tenant tighten-only write path's `tenant-cap-write`).
+  static final String ARM_ON_CREATE_SOURCE = "tenant-create-arm";
+  // Dedicated per-tenant account-cap hash-chain sentinel (mirrors AccountLossCapChangedEvents).
+  static final String ACCOUNT_CHAIN_STRATEGY_ID = "_account";
 
   /**
    * Mirrors {@link com.ohmytradeagent.orchestrator.activities.TenantConfigChangedEmitter}'s
@@ -219,13 +230,91 @@ public class StrategyConfigWriter {
    *     {@code tenant_id}/{@code strategy_id} do not match the create target
    * @throws RowAlreadyExistsException if a row already exists for {@code (tenantId, strategyId)}
    */
-  public long create(String tenantId, String strategyId, StrategyConfig config, String actor) {
+  public long create(
+      String tenantId,
+      String strategyId,
+      StrategyConfig config,
+      BigDecimal accountDailyLossPct,
+      String actor) {
     return dsl.transactionResult(
         cfg -> {
           DSLContext tx = cfg.dsl();
 
-          // a. Validate the proposed config standalone (same gate as update's step b).
-          validate(config, tenantId, strategyId);
+          // a0. Effective account cap: read the tenant's current cap ON THE SAME transaction
+          // connection `tx` — NOT via tenantRegistry, whose own DSLContext would not see the
+          // uncommitted arm INSERT below (THE key correctness point). Absent row ⇒ no cap.
+          Record capRow =
+              tx.fetchOne(
+                  "SELECT account_daily_loss_pct, account_daily_loss_threshold "
+                      + "FROM tenant_config WHERE tenant_id = ?",
+                  tenantId);
+          BigDecimal effectivePct =
+              capRow == null ? null : capRow.get("account_daily_loss_pct", BigDecimal.class);
+          BigDecimal effectiveThreshold =
+              capRow == null ? null : capRow.get("account_daily_loss_threshold", BigDecimal.class);
+          boolean existingCapArmed =
+              (effectivePct != null && effectivePct.signum() > 0)
+                  || (effectiveThreshold != null && effectiveThreshold.signum() > 0);
+
+          // a1. A LIVE strategy whose tenant has NO armed cap arms one now, in-txn, from the
+          // operator-supplied pct — so the live-required gate (validate step a2) passes in a single
+          // operator action. Idempotent: a 2nd live strategy on an already-armed tenant has
+          // existingCapArmed=true and skips this (ON CONFLICT DO NOTHING also leaves the row).
+          if (StrategyConfigInvariants.isLive(config) && !existingCapArmed) {
+            if (accountDailyLossPct == null
+                || accountDailyLossPct.signum() <= 0
+                || accountDailyLossPct.compareTo(BigDecimal.ONE) > 0
+                || accountDailyLossPct.compareTo(TenantConfigWriter.MIN_ACCOUNT_DAILY_LOSS_PCT)
+                    < 0) {
+              throw new InvalidConfigException(
+                  "live create requires account_daily_loss_pct >= "
+                      + TenantConfigWriter.MIN_ACCOUNT_DAILY_LOSS_PCT
+                      + " (a fraction in ["
+                      + TenantConfigWriter.MIN_ACCOUNT_DAILY_LOSS_PCT
+                      + ",1]) to arm the tenant's account-level loss cap — the sole daily-loss"
+                      + " breaker for a real-money strategy (tenant="
+                      + tenantId
+                      + ", got "
+                      + accountDailyLossPct
+                      + ")");
+            }
+            // version is omitted — tenant_config.version is NOT NULL DEFAULT 1 (V8). ON CONFLICT
+            // DO NOTHING keeps the arm idempotent under a concurrent second live create.
+            int armedRows =
+                tx.execute(
+                    "INSERT INTO tenant_config (tenant_id, account_daily_loss_pct, updated_by) "
+                        + "VALUES (?, ?, ?) ON CONFLICT (tenant_id) DO NOTHING",
+                    tenantId,
+                    accountDailyLossPct,
+                    actor);
+            if (armedRows > 0) {
+              // WE armed the row → the live gate uses our cap and the audit records the real arm.
+              effectivePct = accountDailyLossPct;
+              audit.log(accountCapArmedEvent(tenantId, actor, accountDailyLossPct));
+            } else {
+              // Lost the race: a concurrent live create armed this tenant first (ON CONFLICT DO
+              // NOTHING inserted 0 rows). Re-read the winner's committed cap on `tx` so the live
+              // gate validates against the REAL breaker, and emit NO arm audit — we armed nothing.
+              Record racedRow =
+                  tx.fetchOne(
+                      "SELECT account_daily_loss_pct, account_daily_loss_threshold "
+                          + "FROM tenant_config WHERE tenant_id = ?",
+                      tenantId);
+              effectivePct =
+                  racedRow == null
+                      ? null
+                      : racedRow.get("account_daily_loss_pct", BigDecimal.class);
+              effectiveThreshold =
+                  racedRow == null
+                      ? null
+                      : racedRow.get("account_daily_loss_threshold", BigDecimal.class);
+            }
+          }
+
+          // a2. Validate the proposed config standalone (same gate as update's step b), but using
+          // the EFFECTIVE (existing-or-just-armed) cap read on `tx` — NOT tenantRegistry.get(),
+          // which cannot see the uncommitted arm above.
+          validate(config, tenantId, strategyId, effectivePct, effectiveThreshold);
 
           // b. Identity consistency: the config's own tenant_id/strategy_id must match the PK being
           // created (the update path enforces IDENTITY vs the stored row; for a create the target
@@ -373,9 +462,59 @@ public class StrategyConfigWriter {
     return event;
   }
 
+  /**
+   * Builds the neutral {@code AccountCapArmedOnCreate} observability {@link AuditEvent} for the
+   * arm-on-create tenant_config INSERT. Rides the dedicated per-tenant account-cap hash chain
+   * ({@code strategy_id="_account"}, correlation {@code <tenant>/_account}) — the same chain
+   * AccountLossCapChanged uses — so the arm and later tighten edits share one tenant-scoped ledger.
+   * Not workflow code (driven from an Activity), so {@code OffsetDateTime.now}/{@code
+   * UUID.randomUUID} are permitted. Carries ZERO key material.
+   */
+  private AuditEvent accountCapArmedEvent(String tenantId, String actor, BigDecimal pct) {
+    OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("tenant_id", tenantId);
+    subject.put("actor", actor);
+    subject.put("source", ARM_ON_CREATE_SOURCE);
+    subject.put("account_daily_loss_pct", pct);
+    subject.put("loaded_at", now);
+
+    AuditEvent event = new AuditEvent();
+    event.setSchemaVersion(1L);
+    event.setTenantId(tenantId);
+    event.setStrategyId(ACCOUNT_CHAIN_STRATEGY_ID);
+    event.setEventId(UUID.randomUUID().toString());
+    event.setOccurredAt(now);
+    event.setKind(KIND_ACCOUNT_CAP_ARMED_ON_CREATE);
+    event.setActor(actor);
+    event.setCorrelationId(tenantId + "/" + ACCOUNT_CHAIN_STRATEGY_ID);
+    event.setSubject(subject);
+    return event;
+  }
+
   // --- B1: standalone validation ---
 
+  /**
+   * UPDATE-path validation entry: reads the tenant's account cap via {@link #tenantRegistry} (its
+   * own DSLContext is correct here — the update path never arms an uncommitted row in the same
+   * transaction) and delegates to the cap-parameterized overload. The CREATE path instead calls the
+   * overload directly with the cap it read on the transaction connection (see {@link #create}).
+   */
   private void validate(StrategyConfig cfg, String tenantId, String strategyId) {
+    TenantConfig tenantConfig = tenantRegistry.get(cfg.getTenantId());
+    BigDecimal accountDailyLossPct =
+        tenantConfig == null ? null : tenantConfig.getAccountDailyLossPct();
+    BigDecimal accountDailyLossThreshold =
+        tenantConfig == null ? null : tenantConfig.getAccountDailyLossThreshold();
+    validate(cfg, tenantId, strategyId, accountDailyLossPct, accountDailyLossThreshold);
+  }
+
+  private void validate(
+      StrategyConfig cfg,
+      String tenantId,
+      String strategyId,
+      BigDecimal accountDailyLossPct,
+      BigDecimal accountDailyLossThreshold) {
     String label = tenantId + "/" + strategyId;
 
     // (i) schema_version non-null and within build support.
@@ -421,17 +560,12 @@ public class StrategyConfigWriter {
     }
 
     // (iii) live-required gates: reuse the source-agnostic invariant, rewrap its failure.
-    // Phase 3b (single-account-loss-rule): read the tenant's account cap directly (this is a plain
-    // component, no Temporal replay concern) and thread it into the 4-arg overload, so an armed
-    // account cap satisfies the live loss-breaker invariant (per-strategy daily_loss_threshold
-    // optional). cfg.getTenantId() is requireNonNull-checked above; a config-absent tenant
-    // (tenantRegistry.get == null) or unset cap passes nulls → the overload (correctly) rejects a
-    // -live strategy with no armed account cap.
-    TenantConfig tenantConfig = tenantRegistry.get(cfg.getTenantId());
-    BigDecimal accountDailyLossPct =
-        tenantConfig == null ? null : tenantConfig.getAccountDailyLossPct();
-    BigDecimal accountDailyLossThreshold =
-        tenantConfig == null ? null : tenantConfig.getAccountDailyLossThreshold();
+    // Phase 3b (single-account-loss-rule): the caller supplies the tenant's effective account cap
+    // (UPDATE path reads it via tenantRegistry; CREATE path reads it on the transaction connection
+    // and may have just armed it) and threads it into the 4-arg overload, so an armed account cap
+    // satisfies the live loss-breaker invariant (per-strategy daily_loss_threshold optional). A
+    // null cap (unset / config-absent tenant) makes the overload (correctly) reject a -live
+    // strategy with no armed account cap.
     try {
       StrategyConfigInvariants.validateLiveRequiredGates(
           cfg, accountDailyLossPct, accountDailyLossThreshold, label);

@@ -75,7 +75,7 @@ class CreateTenantControllerTest {
   }
 
   private static TenantCreateRequest body() {
-    return new TenantCreateRequest(new StrategyConfig(), "corr-1");
+    return new TenantCreateRequest(new StrategyConfig(), "corr-1", null);
   }
 
   private static StrategyConfigCreateResult result(
@@ -146,7 +146,10 @@ class CreateTenantControllerTest {
     assertResponseStatus(
         () ->
             controller.create(
-                reqWithOperator(OPERATOR), TENANT, STRATEGY, new TenantCreateRequest(null, "c")),
+                reqWithOperator(OPERATOR),
+                TENANT,
+                STRATEGY,
+                new TenantCreateRequest(null, "c", null)),
         HttpStatus.BAD_REQUEST);
     verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
   }
@@ -173,7 +176,7 @@ class CreateTenantControllerTest {
         .thenReturn(result(StrategyConfigCreateResult.Outcome.CREATED, 1L));
     StrategyConfig armed = new StrategyConfig();
     armed.setEnabled(true);
-    TenantCreateRequest armedBody = new TenantCreateRequest(armed, "corr-armed");
+    TenantCreateRequest armedBody = new TenantCreateRequest(armed, "corr-armed", null);
 
     controller.create(reqWithOperator(OPERATOR), TENANT, STRATEGY, armedBody);
 
@@ -181,6 +184,38 @@ class CreateTenantControllerTest {
         org.mockito.ArgumentCaptor.forClass(StrategyConfigCreateRequest.class);
     verify(stub).create(captor.capture());
     assertThat(captor.getValue().getConfig().getEnabled()).isFalse();
+  }
+
+  @Test
+  void accountDailyLossPct_isThreadedOntoStartedWorkflowRequest() {
+    // PLAN-2026-08-05: a POST body carrying account_daily_loss_pct sets it on the started workflow
+    // request so the orchestrator writer can arm the tenant's account cap on a live create.
+    when(stub.create(any(StrategyConfigCreateRequest.class)))
+        .thenReturn(result(StrategyConfigCreateResult.Outcome.CREATED, 1L));
+    TenantCreateRequest withCap =
+        new TenantCreateRequest(new StrategyConfig(), "corr-cap", new java.math.BigDecimal("0.20"));
+
+    controller.create(reqWithOperator(OPERATOR), TENANT, STRATEGY, withCap);
+
+    org.mockito.ArgumentCaptor<StrategyConfigCreateRequest> captor =
+        org.mockito.ArgumentCaptor.forClass(StrategyConfigCreateRequest.class);
+    verify(stub).create(captor.capture());
+    assertThat(captor.getValue().getAccountDailyLossPct()).isEqualByComparingTo("0.20");
+  }
+
+  @Test
+  void accountDailyLossPct_absent_isNullOnWorkflowRequest() {
+    // Absent in the body → null on the workflow request (the writer then rejects a live create with
+    // no pre-existing cap, exactly as today).
+    when(stub.create(any(StrategyConfigCreateRequest.class)))
+        .thenReturn(result(StrategyConfigCreateResult.Outcome.CREATED, 1L));
+
+    controller.create(reqWithOperator(OPERATOR), TENANT, STRATEGY, body()); // body()'s cap is null
+
+    org.mockito.ArgumentCaptor<StrategyConfigCreateRequest> captor =
+        org.mockito.ArgumentCaptor.forClass(StrategyConfigCreateRequest.class);
+    verify(stub).create(captor.capture());
+    assertThat(captor.getValue().getAccountDailyLossPct()).isNull();
   }
 
   @Test

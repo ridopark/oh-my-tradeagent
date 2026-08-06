@@ -104,6 +104,11 @@ public class CreateTenantController {
     request.setConfig(body.config());
     request.setOperatorId(operator);
     request.setCorrelationId(correlationId);
+    // PLAN-2026-08-05-direct-live-tenant-onboarding: forward the optional operator-supplied account
+    // cap verbatim. No gateway validation — the writer is the authority (a null passes through and
+    // a
+    // live create with no pre-existing cap still rejects, exactly as today).
+    request.setAccountDailyLossPct(body.accountDailyLossPct());
 
     WorkflowOptions opts =
         WorkflowOptions.newBuilder()

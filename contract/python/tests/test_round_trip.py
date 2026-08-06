@@ -671,3 +671,32 @@ def test_strategy_config_watchlist_only_fields_null_when_absent() -> None:
     assert model.gap_tolerance_pct is None
     assert model.equity_emit_delta_pct is None
     assert model.enabled is True
+
+
+def test_strategy_config_create_request_account_cap_round_trip() -> None:
+    """PLAN-2026-08-05: optional account_daily_loss_pct parses, round-trips, absent → None."""
+    from ohmytradeagent_contract.models.strategy_config_create_request import (
+        StrategyConfigCreateRequest,
+    )
+
+    base = {
+        "schema_version": 1,
+        "tenant_id": "new_tenant",
+        "strategy_id": "copytrade-v1",
+        "operator_id": "ridopark@gmail.com",
+        "config": _STRATEGY_CONFIG_BASE,
+    }
+    m = StrategyConfigCreateRequest.model_validate({**base, "account_daily_loss_pct": 0.20})
+    assert m.account_daily_loss_pct == 0.20
+    reloaded = StrategyConfigCreateRequest.model_validate_json(
+        m.model_dump_json(by_alias=True, exclude_none=True)
+    )
+    assert reloaded.account_daily_loss_pct == 0.20
+
+    absent = StrategyConfigCreateRequest.model_validate(base)
+    assert absent.account_daily_loss_pct is None
+
+    with pytest.raises(ValidationError):
+        StrategyConfigCreateRequest.model_validate({**base, "account_daily_loss_pct": 0})
+    with pytest.raises(ValidationError):
+        StrategyConfigCreateRequest.model_validate({**base, "account_daily_loss_pct": 1.5})

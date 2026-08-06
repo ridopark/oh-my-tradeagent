@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, confloat, conint, constr
 
 
 class StrategyConfigCreateRequest(BaseModel):
@@ -39,4 +39,8 @@ class StrategyConfigCreateRequest(BaseModel):
     correlation_id: str | None = None
     """
     OPTIONAL cross-event correlation key. Embedded in the workflow id so a retried api-gateway call dedups on REJECT_DUPLICATE rather than re-running the INSERT.
+    """
+    account_daily_loss_pct: confloat(le=1.0, gt=0.0) | None = None
+    """
+    PLAN-2026-08-05-direct-live-tenant-onboarding: OPTIONAL operator-supplied account-level daily-loss cap (fraction of start-of-day equity). When a LIVE strategy is created and the tenant has no armed cap yet, StrategyConfigWriter.create arms it — an unconditional INSERT into tenant_config (ON CONFLICT DO NOTHING) BEFORE the strategy INSERT — so the live-required-gate (StrategyConfigInvariants.validateLiveRequiredGates: accountCapArmed = account_daily_loss_pct>0 OR account_daily_loss_threshold>0) passes in one operator action. Floored at TenantConfigWriter.MIN_ACCOUNT_DAILY_LOSS_PCT (0.05). Null/absent = no cap supplied → a live create with no pre-existing cap is still REJECTED_INVALID (unchanged); a paper create ignores it. The per-strategy StrategyConfig.daily_loss_threshold is a DEAD field and does NOT satisfy this gate.
     """

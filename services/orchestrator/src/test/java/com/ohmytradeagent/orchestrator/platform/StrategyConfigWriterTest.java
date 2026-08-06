@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -17,6 +18,7 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigChangedEvents;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigSnapshot;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -327,6 +329,111 @@ class StrategyConfigWriterTest {
         .hasMessageContaining("max_notional_per_signal");
   }
 
+  // --- create: arm-on-create account cap (PLAN-2026-08-05-direct-live-tenant-onboarding) ---
+
+  @Test
+  void create_liveNoPriorCap_armsAccountCap_andCreates() {
+    // INCIDENT REPRO: a LIVE create (broker_target=alpaca-live) whose tenant has NO prior
+    // tenant_config row, with an operator-supplied 0.20, SUCCEEDS: it arms the account cap in-txn
+    // (INSERT tenant_config with pct=0.20), audits AccountCapArmedOnCreate, and inserts
+    // strategy_config — all in one operator action, so the live-required gate passes.
+    List<Object[]> capInserts = new ArrayList<>();
+    long version =
+        createWriterFor(null, capInserts)
+            .create(TENANT, STRATEGY, liveSafeStored(), new BigDecimal("0.20"), "operator");
+
+    assertThat(version).isEqualTo(1L);
+    // tenant_config armed with the supplied 0.20 (bindings: tenant_id, pct, updated_by).
+    assertThat(capInserts).hasSize(1);
+    assertThat(capInserts.get(0)).contains(new BigDecimal("0.20"));
+    // Two audit events: the AccountCapArmedOnCreate arm event + the TenantConfigChanged create.
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, times(2)).log(captor.capture());
+    assertThat(captor.getAllValues()).anyMatch(e -> "AccountCapArmedOnCreate".equals(e.getKind()));
+  }
+
+  @Test
+  void create_liveNullCap_stillRejected() {
+    // A LIVE create with NO cap supplied (null) and no prior cap is still rejected — the unchanged
+    // "a real-money strategy must have a loss breaker" behavior. Nothing is armed or audited.
+    assertThatThrownBy(
+            () ->
+                createWriterFor(null, new ArrayList<>())
+                    .create(TENANT, STRATEGY, liveSafeStored(), null, "operator"))
+        .isInstanceOf(InvalidConfigException.class)
+        .hasMessageContaining("account_daily_loss_pct");
+    verify(audit, never()).log(any());
+  }
+
+  @Test
+  void create_liveBelowFloorCap_rejected() {
+    // A supplied cap below the 0.05 policy floor is rejected (a near-zero cap would self-brick the
+    // real-money account — mirrors TenantConfigWriter.MIN_ACCOUNT_DAILY_LOSS_PCT).
+    assertThatThrownBy(
+            () ->
+                createWriterFor(null, new ArrayList<>())
+                    .create(TENANT, STRATEGY, liveSafeStored(), new BigDecimal("0.02"), "operator"))
+        .isInstanceOf(InvalidConfigException.class)
+        .hasMessageContaining("account_daily_loss_pct");
+    verify(audit, never()).log(any());
+  }
+
+  @Test
+  void create_liveExistingArmedCap_doesNotRearm() {
+    // A 2nd LIVE strategy on a tenant whose account cap is ALREADY armed (existing 0.10) does NOT
+    // re-arm — the in-txn read sees the armed cap, so no tenant_config INSERT and no arm audit; the
+    // create succeeds on the existing cap (the supplied 0.30 is ignored).
+    List<Object[]> capInserts = new ArrayList<>();
+    long version =
+        createWriterFor(new BigDecimal("0.10"), capInserts)
+            .create(TENANT, STRATEGY, liveSafeStored(), new BigDecimal("0.30"), "operator");
+
+    assertThat(version).isEqualTo(1L);
+    assertThat(capInserts).isEmpty();
+    // Only the TenantConfigChanged create audit — no AccountCapArmedOnCreate.
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit).log(captor.capture());
+    assertThat(captor.getValue().getKind()).isEqualTo("TenantConfigChanged");
+  }
+
+  @Test
+  void create_liveLostArmRace_usesWinnersCap_emitsNoArmAudit_andCreates() {
+    // CONCURRENCY RACE: two live creates for the SAME brand-new tenant both pass the
+    // !existingCapArmed guard (initial SELECT saw no row). This create loses the ON CONFLICT DO
+    // NOTHING (0 rows inserted) — a concurrent live create armed the tenant first. The fix must
+    // NOT claim it armed: it re-reads the winner's committed cap (0.20) on `tx`, the live gate
+    // passes on that REAL breaker, the strategy_config INSERT runs, and NO AccountCapArmedOnCreate
+    // audit is emitted (we armed nothing). Only the TenantConfigChanged create audit fires.
+    List<Object[]> capInserts = new ArrayList<>();
+    long version =
+        racedCreateWriterFor(new BigDecimal("0.20"), capInserts)
+            .create(TENANT, STRATEGY, liveSafeStored(), new BigDecimal("0.30"), "operator");
+
+    assertThat(version).isEqualTo(1L);
+    // The arm INSERT was attempted (bindings recorded) but lost the race (0 rows).
+    assertThat(capInserts).hasSize(1);
+    // Exactly one audit — the create — and it is NOT the arm event (we armed nothing).
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit).log(captor.capture());
+    assertThat(captor.getValue().getKind()).isEqualTo("TenantConfigChanged");
+    assertThat(captor.getAllValues()).noneMatch(e -> "AccountCapArmedOnCreate".equals(e.getKind()));
+  }
+
+  @Test
+  void create_paper_noAccountCapWrite() {
+    // A PAPER create never touches tenant_config regardless of the supplied cap — the live gate is
+    // a no-op for paper, and the arm branch is only reached for a -live strategy.
+    List<Object[]> capInserts = new ArrayList<>();
+    StrategyConfig config = liveSafeStored();
+    config.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
+
+    long version =
+        createWriterFor(null, capInserts).create(TENANT, STRATEGY, config, null, "operator");
+
+    assertThat(version).isEqualTo(1L);
+    assertThat(capInserts).isEmpty();
+  }
+
   // --- audit factory shape ---
 
   @Test
@@ -497,6 +604,104 @@ class StrategyConfigWriterTest {
     MockConnection connection = new MockConnection(provider);
     DSLContext dsl = DSL.using(connection, SQLDialect.POSTGRES);
     return new StrategyConfigWriter(dsl, om, audit, tenantRegistry);
+  }
+
+  /**
+   * A {@link StrategyConfigWriter} for the CREATE path backed by a jOOQ {@link MockDataProvider}
+   * that models the in-txn {@code tenant_config} cap read + arm INSERT + {@code strategy_config}
+   * INSERT:
+   *
+   * <ul>
+   *   <li>{@code SELECT ... FROM tenant_config}: returns a single row with {@code
+   *       account_daily_loss_pct=existingPct} when non-null, else an empty result (no armed cap).
+   *   <li>{@code INSERT INTO tenant_config}: records its bind values into {@code capInserts} and
+   *       reports 1 affected row.
+   *   <li>{@code INSERT INTO strategy_config}: reports 1 affected row (created).
+   * </ul>
+   *
+   * <p>The writer is wired with an UNARMED {@link TenantRegistry} on purpose — the CREATE path must
+   * read the cap on the transaction connection, NOT via the registry (the key correctness point),
+   * so an unarmed registry proves create does not depend on it.
+   */
+  private StrategyConfigWriter createWriterFor(BigDecimal existingPct, List<Object[]> capInserts) {
+    MockDataProvider provider =
+        ctx -> {
+          String sql = ctx.sql().toLowerCase();
+          if (sql.contains("select") && sql.contains("from tenant_config")) {
+            DSLContext create = DSL.using(SQLDialect.POSTGRES);
+            Field<BigDecimal> pct = DSL.field("account_daily_loss_pct", BigDecimal.class);
+            Field<BigDecimal> threshold =
+                DSL.field("account_daily_loss_threshold", BigDecimal.class);
+            Field<?>[] fields = {pct, threshold};
+            Result<Record> result = create.newResult(fields);
+            if (existingPct != null) {
+              Record record = create.newRecord(fields);
+              record.set(pct, existingPct);
+              record.set(threshold, (BigDecimal) null);
+              result.add(record);
+            }
+            return new MockResult[] {new MockResult(result.size(), result)};
+          }
+          if (sql.contains("insert into tenant_config")) {
+            capInserts.add(ctx.bindings());
+            return new MockResult[] {new MockResult(1, null)};
+          }
+          if (sql.contains("insert into strategy_config")) {
+            return new MockResult[] {new MockResult(1, null)};
+          }
+          // begin/commit/savepoint and any other no-op statements.
+          return new MockResult[] {new MockResult(0, null)};
+        };
+    MockConnection connection = new MockConnection(provider);
+    DSLContext dsl = DSL.using(connection, SQLDialect.POSTGRES);
+    return new StrategyConfigWriter(dsl, om, audit, unarmedTenantRegistry());
+  }
+
+  /**
+   * A {@link StrategyConfigWriter} for the CREATE path that models the ON-CONFLICT-loser race: the
+   * initial {@code SELECT ... FROM tenant_config} sees NO row (so the arm block is entered), the
+   * arm {@code INSERT ... ON CONFLICT DO NOTHING} reports {@code 0} rows (a concurrent live create
+   * armed the tenant first), and the re-{@code SELECT ... FROM tenant_config} returns the WINNER's
+   * committed cap {@code winnerPct}. Proves the loser validates against the real breaker and emits
+   * no arm audit. Wired with an UNARMED registry — the CREATE path reads the cap on {@code tx}.
+   */
+  private StrategyConfigWriter racedCreateWriterFor(
+      BigDecimal winnerPct, List<Object[]> capInserts) {
+    int[] selectCount = {0};
+    MockDataProvider provider =
+        ctx -> {
+          String sql = ctx.sql().toLowerCase();
+          if (sql.contains("select") && sql.contains("from tenant_config")) {
+            DSLContext create = DSL.using(SQLDialect.POSTGRES);
+            Field<BigDecimal> pct = DSL.field("account_daily_loss_pct", BigDecimal.class);
+            Field<BigDecimal> threshold =
+                DSL.field("account_daily_loss_threshold", BigDecimal.class);
+            Field<?>[] fields = {pct, threshold};
+            Result<Record> result = create.newResult(fields);
+            // First SELECT (the a0 cap read) sees no row; the SECOND (the post-conflict re-read)
+            // returns the winner's committed cap.
+            if (selectCount[0]++ > 0) {
+              Record record = create.newRecord(fields);
+              record.set(pct, winnerPct);
+              record.set(threshold, (BigDecimal) null);
+              result.add(record);
+            }
+            return new MockResult[] {new MockResult(result.size(), result)};
+          }
+          if (sql.contains("insert into tenant_config")) {
+            capInserts.add(ctx.bindings());
+            // Lost the race: ON CONFLICT DO NOTHING inserted 0 rows.
+            return new MockResult[] {new MockResult(0, null)};
+          }
+          if (sql.contains("insert into strategy_config")) {
+            return new MockResult[] {new MockResult(1, null)};
+          }
+          // begin/commit/savepoint and any other no-op statements.
+          return new MockResult[] {new MockResult(0, null)};
+        };
+    MockConnection connection = new MockConnection(provider);
+    DSLContext dsl = DSL.using(connection, SQLDialect.POSTGRES);
+    return new StrategyConfigWriter(dsl, om, audit, unarmedTenantRegistry());
   }
 
   /** A complete, live-safe stored config (passes all B1 checks; -live with gates set). */
