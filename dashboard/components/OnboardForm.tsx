@@ -336,6 +336,7 @@ export function OnboardForm({
     formData.set("tenant_id", tenant);
     formData.set("strategy_id", strategy);
     formData.set("alert_webhook_url", alertWebhook);
+    formData.set("mode", mode);
     startCreate(async () => setCreateResult(await createAction(formData)));
   }
 
@@ -540,6 +541,29 @@ export function OnboardForm({
               a candidate to make DB-driven); (2) the <strong>real-time stock feed</strong> must be on
               — a one-time cluster toggle on market-data, not per-tenant. Then enable the strategy.
             </p>
+          )}
+          {live && (
+          <div className="mt-3">
+            <label className={labelCls} htmlFor="ob-account-daily-loss-pct">
+              Account daily-loss cap (fraction of start-of-day equity)
+            </label>
+            <input
+              id="ob-account-daily-loss-pct"
+              name="account_daily_loss_pct"
+              type="number"
+              step="0.01"
+              min="0.05"
+              max="1"
+              defaultValue="0.20"
+              className={inputCls}
+              disabled={!createEnabled}
+              autoComplete="off"
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              The real kill-switch breaker for a live tenant. Min 0.05. Required for live; the
+              config&apos;s daily_loss_threshold is a dead field and does not satisfy it.
+            </p>
+          </div>
           )}
           {!addingToExisting && (
           <div className="mt-3">

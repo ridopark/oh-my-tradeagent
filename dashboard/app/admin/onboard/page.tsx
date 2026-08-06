@@ -259,7 +259,21 @@ export default async function OnboardPage() {
       }
       config.alert_webhook_url = alertWebhookUrl;
     }
-    const r = await createTenant(tenant, strategy, config);
+    // Account-level daily-loss cap (fraction of SOD equity). REQUIRED for a live create — the backend
+    // rejects a live tenant with no armed cap. Mirrors the ID_RE/webhook 400 guards above: for live,
+    // the value must be a finite number in [0.05, 1]; blank/out-of-range is a client 400. Paper omits
+    // it entirely (the field only renders in live mode). `mode` is set by the form's submit handler.
+    const live = String(formData.get("mode") ?? "").trim() === "live";
+    let accountDailyLossPct: number | undefined;
+    if (live) {
+      const capRaw = String(formData.get("account_daily_loss_pct") ?? "").trim();
+      const cap = Number(capRaw);
+      if (!capRaw || !Number.isFinite(cap) || cap < 0.05 || cap > 1) {
+        return { ok: false, status: 400 };
+      }
+      accountDailyLossPct = cap;
+    }
+    const r = await createTenant(tenant, strategy, config, accountDailyLossPct);
     return { ok: r.ok, status: r.status, createdVersion: r.createdVersion };
   }
 
