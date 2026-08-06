@@ -92,6 +92,7 @@ class StrategyConfigWriterIT {
   void truncate() throws Exception {
     try (Statement st = adminConn.createStatement()) {
       st.execute("DELETE FROM strategy_config");
+      st.execute("DELETE FROM tenant_config");
       st.execute("DELETE FROM audit_log");
     }
   }
@@ -359,13 +360,18 @@ class StrategyConfigWriterIT {
 
   // --- Phase I-1b: create-tenant INSERT path ---
 
-  /** A create INSERTs the first row at version 1 with updated_by = the operator. */
+  /**
+   * A create INSERTs the first row at version 1 with updated_by = the operator. PLAN-2026-08-05: a
+   * LIVE create now reads the tenant cap on the transaction connection and, finding none, arms it
+   * from the supplied 0.20 — so the operator-supplied cap is now required and threaded here.
+   */
   @Test
   void create_insertsFirstRowAtVersionOne() throws Exception {
     StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
 
     StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
-    long version = writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com");
+    long version =
+        writer.create("acme", "copytrade-v1", config, new BigDecimal("0.20"), "ridopark@gmail.com");
 
     assertThat(version).isEqualTo(1L);
     assertThat(versionOf("acme", "copytrade-v1")).isEqualTo(1L);
@@ -374,16 +380,65 @@ class StrategyConfigWriterIT {
         .isEqualTo("alpaca-live");
   }
 
+  /**
+   * PLAN-2026-08-05 INCIDENT REPRO (IT): a LIVE create whose tenant has NO prior tenant_config row
+   * arms the account cap in the SAME transaction (read on `tx`, not via the registry — the
+   * uncommitted arm must be visible to the live gate) and creates the strategy in one action. The
+   * writer is wired with an UNARMED registry to prove create does not depend on it.
+   */
+  @Test
+  void create_live_armsAccountCapRow_fromSuppliedPct() throws Exception {
+    StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
+    config.setDailyLossThreshold(null); // no per-strategy breaker — the account cap is the breaker
+
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, unarmedTenantRegistry());
+    long version =
+        writer.create("acme", "copytrade-v1", config, new BigDecimal("0.20"), "ridopark@gmail.com");
+
+    assertThat(version).isEqualTo(1L);
+    // The account cap row now exists, armed at the supplied 0.20.
+    assertThat(tenantConfigPct("acme")).isEqualByComparingTo("0.20");
+    // strategy_config row created.
+    assertThat(configJson("acme", "copytrade-v1").get("broker_target").textValue())
+        .isEqualTo("alpaca-live");
+    // AccountCapArmedOnCreate audited on the tenant's account chain.
+    assertThat(auditKindCount("AccountCapArmedOnCreate", "acme", "_account")).isEqualTo(1);
+  }
+
+  /**
+   * PLAN-2026-08-05: a 2nd LIVE strategy on a tenant whose account cap is ALREADY armed (0.10) does
+   * NOT overwrite it (ON CONFLICT DO NOTHING) — the create succeeds on the existing cap and the
+   * supplied 0.30 is ignored.
+   */
+  @Test
+  void create_live_existingArmedCap_leavesRowUnchanged() throws Exception {
+    seedTenantConfigPct("acme", new BigDecimal("0.10"));
+
+    StrategyConfig config = liveSafeConfig("acme", "copytrade-v2");
+    config.setStrategyId("copytrade-v2");
+
+    StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, unarmedTenantRegistry());
+    long version =
+        writer.create("acme", "copytrade-v2", config, new BigDecimal("0.30"), "ridopark@gmail.com");
+
+    assertThat(version).isEqualTo(1L);
+    assertThat(tenantConfigPct("acme")).isEqualByComparingTo("0.10"); // unchanged
+    assertThat(auditKindCount("AccountCapArmedOnCreate", "acme", "_account")).isZero();
+  }
+
   /** A second create for the same (tenant, strategy) is a no-op → RowAlreadyExistsException. */
   @Test
   void create_duplicate_throwsRowAlreadyExists_doesNotOverwrite() throws Exception {
     StrategyConfig first = liveSafeConfig("acme", "copytrade-v1");
     StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
-    writer.create("acme", "copytrade-v1", first, "ridopark@gmail.com");
+    writer.create("acme", "copytrade-v1", first, new BigDecimal("0.20"), "ridopark@gmail.com");
 
     StrategyConfig second = copy(first);
     second.setMaxPositions(99L); // would overwrite if create were an upsert
-    assertThatThrownBy(() -> writer.create("acme", "copytrade-v1", second, "someone-else"))
+    assertThatThrownBy(
+            () ->
+                writer.create(
+                    "acme", "copytrade-v1", second, new BigDecimal("0.30"), "someone-else"))
         .isInstanceOf(RowAlreadyExistsException.class);
 
     // unchanged: still the first row's value + version + operator
@@ -398,10 +453,16 @@ class StrategyConfigWriterIT {
     StrategyConfig config = liveSafeConfig("other", "copytrade-v1"); // config says tenant "other"
 
     StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
-    assertThatThrownBy(() -> writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com"))
+    assertThatThrownBy(
+            () ->
+                writer.create(
+                    "acme", "copytrade-v1", config, new BigDecimal("0.20"), "ridopark@gmail.com"))
         .isInstanceOf(InvalidConfigException.class);
 
+    // The whole transaction rolls back on the identity throw — neither strategy_config nor the
+    // arm-INSERTed tenant_config row survives.
     assertThat(dsl.fetchCount(org.jooq.impl.DSL.table("strategy_config"))).isZero();
+    assertThat(dsl.fetchCount(org.jooq.impl.DSL.table("tenant_config"))).isZero();
   }
 
   /**
@@ -415,9 +476,11 @@ class StrategyConfigWriterIT {
     StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
     config.setDailyLossThreshold(null); // no per-strategy breaker...
 
-    // ...and no armed account cap either → the -live strategy has no daily-loss breaker.
+    // ...and no armed account cap either, AND no operator-supplied cap → the -live strategy has no
+    // daily-loss breaker and cannot arm one.
     StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, unarmedTenantRegistry());
-    assertThatThrownBy(() -> writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com"))
+    assertThatThrownBy(
+            () -> writer.create("acme", "copytrade-v1", config, null, "ridopark@gmail.com"))
         .isInstanceOf(InvalidConfigException.class);
 
     assertThat(dsl.fetchCount(org.jooq.impl.DSL.table("strategy_config"))).isZero();
@@ -432,11 +495,13 @@ class StrategyConfigWriterIT {
     config.setNotionalCapPctOfCapitalBase(null); // not required for paper
 
     StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
-    long version = writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com");
+    long version = writer.create("acme", "copytrade-v1", config, null, "ridopark@gmail.com");
 
     assertThat(version).isEqualTo(1L);
     assertThat(configJson("acme", "copytrade-v1").get("broker_target").textValue())
         .isEqualTo("alpaca-paper");
+    // A paper create never arms an account cap, even with none supplied.
+    assertThat(dsl.fetchCount(org.jooq.impl.DSL.table("tenant_config"))).isZero();
   }
 
   /** A successful create emits exactly one TenantConfigChanged audit row, source=tenant-create. */
@@ -445,7 +510,7 @@ class StrategyConfigWriterIT {
     StrategyConfig config = liveSafeConfig("acme", "copytrade-v1");
 
     StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
-    writer.create("acme", "copytrade-v1", config, "ridopark@gmail.com");
+    writer.create("acme", "copytrade-v1", config, new BigDecimal("0.20"), "ridopark@gmail.com");
 
     try (var ps =
         adminConn.prepareStatement(
@@ -537,6 +602,40 @@ class StrategyConfigWriterIT {
 
   private StrategyConfig copy(StrategyConfig src) throws Exception {
     return om.readValue(om.writeValueAsString(src), StrategyConfig.class);
+  }
+
+  /** Seed a tenant_config row with an armed {@code account_daily_loss_pct} (as the admin role). */
+  private void seedTenantConfigPct(String tenantId, BigDecimal pct) throws Exception {
+    try (var ps =
+        adminConn.prepareStatement(
+            "INSERT INTO tenant_config (tenant_id, account_daily_loss_pct, updated_by) "
+                + "VALUES (?, ?, ?)")) {
+      ps.setString(1, tenantId);
+      ps.setBigDecimal(2, pct);
+      ps.setString(3, "seed");
+      ps.executeUpdate();
+    }
+  }
+
+  private BigDecimal tenantConfigPct(String tenantId) {
+    return dsl.fetchOne(
+            "SELECT account_daily_loss_pct FROM tenant_config WHERE tenant_id = ?", tenantId)
+        .get("account_daily_loss_pct", BigDecimal.class);
+  }
+
+  private int auditKindCount(String kind, String tenantId, String strategyId) throws Exception {
+    try (var ps =
+        adminConn.prepareStatement(
+            "SELECT count(*) AS n FROM audit_log "
+                + "WHERE kind = ? AND tenant_id = ? AND strategy_id = ?")) {
+      ps.setString(1, kind);
+      ps.setString(2, tenantId);
+      ps.setString(3, strategyId);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt("n");
+      }
+    }
   }
 
   private Long versionOf(String tenantId, String strategyId) {

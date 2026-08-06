@@ -531,5 +531,12 @@ public final class AuditEventKinds {
           // residual stores cleaned; a step fault reuses the shared TenantDeleteStepFailed kind
           // above. Neutral events — in ALL_KINDS only, not in any *_KINDS lifecycle group.
           "TenantResidualCleanupRequested",
-          "TenantResidualCleanupCompleted");
+          "TenantResidualCleanupCompleted",
+          // PLAN-2026-08-05-direct-live-tenant-onboarding: emitted by StrategyConfigWriter.create
+          // when a LIVE create arms the tenant's account-level loss cap in-transaction (an INSERT
+          // into tenant_config BEFORE the strategy_config INSERT) so the live-required gate passes
+          // in one operator action. A neutral create-time provisioning event on the dedicated
+          // per-tenant account-cap chain (strategy_id '_account') — in ALL_KINDS only, not in any
+          // *_KINDS lifecycle group.
+          "AccountCapArmedOnCreate");
 }

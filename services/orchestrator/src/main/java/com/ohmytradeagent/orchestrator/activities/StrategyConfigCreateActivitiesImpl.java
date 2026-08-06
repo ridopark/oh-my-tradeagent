@@ -36,6 +36,7 @@ public class StrategyConfigCreateActivitiesImpl implements StrategyConfigCreateA
               request.getTenantId(),
               request.getStrategyId(),
               request.getConfig(),
+              request.getAccountDailyLossPct(),
               request.getOperatorId());
       // CREATED is constructed ONLY here, on the writer's normal long return.
       result.setOutcome(StrategyConfigCreateResult.Outcome.CREATED);
