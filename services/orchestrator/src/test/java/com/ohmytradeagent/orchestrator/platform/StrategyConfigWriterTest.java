@@ -397,6 +397,29 @@ class StrategyConfigWriterTest {
   }
 
   @Test
+  void create_liveLostArmRace_usesWinnersCap_emitsNoArmAudit_andCreates() {
+    // CONCURRENCY RACE: two live creates for the SAME brand-new tenant both pass the
+    // !existingCapArmed guard (initial SELECT saw no row). This create loses the ON CONFLICT DO
+    // NOTHING (0 rows inserted) — a concurrent live create armed the tenant first. The fix must
+    // NOT claim it armed: it re-reads the winner's committed cap (0.20) on `tx`, the live gate
+    // passes on that REAL breaker, the strategy_config INSERT runs, and NO AccountCapArmedOnCreate
+    // audit is emitted (we armed nothing). Only the TenantConfigChanged create audit fires.
+    List<Object[]> capInserts = new ArrayList<>();
+    long version =
+        racedCreateWriterFor(new BigDecimal("0.20"), capInserts)
+            .create(TENANT, STRATEGY, liveSafeStored(), new BigDecimal("0.30"), "operator");
+
+    assertThat(version).isEqualTo(1L);
+    // The arm INSERT was attempted (bindings recorded) but lost the race (0 rows).
+    assertThat(capInserts).hasSize(1);
+    // Exactly one audit — the create — and it is NOT the arm event (we armed nothing).
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit).log(captor.capture());
+    assertThat(captor.getValue().getKind()).isEqualTo("TenantConfigChanged");
+    assertThat(captor.getAllValues()).noneMatch(e -> "AccountCapArmedOnCreate".equals(e.getKind()));
+  }
+
+  @Test
   void create_paper_noAccountCapWrite() {
     // A PAPER create never touches tenant_config regardless of the supplied cap — the live gate is
     // a no-op for paper, and the arm branch is only reached for a -live strategy.
@@ -622,6 +645,53 @@ class StrategyConfigWriterTest {
           if (sql.contains("insert into tenant_config")) {
             capInserts.add(ctx.bindings());
             return new MockResult[] {new MockResult(1, null)};
+          }
+          if (sql.contains("insert into strategy_config")) {
+            return new MockResult[] {new MockResult(1, null)};
+          }
+          // begin/commit/savepoint and any other no-op statements.
+          return new MockResult[] {new MockResult(0, null)};
+        };
+    MockConnection connection = new MockConnection(provider);
+    DSLContext dsl = DSL.using(connection, SQLDialect.POSTGRES);
+    return new StrategyConfigWriter(dsl, om, audit, unarmedTenantRegistry());
+  }
+
+  /**
+   * A {@link StrategyConfigWriter} for the CREATE path that models the ON-CONFLICT-loser race: the
+   * initial {@code SELECT ... FROM tenant_config} sees NO row (so the arm block is entered), the
+   * arm {@code INSERT ... ON CONFLICT DO NOTHING} reports {@code 0} rows (a concurrent live create
+   * armed the tenant first), and the re-{@code SELECT ... FROM tenant_config} returns the WINNER's
+   * committed cap {@code winnerPct}. Proves the loser validates against the real breaker and emits
+   * no arm audit. Wired with an UNARMED registry — the CREATE path reads the cap on {@code tx}.
+   */
+  private StrategyConfigWriter racedCreateWriterFor(
+      BigDecimal winnerPct, List<Object[]> capInserts) {
+    int[] selectCount = {0};
+    MockDataProvider provider =
+        ctx -> {
+          String sql = ctx.sql().toLowerCase();
+          if (sql.contains("select") && sql.contains("from tenant_config")) {
+            DSLContext create = DSL.using(SQLDialect.POSTGRES);
+            Field<BigDecimal> pct = DSL.field("account_daily_loss_pct", BigDecimal.class);
+            Field<BigDecimal> threshold =
+                DSL.field("account_daily_loss_threshold", BigDecimal.class);
+            Field<?>[] fields = {pct, threshold};
+            Result<Record> result = create.newResult(fields);
+            // First SELECT (the a0 cap read) sees no row; the SECOND (the post-conflict re-read)
+            // returns the winner's committed cap.
+            if (selectCount[0]++ > 0) {
+              Record record = create.newRecord(fields);
+              record.set(pct, winnerPct);
+              record.set(threshold, (BigDecimal) null);
+              result.add(record);
+            }
+            return new MockResult[] {new MockResult(result.size(), result)};
+          }
+          if (sql.contains("insert into tenant_config")) {
+            capInserts.add(ctx.bindings());
+            // Lost the race: ON CONFLICT DO NOTHING inserted 0 rows.
+            return new MockResult[] {new MockResult(0, null)};
           }
           if (sql.contains("insert into strategy_config")) {
             return new MockResult[] {new MockResult(1, null)};

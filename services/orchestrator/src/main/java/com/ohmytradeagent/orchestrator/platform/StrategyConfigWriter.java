@@ -280,14 +280,35 @@ public class StrategyConfigWriter {
             }
             // version is omitted — tenant_config.version is NOT NULL DEFAULT 1 (V8). ON CONFLICT
             // DO NOTHING keeps the arm idempotent under a concurrent second live create.
-            tx.execute(
-                "INSERT INTO tenant_config (tenant_id, account_daily_loss_pct, updated_by) "
-                    + "VALUES (?, ?, ?) ON CONFLICT (tenant_id) DO NOTHING",
-                tenantId,
-                accountDailyLossPct,
-                actor);
-            effectivePct = accountDailyLossPct; // the live gate below uses the just-armed cap
-            audit.log(accountCapArmedEvent(tenantId, actor, accountDailyLossPct));
+            int armedRows =
+                tx.execute(
+                    "INSERT INTO tenant_config (tenant_id, account_daily_loss_pct, updated_by) "
+                        + "VALUES (?, ?, ?) ON CONFLICT (tenant_id) DO NOTHING",
+                    tenantId,
+                    accountDailyLossPct,
+                    actor);
+            if (armedRows > 0) {
+              // WE armed the row → the live gate uses our cap and the audit records the real arm.
+              effectivePct = accountDailyLossPct;
+              audit.log(accountCapArmedEvent(tenantId, actor, accountDailyLossPct));
+            } else {
+              // Lost the race: a concurrent live create armed this tenant first (ON CONFLICT DO
+              // NOTHING inserted 0 rows). Re-read the winner's committed cap on `tx` so the live
+              // gate validates against the REAL breaker, and emit NO arm audit — we armed nothing.
+              Record racedRow =
+                  tx.fetchOne(
+                      "SELECT account_daily_loss_pct, account_daily_loss_threshold "
+                          + "FROM tenant_config WHERE tenant_id = ?",
+                      tenantId);
+              effectivePct =
+                  racedRow == null
+                      ? null
+                      : racedRow.get("account_daily_loss_pct", BigDecimal.class);
+              effectiveThreshold =
+                  racedRow == null
+                      ? null
+                      : racedRow.get("account_daily_loss_threshold", BigDecimal.class);
+            }
           }
 
           // a2. Validate the proposed config standalone (same gate as update's step b), but using
