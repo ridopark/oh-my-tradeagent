@@ -89,6 +89,26 @@ export function TrimButton({
     setPicking(false);
     setConfirming(null);
   };
+
+  // Disarm only when focus leaves the CONTROL, not when it moves between the buttons inside it.
+  // React's onBlur is focusout, which BUBBLES: without the containment check, clicking any preset
+  // other than the autofocused first one blurs that first button, bubbles to the container, and
+  // disarms the picker on mousedown — so the picker unmounts before mouseup and the click never
+  // lands. That is why 25% (autofocused, so clicking it moves no focus) worked while 50%/75% were
+  // dead. A null relatedTarget (focus left to nothing) is correctly treated as "left the control".
+  const handleBlur = (e: React.FocusEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      disarm();
+    }
+  };
+
+  // Belt-and-braces for the same failure: preventDefault on mousedown stops the browser moving
+  // focus on click at all, so no focusout fires for ANY mouse interaction inside the control. This
+  // matters beyond the containment check above because Safari and Firefox do not focus a <button>
+  // on click — there the relatedTarget would be null and the containment check alone would still
+  // swallow every preset click. Keyboard focus/Tab is unaffected, so the containment check remains
+  // the guard for keyboard users.
+  const keepFocus = (e: React.MouseEvent) => e.preventDefault();
   const armTimer = () => {
     clearTimer();
     timerRef.current = setTimeout(disarm, CONFIRM_TIMEOUT_MS);
@@ -166,7 +186,11 @@ export function TrimButton({
 
   if (confirming) {
     return (
-      <div className="flex items-center gap-2" onBlur={disarm}>
+      <div
+        className="flex items-center gap-2"
+        onBlur={handleBlur}
+        onMouseDown={keepFocus}
+      >
         <button
           type="button"
           autoFocus
@@ -188,7 +212,11 @@ export function TrimButton({
 
   if (picking) {
     return (
-      <div className="flex items-center gap-1" onBlur={disarm}>
+      <div
+        className="flex items-center gap-1"
+        onBlur={handleBlur}
+        onMouseDown={keepFocus}
+      >
         <span className="pr-1 text-[11px] text-slate-400">Trim</span>
         {presets.map((preset, i) => (
           <button
