@@ -265,11 +265,23 @@ Phase 1 (contract)  →  Phase 2 (orchestrator, TRADING-CRITICAL)  →  Phase 3 
                               ↑ merge + DEPLOY before Phase 3 merges
 ```
 
-Phase 3 sends `source`/`qty_override` on the wire; if the orchestrator deployed to the cluster does
-not yet understand them, Jackson drops the unknown fields and the entry silently auto-sizes off
-`capital_weight` instead of the operator's qty. **Phase 2 must be deployed, not merely merged, before
-the Phase 3 flag is flipped.** Phases 3 and 4 are inert until the flags flip, so they can merge
-freely.
+Phase 3 sends `source`/`qty_override` on the wire. **Phase 2 must be deployed, not merely merged,
+before the Phase 3 flag is flipped.** Phases 3 and 4 are inert until the flags flip, so they can
+merge freely.
+
+**The failure mode, verified empirically** (this plan originally asserted the opposite — that an old
+orchestrator would silently drop the unknown fields and auto-size off `capital_weight`; that is
+wrong): Temporal's `JacksonJsonPayloadConverter` does NOT disable `FAIL_ON_UNKNOWN_PROPERTIES`, and
+jsonschema2pojo emits no `@JsonIgnoreProperties`. An old worker therefore throws
+`UnrecognizedPropertyException` deserializing the workflow input, the workflow task fails, and
+Temporal retries it forever. A premature flag flip does not place a wrongly-sized real-money order —
+it **wedges** the entry, which trades nothing while workflow-task failures accumulate. Look for a
+stuck workflow, not a bad fill.
+
+Self-heal caveat: once Phase 2 deploys, the retried task succeeds and the pending entry runs with an
+ask anchor that may be hours stale. The existing `max_signal_age_bto_secs` gate rejects it
+(`SIGNAL_TOO_OLD`) rather than filling at a stale price, but terminate any wedged manual-entry
+workflow rather than relying on that.
 
 Each phase is one PR. Per `[[feedback_claude_pr_workflow_edits]]` plain CI is the real gate; per
 `[[feedback_spotless_precommit]]` run `spotless:apply` on every touched Java module before pushing.
