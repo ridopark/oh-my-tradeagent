@@ -172,6 +172,24 @@ export function ManualEntryPanel({
 
   const selectedStrategy =
     strategies.find((s) => s.strategyId === strategyId) ?? strategies[0];
+
+  /**
+   * Switching strategy changes the legal qty range, so the currently-picked qty has to come with
+   * it. Without this, picking 30 on a max-50 strategy and switching to a max-5 one leaves qty=30:
+   * the <select> has no matching option (React warns and renders blank) and Confirm is disabled
+   * with nothing on screen explaining why. Every live tenant has both a copytrade (max 50) and a
+   * watchlist (max 5) strategy, so this is reachable in one click, not a corner case.
+   */
+  const selectStrategy = (nextId: string) => {
+    setStrategyId(nextId);
+    const next = strategies.find((s) => s.strategyId === nextId);
+    if (!next) return;
+    const current = Number.parseInt(qty, 10);
+    const clamped = Number.isInteger(current)
+      ? Math.min(Math.max(current, next.minContracts), next.maxContracts)
+      : next.minContracts;
+    setQty(String(clamped));
+  };
   const minQty = selectedStrategy?.minContracts ?? 1;
   const maxQty = Math.max(minQty, selectedStrategy?.maxContracts ?? 1);
   const qtyChoices = Array.from({ length: maxQty - minQty + 1 }, (_, i) => minQty + i);
@@ -288,7 +306,7 @@ export function ManualEntryPanel({
             {strategies.length > 1 && (
               <select
                 value={strategyId}
-                onChange={(e) => setStrategyId(e.target.value)}
+                onChange={(e) => selectStrategy(e.target.value)}
                 className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
               >
                 {strategies.map((s) => (
