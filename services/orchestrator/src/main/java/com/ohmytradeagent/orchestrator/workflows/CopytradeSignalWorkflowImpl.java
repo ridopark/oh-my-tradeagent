@@ -4,6 +4,7 @@ import com.ohmytradeagent.contract.AccountSnapshotRequest;
 import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.CopytradeEntryStatus;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.OrderIntent;
@@ -99,6 +100,14 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // emits its own PositionSupersededByCorrection + the flatten kinds when it actions the signal.
   // Registered in AuditEventKinds.ALL_KINDS.
   private static final String KIND_BTO_CORRECTION_SUPERSEDED = "BtoCorrectionSuperseded";
+
+  /**
+   * PLAN-2026-08-10-live-manual-bto: {@code reason_code} for an operator qty_override outside the
+   * strategy's [min_contracts, max_contracts]. A distinct code (not the generic
+   * NOTIONAL_CAP_EXCEEDED) because the operator can fix this one by typing a different number,
+   * whereas a cap breach depends on the book.
+   */
+  private static final String REASON_MANUAL_QTY_OUT_OF_BOUNDS = "MANUAL_QTY_OUT_OF_BOUNDS";
 
   // Phase 2 (PLAN-2026-07-06-pretrade-check-orchestrator-wiring): the top-level failure-audit kind.
   // The 2026-07-06 incident: pre_trade_check_enabled=true with the orchestrator routability bean
@@ -335,6 +344,58 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private String riskBreachReason;
   private String riskBreachActor;
 
+  /**
+   * PLAN-2026-08-10-live-manual-bto: entry outcome reported by the {@link #entryStatus()} Query.
+   * Plain mutable workflow state stamped by the paths below — assigning a field is NOT a command,
+   * so none of this affects replay determinism or the recorded history.
+   */
+  private final CopytradeEntryStatus entryStatus = pendingEntryStatus();
+
+  private static CopytradeEntryStatus pendingEntryStatus() {
+    CopytradeEntryStatus s = new CopytradeEntryStatus();
+    s.setSchemaVersion(1L);
+    s.setState(CopytradeEntryStatus.State.PENDING);
+    return s;
+  }
+
+  @Override
+  public CopytradeEntryStatus entryStatus() {
+    return entryStatus;
+  }
+
+  /**
+   * Stamp the terminal REJECTED status alongside the {@code SignalRejected} audit every refusal
+   * already emits. Kept as a helper so a new gate cannot emit the audit and forget the Query state
+   * (which would leave the dashboard spinning on PENDING for an entry that will never happen).
+   */
+  private void rejectStatus(String reasonCode, String reasonDetail) {
+    entryStatus.setState(CopytradeEntryStatus.State.REJECTED);
+    entryStatus.setReasonCode(reasonCode);
+    entryStatus.setReasonDetail(reasonDetail);
+  }
+
+  /**
+   * Stamp the terminal FILLED status from a broker fill. Shared by the happy-path fill branch and
+   * the two cancel-on-filled recoveries, so an adopted lot reports FILLED rather than the EXPIRED
+   * its enclosing TTL branch would otherwise leave behind.
+   */
+  private void filledStatus(ContractResolveResult resolved, FillSignalPayload fill) {
+    entryStatus.setState(CopytradeEntryStatus.State.FILLED);
+    entryStatus.setOptionSymbol(resolved.optionSymbol());
+    entryStatus.setBrokerOrderId(fill.getBrokerOrderId());
+    entryStatus.setFilledQty(fill.getFilledQty());
+    entryStatus.setAvgFillPrice(fill.getAvgFillPrice());
+  }
+
+  /**
+   * PLAN-2026-08-10-live-manual-bto: true when this signal was hand-submitted by an operator from
+   * the /live dashboard rather than parsed off Discord. Null/absent {@code source} (every
+   * sidecar-emitted signal, and every payload in a pre-deploy replay history) is NOT manual.
+   */
+  private static boolean isManual(CopytradeSignalPayload payload) {
+    return payload.getSource() == CopytradeSignalPayload.Source.MANUAL;
+  }
+
   @Override
   public void onFill(FillSignalPayload event) {
     this.fillEvent = event;
@@ -381,6 +442,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       if (failureAuditVersion >= 1) {
         logAudit(payload, KIND_ENTRY_WORKFLOW_FAILED, entryFailureSubject(payload, e));
       }
+      // PLAN-2026-08-10-live-manual-bto: mirror the alertable audit into the Query state so a
+      // manual entry that died on an unhandled failure reports FAILED rather than a stale PENDING.
+      // Stamped at EVERY version (unlike the audit) — it adds no command, so there is nothing to
+      // gate, and a v=DEFAULT_VERSION in-flight execution deserves the same honest answer.
+      entryStatus.setState(CopytradeEntryStatus.State.FAILED);
+      entryStatus.setReasonDetail(e.getClass().getSimpleName());
       throw e;
     }
   }
@@ -413,6 +480,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               "reason_code", "STRATEGY_DISABLED",
               "reason_detail", "strategy_disabled",
               "outcome", "REJECTED"));
+      rejectStatus("STRATEGY_DISABLED", "strategy_disabled");
       return payload.getSignalId();
     }
 
@@ -497,6 +565,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         rejectSubject.put("reason_detail", decision.detail());
       }
       logAudit(payload, KIND_SIGNAL_REJECTED, rejectSubject);
+      rejectStatus(decision.reason().name(), decision.detail());
       return payload.getSignalId();
     }
 
@@ -523,6 +592,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
                 "reason_code", "CAPITAL_UNAVAILABLE",
                 "reason_detail", "capital_unavailable",
                 "outcome", "REJECTED"));
+        rejectStatus("CAPITAL_UNAVAILABLE", "capital_unavailable");
         // Fail-closed: NO placeOrder, NO PositionWorkflow.
         return payload.getSignalId();
       }
@@ -536,6 +606,54 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // entry_scale_in_fraction when the BTO tail carries a scale-in cue (see Sizing#computeEntry).
     Sizing.EntrySizing sized = Sizing.computeEntry(payload, config, capital, priced.limit());
     long contracts = sized.contracts();
+
+    // PLAN-2026-08-10-live-manual-bto: an operator-typed contract count REPLACES capital-weight
+    // sizing for this entry. Sizing.computeEntry above still runs — it is a pure function (no
+    // command), and the SignalAccepted audit below reports its pre-override base so forensics can
+    // still see what auto-sizing WOULD have chosen next to what the operator asked for.
+    //
+    // The bounds check is UNCONDITIONAL, deliberately: Sizing already clamps the auto-sized path to
+    // [min_contracts, max_contracts], so without this the manual path would be the one way for an
+    // entry to exceed the tenant's per-entry exposure ceiling. Reject rather than clamp — the
+    // operator named a size, and quietly filling a different one is not an acceptable answer to a
+    // real-money instruction.
+    //
+    // Replay: reachable ONLY when qty_override is non-null, which no pre-deploy history can carry
+    // (nothing emitted the field before this change), so a legacy replay never reaches the new
+    // logAudit command and needs no getVersion marker.
+    if (payload.getQtyOverride() != null) {
+      long requested = payload.getQtyOverride();
+      if (requested < config.getMinContracts() || requested > config.getMaxContracts()) {
+        logAudit(
+            payload,
+            KIND_SIGNAL_REJECTED,
+            subject(
+                "signal_id",
+                payload.getSignalId(),
+                "reason_code",
+                REASON_MANUAL_QTY_OUT_OF_BOUNDS,
+                "reason_detail",
+                "requested="
+                    + requested
+                    + " min_contracts="
+                    + config.getMinContracts()
+                    + " max_contracts="
+                    + config.getMaxContracts(),
+                "outcome",
+                "REJECTED"));
+        rejectStatus(
+            REASON_MANUAL_QTY_OUT_OF_BOUNDS,
+            "requested="
+                + requested
+                + " min_contracts="
+                + config.getMinContracts()
+                + " max_contracts="
+                + config.getMaxContracts());
+        // Fail-closed: NO placeOrder, NO PositionWorkflow.
+        return payload.getSignalId();
+      }
+      contracts = requested;
+    }
 
     // Phase F4B (clamp-to-fit headroom): instead of letting checkNotionalCap reject an over-cap
     // entry, SIZE IT DOWN to the largest qty that fits the remaining notional-cap headroom. The
@@ -572,15 +690,41 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
                 "clamp_below_min headroom=" + headroom + " min=" + config.getMinContracts(),
                 "outcome",
                 "REJECTED"));
+        rejectStatus(
+            "NOTIONAL_CAP_EXCEEDED",
+            "clamp_below_min headroom=" + headroom + " min=" + config.getMinContracts());
+        // Fail-closed: NO placeOrder, NO PositionWorkflow.
+        return payload.getSignalId();
+      }
+      // PLAN-2026-08-10-live-manual-bto: clamping DOWN is right for an auto-sized signal (the
+      // capital-weight qty is our estimate, so fitting it to the headroom is a refinement). It is
+      // wrong for an operator-typed qty: silently buying 2 when the operator asked for 10 is a
+      // different trade than the one authorized. Reject and let them re-decide against the
+      // refreshed headroom. Reachable only on the manual path, so the auto-sized behavior is
+      // byte-identical to before.
+      if (payload.getQtyOverride() != null && clamped < contracts) {
+        logAudit(
+            payload,
+            KIND_SIGNAL_REJECTED,
+            subject(
+                "signal_id",
+                payload.getSignalId(),
+                "reason_code",
+                "NOTIONAL_CAP_EXCEEDED",
+                "reason_detail",
+                "manual_qty_exceeds_headroom requested=" + contracts + " headroom=" + headroom,
+                "outcome",
+                "REJECTED"));
+        rejectStatus(
+            "NOTIONAL_CAP_EXCEEDED",
+            "manual_qty_exceeds_headroom requested=" + contracts + " headroom=" + headroom);
         // Fail-closed: NO placeOrder, NO PositionWorkflow.
         return payload.getSignalId();
       }
       contracts = clamped;
     }
 
-    logAudit(
-        payload,
-        KIND_SIGNAL_ACCEPTED,
+    Map<String, Object> acceptedSubject =
         subject(
             "signal_id",
             payload.getSignalId(),
@@ -597,7 +741,17 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "scale_in_fraction",
             config.getEntryScaleInFraction(),
             "ref_premium",
-            payload.getPrice()));
+            payload.getPrice());
+    // PLAN-2026-08-10-live-manual-bto: tag the manual path so forensics can separate operator
+    // entries from copied ones, and record the qty the operator actually asked for next to the
+    // auto-sizing this overrode. Added ONLY on the manual path so a Discord signal's audit subject
+    // is byte-identical to before (no null-valued keys appearing on every row).
+    if (isManual(payload)) {
+      acceptedSubject.put("source", CopytradeSignalPayload.Source.MANUAL.value());
+      acceptedSubject.put("qty_override", payload.getQtyOverride());
+      acceptedSubject.put("contracts_auto_sized", sized.contracts());
+    }
+    logAudit(payload, KIND_SIGNAL_ACCEPTED, acceptedSubject);
 
     // Edited-signal supersede (F1): when this corrected BTO matches a prior just-filled leg on
     // tenant+strategy+underlying+strike+right but a DIFFERENT expiry, and the prior leg's entry is
@@ -639,6 +793,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
                 "broker_target", config.getBrokerTarget().value(),
                 "reason", status.name().toLowerCase(Locale.ROOT),
                 "outcome", "REJECTED"));
+        rejectStatus("live_promotion_missing", status.name().toLowerCase(Locale.ROOT));
         // Fail-closed: NO placeOrder, NO PositionWorkflow.
         return payload.getSignalId();
       }
@@ -659,6 +814,11 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "qty", contracts,
             "broker_target", config.getBrokerTarget().value(),
             "limit_price_strategy", priced.strategy().wireKey()));
+
+    entryStatus.setState(CopytradeEntryStatus.State.SUBMITTED);
+    entryStatus.setOptionSymbol(resolved.optionSymbol());
+    entryStatus.setContracts(contracts);
+    entryStatus.setBrokerOrderId(placed.getBrokerOrderId());
 
     long ttlSecs = pendingTtlSecs(config);
     // Phase 5: also wake on risk_breach so the cascade can short-circuit the BTO.
@@ -725,6 +885,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         entrySubject.put("option_symbol", resolved.optionSymbol());
       }
       logAudit(payload, KIND_ENTRY_FILLED, entrySubject);
+      filledStatus(resolved, fillEvent);
 
       // Phase 3: start PositionWorkflow + cache OCC → workflow_id mapping. Versioned so
       // Phase 2b workflows in flight on replay don't attempt to spawn a child.
@@ -763,6 +924,17 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       CopytradeSignalPayload payload, StrategyConfig config, ContractResolveResult resolved) {
     int v = Workflow.getVersion(VERSION_BTO_CORRECTION_SUPERSEDE, Workflow.DEFAULT_VERSION, 1);
     if (v == Workflow.DEFAULT_VERSION) {
+      return;
+    }
+    // PLAN-2026-08-10-live-manual-bto: NEVER auto-supersede off a hand-typed entry. This whole
+    // mechanism exists to undo an author's EDITED Discord signal — the corrected line arrives
+    // seconds after the wrong one, so a same-underlying/strike/right + different-expiry match
+    // inside SUPERSEDE_WINDOW is strong evidence of a correction. An operator manually opening a
+    // different expiry carries no such meaning, and treating it as a correction would silently
+    // FLATTEN a live Discord-sourced leg the operator never touched. Placed AFTER the version read
+    // so the command stream for legacy histories is unchanged, and reachable only for payloads
+    // carrying source=manual (which no pre-deploy history can).
+    if (isManual(payload)) {
       return;
     }
     // Required fields for an expiry-correction match. Any missing → no lookup, no command.
@@ -839,6 +1011,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       s.put("intent_key", intentKey);
     }
     logAudit(payload, KIND_SIGNAL_ABORTED_BY_RISK_BREACH, s);
+    // Every audit-and-abort path routes through here, so one stamp covers them all.
+    entryStatus.setState(CopytradeEntryStatus.State.ABORTED);
+    entryStatus.setReasonDetail(riskBreachReason);
   }
 
   private void startPositionWorkflow(
@@ -1274,6 +1449,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "broker_order_id", placed.getBrokerOrderId(),
             "ttl_secs", ttlSecs,
             "outcome", "EXPIRED"));
+    // Reached only when neither cancel-on-filled recovery adopted a lot (both return early after
+    // stamping FILLED), so this cannot overwrite a genuine fill.
+    entryStatus.setState(CopytradeEntryStatus.State.EXPIRED);
+    entryStatus.setReasonDetail("ttl_secs=" + ttlSecs);
   }
 
   /**
@@ -1316,6 +1495,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       recoverySubject.put("option_symbol", resolved.optionSymbol());
     }
     logAudit(payload, KIND_ENTRY_FILLED, recoverySubject);
+    filledStatus(resolved, synth);
 
     startPositionWorkflow(payload, config, resolved, synth);
   }

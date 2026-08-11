@@ -1576,6 +1576,50 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   }
 
   /**
+   * PLAN-2026-08-10-live-manual-bto: clamping DOWN to the cap headroom is right for an auto-sized
+   * signal (the tests above), but WRONG for an operator-typed qty — silently buying 1 when the
+   * operator asked for 4 is a different trade than the one authorized. On the manual path the
+   * headroom shortfall REJECTS instead, naming both numbers so the operator can re-decide.
+   */
+  @Test
+  void notionalCap_manualQtyOverHeadroom_rejectsInsteadOfClamping() {
+    StrategyConfig cfg = configWithPreTradeEnabled();
+    cfg.setPreTradeCheckEnabled(false);
+    cfg.setCapitalSource(StrategyConfig.CapitalSource.ACCOUNT_CASH);
+    cfg.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(contract.resolve(any())).thenReturn(resolved());
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    // Same headroom (1) that clamps an auto-sized entry down to 1 contract above.
+    when(risk.notionalCapHeadroomContracts(eq(cfg), any(), any(), anyString(), anyString()))
+        .thenReturn(1L);
+
+    AccountSnapshotActivity accountStub =
+        request -> {
+          AccountSnapshotResult r = new AccountSnapshotResult();
+          r.setSchemaVersion(1L);
+          r.setCash(new BigDecimal("5000"));
+          return r;
+        };
+    Worker brokerWorker = env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER);
+    brokerWorker.registerActivitiesImplementations(exec, accountStub);
+    env.start();
+
+    CopytradeSignalPayload p = btoPayload();
+    p.setPrice(new BigDecimal("2.27"));
+    p.setSource(CopytradeSignalPayload.Source.MANUAL);
+    p.setQtyOverride(4L); // within [min,max] but over the headroom
+    runWorkflow(p);
+
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+    AuditEvent rejected = capture("SignalRejected");
+    assertThat(rejected.getSubject()).containsEntry("reason_code", "NOTIONAL_CAP_EXCEEDED");
+    assertThat((String) rejected.getSubject().get("reason_detail"))
+        .isEqualTo("manual_qty_exceeds_headroom requested=4 headroom=1");
+  }
+
+  /**
    * Phase F4B: the placed qty is exactly MIN(account-cash sizing, cap-headroom, max_contracts),
    * floored. cash=5000 × 0.2 = $1000 / ($2.27 × 100) = 4 cash-sized; headroom (stubbed) = 3; max=2.
    * MIN(4, 3, 2) = 2 → 2 contracts placed.

@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.CopytradeEntryStatus;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
@@ -1902,6 +1903,212 @@ class CopytradeSignalWorkflowImplTest {
     StrategyConfig c = config();
     c.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_LIVE);
     return c;
+  }
+
+  // ---------- PLAN-2026-08-10-live-manual-bto: operator-initiated manual entry ----------
+
+  /** An operator-submitted BTO: source=manual + a hand-typed contract count. */
+  private CopytradeSignalPayload manualBtoPayload(long qty) {
+    CopytradeSignalPayload p = btoPayload();
+    p.setSource(CopytradeSignalPayload.Source.MANUAL);
+    p.setQtyOverride(qty);
+    p.setAuthor("operator@example.com");
+    p.setRawLine("MANUAL BTO NVDA  260516C00140000 qty=" + qty + " ask=2.30");
+    return p;
+  }
+
+  /** Approve every gate for an NVDA entry so the qty math is the only variable under test. */
+  private void setupApprovedNvdaMocks(StrategyConfig cfg) {
+    cfg.setPendingTtlPaperSecs(1L); // short TTL so the no-fill tests exit quickly
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), any(), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    // capital_weight 0.2 of $100k over a $2.30 premium sizes WAY past max_contracts, so auto-sizing
+    // lands on the max_contracts clamp (5). Any qty_override below that is therefore visibly the
+    // operator's number and not a coincidence of the sizing math.
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "stub-K"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "stub-K"));
+  }
+
+  /** Run to completion, then Query the terminal entry status (queries answer on CLOSED runs). */
+  private CopytradeEntryStatus runAndQueryStatus(CopytradeSignalPayload payload) {
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId(
+                        WorkflowIds.copytradeSignal("dev", "copytrade-v1", payload.getSignalId()))
+                    .build());
+    WorkflowStub.fromTyped(wf).start(payload);
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+    return wf.entryStatus();
+  }
+
+  @Test
+  void manualBto_qtyOverride_placesExactlyThatManyContracts() {
+    // The operator asked for 3. Auto-sizing would have clamped to max_contracts (5). The override
+    // wins, and the SignalAccepted audit records BOTH so forensics can see what was overridden.
+    setupApprovedNvdaMocks(config());
+
+    runWorkflow(manualBtoPayload(3L));
+
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec).placeOrder(intentCaptor.capture());
+    assertThat(intentCaptor.getValue().getQty()).isEqualTo(3L);
+
+    AuditEvent accepted = capture("SignalAccepted");
+    assertThat(accepted.getSubject())
+        .containsEntry("contracts", 3)
+        .containsEntry("source", "manual")
+        .containsEntry("qty_override", 3)
+        .containsEntry("contracts_auto_sized", 5);
+  }
+
+  @Test
+  void discordBto_withoutOverride_sizesFromCapitalWeightAndCarriesNoManualKeys() {
+    // The invariant the whole design rests on: an ordinary Discord signal (source/qty_override
+    // absent) is byte-identical to before — auto-sized, and its audit subject gains no new keys.
+    setupApprovedNvdaMocks(config());
+
+    runWorkflow(btoPayload());
+
+    ArgumentCaptor<OrderIntent> intentCaptor = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec).placeOrder(intentCaptor.capture());
+    assertThat(intentCaptor.getValue().getQty()).isEqualTo(5L);
+
+    AuditEvent accepted = capture("SignalAccepted");
+    assertThat(accepted.getSubject())
+        .containsEntry("contracts", 5)
+        .doesNotContainKey("source")
+        .doesNotContainKey("qty_override")
+        .doesNotContainKey("contracts_auto_sized");
+  }
+
+  @Test
+  void manualBto_qtyOverrideAboveMaxContracts_isRejectedAndPlacesNoOrder() {
+    // max_contracts is the tenant's per-entry exposure ceiling. Sizing clamps the auto path to it,
+    // so the manual path must not become the way around it.
+    setupApprovedNvdaMocks(config()); // max_contracts = 5
+
+    runWorkflow(manualBtoPayload(99L));
+
+    verify(exec, never()).placeOrder(any());
+    AuditEvent rejected = capture("SignalRejected");
+    assertThat(rejected.getSubject())
+        .containsEntry("reason_code", "MANUAL_QTY_OUT_OF_BOUNDS")
+        .containsEntry("outcome", "REJECTED");
+    assertThat((String) rejected.getSubject().get("reason_detail"))
+        .contains("requested=99")
+        .contains("max_contracts=5");
+  }
+
+  @Test
+  void manualBto_qtyOverrideBelowMinContracts_isRejectedAndPlacesNoOrder() {
+    StrategyConfig cfg = config();
+    cfg.setMinContracts(2L);
+    setupApprovedNvdaMocks(cfg);
+
+    runWorkflow(manualBtoPayload(1L));
+
+    verify(exec, never()).placeOrder(any());
+    assertThat(capture("SignalRejected").getSubject())
+        .containsEntry("reason_code", "MANUAL_QTY_OUT_OF_BOUNDS");
+  }
+
+  @Test
+  void manualBto_doesNotSupersedePriorWrongExpiryLeg() {
+    // THE safety case. An operator hand-opening a different expiry of the same underlying/strike/
+    // right, inside the 120s correction window of a filled Discord leg, must NOT be read as an
+    // edited-signal correction — that would auto-FLATTEN a live position the operator never
+    // touched. Same setup as correctedBto_withinWindow_supersedesPriorWrongExpiryLeg, one field
+    // different: source=manual.
+    setupApprovedSpyMocks(SPY_0708);
+    OffsetDateTime priorEntryAt = OffsetDateTime.parse("2026-07-05T14:30:00Z");
+    when(positionLookup.findOpenPositionByUnderlyingStrikeRight(
+            eq("dev"), eq("copytrade-v1"), eq("SPY"), any(), eq("P"), eq("2026-07-08")))
+        .thenReturn(
+            new PositionLookupActivities.SupersedeCandidate(
+                "wf-prior", SPY_0706, priorEntryAt, false));
+
+    CopytradeSignalPayload manual =
+        spyPut(LocalDate.of(2026, 7, 8), "705:0", priorEntryAt.plusSeconds(30));
+    manual.setSource(CopytradeSignalPayload.Source.MANUAL);
+    manual.setQtyOverride(1L);
+    runWorkflow(manual);
+
+    assertNoAudit("BtoCorrectionSuperseded");
+    // Suppressed BEFORE the lookup dispatch — no activity call at all, not just no supersede.
+    verify(positionLookup, never())
+        .findOpenPositionByUnderlyingStrikeRight(
+            anyString(), anyString(), anyString(), any(), anyString(), anyString());
+    // …and the manual entry itself still went through.
+    verify(exec).placeOrder(any());
+  }
+
+  @Test
+  void entryStatus_startsPendingAndReportsRejectedWithTheGateThatRefused() {
+    StrategyConfig cfg = config();
+    cfg.setEnabled(false);
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+
+    CopytradeEntryStatus status = runAndQueryStatus(manualBtoPayload(1L));
+
+    assertThat(status.getState()).isEqualTo(CopytradeEntryStatus.State.REJECTED);
+    assertThat(status.getReasonCode()).isEqualTo("STRATEGY_DISABLED");
+    assertThat(status.getReasonDetail()).isEqualTo("strategy_disabled");
+  }
+
+  @Test
+  void entryStatus_reportsExpiredWhenTheEntryTtlElapsesWithNoFill() {
+    setupApprovedNvdaMocks(config());
+
+    CopytradeEntryStatus status = runAndQueryStatus(manualBtoPayload(2L));
+
+    assertThat(status.getState()).isEqualTo(CopytradeEntryStatus.State.EXPIRED);
+    // SUBMITTED stamped the placement details on the way through; EXPIRED preserves them.
+    assertThat(status.getOptionSymbol()).isEqualTo("NVDA  260516C00140000");
+    assertThat(status.getContracts()).isEqualTo(2L);
+    assertThat(status.getBrokerOrderId()).isEqualTo("stub-K");
+  }
+
+  @Test
+  void entryStatus_reportsFilledWithTheBrokerEconomics() {
+    setupApprovedNvdaMocks(config());
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId(WorkflowIds.copytradeSignal("dev", "copytrade-v1", "111:0"))
+                    .build());
+    WorkflowStub.fromTyped(wf).start(manualBtoPayload(2L));
+    wf.onFill(
+        new FillSignalPayload()
+            .withBrokerOrderId("stub-K")
+            .withFilledQty(2L)
+            .withAvgFillPrice(new BigDecimal("2.34"))
+            .withFilledAt(OffsetDateTime.parse("2026-05-13T17:23:00Z")));
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    CopytradeEntryStatus status = wf.entryStatus();
+    assertThat(status.getState()).isEqualTo(CopytradeEntryStatus.State.FILLED);
+    assertThat(status.getFilledQty()).isEqualTo(2L);
+    assertThat(status.getAvgFillPrice()).isEqualByComparingTo("2.34");
+    assertThat(status.getOptionSymbol()).isEqualTo("NVDA  260516C00140000");
   }
 
   // ---------- selectPendingTtlSecs unit tests ----------
