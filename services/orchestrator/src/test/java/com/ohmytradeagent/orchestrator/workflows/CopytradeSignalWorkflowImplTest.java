@@ -2052,6 +2052,50 @@ class CopytradeSignalWorkflowImplTest {
         .containsEntry("fanout_leg", true);
   }
 
+  @Test
+  void stc_fansOutEvenWhenThePrimaryLegIsAlreadyDead() {
+    // Review finding: the primary path's bail-outs used to `return`, cancelling the exit for every
+    // OTHER leg. This is the likeliest shape of it — the Redis pointer resolves the most RECENT
+    // leg, that leg was force-exited, so the running-guard fails. The author's STC must still
+    // close the leg that IS running.
+    String deadPrimary = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-DEAD";
+    String liveLeg = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-LIVE";
+    setupStcMocks();
+    startLeg(liveLeg);
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(deadPrimary);
+    when(positionLookup.findAllPositionWorkflowIds(anyString(), anyString(), anyString()))
+        .thenReturn(java.util.List.of(liveLeg, deadPrimary));
+    when(positionLookup.isPositionWorkflowRunning(deadPrimary)).thenReturn(false);
+    when(positionLookup.isPositionWorkflowRunning(liveLeg)).thenReturn(true);
+
+    runWorkflow(stcPayload("half out"));
+
+    assertThat(exitRequestedLegs()).containsExactly(liveLeg);
+  }
+
+  @Test
+  void stc_fansOutEvenWhenThePrimarySignalDispatchFails() {
+    // The TOCTOU case the reviewer named: the primary passes the running-guard but dies before the
+    // signal lands. OrphanSTC is still audited for it, AND the surviving leg still gets the exit.
+    String legLive = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-LIVE";
+    String legGone = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-GONE";
+    setupStcMocks();
+    startLeg(legLive);
+    // legGone is never started, so signalling it fails the way a terminated target does.
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(legGone);
+    when(positionLookup.findAllPositionWorkflowIds(anyString(), anyString(), anyString()))
+        .thenReturn(java.util.List.of(legLive, legGone));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
+
+    runWorkflow(stcPayload("half out"));
+
+    AuditEvent orphan = capture("OrphanSTC");
+    assertThat(orphan.getSubject()).containsEntry("position_workflow_id", legGone);
+    assertThat(exitRequestedLegs()).contains(legLive);
+  }
+
   // ---------- PLAN-2026-08-10-live-manual-bto: operator-initiated manual entry ----------
 
   /** An operator-submitted BTO: source=manual + a hand-typed contract count. */

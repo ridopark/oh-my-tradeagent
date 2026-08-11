@@ -1178,23 +1178,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     int stcGuardVersion =
         Workflow.getVersion(VERSION_STC_RUNNING_GUARD, Workflow.DEFAULT_VERSION, 1);
 
-    // Change point A (preventive): a stale Redis mapping can return a non-null but DEAD (terminal)
-    // PositionWorkflow id. Verify it's RUNNING before emitting ExitRequested or signalling it. The
-    // && short-circuit guarantees v=0 schedules NO isPositionWorkflowRunning activity (the v=0
-    // command stream stays byte-identical).
-    if (stcGuardVersion >= 1 && !positionLookup.isPositionWorkflowRunning(positionId)) {
-      logAudit(
-          payload,
-          KIND_STC_NO_OPEN_POSITION,
-          subject(
-              "signal_id", payload.getSignalId(),
-              "option_symbol", occ,
-              "position_workflow_id", positionId,
-              "reason", REASON_POSITION_WF_NOT_RUNNING,
-              "author", payload.getAuthor()));
-      return payload.getSignalId();
-    }
-
+    // Fraction resolution is hoisted ABOVE the primary-dispatch block because the FAN-OUT needs it
+    // too — and must still have it when the primary bails out. Every line of it is pure computation
+    // (keyword matcher + config/payload reads, no Workflow.* call and no activity), so moving it
+    // emits no command and cannot reorder the recorded history.
     // PLAN-2026-07-01-unrecognized-stc-tail-alert: compute the match REPORT (fraction + winning
     // key) rather than just the fraction. The fraction is unchanged — matchReporting resolves the
     // identical value as match() — but the winning key (empty when the default was applied) is
@@ -1236,131 +1223,170 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     boolean intentApplied = enforce && intent == CopytradeSignalPayload.CloseIntent.FULL;
     double effectiveFraction = intentApplied ? 1.0 : keywordFraction;
 
-    PartialExitRequest req = new PartialExitRequest();
-    req.setSchemaVersion(1L);
-    req.setTenantId(tenant);
-    req.setStrategyId(strategyId);
-    req.setSignalId(payload.getSignalId());
-    req.setPositionWorkflowId(positionId);
-    req.setFraction(BigDecimal.valueOf(effectiveFraction));
-    req.setRefPremium(payload.getPrice());
-    req.setReason("stc_signal");
-    req.setAuthor(payload.getAuthor());
-    req.setRawLine(payload.getRawLine());
-    req.setOccurredAt(workflowNow());
-
-    // Audit BEFORE dispatch so the intent is durably recorded even if the target workflow has
-    // already closed (race) — reconciliation in Phase 5 reads these to detect orphan STCs.
-    logAudit(
-        payload,
-        KIND_EXIT_REQUESTED,
-        subject(
-            "signal_id",
-            payload.getSignalId(),
-            "option_symbol",
-            occ,
-            "position_workflow_id",
-            positionId,
-            // "fraction" = the exit fraction we DISPATCHED (legacy key; correct ExitRequested
-            // semantics). keyword_fraction = the keyword/default-resolved value (what a
-            // no-keyword-match tail fell back to). The classifier shadow fields below
-            // (close_intent/intent_source/intent_enforced) explain any divergence between them.
-            "fraction",
-            effectiveFraction,
-            // PLAN-2026-07-25-stc-intent-classifier: subject-only shadow enrichment (same
-            // replay-safety rationale — no new command, no version gate). close_intent/
-            // close_confidence are the classifier's verdict on EVERY STC; keyword_fraction is the
-            // matcher's value; intent_source is "classifier" only when the enforce override
-            // actually
-            // arbitrated the fraction, else "keyword"; intent_enforced is the per-tenant flag. This
-            // gives the shadow comparison (classifier vs keyword) for free on every STC.
-            "close_intent",
-            intent != null ? intent.value() : null,
-            "close_confidence",
-            payload.getCloseConfidence(),
-            "keyword_fraction",
-            keywordFraction,
-            "intent_source",
-            intentApplied ? "classifier" : "keyword",
-            "intent_enforced",
-            enforce,
-            // PLAN-2026-07-01-unrecognized-stc-tail-alert: subject-only enrichment (no new command,
-            // no version gate — activity-input payloads are ignored on Temporal 1.27 replay). The
-            // out-of-workflow UnrecognizedStcTailAlerter reads these to page when a non-empty tail
-            // matched no keyword. matched_keyword is null when the default fraction was applied.
-            "matched_keyword",
-            matchResult.matchedKey().orElse(null),
-            "tail",
-            payload.getTail(),
-            "author",
-            payload.getAuthor(),
-            "raw_line",
-            payload.getRawLine(),
-            // PLAN-2026-07-20-stc-fraction-keyword-collision: subject-only enrichment (same
-            // replay-safety rationale — no new command, no version gate). fraction_collision flags
-            // a tail that matched ≥2 keywords with DIFFERENT fractions (auto-resolved to the
-            // smallest); matched_keywords lists every phrase that fired so the alerter can page.
-            "fraction_collision",
-            matchResult.fractionCollision(),
-            "matched_keywords",
-            String.join(",", matchResult.matchedKeys())));
-
-    ExternalWorkflowStub stub = Workflow.newUntypedExternalWorkflowStub(positionId);
-    // Change point B (defense-in-depth): even past the running-guard the target can die between the
-    // guard and the signal (TOCTOU). v=0 keeps the bare single command (byte-identical replay);
-    // v>=1
-    // catches the dispatch failure and emits OrphanSTC instead of crashing.
+    // The primary dispatch is wrapped in a labeled block so its two bail-outs (target not RUNNING,
+    // signal dispatch failed) skip the REST OF THE PRIMARY PATH without skipping the multi-leg
+    // fan-out below. They used to `return`, which meant a dead or dying primary leg silently
+    // cancelled the exit for every OTHER leg of the same OCC — the exact guarantee the fan-out
+    // exists to provide, defeated by the likeliest case: the Redis pointer resolves the most recent
+    // leg, so a leg closed by a force-exit or its own stop leaves the pointer stale, the guard
+    // fails, and the author's STC never reached the legs that were still running.
     //
-    // The catch is narrow by construction: the try wraps ONLY the single stub.signal command, so
-    // the
-    // only exception that can originate here is a signal-external-workflow dispatch failure. The
-    // Temporal Java SDK 1.27 surfaces a NOT_FOUND/terminal target as
-    // io.temporal.failure.ApplicationFailure (type SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_FAILED_*),
-    // converted from the server Failure proto by DataConverter.failureToException — NOT as
-    // SignalExternalWorkflowException (the SDK only constructs that type on the cancel-external
-    // path
-    // in this version). We catch both so the production crash is actually prevented; we
-    // deliberately
-    // do NOT catch bare RuntimeException so genuine bugs still fail the workflow loudly.
-    if (stcGuardVersion == Workflow.DEFAULT_VERSION) {
-      stub.signal("partialExit", req);
-    } else {
-      try {
-        stub.signal("partialExit", req);
-      } catch (SignalExternalWorkflowException | ApplicationFailure e) {
+    // A labeled break (rather than extracting a method) keeps the command stream provably
+    // unchanged: the enclosed code is byte-identical and merely re-scoped, so a v=DEFAULT_VERSION
+    // replay emits exactly the commands it emitted before.
+    primaryDispatch:
+    {
+
+      // Change point A (preventive): a stale Redis mapping can return a non-null but DEAD
+      // (terminal)
+      // PositionWorkflow id. Verify it's RUNNING before emitting ExitRequested or signalling it.
+      // The
+      // && short-circuit guarantees v=0 schedules NO isPositionWorkflowRunning activity (the v=0
+      // command stream stays byte-identical).
+      if (stcGuardVersion >= 1 && !positionLookup.isPositionWorkflowRunning(positionId)) {
         logAudit(
             payload,
-            KIND_ORPHAN_STC,
+            KIND_STC_NO_OPEN_POSITION,
             subject(
                 "signal_id", payload.getSignalId(),
                 "option_symbol", occ,
                 "position_workflow_id", positionId,
-                "reason", REASON_SIGNAL_DISPATCH_FAILED,
-                "error", String.valueOf(e.getMessage())));
-        return payload.getSignalId();
+                "reason", REASON_POSITION_WF_NOT_RUNNING,
+                "author", payload.getAuthor()));
+        break primaryDispatch;
       }
-    }
 
-    // Phase 4: arm CHANDELIER_TRAIL when the strategy opts in.
-    if (Boolean.TRUE.equals(config.getTrailOnPartial())) {
-      ArmChandelierPayload arm = new ArmChandelierPayload();
-      arm.setSchemaVersion(1L);
-      arm.setTenantId(tenant);
-      arm.setStrategyId(strategyId);
-      arm.setPositionWorkflowId(positionId);
-      arm.setSourceSignalId(payload.getSignalId());
-      arm.setPeakPremium(payload.getPrice());
-      arm.setGivebackPct(config.getTrailGivebackPct());
-      stub.signal("armChandelier", arm);
+      PartialExitRequest req = new PartialExitRequest();
+      req.setSchemaVersion(1L);
+      req.setTenantId(tenant);
+      req.setStrategyId(strategyId);
+      req.setSignalId(payload.getSignalId());
+      req.setPositionWorkflowId(positionId);
+      req.setFraction(BigDecimal.valueOf(effectiveFraction));
+      req.setRefPremium(payload.getPrice());
+      req.setReason("stc_signal");
+      req.setAuthor(payload.getAuthor());
+      req.setRawLine(payload.getRawLine());
+      req.setOccurredAt(workflowNow());
+
+      // Audit BEFORE dispatch so the intent is durably recorded even if the target workflow has
+      // already closed (race) — reconciliation in Phase 5 reads these to detect orphan STCs.
       logAudit(
           payload,
-          KIND_CHANDELIER_ARM_REQUESTED,
+          KIND_EXIT_REQUESTED,
           subject(
-              "signal_id", payload.getSignalId(),
-              "position_workflow_id", positionId,
-              "peak_premium", payload.getPrice(),
-              "giveback_pct", config.getTrailGivebackPct()));
-    }
+              "signal_id",
+              payload.getSignalId(),
+              "option_symbol",
+              occ,
+              "position_workflow_id",
+              positionId,
+              // "fraction" = the exit fraction we DISPATCHED (legacy key; correct ExitRequested
+              // semantics). keyword_fraction = the keyword/default-resolved value (what a
+              // no-keyword-match tail fell back to). The classifier shadow fields below
+              // (close_intent/intent_source/intent_enforced) explain any divergence between them.
+              "fraction",
+              effectiveFraction,
+              // PLAN-2026-07-25-stc-intent-classifier: subject-only shadow enrichment (same
+              // replay-safety rationale — no new command, no version gate). close_intent/
+              // close_confidence are the classifier's verdict on EVERY STC; keyword_fraction is the
+              // matcher's value; intent_source is "classifier" only when the enforce override
+              // actually
+              // arbitrated the fraction, else "keyword"; intent_enforced is the per-tenant flag.
+              // This
+              // gives the shadow comparison (classifier vs keyword) for free on every STC.
+              "close_intent",
+              intent != null ? intent.value() : null,
+              "close_confidence",
+              payload.getCloseConfidence(),
+              "keyword_fraction",
+              keywordFraction,
+              "intent_source",
+              intentApplied ? "classifier" : "keyword",
+              "intent_enforced",
+              enforce,
+              // PLAN-2026-07-01-unrecognized-stc-tail-alert: subject-only enrichment (no new
+              // command,
+              // no version gate — activity-input payloads are ignored on Temporal 1.27 replay). The
+              // out-of-workflow UnrecognizedStcTailAlerter reads these to page when a non-empty
+              // tail
+              // matched no keyword. matched_keyword is null when the default fraction was applied.
+              "matched_keyword",
+              matchResult.matchedKey().orElse(null),
+              "tail",
+              payload.getTail(),
+              "author",
+              payload.getAuthor(),
+              "raw_line",
+              payload.getRawLine(),
+              // PLAN-2026-07-20-stc-fraction-keyword-collision: subject-only enrichment (same
+              // replay-safety rationale — no new command, no version gate). fraction_collision
+              // flags
+              // a tail that matched ≥2 keywords with DIFFERENT fractions (auto-resolved to the
+              // smallest); matched_keywords lists every phrase that fired so the alerter can page.
+              "fraction_collision",
+              matchResult.fractionCollision(),
+              "matched_keywords",
+              String.join(",", matchResult.matchedKeys())));
+
+      ExternalWorkflowStub stub = Workflow.newUntypedExternalWorkflowStub(positionId);
+      // Change point B (defense-in-depth): even past the running-guard the target can die between
+      // the
+      // guard and the signal (TOCTOU). v=0 keeps the bare single command (byte-identical replay);
+      // v>=1
+      // catches the dispatch failure and emits OrphanSTC instead of crashing.
+      //
+      // The catch is narrow by construction: the try wraps ONLY the single stub.signal command, so
+      // the
+      // only exception that can originate here is a signal-external-workflow dispatch failure. The
+      // Temporal Java SDK 1.27 surfaces a NOT_FOUND/terminal target as
+      // io.temporal.failure.ApplicationFailure (type SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_FAILED_*),
+      // converted from the server Failure proto by DataConverter.failureToException — NOT as
+      // SignalExternalWorkflowException (the SDK only constructs that type on the cancel-external
+      // path
+      // in this version). We catch both so the production crash is actually prevented; we
+      // deliberately
+      // do NOT catch bare RuntimeException so genuine bugs still fail the workflow loudly.
+      if (stcGuardVersion == Workflow.DEFAULT_VERSION) {
+        stub.signal("partialExit", req);
+      } else {
+        try {
+          stub.signal("partialExit", req);
+        } catch (SignalExternalWorkflowException | ApplicationFailure e) {
+          logAudit(
+              payload,
+              KIND_ORPHAN_STC,
+              subject(
+                  "signal_id", payload.getSignalId(),
+                  "option_symbol", occ,
+                  "position_workflow_id", positionId,
+                  "reason", REASON_SIGNAL_DISPATCH_FAILED,
+                  "error", String.valueOf(e.getMessage())));
+          break primaryDispatch;
+        }
+      }
+
+      // Phase 4: arm CHANDELIER_TRAIL when the strategy opts in.
+      if (Boolean.TRUE.equals(config.getTrailOnPartial())) {
+        ArmChandelierPayload arm = new ArmChandelierPayload();
+        arm.setSchemaVersion(1L);
+        arm.setTenantId(tenant);
+        arm.setStrategyId(strategyId);
+        arm.setPositionWorkflowId(positionId);
+        arm.setSourceSignalId(payload.getSignalId());
+        arm.setPeakPremium(payload.getPrice());
+        arm.setGivebackPct(config.getTrailGivebackPct());
+        stub.signal("armChandelier", arm);
+        logAudit(
+            payload,
+            KIND_CHANDELIER_ARM_REQUESTED,
+            subject(
+                "signal_id", payload.getSignalId(),
+                "position_workflow_id", positionId,
+                "peak_premium", payload.getPrice(),
+                "giveback_pct", config.getTrailGivebackPct()));
+      }
+    } // end primaryDispatch — the fan-out below runs whether or not the primary leg was reached
 
     // ---- multi-leg fan-out -------------------------------------------------------------------
     // Everything above dispatched to ONE leg — whichever findPositionWorkflowId happened to

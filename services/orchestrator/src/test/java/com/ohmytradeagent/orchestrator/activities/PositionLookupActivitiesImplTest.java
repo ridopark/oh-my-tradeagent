@@ -302,6 +302,113 @@ class PositionLookupActivitiesImplTest {
         .doesNotContain("WorkflowId");
   }
 
+  // ---------- findAllPositionWorkflowIds (STC multi-leg fan-out) ----------
+
+  private static io.temporal.client.WorkflowExecutionMetadata metaAt(String wfId, String startIso) {
+    io.temporal.client.WorkflowExecutionMetadata m =
+        mock(io.temporal.client.WorkflowExecutionMetadata.class);
+    when(m.getExecution())
+        .thenReturn(
+            io.temporal.api.common.v1.WorkflowExecution.newBuilder().setWorkflowId(wfId).build());
+    when(m.getStartTime()).thenReturn(java.time.Instant.parse(startIso));
+    return m;
+  }
+
+  private ValueOperations<String, String> stubCachedPointer(String cached) {
+    @SuppressWarnings("unchecked")
+    ValueOperations<String, String> ops = mock(ValueOperations.class);
+    when(redis.opsForValue()).thenReturn(ops);
+    when(ops.get(anyString())).thenReturn(cached);
+    return ops;
+  }
+
+  @Test
+  void findAll_returnsEveryVisibleLegOldestFirst() {
+    // Exit order should follow entry order, so the enumeration is sorted by start time — the raw
+    // Visibility stream carries no ordering guarantee.
+    var newer = metaAt("wf-newer", "2026-07-05T15:00:00Z");
+    var older = metaAt("wf-older", "2026-07-05T14:00:00Z");
+    when(workflowClient.listExecutions(anyString()))
+        .thenReturn(java.util.stream.Stream.of(newer, older));
+    stubCachedPointer(null);
+
+    assertThat(svc.findAllPositionWorkflowIds("dev", "copytrade-v1", "NVDA  260516C00140000"))
+        .containsExactly("wf-older", "wf-newer");
+  }
+
+  @Test
+  void findAll_includesACachedLegVisibilityHasNotIndexedYet() {
+    // THE reason this is a union. Visibility lags under Postgres load, and the leg it is most
+    // likely to be missing is the newest one — which is exactly the one the Redis pointer holds.
+    // Dropping it would leave a just-opened position running after the author's exit.
+    var older = metaAt("wf-older", "2026-07-05T14:00:00Z");
+    when(workflowClient.listExecutions(anyString())).thenReturn(java.util.stream.Stream.of(older));
+    stubCachedPointer("wf-brand-new");
+
+    assertThat(svc.findAllPositionWorkflowIds("dev", "copytrade-v1", "NVDA  260516C00140000"))
+        .containsExactly("wf-older", "wf-brand-new");
+  }
+
+  @Test
+  void findAll_doesNotDuplicateALegPresentInBothSources() {
+    // The common case: the cached pointer IS one of the visible legs. Signalling it twice would
+    // dispatch the same partialExit to one position twice.
+    var a = metaAt("wf-a", "2026-07-05T14:00:00Z");
+    var b = metaAt("wf-b", "2026-07-05T15:00:00Z");
+    when(workflowClient.listExecutions(anyString())).thenReturn(java.util.stream.Stream.of(a, b));
+    stubCachedPointer("wf-b");
+
+    assertThat(svc.findAllPositionWorkflowIds("dev", "copytrade-v1", "NVDA  260516C00140000"))
+        .containsExactly("wf-a", "wf-b");
+  }
+
+  @Test
+  void findAll_cachedOnly_whenVisibilityKnowsNothing() {
+    when(workflowClient.listExecutions(anyString())).thenReturn(java.util.stream.Stream.empty());
+    stubCachedPointer("wf-only");
+
+    assertThat(svc.findAllPositionWorkflowIds("dev", "copytrade-v1", "NVDA  260516C00140000"))
+        .containsExactly("wf-only");
+  }
+
+  @Test
+  void findAll_emptyWhenNeitherSourceHasALeg() {
+    when(workflowClient.listExecutions(anyString())).thenReturn(java.util.stream.Stream.empty());
+    stubCachedPointer(null);
+
+    assertThat(svc.findAllPositionWorkflowIds("dev", "copytrade-v1", "NVDA  260516C00140000"))
+        .isEmpty();
+  }
+
+  @Test
+  void findAll_propagatesAVisibilityFailureRatherThanReturningAShortList() {
+    // Deliberately NOT best-effort, unlike the recon probes in this class. Swallowing the error
+    // would return a truncated list, the caller would audit the STC as handled, and real legs
+    // would stay open. A propagated failure just retries the activity.
+    when(workflowClient.listExecutions(anyString()))
+        .thenThrow(new IllegalStateException("visibility down"));
+    stubCachedPointer("wf-cached");
+
+    assertThatCode(
+            () -> svc.findAllPositionWorkflowIds("dev", "copytrade-v1", "NVDA  260516C00140000"))
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void findAll_queriesTheTenantStrategyAndContractSymbolScopedVisibility() {
+    // The OCC must be the PADDED canonical form: ContractSymbol is an equality predicate, so a
+    // compact OCC would silently match nothing and the fan-out would find no legs.
+    when(workflowClient.listExecutions(anyString())).thenReturn(java.util.stream.Stream.empty());
+    stubCachedPointer(null);
+
+    svc.findAllPositionWorkflowIds("dev", "copytrade-v1", "NVDA  260516C00140000");
+
+    verify(workflowClient)
+        .listExecutions(
+            PositionLookupActivitiesImpl.visibilityQuery(
+                "dev", "copytrade-v1", "NVDA  260516C00140000"));
+  }
+
   private static io.temporal.client.WorkflowExecutionMetadata meta(String wfId) {
     io.temporal.client.WorkflowExecutionMetadata m =
         mock(io.temporal.client.WorkflowExecutionMetadata.class);
