@@ -109,6 +109,19 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    */
   private static final String REASON_MANUAL_QTY_OUT_OF_BOUNDS = "MANUAL_QTY_OUT_OF_BOUNDS";
 
+  /**
+   * Gate for the STC multi-leg FAN-OUT. One OCC can have several open legs (two BTOs on the same
+   * contract each start their own PositionWorkflow — {@code WorkflowIds.position} keys on the entry
+   * signal id), but {@code findPositionWorkflowId} returns exactly ONE, and which one depends on
+   * Redis cache state. Every other leg silently survived the author's exit.
+   *
+   * <p>This marker is MANDATORY, unlike the manual-BTO branches: the fan-out turns one {@code
+   * signal} command into N, so an in-flight STC execution replaying a pre-change history would
+   * diverge on command count. v=DEFAULT_VERSION keeps the single-leg dispatch byte-identical; only
+   * v>=1 enumerates and signals the extra legs.
+   */
+  private static final String VERSION_STC_MULTI_LEG_FANOUT = "stc-multi-leg-fanout-v1";
+
   // Phase 2 (PLAN-2026-07-06-pretrade-check-orchestrator-wiring): the top-level failure-audit kind.
   // The 2026-07-06 incident: pre_trade_check_enabled=true with the orchestrator routability bean
   // unwired made assertPreTradeCheckRoutable throw a non-retryable ApplicationFailure
@@ -1349,7 +1362,144 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               "giveback_pct", config.getTrailGivebackPct()));
     }
 
+    // ---- multi-leg fan-out -------------------------------------------------------------------
+    // Everything above dispatched to ONE leg — whichever findPositionWorkflowId happened to
+    // resolve. When the same OCC has more open legs (a second BTO, or an operator manual entry on
+    // a contract the author already holds), those legs never saw the author's exit and kept
+    // running their own stop/target/trail. Close them too.
+    //
+    // Placed AFTER the single-leg path rather than replacing it, so v=DEFAULT_VERSION replays the
+    // pre-change command stream byte-for-byte and the fan-out is purely additive.
+    //
+    // The fraction applies PER LEG, not to the combined size: each leg reuses its own qty math,
+    // min_partial_qty_behavior and dedupe. "Half out" across legs of 3 and 2 therefore sells 2 and
+    // 1. Over-selling is impossible by construction — each leg only ever sells what it itself
+    // tracks, and the broker holds the sum of all legs.
+    int fanoutVersion =
+        Workflow.getVersion(VERSION_STC_MULTI_LEG_FANOUT, Workflow.DEFAULT_VERSION, 1);
+    if (fanoutVersion >= 1) {
+      for (String legId : positionLookup.findAllPositionWorkflowIds(tenant, strategyId, occ)) {
+        if (legId.equals(positionId)) {
+          continue; // already dispatched above
+        }
+        dispatchStcToLeg(payload, config, occ, legId, effectiveFraction);
+      }
+    }
+
     return payload.getSignalId();
+  }
+
+  /**
+   * Dispatch the SAME exit to one additional leg of a multi-leg OCC. Mirrors the single-leg path's
+   * shape: verify the target is RUNNING, audit the intent BEFORE dispatch (so a lost race is still
+   * recorded), signal {@code partialExit}, then arm the chandelier when the strategy opts in.
+   *
+   * <p>A dead or dying leg is skipped rather than fatal: the legs are independent, and one that
+   * closed on its own stop between the enumeration and the signal is not a failure of this STC.
+   * Each outcome is audited so the fan-out is reconstructable — {@code fanout_leg=true} separates
+   * these rows from the primary dispatch.
+   */
+  private void dispatchStcToLeg(
+      CopytradeSignalPayload payload,
+      StrategyConfig config,
+      String occ,
+      String legId,
+      double effectiveFraction) {
+    if (!positionLookup.isPositionWorkflowRunning(legId)) {
+      logAudit(
+          payload,
+          KIND_STC_NO_OPEN_POSITION,
+          subject(
+              "signal_id",
+              payload.getSignalId(),
+              "option_symbol",
+              occ,
+              "position_workflow_id",
+              legId,
+              "reason",
+              REASON_POSITION_WF_NOT_RUNNING,
+              "fanout_leg",
+              true,
+              "author",
+              payload.getAuthor()));
+      return;
+    }
+
+    PartialExitRequest req = new PartialExitRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId(payload.getTenantId());
+    req.setStrategyId(payload.getStrategyId());
+    req.setSignalId(payload.getSignalId());
+    req.setPositionWorkflowId(legId);
+    req.setFraction(BigDecimal.valueOf(effectiveFraction));
+    req.setRefPremium(payload.getPrice());
+    req.setReason("stc_signal");
+    req.setAuthor(payload.getAuthor());
+    req.setRawLine(payload.getRawLine());
+    req.setOccurredAt(workflowNow());
+
+    logAudit(
+        payload,
+        KIND_EXIT_REQUESTED,
+        subject(
+            "signal_id",
+            payload.getSignalId(),
+            "option_symbol",
+            occ,
+            "position_workflow_id",
+            legId,
+            "fraction",
+            effectiveFraction,
+            "fanout_leg",
+            true,
+            "author",
+            payload.getAuthor(),
+            "raw_line",
+            payload.getRawLine()));
+
+    ExternalWorkflowStub legStub = Workflow.newUntypedExternalWorkflowStub(legId);
+    try {
+      legStub.signal("partialExit", req);
+    } catch (SignalExternalWorkflowException | ApplicationFailure e) {
+      logAudit(
+          payload,
+          KIND_ORPHAN_STC,
+          subject(
+              "signal_id",
+              payload.getSignalId(),
+              "option_symbol",
+              occ,
+              "position_workflow_id",
+              legId,
+              "reason",
+              REASON_SIGNAL_DISPATCH_FAILED,
+              "fanout_leg",
+              true,
+              "error",
+              String.valueOf(e.getMessage())));
+      return;
+    }
+
+    if (Boolean.TRUE.equals(config.getTrailOnPartial())) {
+      ArmChandelierPayload arm = new ArmChandelierPayload();
+      arm.setSchemaVersion(1L);
+      arm.setTenantId(payload.getTenantId());
+      arm.setStrategyId(payload.getStrategyId());
+      arm.setPositionWorkflowId(legId);
+      arm.setSourceSignalId(payload.getSignalId());
+      arm.setPeakPremium(payload.getPrice());
+      arm.setGivebackPct(config.getTrailGivebackPct());
+      legStub.signal("armChandelier", arm);
+      logAudit(
+          payload,
+          KIND_CHANDELIER_ARM_REQUESTED,
+          subject(
+              "signal_id", payload.getSignalId(),
+              "position_workflow_id", legId,
+              "peak_premium", payload.getPrice(),
+              "fanout_leg", true,
+              "giveback_pct", config.getTrailGivebackPct()));
+    }
   }
 
   private String handleAvg(CopytradeSignalPayload payload, StrategyConfig config) {
