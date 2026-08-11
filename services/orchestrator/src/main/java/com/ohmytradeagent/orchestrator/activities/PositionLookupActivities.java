@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.activities;
 import io.temporal.activity.ActivityInterface;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 
 /**
  * Resolves OCC option symbols to the currently-running {@link
@@ -18,6 +19,27 @@ public interface PositionLookupActivities {
    *     for the OCC under this tenant/strategy.
    */
   String findPositionWorkflowId(String tenantId, String strategyId, String occ);
+
+  /**
+   * EVERY running PositionWorkflow holding {@code occ} under this tenant/strategy, oldest first.
+   *
+   * <p>One OCC can have several open legs — two BTOs on the same contract produce two independent
+   * PositionWorkflows ({@code WorkflowIds.position} keys on the entry signal id), and an
+   * operator-initiated manual entry makes that trivial to do on purpose. {@link
+   * #findPositionWorkflowId} deliberately returns only ONE of them, and WHICH one depends on cache
+   * state (the Redis pointer holds the most recent leg; on a cache miss the Visibility fallback
+   * returns the EARLIEST). An STC routed through it therefore closes one arbitrary leg and silently
+   * leaves the rest open. This method is the fan-out primitive that fixes that.
+   *
+   * <p>The result is the UNION of the Redis pointer and the {@code ContractSymbol} Visibility
+   * enumeration. Neither source alone is sufficient: Visibility lags under Postgres load, so a
+   * just-started leg can be missing from it — and that leg is exactly the one the Redis pointer
+   * holds. Ordered oldest-first with the (possibly not-yet-visible) cached id appended last, so the
+   * order is stable for a given input.
+   *
+   * @return possibly empty, never null. Ordering is deterministic.
+   */
+  List<String> findAllPositionWorkflowIds(String tenantId, String strategyId, String occ);
 
   /** Write-through cache hook called by CopytradeSignalWorkflow once a PositionWorkflow starts. */
   void cachePositionMapping(String tenantId, String strategyId, String occ, String workflowId);

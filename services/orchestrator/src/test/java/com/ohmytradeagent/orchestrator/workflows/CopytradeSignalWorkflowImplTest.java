@@ -1905,6 +1905,197 @@ class CopytradeSignalWorkflowImplTest {
     return c;
   }
 
+  // ---------- STC multi-leg fan-out ----------
+
+  /** Start a real PositionWorkflow at the given id so an external signal has a live target. */
+  private void startLeg(String wfId) {
+    PositionWorkflow leg =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                PositionWorkflow.class,
+                WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).setWorkflowId(wfId).build());
+    WorkflowStub.fromTyped(leg).start(positionInput());
+  }
+
+  private void setupStcMocks() {
+    StrategyConfig cfg = config();
+    cfg.setPendingTtlPaperSecs(1L);
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
+  }
+
+  private CopytradeSignalPayload stcPayload(String tail) {
+    CopytradeSignalPayload p = btoPayload();
+    p.setAction(CopytradeSignalPayload.Action.STC);
+    p.setTail(tail);
+    p.setSignalId("222:0");
+    return p;
+  }
+
+  private java.util.List<String> exitRequestedLegs() {
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    return all.getAllValues().stream()
+        .filter(e -> "ExitRequested".equals(e.getKind()))
+        .map(e -> String.valueOf(e.getSubject().get("position_workflow_id")))
+        .distinct()
+        .toList();
+  }
+
+  @Test
+  void stc_fansOutToEveryOpenLegForTheOcc() {
+    // THE case this exists for: two BTOs on the same contract leave two independent
+    // PositionWorkflows. Before the fan-out the author's STC closed whichever one the Redis
+    // pointer happened to hold and the other kept running its own exits.
+    String legA = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-A";
+    String legB = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-B";
+    setupStcMocks();
+    startLeg(legA);
+    startLeg(legB);
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(legB); // the cached pointer resolves the NEWER leg
+    when(positionLookup.findAllPositionWorkflowIds(anyString(), anyString(), anyString()))
+        .thenReturn(java.util.List.of(legA, legB));
+
+    runWorkflow(stcPayload("half out"));
+
+    assertThat(exitRequestedLegs()).containsExactlyInAnyOrder(legA, legB);
+  }
+
+  @Test
+  void stc_fanoutMarksTheExtraLegsAndAppliesTheFractionPerLeg() {
+    String legA = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-A";
+    String legB = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-B";
+    setupStcMocks();
+    startLeg(legA);
+    startLeg(legB);
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(legA);
+    when(positionLookup.findAllPositionWorkflowIds(anyString(), anyString(), anyString()))
+        .thenReturn(java.util.List.of(legA, legB));
+
+    runWorkflow(stcPayload("half out"));
+
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    var exits =
+        all.getAllValues().stream().filter(e -> "ExitRequested".equals(e.getKind())).toList();
+    // The primary leg is NOT tagged as fan-out; the extra leg is — so forensics can tell the two
+    // dispatches apart.
+    var primary =
+        exits.stream()
+            .filter(e -> legA.equals(e.getSubject().get("position_workflow_id")))
+            .toList();
+    var extra =
+        exits.stream()
+            .filter(e -> legB.equals(e.getSubject().get("position_workflow_id")))
+            .toList();
+    assertThat(primary).isNotEmpty();
+    assertThat(extra).isNotEmpty();
+    assertThat(primary.get(0).getSubject()).doesNotContainKey("fanout_leg");
+    assertThat(extra.get(0).getSubject()).containsEntry("fanout_leg", true);
+    // Same fraction on BOTH — it applies per leg, not split across them.
+    assertThat(((Number) primary.get(0).getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
+    assertThat(((Number) extra.get(0).getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
+  }
+
+  @Test
+  void stc_singleLeg_dispatchesExactlyOnce() {
+    // The common case must be unchanged: one leg, one ExitRequested, no duplicate dispatch from
+    // the fan-out re-signalling the primary.
+    String legA = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-A";
+    setupStcMocks();
+    startLeg(legA);
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(legA);
+    when(positionLookup.findAllPositionWorkflowIds(anyString(), anyString(), anyString()))
+        .thenReturn(java.util.List.of(legA));
+
+    runWorkflow(stcPayload("half out"));
+
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    assertThat(all.getAllValues().stream().filter(e -> "ExitRequested".equals(e.getKind())).count())
+        .isEqualTo(1);
+  }
+
+  @Test
+  void stc_fanoutSkipsALegThatIsNoLongerRunning() {
+    // A leg that closed on its own stop between enumeration and dispatch is not a failure of this
+    // STC — skip it, audit why, and still close the others.
+    String legA = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-A";
+    String deadLeg = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-DEAD";
+    setupStcMocks();
+    startLeg(legA);
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(legA);
+    when(positionLookup.findAllPositionWorkflowIds(anyString(), anyString(), anyString()))
+        .thenReturn(java.util.List.of(legA, deadLeg));
+    when(positionLookup.isPositionWorkflowRunning(deadLeg)).thenReturn(false);
+    when(positionLookup.isPositionWorkflowRunning(legA)).thenReturn(true);
+
+    runWorkflow(stcPayload("half out"));
+
+    assertThat(exitRequestedLegs()).containsExactly(legA);
+    AuditEvent skipped = capture("StcNoOpenPosition");
+    assertThat(skipped.getSubject())
+        .containsEntry("position_workflow_id", deadLeg)
+        .containsEntry("fanout_leg", true);
+  }
+
+  @Test
+  void stc_fansOutEvenWhenThePrimaryLegIsAlreadyDead() {
+    // Review finding: the primary path's bail-outs used to `return`, cancelling the exit for every
+    // OTHER leg. This is the likeliest shape of it — the Redis pointer resolves the most RECENT
+    // leg, that leg was force-exited, so the running-guard fails. The author's STC must still
+    // close the leg that IS running.
+    String deadPrimary = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-DEAD";
+    String liveLeg = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-LIVE";
+    setupStcMocks();
+    startLeg(liveLeg);
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(deadPrimary);
+    when(positionLookup.findAllPositionWorkflowIds(anyString(), anyString(), anyString()))
+        .thenReturn(java.util.List.of(liveLeg, deadPrimary));
+    when(positionLookup.isPositionWorkflowRunning(deadPrimary)).thenReturn(false);
+    when(positionLookup.isPositionWorkflowRunning(liveLeg)).thenReturn(true);
+
+    runWorkflow(stcPayload("half out"));
+
+    assertThat(exitRequestedLegs()).containsExactly(liveLeg);
+  }
+
+  @Test
+  void stc_fansOutEvenWhenThePrimarySignalDispatchFails() {
+    // The TOCTOU case the reviewer named: the primary passes the running-guard but dies before the
+    // signal lands. OrphanSTC is still audited for it, AND the surviving leg still gets the exit.
+    String legLive = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-LIVE";
+    String legGone = "t-dev/s-copytrade-v1/pos/NVDA  260516C00140000/entry-GONE";
+    setupStcMocks();
+    startLeg(legLive);
+    // legGone is never started, so signalling it fails the way a terminated target does.
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(legGone);
+    when(positionLookup.findAllPositionWorkflowIds(anyString(), anyString(), anyString()))
+        .thenReturn(java.util.List.of(legLive, legGone));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
+
+    runWorkflow(stcPayload("half out"));
+
+    AuditEvent orphan = capture("OrphanSTC");
+    assertThat(orphan.getSubject()).containsEntry("position_workflow_id", legGone);
+    assertThat(exitRequestedLegs()).contains(legLive);
+  }
+
   // ---------- PLAN-2026-08-10-live-manual-bto: operator-initiated manual entry ----------
 
   /** An operator-submitted BTO: source=manual + a hand-typed contract count. */

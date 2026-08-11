@@ -109,6 +109,38 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
     return workflowId;
   }
 
+  /**
+   * Fan-out primitive for the STC exit path — see {@link
+   * PositionLookupActivities#findAllPositionWorkflowIds} for why one OCC can have several legs and
+   * why neither source alone is sufficient.
+   *
+   * <p>Visibility supplies the authoritative set (oldest first, so the exit order matches entry
+   * order); the Redis pointer is appended only when Visibility has not caught up with it yet. Both
+   * are already-proven idioms in this class: the {@code ContractSymbol = occ} equality query with a
+   * try-with-resources paging stream, and the {@code pos:} key.
+   *
+   * <p>NOT best-effort: a Visibility failure propagates. The caller is dispatching an EXIT, and
+   * silently returning a short list would leave real legs open while the audit says the STC was
+   * handled — worse than a retried activity.
+   */
+  @Override
+  public List<String> findAllPositionWorkflowIds(String tenantId, String strategyId, String occ) {
+    Set<String> ids = new LinkedHashSet<>();
+    try (Stream<WorkflowExecutionMetadata> stream =
+        workflowClient.listExecutions(visibilityQuery(tenantId, strategyId, occ))) {
+      stream
+          .sorted(Comparator.comparing(WorkflowExecutionMetadata::getStartTime, instantNullsLast()))
+          .forEach(e -> ids.add(e.getExecution().getWorkflowId()));
+    }
+    // The cached pointer is the most RECENT leg, which is precisely the one a lagging Visibility
+    // index can omit. LinkedHashSet keeps it out when Visibility already listed it.
+    String cached = redis.opsForValue().get(key(tenantId, strategyId, occ));
+    if (cached != null) {
+      ids.add(cached);
+    }
+    return List.copyOf(ids);
+  }
+
   @Override
   public void cachePositionMapping(
       String tenantId, String strategyId, String occ, String workflowId) {
