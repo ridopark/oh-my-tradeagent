@@ -203,75 +203,21 @@ public class PositionsController {
   }
 
   /**
-   * Shared workflow-id guards for every position-lifecycle write, applied BEFORE any Temporal call.
-   * Returns a 403 refusal, or {@code null} when the id is addressable by this tenant.
-   *
-   * <p>Cross-tenant guard (defense-in-depth): the /live view is a TENANT view spanning ALL of the
-   * tenant's strategies (unlike the api-gateway force-close, which is single-strategy and guards on
-   * tenantStrategy). The SAFEST correct guard here is therefore the tenant segment itself: every
-   * PositionWorkflow id begins "t-&lt;tenant&gt;/s-&lt;strategy&gt;/pos/..." (WorkflowIds.position
-   * -&gt; tenantStrategy -&gt; "t-"+tenant+"/s-"+strategy), so requiring the "t-&lt;tenant&gt;/"
-   * prefix accepts any of the caller's own strategies and rejects any id belonging to another
-   * tenant. The trailing "/" makes the tenant segment a hard boundary, so "acme" cannot reach
-   * "acme2"'s positions ("t-acme2/..." does not start with "t-acme/").
-   *
-   * <p>Position guard: the tenant-prefix guard also accepts the tenant's OWN non-position workflows
-   * (killswitch/config/recon ids share the "t-&lt;tenant&gt;/" prefix); those would hit an unknown
-   * update. Every PositionWorkflow id is "t-&lt;tenant&gt;/s-&lt;strategy&gt;/pos/&lt;occ&gt;/&lt;
-   * entrySignalId&gt;" (WorkflowIds.position), so additionally require the "/pos/" segment.
+   * Workflow-id guards for every position-lifecycle write, applied BEFORE any Temporal call.
+   * Delegates to {@link WorkflowWriteGuards} — the ONE implementation of the tenant boundary,
+   * shared with the manual-entry routes — pinning the kind to {@code "/pos/"} because every
+   * PositionWorkflow id is {@code "t-<tenant>/s-<strategy>/pos/<occ>/<entrySignalId>"} ({@code
+   * WorkflowIds.position}). Without the kind check the tenant-prefix guard would also accept the
+   * tenant's OWN killswitch/config/recon workflows, which would hit an unknown update.
    */
   private ResponseEntity<Map<String, Object>> guardWorkflowId(String tenant, String workflowId) {
-    String requiredPrefix = "t-" + tenant + "/";
-    if (!workflowId.startsWith(requiredPrefix)) {
-      return refuseForbidden("cross_tenant_workflow_id", tenant, workflowId);
-    }
-    if (!workflowId.contains("/pos/")) {
-      return refuseForbidden("not_a_position_workflow_id", tenant, workflowId);
-    }
-    return null;
+    return WorkflowWriteGuards.refuseUnlessTenantOwned(
+        tenant, workflowId, "/pos/", "not_a_position_workflow_id");
   }
 
-  /**
-   * The tenant path attributes the action to the tenant itself (same convention as the account
-   * kill-switch reset: operator_id = "tenant:"+tenant). When present, the OPTIONAL X-Operator-Id
-   * header threads a verified-actor identity (the dashboard server action sends the verified
-   * session email) into the audit subject for per-human attribution on multi-user tenants. NOTE:
-   * X-Operator-Id is attribution-only (recorded on the ForceCloseRequested / OperatorTrimRequested
-   * audit); authorization is the tenant-prefix guard + the dark flag.
-   */
+  /** See {@link WorkflowWriteGuards#operatorId} — attribution only, never an authz principal. */
   private String operatorId(HttpServletRequest req, String tenant) {
-    String actor = sanitizeActor(req.getHeader(TenantContext.HEADER_OPERATOR));
-    return actor.isEmpty() ? "tenant:" + tenant : "tenant:" + tenant + ":" + actor;
-  }
-
-  /**
-   * Refuse a position-lifecycle write BEFORE any Temporal call: log the reason and return a 403
-   * whose body names the guard that rejected it. Shared by the cross-tenant and not-a-position
-   * guards (identical shape, differing only by {@code code}).
-   */
-  private ResponseEntity<Map<String, Object>> refuseForbidden(
-      String code, String tenant, String workflowId) {
-    // Endpoint-neutral wording: this guard is shared by force-close and partial-close, so naming
-    // one of them would mis-attribute the other's refusals during a cross-tenant probe triage.
-    log.warn("position write refused: {} tenant={} workflow_id={}", code, tenant, workflowId);
-    return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", code));
-  }
-
-  /**
-   * Sanitize the caller-supplied {@code X-Operator-Id} for audit safety. It is attribution, NOT an
-   * authz principal (the tenant scope + dark flag are the authz), so we only make it safe to embed
-   * in the audit subject: trim, cap length, and keep a conservative char set so it cannot inject
-   * weird content. A null/blank/all-stripped actor returns "" → caller falls back to "tenant:"+t.
-   */
-  private static String sanitizeActor(String raw) {
-    if (raw == null) {
-      return "";
-    }
-    String trimmed = raw.trim();
-    if (trimmed.length() > 128) {
-      trimmed = trimmed.substring(0, 128);
-    }
-    return trimmed.replaceAll("[^A-Za-z0-9_.@+-]", "");
+    return WorkflowWriteGuards.operatorId(req, tenant);
   }
 
   private static Map<String, Object> item(OpenPosition p) {
