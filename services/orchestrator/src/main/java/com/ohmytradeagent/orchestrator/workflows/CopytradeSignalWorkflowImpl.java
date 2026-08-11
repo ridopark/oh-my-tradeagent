@@ -489,6 +489,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // fails fast (an unroutable broker_target is a config bug, not a transient error).
     this.exec = ExecActivitiesFactory.forTarget(config.getBrokerTarget().value());
 
+    // PLAN-2026-08-10-live-manual-bto: entryStatus reports the ENTRY. A non-BTO signal opens none,
+    // so give it a terminal answer here rather than letting a caller poll PENDING forever. Covers
+    // STC, AVG and the defensive default branch in one place. Field assignment, not a command.
+    if (payload.getAction() != CopytradeSignalPayload.Action.BTO) {
+      rejectStatus("NOT_AN_ENTRY", "action=" + payload.getAction().value());
+    }
+
     switch (payload.getAction()) {
       case BTO:
         return handleBto(payload, config);
