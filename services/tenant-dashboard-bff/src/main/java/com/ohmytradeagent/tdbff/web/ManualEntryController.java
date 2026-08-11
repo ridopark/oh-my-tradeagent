@@ -22,9 +22,12 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -88,6 +91,18 @@ public class ManualEntryController {
   private final String orchestratorTaskQueue;
 
   /**
+   * Tenants allowed to use manual entry, on top of the dark flag. EMPTY (the default) means the
+   * flag alone governs — i.e. every tenant.
+   *
+   * <p>This exists because the BFF is ONE deployment serving every tenant, so {@code
+   * entries.manual.write-enabled} alone is all-or-nothing: flipping it would arm the real-money
+   * tenants at the same instant as the paper one, and the plan's paper-canary-first sequence would
+   * be impossible to actually run. With this set to {@code staging_paper}, the canary is genuinely
+   * isolated; widening it later is a second, deliberate operator action.
+   */
+  private final Set<String> allowedTenants;
+
+  /**
    * Server-side dark-launch gate for the manual-entry surface (default false). This endpoint can
    * OPEN a real-money position — the only BFF route that can — so while off both the write and its
    * quote preview 404 server-side; the write surface is not merely hidden on the dashboard. Flipped
@@ -101,13 +116,28 @@ public class ManualEntryController {
       MarketDataQuoteClient quotes,
       StrategyConfigReader strategyConfigs,
       @Value("${temporal.orchestrator-task-queue:orchestrator-core}") String orchestratorTaskQueue,
-      @Value("${entries.manual.write-enabled:false}") boolean manualEntryWriteEnabled) {
+      @Value("${entries.manual.write-enabled:false}") boolean manualEntryWriteEnabled,
+      @Value("${entries.manual.allowed-tenants:}") String allowedTenants) {
     this.client = client;
     this.ctx = ctx;
     this.quotes = quotes;
     this.strategyConfigs = strategyConfigs;
     this.orchestratorTaskQueue = orchestratorTaskQueue;
     this.manualEntryWriteEnabled = manualEntryWriteEnabled;
+    this.allowedTenants =
+        Arrays.stream(allowedTenants.split(","))
+            .map(String::trim)
+            .filter(s -> !s.isEmpty())
+            .collect(Collectors.toUnmodifiableSet());
+  }
+
+  /**
+   * Whether this tenant may use manual entry. Callers return the SAME {@code manual_entry_disabled}
+   * 404 as the flag-off path on purpose: to a tenant outside the allowlist the feature simply does
+   * not exist, and the response is not an oracle for which other tenants have it.
+   */
+  private boolean allowedForTenant(String tenant) {
+    return allowedTenants.isEmpty() || allowedTenants.contains(tenant);
   }
 
   /** Parsed contract + live NBBO for the confirm step. */
@@ -117,7 +147,9 @@ public class ManualEntryController {
     if (!manualEntryWriteEnabled) {
       return disabled();
     }
-    ctx.tenantId(req); // fail-closed 401 even on the read — this is part of a write flow.
+    if (!allowedForTenant(ctx.tenantId(req))) { // fail-closed 401 first — part of a write flow
+      return disabled();
+    }
 
     ParsedOcc parsed;
     try {
@@ -128,9 +160,9 @@ public class ManualEntryController {
     }
 
     OptionQuote q = quotes.optionQuote(parsed.occ());
-    if (q == null || q.ask() == null) {
-      // No ask means no anchor for the marketable limit. Refuse rather than show the operator a
-      // half-populated confirm step they might submit anyway.
+    if (!isPriceable(q)) {
+      // No usable ask means no anchor for the marketable limit. Refuse rather than show the
+      // operator a half-populated confirm step they might submit anyway.
       return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
           .body(Map.of("error", "quote_unavailable", "occ", parsed.occ()));
     }
@@ -156,6 +188,9 @@ public class ManualEntryController {
       return disabled();
     }
     String tenant = ctx.tenantId(req); // fail-closed 401 — the tenant is NEVER a client parameter
+    if (!allowedForTenant(tenant)) {
+      return disabled();
+    }
 
     if (body == null) {
       throw new IllegalArgumentException("request body is required");
@@ -195,7 +230,7 @@ public class ManualEntryController {
     // marketable limit must be the market now, not then. A fresh ask that has run away from the
     // confirmed one is refused rather than filled.
     OptionQuote fresh = quotes.optionQuote(parsed.occ());
-    if (fresh == null || fresh.ask() == null) {
+    if (!isPriceable(fresh)) {
       return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
           .body(Map.of("error", "quote_unavailable", "occ", parsed.occ()));
     }
@@ -275,6 +310,9 @@ public class ManualEntryController {
       return disabled();
     }
     String tenant = ctx.tenantId(req);
+    if (!allowedForTenant(tenant)) {
+      return disabled();
+    }
 
     String workflowId = WorkflowIds.copytradeSignal(tenant, strategyId, signalId);
     ResponseEntity<Map<String, Object>> refusal =
@@ -371,6 +409,21 @@ public class ManualEntryController {
       return ResponseEntity.status(HttpStatus.CONFLICT).body(refusal);
     }
     return null;
+  }
+
+  /**
+   * A quote we can actually anchor a BUY on: present, with a STRICTLY POSITIVE ask.
+   *
+   * <p>The zero check is not pedantry. A 0.00 ask reaches {@code BtoPricing} as a zero limit, and
+   * {@code Sizing.rawContracts} then throws a bare {@code IllegalArgumentException} — which
+   * CopytradeSignalWorkflowImpl's top-level catch deliberately does NOT catch (it only catches
+   * TemporalFailure, so that plain runtime exceptions keep their loud workflow-TASK retry
+   * behavior). The result would be an infinitely retrying workflow task with no audit, no alert,
+   * and entryStatus pinned at PENDING forever — the exact invisible failure this feature's status
+   * Query exists to prevent. Refuse at the door instead.
+   */
+  private static boolean isPriceable(OptionQuote q) {
+    return q != null && q.ask() != null && q.ask().signum() > 0;
   }
 
   private static String require(String value, String field) {
