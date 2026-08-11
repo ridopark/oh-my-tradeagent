@@ -12,6 +12,12 @@ import {
   type ForceExitActionResult,
 } from "@/components/ForceExitButton";
 import { TrimButton, type TrimActionResult } from "@/components/TrimButton";
+import {
+  ManualEntryPanel,
+  type QuoteActionResult,
+  type SubmitActionResult,
+  type StatusView,
+} from "@/components/ManualEntryPanel";
 import Link from "next/link";
 import {
   getOrders,
@@ -19,6 +25,10 @@ import {
   getTrades,
   getTenantConfig,
   getAccountKillSwitch,
+  getStrategyConfig,
+  getOptionQuote,
+  submitManualEntry,
+  getEntryStatus,
   forcePositionExit,
   trimPosition,
   NotAuthenticatedError,
@@ -46,6 +56,13 @@ const FORCE_EXIT_WRITE_ENABLED =
 // without the other. With both off the actions column is absent and /live is byte-identical to
 // before this feature.
 const TRIM_WRITE_ENABLED = process.env.TRIM_WRITE_ENABLED === "true";
+
+// PLAN-2026-08-10-live-manual-bto. Dark-by-default gate for the operator "Manual entry" panel,
+// paired with the BFF's own `entries.manual.write-enabled` server flag (which 404s all three
+// routes when off), so BOTH must be on before a hand-typed order can reach Temporal. Its OWN flag,
+// separate from trim/force-exit: OPENING a position is a categorically bigger capability than
+// reducing one, and must be armable (and disarmable) on its own.
+const MANUAL_ENTRY_WRITE_ENABLED = process.env.MANUAL_ENTRY_WRITE_ENABLED === "true";
 
 // Inline server action: re-verifies the session, threads the verified operator email into the BFF
 // force-close call (X-Operator-Id → audit attribution), and revalidates /live so a placed/cleared
@@ -118,6 +135,59 @@ async function trimAction(
   return { ok: false, kind: "error" };
 }
 
+// PLAN-2026-08-10-live-manual-bto: the three manual-entry server actions. Each re-verifies the
+// session (the client island can call these directly, so the session check is the boundary, not a
+// formality) and threads the verified operator email as X-Operator-Id for audit attribution.
+//
+// Deliberately NOT revalidating /live on submit: the entry takes up to the ~90s entry TTL to
+// resolve, and a revalidate would remount the panel and destroy the poll that is reporting the
+// outcome. The operator refreshes (or uses "New entry") once the terminal state is shown.
+async function quoteAction(occ: string): Promise<QuoteActionResult> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return { ok: false, kind: "error" };
+  }
+  return getOptionQuote(occ);
+}
+
+async function submitManualEntryAction(
+  occ: string,
+  strategyId: string,
+  qty: number,
+  quotedAsk: number,
+  quotedAt: string,
+  idempotencyKey: string,
+): Promise<SubmitActionResult> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return { ok: false, kind: "error" };
+  }
+  const operator = s.user?.email ?? s.user?.name ?? undefined;
+  return submitManualEntry(
+    occ,
+    strategyId,
+    qty,
+    quotedAsk,
+    quotedAt,
+    idempotencyKey,
+    operator,
+  );
+}
+
+async function entryStatusAction(
+  signalId: string,
+  strategyId: string,
+): Promise<StatusView | null> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return null;
+  }
+  return getEntryStatus(signalId, strategyId);
+}
+
 // Robinhood-style account view: account-total header + range-aware +$X (Y%) and the equity chart
 // (both client-side, sharing one history fetch via LiveAccount), then the open holdings and a recent
 // activity strip. The chart's history is a READ-ONLY account-level (shared) proxy — no money path.
@@ -169,6 +239,23 @@ export default async function LivePage() {
   const guardState: "tripped" | "healthy" = killSwitch?.tripped
     ? "tripped"
     : "healthy";
+
+  // Manual-entry panel inputs. Read ONLY when the flag is on — with it off /live issues exactly the
+  // same BFF calls it always has. Degrades to an empty list on failure, which renders no panel
+  // rather than a panel whose strategy picker cannot be satisfied.
+  const strategies = MANUAL_ENTRY_WRITE_ENABLED
+    ? await getStrategyConfig()
+        .then((r) =>
+          r.items.map((i) => ({
+            strategyId: i.strategy_id,
+            enabled: i.config.enabled !== false,
+          })),
+        )
+        .catch((err) => {
+          console.error("getStrategyConfig failed; rendering /live without manual entry", err);
+          return [];
+        })
+    : [];
 
   const count = portfolio.open_positions_count;
 
@@ -295,6 +382,19 @@ export default async function LivePage() {
           todayPl={todayPl}
           todayPlPct={todayPlPct}
         />
+
+        {MANUAL_ENTRY_WRITE_ENABLED && strategies.length > 0 && (
+          <ManualEntryPanel
+            strategies={strategies}
+            // Compact OCCs so the "you already hold this" check matches regardless of padding.
+            heldOccs={portfolio.open_positions.map((p) =>
+              String(p.contract_symbol).replace(/\s+/g, ""),
+            )}
+            quoteAction={quoteAction}
+            submitAction={submitManualEntryAction}
+            statusAction={entryStatusAction}
+          />
+        )}
 
         <section>
           <div className="mb-2 flex items-baseline justify-between">
