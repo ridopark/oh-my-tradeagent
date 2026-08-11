@@ -168,7 +168,24 @@ export function ManualEntryPanel({
       reset();
     }
   };
-  const keepFocus = (e: React.MouseEvent) => e.preventDefault();
+  /**
+   * Suppress the browser's focus-move on mousedown so no focusout fires for a mouse interaction
+   * inside the control — this is what stops Safari/Firefox (which do not focus a <button> on click,
+   * leaving relatedTarget null) from tripping the containment check in handleBlur and disarming the
+   * confirm step before the click lands. Same guard as TrimButton.
+   *
+   * EXCEPT for native form controls. On a <select>, mousedown IS the gesture that opens the option
+   * list, so preventDefault there makes the dropdown permanently unopenable — which is exactly what
+   * it did to the qty picker. Those elements need their default behavior AND they take focus
+   * natively, so handleBlur's containment check (relatedTarget is inside the container) already
+   * covers them without any help from here.
+   */
+  const keepFocus = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement | null)?.closest("select, input, textarea, option")) {
+      return;
+    }
+    e.preventDefault();
+  };
 
   const selectedStrategy =
     strategies.find((s) => s.strategyId === strategyId) ?? strategies[0];
