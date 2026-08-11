@@ -26,6 +26,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Supplier;
@@ -194,14 +195,34 @@ public class RiskActivitiesImpl implements RiskActivities {
       PreTradeCheckResult preTradeResult,
       BigDecimal entryNotional,
       BigDecimal accountCash) {
-    if (!config.getAuthorWhitelist().contains(payload.getAuthor())) {
+    // PLAN-2026-08-10-live-manual-bto: an operator-submitted entry (source=manual) is NOT a copied
+    // Discord line, so two of the three copytrade-only pre-gates below are meaningless for it and
+    // one is actively harmful. Same carve-out the watchlist path already makes (see
+    // checkWatchlistEntry) — and like that one, this is INTERNAL to the Activity, so it changes no
+    // command in any workflow history and needs no replay marker.
+    //
+    //   * author_whitelist — a manual entry HAS no Discord author; its author field carries the
+    //     operator id. Applying the whitelist would reject 100% of manual entries, and "just add
+    //     the operator to author_whitelist" is the wrong fix: that list is the set of Discord
+    //     authors this tenant will COPY, and widening it to an operator email would silently make
+    //     any Discord line posted under that name tradeable.
+    //   * future-skew — posted_at is stamped by the BFF's clock and read against the risk service's
+    //     clock, so this gate measures inter-service clock skew and nothing else.
+    //
+    // The max_signal_age gate below is deliberately KEPT: it is the backstop that stops a manual
+    // entry which sat wedged (e.g. started against an orchestrator that predates this feature, then
+    // resumed after the deploy) from filling hours later against the ask it was anchored on.
+    boolean manual = payload.getSource() == CopytradeSignalPayload.Source.MANUAL;
+
+    Set<String> authorWhitelist = config.getAuthorWhitelist();
+    if (!manual && (authorWhitelist == null || !authorWhitelist.contains(payload.getAuthor()))) {
       return RiskDecision.rejected(
           RejectionReason.AUTHOR_NOT_WHITELISTED, "author=" + payload.getAuthor());
     }
 
     OffsetDateTime now = OffsetDateTime.now(clock);
     OffsetDateTime postedAt = payload.getPostedAt();
-    if (postedAt.isAfter(now.plus(FUTURE_DATE_TOLERANCE))) {
+    if (!manual && postedAt.isAfter(now.plus(FUTURE_DATE_TOLERANCE))) {
       Duration skew = Duration.between(now, postedAt);
       return RiskDecision.rejected(
           RejectionReason.INVALID_TIMESTAMP, "future_skew_secs=" + skew.toSeconds());

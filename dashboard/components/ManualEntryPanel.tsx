@@ -69,6 +69,11 @@ export interface StrategyOption {
 // handed a refusal they could not have avoided.
 const QUOTE_REFRESH_MS = 20_000;
 
+// …but not forever. Each refresh is a server action → BFF hop → live Alpaca snapshot, so an
+// operator who opens the confirm step and walks away would otherwise poll the market indefinitely.
+// After this many refreshes the panel stops and makes them ask again explicitly.
+const MAX_QUOTE_REFRESHES = 5;
+
 // Poll cadence + ceiling for the outcome. The entry TTL is ~90s (pendingTtlSecs), so a poll window
 // a bit past that covers "submitted → filled or expired" without spinning forever.
 const POLL_INTERVAL_MS = 2_000;
@@ -129,12 +134,23 @@ export function ManualEntryPanel({
   const [strategyId, setStrategyId] = useState(strategies[0]?.strategyId ?? "");
   const [step, setStep] = useState<Step>({ kind: "idle" });
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  // clearTimers() alone does NOT stop the loops: if the component unmounts while a poll tick or a
+  // quote refresh is awaiting its server action, the cleanup has already run by the time that
+  // promise resolves, and the resolution then arms a fresh timer nothing will ever clear. Checked
+  // after every await before re-arming.
+  const cancelled = useRef(false);
 
   const clearTimers = () => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
   };
-  useEffect(() => clearTimers, []);
+  useEffect(() => {
+    cancelled.current = false;
+    return () => {
+      cancelled.current = true;
+      clearTimers();
+    };
+  }, []);
 
   const reset = () => {
     clearTimers();
@@ -153,10 +169,11 @@ export function ManualEntryPanel({
   const quantity = Number.parseInt(qty, 10);
   const qtyValid = Number.isInteger(quantity) && quantity >= 1;
 
-  const requestQuote = async () => {
+  const requestQuote = async (refreshesLeft = MAX_QUOTE_REFRESHES) => {
     clearTimers();
     setStep({ kind: "quoting" });
     const r = await quoteAction(occ);
+    if (cancelled.current) return;
     if (!r.ok) {
       const messages: Record<string, string> = {
         "invalid-occ": r.kind === "invalid-occ" ? r.detail : "",
@@ -174,8 +191,14 @@ export function ManualEntryPanel({
       quote: r.quote,
       idempotencyKey: crypto.randomUUID(),
     });
-    // Auto-refresh the quote just under the server's 30s staleness bound.
-    timers.current.push(setTimeout(() => void requestQuote(), QUOTE_REFRESH_MS));
+    // Auto-refresh the quote just under the server's 30s staleness bound, bounded so an abandoned
+    // confirm step stops polling the market. When the budget runs out the quote simply goes stale
+    // and the server refuses the submit — which is the correct, fail-closed outcome.
+    if (refreshesLeft > 0) {
+      timers.current.push(
+        setTimeout(() => void requestQuote(refreshesLeft - 1), QUOTE_REFRESH_MS),
+      );
+    }
   };
 
   const submit = async (quote: QuoteView, idempotencyKey: string) => {
@@ -189,6 +212,7 @@ export function ManualEntryPanel({
       quote.quoted_at,
       idempotencyKey,
     );
+    if (cancelled.current) return;
     if (!r.ok) {
       const messages: Record<string, string> = {
         "quote-moved":
@@ -216,6 +240,7 @@ export function ManualEntryPanel({
   const poll = (signalId: string, startedAt: number) => {
     const tick = async () => {
       const status = await statusAction(signalId, strategyId);
+      if (cancelled.current) return;
       setStep((prev) =>
         prev.kind === "tracking" && prev.signalId === signalId ? { ...prev, status } : prev,
       );
