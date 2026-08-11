@@ -63,6 +63,10 @@ export interface StatusView {
 export interface StrategyOption {
   strategyId: string;
   enabled: boolean;
+  // The workflow rejects MANUAL_QTY_OUT_OF_BOUNDS outside this range, so the picker offers exactly
+  // it — the operator sees the ceiling rather than discovering it by being refused.
+  minContracts: number;
+  maxContracts: number;
 }
 
 // A quote goes stale server-side at 30s. Re-quote a little before that so the operator is not
@@ -130,7 +134,7 @@ export function ManualEntryPanel({
   statusAction: (signalId: string, strategyId: string) => Promise<StatusView | null>;
 }) {
   const [occ, setOcc] = useState("");
-  const [qty, setQty] = useState("1");
+  const [qty, setQty] = useState(String(strategies[0]?.minContracts ?? 1));
   const [strategyId, setStrategyId] = useState(strategies[0]?.strategyId ?? "");
   const [step, setStep] = useState<Step>({ kind: "idle" });
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -166,8 +170,14 @@ export function ManualEntryPanel({
   };
   const keepFocus = (e: React.MouseEvent) => e.preventDefault();
 
+  const selectedStrategy =
+    strategies.find((s) => s.strategyId === strategyId) ?? strategies[0];
+  const minQty = selectedStrategy?.minContracts ?? 1;
+  const maxQty = Math.max(minQty, selectedStrategy?.maxContracts ?? 1);
+  const qtyChoices = Array.from({ length: maxQty - minQty + 1 }, (_, i) => minQty + i);
+
   const quantity = Number.parseInt(qty, 10);
-  const qtyValid = Number.isInteger(quantity) && quantity >= 1;
+  const qtyValid = Number.isInteger(quantity) && quantity >= minQty && quantity <= maxQty;
 
   const requestQuote = async (refreshesLeft = MAX_QUOTE_REFRESHES) => {
     clearTimers();
@@ -326,15 +336,21 @@ export function ManualEntryPanel({
               </span>
               <label className="flex items-center gap-1">
                 qty
-                <input
-                  type="number"
-                  min={1}
-                  step={1}
+                <select
                   value={qty}
                   onChange={(e) => setQty(e.target.value)}
-                  className="w-16 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
-                />
+                  className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
+                >
+                  {qtyChoices.map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
               </label>
+              <span className="text-[11px] text-slate-500">
+                max {maxQty} for {strategyId}
+              </span>
               {qtyValid && (
                 <span className="text-slate-400">
                   ≈ {fmt(step.quote.ask * quantity * 100)} at the ask

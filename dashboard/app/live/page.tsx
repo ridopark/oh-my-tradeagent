@@ -249,6 +249,12 @@ export default async function LivePage() {
           r.items.map((i) => ({
             strategyId: i.strategy_id,
             enabled: i.config.enabled !== false,
+            // The qty dropdown is bounded by the SAME [min_contracts, max_contracts] the workflow
+            // enforces (MANUAL_QTY_OUT_OF_BOUNDS), so the ceiling is visible up front instead of
+            // being discovered via a rejected entry. Fallbacks keep the panel usable if a config
+            // omits them; the server remains the authority either way.
+            minContracts: positiveInt(i.config.min_contracts) ?? 1,
+            maxContracts: positiveInt(i.config.max_contracts) ?? 10,
           })),
         )
         .catch((err) => {
@@ -450,6 +456,14 @@ export default async function LivePage() {
       </main>
     </>
   );
+}
+
+// Coerce a strategy-config numeric field to a positive integer, or null when it is absent/garbage.
+// The config blob is Record<string, unknown> (it mirrors whatever JSONB the row holds), so every
+// read of it has to be defensive.
+function positiveInt(raw: unknown): number | null {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 // The equity-options contract multiplier: a premium quote is per-share, and one contract covers 100
