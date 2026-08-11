@@ -27,11 +27,16 @@ from ohmytradeagent_contract.models.copytrade_derisk_payload import (
     CopytradeDeriskPayload,
     Right as DeriskRight,
 )
+from ohmytradeagent_contract.models.copytrade_entry_status import (
+    CopytradeEntryStatus,
+    State as EntryState,
+)
 from ohmytradeagent_contract.models.copytrade_signal_payload import (
     Action,
     CloseIntent,
     CopytradeSignalPayload,
     Right,
+    Source,
 )
 from ohmytradeagent_contract.models.fill_signal_payload import FillSignalPayload
 from ohmytradeagent_contract.models.order_intent import OrderIntent
@@ -700,3 +705,60 @@ def test_strategy_config_create_request_account_cap_round_trip() -> None:
         StrategyConfigCreateRequest.model_validate({**base, "account_daily_loss_pct": 0})
     with pytest.raises(ValidationError):
         StrategyConfigCreateRequest.model_validate({**base, "account_daily_loss_pct": 1.5})
+
+
+def test_copytrade_signal_payload_manual_entry_fields_round_trip() -> None:
+    """PLAN-2026-08-10-live-manual-bto: optional source/qty_override parse, round-trip, absent → None."""
+    base = _load("copytrade-signal-payload-bto.json")
+    manual = {**base, "source": "manual", "qty_override": 3}
+
+    model = CopytradeSignalPayload.model_validate(manual)
+    assert model.source == Source.manual
+    assert model.qty_override == 3
+
+    serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert serialized == manual
+
+    # Absent case (every sidecar-emitted signal, incl. the existing BTO fixture) → None. This is
+    # the invariant the orchestrator's manual-entry branches key off: no Discord signal may ever
+    # look manual.
+    absent = CopytradeSignalPayload.model_validate(base)
+    assert absent.source is None
+    assert absent.qty_override is None
+
+    # qty_override is a contract COUNT: zero and negatives are not orders.
+    with pytest.raises(ValidationError):
+        CopytradeSignalPayload.model_validate({**base, "qty_override": 0})
+    with pytest.raises(ValidationError):
+        CopytradeSignalPayload.model_validate({**base, "source": "api"})
+
+
+def test_copytrade_entry_status_round_trips() -> None:
+    """PLAN-2026-08-10-live-manual-bto: the entryStatus Query result."""
+    pending = CopytradeEntryStatus.model_validate({"schema_version": 1, "state": "PENDING"})
+    assert pending.state == EntryState.pending
+    assert pending.reason_code is None
+
+    rejected = {
+        "schema_version": 1,
+        "state": "REJECTED",
+        "reason_code": "MANUAL_QTY_OUT_OF_BOUNDS",
+        "reason_detail": "requested=99 max_contracts=5",
+    }
+    model = CopytradeEntryStatus.model_validate(rejected)
+    assert model.state == EntryState.rejected
+    assert json.loads(model.model_dump_json(by_alias=True, exclude_none=True)) == rejected
+
+    filled = {
+        "schema_version": 1,
+        "state": "FILLED",
+        "option_symbol": "NVDA  260821C00225000",
+        "contracts": 3,
+        "broker_order_id": "bo-1",
+        "filled_qty": 3,
+        "avg_fill_price": 2.34,
+    }
+    fill = CopytradeEntryStatus.model_validate(filled)
+    assert fill.state == EntryState.filled
+    assert fill.avg_fill_price == Decimal("2.34")
+    assert json.loads(fill.model_dump_json(by_alias=True, exclude_none=True)) == filled
