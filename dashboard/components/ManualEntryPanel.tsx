@@ -128,7 +128,6 @@ export function ManualEntryPanel({
   const [qty, setQty] = useState("1");
   const [strategyId, setStrategyId] = useState(strategies[0]?.strategyId ?? "");
   const [step, setStep] = useState<Step>({ kind: "idle" });
-  const [note, setNote] = useState<string | null>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const clearTimers = () => {
@@ -156,7 +155,6 @@ export function ManualEntryPanel({
 
   const requestQuote = async () => {
     clearTimers();
-    setNote(null);
     setStep({ kind: "quoting" });
     const r = await quoteAction(occ);
     if (!r.ok) {
@@ -279,7 +277,6 @@ export function ManualEntryPanel({
                 {step.message}
               </span>
             )}
-            {note && <span className="text-xs text-slate-400">{note}</span>}
           </div>
         )}
 
