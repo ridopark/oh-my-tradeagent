@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/copytrade-entry-status.json",
+  "title": "CopytradeEntryStatus",
+  "description": "PLAN-2026-08-10-live-manual-bto: synchronous return value of the CopytradeSignalWorkflow.entryStatus Query. A Query emits NO Temporal commands, so this surface is replay-inert — it reports state the workflow already tracks. Added so an operator-initiated /live manual BTO can show WHY an entry did not happen: without it a gate rejection (EOD cutoff, notional cap, kill switch, missing live promotion) is indistinguishable from an accepted entry until someone reads audit_log. Also queryable on a CLOSED execution (the workflow completes ~90s after submit, on fill or entry-TTL expiry), which is what lets the dashboard keep polling past completion.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.CopytradeEntryStatus",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "DTO contract version."
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "REJECTED",
+        "SUBMITTED",
+        "FILLED",
+        "EXPIRED",
+        "ABORTED",
+        "FAILED"
+      ],
+      "description": "PENDING: the entry is still running the pre-order gates (transient). REJECTED: a gate refused it — no order was placed, no position exists; reason_code names the gate. SUBMITTED: the broker order is placed and the workflow is awaiting the fill. FILLED: the entry filled and a PositionWorkflow now owns the position. EXPIRED: the entry-TTL elapsed with no fill (EntryExpired). ABORTED: a kill-switch risk-breach cascade short-circuited the entry. FAILED: the workflow terminated on an unhandled failure (mirrors the EntryWorkflowFailed audit). Every state except PENDING is terminal for the ENTRY (FILLED hands off to the position's own lifecycle)."
+    },
+    "reason_code": {
+      "type": "string",
+      "description": "Machine-readable refusal code when state=REJECTED — the same value the SignalRejected audit carries (e.g. NOTIONAL_CAP_EXCEEDED, MANUAL_QTY_OUT_OF_BOUNDS, STRATEGY_DISABLED, CAPITAL_UNAVAILABLE), or 'live_promotion_missing' for the LIVE promotion gate. Absent for every non-REJECTED state."
+    },
+    "reason_detail": {
+      "type": "string",
+      "description": "Human-readable detail for the refusal (e.g. 'manual_qty_exceeds_headroom requested=10 headroom=2'). Optional even when state=REJECTED — not every gate supplies one."
+    },
+    "option_symbol": {
+      "type": "string",
+      "description": "Resolved OCC option symbol. Absent when the entry was refused BEFORE contract resolution (the early gates: strategy-disabled, risk decision, capital-unavailable)."
+    },
+    "contracts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Contract count the entry was placed for, after sizing (or after the operator's qty_override). Absent until the order is submitted."
+    },
+    "broker_order_id": {
+      "type": "string",
+      "description": "Broker-assigned order id, present from SUBMITTED onward."
+    },
+    "filled_qty": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Cumulative filled quantity reported by the broker. Present when state=FILLED."
+    },
+    "avg_fill_price": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Average fill premium per contract, dollars. Present when state=FILLED."
+    }
+  }
+}

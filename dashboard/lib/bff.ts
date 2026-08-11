@@ -49,6 +49,33 @@ async function bffGet<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+// Non-throwing sibling of bffGet: returns the raw status + parsed body so a caller can branch on
+// an EXPECTED non-2xx instead of catching. bffGet's throw-on-error is right for a page render (a
+// failed read is a data outage); it is wrong for the manual-entry reads, where 400/404/503 are
+// each a distinct thing to tell the operator.
+async function bffGetRaw(path: string): Promise<{ status: number; body: unknown }> {
+  const session = await auth();
+  const tenantId = session?.tenantId;
+  if (!tenantId) {
+    throw new NotAuthenticatedError("no tenant in session");
+  }
+  const res = await fetch(`${BFF_URL}${path}`, {
+    headers: {
+      Authorization: `Bearer ${BFF_TOKEN}`,
+      "X-Tenant-Id": tenantId,
+    },
+    cache: "no-store",
+    signal: AbortSignal.timeout(BFF_TIMEOUT_MS),
+  });
+  let parsed: unknown = null;
+  try {
+    parsed = await res.json();
+  } catch {
+    parsed = null;
+  }
+  return { status: res.status, body: parsed };
+}
+
 export interface Envelope<T> {
   tenant_id: string;
   count: number;
@@ -233,6 +260,140 @@ export async function trimPosition(
     return { ok: false, alreadyClosed: true };
   }
   return { ok: false };
+}
+
+// PLAN-2026-08-10-live-manual-bto ------------------------------------------------------------
+// The /live manual-entry panel's three calls. All follow trimPosition's contract: never throw on
+// an expected non-2xx, return a typed result the UI can branch on, because every one of these
+// statuses is something the operator needs to SEE (a silent failure on a real-money entry is the
+// failure mode this whole feature has to avoid).
+
+// Parsed contract + live NBBO for the confirm step. `ask` is what anchors the marketable limit,
+// so it is non-null by construction — the BFF 503s rather than returning a quote without one.
+export interface OptionQuote {
+  occ: string;
+  underlying: string;
+  expiry: string;
+  strike: number;
+  right: "C" | "P";
+  bid: number | null;
+  mid: number | null;
+  ask: number;
+  quoted_at: string;
+}
+
+export type OptionQuoteResult =
+  | { ok: true; quote: OptionQuote }
+  | { ok: false; kind: "invalid-occ"; detail: string }
+  | { ok: false; kind: "unavailable" | "disabled" | "error" };
+
+export async function getOptionQuote(occ: string): Promise<OptionQuoteResult> {
+  const { status, body } = await bffGetRaw(
+    `/api/entries/quote?occ=${encodeURIComponent(occ)}`,
+  );
+  const err = (body as { error?: string; detail?: string } | null) ?? {};
+  if (status === 200) {
+    return { ok: true, quote: body as OptionQuote };
+  }
+  if (status === 400 && err.error === "invalid_occ") {
+    return { ok: false, kind: "invalid-occ", detail: err.detail ?? "not a valid contract" };
+  }
+  if (status === 503) {
+    return { ok: false, kind: "unavailable" };
+  }
+  if (status === 404) {
+    return { ok: false, kind: "disabled" };
+  }
+  return { ok: false, kind: "error" };
+}
+
+// Outcome of a submit. `quote-moved` carries both prices so the operator can see WHY it refused
+// rather than being told to try again with no explanation.
+export type ManualEntryResult =
+  | { ok: true; signalId: string; anchorAsk: number | null }
+  | { ok: false; kind: "quote-moved"; confirmedAsk: number; currentAsk: number }
+  | {
+      ok: false;
+      kind:
+        | "quote-stale"
+        | "quote-unavailable"
+        | "duplicate"
+        | "unknown-strategy"
+        | "invalid-occ"
+        | "disabled"
+        | "error";
+    };
+
+export async function submitManualEntry(
+  occ: string,
+  strategyId: string,
+  qty: number,
+  quotedAsk: number,
+  quotedAt: string,
+  idempotencyKey: string,
+  operatorId?: string,
+): Promise<ManualEntryResult> {
+  const { status, body } = await bffPost(
+    "/api/entries/manual",
+    {
+      occ,
+      strategy_id: strategyId,
+      qty,
+      quoted_ask: quotedAsk,
+      quoted_at: quotedAt,
+      idempotency_key: idempotencyKey,
+    },
+    operatorId ? { "X-Operator-Id": operatorId } : undefined,
+  );
+  const b = (body as Record<string, unknown> | null) ?? {};
+  const err = b.error as string | undefined;
+  if (status === 202) {
+    return {
+      ok: true,
+      signalId: String(b.signal_id ?? ""),
+      anchorAsk: b.anchor_ask == null ? null : Number(b.anchor_ask),
+    };
+  }
+  if (status === 409 && err === "quote_moved") {
+    return {
+      ok: false,
+      kind: "quote-moved",
+      confirmedAsk: Number(b.confirmed_ask),
+      currentAsk: Number(b.current_ask),
+    };
+  }
+  if (status === 409 && err === "quote_stale") return { ok: false, kind: "quote-stale" };
+  if (status === 409 && err === "duplicate_submission") return { ok: false, kind: "duplicate" };
+  if (status === 403 && err === "unknown_strategy") {
+    return { ok: false, kind: "unknown-strategy" };
+  }
+  if (status === 400 && err === "invalid_occ") return { ok: false, kind: "invalid-occ" };
+  if (status === 503) return { ok: false, kind: "quote-unavailable" };
+  if (status === 404) return { ok: false, kind: "disabled" };
+  return { ok: false, kind: "error" };
+}
+
+// Mirrors the CopytradeEntryStatus contract DTO. PENDING is transient (the gates are still
+// running); everything else is terminal for the entry.
+export interface EntryStatus {
+  state: "PENDING" | "REJECTED" | "SUBMITTED" | "FILLED" | "EXPIRED" | "ABORTED" | "FAILED";
+  reason_code: string | null;
+  reason_detail: string | null;
+  option_symbol: string | null;
+  contracts: number | null;
+  broker_order_id: string | null;
+  filled_qty: number | null;
+  avg_fill_price: string | number | null;
+}
+
+export async function getEntryStatus(
+  signalId: string,
+  strategyId: string,
+): Promise<EntryStatus | null> {
+  const { status, body } = await bffGetRaw(
+    `/api/entries/${encodeURIComponent(signalId)}/status?strategy_id=${encodeURIComponent(strategyId)}`,
+  );
+  return status === 200 ? (body as EntryStatus) : null;
 }
 
 export interface Position {

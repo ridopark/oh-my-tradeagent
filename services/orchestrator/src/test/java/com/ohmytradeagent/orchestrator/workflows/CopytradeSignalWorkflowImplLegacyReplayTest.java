@@ -7,6 +7,7 @@ import static org.mockito.Mockito.when;
 import com.ohmytradeagent.contract.AccountSnapshotRequest;
 import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.CopytradeEntryStatus;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.OrderIntent;
@@ -987,6 +988,11 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
       }
       this.riskBreachReceived = true;
     }
+
+    @Override
+    public CopytradeEntryStatus entryStatus() {
+      return null; // emulator: mints legacy histories only, never queried.
+    }
   }
 
   /**
@@ -1052,6 +1058,11 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
 
     @Override
     public void riskBreach(RiskBreachPayload payload) {}
+
+    @Override
+    public CopytradeEntryStatus entryStatus() {
+      return null; // emulator: mints legacy histories only, never queried.
+    }
   }
 
   /**
@@ -1124,6 +1135,11 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
 
     @Override
     public void riskBreach(RiskBreachPayload payload) {}
+
+    @Override
+    public CopytradeEntryStatus entryStatus() {
+      return null; // emulator: mints legacy histories only, never queried.
+    }
   }
 
   /**
@@ -1258,6 +1274,11 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
 
     @Override
     public void riskBreach(RiskBreachPayload payload) {}
+
+    @Override
+    public CopytradeEntryStatus entryStatus() {
+      return null; // emulator: mints legacy histories only, never queried.
+    }
   }
 
   private static OrderIntent intent(
@@ -1341,6 +1362,11 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
 
     @Override
     public void riskBreach(com.ohmytradeagent.contract.RiskBreachPayload payload) {}
+
+    @Override
+    public CopytradeEntryStatus entryStatus() {
+      return null; // emulator: mints legacy histories only, never queried.
+    }
 
     private static AuditEvent auditEvent(CopytradeSignalPayload payload, String kind) {
       AuditEvent event = new AuditEvent();

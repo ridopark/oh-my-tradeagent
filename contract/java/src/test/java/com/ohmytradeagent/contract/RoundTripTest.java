@@ -396,4 +396,71 @@ class RoundTripTest {
     assertThat(mapper.readTree(reserialized).get("capital_source").asText())
         .isEqualTo("account_cash");
   }
+
+  @Test
+  void copytradeSignalPayload_manualEntryFields_roundTrip() throws Exception {
+    // PLAN-2026-08-10-live-manual-bto: the /live manual BTO is a synthetic CopytradeSignalPayload,
+    // distinguished from a sidecar-emitted one by source=manual + an operator qty_override.
+    String base = Files.readString(FIXTURES.resolve("copytrade-signal-payload-bto.json"));
+    JsonNode enriched =
+        ((com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(base))
+            .put("source", "manual")
+            .put("qty_override", 3);
+
+    CopytradeSignalPayload manual =
+        mapper.readValue(mapper.writeValueAsString(enriched), CopytradeSignalPayload.class);
+
+    assertThat(manual.getSource()).isEqualTo(CopytradeSignalPayload.Source.MANUAL);
+    assertThat(manual.getQtyOverride()).isEqualTo(3L);
+    assertThat(mapper.readTree(mapper.writeValueAsString(manual))).isEqualTo(enriched);
+  }
+
+  @Test
+  void copytradeSignalPayload_manualEntryFields_absentAreNull() throws Exception {
+    // The ship-order gate depends on this: every sidecar-emitted signal omits both fields, so they
+    // MUST deserialize to null (not a default) and MUST NOT be emitted on re-serialization —
+    // otherwise the orchestrator's manual-entry branches would fire on ordinary Discord signals.
+    String json = Files.readString(FIXTURES.resolve("copytrade-signal-payload-bto.json"));
+
+    CopytradeSignalPayload deserialized = mapper.readValue(json, CopytradeSignalPayload.class);
+
+    assertThat(deserialized.getSource()).isNull();
+    assertThat(deserialized.getQtyOverride()).isNull();
+    assertThat(mapper.readTree(mapper.writeValueAsString(deserialized)))
+        .isEqualTo(mapper.readTree(json));
+  }
+
+  @Test
+  void copytradeEntryStatus_roundTrips() throws Exception {
+    // Required-only: the transient PENDING a query sees before any gate has resolved.
+    CopytradeEntryStatus pending =
+        mapper.readValue(
+            "{\"schema_version\":1,\"state\":\"PENDING\"}", CopytradeEntryStatus.class);
+    assertThat(pending.getState()).isEqualTo(CopytradeEntryStatus.State.PENDING);
+    assertThat(pending.getReasonCode()).isNull();
+    assertThat(pending.getContracts()).isNull();
+
+    // Terminal REJECTED carries the gate that refused the entry — the whole point of the Query.
+    String rejected =
+        "{\"schema_version\":1,\"state\":\"REJECTED\",\"reason_code\":\"NOTIONAL_CAP_EXCEEDED\","
+            + "\"reason_detail\":\"manual_qty_exceeds_headroom requested=10 headroom=2\","
+            + "\"option_symbol\":\"NVDA  260821C00225000\"}";
+    CopytradeEntryStatus deserialized = mapper.readValue(rejected, CopytradeEntryStatus.class);
+    assertThat(deserialized.getState()).isEqualTo(CopytradeEntryStatus.State.REJECTED);
+    assertThat(deserialized.getReasonCode()).isEqualTo("NOTIONAL_CAP_EXCEEDED");
+    assertThat(mapper.readTree(mapper.writeValueAsString(deserialized)))
+        .isEqualTo(mapper.readTree(rejected));
+
+    // Terminal FILLED carries the broker's fill economics.
+    String filled =
+        "{\"schema_version\":1,\"state\":\"FILLED\",\"option_symbol\":\"NVDA  260821C00225000\","
+            + "\"contracts\":3,\"broker_order_id\":\"bo-1\",\"filled_qty\":3,"
+            + "\"avg_fill_price\":2.34}";
+    CopytradeEntryStatus fill = mapper.readValue(filled, CopytradeEntryStatus.class);
+    assertThat(fill.getState()).isEqualTo(CopytradeEntryStatus.State.FILLED);
+    assertThat(fill.getContracts()).isEqualTo(3L);
+    assertThat(fill.getFilledQty()).isEqualTo(3L);
+    assertThat(fill.getAvgFillPrice()).isEqualByComparingTo("2.34");
+    assertThat(mapper.readTree(mapper.writeValueAsString(fill))).isEqualTo(mapper.readTree(filled));
+  }
 }

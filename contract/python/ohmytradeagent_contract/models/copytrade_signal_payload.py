@@ -48,6 +48,15 @@ class CloseIntent(StrEnum):
     partial = "partial"
 
 
+class Source(StrEnum):
+    """
+    PLAN-2026-08-10-live-manual-bto: who produced this signal. Null/absent == 'discord' (every signal the sidecar emits; the field is deliberately NOT defaulted in-schema so an absent value stays null on the Java DTO and legacy replay histories are unaffected). 'manual' marks an operator-initiated entry submitted from the /live dashboard: it suppresses the edited-signal supersede in CopytradeSignalWorkflowImpl.maybeSupersedePriorLeg (a hand-typed BTO must never auto-flatten a Discord leg that happens to share underlying+strike+right within the 120s correction window) and tags the audit trail for forensics.
+    """
+
+    discord = "discord"
+    manual = "manual"
+
+
 class CopytradeSignalPayload(BaseModel):
     """
     Parsed Discord BTO/STC/AVG line emitted by signal-source-discord and consumed by CopytradeSignalWorkflow. Carries the underlying ticker plus the (expiry, strike, right) tuple — NOT the resolved OCC option symbol. OCC resolution (e.g. 'AAPL250117C00150000') is performed downstream by ContractActivities.resolve and surfaces on OrderIntent.option_symbol / PreTradeCheckRequest.option_symbol. Reference: docs/plans/PLAN.md, oh-my-opentrade/backend/internal/domain/copytrade.go.
@@ -120,6 +129,14 @@ class CopytradeSignalPayload(BaseModel):
     close_confidence: confloat(ge=0.0, le=1.0) | None = None
     """
     Optional confidence score in [0,1] for close_intent. Null/absent = no score. Spec-only in Phase 1; no consumer yet.
+    """
+    source: Source | None = None
+    """
+    PLAN-2026-08-10-live-manual-bto: who produced this signal. Null/absent == 'discord' (every signal the sidecar emits; the field is deliberately NOT defaulted in-schema so an absent value stays null on the Java DTO and legacy replay histories are unaffected). 'manual' marks an operator-initiated entry submitted from the /live dashboard: it suppresses the edited-signal supersede in CopytradeSignalWorkflowImpl.maybeSupersedePriorLeg (a hand-typed BTO must never auto-flatten a Discord leg that happens to share underlying+strike+right within the 120s correction window) and tags the audit trail for forensics.
+    """
+    qty_override: conint(ge=1) | None = None
+    """
+    PLAN-2026-08-10-live-manual-bto: operator-chosen contract count that REPLACES capital-weight sizing for this entry. Null/absent (every sidecar-emitted signal) == today's Sizing.computeEntry path, unchanged. When set, the entry is still gated: it is rejected when outside [min_contracts, max_contracts], and rejected (NOT silently clamped down, unlike the auto-sized path) when the notional-cap headroom is smaller than the requested qty — a manual entry that cannot be filled at the requested size is the operator's decision to re-make, not ours to shrink.
     """
     raw_line: constr(min_length=1)
     """
