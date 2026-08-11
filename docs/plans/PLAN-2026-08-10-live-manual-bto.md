@@ -19,6 +19,26 @@ Manual entry
                                    (or) Rejected: NOTIONAL_CAP_EXCEEDED
 ```
 
+## Implementation status (read this first)
+
+**Phases 1-4 are IMPLEMENTED and green on `feat/live-manual-bto` → PR #662** (branched off `main`
+@ `bbdeb4e`). Phase 5 is operator-only and deliberately NOT in that PR.
+
+Verified at authoring time: orchestrator 1244 tests green (incl.
+`CopytradeSignalWorkflowImplLegacyReplayTest` at 16 run / 5 skipped — byte-identical to the
+pre-change baseline, re-checked with the changes stashed); tenant-dashboard-bff 242 green (203
+before); contract Java + Python round-trips green with the regen-drift guard clean; full `mvn -T 1C
+test` reactor green; dashboard `tsc --noEmit` + `next build` clean, plus every UI state driven in a
+real browser against a throwaway stub BFF — including the flag-off dark default.
+
+Two deviations from the plan as written, both deliberate:
+- **`entryStatus` gained a `FAILED` state** (7, not the 6 sketched below) to mirror the existing
+  `EntryWorkflowFailed` audit on the `process()` top-level catch. Without it a workflow that died on
+  an unhandled failure would report a stale `PENDING` forever.
+- **`WorkflowWriteGuards` is a new class**, not a set of helpers left in `PositionsController`; the
+  controller now delegates to it. Same behavior (proven by the pre-existing force-close/partial-close
+  guard tests), one implementation of the tenant boundary.
+
 ## Core design decision — reuse `CopytradeSignalWorkflow`, don't rebuild
 
 A manual entry is a `CopytradeSignalPayload{action:BTO}` started on the orchestrator task queue,
