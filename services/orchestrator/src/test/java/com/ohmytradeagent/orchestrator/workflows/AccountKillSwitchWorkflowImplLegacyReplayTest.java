@@ -125,6 +125,26 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   private static final String MTM_DEFER_EMULATOR_WORKFLOW_ID =
       "account-killswitch-mtm-defer-v1-emulator";
 
+  // PLAN-2026-08-12: a pre-rollover-clear in-flight history for a TRIPPED
+  // (auto:account_daily_loss) execution whose trading day ROLLS OVER mid-history. Every other
+  // fixture in this class pins todayEt to a single date, so none of them enters the rollover branch
+  // at all — they cannot see this change. See
+  // legacyTrippedAccountDailyLossRolloverHistoryDoesNotClear.
+  private static final String ROLLOVER_FIXTURE_RESOURCE =
+      "temporal/replay/account-killswitch-pre-rollover-clear-tripped-rollover-history.json";
+  private static final Path ROLLOVER_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "account-killswitch-pre-rollover-clear-tripped-rollover-history.json");
+  private static final String ROLLOVER_EMULATOR_WORKFLOW_ID =
+      "account-killswitch-pre-rollover-clear-emulator";
+
+  /** Day 1 for the rollover fixture — the day the (carried) trip was taken. */
+  private static final LocalDate ROLLOVER_DAY_1 = LocalDate.of(2026, 6, 14);
+
+  /** Day 2 for the rollover fixture — the day the heartbeat rolls into mid-history. */
+  private static final LocalDate ROLLOVER_DAY_2 = LocalDate.of(2026, 6, 15);
+
   /**
    * Pins the version-marker constant value so a rename in {@link AccountKillSwitchWorkflowImpl}
    * fails this test loudly. Renaming the literal would silently re-version live executions.
@@ -135,6 +155,23 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
         AccountKillSwitchWorkflowImpl.class.getDeclaredField("VERSION_ACCOUNT_DAILY_LOSS_PCT");
     marker.setAccessible(true);
     assertThat((String) marker.get(null)).isEqualTo("account-daily-loss-pct-of-sod-equity-v1");
+  }
+
+  /**
+   * PLAN-2026-08-12: pins the rollover-clear marker constant. Also pins that it is a DISTINCT
+   * string from the per-strategy {@code KillSwitchWorkflowImpl} gate — the two workflows have
+   * independent histories, so a shared id would be legal but would make an in-flight execution's
+   * marker ambiguous to read at the CLI.
+   */
+  @Test
+  void versionAccountClearDailyLossOnRolloverConstantNameIsStable() throws Exception {
+    Field marker =
+        AccountKillSwitchWorkflowImpl.class.getDeclaredField(
+            "VERSION_ACCOUNT_CLEAR_DAILY_LOSS_ON_ROLLOVER");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null))
+        .isEqualTo("account-killswitch-clear-daily-loss-trip-on-rollover-v1")
+        .isNotEqualTo("killswitch-clear-daily-loss-trip-on-rollover-v1");
   }
 
   /**
@@ -421,9 +458,116 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
         FIXTURE_RESOURCE, AccountKillSwitchWorkflowImpl.class);
   }
 
+  /**
+   * PLAN-2026-08-12 SENTINEL — the one fixture with teeth for the account rollover clear.
+   *
+   * <p>A pre-change in-flight history for a TRIPPED {@code auto:account_daily_loss} execution
+   * (carried in via the continue-as-new fields, the real prod-kipark/prod-jinchul shape) whose
+   * {@code todayEt} ADVANCES mid-history. Faithful to the live population: it records all SIX
+   * pre-existing markers at the positions production records them, so on replay the repage gate
+   * resolves to {@code v>=1} and each tripped tick really does run {@code
+   * maybeRepageWhileHolding()} → {@code isMarketOpen}. Only the NEW rollover-clear change-id is
+   * absent, so it resolves to {@link Workflow#DEFAULT_VERSION} (the SDK yields to the end of the
+   * workflow task, then returns DEFAULT_VERSION, emitting no command) and the clear is skipped.
+   *
+   * <p>Per tick: {@code sleep(60s)} → [tick 1 only: the five heartbeat markers] → {@code todayEt} →
+   * rollover assignment on tick 3 (pure field writes, no command) → tripped → {@code isMarketOpen}
+   * (the re-page probe; the 15-tick throttle is never reached in 5 ticks) → [tick 1 only: the
+   * cap-inactive marker].
+   *
+   * <p><b>Teeth verified 2026-08-12 (observed, not predicted).</b> Temporarily deleting the {@code
+   * clearDailyLossOnRollover >= 1 &&} conjunct from {@link AccountKillSwitchWorkflowImpl#heartbeat}
+   * makes this replay throw:
+   *
+   * <pre>
+   * io.temporal.worker.NonDeterministicException: [TMPRL1100] Failure handling event 56 of type
+   * 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED' during replay. [TMPRL1100] Command
+   * COMMAND_TYPE_SCHEDULE_ACTIVITY_TASK doesn't match event EVENT_TYPE_ACTIVITY_TASK_SCHEDULED with
+   * EventId=56 on check activityId with an expected value '5a1ed6f7-...' and an actual value
+   * '86b5ba5f-...'.
+   * </pre>
+   *
+   * <p>— the ungated clear un-trips the workflow on the rollover tick, so it dispatches {@code
+   * audit.log(KillSwitchClearedOnRollover)} where the recorded tick dispatched the re-page probe
+   * {@code calendar.isMarketOpen()}. Both are SCHEDULE_ACTIVITY_TASK, so the divergence is caught
+   * on the deterministic {@code activityId} rather than the command type — the check fires at the
+   * SAME command position, which is tighter than a type mismatch one command later. Restoring the
+   * gate makes it pass again.
+   *
+   * <p>The other four fixtures in this class pass with OR without the gate — they pin {@code
+   * todayEt} to a single date and so never enter the rollover branch at all. That is exactly why
+   * this fixture exists: without it the replay suite cannot see this change.
+   */
+  @Test
+  void legacyTrippedAccountDailyLossRolloverHistoryDoesNotClear() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(ROLLOVER_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. Regenerate with"
+                + " `mvn -pl services/orchestrator test -Dgenerate.legacy.fixture=true"
+                + " -Dtest=AccountKillSwitchWorkflowImplLegacyReplayTest#regenerateTrippedRolloverFixture`",
+            ROLLOVER_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    WorkflowReplayer.replayWorkflowExecutionFromResource(
+        ROLLOVER_FIXTURE_RESOURCE, AccountKillSwitchWorkflowImpl.class);
+  }
+
   // ---------------------------------------------------------------------------
   // Fixture regeneration
   // ---------------------------------------------------------------------------
+
+  /**
+   * PLAN-2026-08-12: records the pre-change TRIPPED + ROLLOVER history. The day sequence {@code
+   * (d1, d1, d2, d2, d2)} puts a genuine rollover tick in the middle of the captured stream (ticks
+   * 1-2 on day 1, tick 3 crosses into day 2). The input carries {@code tripped=true} / {@code
+   * actor=auto:account_daily_loss} / {@code trading_day=d1} via the continue-as-new fields — the
+   * shape of a real tripped account switch, and the reason {@code run()} skips its bootstrap {@code
+   * todayEt()} call.
+   */
+  @Test
+  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
+  void regenerateTrippedRolloverFixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(LegacyTrippedRolloverEmulatorWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
+      TenantConfigActivities tenantConfig = Mockito.mock(TenantConfigActivities.class);
+      AccountPnlActivities accountPnl = Mockito.mock(AccountPnlActivities.class);
+      AccountKillSwitchCascadeActivities cascade =
+          Mockito.mock(AccountKillSwitchCascadeActivities.class);
+
+      // The day ADVANCES on the third heartbeat — the rollover tick this fixture exists for.
+      when(calendar.todayEt())
+          .thenReturn(ROLLOVER_DAY_1, ROLLOVER_DAY_1, ROLLOVER_DAY_2, ROLLOVER_DAY_2);
+      when(calendar.isMarketOpen()).thenReturn(true);
+
+      worker.registerActivitiesImplementations(audit, calendar, tenantConfig, accountPnl, cascade);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      AccountKillSwitchWorkflow wf =
+          client.newWorkflowStub(
+              AccountKillSwitchWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(ROLLOVER_EMULATOR_WORKFLOW_ID)
+                  .build());
+      WorkflowStub.fromTyped(wf).start(trippedAccountDailyLossCarryInput(ROLLOVER_DAY_1));
+
+      env.sleep(Duration.ofMinutes(5));
+      json = client.fetchHistory(ROLLOVER_EMULATOR_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
+    Files.createDirectories(ROLLOVER_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(ROLLOVER_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
 
   @Test
   @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
@@ -1026,6 +1170,137 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * PLAN-2026-08-12 pre-rollover-clear TRIPPED emulator. Mirrors the PRE-change {@code run()} +
+   * {@code heartbeat()} + {@code maybeRepageWhileHolding()} command stream for an execution that is
+   * ALREADY TRIPPED with {@code actor=auto:account_daily_loss}, across a trading-day rollover.
+   *
+   * <p>Faithful to the live population rather than minimal: it reads the SIX pre-existing gates at
+   * exactly the positions production reads them (the five in {@code heartbeat()}, then the
+   * cap-inactive one in {@code run()}), so the recorded history carries their markers and the new
+   * impl takes the {@code v>=1} branches on replay — in particular the tripped tick really does run
+   * the re-page probe. It deliberately does NOT read the new {@code
+   * account-killswitch-clear-daily-loss-trip-on-rollover-v1} gate, so that one resolves to {@code
+   * DEFAULT_VERSION} and the clear must be skipped.
+   *
+   * <p>Per tick: {@code sleep(60s)} → [tick 1: pct / realized / repage / mtm-debounce /
+   * expired-worth-zero markers] → {@code todayEt} → rollover field writes when the day advances (no
+   * command) → tripped → re-page probe {@code isMarketOpen} (the 15-tick throttle is never reached
+   * in the five captured ticks, so no page is emitted) → [tick 1: cap-inactive marker].
+   */
+  public static class LegacyTrippedRolloverEmulatorWorkflowImpl
+      implements AccountKillSwitchWorkflow {
+    private static final ActivityOptions OPTS =
+        ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
+
+    private final MarketCalendarActivities calendar =
+        Workflow.newActivityStub(MarketCalendarActivities.class, OPTS);
+
+    // Mirrors the production field set so this reads as a faithful transcript. Only `tradingDay`,
+    // `tripped` and the repage version actually GATE a command — the rest are inert here (never
+    // compared, and killswitchState() is never queried during fixture generation). Do not infer
+    // from the mirroring that a newly-added production field is safe to copy in blind: one that
+    // gates a command WOULD change what regeneration records.
+    private boolean tripped;
+    private String reason = "";
+    private String actor = "";
+    private LocalDate tradingDay;
+    private int stillHoldingRepageTicks;
+    private int consecutiveMtmUnavailableTicks;
+
+    @WorkflowInit
+    public LegacyTrippedRolloverEmulatorWorkflowImpl(AccountKillSwitchWorkflowInput in) {
+      // Mirrors AccountKillSwitchWorkflowImpl's carry-forward hydration.
+      if (Boolean.TRUE.equals(in.getTripped())) {
+        this.tripped = true;
+      }
+      if (in.getReason() != null) {
+        this.reason = in.getReason();
+      }
+      if (in.getActor() != null) {
+        this.actor = in.getActor();
+      }
+      if (in.getTradingDay() != null) {
+        this.tradingDay = in.getTradingDay();
+      }
+    }
+
+    @Override
+    public String run(AccountKillSwitchWorkflowInput in) {
+      if (this.tradingDay == null) {
+        this.tradingDay = calendar.todayEt();
+      }
+      while (true) {
+        Workflow.sleep(Duration.ofSeconds(60));
+        legacyHeartbeat();
+        // run()'s cap-inactive gate, read AFTER heartbeat() exactly as production does. A tripped
+        // tick reports armed=true, so recordInactivityOutcome only resets counters — no command.
+        Workflow.getVersion("account-cap-inactive-alert-v1", Workflow.DEFAULT_VERSION, 1);
+      }
+    }
+
+    /** The PRE-change heartbeat body as a TRIPPED switch executes it. */
+    private void legacyHeartbeat() {
+      // The five heartbeat gates, in production's order and at production's position (before
+      // todayEt). maxSupported mirrors production exactly — note the mtm-debounce gate is 2.
+      Workflow.getVersion("account-daily-loss-pct-of-sod-equity-v1", Workflow.DEFAULT_VERSION, 1);
+      Workflow.getVersion("killswitch-realized-from-exec-journal-v1", Workflow.DEFAULT_VERSION, 1);
+      int repageVersion =
+          Workflow.getVersion("account-trip-repage-while-holding-v1", Workflow.DEFAULT_VERSION, 1);
+      Workflow.getVersion("account-mtm-debounce-v1", Workflow.DEFAULT_VERSION, 2);
+      Workflow.getVersion("killswitch-expired-worth-zero-v1", Workflow.DEFAULT_VERSION, 1);
+
+      LocalDate today = calendar.todayEt();
+      if (!today.equals(tradingDay)) {
+        // Pre-change rollover: tradingDay + the day-scoped counters only. tripped PERSISTED.
+        this.tradingDay = today;
+        this.consecutiveMtmUnavailableTicks = 0;
+      }
+      if (tripped) {
+        if (repageVersion >= 1) {
+          maybeRepageWhileHolding();
+        }
+        return;
+      }
+      // The untripped tail is unreachable in this fixture (the carried input starts tripped and
+      // the pre-change code never un-trips), so it is deliberately not emulated.
+    }
+
+    /** The re-page probe. Only the market-hours read fires within the captured ticks. */
+    private void maybeRepageWhileHolding() {
+      if (!calendar.isMarketOpen()) {
+        stillHoldingRepageTicks = 0;
+        return;
+      }
+      stillHoldingRepageTicks++;
+      // STILL_HOLDING_REPAGE_TICKS is 15; five captured ticks never reach the throttle boundary, so
+      // the book read + page are never dispatched.
+    }
+
+    @Override
+    public void tripValidator(TripKillSwitchRequest request) {}
+
+    @Override
+    public void trip(TripKillSwitchRequest request) {}
+
+    @Override
+    public void resetValidator(ResetKillSwitchRequest request) {}
+
+    @Override
+    public void reset(ResetKillSwitchRequest request) {}
+
+    @Override
+    public KillSwitchState killswitchState() {
+      KillSwitchState s = new KillSwitchState();
+      s.setSchemaVersion(1L);
+      s.setTripped(tripped);
+      s.setReason(reason);
+      s.setActor(actor);
+      s.setTradingDay(tradingDay);
+      return s;
+    }
+  }
+
+  /**
    * PLAN-2026-07-22 (defer-page) v1 defer emulator: mirrors the {@code heartbeat()} command stream
    * for the small-book MTM-unavailable DEFER path EXACTLY as it was AT #606 (BEFORE the widen), so
    * the recorded history carries the {@code account-mtm-debounce-v1} marker at value 1 and takes a
@@ -1186,6 +1461,25 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
     AccountKillSwitchWorkflowInput in = new AccountKillSwitchWorkflowInput();
     in.setSchemaVersion(1L);
     in.setTenantId("dev");
+    return in;
+  }
+
+  /**
+   * PLAN-2026-08-12: a continue-as-new carry-forward input for an execution already TRIPPED on
+   * {@code auto:account_daily_loss} as of {@code tradingDay} — the state a real account cap carries
+   * into the next run after an auto trip, and the state prod-kipark was stuck in across
+   * 2026-08-11/12. Stamped v2 (no sod_equity / debounce / exposure fields carried).
+   */
+  private static AccountKillSwitchWorkflowInput trippedAccountDailyLossCarryInput(
+      LocalDate tradingDay) {
+    AccountKillSwitchWorkflowInput in = new AccountKillSwitchWorkflowInput();
+    in.setSchemaVersion(2L);
+    in.setTenantId("dev");
+    in.setTripped(true);
+    in.setReason("auto:account_daily_loss");
+    in.setActor("auto:account_daily_loss");
+    in.setTrippedAt(tradingDay.atTime(14, 46).atOffset(ZoneOffset.UTC));
+    in.setTradingDay(tradingDay);
     return in;
   }
 }
