@@ -351,11 +351,12 @@ public final class AuditEventKinds {
           "KillSwitchTripped",
           "KillSwitchResetApproved",
           "KillSwitchHeartbeatError",
-          // PLAN-2026-08-12: emitted by KillSwitchWorkflowImpl's heartbeat when the trading-day
-          // rollover clears a DAY-SCOPED auto:daily_loss trip, so a daily loss breaker is actually
-          // daily instead of halting the tenant until a human resets it. Only that one actor is
-          // cleared — operator halts and the auto:missing_loss_threshold config fail-closed
-          // persist.
+          // PLAN-2026-08-12: emitted by BOTH kill-switch heartbeats when the trading-day rollover
+          // clears a DAY-SCOPED auto trip, so a daily breaker is actually daily instead of halting
+          // the tenant until a human resets it. KillSwitchWorkflowImpl clears auto:daily_loss;
+          // AccountKillSwitchWorkflowImpl clears auto:account_daily_loss and marks its subject
+          // scope=account (strategy_id=__account__). Only those actors are cleared — operator
+          // halts, auto:missing_loss_threshold, and auto:account_mtm_unavailable all persist.
           // The un-halt is a record, not a page: KillSwitchAlerter matches only KillSwitchTripped,
           // so this kind does not reach Discord. Observability-only — in ALL_KINDS only, not in any
           // *_KINDS lifecycle group.

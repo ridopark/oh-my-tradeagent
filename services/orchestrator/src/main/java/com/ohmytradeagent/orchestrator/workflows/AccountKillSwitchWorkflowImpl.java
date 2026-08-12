@@ -239,10 +239,8 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * neither the id nor the marker): the two workflows have independent histories, so sharing an id
    * would be legal but would make an in-flight execution's marker ambiguous to read at the CLI.
    *
-   * <p>Read as the LAST of the six gates in {@link #heartbeat()}'s existing version block, at the
-   * same stable scope and BEFORE {@code calendar.todayEt()} — so the five existing markers keep
-   * their recorded order in new histories, and the gate is still resolved before the rollover
-   * branch and the {@code if (tripped)} early-return that follow it.
+   * <p>Read at the END of {@link #heartbeat()}'s existing version block; the comment at that read
+   * states why the position matters. Do not move it without reading that comment.
    *
    * <p><b>The gate covers the STATE MUTATION as well as the audit</b>, and the mutation is the
    * load-bearing half: clearing {@code tripped} at {@link Workflow#DEFAULT_VERSION} would drop the
@@ -1498,9 +1496,6 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * check AND have {@code RiskActivitiesImpl.checkAccountKillSwitch} reject entries with {@code
    * KILL_SWITCH_COOLING_DOWN} — for exactly the window the clear exists to end. Nor {@code
    * consecutiveMtmUnavailableTicks}, which is pre-trip (untripped-tick) state; see {@link #reset}.
-   *
-   * <p>Unlike the per-strategy {@code KillSwitchWorkflowImpl.clearTrippedState()}, this one also
-   * covers the re-page window — that workflow has no re-page mechanism to reset.
    */
   private void clearTrippedState() {
     this.tripped = false;

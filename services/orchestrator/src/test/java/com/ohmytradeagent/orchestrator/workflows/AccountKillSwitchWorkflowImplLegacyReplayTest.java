@@ -1195,6 +1195,11 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
     private final MarketCalendarActivities calendar =
         Workflow.newActivityStub(MarketCalendarActivities.class, OPTS);
 
+    // Mirrors the production field set so this reads as a faithful transcript. Only `tradingDay`,
+    // `tripped` and the repage version actually GATE a command — the rest are inert here (never
+    // compared, and killswitchState() is never queried during fixture generation). Do not infer
+    // from the mirroring that a newly-added production field is safe to copy in blind: one that
+    // gates a command WOULD change what regeneration records.
     private boolean tripped;
     private String reason = "";
     private String actor = "";
@@ -1204,8 +1209,7 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
 
     @WorkflowInit
     public LegacyTrippedRolloverEmulatorWorkflowImpl(AccountKillSwitchWorkflowInput in) {
-      // Mirrors AccountKillSwitchWorkflowImpl's carry-forward hydration for the fields this
-      // emulator's heartbeat actually reads.
+      // Mirrors AccountKillSwitchWorkflowImpl's carry-forward hydration.
       if (Boolean.TRUE.equals(in.getTripped())) {
         this.tripped = true;
       }
