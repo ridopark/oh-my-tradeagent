@@ -95,8 +95,31 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    */
   private static final String KIND_ACCOUNT_MTM_DEFERRED = "AccountKillSwitchMtmDeferred";
 
+  /**
+   * PLAN-2026-08-12: emitted when the trading-day rollover clears a day-scoped {@code
+   * auto:account_daily_loss} trip, so the un-halt is visible in {@code audit_log} rather than a
+   * silent state flip. Deliberately the SAME kind string the per-strategy {@code
+   * KillSwitchWorkflowImpl} uses — one queryable kind for both scopes; the account emit is
+   * distinguished by {@code scope=account} on the subject and by its {@link #ACCOUNT_SCOPE}
+   * strategy_id. Not matched by any alerter, so it records without paging.
+   */
+  private static final String KIND_KILL_SWITCH_CLEARED_ON_ROLLOVER = "KillSwitchClearedOnRollover";
+
   /** Audit strategy_id sentinel — the account cap is tenant-scoped, not strategy-scoped. */
   static final String ACCOUNT_SCOPE = "__account__";
+
+  /**
+   * The actor (and reason) stamped by the auto account daily-loss trip — the ONLY day-scoped trip
+   * this workflow takes, and therefore the only one the rollover clears.
+   *
+   * <p>The match is an EXACT equality on {@code actor}. Deliberately NOT a {@code
+   * startsWith("auto:")} prefix like {@link #doTrip}'s auto-flatten discriminator: that would also
+   * sweep in {@code auto:account_mtm_unavailable}, which is a DATA-QUALITY fail-closed (the book
+   * could not be priced) rather than a day event — a new calendar day does not make it priceable,
+   * so it must stay sticky. And not on {@code reason}, which is free text from the trip request
+   * body on the manual path.
+   */
+  private static final String TRIP_ACTOR_ACCOUNT_DAILY_LOSS = "auto:account_daily_loss";
 
   /**
    * Version gate for the start-of-day-equity pct cap. ALL new commands (the {@code
@@ -206,6 +229,31 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * differs — so no command is added or removed on the valuation path.
    */
   static final String VERSION_ACCOUNT_EXPIRED_WORTH_ZERO = "killswitch-expired-worth-zero-v1";
+
+  /**
+   * PLAN-2026-08-12 change-id: clear a day-scoped {@code auto:account_daily_loss} trip at the
+   * trading-day rollover, so a DAILY cap is actually daily instead of halting the tenant on day N,
+   * N+1, N+2 … until a human resets it.
+   *
+   * <p>A DISTINCT string from the per-strategy {@code KillSwitchWorkflowImpl} gate (which reuses
+   * neither the id nor the marker): the two workflows have independent histories, so sharing an id
+   * would be legal but would make an in-flight execution's marker ambiguous to read at the CLI.
+   *
+   * <p>Read as the LAST of the six gates in {@link #heartbeat()}'s existing version block, at the
+   * same stable scope and BEFORE {@code calendar.todayEt()} — so the five existing markers keep
+   * their recorded order in new histories, and the gate is still resolved before the rollover
+   * branch and the {@code if (tripped)} early-return that follow it.
+   *
+   * <p><b>The gate covers the STATE MUTATION as well as the audit</b>, and the mutation is the
+   * load-bearing half: clearing {@code tripped} at {@link Workflow#DEFAULT_VERSION} would drop the
+   * replaying tick out of the tripped branch — skipping the {@code maybeRepageWhileHolding()}
+   * commands a {@code v>=1} history recorded there — and into the cooldown/market/threshold/
+   * realized/open-book path, a command stream the recorded history does not contain. Pinned by
+   * {@code
+   * AccountKillSwitchWorkflowImplLegacyReplayTest#legacyTrippedAccountDailyLossRolloverHistoryDoesNotClear}.
+   */
+  static final String VERSION_ACCOUNT_CLEAR_DAILY_LOSS_ON_ROLLOVER =
+      "account-killswitch-clear-daily-loss-trip-on-rollover-v1";
 
   /**
    * Phase 2b (risk C1): emitted (and Discord-paged via {@code AccountKillSwitchCapAlerter}) on the
@@ -734,15 +782,41 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // BEFORE the book is valued, and stash it for valueOpenBook (see the field's javadoc).
     this.expiredWorthZeroVersion =
         Workflow.getVersion(VERSION_ACCOUNT_EXPIRED_WORTH_ZERO, Workflow.DEFAULT_VERSION, 1);
+    // PLAN-2026-08-12: read the rollover-clear gate LAST of the block, at this same stable scope,
+    // so the five markers above keep their recorded order. See the change-id javadoc for why the
+    // gate must also cover the state mutation, not just the audit emit.
+    int clearDailyLossOnRollover =
+        Workflow.getVersion(
+            VERSION_ACCOUNT_CLEAR_DAILY_LOSS_ON_ROLLOVER, Workflow.DEFAULT_VERSION, 1);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
-      this.tradingDay = today;
       // New trading day => the prior SOD-equity snapshot is stale; re-capture lazily below.
       this.sodEquity = null;
       // New trading day => a stale mid-outage debounce count must not carry into a fresh session
       // (pure workflow state; a no-op at DEFAULT_VERSION where the counter is always 0).
       this.consecutiveMtmUnavailableTicks = 0;
+      // v>=1: a DAILY cap must be daily. Clear ONLY the day-scoped auto:account_daily_loss trip;
+      // the auto:account_mtm_unavailable data-quality fail-closed and every operator halt persist
+      // (fail-closed on any unrecognised actor). This is the LAST statement of the rollover branch
+      // and sits BEFORE the `if (tripped)` block below, so a cleared tick structurally cannot reach
+      // maybeRepageWhileHolding() and instead falls through to NORMAL evaluation on this same tick
+      // — against the new day's SOD equity, which the sodEquity=null above forces it to re-capture.
+      // At DEFAULT_VERSION none of it runs; see the change-id javadoc.
+      if (clearDailyLossOnRollover >= 1 && tripped && TRIP_ACTOR_ACCOUNT_DAILY_LOSS.equals(actor)) {
+        // Snapshot the subject BEFORE the wipe (the fields it records are the ones being cleared).
+        Map<String, Object> subj =
+            subject(
+                "reason", reason,
+                "actor", actor,
+                "tripped_at", trippedAt,
+                "prior_trading_day", tradingDay,
+                "trading_day", today,
+                "scope", "account");
+        clearTrippedState();
+        auditLog(KIND_KILL_SWITCH_CLEARED_ON_ROLLOVER, subj);
+      }
+      this.tradingDay = today;
     }
     if (tripped) {
       // Phase 2b (risk C1): while tripped + market-open + holding, emit a bounded periodic re-page
@@ -901,8 +975,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     if (totalPnl.compareTo(threshold.negate()) <= 0) {
       // Carry the full listed open-position count + current open MTM so the (no-flatten) page is
       // actionable.
+      // reason == actor here (the heartbeat is its own actor); TRIP_ACTOR_ACCOUNT_DAILY_LOSS is the
+      // value the rollover clear matches on, so the trip and the clear can never drift apart.
       doTrip(
-          "auto:account_daily_loss", "auto:account_daily_loss", totalPnl, book.listed(), openMtm);
+          TRIP_ACTOR_ACCOUNT_DAILY_LOSS,
+          TRIP_ACTOR_ACCOUNT_DAILY_LOSS,
+          totalPnl,
+          book.listed(),
+          openMtm);
     }
     // Threshold resolved and the loss was evaluated against it — the cap is ARMED this tick.
     return true;
@@ -1368,16 +1448,13 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   @Override
   public void reset(ResetKillSwitchRequest request) {
     long cooldownSecs = DEFAULT_RESET_COOLDOWN_SECS;
-    this.tripped = false;
-    this.reason = "";
-    this.actor = "";
-    this.trippedAt = null;
+    clearTrippedState();
     this.coolingDownUntil = workflowNow().plusSeconds(cooldownSecs);
-    // Phase 2b: clear the still-holding re-page window so a later re-trip starts a fresh cadence.
-    this.stillHoldingRepageTicks = 0;
     // PLAN-2026-07-22: clear the MTM-unavailable debounce so a later re-trip starts a fresh N-tick
     // count (else a post-cooldown unpriceable tick would immediately re-fail-close on the stale
     // counter). Pure workflow state; a no-op at DEFAULT_VERSION where the counter is always 0.
+    // NOT part of clearTrippedState(): this counter accumulates on UNTRIPPED ticks (it is the
+    // pre-trip debounce), and the rollover clear's branch already zeroes it for the new day.
     this.consecutiveMtmUnavailableTicks = 0;
 
     Map<String, Object> subj =
@@ -1403,6 +1480,35 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       subj.put("open_mtm", lastOpenMtm);
     }
     auditLog(KIND_KILL_SWITCH_RESET_APPROVED, subj);
+  }
+
+  /**
+   * Clears the trip tuple as a UNIT — the four fields {@link #doTrip} sets together and that both
+   * {@link #killswitchState()} and {@link #buildCarryForwardInput()} project together — plus the
+   * still-holding re-page window, which only ever advances on a tripped tick and so is tripped
+   * state too (leaving it stale would make the first re-page after a later re-trip fire immediately
+   * instead of a full {@link #STILL_HOLDING_REPAGE_TICKS} window later). Shared by the two un-trip
+   * paths ({@link #reset} and the trading-day rollover clear in {@link #heartbeat()}) so a field
+   * added to the trip state can never be cleared by one and leaked by the other — {@code actor} in
+   * particular is the rollover clear's own discriminator, so a stale value there would be
+   * self-corrupting rather than cosmetic.
+   *
+   * <p>Deliberately does NOT touch {@code coolingDownUntil}: only {@link #reset} arms a cooldown. A
+   * rollover clear that armed one would be inert for that window at {@code heartbeat()}'s cooldown
+   * check AND have {@code RiskActivitiesImpl.checkAccountKillSwitch} reject entries with {@code
+   * KILL_SWITCH_COOLING_DOWN} — for exactly the window the clear exists to end. Nor {@code
+   * consecutiveMtmUnavailableTicks}, which is pre-trip (untripped-tick) state; see {@link #reset}.
+   *
+   * <p>Unlike the per-strategy {@code KillSwitchWorkflowImpl.clearTrippedState()}, this one also
+   * covers the re-page window — that workflow has no re-page mechanism to reset.
+   */
+  private void clearTrippedState() {
+    this.tripped = false;
+    this.reason = "";
+    this.actor = "";
+    this.trippedAt = null;
+    // Phase 2b: clear the still-holding re-page window so a later re-trip starts a fresh cadence.
+    this.stillHoldingRepageTicks = 0;
   }
 
   @Override

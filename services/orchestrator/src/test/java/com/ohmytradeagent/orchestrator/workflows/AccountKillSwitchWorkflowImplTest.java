@@ -2023,6 +2023,201 @@ class AccountKillSwitchWorkflowImplTest {
         .doesNotContainKey("open_mtm");
   }
 
+  // ---------- PLAN-2026-08-12: clear the auto account daily-loss trip at the rollover ----------
+
+  @Test
+  void heartbeat_dayRollover_clearsAutoAccountDailyLossTrip_andAudits()
+      throws InterruptedException {
+    // A DAILY cap must be daily. An auto:account_daily_loss trip taken on day 1 must NOT survive
+    // the trading-day rollover: the next heartbeat that observes a new todayEt clears the trip
+    // tuple and records the un-halt in audit_log.
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000")); // crosses the 5000 absolute cap
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-rollover-clear");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75)); // tick 1: trips on day 1
+    KillSwitchState day1 = stub.killswitchState();
+    assertThat(day1.getTripped()).isTrue();
+    assertThat(day1.getActor()).isEqualTo("auto:account_daily_loss");
+
+    // Roll the trading day forward BEFORE the next tick, and stop the loss so the cleared cap does
+    // not immediately re-trip (the re-trip path has its own test below).
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+
+    env.sleep(Duration.ofSeconds(60)); // tick 2: rollover -> clear
+
+    KillSwitchState day2 = stub.killswitchState();
+    assertThat(day2.getTripped()).isFalse();
+    assertThat(day2.getReason()).isEmpty();
+    assertThat(day2.getActor()).isEmpty();
+    assertThat(day2.getTrippedAt()).isNull();
+    assertThat(day2.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 15));
+    // coolingDownUntil is a POST-RESET debounce, not day-scoped: the rollover must not invent one
+    // (a cooldown here would have RiskActivitiesImpl reject entries with KILL_SWITCH_COOLING_DOWN
+    // for the window the clear exists to end).
+    assertThat(day2.getCoolingDownUntil()).isNull();
+
+    waitForAuditKind("KillSwitchClearedOnRollover");
+    AuditEvent cleared = captureKind("KillSwitchClearedOnRollover");
+    assertThat(cleared.getSubject())
+        .containsEntry("reason", "auto:account_daily_loss")
+        .containsEntry("actor", "auto:account_daily_loss")
+        .containsEntry("scope", "account")
+        .containsKey("tripped_at");
+    assertThat(String.valueOf(cleared.getSubject().get("prior_trading_day")))
+        .isEqualTo("2026-05-14");
+    assertThat(String.valueOf(cleared.getSubject().get("trading_day"))).isEqualTo("2026-05-15");
+    assertThat(countKind("KillSwitchClearedOnRollover")).isEqualTo(1L);
+  }
+
+  @Test
+  void heartbeat_dayRollover_mtmUnavailableTripPersists() {
+    // THE NON-GOAL GUARD (PLAN-2026-08-12). auto:account_mtm_unavailable is a DATA-QUALITY
+    // fail-closed, not a day event — the cap engaged because the book could not be priced, and a
+    // new calendar day does not make it priceable. It must stay tripped across the rollover. Guards
+    // against a startsWith("auto:") regression: the discriminator is an EXACT actor match.
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = 0;
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 1; // fail-close on the first miss
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any())).thenReturn(unavailableQuote("NVDA  261218C00140000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-rollover-mtm");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75)); // tick 1: fail-closed trip
+    KillSwitchState day1 = stub.killswitchState();
+    assertThat(day1.getTripped()).isTrue();
+    assertThat(day1.getActor()).isEqualTo("auto:account_mtm_unavailable");
+
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(60));
+
+    // Positive sync point FIRST (the Query round-trips through the workflow, proving the rollover
+    // tick was processed) — only then is the "no clear audit" assertion meaningful.
+    KillSwitchState day2 = stub.killswitchState();
+    assertThat(day2.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 15));
+    assertThat(day2.getTripped()).isTrue();
+    assertThat(day2.getActor()).isEqualTo("auto:account_mtm_unavailable");
+    assertThat(countKind("KillSwitchClearedOnRollover")).isZero();
+  }
+
+  @Test
+  void heartbeat_dayRollover_operatorTripPersists() {
+    // A deliberate operator halt must never be silently re-armed by the passage of midnight.
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-rollover-operator");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("manual:operator_initiated", "operator:ridopark"));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 15));
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("manual:operator_initiated");
+    assertThat(s.getActor()).isEqualTo("operator:ridopark");
+    assertThat(countKind("KillSwitchClearedOnRollover")).isZero();
+  }
+
+  @Test
+  void heartbeat_dayRolloverClear_doesNotRepageWhileHolding() {
+    // The clear sits at the END of the rollover branch, BEFORE the `if (tripped)` block — so a
+    // cleared tick structurally cannot reach maybeRepageWhileHolding(). With the re-page window
+    // set to 1, EVERY tripped tick pages; the rollover tick must page ZERO times because by then
+    // the switch is no longer tripped.
+    AccountKillSwitchWorkflowImpl.STILL_HOLDING_REPAGE_TICKS = 1;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(holdingBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.90")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-rollover-norepage");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75)); // tick 1: trip
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    // POSITIVE CONTROL: one more tripped tick on the SAME day does re-page, so the zero below is
+    // the clear's doing and not a mis-wired throttle.
+    env.sleep(Duration.ofSeconds(60)); // tick 2: tripped + holding -> re-page
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    env.sleep(Duration.ofSeconds(60)); // tick 3: rollover -> clear -> NOT a tripped tick
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isFalse();
+    assertThat(s.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 15));
+    assertThat(countKind("AccountKillSwitchStillHolding")).isEqualTo(1L);
+  }
+
+  @Test
+  void heartbeat_afterRolloverClear_reSnapshotsSodEquityAndReTripsSameTick()
+      throws InterruptedException {
+    // The rollover already nulls sodEquity, so a cleared cap re-captures the NEW day's start-of-day
+    // equity and evaluates against it — the whole point of clearing. And because the clear falls
+    // through to normal evaluation on the SAME tick, a book that is still underwater on the new day
+    // clears and re-trips within one heartbeat: correct-but-noisy, and strictly better than a
+    // silent multi-day halt (PLAN-2026-08-12 "Non-goal: the cross-day unrealized charge").
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    when(accountSnapshot.accountSnapshot(any())).thenReturn(snapshot(new BigDecimal("5000")));
+    // Effective cap = 0.40 * 5000 = 2000; a -3000 realized loss crosses it on both days.
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-3000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-rollover-resnapshot");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75)); // tick 1: day-1 SOD snapshot + trip
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+    verify(accountSnapshot, times(1)).accountSnapshot(any());
+
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(60)); // tick 2: rollover -> clear -> re-snapshot -> re-trip
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getActor()).isEqualTo("auto:account_daily_loss");
+    assertThat(s.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 15));
+    // The cleared cap re-armed against DAY 2's start-of-day equity, not day 1's stale base.
+    verify(accountSnapshot, times(2)).accountSnapshot(any());
+
+    // The clear is on the record, and the re-trip is a NEW trip rather than the stale day-1 one.
+    waitForAuditKind("KillSwitchClearedOnRollover");
+    waitForKindCount("KillSwitchTripped", 2L);
+    assertThat(countKind("KillSwitchClearedOnRollover")).isEqualTo(1L);
+    assertThat(countKind("KillSwitchTripped")).isEqualTo(2L);
+  }
+
+  @Test
+  void heartbeat_sameDay_accountDailyLossTripStaysTripped() {
+    // The clear is scoped to the ROLLOVER branch. Without this test, a bug that hoists it out of
+    // `if (!today.equals(tradingDay))` would un-trip the real-money cap on the very next heartbeat
+    // — making it a no-op — and every other test here would still pass.
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-sameday-sticky");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Several ticks WITHOUT advancing todayEt.
+    env.sleep(Duration.ofSeconds(4 * 60));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getActor()).isEqualTo("auto:account_daily_loss");
+    assertThat(s.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 14));
+    assertThat(countKind("KillSwitchClearedOnRollover")).isZero();
+  }
+
   // ---------- helpers ----------
 
   private static AccountOpenBook holdingBook() {
@@ -2109,5 +2304,33 @@ class AccountKillSwitchWorkflowImplTest {
     ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
     Mockito.verify(audit, Mockito.atLeast(0)).log(captor.capture());
     return captor.getAllValues().stream().filter(e -> kind.equals(e.getKind())).count();
+  }
+
+  /**
+   * Deterministic sync point for async audit emissions (mirrors {@code
+   * KillSwitchWorkflowImplTest}). Heartbeat-driven audits are emitted on the activity worker thread
+   * while the workflow clock is skipped by {@link TestWorkflowEnvironment#sleep}; under CI load the
+   * skip can return before the last tick's {@code audit.log} invocation is visible to this (test)
+   * thread, making an instantaneous {@link #captureKind}/{@link #countKind} read flaky. Poll
+   * (bounded) until at least {@code atLeast} events of {@code kind} have been captured before
+   * asserting on them.
+   */
+  private void waitForKindCount(String kind, long atLeast) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 10_000;
+    while (System.currentTimeMillis() < deadline) {
+      if (countKind(kind) >= atLeast) {
+        return;
+      }
+      Thread.sleep(25);
+    }
+    if (countKind(kind) < atLeast) {
+      throw new AssertionError(
+          "timed out waiting for >=" + atLeast + " audit event(s) with kind=" + kind);
+    }
+  }
+
+  /** Bounded wait for the first audit event of {@code kind} (see {@link #waitForKindCount}). */
+  private void waitForAuditKind(String kind) throws InterruptedException {
+    waitForKindCount(kind, 1L);
   }
 }
