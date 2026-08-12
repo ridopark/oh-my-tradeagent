@@ -66,7 +66,7 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
    * is free text taken straight from the trip request body, so it is caller-shaped; {@code actor}
    * is either set by this workflow or {@code operator:}-prefixed by the only two callers).
    */
-  static final String TRIP_ACTOR_DAILY_LOSS = "auto:daily_loss";
+  private static final String TRIP_ACTOR_DAILY_LOSS = "auto:daily_loss";
 
   /**
    * B2 (P0c-b1) change-id for the live kill-switch heartbeat floor. Gates the fail-closed trip on a
@@ -312,33 +312,25 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     if (!today.equals(tradingDay)) {
       // Day rollover — reset day-scoped state. coolingDownUntil persists across days: it is a
       // POST-RESET debounce, not day-scoped state, and it is already in the past by any rollover.
-      LocalDate priorDay = tradingDay;
-      this.tradingDay = today;
+      //
       // v>=1: a DAILY loss breaker must be daily. Clear ONLY the day-scoped auto:daily_loss trip;
       // every operator halt and config fail-closed trip persists (fail-closed on any unrecognised
-      // actor). Placed here — inside the rollover branch, BEFORE the tripped early-return below —
-      // so a cleared switch falls through to NORMAL evaluation on this same tick.
-      //
-      // At DEFAULT_VERSION none of this runs: no state change and no audit command, so the legacy
-      // tick (todayEt -> rollover assignment -> tripped early-return) replays byte-identically. The
-      // gate covers the MUTATION as much as the audit — see the change-id javadoc.
+      // actor). Sits inside the rollover branch and BEFORE the tripped early-return below, so a
+      // cleared switch falls through to NORMAL evaluation on this same tick. At DEFAULT_VERSION
+      // none of it runs — see the change-id javadoc for why the gate covers the mutation too.
       if (clearDailyLossOnRollover >= 1 && tripped && TRIP_ACTOR_DAILY_LOSS.equals(actor)) {
-        String priorReason = reason;
-        String priorActor = actor;
-        OffsetDateTime priorTrippedAt = trippedAt;
-        this.tripped = false;
-        this.reason = "";
-        this.actor = "";
-        this.trippedAt = null;
-        auditLog(
-            KIND_KILL_SWITCH_CLEARED_ON_ROLLOVER,
+        // Snapshot the subject BEFORE the wipe (the fields it records are the ones being cleared).
+        Map<String, Object> subj =
             subject(
-                "reason", priorReason,
-                "actor", priorActor,
-                "tripped_at", priorTrippedAt,
-                "prior_trading_day", priorDay,
-                "trading_day", tradingDay));
+                "reason", reason,
+                "actor", actor,
+                "tripped_at", trippedAt,
+                "prior_trading_day", tradingDay,
+                "trading_day", today);
+        clearTrippedState();
+        auditLog(KIND_KILL_SWITCH_CLEARED_ON_ROLLOVER, subj);
       }
+      this.tradingDay = today;
     }
 
     if (tripped) {
@@ -552,12 +544,28 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
    * the {@code KillSwitchResetApproved} audit with the caller-provided subject.
    */
   private void doReset(OffsetDateTime coolingUntil, Map<String, Object> subj) {
+    clearTrippedState();
+    this.coolingDownUntil = coolingUntil;
+    auditLog(KIND_KILL_SWITCH_RESET_APPROVED, subj);
+  }
+
+  /**
+   * Clears the trip tuple as a UNIT — the four fields that {@link #doTrip} sets together and that
+   * both {@link #killswitchState()} and {@link #buildCarryForwardInput()} project together. Shared
+   * by the two un-trip paths ({@link #doReset} and the trading-day rollover clear in {@link
+   * #heartbeat()}) so a field added to the trip state can never be cleared by one and leaked by the
+   * other — {@code actor} in particular is the rollover clear's own discriminator, so a stale value
+   * there would be self-corrupting rather than cosmetic.
+   *
+   * <p>Deliberately does NOT touch {@code coolingDownUntil}: only {@link #doReset} arms a cooldown.
+   * A rollover clear that armed one would have {@code RiskActivitiesImpl.checkKillSwitch} reject
+   * entries with {@code KILL_SWITCH_COOLING_DOWN} for the window it exists to end.
+   */
+  private void clearTrippedState() {
     this.tripped = false;
     this.reason = "";
     this.actor = "";
     this.trippedAt = null;
-    this.coolingDownUntil = coolingUntil;
-    auditLog(KIND_KILL_SWITCH_RESET_APPROVED, subj);
   }
 
   @Override
