@@ -47,6 +47,28 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   private static final String KIND_KILL_SWITCH_HEARTBEAT_ERROR = "KillSwitchHeartbeatError";
 
   /**
+   * PLAN-2026-08-12: emitted when the trading-day rollover clears a day-scoped {@code
+   * auto:daily_loss} trip, so the un-halt is visible in {@code audit_log} rather than a silent
+   * state flip. Carries the prior reason/actor/tripped_at and both trading days. Deliberately NOT
+   * matched by {@code KillSwitchAlerter} (which pages only on {@code KillSwitchTripped}) — this is
+   * a record, not a page.
+   */
+  private static final String KIND_KILL_SWITCH_CLEARED_ON_ROLLOVER = "KillSwitchClearedOnRollover";
+
+  /**
+   * The actor (and reason) stamped by the auto daily-loss heartbeat trip — the ONLY day-scoped trip
+   * this workflow takes, and therefore the only one the rollover clears. Every other actor ({@code
+   * operator:*} from {@code KillSwitchController} / {@code LiveActivationGateActivitiesImpl},
+   * {@code auto:missing_loss_threshold} from the config fail-closed path) survives the rollover.
+   *
+   * <p>The match is an EXACT equality on {@code actor}, never a {@code startsWith("auto:")} prefix
+   * (that would sweep in the config fail-closed trip) and never on {@code reason} ({@code reason}
+   * is free text taken straight from the trip request body, so it is caller-shaped; {@code actor}
+   * is either set by this workflow or {@code operator:}-prefixed by the only two callers).
+   */
+  static final String TRIP_ACTOR_DAILY_LOSS = "auto:daily_loss";
+
+  /**
    * B2 (P0c-b1) change-id for the live kill-switch heartbeat floor. Gates the fail-closed trip on a
    * {@code -live} strategy that reaches the heartbeat with no valid {@code daily_loss_threshold}.
    * For every pre-B2 in-flight history {@link Workflow#getVersion} returns {@link
@@ -81,6 +103,38 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
    */
   static final String VERSION_KILLSWITCH_MISSING_THRESHOLD_OPTIONAL =
       "killswitch-missing-threshold-optional-when-account-cap-v1";
+
+  /**
+   * PLAN-2026-08-12 change-id: clear a day-scoped {@code auto:daily_loss} trip at the trading-day
+   * rollover, so a DAILY loss breaker is actually daily (pre-change, one bad day halted the tenant
+   * on day N, N+1, N+2 … until a human reset it — prod-kipark refused every BTO at the 2026-08-12
+   * open off an 2026-08-11 trip; staging_paper had silently taken no entry for nine days).
+   *
+   * <p><b>Read at the VERY TOP of {@link #heartbeat()}, ABOVE the other three gates — do NOT "tidy"
+   * it down beside them.</b> The three existing gates ({@link #VERSION_KILLSWITCH_LIVE_FLOOR},
+   * {@link #VERSION_KILLSWITCH_REALIZED_FROM_EXEC}, {@link
+   * #VERSION_KILLSWITCH_MISSING_THRESHOLD_OPTIONAL}) are read BELOW the {@code if (tripped)
+   * return;} early-return, which short-circuits every tripped tick — and a tripped tick is
+   * precisely when this gate has to be readable. Moving this read down beside them makes the
+   * feature unreachable for the entire population it exists for. Moving it down LATER, once
+   * executions have recorded the marker at the top, is also a needless replay risk. It stays first.
+   *
+   * <p>Reading a NEW change-id above the existing three does NOT reorder their recorded markers:
+   * the SDK resolves version markers by changeId ({@code WorkflowStateMachines.versions} is a
+   * {@code Map<String, VersionStateMachine>}), preloads the current workflow task's markers before
+   * running workflow code, and for a changeId absent from the recorded history yields the workflow
+   * thread until the task's events are exhausted and then returns {@link Workflow#DEFAULT_VERSION}
+   * — emitting NO command. So every pre-change in-flight history replays byte-identically.
+   *
+   * <p><b>The gate covers the STATE MUTATION as well as the audit</b>, and the mutation is the
+   * load-bearing half: clearing {@code tripped} at {@link Workflow#DEFAULT_VERSION} would drop the
+   * replaying tick out of the {@code if (tripped) return;} short-circuit and into {@code
+   * isMarketOpen}/{@code strategy.get}/the realized read — a whole command stream the recorded
+   * history does not contain. Pinned by {@code
+   * KillSwitchWorkflowImplLegacyReplayTest#legacyTrippedDailyLossRolloverHistoryDoesNotClear}.
+   */
+  static final String VERSION_KILLSWITCH_CLEAR_DAILY_LOSS_ON_ROLLOVER =
+      "killswitch-clear-daily-loss-trip-on-rollover-v1";
 
   /**
    * Consecutive exec-realized-read failures the heartbeat tolerates before paging (guardrail G1). A
@@ -244,10 +298,47 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
    * crossed.
    */
   private void heartbeat() {
+    // PLAN-2026-08-12: read the rollover-clear gate FIRST, unconditionally, at a stable scope. It
+    // MUST be read before the `if (tripped) return;` below — that early-return short-circuits the
+    // whole tick (and every other gate), and a tripped tick is exactly when this one matters. See
+    // VERSION_KILLSWITCH_CLEAR_DAILY_LOSS_ON_ROLLOVER's javadoc for why reading a new change-id
+    // above the three existing gates cannot reorder their recorded markers, and why this read must
+    // not be moved down beside them.
+    int clearDailyLossOnRollover =
+        Workflow.getVersion(
+            VERSION_KILLSWITCH_CLEAR_DAILY_LOSS_ON_ROLLOVER, Workflow.DEFAULT_VERSION, 1);
+
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
-      // Day rollover — reset day-scoped state. tripped/coolingDownUntil persist across days.
+      // Day rollover — reset day-scoped state. coolingDownUntil persists across days: it is a
+      // POST-RESET debounce, not day-scoped state, and it is already in the past by any rollover.
+      LocalDate priorDay = tradingDay;
       this.tradingDay = today;
+      // v>=1: a DAILY loss breaker must be daily. Clear ONLY the day-scoped auto:daily_loss trip;
+      // every operator halt and config fail-closed trip persists (fail-closed on any unrecognised
+      // actor). Placed here — inside the rollover branch, BEFORE the tripped early-return below —
+      // so a cleared switch falls through to NORMAL evaluation on this same tick.
+      //
+      // At DEFAULT_VERSION none of this runs: no state change and no audit command, so the legacy
+      // tick (todayEt -> rollover assignment -> tripped early-return) replays byte-identically. The
+      // gate covers the MUTATION as much as the audit — see the change-id javadoc.
+      if (clearDailyLossOnRollover >= 1 && tripped && TRIP_ACTOR_DAILY_LOSS.equals(actor)) {
+        String priorReason = reason;
+        String priorActor = actor;
+        OffsetDateTime priorTrippedAt = trippedAt;
+        this.tripped = false;
+        this.reason = "";
+        this.actor = "";
+        this.trippedAt = null;
+        auditLog(
+            KIND_KILL_SWITCH_CLEARED_ON_ROLLOVER,
+            subject(
+                "reason", priorReason,
+                "actor", priorActor,
+                "tripped_at", priorTrippedAt,
+                "prior_trading_day", priorDay,
+                "trading_day", tradingDay));
+      }
     }
 
     if (tripped) {
@@ -316,7 +407,9 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
       pnlValue = pnl.computeRealizedPnl(input.getTenantId(), input.getStrategyId(), tradingDay);
     }
     if (pnlValue.compareTo(threshold.negate()) <= 0) {
-      doTrip("auto:daily_loss", "auto:daily_loss", pnlValue);
+      // reason == actor here (the heartbeat is its own actor); TRIP_ACTOR_DAILY_LOSS is the value
+      // the rollover clear matches on, so the trip and the clear can never drift apart.
+      doTrip(TRIP_ACTOR_DAILY_LOSS, TRIP_ACTOR_DAILY_LOSS, pnlValue);
     }
   }
 

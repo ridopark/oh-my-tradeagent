@@ -448,6 +448,157 @@ class KillSwitchWorkflowImplTest {
     assertThat(s.getTripped()).isFalse();
   }
 
+  // ---------- PLAN-2026-08-12: clear the auto daily-loss trip at the trading-day rollover
+  // ----------
+
+  @Test
+  void heartbeat_dayRollover_clearsAutoDailyLossTrip_andAudits() throws InterruptedException {
+    // A DAILY loss breaker must be daily. An auto:daily_loss trip taken on day 1 must NOT survive
+    // the trading-day rollover: the next heartbeat that observes a new todayEt clears
+    // tripped/reason/actor/tripped_at and records the clear in audit_log.
+    when(calendar.isMarketOpen()).thenReturn(true);
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-3000")); // crosses the 2500 threshold -> auto-trip
+
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-rollover-clear");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75)); // tick 1: auto-trips on day 1
+    KillSwitchState day1 = stub.killswitchState();
+    assertThat(day1.getTripped()).isTrue();
+    assertThat(day1.getActor()).isEqualTo("auto:daily_loss");
+
+    // Roll the trading day forward BEFORE the next tick, and stop the loss so the cleared switch
+    // does not immediately re-trip (the re-trip path is covered by its own test below).
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+
+    env.sleep(Duration.ofSeconds(60)); // tick 2: rollover -> clear
+
+    KillSwitchState day2 = stub.killswitchState();
+    assertThat(day2.getTripped()).isFalse();
+    assertThat(day2.getReason()).isEmpty();
+    assertThat(day2.getActor()).isEmpty();
+    assertThat(day2.getTrippedAt()).isNull();
+    assertThat(day2.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 15));
+    // coolingDownUntil is a POST-RESET debounce, not day-scoped state — the rollover must not
+    // invent one (it was never set here, so it stays null).
+    assertThat(day2.getCoolingDownUntil()).isNull();
+
+    waitForAuditKind("KillSwitchClearedOnRollover");
+    AuditEvent cleared = captureKind("KillSwitchClearedOnRollover");
+    assertThat(cleared.getSubject())
+        .containsEntry("reason", "auto:daily_loss")
+        .containsEntry("actor", "auto:daily_loss")
+        .containsKey("tripped_at");
+    assertThat(String.valueOf(cleared.getSubject().get("prior_trading_day")))
+        .isEqualTo("2026-05-14");
+    assertThat(String.valueOf(cleared.getSubject().get("trading_day"))).isEqualTo("2026-05-15");
+    // Exactly one clear for one rollover.
+    assertThat(countKind("KillSwitchClearedOnRollover")).isEqualTo(1L);
+  }
+
+  @Test
+  void heartbeat_dayRollover_operatorTripPersists() {
+    // THE REGRESSION GUARD THAT MATTERS. prod_real/watchlist-trigger-v1 is INTENTIONALLY
+    // deactivated via the one-click live-deactivation path (actor operator:<id>, reason
+    // live_deactivation:one_click). A rollover must NEVER silently re-arm a strategy an operator
+    // deliberately halted — only the day-scoped auto:daily_loss actor is cleared; anything else
+    // persists (fail-closed on an unrecognised actor).
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-rollover-operator");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("live_deactivation:one_click", "operator:ridopark"));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(75));
+
+    // Positive sync point FIRST (the Query round-trips through the workflow, so it proves the
+    // rollover tick was processed) — only then is the "no clear audit" assertion meaningful.
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 15));
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("live_deactivation:one_click");
+    assertThat(s.getActor()).isEqualTo("operator:ridopark");
+    assertThat(countKind("KillSwitchClearedOnRollover")).isZero();
+  }
+
+  @Test
+  void heartbeat_dayRollover_missingLossThresholdTripPersists() {
+    // auto:missing_loss_threshold is a CONFIG fault (a -live strategy with no valid loss gate), not
+    // a day event — it must survive the rollover. Guards against a startsWith("auto:") regression:
+    // the discriminator is an EXACT match on the single day-scoped actor.
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-rollover-missingthreshold");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("auto:missing_loss_threshold", "auto:missing_loss_threshold"));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 15));
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getActor()).isEqualTo("auto:missing_loss_threshold");
+    assertThat(countKind("KillSwitchClearedOnRollover")).isZero();
+  }
+
+  @Test
+  void heartbeat_sameDay_autoDailyLossTripStaysTripped() {
+    // The clear is scoped to the ROLLOVER branch. Without this test, a bug that hoists the clear
+    // out of `if (!today.equals(tradingDay))` would un-trip the breaker on the very next heartbeat
+    // — making the daily-loss cap a no-op — and every other test here would still pass.
+    when(calendar.isMarketOpen()).thenReturn(true);
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-3000"));
+
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-sameday-sticky");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Several ticks WITHOUT advancing todayEt.
+    env.sleep(Duration.ofSeconds(4 * 60));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getActor()).isEqualTo("auto:daily_loss");
+    assertThat(s.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 14));
+    assertThat(countKind("KillSwitchClearedOnRollover")).isZero();
+  }
+
+  @Test
+  void heartbeat_rolloverClear_fallsThroughToEvaluation_reTripsSameTickWhenStillBreaching()
+      throws InterruptedException {
+    // The clear sits BEFORE the `if (tripped) return;` early-return, so a cleared switch falls
+    // through to NORMAL evaluation on the SAME tick. With the loss still breaching on the new day
+    // that means: clear -> re-evaluate -> re-trip, all in one heartbeat. Correct-but-noisy is the
+    // documented trade-off (PLAN-2026-08-12 "Non-goal: the cross-day unrealized charge") and it is
+    // strictly better than a silent multi-day halt.
+    when(calendar.isMarketOpen()).thenReturn(true);
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-3000"));
+
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-rollover-retrip");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75)); // tick 1: trip on day 1
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(60)); // tick 2: rollover -> clear -> re-evaluate -> re-trip
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getActor()).isEqualTo("auto:daily_loss");
+    assertThat(s.getTradingDay()).isEqualTo(LocalDate.of(2026, 5, 15));
+
+    // The clear really happened (it is on the record) and the re-trip is a NEW trip, not the stale
+    // day-1 one: two KillSwitchTripped audits, one clear audit.
+    waitForAuditKind("KillSwitchClearedOnRollover");
+    waitForKindCount("KillSwitchTripped", 2L);
+    assertThat(countKind("KillSwitchClearedOnRollover")).isEqualTo(1L);
+    assertThat(countKind("KillSwitchTripped")).isEqualTo(2L);
+  }
+
   // ---------- helpers ----------
 
   private KillSwitchWorkflow newStub(String workflowId) {

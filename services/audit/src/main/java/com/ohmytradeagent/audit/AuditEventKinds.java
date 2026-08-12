@@ -351,6 +351,15 @@ public final class AuditEventKinds {
           "KillSwitchTripped",
           "KillSwitchResetApproved",
           "KillSwitchHeartbeatError",
+          // PLAN-2026-08-12: emitted by KillSwitchWorkflowImpl's heartbeat when the trading-day
+          // rollover clears a DAY-SCOPED auto:daily_loss trip, so a daily loss breaker is actually
+          // daily instead of halting the tenant until a human resets it. Only that one actor is
+          // cleared — operator halts and the auto:missing_loss_threshold config fail-closed
+          // persist.
+          // The un-halt is a record, not a page: KillSwitchAlerter matches only KillSwitchTripped,
+          // so this kind does not reach Discord. Observability-only — in ALL_KINDS only, not in any
+          // *_KINDS lifecycle group.
+          "KillSwitchClearedOnRollover",
           // AccountKillSwitchWorkflowImpl cap-inactive observability (PR #504 follow-up): the
           // account pct cap is configured but failed to ARM for N consecutive heartbeats (the
           // portfolio safety net is OFF) / has re-armed. Both page via AccountKillSwitchCapAlerter.
