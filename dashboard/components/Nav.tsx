@@ -11,6 +11,10 @@ const LINKS = [
   { href: "/trades", label: "Trades" },
   { href: "/orders", label: "Order History" },
   { href: "/config", label: "Config" },
+  // Read-only Discord mirror (PLAN-2026-08-12). Deliberately placed AFTER the first 4 entries:
+  // Nav slices links[0..4) into the mobile primary bar, and MobileBottomNav keys its ICONS map by
+  // href — a new primary link without an icon entry renders iconless.
+  { href: "/options-chat", label: "Options Chat" },
   { href: "/settings", label: "Settings" },
 ];
 
