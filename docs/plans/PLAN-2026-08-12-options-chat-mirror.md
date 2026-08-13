@@ -324,9 +324,12 @@ the grant behaviour, exactly as `reference_pg_where_needs_select` predicts.
   `page.expose_binding`, runs the 10 s reconcile, maintains the seen-LRU, POSTs to the BFF.
 - `ohmytradeagent_sidecar/chat_main.py` — entrypoint: own browser, own `storage_state`, own
   heartbeat file, request interception blocking `image`/`media`/`font`.
-- `infra/k8s/62-discord-chat-mirror.yaml` — new PVC (`discord-chat-mirror-state`, 1Gi, `local-path`)
-  + Deployment (same image, `command: ["python","-m","ohmytradeagent_sidecar.chat_main"]`,
-  limits `cpu 500m / memory 1Gi`, heartbeat liveness probe mirroring `55-*.yaml:133-141`).
+- `infra/k8s/62-discord-chat-mirror.yaml` — Deployment (same image,
+  **`command:`** — never `args:`, see below — `strategy: Recreate`, limits `cpu 500m / memory 1Gi`,
+  heartbeat liveness probe mirroring `55-*.yaml:133-141`, a 45s `initContainer` stagger, and
+  **no `securityContext`**). **No PVC of its own:** an `emptyDir` at `/app/state` owns the heartbeat,
+  and the existing `signal-source-discord-state` PVC is mounted read-only at `/app/session` for the
+  shared session. Ships an **additive** `NetworkPolicy` granting this pod → BFF:8083.
 - `.github/workflows/deploy.yml`: add `discord-chat-mirror` to `SERVICES` (`:100`), to the
   `services/signal-source-discord/*` path mapping (`:179`), and add
   `infra/k8s/62-*.yaml` → same (`:193`).
@@ -336,6 +339,41 @@ must be attribute/prefix-based (`class*="username"`, `id^="chat-messages-"`) exa
 extractor does. Add a counter for "message `<li>` seen but no content div matched" and log it — a
 silent extraction regression that shows an empty page is the realistic failure mode here, and it
 should be loud.
+
+### VERIFIED against the live channel 2026-08-13 (throwaway probe pod, read-only)
+
+A one-off pod on the homelab mounted the shared session read-only and dumped the real DOM. Confirmed:
+
+| Selector | Result |
+|---|---|
+| `ol[data-list-id="chat-messages"]` | **exists, count 1** — the observer target is real; `<li>`'s parent is `OL.scrollerInner__36d07` with that attribute |
+| `div[id="message-accessories-<sf>"]` | **present on 10/10 messages** — the whole attachment path is sound |
+| `div[id="message-content-<sf>"]` (exact id) | `content_missing: 0` |
+| reply structure | confirmed: two `message-content-*` ids inside one `<li>` |
+| `img[class*="avatar"]` | confirmed (`avatar_c19a55 clickable_c19a55`) |
+
+**The finding that matters — do NOT take the attachment URL from `<img src>`.** The real image DOM is:
+
+```
+DIV  visualMediaItemContainer_f4758a
+ DIV  mosaicItem__6c706 / imageContent__0f481 / imageContainer__0f481
+  DIV  imageWrapper_af017a imageZoom_af017a
+   A    originalLink_af017a          <- href = the ORIGINAL cdn attachment URL
+   IMG  imagePlaceholder_af017a imagePlaceholderVisible_af017a   <- src = PLACEHOLDER
+```
+
+With images blocked (which the memory budget requires), the `<img>` that exists is Discord's
+**placeholder**, and it carries a `src`. Reading `img[src]` would have stored a page full of
+blurhash placeholders instead of charts — and it would have looked like it worked. Take the href from
+`a[class*="originalLink"]` (fall back to the wrapping `a[href]`, then `img[src]` last).
+
+**Also learned:** no node carries `width`/`height` attributes, so dimensions must be parsed from the
+CDN URL's query params or left null — `dim(img,'width')` yields nothing.
+
+**Still unverified, and honestly so:** `accessories_with_embed: 0` across the sample and no edited
+message appeared, so the **embed field selectors and the `[class*="edited"]` marker are untested**.
+This room posts uploaded images, not link previews, so embeds are lower-value here — implement them
+per the selector table above but treat a zero embed count as expected, not as a regression signal.
 
 **Verify:** unit tests against captured DOM fixtures (mirrors `tests/test_discord_dom.py`, including
 the void-`<img>` case at `:171-184`); a staging run shows rows appearing within ~1 s of a live post;
@@ -401,33 +439,33 @@ threads.
 - Reconcile handles **edits** (`content_hash` differs → `UPDATE`, set `edited`) and **deletes**
   (present in a prior scrape, absent now, still inside the visible window → set `deleted_at`;
   render as *"message deleted"*).
-- **Backfill late-resolving children.** Phase 1's ingest writes attachments and embeds only on the
-  winning parent insert, so anything Discord had not yet rendered is lost permanently: a re-scrape
-  finds the parent present and skips the children. Discord resolves link previews and embed images
-  asynchronously, seconds after the post, so a scraper that catches a message on first render can
-  store it with zero embeds — and it would then render without its chart forever, which in a trading
-  room is the content. The reconcile therefore needs a "parent exists but has no children" path, not
-  just `content_hash` comparison. (Uploaded attachments are usually in the DOM immediately; link
-  previews are the exposed case.)
+- ~~Backfill late-resolving children.~~ **PULLED FORWARD INTO PHASE 2.** Leaving it here would have
+  shipped a mirror that renders messages without their charts — in a trading room, the content. It
+  needed no migration and no new grant (V9 already grants INSERT on both child tables), so the
+  ingest now backfills children onto an existing parent whose child set is empty, and the scraper
+  uses a 1.5s settle window after each mutation so most accessories have resolved before the first
+  write.
 - `docs/ops/options-chat-mirror.md`: session-expiry recovery (mirrors
   `docs/ops/discord-session-expired.md` — scale to 0, bootstrap pod against the new PVC, scale back),
   and the "page is empty / extraction regressed" runbook keyed off the Phase 2 counter.
 
 ---
 
-## Phase 2 prerequisites the draft missed (BLOCKING — do these before Phase 2 lands)
+## Phase 2 prerequisites (the NetworkPolicy one turned out NOT to need an operator)
 
-1. **The BFF NetworkPolicy forbids the sidecar→BFF hop entirely.**
-   `infra/k8s/58-tenant-dashboard-bff.yaml:236-252` (`tenant-dashboard-bff-allow-dashboard-only`)
-   admits ingress on 8083 **only** from pods labelled `app: dashboard`. The architecture above POSTs
-   from the chat-mirror pod straight to the BFF — that connection is dropped, so Phase 2 lands dead
-   without a second ingress rule for `app: discord-chat-mirror`.
-2. **That manifest must NOT be re-applied wholesale.** `tenant-dashboard-bff` is in `RESTART_ONLY`
-   (`deploy.yml:275`), so CI never applies it, and the live Deployment carries env the repo file
-   does not have (`DASHBOARD_WRITER_*`, `OPERATOR_ADMIN_READ_ENABLED`, `OPERATOR_ALLOWLIST`). A
-   `kubectl apply -f 58-*.yaml` would strip those and take down invites/tenant-delete — and the repo
-   file cannot even boot the BFF, since `application.yml:43` binds `DASHBOARD_WRITER_PASSWORD` with
-   no default. **Apply the NetworkPolicy as a standalone object, or `kubectl patch` it.**
+1. **The BFF NetworkPolicy blocks the mirror→BFF hop — solved additively, in code.**
+   `infra/k8s/58-tenant-dashboard-bff.yaml:235-252` (`tenant-dashboard-bff-allow-dashboard-only`)
+   admits ingress on 8083 only from `app: dashboard`, so the POST is dropped. But **NetworkPolicies
+   selecting the same pod are UNIONed, not overridden**, so a second policy
+   (`tenant-dashboard-bff-allow-chat-mirror`) shipped *inside* `62-discord-chat-mirror.yaml` grants
+   the hop without reading, patching, or re-applying `58-*.yaml` at all. CI applies it automatically
+   with the pod, and the grant lives in the same file as its beneficiary so the two cannot drift.
+   Do **not** add even a clarifying comment to `58-*.yaml` — any edit there matches `deploy.yml:195`
+   and rolls the BFF.
+2. **Never `kubectl apply -f 58-*.yaml`.** Confirmed live: nine env vars exist on the running BFF
+   that the repo manifest lacks (`DASHBOARD_WRITER_*`, `OPERATOR_*`), and `application.yml:43` binds
+   `DASHBOARD_WRITER_PASSWORD` with no default — an apply yields a BFF that **cannot boot**. The two
+   new BFF env vars go on by JSON patch (see the operator steps below).
 3. **Provision `OPTIONS_CHAT_INGEST_TOKEN`** into `dashboard-secrets` and give the chat-mirror pod
    that token and only that token. It fails closed: while unset, the ingest route rejects everything.
 
@@ -435,22 +473,67 @@ threads.
 
 ## Operator steps that CI will not do for you
 
-1. **Seed the new PVC with a Discord session.** `discord-chat-mirror` gets its **own** PVC, not a
-   share of `signal-source-discord-state` — `local-path` RWO across two pods is fragile, and the
-   session-cutover runbook writes into that volume. Either copy `storage_state.json` across once, or
-   run `bootstrap.py` against the new PVC.
-2. **Apply `62-discord-chat-mirror.yaml` by hand the first time.** `deploy.yml:275` puts
-   `signal-source-discord` in `RESTART_ONLY` because applying would clobber live-only env overrides.
-   The new Deployment can be a normal apply target, but the *first* apply is manual either way —
-   `deploy.yml` only applies per-service manifests it already knows about
-   (`reference_deploy_yml_apply_scope`).
-3. **Flip `OPTIONS_CHAT_ENABLED=true`** on the BFF and the dashboard after Phase 3 verification.
-4. **Do not `kubectl apply` `40-tenants-config.yaml`** as a side effect of any of this
+1. **Provision two Secret keys BEFORE merging Phase 2**, or the pod crashloops on a missing
+   `secretKeyRef` and fails the deploy job. Both are `--type merge` patches that touch no existing
+   key (never `create --dry-run | apply`, which replaces the whole `data` map and would wipe
+   `AUTH_SECRET` / `BFF_SHARED_TOKEN`):
+   - `OPTIONS_CHAT_INGEST_TOKEN` → `dashboard-secrets` (shared by the BFF and the mirror, same
+     argument as `BFF_SHARED_TOKEN`). `openssl rand -hex 32`.
+   - `DISCORD_OPTIONS_CHAT_CHANNEL_URL` → `sidecar-config` (that Secret already is "which channels
+     does the scraper watch").
+2. **Wire the BFF with ONE JSON patch, never `kubectl apply -f 58-*.yaml`.** Nine live-only env vars
+   are absent from the repo manifest, and `application.yml:43` binds `DASHBOARD_WRITER_PASSWORD` with
+   no default — an apply would produce a BFF that **cannot boot**, taking the dashboard read path
+   down. Add `OPTIONS_CHAT_ENABLED=true` and the `OPTIONS_CHAT_INGEST_TOKEN` secretKeyRef by patch,
+   then verify `DASHBOARD_WRITER_*` / `OPERATOR_*` survived. `DASHBOARD_WRITER_ENABLED=true` is
+   already live, so the two-name conditional is satisfied.
+3. **Do not `kubectl apply` `40-tenants-config.yaml`** as a side effect of any of this
    (`reference_tenants_configmap_still_needed`).
+
+**No longer needed** (superseded by the verified design): there is no second PVC to seed — the
+session is mounted read-only from the existing one. And the first apply of
+`62-discord-chat-mirror.yaml` is **not** manual: `discord-chat-mirror` is deliberately kept OUT of
+`RESTART_ONLY`, so CI's normal `kubectl apply` creates the Deployment and its NetworkPolicy. Do the
+Secret work first, then merge.
 
 ---
 
-## Open risk to decide before Phase 2
+## RESOLVED 2026-08-13 — the scraper shares the trading Discord account
+
+The operator chose **(b): share the existing account**. A second account was recommended and
+declined. That converts the section below from an open question into three binding constraints:
+
+1. **One session is now a single point of failure for the trading feed AND the mirror.** Session
+   expiry is no longer a chat-mirror inconvenience — the same `storage_state.json` backs real-money
+   signal ingestion. Both session runbooks must cover both pods, and rotation must reach both.
+2. **Stagger the two pods' startups** so the sessions never reconnect in lockstep from one IP.
+3. **The no-REST-backfill rule is now load-bearing, not stylistic.** It was already forbidden; with a
+   shared account, a ban costs the prod signal feed as well. A restart recovers only the ~50–100
+   messages Discord has rendered. That gap is accepted — do not "fix" it later.
+
+**Design consequence — mount the session read-only from the existing PVC rather than copying it.**
+Two copies of one account's session means a rotation that updates one and not the other leaves a pod
+that dies silently at some later reconnect. Mounting `signal-source-discord-state` into the chat pod
+with `readOnly: true` keeps one source of truth and leaves the existing cutover runbook working
+unchanged; the chat pod writes its heartbeat to its own `emptyDir` instead.
+
+**An earlier draft of this plan called sharing that PVC "fragile" and demanded a second one. That was
+wrong**, and it was checked against the live cluster rather than reasoned about: `ReadWriteOnce` is
+**node**-scoped, not pod-scoped (`ReadWriteOncePod` is the pod-scoped mode; this PV is plain RWO);
+the `local-path` PV carries `nodeAffinity: kubernetes.io/hostname In [homelab]`, so the scheduler
+*cannot* split the two pods across nodes even if a node is added — no `podAffinity` pin is needed,
+and adding one would be actively harmful (it makes the chat pod unschedulable whenever the signal pod
+is scaled to 0, which is step 1 of the session-expiry runbook); `local-path` has no CSI attacher, so
+there is no attach/detach controller to raise multi-attach; and empirically **every RollingUpdate of
+`signal-source-discord` already runs two pods mounting this PVC read-WRITE simultaneously**, and has
+for 89 days. A `readOnly` reader is strictly safer than what ships today.
+
+One real consequence for Phase 6's runbook: Playwright reads `storage_state.json` once, at
+`new_context(storage_state=…)` (`main.py:313`), so after a session cutover swaps the file the chat
+pod keeps the stale session in memory until restarted. **Add "restart `discord-chat-mirror`" to
+`docs/ops/sidecar-session-cutover.md`.**
+
+## Original risk analysis (kept for the reasoning)
 
 **A second concurrent headless session on the irreplaceable Discord account.**
 `reference_discord_source_account_irreplaceable` is explicit: a ban means permanent loss of the

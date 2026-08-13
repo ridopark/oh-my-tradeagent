@@ -96,6 +96,14 @@ kubectl -n copytrade run --rm -it pvc-shell \
 kubectl -n copytrade scale deployment/signal-source-discord --replicas=1
 kubectl -n copytrade rollout status deployment/signal-source-discord --timeout=120s
 
+# 4b. REQUIRED since PLAN-2026-08-12 Phase 2. The /options-chat mirror mounts THIS SAME PVC
+#     read-only and shares the one Discord account, and Playwright reads storage_state.json ONCE at
+#     context creation — so a running mirror pod keeps the pre-cutover session in memory. Left
+#     alone it fails LATER and quietly (redirect to /login -> selector timeout -> rebuild budget
+#     exhausted), long after this runbook looks finished.
+kubectl -n copytrade rollout restart deployment/discord-chat-mirror
+kubectl -n copytrade rollout status deployment/discord-chat-mirror --timeout=180s
+
 # 5. Verify the secondary file is present and reasonably sized:
 kubectl -n copytrade exec deploy/signal-source-discord -- \
   sh -c 'ls -la /app/state/storage_state.secondary.json && stat -c "size=%s mtime=%y" /app/state/storage_state.secondary.json'

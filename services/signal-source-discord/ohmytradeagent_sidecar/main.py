@@ -6,31 +6,21 @@ import asyncio
 import logging
 import os
 import pathlib
-import sys
 
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
 from .emitter import TemporalDeriskEmitter, TemporalEmitter, TemporalWatchlistEmitter
+from .runtime import required, setup_logging
 from .watcher import Watcher
 from .watchlist_watcher import WatchlistWatcher
 
 
-def _setup_logging(level: str) -> logging.Logger:
-    lvl = getattr(logging, level.upper(), logging.INFO)
-    logging.basicConfig(
-        level=lvl,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        stream=sys.stdout,
-    )
-    return logging.getLogger("ohmytradeagent_sidecar")
-
-
-def _required(name: str) -> str:
-    val = os.getenv(name, "").strip()
-    if not val:
-        raise SystemExit(f"{name} is required")
-    return val
+# Kept as module-local aliases so every existing call site (and test) is unchanged; the bodies now
+# live in runtime.py so chat_main.py can share them without importing this module (which would pull
+# in temporalio).
+_setup_logging = setup_logging
+_required = required
 
 
 def _parse_additional_targets(raw: str) -> list[tuple[str, str]]:

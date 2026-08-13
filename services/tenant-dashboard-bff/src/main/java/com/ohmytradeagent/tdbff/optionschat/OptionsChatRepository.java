@@ -29,7 +29,10 @@ import org.springframework.stereotype.Repository;
  *
  * <p>Ingest is idempotent by Discord snowflake: {@code ON CONFLICT (message_id) DO NOTHING}. A
  * restart re-scrapes whatever Discord still has rendered and replays it harmlessly. Child rows are
- * written only when the parent insert actually won, so a replay never duplicates attachments.
+ * written when the parent insert wins — OR backfilled onto an existing parent whose child set is
+ * still empty, because Discord resolves accessories asynchronously and a message caught on first
+ * render would otherwise keep rendering without its chart forever. Never duplicates: a non-empty
+ * child set is left alone.
  */
 @Repository
 @ConditionalOnProperty(
@@ -145,8 +148,14 @@ public class OptionsChatRepository {
                     m.edited(),
                     sha256(m.content()));
             if (inserted != 1) {
-              // Already stored. Children were written with the original insert; re-adding them
-              // would violate the (message_id, ordinal) uniqueness.
+              // Already stored — but possibly WITHOUT its children. Discord resolves link previews
+              // and image accessories asynchronously, seconds after the message element appears, so
+              // a scraper that catches a message on first render stores it bare. Without this
+              // backfill a re-scrape would find the parent present and skip the children forever:
+              // the message would render without its chart for the rest of its retention, which in
+              // a trading room is the content. Only fills an EMPTY set, so it never duplicates and
+              // never needs UPDATE (V9 grants INSERT + SELECT only).
+              backfillChildren(tx, m);
               continue;
             }
             stored++;
@@ -156,7 +165,36 @@ public class OptionsChatRepository {
         });
   }
 
+  /**
+   * Add children to an already-stored message that has none.
+   *
+   * <p>Deliberately all-or-nothing per child table: a partial set means the scrape caught the
+   * message mid-resolution, and inserting into a non-empty set would collide with the {@code
+   * (message_id, ordinal)} uniqueness. Waiting for a later sweep with the full set is both correct
+   * and simpler than reconciling ordinals.
+   */
+  private static void backfillChildren(DSLContext tx, IngestMessage m) {
+    if (!m.attachments().isEmpty() && countChildren(tx, "options_chat_attachment", m) == 0) {
+      insertAttachments(tx, m);
+    }
+    if (!m.embeds().isEmpty() && countChildren(tx, "options_chat_embed", m) == 0) {
+      insertEmbeds(tx, m);
+    }
+  }
+
+  private static int countChildren(DSLContext tx, String table, IngestMessage m) {
+    // Table name is a compile-time constant from the two call sites above, never caller input.
+    Record r =
+        tx.fetchOne("SELECT count(*) FROM " + table + " WHERE message_id = ?", m.messageId());
+    return r == null ? 0 : r.get(0, Integer.class);
+  }
+
   private static void insertChildren(DSLContext tx, IngestMessage m) {
+    insertAttachments(tx, m);
+    insertEmbeds(tx, m);
+  }
+
+  private static void insertAttachments(DSLContext tx, IngestMessage m) {
     int ordinal = 0;
     for (IngestAttachment a : m.attachments()) {
       // content_type is intentionally absent — Phase 4 sets it from our own transcode.
@@ -172,7 +210,10 @@ public class OptionsChatRepository {
           a.height(),
           a.byteSize());
     }
-    ordinal = 0;
+  }
+
+  private static void insertEmbeds(DSLContext tx, IngestMessage m) {
+    int ordinal = 0;
     for (IngestEmbed e : m.embeds()) {
       tx.execute(
           "INSERT INTO options_chat_embed (message_id, ordinal, title, description, url, author,"

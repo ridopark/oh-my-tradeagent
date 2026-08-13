@@ -26,10 +26,16 @@ import logging
 import pathlib
 from datetime import date, datetime
 
-from playwright.async_api import BrowserContext, Error as PlaywrightError, Page
+from playwright.async_api import BrowserContext, Page
 
-from .discord_dom import MESSAGES_LI_SELECTOR, RawMessage, extract_recent
+from .discord_dom import RawMessage, extract_recent
 from .emitter import WatchlistEmitter
+from .page_rebuild import (
+    FATAL_ERROR_SUBSTRINGS,
+    is_fatal_page_error,
+    new_ready_page,
+    rebuild_backoff_secs,
+)
 from .watcher import _BoundedSeenLRU
 from .watchlist_detector import is_watchlist
 from .watchlist_state import _ET, DailyMirrorState, et_today
@@ -57,32 +63,11 @@ def _posted_et_date(timestamp_iso: str) -> str | None:
     return dt.astimezone(_ET).date().isoformat()
 
 
-# Substrings of Playwright error messages that mean the page/renderer is gone
-# for good (not a transient DOM hiccup) — the incident's crash signature plus
-# adjacent renderer/connection-death messages.
-# TODO: widen if new crash signatures show up in prod sidecar logs.
-_FATAL_ERROR_SUBSTRINGS = (
-    "Target crashed",
-    "Target closed",
-    "has been closed",
-    "Session closed",
-    "Protocol error",
-)
-
-
-def _is_fatal_page_error(exc: BaseException, page: Page) -> bool:
-    """True when the watchlist page is unrecoverable and must be rebuilt.
-
-    Fatal = the page is already closed, OR a Playwright error whose message
-    carries a renderer-crash / closed-target signature. Anything else is
-    treated as a transient tick error (swallowed on the same page).
-    """
-    if page.is_closed():
-        return True
-    if isinstance(exc, PlaywrightError):
-        msg = str(exc)
-        return any(sub in msg for sub in _FATAL_ERROR_SUBSTRINGS)
-    return False
+# Crash-signature detection lives in page_rebuild so the /options-chat mirror shares ONE definition
+# (and one place to widen the TODO). Re-exported under the original private names because the
+# existing tests import them.
+_FATAL_ERROR_SUBSTRINGS = FATAL_ERROR_SUBSTRINGS
+_is_fatal_page_error = is_fatal_page_error
 
 
 class WatchlistWatcher:
@@ -270,36 +255,19 @@ class WatchlistWatcher:
             return
 
     async def _new_ready_page(self, context: BrowserContext) -> Page:
-        """Open a fresh watchlist tab, navigate, and wait for the DOM to be
-        ready. Re-runnable so the loop can rebuild after a renderer crash.
+        """Open a fresh watchlist tab, navigate, and wait for the DOM to be ready.
 
-        ISOLATION: only ever ``context.new_page()`` — never touches the signal
-        page or the shared browser/context lifecycle.
+        Delegates to the shared helper so the watchlist tab and the /options-chat mirror cannot
+        drift on what "ready" means or on the tab-leak cleanup.
         """
-        self._log.info("navigating to watchlist channel %s", self._channel_url)
-        page = await context.new_page()
-        try:
-            await page.goto(self._channel_url, wait_until="domcontentloaded")
-            await page.wait_for_selector(
-                MESSAGES_LI_SELECTOR, timeout=self.DOM_READY_TIMEOUT_MS
-            )
-        except Exception:
-            # The fresh tab failed to come up (goto/selector timeout, transient
-            # network hiccup right after a crash). Close it so a bounded run of
-            # failed rebuilds doesn't leak tabs into the shared context, then
-            # let the caller count this against the rebuild budget.
-            try:
-                await page.close()
-            except Exception:  # noqa: BLE001 - best-effort; page may be half-built
-                pass
-            raise
-        return page
+        return await new_ready_page(
+            context, self._channel_url, self._log, self.DOM_READY_TIMEOUT_MS
+        )
 
     def _rebuild_backoff_secs(self, attempt: int) -> float:
         """Capped exponential backoff (secs) for the Nth consecutive crash."""
-        return min(
-            self._REBUILD_BACKOFF_BASE_SECS * 2 ** (attempt - 1),
-            self._REBUILD_BACKOFF_CAP_SECS,
+        return rebuild_backoff_secs(
+            attempt, self._REBUILD_BACKOFF_BASE_SECS, self._REBUILD_BACKOFF_CAP_SECS
         )
 
     async def run_on_context(self, context: BrowserContext) -> None:

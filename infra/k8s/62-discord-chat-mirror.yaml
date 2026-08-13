@@ -1,0 +1,176 @@
+# /options-chat Discord mirror — PLAN-2026-08-12 Phase 2.
+#
+# The SAME image as 55-signal-source-discord.yaml with an overridden `command`: one artifact, two
+# processes. Display-only — no Temporal, no tenant/strategy scope, nothing on the trading path. An
+# OOM or crash here makes the mirror stale; it can never drop a trading signal.
+#
+# NO PVC OF ITS OWN. The operator chose (2026-08-13) to SHARE the trading Discord account, so there
+# must be exactly ONE storage_state.json: two copies means a session rotation that updates one and
+# not the other leaves a pod that dies silently at some later reconnect. This pod mounts the
+# EXISTING signal-source-discord-state PVC READ-ONLY for the session, and writes its heartbeat to
+# its own emptyDir.
+#
+# Sharing an RWO local-path PVC across two Deployments is SAFE here (verified against the live
+# cluster 2026-08-13), and an earlier draft of the plan was wrong to call it fragile:
+#   - ReadWriteOnce is NODE-scoped, not pod-scoped (ReadWriteOncePod is the pod-scoped mode; this
+#     PV is plain RWO).
+#   - The local-path PV carries nodeAffinity `kubernetes.io/hostname In [homelab]`, so the scheduler
+#     CANNOT split the two pods across nodes even if a node is added. No podAffinity pin is needed —
+#     and adding one would be harmful, since it would make this pod unschedulable whenever the
+#     signal pod is scaled to 0, which is step 1 of docs/ops/discord-session-expired.md.
+#   - local-path has no CSI attacher, so there is no attach/detach controller to raise Multi-Attach.
+#   - Empirically: every RollingUpdate of signal-source-discord ALREADY runs two pods mounting this
+#     PVC read-WRITE at once. A readOnly reader is strictly safer than what ships today.
+#
+# RUNBOOK CONSEQUENCE: Playwright reads storage_state.json ONCE, at context creation. After a
+# session cutover swaps the file, this pod keeps the stale session in memory until restarted — add
+# `kubectl rollout restart deployment/discord-chat-mirror` to docs/ops/sidecar-session-cutover.md
+# and docs/ops/discord-session-expired.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: discord-chat-mirror
+  namespace: copytrade
+  labels:
+    app: discord-chat-mirror
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: a surge pod would run a SECOND chat Chromium (~+1Gi on a node
+  # already at ~92% of allocatable memory limits) AND open a THIRD concurrent session on the
+  # shared, irreplaceable Discord account. A few seconds of mirror gap is the cheaper trade.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: discord-chat-mirror
+  template:
+    metadata:
+      labels:
+        app: discord-chat-mirror
+    spec:
+      # Startup stagger: a node reboot restarts both Discord pods at once, and the shared account
+      # must not reconnect in lockstep from one IP. Same image, so it is already on the node — no
+      # extra pull. 45s leaves 135s of deploy.yml's 180s rollout-status budget.
+      # NOTE: initContainers do NOT re-run on a container restart, only on pod re-creation, so
+      # CHAT_STARTUP_DELAY_SECS below is the in-process backstop for a crashloop.
+      initContainers:
+        - name: stagger
+          image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-c", "sleep 45"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: chat-mirror
+          image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
+          imagePullPolicy: Always
+          # MUST be `command:` — NEVER `args:`. The Dockerfile's ENTRYPOINT is exec-form with no
+          # CMD, so `args:` would APPEND rather than replace and start
+          # `... main -m ... chat_main` — i.e. a SECOND live trading signal watcher against the
+          # real Discord account. This is the highest-consequence line in the file.
+          command: ["python", "-m", "ohmytradeagent_sidecar.chat_main"]
+          # NO securityContext, deliberately — matching 55-signal-source-discord.yaml, whose live
+          # pod runs with `{}`. The hardening block used by the Java/Node pods breaks Playwright:
+          # `runAsNonRoot: true` fails outright because the image's USER is the NAME `pwuser` (the
+          # kubelet cannot verify a non-numeric user), and `allowPrivilegeEscalation: false` plus
+          # `seccompProfile: RuntimeDefault` both constrain Chromium's sandbox. Harden in its own
+          # PR with a live-pod test, not here.
+          env:
+            # Writable emptyDir — owns the heartbeat the liveness probe reads.
+            - name: STATE_DIR
+              value: /app/state
+            # The SHARED session, on the trading sidecar's PVC, mounted read-only. Deliberately a
+            # different path from STATE_DIR so the heartbeat stays writable.
+            - name: CHAT_STORAGE_STATE_PATH
+              value: /app/session/storage_state.json
+            - name: DISCORD_OPTIONS_CHAT_CHANNEL_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sidecar-config
+                  key: DISCORD_OPTIONS_CHAT_CHANNEL_URL
+            - name: BFF_INTERNAL_URL
+              value: http://tenant-dashboard-bff:8083
+            # Route-scoped ingest credential — NOT BFF_SHARED_TOKEN. ServiceTokenFilter accepts
+            # only this token on /internal/options-chat/** and rejects the shared token there, so a
+            # pod whose whole job is rendering an untrusted room can never set X-Tenant-Id and read
+            # real-money positions.
+            - name: OPTIONS_CHAT_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: OPTIONS_CHAT_INGEST_TOKEN
+            # In-process stagger backstop for the crashloop case (see the initContainer note).
+            - name: CHAT_STARTUP_DELAY_SECS
+              value: "15"
+          volumeMounts:
+            - name: state
+              mountPath: /app/state
+            - name: session
+              mountPath: /app/session
+              readOnly: true
+          # Same contract as 55-signal-source-discord.yaml: heartbeat present and mtime within 120s.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /app/state/heartbeat && test $(( $(date +%s) - $(stat -c %Y /app/state/heartbeat) )) -lt 120
+            # Covers the 45s initContainer stagger plus Chromium + Discord warm-up.
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              # 512Mi, not 384: 55-signal-source-discord.yaml records that 384 under-requested even
+              # the old single-tab sidecar.
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              # Half the trading sidecar's 2Gi: ONE tab, with image loading disabled in Blink and
+              # media/font aborted at the route interceptor. Measured expectation is ~550-750Mi
+              # steady with an ~800-900Mi startup peak. If it OOMKills in week one, go to 1.5Gi
+              # rather than lowering --max-old-space-size (that trades pod memory for renderer
+              # crashes, and a crash burns this pod's rebuild budget).
+              memory: 1Gi
+      volumes:
+        - name: state
+          emptyDir: {}
+        - name: session
+          persistentVolumeClaim:
+            claimName: signal-source-discord-state
+            # readOnly at the VOLUME level as well as the mount: the kubelet mounts `ro`, so nothing
+            # in this pod can corrupt the trading session file.
+            readOnly: true
+---
+# ADDITIVE ingress rule for the BFF. NetworkPolicies selecting the same pod are UNIONed, not
+# overridden, so this grants discord-chat-mirror -> BFF:8083 WITHOUT touching
+# `tenant-dashboard-bff-allow-dashboard-only` in 58-tenant-dashboard-bff.yaml — which matters,
+# because that manifest is drifted from live (it lacks DASHBOARD_WRITER_* / OPERATOR_* env and
+# binds DASHBOARD_WRITER_PASSWORD with no default, so applying it yields a BFF that cannot boot).
+# It lives in THIS file so CI applies the grant with the pod that needs it: the two can never drift
+# apart, and deleting the mirror deletes its access.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-dashboard-bff-allow-chat-mirror
+  namespace: copytrade
+spec:
+  podSelector:
+    matchLabels:
+      app: tenant-dashboard-bff
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: discord-chat-mirror
+      ports:
+        - protocol: TCP
+          port: 8083
