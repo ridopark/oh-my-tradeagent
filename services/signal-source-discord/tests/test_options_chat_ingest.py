@@ -206,3 +206,43 @@ async def test_an_oversized_batch_is_trimmed_to_the_newest_rather_than_400ing():
     await _client(handler).ingest(CHANNEL, msgs)
 
     assert seen["n"] == 200
+
+
+@pytest.mark.asyncio
+async def test_repeated_auth_failures_are_throttled_not_flooded(caplog):
+    """401 is a STEADY STATE, not a blip.
+
+    The BFF fails closed on a blank options-chat.ingest-token, so between deploying the mirror and
+    patching the BFF every single sweep 401s. Observed in production 2026-08-13 emitting ~3 ERRORs
+    every 10s forever — loud enough to bury a real incident. Throttled like the 404 path.
+    """
+    client = _client(lambda r: httpx.Response(401, text=""), max_attempts=1)
+    caplog.set_level(logging.ERROR, logger="test")
+
+    for _ in range(30):
+        res = await client.ingest(CHANNEL, [_message()])
+        assert res.outcome is IngestOutcome.RETRY
+
+    errors = [r for r in caplog.records if "rejected the token" in r.getMessage()]
+    # 1st and 3rd only — not one per attempt.
+    assert len(errors) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_recovery_resets_the_auth_throttle(caplog):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(401 if calls["n"] == 1 else 200, json={"stored": 1})
+
+    client = _client(handler, max_attempts=1)
+    caplog.set_level(logging.ERROR, logger="test")
+
+    await client.ingest(CHANNEL, [_message()])  # 401
+    await client.ingest(CHANNEL, [_message()])  # 200 -> resets
+    calls["n"] = 0
+    await client.ingest(CHANNEL, [_message()])  # 401 again must log, not stay silent
+
+    errors = [r for r in caplog.records if "rejected the token" in r.getMessage()]
+    assert len(errors) == 2

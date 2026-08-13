@@ -121,6 +121,7 @@ class OptionsChatIngestClient:
         self._backoff_base_secs = backoff_base_secs
         self._owns_client = client is None
         self._consecutive_dark = 0
+        self._consecutive_auth = 0
         self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             # An ingest that hangs must not stall the loop past its reconcile budget.
@@ -166,6 +167,7 @@ class OptionsChatIngestClient:
 
         if 200 <= code < 300:
             self._consecutive_dark = 0
+            self._consecutive_auth = 0
             stored = 0
             try:
                 stored = int(resp.json().get("stored") or 0)
@@ -189,9 +191,19 @@ class OptionsChatIngestClient:
             return IngestResult(IngestOutcome.RETRY, detail="route dark (404)")
 
         if code in (401, 403):
-            # Not the message's fault; self-heals when the token is provisioned.
-            self._log.error("options-chat ingest rejected the token (%d) — check "
-                            "OPTIONS_CHAT_INGEST_TOKEN on both ends", code)
+            # Not the message's fault; self-heals the moment the token is provisioned. Throttled
+            # like the 404 path, because this is a STEADY STATE, not a blip: the BFF fails closed on
+            # a blank options-chat.ingest-token, so between deploying this pod and patching the BFF
+            # every sweep 401s. Observed in production 2026-08-13 logging ~3 ERRORs every 10s
+            # forever — loud enough to bury a real incident.
+            self._consecutive_auth += 1
+            if self._consecutive_auth in (1, 3) or self._consecutive_auth % 60 == 0:
+                self._log.error(
+                    "options-chat ingest rejected the token (%d) — is OPTIONS_CHAT_INGEST_TOKEN set "
+                    "on the BFF and equal to this pod's? (consecutive=%d)",
+                    code,
+                    self._consecutive_auth,
+                )
             return IngestResult(IngestOutcome.RETRY, detail=f"auth {code}")
 
         if code in (400, 413, 422):
