@@ -164,6 +164,15 @@ class OptionsChatIngestParserTest {
   }
 
   @Test
+  void safeColorAcceptsOnlySixHexDigits_testedDirectlyLikeSafeUrl() {
+    assertThat(OptionsChatIngestParser.safeColor("#ff0004")).isEqualTo("#ff0004");
+    assertThat(OptionsChatIngestParser.safeColor("#FF0004")).isEqualTo("#FF0004");
+    assertThat(OptionsChatIngestParser.safeColor(null)).isNull();
+    assertThat(OptionsChatIngestParser.safeColor("#fff")).isNull();
+    assertThat(OptionsChatIngestParser.safeColor("#gggggg")).isNull();
+  }
+
+  @Test
   void anUnknownAttachmentKindCollapsesToFile() {
     Map<String, Object> a = attachment("https://cdn.discordapp.com/a.bin");
     a.put("kind", "executable");

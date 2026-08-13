@@ -82,11 +82,11 @@ def parse_author_color(style: str | None) -> str | None:
     m = _RGB_RE.search(style)
     if not m:
         return None
-    try:
-        rgb = [int(g) for g in m.groups()]
-    except ValueError:
-        return None
-    if any(v < 0 or v > 255 for v in rgb):
+    # Each group is 1-3 ASCII digits by construction, so int() cannot raise and cannot be negative;
+    # only the upper bound is a real check. Guarding the other two would be permanently-uncovered
+    # code that misleads the next person into thinking the regex is looser than it is.
+    rgb = [int(g) for g in m.groups()]
+    if any(v > 255 for v in rgb):
         return None
     return "#{:02x}{:02x}{:02x}".format(*rgb)
 

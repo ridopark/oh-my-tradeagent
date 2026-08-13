@@ -10,14 +10,20 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Turns the scraper's raw JSON body into validated {@link IngestMessage} records.
  *
- * <p>This is the ONLY validation point for the whole feature: everything downstream of it — the
- * store, the read endpoint, the page — treats the data as already-safe. The content is an untrusted
- * third-party Discord room being rendered inside a dashboard whose server actions can force-exit
- * real-money positions, so the rules here are the security boundary, not hygiene.
+ * <p>This is the PRIMARY validation point for the whole feature: the store and the read endpoint
+ * treat the data as already-safe. The content is an untrusted third-party Discord room being
+ * rendered inside a dashboard whose server actions can force-exit real-money positions, so the
+ * rules here are the security boundary, not hygiene.
+ *
+ * <p>The renderer re-checks the few values that land in a URL or CSS context (an embed href, an
+ * author colour). That is this codebase's established practice rather than redundancy — those
+ * values cross two services to reach a context where being wrong is executable, and the check costs
+ * a regex. Do not delete a renderer-side check on the strength of this class existing.
  *
  * <p>Two failure modes, deliberately different:
  *
@@ -56,8 +62,7 @@ public final class OptionsChatIngestParser {
    * normalises Discord's {@code rgb(r,g,b)} to this form; anything that does not match is dropped
    * rather than repaired.
    */
-  private static final java.util.regex.Pattern HEX_COLOR =
-      java.util.regex.Pattern.compile("^#[0-9a-fA-F]{6}$");
+  private static final Pattern HEX_COLOR = Pattern.compile("^#[0-9a-fA-F]{6}$");
 
   private OptionsChatIngestParser() {}
 
@@ -112,10 +117,7 @@ public final class OptionsChatIngestParser {
     Long replyToId = Snowflakes.parse(m.get("reply_to_id"));
     boolean edited = Boolean.TRUE.equals(m.get("edited"));
     String avatar = safeUrl(optionalString(m, "author_avatar_url", null));
-    String color = optionalString(m, "author_color", null);
-    if (color != null && !HEX_COLOR.matcher(color).matches()) {
-      color = null;
-    }
+    String color = safeColor(optionalString(m, "author_color", null));
 
     return new IngestMessage(
         messageId,
@@ -207,6 +209,18 @@ public final class OptionsChatIngestParser {
    * corrupted trailing character. Reachable in ordinary traffic: MAX_EMBED_TEXT is below Discord's
    * own 4096-char embed-description limit, and an emoji at the boundary is a surrogate pair.
    */
+  /**
+   * {@code null} unless this is exactly {@code #rrggbb}.
+   *
+   * <p>The colour ends up in a CSS context in the browser, so the stored value must be structurally
+   * incapable of carrying anything else — not "sanitised", but unable to represent an injection.
+   * The scraper already normalises Discord's {@code rgb(r,g,b)} to this form; anything that does
+   * not match is dropped rather than repaired.
+   */
+  static String safeColor(String s) {
+    return s != null && HEX_COLOR.matcher(s).matches() ? s : null;
+  }
+
   private static String truncate(String s, int max) {
     if (s == null) {
       return null;
