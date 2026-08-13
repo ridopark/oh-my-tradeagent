@@ -134,9 +134,14 @@ public class OptionsChatRepository {
             // that grant this is the 42501 that forced the invite bind's SAVEPOINT workaround.
             int inserted =
                 tx.execute(
+                    // posted_at is bound with an EXPLICIT ::timestamptz cast. jOOQ renders an
+                    // OffsetDateTime bind as a STRING for PostgreSQL, and an uncast string against
+                    // a timestamptz column fails with 42804 ("column is of type timestamp with
+                    // time zone but expression is of type character varying"). Discovered the hard
+                    // way: this 500'd every ingest in production until the cast was added.
                     "INSERT INTO options_chat_message (message_id, channel_id, author_name,"
                         + " author_avatar_url, posted_at, content, reply_to_id, edited,"
-                        + " content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        + " content_hash) VALUES (?, ?, ?, ?, ?::timestamptz, ?, ?, ?, ?)"
                         + " ON CONFLICT (message_id) DO NOTHING",
                     m.messageId(),
                     channelId,
