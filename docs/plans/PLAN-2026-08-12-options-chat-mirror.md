@@ -231,10 +231,15 @@ cursor exactly. Read the migration for the current shape rather than trusting th
 **PG16 grant footgun.** The ingest uses `ON CONFLICT DO NOTHING` and the Phase 6 reconcile uses
 `UPDATE … WHERE content_hash <> ?`. Per `reference_pg_where_needs_select`, a writer without `SELECT`
 on the columns those statements *read* fails at runtime with 42501 — that exact denial is why the
-invite bind carries a SAVEPOINT workaround. V9 grants `dashboard_writer` table-level
-`SELECT, INSERT, UPDATE` on the message and attachment tables and `SELECT, INSERT` on embeds (never
-mutated in place), and **no DELETE** — Phase 6's retention job adds that in its own migration, as V5
-withheld DELETE until V7 needed it.
+invite bind carries a SAVEPOINT workaround.
+
+V9 grants `dashboard_writer` exactly `SELECT, INSERT` on all three tables — precisely what the
+shipped code issues — and **neither UPDATE nor DELETE**. Phase 4 (media fill: `SET bytes`) and
+Phase 6 (edit reconcile, retention `DELETE`) each widen in their own migration alongside the code
+that needs it, as V5 withheld DELETE until V7 needed it. `OptionsChatMigrationIT` asserts both are
+denied, so a later phase has to widen deliberately rather than find the privilege already lying
+around. Granting UPDATE up front "because the next phase wants it" is the same speculative widening
+the DELETE decision refuses.
 
 Table-level rather than the column-scoped style of V7/V8: those scope columns to keep PII in
 `dashboard_user` unreadable, whereas this read endpoint returns whole chat rows by design.
@@ -286,7 +291,13 @@ The whole backend, with nothing producing data yet.
   authentication but deliberately ignores its value; snowflakes are emitted as strings.
 - `web/OptionsChatIngestController` — `POST /internal/options-chat/ingest`.
 - `security/ServiceTokenFilter` — route-scopes `/internal/options-chat/**` to
-  `OPTIONS_CHAT_INGEST_TOKEN` and rejects the shared token there.
+  `OPTIONS_CHAT_INGEST_TOKEN` and rejects the shared token there. It also now rejects any path
+  containing a dot segment or percent-encoded dot **before** making any path-based decision:
+  `getRequestURI()` is the raw request line while Spring dispatches on the normalized path, so
+  `POST /internal/options-chat/%2e%2e/%2e%2e/api/positions` would otherwise have let the scraper's
+  token through to a real-money tenant read. The pre-existing `/actuator/` exemption had the same
+  shape, unauthenticated. Same approach as Spring Security's `StrictHttpFirewall`; free here because
+  no route in this service takes a dot-bearing path segment.
 - Flags: `OPTIONS_CHAT_ENABLED` (default false) **and** `DASHBOARD_WRITER_ENABLED`, gating BOTH the
   read and the ingest. Gating only the read would ship a live write sink for untrusted content with
   no consumer — worse than shipping nothing.
