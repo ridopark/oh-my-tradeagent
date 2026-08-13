@@ -23,6 +23,12 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * and a cluster-internal Prometheus can scrape {@code /actuator/prometheus} without the shared
  * token. Safe because the service is ClusterIP-only and NetworkPolicy-restricted, and the exposed
  * set (health, info, prometheus) carries no secrets.
+ *
+ * <p>ONE EXCEPTION TO THE SINGLE-TOKEN MODEL: {@code /internal/options-chat/**} is gated on a
+ * separate {@code OPTIONS_CHAT_INGEST_TOKEN} and rejects the shared token outright, because its
+ * caller renders an untrusted third-party Discord room and must not be able to spoof a tenant. Both
+ * directions of that isolation are pinned in {@code ServiceTokenFilterTest}; the rationale lives
+ * with the config in {@code application.yml}. Fail-closed: a blank ingest token matches nothing.
  */
 @Component
 public class ServiceTokenFilter extends OncePerRequestFilter {
@@ -31,11 +37,19 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   // The application.yml fallback used for local dev. Accepting it in production would mean a pod
   // started without BFF_SHARED_TOKEN silently trusts a value anyone can read from this repo.
   private static final String INSECURE_DEFAULT_TOKEN = "dev-shared-token";
+  private static final String OPTIONS_CHAT_INGEST_PREFIX = "/internal/options-chat/";
+  // Percent-encodings the container decodes into a dot, a separator, or a path parameter — each
+  // would change which handler runs after this filter has already chosen a token. See
+  // hasSuspiciousPath.
+  private static final String[] ENCODED_SEPARATORS = {"%2e", "%2f", "%5c", "%3b"};
 
   private final String sharedToken;
+  private final String optionsChatIngestToken;
 
   public ServiceTokenFilter(
-      @Value("${bff.service-token}") String sharedToken, Environment environment) {
+      @Value("${bff.service-token}") String sharedToken,
+      @Value("${options-chat.ingest-token:}") String optionsChatIngestToken,
+      Environment environment) {
     if (INSECURE_DEFAULT_TOKEN.equals(sharedToken)
         && environment.acceptsProfiles(Profiles.of("prod"))) {
       // Fail fast at boot rather than run with a well-known token (the k8s Deployment sets the
@@ -45,32 +59,127 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
               + " to a real secret");
     }
     this.sharedToken = sharedToken;
+    this.optionsChatIngestToken = optionsChatIngestToken;
   }
 
   @Override
   protected boolean shouldNotFilter(HttpServletRequest request) {
     String path = request.getRequestURI();
-    return path != null && path.startsWith("/actuator/");
+    // The exemption applies only to a path that cannot normalize into something else. Without the
+    // second clause, `/actuator/%2e%2e/api/positions` would skip this filter entirely and reach a
+    // tenant read UNAUTHENTICATED — a worse version of the ingest-token problem documented in
+    // doFilterInternal. Suspicious paths fall through to the filter, which rejects them.
+    return path != null && path.startsWith("/actuator/") && !hasSuspiciousPath(path);
   }
 
   @Override
   protected void doFilterInternal(
       HttpServletRequest request, HttpServletResponse response, FilterChain chain)
       throws ServletException, IOException {
+    // Path-traversal guard, BEFORE any path-based decision (this filter makes two: the actuator
+    // exemption and the ingest-token prefix). getRequestURI() is the RAW, un-normalized request
+    // line, while Spring dispatches on the DECODED and NORMALIZED path — so the string this filter
+    // authorizes and the handler that actually runs can disagree:
+    //
+    //   POST /internal/options-chat/%2e%2e/%2e%2e/api/positions
+    //
+    // startsWith("/internal/options-chat/") is true, so the ingest token would be accepted, but the
+    // request dispatches to /api/positions — turning a scraper credential into a real-money tenant
+    // read, the precise thing the split token exists to prevent. Rather than trying to reproduce
+    // the container's normalization here (getting that subtly wrong is how these bugs happen), we
+    // reject any request whose path could normalize to something other than itself. This is what
+    // Spring Security's StrictHttpFirewall does, and it costs us nothing: no route in this service
+    // takes a path segment containing a dot (tenant ids are [A-Za-z0-9_-]+), so a legitimate caller
+    // never sends one.
+    if (hasSuspiciousPath(request.getRequestURI())) {
+      reject(response);
+      return;
+    }
     String header = request.getHeader("Authorization");
-    if (header == null || !header.startsWith(BEARER_PREFIX) || !tokenMatches(header)) {
-      response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-      response.setContentType("application/json");
-      response.getWriter().write("{\"error\":\"unauthorized\"}");
+    if (header == null || !header.startsWith(BEARER_PREFIX) || !tokenMatches(request, header)) {
+      reject(response);
       return;
     }
     chain.doFilter(request, response);
   }
 
-  private boolean tokenMatches(String header) {
+  private static void reject(HttpServletResponse response) throws IOException {
+    response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    response.setContentType("application/json");
+    response.getWriter().write("{\"error\":\"unauthorized\"}");
+  }
+
+  /**
+   * True if the raw path could normalize into a different path than the one this filter inspects.
+   * This is Spring Security's {@code StrictHttpFirewall} rule set, and every entry earns its place
+   * — each corresponds to a transformation Tomcat applies BETWEEN this filter and handler dispatch:
+   *
+   * <ul>
+   *   <li>{@code ;} and {@code %3b} — path PARAMETERS, stripped by {@code parsePathParameters}
+   *       before decoding and normalizing. So {@code ..;a} is not the literal string {@code ".."}
+   *       here, but IS a {@code ..} by the time the path is normalized. Omitting this was a real
+   *       bypass: {@code /internal/options-chat/..;a/..;b/api/positions} would have carried the
+   *       ingest token into a tenant read.
+   *   <li>{@code .} / {@code ..} segments and {@code %2e} — the traversal itself, literal or
+   *       encoded (the container decodes once, then normalizes).
+   *   <li>{@code %2f} and {@code %5c} — encoded separators that become segment boundaries.
+   *   <li>empty segments ({@code //}) — collapsed by normalize, so {@code /internal//options-chat/}
+   *       reaches the ingest handler while failing this filter's prefix test, which would let the
+   *       SHARED token through to the ingest route.
+   * </ul>
+   *
+   * <p>Free for us: no route in this service takes a path segment containing a dot, a semicolon, or
+   * anything needing percent-encoding (tenant ids are {@code [A-Za-z0-9_-]+}).
+   */
+  private static boolean hasSuspiciousPath(String rawUri) {
+    if (rawUri == null || rawUri.isEmpty()) {
+      return true; // no path to reason about — fail closed
+    }
+    String lower = rawUri.toLowerCase(java.util.Locale.ROOT);
+    for (String encoded : ENCODED_SEPARATORS) {
+      if (lower.contains(encoded)) {
+        return true;
+      }
+    }
+    if (rawUri.indexOf(';') >= 0 || rawUri.indexOf('\\') >= 0) {
+      return true;
+    }
+    // Index 0 is the empty string before the leading '/'; a later empty segment means '//'.
+    String[] segments = rawUri.split("/", -1);
+    for (int i = 1; i < segments.length; i++) {
+      String segment = segments[i];
+      // A trailing '/' leaves a final empty segment and is harmless.
+      if (segment.isEmpty() && i < segments.length - 1) {
+        return true;
+      }
+      if (segment.equals(".") || segment.equals("..")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean tokenMatches(HttpServletRequest request, String header) {
     String presented = header.substring(BEARER_PREFIX.length());
-    // Constant-time compare so a timing side-channel can't be used to recover the shared token.
+    String expected = expectedTokenFor(request.getRequestURI());
+    // Fail closed: an unprovisioned (blank) expected token matches nothing, so the route stays shut
+    // rather than accepting an empty bearer.
+    if (expected == null || expected.isBlank()) {
+      return false;
+    }
+    // Constant-time compare so a timing side-channel can't be used to recover the token.
     return java.security.MessageDigest.isEqual(
-        presented.getBytes(StandardCharsets.UTF_8), sharedToken.getBytes(StandardCharsets.UTF_8));
+        presented.getBytes(StandardCharsets.UTF_8), expected.getBytes(StandardCharsets.UTF_8));
+  }
+
+  /**
+   * The one token accepted for this path. The options-chat ingest prefix accepts ONLY its own token
+   * — the shared token is rejected there too, so nothing about holding one implies the other.
+   */
+  private String expectedTokenFor(String path) {
+    if (path != null && path.startsWith(OPTIONS_CHAT_INGEST_PREFIX)) {
+      return optionsChatIngestToken;
+    }
+    return sharedToken;
   }
 }
