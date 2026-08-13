@@ -2,10 +2,14 @@
 -- information at a glance: the caller reads differently from everyone else. The mirror stored the
 -- name but not the colour, so every author rendered identically.
 --
--- Per MESSAGE rather than per author, deliberately. Role colours change (a promotion, a colour
--- tweak, a role removed), and a per-author table would silently rewrite history — every past
--- message would repaint to the author's current colour. Storing what was rendered at the time keeps
--- the mirror a mirror. The cost is a few bytes per row.
+-- Per MESSAGE rather than per author, deliberately — but NOT because it is the more faithful
+-- mirror. Discord itself repaints history: it renders an author's CURRENT role colour on old
+-- messages, so a per-author table would actually match Discord more closely.
+--
+-- This is a deliberate SNAPSHOT instead: a record of what the operator actually saw at the moment
+-- they read the message and possibly acted on it. For a room whose messages drive real-money
+-- decisions, "what was on screen at 09:31" is worth more than "what it would look like today".
+-- The cost is a few bytes per row.
 --
 -- NO NEW GRANT IS NEEDED: V9 granted table-level SELECT + INSERT on options_chat_message, and in
 -- PostgreSQL a table-level privilege covers columns added later. (A column-scoped grant — the

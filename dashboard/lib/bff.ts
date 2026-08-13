@@ -619,8 +619,13 @@ export interface OptionsChatEmbed {
 export interface OptionsChatMessage {
   message_id: string;
   author_name: string;
-  /** Discord role colour as `#rrggbb`, or null when the author has none. Validated at ingest. */
-  author_color: string | null;
+  /**
+   * Discord role colour as `#rrggbb`, or null when the author has none. Validated at ingest.
+   *
+   * OPTIONAL, not merely nullable: during a rolling deploy — or against a BFF that predates the
+   * column — the key is ABSENT rather than null, which a non-optional type claims is impossible.
+   */
+  author_color?: string | null;
   author_avatar_url: string | null;
   posted_at: string | null;
   /** PLAIN TEXT — never HTML. Render it through DiscordMarkdown, never as markup. */

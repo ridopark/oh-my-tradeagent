@@ -71,7 +71,12 @@ class OptionsChatRepositoryIT {
         id,
         "TradingTheTrend",
         "#ff0004",
-        null,
+        // DISTINCT, non-null, and asserted on the way back out. author_name, author_color and
+        // author_avatar_url are three adjacent String components of a POSITIONAL record: a
+        // transposition compiles, passes every mocked web test, and silently stores the colour in
+        // the avatar column — the page then renders <img src="#ff0004"> and every name loses its
+        // colour. Leaving avatar null here made that swap undetectable.
+        "https://cdn.discordapp.com/avatars/1/av.png",
         OffsetDateTime.of(2026, 8, 13, 14, 3, 11, 0, ZoneOffset.UTC),
         content,
         null,
@@ -89,6 +94,10 @@ class OptionsChatRepositoryIT {
     List<StoredMessage> page = repo.recent(CHANNEL, null, 50);
     StoredMessage stored = page.stream().filter(m -> m.messageId() == id).findFirst().orElseThrow();
     assertThat(stored.content()).isEqualTo("NVDA looking strong");
+    // The three adjacent Strings, each pinned to its own column.
+    assertThat(stored.authorName()).isEqualTo("TradingTheTrend");
+    assertThat(stored.authorColor()).isEqualTo("#ff0004");
+    assertThat(stored.authorAvatarUrl()).isEqualTo("https://cdn.discordapp.com/avatars/1/av.png");
     // Round-trips as an instant, not a string.
     assertThat(stored.postedAt()).isNotNull();
     assertThat(stored.postedAt().toInstant())
