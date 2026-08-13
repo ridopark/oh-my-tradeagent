@@ -158,3 +158,66 @@ async def test_one_bad_attachment_does_not_stall_the_others():
         await f._fetch_one(item)
 
     assert stored == ["/internal/options-chat/media/2"]
+
+
+# --- SSRF guard ---------------------------------------------------------------------------------
+#
+# source_url originates in an untrusted third-party Discord DOM. Without a host allowlist the
+# fetcher is a confused deputy: it can reach things the dashboard cannot, and whatever it fetches is
+# STORED and then SERVED BACK to every viewer of /options-chat.
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://tenant-dashboard-bff:8083/api/positions",  # our own internal service
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata
+        "http://127.0.0.1:8083/actuator/health",  # loopback
+        "http://10.42.0.1/",  # cluster network
+        "https://evil.example.com/x.png",  # arbitrary external host
+        "https://cdn.discordapp.com.attacker.io/x.png",  # suffix-confusion
+        "https://attacker.io/?x=cdn.discordapp.com",  # substring-confusion
+        "http://cdn.discordapp.com/a.png",  # right host, but plaintext
+        "file:///etc/passwd",
+        "not-a-url",
+    ],
+)
+def test_only_discord_attachment_hosts_over_https_are_fetchable(url):
+    from ohmytradeagent_sidecar.media_fetcher import is_allowed_media_url
+
+    assert is_allowed_media_url(url) is False, url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://cdn.discordapp.com/attachments/1/2/a.png?ex=1&is=2&hm=3",
+        "https://media.discordapp.net/attachments/1/2/a.png",
+        "https://CDN.DiscordApp.com/attachments/1/2/a.png",  # case-insensitive host
+        "https://cdn.discordapp.com:443/attachments/1/2/a.png",  # explicit default port
+    ],
+)
+def test_real_discord_attachment_urls_are_allowed(url):
+    from ohmytradeagent_sidecar.media_fetcher import is_allowed_media_url
+
+    assert is_allowed_media_url(url) is True, url
+
+
+@pytest.mark.asyncio
+async def test_a_disallowed_host_is_never_requested_and_is_marked_terminal():
+    cdn_calls = {"n": 0}
+    put = {}
+
+    def cdn(request):
+        cdn_calls["n"] += 1
+        return httpx.Response(200, content=PNG)
+
+    def bff(request):
+        put["body"] = request.content
+        return httpx.Response(200, json={"stored": False})
+
+    f = _fetcher(bff, cdn)
+    await f._fetch_one({"id": "13", "source_url": "http://tenant-dashboard-bff:8083/api/positions"})
+
+    assert cdn_calls["n"] == 0, "the disallowed host must never be contacted at all"
+    assert put["body"] == b"", "and the row must be marked terminal, not retried forever"

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -27,6 +28,41 @@ MEDIA_PATH = "/internal/options-chat/media"
 # Mirrors OptionsChatMediaController.MAX_BYTES. Anything larger is marked terminal rather than
 # retried forever — a 50MB video will not get smaller on the next sweep.
 MAX_BYTES = 10 * 1024 * 1024
+
+# HOSTS THIS PROCESS WILL FETCH FROM. `source_url` originates in an untrusted third-party Discord
+# DOM, so without this the scraper is a confused deputy: a crafted message could point it at an
+# internal address it can reach and the dashboard cannot (the BFF itself, the k8s API, a cloud
+# metadata endpoint), and the response body would be STORED and then SERVED BACK to every viewer of
+# /options-chat — a read primitive plus an exfiltration channel in one.
+#
+# `_https()` in chat_dom already restricts the SCHEME; this restricts the HOST, which is the half
+# that matters for SSRF. Exact-match (never `endswith`, which "evil-cdn.discordapp.com.attacker.io"
+# would satisfy).
+ALLOWED_MEDIA_HOSTS = frozenset(
+    {
+        "cdn.discordapp.com",
+        "media.discordapp.net",
+        "images-ext-1.discordapp.net",
+        "images-ext-2.discordapp.net",
+    }
+)
+
+
+def is_allowed_media_url(url: str) -> bool:
+    """True only for an https URL on a known Discord attachment host.
+
+    https-only as well as host-allowlisted: plain http would let a network-position attacker swap
+    the bytes we are about to store and serve from our own origin.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme != "https":
+        return False
+    # `hostname` is lowercased and strips any userinfo/port, so "user@cdn.discordapp.com:443" and
+    # "CDN.DiscordApp.com" both normalise before the comparison.
+    return parts.hostname in ALLOWED_MEDIA_HOSTS
 
 
 class MediaFetcher:
@@ -101,6 +137,18 @@ class MediaFetcher:
         if not attachment_id or not url:
             return
 
+        if not is_allowed_media_url(url):
+            # Terminal, not retried: the url is not going to become allowed. Marking it stops the
+            # row being handed out forever, and logs loudly because a non-Discord attachment host
+            # means either Discord changed its CDN or someone is probing us.
+            self._log.error(
+                "options-chat media url rejected by the host allowlist id=%s host=%s",
+                attachment_id,
+                urlsplit(url).hostname,
+            )
+            await self._mark_unavailable(attachment_id)
+            return
+
         try:
             data = await self._download(url)
         except Exception:  # noqa: BLE001 - transient: leave this row pending and move on
@@ -130,6 +178,17 @@ class MediaFetcher:
         except Exception as exc:  # noqa: BLE001
             # Leave it pending; the next sweep retries while the url is still alive.
             self._log.debug("media PUT failed id=%s: %r", attachment_id, exc)
+
+    async def _mark_unavailable(self, attachment_id) -> None:
+        """Tell the BFF this attachment will never arrive (empty body = terminal)."""
+        try:
+            await self._client.put(
+                f"{MEDIA_PATH}/{attachment_id}",
+                content=b"",
+                headers={**self._auth, "Content-Type": "application/octet-stream"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug("media terminal-mark failed id=%s: %r", attachment_id, exc)
 
     async def _download(self, url: str) -> bytes | None:
         """The attachment's bytes, or None if it is permanently unavailable.
