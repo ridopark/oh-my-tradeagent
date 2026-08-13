@@ -75,6 +75,7 @@ on:
           - market-data
           - api-gateway
           - signal-source-discord
+          - discord-chat-mirror
           - tenant-dashboard-bff
           - dashboard
           - stc-intent-service
@@ -97,7 +98,7 @@ env:
   # `oh-my-tradeagent-exec` image which the `exec-alpaca-paper` Deployment
   # pulls. Build-name ≠ Deployment-name is intentional — see
   # `infra/k8s/52-exec-alpaca-paper.yaml`.
-  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord tenant-dashboard-bff dashboard stc-intent-service"
+  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord discord-chat-mirror tenant-dashboard-bff dashboard stc-intent-service"
 
 jobs:
   preflight:
@@ -176,7 +177,14 @@ jobs:
               services/exec/*)                          want[exec-alpaca-paper]=1 ;;
               services/market-data/*)                   want[market-data]=1 ;;
               services/api-gateway/*)                   want[api-gateway]=1 ;;
-              services/signal-source-discord/*)         want[signal-source-discord]=1 ;;
+              # ONE source dir, TWO Deployments (PLAN-2026-08-12): the /options-chat mirror ships
+              # as a second entrypoint (ohmytradeagent_sidecar.chat_main) in the SAME image, so any
+              # change here rebuilds the one image BOTH pods pull and both must be rolled.
+              # CONSEQUENCE: a chat-mirror-only fix (e.g. a chat_dom selector) also restarts the
+              # LIVE trading signal watcher, which loses its rendered scrollback with no backfill.
+              # Merge changes under this path outside market hours.
+              services/signal-source-discord/*)         want[signal-source-discord]=1
+                                                        want[discord-chat-mirror]=1 ;;
               services/stc-intent-service/*)            want[stc-intent-service]=1 ;;
               services/tenant-dashboard-bff/*)          want[tenant-dashboard-bff]=1 ;;
               services/audit/*)                         : ;;   # no rolled Deployment
@@ -191,6 +199,7 @@ jobs:
               infra/k8s/53-market-data.yaml)            want[market-data]=1 ;;
               infra/k8s/54-api-gateway.yaml)            want[api-gateway]=1 ;;
               infra/k8s/55-signal-source-discord.yaml)  want[signal-source-discord]=1 ;;
+              infra/k8s/62-discord-chat-mirror.yaml)    want[discord-chat-mirror]=1 ;;
               infra/k8s/60-stc-intent-service.yaml)     want[stc-intent-service]=1 ;;
               infra/k8s/58-tenant-dashboard-bff.yaml)   want[tenant-dashboard-bff]=1 ;;
               infra/k8s/59-dashboard.yaml)              want[dashboard]=1 ;;

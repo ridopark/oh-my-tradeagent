@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
-from collections import OrderedDict
 from datetime import datetime, timezone
 
 from ohmytradeagent_contract.models.copytrade_derisk_payload import CopytradeDeriskPayload
@@ -34,6 +33,7 @@ from .derisk_tracker import RecentBto, RecentBtoTracker
 from .discord_dom import MESSAGES_LI_SELECTOR, extract_recent
 from .emitter import DeriskEmitter, Emitter
 from .stc_intent import StcIntentClassifier
+from .seen_lru import BoundedSeenLRU
 from .parser import DeriskCue, ParsedSignal, classify_derisk, parse_message
 
 
@@ -46,34 +46,9 @@ def _parse_posted_at(posted_at_iso: str | None) -> datetime:
     )
 
 
-class _BoundedSeenLRU:
-    """Single-purpose data class: a bounded ordered set used as an LRU cache.
-
-    Extracted as a class so the eviction policy lives in one place rather than
-    being inlined in the watcher loop (SRP). The semantics intentionally match
-    only the watcher's needs — adding, membership testing, eviction on cap —
-    no general-purpose collection API.
-    """
-
-    def __init__(self, capacity: int) -> None:
-        if capacity <= 0:
-            raise ValueError("capacity must be positive")
-        self._capacity = capacity
-        self._items: OrderedDict[str, None] = OrderedDict()
-
-    def add(self, key: str) -> None:
-        if key in self._items:
-            self._items.move_to_end(key)
-            return
-        self._items[key] = None
-        if len(self._items) > self._capacity:
-            self._items.popitem(last=False)
-
-    def __contains__(self, key: object) -> bool:
-        return key in self._items
-
-    def __len__(self) -> int:
-        return len(self._items)
+# The LRU itself lives in seen_lru.py so chat_watcher can reuse it without importing this module
+# (which would pull in temporalio). Aliased to keep the original private name.
+_BoundedSeenLRU = BoundedSeenLRU
 
 
 class Watcher:
