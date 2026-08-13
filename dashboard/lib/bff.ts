@@ -586,3 +586,60 @@ export const getOrders = (limit = 100) =>
 export const getPortfolio = () => bffGet<Portfolio>("/api/portfolio");
 export const getBrokerCredentialStatus = () =>
   bffGet<Envelope<BrokerCredentialStatus>>("/api/broker-credentials/status");
+
+// --- /options-chat Discord mirror (PLAN-2026-08-12) -------------------------------------------
+//
+// DELIBERATELY TENANT-INDEPENDENT: the BFF returns identical bytes for every tenant, because the
+// mirror is one shared room rather than per-tenant trading data. bffGet still injects X-Tenant-Id
+// and still throws without a session — the header is the authentication assertion, not a scope.
+//
+// Snowflake ids are STRINGS on the wire. They exceed 2^53, so typing them as `number` here would
+// silently corrupt every id the moment JSON.parse ran.
+
+export interface OptionsChatAttachment {
+  id: string;
+  kind: string;
+  filename: string | null;
+  content_type: string | null;
+  width: number | null;
+  height: number | null;
+  /** pending | ok | failed | skipped_too_large — bytes exist only once this is "ok" (Phase 4). */
+  fetch_state: string;
+}
+
+export interface OptionsChatEmbed {
+  title: string | null;
+  description: string | null;
+  url: string | null;
+  author: string | null;
+  footer: string | null;
+  thumbnail_url: string | null;
+}
+
+export interface OptionsChatMessage {
+  message_id: string;
+  author_name: string;
+  author_avatar_url: string | null;
+  posted_at: string | null;
+  /** PLAIN TEXT — never HTML. Render it through DiscordMarkdown, never as markup. */
+  content: string;
+  reply_to_id: string | null;
+  edited: boolean;
+  deleted: boolean;
+  attachments: OptionsChatAttachment[];
+  embeds: OptionsChatEmbed[];
+}
+
+export interface OptionsChatPage {
+  channel_id: string;
+  count: number;
+  items: OptionsChatMessage[];
+}
+
+export const getOptionsChatMessages = (opts: { before?: string; limit?: number } = {}) => {
+  const params = new URLSearchParams();
+  if (opts.before) params.set("before", opts.before);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  return bffGet<OptionsChatPage>(`/api/options-chat/messages${qs ? `?${qs}` : ""}`);
+};
