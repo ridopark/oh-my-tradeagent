@@ -313,7 +313,11 @@ export function OptionsChat() {
   };
 
   return (
-    <div className="flex h-[calc(100vh-12rem)] flex-col rounded border border-slate-800 bg-slate-900/40">
+    // 10rem, not 12: collapsing the page blurb into a disclosure reclaimed roughly two lines, and
+    // the point of collapsing it was to give that space to the messages. Expanding the disclosure
+    // pushes the page slightly past the viewport, which is the right trade — it is a
+    // read-once-then-collapse affordance, not something that stays open.
+    <div className="flex h-[calc(100vh-10rem)] flex-col rounded border border-slate-800 bg-slate-900/40">
       {disabled && (
         <div className="border-b border-slate-700 bg-slate-800/60 px-3 py-1 text-xs text-slate-300">
           The mirror is not enabled in this environment yet. Nothing is wrong with the scraper —
