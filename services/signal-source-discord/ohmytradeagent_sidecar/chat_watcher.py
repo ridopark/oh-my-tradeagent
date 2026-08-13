@@ -84,6 +84,11 @@ class ChatWatcher:
     MAX_CONSECUTIVE_CRASHES = 5
     # How many rendered messages to read per sweep.
     EXTRACT_LIMIT = 50
+    # Heartbeat log interval. The watcher otherwise logs ONLY when it stores something, which makes
+    # a healthy-but-quiet room indistinguishable from a blind tab — diagnosing that once cost a
+    # throwaway probe pod and a lot of guessing. This line makes "the DOM has N messages, newest is
+    # X" answerable from `kubectl logs` alone.
+    STATS_LOG_SECS = 300.0
 
     def __init__(
         self,
@@ -103,6 +108,8 @@ class ChatWatcher:
         self._seen = BoundedSeenLRU(seen_capacity)
         self._wake = asyncio.Event()
         self._last_stats: ExtractionStats | None = None
+        self._last_stats_log = 0.0
+        self._newest_seen: str | None = None
 
     async def _on_dom_changed(self, source, kind: str) -> None:
         """Binding callback. Must be trivial and must never raise.
@@ -193,6 +200,9 @@ class ChatWatcher:
         messages, stats = build_chat_messages(raw, self._channel_id)
         self._last_stats = stats
         self._warn_on_regression(stats)
+        if messages:
+            self._newest_seen = messages[-1].message_id
+        self._log_stats_periodically(stats)
 
         fresh = [m for m in messages if m.message_id not in self._seen]
         if not fresh:
@@ -213,6 +223,27 @@ class ChatWatcher:
                     stats.attachments,
                     stats.embeds,
                 )
+
+    def _log_stats_periodically(self, stats: ExtractionStats) -> None:
+        """Periodic proof-of-life, so silence is never ambiguous.
+
+        Distinguishes the three states that previously looked identical in the logs: a quiet room
+        (li_count > 0, newest unchanged), a blind tab (li_count 0), and a broken extractor
+        (li_count > 0 but content_missing high).
+        """
+        now = time.monotonic()
+        if now - self._last_stats_log < self.STATS_LOG_SECS:
+            return
+        self._last_stats_log = now
+        self._log.info(
+            "options-chat alive: rendered=%d extracted_ok=%d newest=%s "
+            "(content_missing=%d system_skipped=%d)",
+            stats.li_count,
+            stats.li_count - stats.content_missing,
+            self._newest_seen or "none",
+            stats.content_missing,
+            stats.system_skipped,
+        )
 
     def _warn_on_regression(self, stats: ExtractionStats) -> None:
         """A rotated selector is invisible in the output but obvious in the ratio.
