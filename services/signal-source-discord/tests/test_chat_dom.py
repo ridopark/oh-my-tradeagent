@@ -8,6 +8,8 @@ Fixtures mimic the real DOM shape verified live on 2026-08-13 (see the plan's VE
 
 from __future__ import annotations
 
+import pytest
+
 from ohmytradeagent_sidecar.chat_dom import (
     MAX_CHILDREN,
     ChatAttachment,
@@ -28,6 +30,7 @@ def _msg(**over):
         "has_own_content": True,
         "has_accessories": False,
         "author": "TradingTheTrend",
+        "author_style": "color: rgb(255, 0, 4);",
         "avatar_src": "https://cdn.discordapp.com/avatars/1/a.png",
         "posted_at": "2026-08-12T14:03:11.000Z",
         "text": "NVDA looking strong",
@@ -244,3 +247,50 @@ def test_split_li_id_rejects_shapes_it_cannot_trust():
     assert split_li_id("chat-messages-123") == (None, None)
     assert split_li_id("something-else") == (None, None)
     assert split_li_id("chat-messages-abc-def") == (None, None)
+
+
+# --- author role colour --------------------------------------------------------------------------
+
+
+def test_the_role_colour_is_normalised_to_hex():
+    from ohmytradeagent_sidecar.chat_dom import parse_author_color
+
+    # The real value observed live: TradingTheTrend renders red, distinct from everyone else.
+    assert parse_author_color("color: rgb(255, 0, 4);") == "#ff0004"
+    assert parse_author_color("color: rgb(26, 188, 156);") == "#1abc9c"
+    assert parse_author_color("COLOR:RGB(17,255,0)") == "#11ff00"
+
+
+def test_no_role_colour_means_none_so_the_page_uses_its_own_default():
+    from ohmytradeagent_sidecar.chat_dom import parse_author_color
+
+    assert parse_author_color(None) is None
+    assert parse_author_color("") is None
+    assert parse_author_color("font-weight: bold;") is None
+
+
+@pytest.mark.parametrize(
+    "style",
+    [
+        "color: red;",  # named colours are not role colours
+        "color: var(--evil);",
+        "color: url(https://attacker.io/x)",
+        "color: rgb(999, 0, 0);",  # out of range
+        "color: rgb(1,2)",  # malformed
+        "color: expression(alert(1))",
+        "background: url(https://attacker.io/beacon)",
+    ],
+)
+def test_anything_that_is_not_an_rgb_triple_is_ignored(style):
+    # A raw style string from an untrusted DOM must never reach a CSS context; only a parsed,
+    # range-checked rgb triple survives, and it leaves here as six hex digits.
+    from ohmytradeagent_sidecar.chat_dom import parse_author_color
+
+    assert parse_author_color(style) is None
+
+
+def test_the_colour_rides_along_on_the_extracted_message():
+    out, _ = build_chat_messages(
+        _payload(_msg(author_style="color: rgb(255, 0, 4);")), CHANNEL
+    )
+    assert out[0].author_color == "#ff0004"

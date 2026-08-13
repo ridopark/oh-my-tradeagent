@@ -18,6 +18,16 @@ const PAGE = 50;
 // How close to the bottom still counts as "following the conversation".
 const STICK_PX = 120;
 
+// Re-validated HERE even though the BFF already enforced it. This value goes straight into a CSS
+// context, it originates in an untrusted third-party DOM, and it crosses two services to get here —
+// the cost of checking again is one regex, and the cost of being wrong is CSS injection on a page
+// whose session can force-exit real-money positions.
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+function safeColor(c: string | null): string | undefined {
+  return c && HEX_COLOR.test(c) ? c : undefined;
+}
+
 function fmtTime(iso: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
@@ -134,7 +144,14 @@ function Message({ m, prev }: { m: OptionsChatMessage; prev?: OptionsChatMessage
     <div className={`px-3 ${grouped ? "py-0.5" : "pt-3 pb-0.5"}`}>
       {!grouped && (
         <div className="flex items-baseline gap-2">
-          <span className="text-sm font-semibold text-slate-100">{m.author_name}</span>
+          <span
+            className="text-sm font-semibold text-slate-100"
+            // Falls back to the class colour when the author has no role colour, so the dark
+            // theme stays coherent rather than inheriting Discord's default grey.
+            style={{ color: safeColor(m.author_color) }}
+          >
+            {m.author_name}
+          </span>
           <span className="text-xs text-slate-500">{fmtTime(m.posted_at)}</span>
         </div>
       )}

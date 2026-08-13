@@ -1,0 +1,16 @@
+-- Discord colours a member's name by their highest role, and in a signal room that is real
+-- information at a glance: the caller reads differently from everyone else. The mirror stored the
+-- name but not the colour, so every author rendered identically.
+--
+-- Per MESSAGE rather than per author, deliberately. Role colours change (a promotion, a colour
+-- tweak, a role removed), and a per-author table would silently rewrite history — every past
+-- message would repaint to the author's current colour. Storing what was rendered at the time keeps
+-- the mirror a mirror. The cost is a few bytes per row.
+--
+-- NO NEW GRANT IS NEEDED: V9 granted table-level SELECT + INSERT on options_chat_message, and in
+-- PostgreSQL a table-level privilege covers columns added later. (A column-scoped grant — the
+-- V7/V8 style — would NOT have, which is worth knowing before scoping one.)
+--
+-- Nullable on purpose: a member with no role colour renders in Discord's default, and NULL lets the
+-- page use ITS own default rather than baking Discord's grey into a dark dashboard.
+ALTER TABLE options_chat_message ADD COLUMN author_color TEXT;

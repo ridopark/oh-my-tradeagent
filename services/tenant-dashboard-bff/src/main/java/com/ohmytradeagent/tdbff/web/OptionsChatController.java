@@ -82,6 +82,7 @@ public class OptionsChatController {
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("message_id", Long.toString(m.messageId()));
     out.put("author_name", m.authorName());
+    out.put("author_color", m.authorColor());
     out.put("author_avatar_url", m.authorAvatarUrl());
     out.put("posted_at", m.postedAt() == null ? null : m.postedAt().toString());
     // Plain text. The client renders it through a sanitizing markdown component and must never

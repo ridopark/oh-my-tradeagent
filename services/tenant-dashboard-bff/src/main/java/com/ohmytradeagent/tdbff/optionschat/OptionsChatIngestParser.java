@@ -49,6 +49,16 @@ public final class OptionsChatIngestParser {
 
   private static final Set<String> ALLOWED_KINDS = Set.of("image", "video", "file", "embed_image");
 
+  /**
+   * Exactly six hex digits behind a {@code #}. The author colour ends up in a CSS context in the
+   * browser, so the stored value must be structurally incapable of carrying anything else — not
+   * "sanitised", but unable to represent an injection in the first place. The scraper already
+   * normalises Discord's {@code rgb(r,g,b)} to this form; anything that does not match is dropped
+   * rather than repaired.
+   */
+  private static final java.util.regex.Pattern HEX_COLOR =
+      java.util.regex.Pattern.compile("^#[0-9a-fA-F]{6}$");
+
   private OptionsChatIngestParser() {}
 
   /**
@@ -102,10 +112,15 @@ public final class OptionsChatIngestParser {
     Long replyToId = Snowflakes.parse(m.get("reply_to_id"));
     boolean edited = Boolean.TRUE.equals(m.get("edited"));
     String avatar = safeUrl(optionalString(m, "author_avatar_url", null));
+    String color = optionalString(m, "author_color", null);
+    if (color != null && !HEX_COLOR.matcher(color).matches()) {
+      color = null;
+    }
 
     return new IngestMessage(
         messageId,
         authorName,
+        color,
         avatar,
         postedAt,
         content,

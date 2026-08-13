@@ -70,6 +70,7 @@ class OptionsChatRepositoryIT {
     return new IngestMessage(
         id,
         "TradingTheTrend",
+        "#ff0004",
         null,
         OffsetDateTime.of(2026, 8, 13, 14, 3, 11, 0, ZoneOffset.UTC),
         content,
@@ -111,6 +112,7 @@ class OptionsChatRepositoryIT {
         new IngestMessage(
             id,
             "TradingTheTrend",
+            "#ff0004",
             null,
             OffsetDateTime.now(ZoneOffset.UTC),
             "chart",
@@ -148,6 +150,7 @@ class OptionsChatRepositoryIT {
         new IngestMessage(
             id,
             "TradingTheTrend",
+            "#ff0004",
             null,
             OffsetDateTime.now(ZoneOffset.UTC),
             "chart incoming",
