@@ -23,6 +23,11 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
     return new Response(null, { status: 502 });
   }
   if (!upstream.ok) {
+    // 404 is a real client-visible answer (unknown id, or bytes not mirrored yet). Everything else
+    // — including an upstream 401 — is a SERVER-side problem from the browser's point of view: this
+    // route already verified the session, so a 401 here means the BFF token is misconfigured, not
+    // that the viewer is unauthenticated. Reporting that as 401 would send someone to re-login for
+    // an outage they cannot fix.
     return new Response(null, { status: upstream.status === 404 ? 404 : 502 });
   }
 

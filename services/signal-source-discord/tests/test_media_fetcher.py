@@ -221,3 +221,90 @@ async def test_a_disallowed_host_is_never_requested_and_is_marked_terminal():
 
     assert cdn_calls["n"] == 0, "the disallowed host must never be contacted at all"
     assert put["body"] == b"", "and the row must be marked terminal, not retried forever"
+
+
+# --- redirect validation -------------------------------------------------------------------------
+#
+# The allowlist is only a guarantee if it applies to EVERY hop. Automatic redirect-following would
+# check the first url and then walk anywhere the first host pointed.
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_off_the_allowlist_is_refused_and_never_requested():
+    hops = []
+
+    def cdn(request):
+        hops.append(str(request.url))
+        if "start" in str(request.url):
+            return httpx.Response(302, headers={"location": "http://169.254.169.254/latest/meta-data/"})
+        return httpx.Response(200, content=PNG)
+
+    put = {}
+
+    def bff(request):
+        put["body"] = request.content
+        return httpx.Response(200, json={"stored": False})
+
+    f = _fetcher(bff, cdn)
+    await f._fetch_one({"id": "20", "source_url": "https://cdn.discordapp.com/start.png"})
+
+    assert len(hops) == 1, "the off-allowlist redirect target must never be requested"
+    assert "169.254" not in " ".join(hops)
+    assert put["body"] == b""
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_within_the_allowlist_is_followed():
+    def cdn(request):
+        if "start" in str(request.url):
+            return httpx.Response(
+                302, headers={"location": "https://cdn.discordapp.com/final.png"}
+            )
+        return httpx.Response(200, content=PNG)
+
+    stored = {}
+
+    def bff(request):
+        stored["body"] = request.content
+        return httpx.Response(200, json={"stored": True})
+
+    f = _fetcher(bff, cdn)
+    await f._fetch_one({"id": "21", "source_url": "https://media.discordapp.net/start.png"})
+
+    assert stored["body"] == PNG
+
+
+@pytest.mark.asyncio
+async def test_a_relative_redirect_is_resolved_before_being_validated():
+    def cdn(request):
+        if "start" in str(request.url):
+            return httpx.Response(302, headers={"location": "/attachments/1/2/final.png"})
+        return httpx.Response(200, content=PNG)
+
+    stored = {}
+
+    def bff(request):
+        stored["body"] = request.content
+        return httpx.Response(200, json={"stored": True})
+
+    f = _fetcher(bff, cdn)
+    await f._fetch_one({"id": "22", "source_url": "https://cdn.discordapp.com/start.png"})
+
+    assert stored["body"] == PNG
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_loop_terminates():
+    def cdn(request):
+        return httpx.Response(302, headers={"location": "https://cdn.discordapp.com/loop.png"})
+
+    put = {}
+
+    def bff(request):
+        put["body"] = request.content
+        return httpx.Response(200, json={"stored": False})
+
+    f = _fetcher(bff, cdn)
+    await f._fetch_one({"id": "23", "source_url": "https://cdn.discordapp.com/loop.png"})
+
+    assert put["body"] == b""

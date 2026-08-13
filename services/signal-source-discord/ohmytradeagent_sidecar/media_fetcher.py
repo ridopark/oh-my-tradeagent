@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -28,6 +28,11 @@ MEDIA_PATH = "/internal/options-chat/media"
 # Mirrors OptionsChatMediaController.MAX_BYTES. Anything larger is marked terminal rather than
 # retried forever — a 50MB video will not get smaller on the next sweep.
 MAX_BYTES = 10 * 1024 * 1024
+
+# Discord's CDN does redirect (media.discordapp.net -> cdn.discordapp.com and similar), so
+# redirects must be SUPPORTED but each hop re-validated. A handful is plenty; a longer chain is
+# either a loop or someone walking us somewhere.
+MAX_REDIRECTS = 3
 
 # HOSTS THIS PROCESS WILL FETCH FROM. `source_url` originates in an untrusted third-party Discord
 # DOM, so without this the scraper is a confused deputy: a crafted message could point it at an
@@ -99,7 +104,11 @@ class MediaFetcher:
         self._download_client = download_client or httpx.AsyncClient(
             # Generous read timeout: these are images, not API calls.
             timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
-            follow_redirects=True,
+            # follow_redirects=False is LOAD-BEARING, not a default. httpx following redirects
+            # itself would silently defeat the host allowlist: an allowed host answering 302 with
+            # Location: http://169.254.169.254/ would be followed transparently, and only the FIRST
+            # url was ever checked. Redirects are followed manually below so every hop is validated.
+            follow_redirects=False,
         )
 
     @property
@@ -193,33 +202,60 @@ class MediaFetcher:
     async def _download(self, url: str) -> bytes | None:
         """The attachment's bytes, or None if it is permanently unavailable.
 
-        Uses a streaming request so an oversized body is abandoned rather than buffered.
+        Follows redirects MANUALLY so the host allowlist applies to every hop. Automatic following
+        would check only the first url, and an allowed host answering
+        ``302 Location: http://169.254.169.254/`` would walk straight past the guard — the exact
+        SSRF the allowlist exists to stop.
+
+        Streams the body so an oversized response is abandoned rather than buffered.
         """
-        try:
-            async with self._download_client.stream("GET", url) as resp:
-                if resp.status_code in (403, 404, 410):
-                    # A signed url that has expired, or an attachment Discord deleted. Retrying
-                    # cannot help — the signature will not come back.
-                    return None
-                if resp.status_code != 200:
-                    raise RuntimeError(f"download {resp.status_code}")
-
-                declared = resp.headers.get("content-length")
-                if declared and int(declared) > MAX_BYTES:
-                    self._log.info("options-chat media too large (%s bytes), skipping", declared)
-                    return None
-
-                buf = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    buf.extend(chunk)
-                    if len(buf) > MAX_BYTES:
-                        # Servers may omit Content-Length; stop reading rather than trusting it.
-                        self._log.info("options-chat media exceeded cap mid-stream, skipping")
+        current = url
+        for _ in range(MAX_REDIRECTS + 1):
+            if not is_allowed_media_url(current):
+                self._log.error(
+                    "options-chat media redirect left the allowlist (host=%s) — refusing",
+                    urlsplit(current).hostname,
+                )
+                return None
+            try:
+                async with self._download_client.stream("GET", current) as resp:
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        location = resp.headers.get("location")
+                        if not location:
+                            return None
+                        # Relative Locations are legal; resolve before re-validating.
+                        current = urljoin(current, location)
+                        continue
+                    if resp.status_code in (403, 404, 410):
+                        # A signed url that has expired, or an attachment Discord deleted. Retrying
+                        # cannot help — the signature will not come back.
                         return None
-                return bytes(buf)
-        except Exception as exc:  # noqa: BLE001 - transient; leave the row pending for a retry
-            self._log.debug("media download failed: %r", exc)
-            raise
+                    if resp.status_code != 200:
+                        raise RuntimeError(f"download {resp.status_code}")
+
+                    declared = resp.headers.get("content-length")
+                    if declared and int(declared) > MAX_BYTES:
+                        self._log.info(
+                            "options-chat media too large (%s bytes), skipping", declared
+                        )
+                        return None
+
+                    buf = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        buf.extend(chunk)
+                        if len(buf) > MAX_BYTES:
+                            # Servers may omit Content-Length; do not trust it alone.
+                            self._log.info(
+                                "options-chat media exceeded cap mid-stream, skipping"
+                            )
+                            return None
+                    return bytes(buf)
+            except Exception as exc:  # noqa: BLE001 - transient; leave the row pending for a retry
+                self._log.debug("media download failed: %r", exc)
+                raise
+
+        self._log.warning("options-chat media exceeded %d redirects, giving up", MAX_REDIRECTS)
+        return None
 
     async def aclose(self) -> None:
         if self._owns_client:

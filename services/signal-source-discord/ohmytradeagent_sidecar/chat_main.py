@@ -18,6 +18,7 @@ TWO DIFFERENCES FROM ``main.py`` THAT ARE DELIBERATE:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import pathlib
 import sys
@@ -136,7 +137,12 @@ async def _run() -> int:
             try:
                 await watcher.run_on_context(context)
             finally:
+                # cancel() only REQUESTS cancellation; without awaiting, the fetcher could still be
+                # mid-request while the browser closes underneath it. Await the cancellation so
+                # shutdown is ordered.
                 media_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await media_task
             await browser.close()
     finally:
         await ingest.aclose()
