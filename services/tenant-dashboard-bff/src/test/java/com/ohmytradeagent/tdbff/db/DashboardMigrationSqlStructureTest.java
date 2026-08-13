@@ -210,4 +210,32 @@ class DashboardMigrationSqlStructureTest {
         .as("V9 must not grant or even reference dashboard_readonly")
         .doesNotContain("dashboard_readonly");
   }
+
+  @Test
+  void v10WidensOnlyAttachmentUpdate_forThePhase4MediaFill() throws IOException {
+    String sql = executableSql("/db/dashboard/V10__options_chat_media.sql");
+
+    // Exactly one grant, exactly one table, exactly one privilege: filling in the fetched bytes.
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+UPDATE\\s+ON\\s+options_chat_attachment\\s+TO\\s+dashboard_writer"));
+
+    // The message and embed tables stay unwidened — Phase 6 owns the edit reconcile, and embeds are
+    // replaced with their message rather than mutated.
+    assertThat(sql)
+        .as("V10 must not widen options_chat_message")
+        .doesNotContainPattern(Pattern.compile("GRANT[^;]*options_chat_message"));
+    assertThat(sql)
+        .as("V10 must not widen options_chat_embed")
+        .doesNotContainPattern(Pattern.compile("GRANT[^;]*options_chat_embed"));
+    // Retention is still a later, separate decision.
+    assertThat(sql)
+        .as("V10 never grants DELETE")
+        .doesNotContainPattern(
+            Pattern.compile("GRANT\\s+[A-Z, ]*DELETE", Pattern.CASE_INSENSITIVE));
+    assertThat(sql)
+        .as("V10 must not reference dashboard_readonly")
+        .doesNotContain("dashboard_readonly");
+  }
 }

@@ -18,6 +18,7 @@ TWO DIFFERENCES FROM ``main.py`` THAT ARE DELIBERATE:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import pathlib
 import sys
@@ -26,6 +27,7 @@ from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
 from .chat_watcher import ChatWatcher
+from .media_fetcher import MediaFetcher
 from .options_chat_ingest import OptionsChatIngestClient
 from .runtime import required, setup_logging
 
@@ -86,6 +88,7 @@ async def _run() -> int:
         await asyncio.sleep(startup_delay)
 
     ingest = OptionsChatIngestClient(base_url=bff_url, token=ingest_token, log=log)
+    media = MediaFetcher(base_url=bff_url, token=ingest_token, log=log)
     watcher = ChatWatcher(
         channel_url=channel_url,
         channel_id=channel_id,
@@ -122,10 +125,28 @@ async def _run() -> int:
                 else route.continue_(),
             )
             await watcher.install(context)
-            await watcher.run_on_context(context)
+            # ISOLATION: media fetching is best-effort and MUST NOT delay or kill the message
+            # mirror. Run it as a sibling with a log-only done-callback — the same shape main.py
+            # uses to keep its best-effort watchers away from the trading-critical signal watcher.
+            media_task = asyncio.create_task(media.run(), name="media-fetcher")
+            media_task.add_done_callback(
+                lambda t: log.error("media fetcher exited: %r", t.exception())
+                if not t.cancelled() and t.exception()
+                else None
+            )
+            try:
+                await watcher.run_on_context(context)
+            finally:
+                # cancel() only REQUESTS cancellation; without awaiting, the fetcher could still be
+                # mid-request while the browser closes underneath it. Await the cancellation so
+                # shutdown is ordered.
+                media_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await media_task
             await browser.close()
     finally:
         await ingest.aclose()
+        await media.aclose()
 
     # run_on_context only returns when the tab could not be rebuilt.
     log.error("options-chat watcher gave up — exiting so Kubernetes restarts the pod")

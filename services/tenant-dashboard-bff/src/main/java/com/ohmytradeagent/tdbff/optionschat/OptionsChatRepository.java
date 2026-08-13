@@ -81,6 +81,12 @@ public class OptionsChatRepository {
       List<IngestAttachment> attachments,
       List<IngestEmbed> embeds) {}
 
+  /** One attachment still awaiting its bytes, as handed to the scraper to fetch. */
+  public record PendingMedia(long id, String sourceUrl) {}
+
+  /** Stored media, as served by the media route. */
+  public record Media(byte[] bytes, String contentType) {}
+
   /** An attachment as served to the page. Deliberately carries no {@code bytes}. */
   public record StoredAttachment(
       long id,
@@ -341,5 +347,77 @@ public class OptionsChatRepository {
     } catch (NoSuchAlgorithmException e) {
       throw new IllegalStateException("SHA-256 unavailable", e);
     }
+  }
+
+  /**
+   * Attachments whose bytes we still owe, oldest first.
+   *
+   * <p>Oldest-first is deliberate and time-critical: Discord's CDN urls are SIGNED and expire in
+   * roughly 24h, so the longest-waiting row is the one closest to becoming permanently unfetchable.
+   * Scoped to the channel so this can never hand out rows belonging to anything else.
+   */
+  public List<PendingMedia> pendingMedia(long channelId, int limit) {
+    Result<Record> rows =
+        writerDsl.fetch(
+            "SELECT a.id, a.source_url FROM options_chat_attachment a"
+                + " JOIN options_chat_message m ON m.message_id = a.message_id"
+                + " WHERE m.channel_id = ? AND a.fetch_state = 'pending'"
+                + " ORDER BY a.id ASC LIMIT ?",
+            channelId,
+            limit);
+    List<PendingMedia> out = new ArrayList<>(rows.size());
+    for (Record r : rows) {
+      out.add(new PendingMedia(r.get("id", Long.class), r.get("source_url", String.class)));
+    }
+    return out;
+  }
+
+  /**
+   * Fill in the fetched bytes. Returns false when the row is gone or already filled.
+   *
+   * <p>{@code content_type} is whatever the CALLER of this method decided — and the only caller
+   * sniffs it from the bytes themselves rather than trusting any header, so a hostile {@code
+   * text/html} can never become the Content-Type the browser sees.
+   */
+  public boolean storeMedia(long attachmentId, byte[] bytes, String contentType) {
+    return writerDsl.execute(
+            "UPDATE options_chat_attachment SET bytes = ?, content_type = ?, byte_size = ?,"
+                + " fetch_state = 'ok' WHERE id = ? AND fetch_state <> 'ok'",
+            bytes,
+            contentType,
+            bytes.length,
+            attachmentId)
+        == 1;
+  }
+
+  /** Mark an attachment permanently un-fetchable so it stops being handed out forever. */
+  public boolean markMediaTerminal(long attachmentId, String state) {
+    return writerDsl.execute(
+            "UPDATE options_chat_attachment SET fetch_state = ? WHERE id = ? AND fetch_state <> 'ok'",
+            state,
+            attachmentId)
+        == 1;
+  }
+
+  /**
+   * One attachment's bytes, for the media route.
+   *
+   * <p>The ONLY place {@code bytes} is ever projected. Never widen this to a list query: the BFF
+   * runs on a 768Mi limit with a ~192MB default heap, and detoasting a page of images would exhaust
+   * it.
+   */
+  public Media media(long channelId, long attachmentId) {
+    Record r =
+        writerDsl.fetchOne(
+            "SELECT a.bytes, a.content_type FROM options_chat_attachment a"
+                + " JOIN options_chat_message m ON m.message_id = a.message_id"
+                + " WHERE m.channel_id = ? AND a.id = ? AND a.fetch_state = 'ok'",
+            channelId,
+            attachmentId);
+    if (r == null) {
+      return null;
+    }
+    byte[] bytes = r.get("bytes", byte[].class);
+    return bytes == null ? null : new Media(bytes, r.get("content_type", String.class));
   }
 }

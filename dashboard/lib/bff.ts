@@ -663,3 +663,27 @@ export const getOptionsChatMessages = async (
   }
   return { page: body as OptionsChatPage, disabled: false };
 };
+
+/**
+ * Raw upstream response for one mirrored attachment's bytes.
+ *
+ * Returns the {@link Response} rather than parsed data because the caller streams the body straight
+ * through — buffering an image in the route handler would double its memory for no reason.
+ *
+ * Deliberately built on the shared {@link BFF_URL}/{@link BFF_TOKEN} rather than re-reading the env
+ * in the route handler: a second copy drifts, and the copy this replaced had a WEAKER fallback
+ * (defaulting the shared token to a well-known dev value instead of failing loudly like the
+ * module-level check above).
+ */
+export const fetchOptionsChatMedia = async (attachmentId: string): Promise<Response> => {
+  const session = await auth();
+  const tenantId = session?.tenantId;
+  if (!tenantId) {
+    throw new NotAuthenticatedError("no tenant in session");
+  }
+  return fetch(`${BFF_URL}/api/options-chat/media/${attachmentId}`, {
+    headers: { Authorization: `Bearer ${BFF_TOKEN}`, "X-Tenant-Id": tenantId },
+    cache: "no-store",
+    signal: AbortSignal.timeout(BFF_TIMEOUT_MS),
+  });
+};
