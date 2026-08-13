@@ -294,3 +294,25 @@ def test_the_colour_rides_along_on_the_extracted_message():
         _payload(_msg(author_style="color: rgb(255, 0, 4);")), CHANNEL
     )
     assert out[0].author_color == "#ff0004"
+
+
+@pytest.mark.parametrize(
+    "style,expected",
+    [
+        # The property must be `color`, not merely END in it. Without a boundary the pattern
+        # matched background-color, and when a span carried BOTH the first match won — so an
+        # author's name could be painted with its own background colour, i.e. invisible. Discord
+        # has display modes that colour the name's background (usernameColorOnName), so this is
+        # reachable, not theoretical.
+        ("background-color: rgb(1, 2, 3);", None),
+        ("border-color: rgb(9, 9, 9)", None),
+        ("outline-color: rgb(4,4,4)", None),
+        ("background-color: rgb(1,2,3); color: rgb(255,0,4);", "#ff0004"),
+        ("color: rgb(255,0,4); background-color: rgb(1,2,3);", "#ff0004"),
+        ("color: rgb(26, 188, 156);", "#1abc9c"),
+    ],
+)
+def test_only_the_color_property_is_read_never_a_property_that_ends_in_color(style, expected):
+    from ohmytradeagent_sidecar.chat_dom import parse_author_color
+
+    assert parse_author_color(style) == expected

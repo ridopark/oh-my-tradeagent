@@ -31,7 +31,16 @@ KIND_EMBED_IMAGE = "embed_image"
 
 # Discord renders a member's highest-role colour as `color: rgb(r, g, b)`. Anything else — a named
 # colour, a var(), a gradient, an injection attempt — is ignored rather than passed through.
-_RGB_RE = re.compile(r"color:\s*rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)", re.I)
+#
+# The `(?:^|;)` boundary is LOAD-BEARING, not tidiness. Without it the pattern matches the tail of
+# ANY property ending in "color": `background-color: rgb(1,2,3)` would be read as the text colour,
+# and when a span carries both, the first match wins — so an author's name could be painted with its
+# own background colour, i.e. invisible. Discord has display modes that colour the name's background
+# (`usernameColorOnName`), so this is reachable rather than theoretical.
+_RGB_RE = re.compile(
+    r"(?:^|;)\s*color\s*:\s*rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)",
+    re.I,
+)
 
 _ATTACHMENT_HOST_RE = re.compile(
     r"^https://(?:cdn|media)\.discordapp\.(?:com|net)/", re.IGNORECASE
