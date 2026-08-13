@@ -1,0 +1,21 @@
+-- Phase 4 of the /options-chat mirror: store the attachment BYTES so the page can serve images from
+-- our own endpoint instead of hotlinking Discord's CDN (whose signed urls expire in ~24h and whose
+-- every load would leak a dashboard viewer's IP).
+--
+-- THIS IS THE DELIBERATE WIDENING V9 SET UP. V9 granted SELECT + INSERT only — exactly what the
+-- code shipped then issued — and OptionsChatMigrationIT asserts UPDATE is DENIED precisely so that
+-- a later phase has to widen consciously rather than find the privilege already lying around.
+-- This is that phase, and the grant is scoped to the one table and the one operation it needs:
+-- filling in `bytes` / `content_type` / `fetch_state` on an attachment row that already exists.
+--
+--   UPDATE options_chat_attachment SET bytes = ?, content_type = ?, fetch_state = 'ok',
+--                                      byte_size = ? WHERE id = ?
+--
+-- The WHERE reads `id`, and SELECT is already granted table-wide by V9, so no additional column
+-- grant is needed (the PG rule that bit V7).
+--
+-- STILL WITHHELD, on purpose:
+--   * UPDATE on options_chat_message  — Phase 6's edit reconcile widens that when it ships.
+--   * UPDATE on options_chat_embed    — embeds are replaced with their message, never mutated.
+--   * DELETE on anything              — Phase 6's retention job widens that when it ships.
+GRANT UPDATE ON options_chat_attachment TO dashboard_writer;

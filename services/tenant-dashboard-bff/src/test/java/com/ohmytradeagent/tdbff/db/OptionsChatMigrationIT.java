@@ -201,7 +201,8 @@ class OptionsChatMigrationIT {
   }
 
   @Test
-  void writerIsDeniedUpdate_soPhase4And6MustWidenDeliberately() throws SQLException {
+  void writerIsStillDeniedUpdateOnMessageAndEmbed_afterV10WidenedAttachmentsOnly()
+      throws SQLException {
     // Phase 1 issues no UPDATE, so V9 grants none. Phase 4 (media fill: SET bytes, fetch_state) and
     // Phase 6 (edit reconcile: SET content WHERE content_hash <> ?) each add their own grant with
     // the code that needs it. These assertions are what force that to be a conscious act rather
@@ -210,8 +211,10 @@ class OptionsChatMigrationIT {
     try (Connection w = asRole("dashboard_writer", WRITER_PW);
         var st = w.createStatement()) {
       assertDenied(() -> st.executeUpdate("UPDATE options_chat_message SET edited = TRUE"));
-      assertDenied(() -> st.executeUpdate("UPDATE options_chat_attachment SET fetch_state = 'ok'"));
       assertDenied(() -> st.executeUpdate("UPDATE options_chat_embed SET title = 'x'"));
+      // options_chat_attachment IS now updatable — V10 widened it for the Phase 4 media fill, which
+      // is the deliberate-widening flow this assertion set exists to force.
+      st.executeUpdate("UPDATE options_chat_attachment SET fetch_state = 'ok' WHERE id = -1");
     }
   }
 

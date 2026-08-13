@@ -43,13 +43,54 @@ function fmtDay(iso: string | null): string {
 function Attachment({ a }: { a: OptionsChatAttachment }) {
   const label = a.filename || a.kind;
   const dims = a.width && a.height ? `${a.width}×${a.height}` : null;
+
+  // Served from OUR origin once the bytes are mirrored. Never Discord's CDN — the payload carries
+  // no source_url, so hotlinking is impossible rather than merely discouraged.
+  if (a.fetch_state === "ok" && (a.kind === "image" || a.kind === "embed_image")) {
+    return (
+      <a
+        href={`/api/options-chat/media/${a.id}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mt-1 block"
+      >
+        {/* Plain <img>: next/image would try to optimize an authenticated, non-static route. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={`/api/options-chat/media/${a.id}`}
+          alt={label ?? "attachment"}
+          loading="lazy"
+          className="max-h-96 max-w-full rounded border border-slate-700 object-contain"
+        />
+      </a>
+    );
+  }
+
+  if (a.fetch_state === "ok") {
+    return (
+      <a
+        href={`/api/options-chat/media/${a.id}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mt-1 inline-flex items-center gap-2 rounded border border-slate-700 bg-slate-900/60 px-2 py-1 text-xs text-sky-400 underline decoration-sky-400/40"
+      >
+        <span aria-hidden>{a.kind === "video" ? "▶" : "📎"}</span>
+        <span className="max-w-[18rem] truncate">{label}</span>
+      </a>
+    );
+  }
+
   return (
     <div className="mt-1 inline-flex items-center gap-2 rounded border border-slate-700 bg-slate-900/60 px-2 py-1 text-xs text-slate-400">
       <span aria-hidden>{a.kind === "video" ? "▶" : a.kind === "file" ? "📎" : "🖼"}</span>
       <span className="max-w-[18rem] truncate text-slate-300">{label}</span>
       {dims && <span className="text-slate-500">{dims}</span>}
       <span className="text-slate-500">
-        {a.fetch_state === "ok" ? "stored" : "media not yet mirrored"}
+        {a.fetch_state === "pending"
+          ? "fetching…"
+          : a.fetch_state === "skipped_too_large"
+            ? "too large to mirror"
+            : "unavailable (the source link expired)"}
       </span>
     </div>
   );
