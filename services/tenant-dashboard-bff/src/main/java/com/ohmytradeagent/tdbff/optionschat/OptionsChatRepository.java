@@ -73,6 +73,7 @@ public class OptionsChatRepository {
   public record IngestMessage(
       long messageId,
       String authorName,
+      String authorColor,
       String authorAvatarUrl,
       OffsetDateTime postedAt,
       String content,
@@ -110,6 +111,7 @@ public class OptionsChatRepository {
   public record StoredMessage(
       long messageId,
       String authorName,
+      String authorColor,
       String authorAvatarUrl,
       OffsetDateTime postedAt,
       String content,
@@ -146,12 +148,14 @@ public class OptionsChatRepository {
                     // time zone but expression is of type character varying"). Discovered the hard
                     // way: this 500'd every ingest in production until the cast was added.
                     "INSERT INTO options_chat_message (message_id, channel_id, author_name,"
-                        + " author_avatar_url, posted_at, content, reply_to_id, edited,"
-                        + " content_hash) VALUES (?, ?, ?, ?, ?::timestamptz, ?, ?, ?, ?)"
+                        + " author_color, author_avatar_url, posted_at, content, reply_to_id,"
+                        + " edited, content_hash)"
+                        + " VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?, ?, ?, ?)"
                         + " ON CONFLICT (message_id) DO NOTHING",
                     m.messageId(),
                     channelId,
                     m.authorName(),
+                    m.authorColor(),
                     m.authorAvatarUrl(),
                     m.postedAt(),
                     m.content(),
@@ -252,7 +256,7 @@ public class OptionsChatRepository {
     long cursor = (before == null) ? Long.MAX_VALUE : before;
     Result<Record> rows =
         writerDsl.fetch(
-            "SELECT message_id, author_name, author_avatar_url, posted_at, content,"
+            "SELECT message_id, author_name, author_color, author_avatar_url, posted_at, content,"
                 + " reply_to_id, edited, deleted_at FROM options_chat_message"
                 + " WHERE channel_id = ? AND message_id < ? ORDER BY message_id DESC LIMIT ?",
             channelId,
@@ -298,6 +302,7 @@ public class OptionsChatRepository {
           new StoredMessage(
               id,
               r.get("author_name", String.class),
+              r.get("author_color", String.class),
               r.get("author_avatar_url", String.class),
               r.get("posted_at", OffsetDateTime.class),
               r.get("content", String.class),

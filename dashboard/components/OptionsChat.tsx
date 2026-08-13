@@ -18,6 +18,53 @@ const PAGE = 50;
 // How close to the bottom still counts as "following the conversation".
 const STICK_PX = 120;
 
+// Re-validated here even though the BFF already enforced it. NOT because CSS injection is
+// reachable through React's style prop — it assigns via CSSOM (`node.style.color = value`), which
+// parses a single value and drops anything malformed, so `"#fff; background: url(x)"` simply does
+// not apply. It is cheap insurance for the day this becomes a CSS custom property, a template
+// string, or anything that reaches a stylesheet rather than a property setter. Stating the real
+// (smaller) reason matters: an overstated one is how the NEXT redundant check gets waved through.
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+// Minimum WCAG relative luminance against this dark theme. #000000 is a perfectly legal Discord
+// role colour, and slate-900 is nearly black — so an author could arrive literally invisible, which
+// in a room where identifying the caller is the entire point is strictly worse than no colour at
+// all. This is the check with a real failure scenario behind it.
+const MIN_LUMINANCE = 0.12;
+
+function channelLuminance(c: number): number {
+  const s = c / 255;
+  return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+}
+
+/** WCAG relative luminance, 0 (black) to 1 (white). */
+function luminance(r: number, g: number, b: number): number {
+  return (
+    0.2126 * channelLuminance(r) + 0.7152 * channelLuminance(g) + 0.0722 * channelLuminance(b)
+  );
+}
+
+/**
+ * The author's colour, lightened just enough to stay readable on the dark surface.
+ *
+ * Lightens rather than discarding: the whole value of role colours is telling authors apart at a
+ * glance, so dropping a too-dark colour would quietly erase the identity we went to the trouble of
+ * mirroring. Blending toward white preserves the hue.
+ */
+function readableColor(c: string | null | undefined): string | undefined {
+  if (!c || !HEX_COLOR.test(c)) return undefined;
+  let r = parseInt(c.slice(1, 3), 16);
+  let g = parseInt(c.slice(3, 5), 16);
+  let b = parseInt(c.slice(5, 7), 16);
+  // Bounded: each step moves 20% toward white, so this converges well before the cap.
+  for (let i = 0; i < 12 && luminance(r, g, b) < MIN_LUMINANCE; i++) {
+    r = Math.round(r + (255 - r) * 0.2);
+    g = Math.round(g + (255 - g) * 0.2);
+    b = Math.round(b + (255 - b) * 0.2);
+  }
+  return `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
 function fmtTime(iso: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
@@ -134,7 +181,14 @@ function Message({ m, prev }: { m: OptionsChatMessage; prev?: OptionsChatMessage
     <div className={`px-3 ${grouped ? "py-0.5" : "pt-3 pb-0.5"}`}>
       {!grouped && (
         <div className="flex items-baseline gap-2">
-          <span className="text-sm font-semibold text-slate-100">{m.author_name}</span>
+          <span
+            className="text-sm font-semibold text-slate-100"
+            // Falls back to the class colour when the author has no role colour, so the dark
+            // theme stays coherent rather than inheriting Discord's default grey.
+            style={{ color: readableColor(m.author_color) }}
+          >
+            {m.author_name}
+          </span>
           <span className="text-xs text-slate-500">{fmtTime(m.posted_at)}</span>
         </div>
       )}

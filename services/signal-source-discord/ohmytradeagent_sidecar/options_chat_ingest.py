@@ -90,6 +90,7 @@ def to_wire(channel_id: str, messages: list[ChatMessage]) -> dict:
             {
                 "message_id": m.message_id,
                 "author_name": m.author_name,
+                "author_color": m.author_color,
                 "posted_at": m.posted_at,
                 "content": m.content,
                 "reply_to_id": m.reply_to_id,

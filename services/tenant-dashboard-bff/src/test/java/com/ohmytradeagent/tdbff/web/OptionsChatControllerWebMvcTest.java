@@ -64,6 +64,7 @@ class OptionsChatControllerWebMvcTest {
                 new StoredMessage(
                     1273987654321098765L,
                     "TradingTheTrend",
+                    "#ff0004",
                     "https://cdn.discordapp.com/avatar.png",
                     OffsetDateTime.of(2026, 8, 12, 14, 3, 11, 0, ZoneOffset.UTC),
                     "NVDA looking strong",
@@ -80,6 +81,8 @@ class OptionsChatControllerWebMvcTest {
         .andExpect(jsonPath("$.count").value(1))
         // Strings, not numbers: these exceed 2^53 and JavaScript would silently corrupt them.
         .andExpect(jsonPath("$.items[0].message_id").value("1273987654321098765"))
+        // Discord's role colour, normalised upstream and re-validated at ingest.
+        .andExpect(jsonPath("$.items[0].author_color").value("#ff0004"))
         .andExpect(jsonPath("$.items[0].reply_to_id").value("1273987654321098700"))
         .andExpect(jsonPath("$.items[0].attachments[0].id").value("42"))
         .andExpect(jsonPath("$.items[0].attachments[0].fetch_state").value("pending"))
@@ -95,6 +98,7 @@ class OptionsChatControllerWebMvcTest {
                 new StoredMessage(
                     1L,
                     "a",
+                    null,
                     null,
                     OffsetDateTime.of(2026, 8, 12, 14, 3, 11, 0, ZoneOffset.UTC),
                     "",

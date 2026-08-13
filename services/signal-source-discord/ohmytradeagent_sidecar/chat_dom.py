@@ -29,6 +29,19 @@ KIND_VIDEO = "video"
 KIND_FILE = "file"
 KIND_EMBED_IMAGE = "embed_image"
 
+# Discord renders a member's highest-role colour as `color: rgb(r, g, b)`. Anything else — a named
+# colour, a var(), a gradient, an injection attempt — is ignored rather than passed through.
+#
+# The `(?:^|;)` boundary is LOAD-BEARING, not tidiness. Without it the pattern matches the tail of
+# ANY property ending in "color": `background-color: rgb(1,2,3)` would be read as the text colour,
+# and when a span carries both, the first match wins — so an author's name could be painted with its
+# own background colour, i.e. invisible. Discord has display modes that colour the name's background
+# (`usernameColorOnName`), so this is reachable rather than theoretical.
+_RGB_RE = re.compile(
+    r"(?:^|;)\s*color\s*:\s*rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)",
+    re.I,
+)
+
 _ATTACHMENT_HOST_RE = re.compile(
     r"^https://(?:cdn|media)\.discordapp\.(?:com|net)/", re.IGNORECASE
 )
@@ -54,6 +67,30 @@ class ChatEmbed:
     thumbnail_url: str | None = None
 
 
+def parse_author_color(style: str | None) -> str | None:
+    """``color: rgb(r, g, b)`` → ``#rrggbb``, or None.
+
+    Normalised to hex HERE so exactly one format ever crosses the wire, and so the value that
+    reaches a CSS context is structurally incapable of carrying anything but six hex digits — a raw
+    style string from an untrusted DOM has no business being handed to a renderer.
+
+    Returns None when the span has no explicit colour: that means the author has no role colour, and
+    the page should use its own default rather than Discord's.
+    """
+    if not style:
+        return None
+    m = _RGB_RE.search(style)
+    if not m:
+        return None
+    # Each group is 1-3 ASCII digits by construction, so int() cannot raise and cannot be negative;
+    # only the upper bound is a real check. Guarding the other two would be permanently-uncovered
+    # code that misleads the next person into thinking the regex is looser than it is.
+    rgb = [int(g) for g in m.groups()]
+    if any(v > 255 for v in rgb):
+        return None
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
 @dataclass(frozen=True)
 class ChatMessage:
     """One scraped message, already safe to hand to the BFF ingest.
@@ -67,6 +104,9 @@ class ChatMessage:
     author_name: str
     posted_at: str
     content: str
+    # Optional, and defaulted so a caller that does not care about presentation need not supply it:
+    # most authors have no role colour, and None means "use the page's own default".
+    author_color: str | None = None
     reply_to_id: str | None = None
     edited: bool = False
     attachments: list[ChatAttachment] = field(default_factory=list)
@@ -110,11 +150,14 @@ EXTRACT_JS = r"""
     const acc = li.querySelector('div[id="message-accessories-' + ownSuffix + '"]');
 
     // Author + avatar: walk previous siblings for grouped (headerless) messages.
-    let author = null, avatar = null, node = li;
+    let author = null, avatar = null, authorStyle = null, node = li;
     while (node) {
       const u = node.querySelector('h3 span[class*="username"]');
       if (u) {
         author = txt(u);
+        // Discord sets the role colour as an INLINE style on the username span, e.g.
+        // style="color: rgb(255, 0, 4);". Dumped raw — Python parses and validates it.
+        authorStyle = u.getAttribute('style');
         const img = node.querySelector('img[class*="avatar"]');
         avatar = img ? img.getAttribute('src') : null;
         break;
@@ -193,6 +236,7 @@ EXTRACT_JS = r"""
       has_own_content: !!own,
       has_accessories: !!acc,
       author: author,
+      author_style: authorStyle,
       avatar_src: avatar,
       posted_at: timeEl ? timeEl.getAttribute('datetime') : null,
       text: own ? (own.innerText || own.textContent || '') : '',
@@ -399,6 +443,7 @@ def build_chat_messages(
                 message_id=message_id,
                 channel_id=channel_id,
                 author_name=author,
+                author_color=parse_author_color(raw.get("author_style")),
                 posted_at=posted_at,
                 content=content,
                 reply_to_id=reply_to,

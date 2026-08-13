@@ -131,6 +131,48 @@ class OptionsChatIngestParserTest {
   }
 
   @Test
+  void avalidRoleColourSurvives() {
+    Map<String, Object> m = message();
+    m.put("author_color", "#ff0004");
+
+    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), CHANNEL);
+
+    assertThat(out.get(0).authorColor()).isEqualTo("#ff0004");
+  }
+
+  @Test
+  void anythingThatIsNotSixHexDigitsIsDropped_becauseItEndsUpInACssContext() {
+    // Not sanitised — the stored value must be structurally incapable of representing an
+    // injection, so anything that is not exactly #rrggbb becomes null rather than being repaired.
+    for (String hostile :
+        List.of(
+            "red",
+            "#fff",
+            "#ff0004; background: url(https://attacker.io/beacon)",
+            "rgb(255,0,4)",
+            "expression(alert(1))",
+            "var(--x)",
+            "#gggggg",
+            "javascript:alert(1)")) {
+      Map<String, Object> m = message();
+      m.put("author_color", hostile);
+
+      List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), CHANNEL);
+
+      assertThat(out.get(0).authorColor()).as(hostile).isNull();
+    }
+  }
+
+  @Test
+  void safeColorAcceptsOnlySixHexDigits_testedDirectlyLikeSafeUrl() {
+    assertThat(OptionsChatIngestParser.safeColor("#ff0004")).isEqualTo("#ff0004");
+    assertThat(OptionsChatIngestParser.safeColor("#FF0004")).isEqualTo("#FF0004");
+    assertThat(OptionsChatIngestParser.safeColor(null)).isNull();
+    assertThat(OptionsChatIngestParser.safeColor("#fff")).isNull();
+    assertThat(OptionsChatIngestParser.safeColor("#gggggg")).isNull();
+  }
+
+  @Test
   void anUnknownAttachmentKindCollapsesToFile() {
     Map<String, Object> a = attachment("https://cdn.discordapp.com/a.bin");
     a.put("kind", "executable");
