@@ -185,27 +185,24 @@ class DashboardMigrationSqlStructureTest {
   }
 
   @Test
-  void v9GrantsSelectInsertUpdateToWriterOnly_neverDeleteNeverReadonly() throws IOException {
+  void v9GrantsSelectInsertToWriterOnly_neverUpdateOrDelete_neverReadonly() throws IOException {
     String sql = executableSql("/db/dashboard/V9__options_chat.sql");
 
-    // SELECT is load-bearing on a WRITE path here, not just for reads: `ON CONFLICT (message_id) DO
-    // NOTHING` reads the arbiter index and `UPDATE ... WHERE content_hash <> ?` reads the existing
-    // row. Without SELECT both raise 42501 (the same PG rule V7 documents for its DELETE).
-    assertThat(privilegesGrantedOn(sql, "options_chat_message"))
-        .isEqualTo("SELECT, INSERT, UPDATE");
-    // Phase 4 fills in `bytes` / `fetch_state`, hence UPDATE.
-    assertThat(privilegesGrantedOn(sql, "options_chat_attachment"))
-        .isEqualTo("SELECT, INSERT, UPDATE");
-    // Embeds are replaced wholesale with their message, never mutated in place.
+    // SELECT is load-bearing on the WRITE path here, not just for reads: `ON CONFLICT (message_id)
+    // DO NOTHING` reads the arbiter index, and without SELECT that raises 42501 (the same PG rule
+    // V7 documents for its DELETE). Exactly what the shipped code issues, and no more.
+    assertThat(privilegesGrantedOn(sql, "options_chat_message")).isEqualTo("SELECT, INSERT");
+    assertThat(privilegesGrantedOn(sql, "options_chat_attachment")).isEqualTo("SELECT, INSERT");
     assertThat(privilegesGrantedOn(sql, "options_chat_embed")).isEqualTo("SELECT, INSERT");
 
-    // No DELETE: Phase 6's retention job adds it in its own migration, exactly as V5 withheld
-    // DELETE
-    // until V7 needed it. Granting a privilege nothing uses is how least-privilege rots.
+    // Neither DELETE (Phase 6 retention) nor UPDATE (Phase 4 media fill, Phase 6 edit reconcile).
+    // Each widens deliberately in its own migration when the code needing it ships, exactly as V5
+    // withheld DELETE until V7 needed it. Granting a privilege nothing uses is how least-privilege
+    // rots — and "the next phase will want it" is the argument that starts the rot.
     assertThat(sql)
-        .as("V9 never grants DELETE — retention is a later migration")
+        .as("V9 never grants DELETE or UPDATE — later phases widen deliberately")
         .doesNotContainPattern(
-            Pattern.compile("GRANT\\s+[A-Z, ]*DELETE", Pattern.CASE_INSENSITIVE));
+            Pattern.compile("GRANT\\s+[A-Z, ]*(DELETE|UPDATE)", Pattern.CASE_INSENSITIVE));
     // dashboard_readonly is the browser-facing Next.js pool (dashboard/lib/db.ts). /options-chat is
     // served through the BFF, so granting that role SELECT on untrusted third-party content would
     // widen a Next.js compromise for no benefit.

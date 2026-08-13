@@ -51,8 +51,12 @@ public final class OptionsChatIngestParser {
 
   private OptionsChatIngestParser() {}
 
-  /** Thrown for structural problems; the controller maps this to 400. */
-  public static class InvalidIngestException extends RuntimeException {
+  /**
+   * Thrown for structural problems. Extends {@link IllegalArgumentException} so {@code
+   * GlobalExceptionHandler} maps it to the service's standard 400 envelope — a hand-rolled 400 in
+   * the controller would give this one route a different error shape from every other endpoint.
+   */
+  public static class InvalidIngestException extends IllegalArgumentException {
     public InvalidIngestException(String message) {
       super(message);
     }
@@ -68,7 +72,7 @@ public final class OptionsChatIngestParser {
     if (body == null) {
       throw new InvalidIngestException("body is required");
     }
-    long channelId = requireLong(body, "channel_id");
+    long channelId = requireSnowflake(body, "channel_id");
     if (channelId != expectedChannelId) {
       throw new InvalidIngestException("channel_id is not the configured options-chat channel");
     }
@@ -90,12 +94,12 @@ public final class OptionsChatIngestParser {
   }
 
   private static IngestMessage parseMessage(Map<String, Object> m) {
-    long messageId = requireLong(m, "message_id");
+    long messageId = requireSnowflake(m, "message_id");
     String authorName = truncate(requireString(m, "author_name"), MAX_AUTHOR);
     OffsetDateTime postedAt = requireTimestamp(m, "posted_at");
     // Content may legitimately be empty — an image-only post has no text.
     String content = truncate(optionalString(m, "content", ""), MAX_CONTENT);
-    Long replyToId = optionalLong(m, "reply_to_id");
+    Long replyToId = Snowflakes.parse(m.get("reply_to_id"));
     boolean edited = Boolean.TRUE.equals(m.get("edited"));
     String avatar = safeUrl(optionalString(m, "author_avatar_url", null));
 
@@ -128,10 +132,6 @@ public final class OptionsChatIngestParser {
               kind,
               url,
               truncate(optionalString(a, "filename", null), MAX_FILENAME),
-              // content_type is NOT taken from the caller: /media/{id} serves it as a response
-              // header, so a caller-chosen value would be a content-sniffing lever. Phase 4 sets it
-              // from our own transcode.
-              null,
               optionalInt(a, "width"),
               optionalInt(a, "height"),
               optionalInt(a, "byte_size")));
@@ -193,26 +193,12 @@ public final class OptionsChatIngestParser {
     return s.length() <= max ? s : s.substring(0, max);
   }
 
-  private static long requireLong(Map<String, Object> m, String key) {
-    Long v = optionalLong(m, key);
+  private static long requireSnowflake(Map<String, Object> m, String key) {
+    Long v = Snowflakes.parse(m.get(key));
     if (v == null) {
       throw new InvalidIngestException(key + " is required and must be a snowflake");
     }
     return v;
-  }
-
-  /** Snowflakes arrive as JSON strings — a 19-digit JSON number loses precision in JavaScript. */
-  private static Long optionalLong(Map<String, Object> m, String key) {
-    Object v = m.get(key);
-    if (v == null) {
-      return null;
-    }
-    try {
-      long parsed = v instanceof Number n ? n.longValue() : Long.parseLong(v.toString().trim());
-      return parsed > 0 ? parsed : null;
-    } catch (NumberFormatException e) {
-      return null;
-    }
   }
 
   private static Integer optionalInt(Map<String, Object> m, String key) {

@@ -91,11 +91,13 @@ CREATE TABLE options_chat_embed (
 --     Without SELECT this raises 42501; that exact failure is why the invite bind carries a
 --     SAVEPOINT + swallow-23505 workaround (InviteWriterRepository). With SELECT granted, plain
 --     ON CONFLICT works and no workaround is needed.
---   * UPDATE ... WHERE content_hash <> ?              -> the predicate reads the existing row.
 --
--- No DELETE: Phase 6's retention job needs it and will add it in its own migration, mirroring how
--- V5 withheld DELETE until V7 needed it. Widening early would grant a privilege nothing uses.
-GRANT SELECT, INSERT, UPDATE ON options_chat_message    TO dashboard_writer;
-GRANT SELECT, INSERT, UPDATE ON options_chat_attachment TO dashboard_writer;
--- Embeds are never mutated in place (a re-ingest replaces the message's set), so no UPDATE.
-GRANT SELECT, INSERT           ON options_chat_embed    TO dashboard_writer;
+-- SELECT + INSERT is EXACTLY what the shipped code issues, and the grant stops there. Phase 4's
+-- media fill (UPDATE ... SET bytes) and Phase 6's edit reconcile (UPDATE ... WHERE content_hash)
+-- and retention (DELETE) each add their own grant when the code that needs it ships — mirroring V5,
+-- which withheld DELETE until V7 actually needed it. Granting UPDATE now "because the next phase
+-- will want it" is the same speculative widening this comment exists to refuse; OptionsChatMigrationIT
+-- asserts UPDATE and DELETE are both denied, so a later phase has to widen deliberately.
+GRANT SELECT, INSERT ON options_chat_message    TO dashboard_writer;
+GRANT SELECT, INSERT ON options_chat_attachment TO dashboard_writer;
+GRANT SELECT, INSERT ON options_chat_embed      TO dashboard_writer;

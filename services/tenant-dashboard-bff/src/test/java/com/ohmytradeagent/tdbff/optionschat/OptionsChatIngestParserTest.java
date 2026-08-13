@@ -115,7 +115,10 @@ class OptionsChatIngestParserTest {
   }
 
   @Test
-  void callerSuppliedContentTypeIsIgnored_becauseMediaServesItAsAResponseHeader() {
+  void aCallerSuppliedContentTypeIsIgnoredRatherThanRejected() {
+    // IngestAttachment carries no contentType component at all, so a caller cannot influence what
+    // /media/{id} later serves as a Content-Type header — the guarantee is structural, not a check.
+    // What this pins is that supplying one is silently ignored rather than failing the batch.
     Map<String, Object> a = attachment("https://cdn.discordapp.com/a.png");
     a.put("content_type", "text/html");
     Map<String, Object> m = message();
@@ -123,9 +126,8 @@ class OptionsChatIngestParserTest {
 
     List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), CHANNEL);
 
-    assertThat(out.get(0).attachments().get(0).contentType())
-        .as("content_type must come from our own transcode, never the caller")
-        .isNull();
+    assertThat(out.get(0).attachments()).hasSize(1);
+    assertThat(out.get(0).attachments().get(0).kind()).isEqualTo("image");
   }
 
   @Test

@@ -4,6 +4,7 @@ import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.StoredAttachment;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.StoredEmbed;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.StoredMessage;
+import com.ohmytradeagent.tdbff.optionschat.Snowflakes;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -29,14 +30,8 @@ import org.springframework.web.bind.annotation.RestController;
  * dashboard reuse {@code bffGet} unchanged. Do not read tenant scoping into this endpoint; there is
  * none.
  *
- * <p>DARK-GATED via a two-name {@code @ConditionalOnProperty} (both must be {@code true}, missing =
- * fail-closed): the bean exists only when BOTH {@code options-chat.enabled=true} AND {@code
- * dashboard.writer.enabled=true}, the latter because the read goes through the {@code
- * dashboard_writer} DSL — the only dashboard-DB DSLContext the BFF has. With either off the bean is
- * absent and the route 404s.
- *
- * <p>Snowflake ids are emitted as JSON STRINGS. They exceed 2^53, so a JSON number would be
- * silently corrupted by JavaScript's double-precision parse before it ever reached React.
+ * <p>Dark-gated via a two-name {@code @ConditionalOnProperty} — see {@code application.yml} for why
+ * both names are load-bearing. Snowflake ids are emitted as JSON STRINGS (see {@code Snowflakes}).
  */
 @RestController
 @RequestMapping("/api/options-chat")
@@ -69,35 +64,18 @@ public class OptionsChatController {
     // Authentication only — the value is intentionally unused (see the class javadoc).
     ctx.tenantId(req);
 
+    // A malformed cursor falls back to the newest page rather than 400ing: it is opaque to the
+    // client, so the only ways to get one wrong are a bug or a hand-edited URL, and neither is
+    // worth an error page instead of the newest messages.
     List<StoredMessage> rows =
-        repo.recent(channelId, parseCursor(before), Math.clamp(limit, 1, MAX_LIMIT));
+        repo.recent(channelId, Snowflakes.parse(before), Math.clamp(limit, 1, MAX_LIMIT));
 
-    List<Map<String, Object>> items = new ArrayList<>(rows.size());
-    for (StoredMessage m : rows) {
-      items.add(toJson(m));
-    }
+    List<Map<String, Object>> items = rows.stream().map(OptionsChatController::toJson).toList();
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("channel_id", Long.toString(channelId));
     body.put("count", items.size());
     body.put("items", items);
     return ResponseEntity.ok(body);
-  }
-
-  /**
-   * A malformed cursor is treated as absent (first page) rather than a 400 — it is opaque to the
-   * client, so the only way to get one wrong is a bug or a hand-edited URL, and neither is worth an
-   * error page over the newest messages.
-   */
-  private static Long parseCursor(String before) {
-    if (before == null || before.isBlank()) {
-      return null;
-    }
-    try {
-      long v = Long.parseLong(before.trim());
-      return v > 0 ? v : null;
-    } catch (NumberFormatException e) {
-      return null;
-    }
   }
 
   private static Map<String, Object> toJson(StoredMessage m) {

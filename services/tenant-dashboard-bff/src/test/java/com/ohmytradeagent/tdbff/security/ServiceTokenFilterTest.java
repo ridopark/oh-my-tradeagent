@@ -123,6 +123,65 @@ class ServiceTokenFilterTest {
     assertThat(res.getStatus()).isEqualTo(401);
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // Path-traversal guard. getRequestURI() is the RAW request line; Spring dispatches on the DECODED
+  // and NORMALIZED path. Without this guard the two disagree and every path-based decision this
+  // filter makes can be aimed at a different handler than the one it authorized.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void ingestPrefixWithEncodedDots_cannotSmuggleTheIngestTokenIntoATenantRead() throws Exception {
+    // The raw URI startsWith the ingest prefix, so the prefix check alone would accept the ingest
+    // token — while the container normalizes this to /api/positions.
+    MockHttpServletResponse res =
+        run("/internal/options-chat/%2e%2e/%2e%2e/api/positions", "Bearer " + INGEST_TOKEN);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void actuatorPrefixWithEncodedDots_isNotExempt() throws Exception {
+    // Worse than the ingest case: the actuator exemption skips the filter entirely, so without the
+    // guard this would reach a tenant read with NO credential at all.
+    MockHttpServletRequest req =
+        new MockHttpServletRequest("GET", "/actuator/%2e%2e/api/positions");
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(401);
+    assertThat(chain.getRequest()).as("must not have been passed downstream").isNull();
+  }
+
+  @Test
+  void literalDotSegments_areRejectedEvenWithAValidSharedToken() throws Exception {
+    assertThat(run("/api/../api/positions", "Bearer " + TOKEN).getStatus()).isEqualTo(401);
+    assertThat(run("/api/./positions", "Bearer " + TOKEN).getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void encodedDotsAreRejectedInAnyCase() throws Exception {
+    assertThat(run("/internal/options-chat/%2E%2E/api/positions", "Bearer " + INGEST_TOKEN))
+        .extracting(MockHttpServletResponse::getStatus)
+        .isEqualTo(401);
+  }
+
+  @Test
+  void ordinaryPathsAreUnaffectedByTheGuard() throws Exception {
+    // No route in this service takes a dot-bearing path segment, so the guard must be invisible to
+    // every legitimate caller — including the tenant-scoped admin routes.
+    MockHttpServletRequest req =
+        new MockHttpServletRequest("DELETE", "/api/admin/tenants/acme-paper_1/dashboard-rows");
+    req.addHeader("Authorization", "Bearer " + TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
   @Test
   void ingestRoute_whenIngestTokenIsUnprovisioned_is401_evenWithAnEmptyBearer() throws Exception {
     // Fail-closed: a blank configured token must match NOTHING, not "any empty bearer".

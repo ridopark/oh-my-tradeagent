@@ -25,13 +25,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * set (health, info, prometheus) carries no secrets.
  *
  * <p>ONE EXCEPTION TO THE SINGLE-TOKEN MODEL: {@code /internal/options-chat/**} is gated on a
- * SEPARATE {@code OPTIONS_CHAT_INGEST_TOKEN} and rejects the shared token outright. Its caller is
- * the Discord chat-mirror pod, whose entire job is rendering an untrusted third-party room — with
- * {@code BFF_SHARED_TOKEN} it could set any {@code X-Tenant-Id} and read positions, orders and
- * portfolio for real-money tenants, which is exactly the spoofing this filter exists to prevent.
- * The narrow token confines a compromise of that pod to defacing the chat mirror. Fail-closed: an
- * unset or blank ingest token rejects every request to that prefix, so the route cannot be reached
- * before the secret is provisioned.
+ * separate {@code OPTIONS_CHAT_INGEST_TOKEN} and rejects the shared token outright, because its
+ * caller renders an untrusted third-party Discord room and must not be able to spoof a tenant. Both
+ * directions of that isolation are pinned in {@code ServiceTokenFilterTest}; the rationale lives
+ * with the config in {@code application.yml}. Fail-closed: a blank ingest token matches nothing.
  */
 @Component
 public class ServiceTokenFilter extends OncePerRequestFilter {
@@ -64,21 +61,69 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   @Override
   protected boolean shouldNotFilter(HttpServletRequest request) {
     String path = request.getRequestURI();
-    return path != null && path.startsWith("/actuator/");
+    // The exemption applies only to a path that cannot normalize into something else. Without the
+    // second clause, `/actuator/%2e%2e/api/positions` would skip this filter entirely and reach a
+    // tenant read UNAUTHENTICATED — a worse version of the ingest-token problem documented in
+    // doFilterInternal. Suspicious paths fall through to the filter, which rejects them.
+    return path != null && path.startsWith("/actuator/") && !hasSuspiciousPath(path);
   }
 
   @Override
   protected void doFilterInternal(
       HttpServletRequest request, HttpServletResponse response, FilterChain chain)
       throws ServletException, IOException {
+    // Path-traversal guard, BEFORE any path-based decision (this filter makes two: the actuator
+    // exemption and the ingest-token prefix). getRequestURI() is the RAW, un-normalized request
+    // line, while Spring dispatches on the DECODED and NORMALIZED path — so the string this filter
+    // authorizes and the handler that actually runs can disagree:
+    //
+    //   POST /internal/options-chat/%2e%2e/%2e%2e/api/positions
+    //
+    // startsWith("/internal/options-chat/") is true, so the ingest token would be accepted, but the
+    // request dispatches to /api/positions — turning a scraper credential into a real-money tenant
+    // read, the precise thing the split token exists to prevent. Rather than trying to reproduce
+    // the container's normalization here (getting that subtly wrong is how these bugs happen), we
+    // reject any request whose path could normalize to something other than itself. This is what
+    // Spring Security's StrictHttpFirewall does, and it costs us nothing: no route in this service
+    // takes a path segment containing a dot (tenant ids are [A-Za-z0-9_-]+), so a legitimate caller
+    // never sends one.
+    if (hasSuspiciousPath(request.getRequestURI())) {
+      reject(response);
+      return;
+    }
     String header = request.getHeader("Authorization");
     if (header == null || !header.startsWith(BEARER_PREFIX) || !tokenMatches(request, header)) {
-      response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-      response.setContentType("application/json");
-      response.getWriter().write("{\"error\":\"unauthorized\"}");
+      reject(response);
       return;
     }
     chain.doFilter(request, response);
+  }
+
+  private static void reject(HttpServletResponse response) throws IOException {
+    response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    response.setContentType("application/json");
+    response.getWriter().write("{\"error\":\"unauthorized\"}");
+  }
+
+  /**
+   * True if the raw path contains a dot segment or a percent-encoded dot, in any case. Both forms
+   * are rejected: the literal {@code ..} because the container would collapse it, and {@code %2e}
+   * because the container decodes once before normalizing, so an encoded dot becomes a real one
+   * after this filter has already made its decision.
+   */
+  private static boolean hasSuspiciousPath(String rawUri) {
+    if (rawUri == null) {
+      return true; // no path to reason about — fail closed
+    }
+    if (rawUri.toLowerCase(java.util.Locale.ROOT).contains("%2e")) {
+      return true;
+    }
+    for (String segment : rawUri.split("/")) {
+      if (segment.equals(".") || segment.equals("..")) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private boolean tokenMatches(HttpServletRequest request, String header) {

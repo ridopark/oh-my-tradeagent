@@ -1,5 +1,6 @@
 package com.ohmytradeagent.tdbff.web;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
@@ -69,10 +70,9 @@ class OptionsChatIngestControllerWebMvcTest {
   }
 
   private static void assertThatOneMessageSurvived(List<IngestMessage> messages) {
-    org.assertj.core.api.Assertions.assertThat(messages).hasSize(1);
-    org.assertj.core.api.Assertions.assertThat(messages.get(0).messageId())
-        .isEqualTo(1273987654321098765L);
-    org.assertj.core.api.Assertions.assertThat(messages.get(0).attachments()).hasSize(1);
+    assertThat(messages).hasSize(1);
+    assertThat(messages.get(0).messageId()).isEqualTo(1273987654321098765L);
+    assertThat(messages.get(0).attachments()).hasSize(1);
   }
 
   @Test

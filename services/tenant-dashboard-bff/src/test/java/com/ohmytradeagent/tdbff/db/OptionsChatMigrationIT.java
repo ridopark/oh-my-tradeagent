@@ -127,33 +127,6 @@ class OptionsChatMigrationIT {
                       + msg
                       + ", 0, 'a title')"))
           .isEqualTo(1);
-
-      // Phase 4 fills in the fetched bytes; the UPDATE grant covers it.
-      assertThat(
-              st.executeUpdate(
-                  "UPDATE options_chat_attachment SET fetch_state = 'ok', content_type = "
-                      + "'image/webp' WHERE message_id = "
-                      + msg))
-          .isEqualTo(1);
-    }
-  }
-
-  @Test
-  void writerCanRunTheEditDetectingUpdate_provingThePredicateSelectGrant() throws SQLException {
-    long msg = MSG + 2;
-    try (Connection w = asRole("dashboard_writer", WRITER_PW);
-        var st = w.createStatement()) {
-      insertMessage(st, msg, "before edit");
-
-      // Phase 6's reconcile. The WHERE reads the stored row, so this needs SELECT on content_hash
-      // in addition to UPDATE.
-      assertThat(
-              st.executeUpdate(
-                  "UPDATE options_chat_message SET content = 'after edit', edited = TRUE, "
-                      + "content_hash = 'hash-2' WHERE message_id = "
-                      + msg
-                      + " AND content_hash <> 'hash-2'"))
-          .isEqualTo(1);
     }
   }
 
@@ -189,9 +162,16 @@ class OptionsChatMigrationIT {
   }
 
   @Test
-  void writerIsDeniedUpdateOnEmbeds_whichAreReplacedNeverMutated() throws SQLException {
+  void writerIsDeniedUpdate_soPhase4And6MustWidenDeliberately() throws SQLException {
+    // Phase 1 issues no UPDATE, so V9 grants none. Phase 4 (media fill: SET bytes, fetch_state) and
+    // Phase 6 (edit reconcile: SET content WHERE content_hash <> ?) each add their own grant with
+    // the code that needs it. These assertions are what force that to be a conscious act rather
+    // than something already lying around — flipping one of them is the signal to review the
+    // widening.
     try (Connection w = asRole("dashboard_writer", WRITER_PW);
         var st = w.createStatement()) {
+      assertDenied(() -> st.executeUpdate("UPDATE options_chat_message SET edited = TRUE"));
+      assertDenied(() -> st.executeUpdate("UPDATE options_chat_attachment SET fetch_state = 'ok'"));
       assertDenied(() -> st.executeUpdate("UPDATE options_chat_embed SET title = 'x'"));
     }
   }

@@ -1,7 +1,6 @@
 package com.ohmytradeagent.tdbff.web;
 
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatIngestParser;
-import com.ohmytradeagent.tdbff.optionschat.OptionsChatIngestParser.InvalidIngestException;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.IngestMessage;
 import java.util.LinkedHashMap;
@@ -20,17 +19,10 @@ import org.springframework.web.bind.annotation.RestController;
  * /options-chat} mirror. A SERVICE route, not tenant- or operator-scoped: it carries no {@code
  * X-Tenant-Id} and grants no tenant anything.
  *
- * <p>AUTH IS DELIBERATELY NOT THE BFF SHARED TOKEN. {@code ServiceTokenFilter} route-scopes {@code
- * /internal/options-chat/**} to a SEPARATE {@code OPTIONS_CHAT_INGEST_TOKEN}, and that token opens
- * nothing else. The caller is a pod whose entire job is rendering an untrusted third-party Discord
- * room; handing it {@code BFF_SHARED_TOKEN} would let it set any {@code X-Tenant-Id} and read
- * positions, orders and portfolio for real-money tenants. The narrow token keeps a compromise of
- * the scraper confined to defacing this one mirror.
- *
- * <p>DARK-GATED on BOTH {@code options-chat.enabled} and {@code dashboard.writer.enabled}, matching
- * the read side. The ingest is gated too, not just the read: a live write endpoint accepting
- * arbitrary untrusted content into the dashboard DB with nothing consuming it is strictly worse
- * than no endpoint at all.
+ * <p>Auth is the separate {@code OPTIONS_CHAT_INGEST_TOKEN}, NOT the BFF shared token — enforced
+ * and explained in {@code ServiceTokenFilter}. Dark-gated on both {@code options-chat.enabled} and
+ * {@code dashboard.writer.enabled}, matching the read side; the ingest is gated too because a live
+ * write endpoint taking untrusted content with nothing consuming it is worse than no endpoint.
  *
  * <p>Idempotent by snowflake, so the scraper may safely re-send anything Discord still has rendered
  * after a restart.
@@ -54,14 +46,10 @@ public class OptionsChatIngestController {
   @PostMapping("/ingest")
   public ResponseEntity<Map<String, Object>> ingest(
       @RequestBody(required = false) Map<String, Object> body) {
-    List<IngestMessage> messages;
-    try {
-      messages = OptionsChatIngestParser.parse(body, channelId);
-    } catch (InvalidIngestException e) {
-      // Structural rejection: the caller is broken or is not our scraper. Content-level problems
-      // never land here — the parser sanitizes those (see its javadoc).
-      return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
-    }
+    // A structural rejection throws InvalidIngestException (an IllegalArgumentException), which
+    // GlobalExceptionHandler turns into the service's standard 400 envelope. Content-level problems
+    // never reach here — the parser sanitizes those.
+    List<IngestMessage> messages = OptionsChatIngestParser.parse(body, channelId);
     int stored = repo.ingest(channelId, messages);
 
     Map<String, Object> out = new LinkedHashMap<>();
