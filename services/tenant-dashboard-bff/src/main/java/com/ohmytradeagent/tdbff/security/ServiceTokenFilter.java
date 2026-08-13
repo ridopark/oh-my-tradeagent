@@ -38,6 +38,10 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   // started without BFF_SHARED_TOKEN silently trusts a value anyone can read from this repo.
   private static final String INSECURE_DEFAULT_TOKEN = "dev-shared-token";
   private static final String OPTIONS_CHAT_INGEST_PREFIX = "/internal/options-chat/";
+  // Percent-encodings the container decodes into a dot, a separator, or a path parameter — each
+  // would change which handler runs after this filter has already chosen a token. See
+  // hasSuspiciousPath.
+  private static final String[] ENCODED_SEPARATORS = {"%2e", "%2f", "%5c", "%3b"};
 
   private final String sharedToken;
   private final String optionsChatIngestToken;
@@ -106,19 +110,48 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   }
 
   /**
-   * True if the raw path contains a dot segment or a percent-encoded dot, in any case. Both forms
-   * are rejected: the literal {@code ..} because the container would collapse it, and {@code %2e}
-   * because the container decodes once before normalizing, so an encoded dot becomes a real one
-   * after this filter has already made its decision.
+   * True if the raw path could normalize into a different path than the one this filter inspects.
+   * This is Spring Security's {@code StrictHttpFirewall} rule set, and every entry earns its place
+   * — each corresponds to a transformation Tomcat applies BETWEEN this filter and handler dispatch:
+   *
+   * <ul>
+   *   <li>{@code ;} and {@code %3b} — path PARAMETERS, stripped by {@code parsePathParameters}
+   *       before decoding and normalizing. So {@code ..;a} is not the literal string {@code ".."}
+   *       here, but IS a {@code ..} by the time the path is normalized. Omitting this was a real
+   *       bypass: {@code /internal/options-chat/..;a/..;b/api/positions} would have carried the
+   *       ingest token into a tenant read.
+   *   <li>{@code .} / {@code ..} segments and {@code %2e} — the traversal itself, literal or
+   *       encoded (the container decodes once, then normalizes).
+   *   <li>{@code %2f} and {@code %5c} — encoded separators that become segment boundaries.
+   *   <li>empty segments ({@code //}) — collapsed by normalize, so {@code /internal//options-chat/}
+   *       reaches the ingest handler while failing this filter's prefix test, which would let the
+   *       SHARED token through to the ingest route.
+   * </ul>
+   *
+   * <p>Free for us: no route in this service takes a path segment containing a dot, a semicolon, or
+   * anything needing percent-encoding (tenant ids are {@code [A-Za-z0-9_-]+}).
    */
   private static boolean hasSuspiciousPath(String rawUri) {
-    if (rawUri == null) {
+    if (rawUri == null || rawUri.isEmpty()) {
       return true; // no path to reason about — fail closed
     }
-    if (rawUri.toLowerCase(java.util.Locale.ROOT).contains("%2e")) {
+    String lower = rawUri.toLowerCase(java.util.Locale.ROOT);
+    for (String encoded : ENCODED_SEPARATORS) {
+      if (lower.contains(encoded)) {
+        return true;
+      }
+    }
+    if (rawUri.indexOf(';') >= 0 || rawUri.indexOf('\\') >= 0) {
       return true;
     }
-    for (String segment : rawUri.split("/")) {
+    // Index 0 is the empty string before the leading '/'; a later empty segment means '//'.
+    String[] segments = rawUri.split("/", -1);
+    for (int i = 1; i < segments.length; i++) {
+      String segment = segments[i];
+      // A trailing '/' leaves a final empty segment and is harmless.
+      if (segment.isEmpty() && i < segments.length - 1) {
+        return true;
+      }
       if (segment.equals(".") || segment.equals("..")) {
         return true;
       }

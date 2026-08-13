@@ -186,9 +186,18 @@ public final class OptionsChatIngestParser {
     return (lower.startsWith("http://") || lower.startsWith("https://")) ? s : null;
   }
 
+  /**
+   * Truncate to at most {@code max} chars WITHOUT splitting a surrogate pair. Cutting mid-pair
+   * would leave an unpaired surrogate that pgjdbc stores as a replacement byte — a silently
+   * corrupted trailing character. Reachable in ordinary traffic: MAX_EMBED_TEXT is below Discord's
+   * own 4096-char embed-description limit, and an emoji at the boundary is a surrogate pair.
+   */
   private static String truncate(String s, int max) {
     if (s == null) {
       return null;
+    }
+    if (s.length() > max && Character.isHighSurrogate(s.charAt(max - 1))) {
+      return s.substring(0, max - 1);
     }
     return s.length() <= max ? s : s.substring(0, max);
   }
@@ -201,16 +210,31 @@ public final class OptionsChatIngestParser {
     return v;
   }
 
+  /**
+   * A non-negative {@code int}, or {@code null} if absent, unparseable, or out of range.
+   *
+   * <p>Out-of-range values are DROPPED, never narrowed: {@code intValue()} on an untrusted
+   * 5_000_000_000 wraps to 705032704, and on 4_294_967_296 to 0. {@code byte_size} exists so Phase
+   * 4 can skip an over-large attachment WITHOUT downloading it, so a wrapped value would defeat
+   * exactly the gate it feeds — and null (unknown, fetch and find out) is the safe answer, whereas
+   * a small wrapped number is a confident lie.
+   */
   private static Integer optionalInt(Map<String, Object> m, String key) {
     Object v = m.get(key);
-    if (v instanceof Number n) {
-      return n.intValue();
-    }
-    try {
-      return v == null ? null : Integer.valueOf(v.toString().trim());
-    } catch (NumberFormatException e) {
+    if (v == null) {
       return null;
     }
+    long parsed;
+    if (v instanceof Number n) {
+      parsed = n.longValue();
+    } else {
+      try {
+        parsed = Long.parseLong(v.toString().trim());
+      } catch (NumberFormatException e) {
+        return null;
+      }
+    }
+    return (parsed < 0 || parsed > Integer.MAX_VALUE) ? null : (int) parsed;
   }
 
   private static String requireString(Map<String, Object> m, String key) {

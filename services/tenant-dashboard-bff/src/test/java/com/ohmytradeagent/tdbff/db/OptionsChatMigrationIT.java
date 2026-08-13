@@ -98,7 +98,10 @@ class OptionsChatMigrationIT {
       // Without SELECT on the arbiter column this line raises 42501 instead of returning 0.
       assertThat(insertMessage(st, MSG, "first")).as("replay is a silent no-op").isEqualTo(0);
 
-      try (var rs = st.executeQuery("SELECT count(*) FROM options_chat_message")) {
+      // Scoped to THIS test's snowflake: the container is static and sibling tests insert their own
+      // rows, so an unscoped count(*) would pass only while this method happened to run first.
+      try (var rs =
+          st.executeQuery("SELECT count(*) FROM options_chat_message WHERE message_id = " + MSG)) {
         rs.next();
         assertThat(rs.getInt(1)).isEqualTo(1);
       }

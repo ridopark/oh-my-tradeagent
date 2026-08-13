@@ -153,6 +153,49 @@ class OptionsChatIngestParserTest {
   }
 
   @Test
+  void truncationNeverSplitsASurrogatePair() {
+    // An emoji sitting exactly on the boundary. Cutting mid-pair leaves an unpaired surrogate that
+    // pgjdbc stores as a replacement byte — a silently corrupted trailing character.
+    String emoji = "🚀"; // rocket, one code point, two chars
+    Map<String, Object> m = message();
+    m.put("content", "x".repeat(OptionsChatIngestParser.MAX_CONTENT - 1) + emoji);
+
+    String content =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), CHANNEL).get(0).content();
+
+    assertThat(content).hasSize(OptionsChatIngestParser.MAX_CONTENT - 1);
+    assertThat(Character.isHighSurrogate(content.charAt(content.length() - 1)))
+        .as("must not end on an unpaired high surrogate")
+        .isFalse();
+  }
+
+  @Test
+  void anOutOfRangeByteSizeIsDroppedRatherThanWrapped() {
+    // intValue() would narrow 5_000_000_000 to 705032704 — a confident lie fed straight into the
+    // Phase 4 "skip if too large" gate. Unknown is the safe answer.
+    Map<String, Object> a = attachment("https://cdn.discordapp.com/a.png");
+    a.put("byte_size", 5_000_000_000L);
+    Map<String, Object> m = message();
+    m.put("attachments", List.of(a));
+
+    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), CHANNEL);
+
+    assertThat(out.get(0).attachments().get(0).byteSize()).isNull();
+  }
+
+  @Test
+  void aNegativeDimensionIsDropped() {
+    Map<String, Object> a = attachment("https://cdn.discordapp.com/a.png");
+    a.put("width", -1);
+    Map<String, Object> m = message();
+    m.put("attachments", List.of(a));
+
+    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), CHANNEL);
+
+    assertThat(out.get(0).attachments().get(0).width()).isNull();
+  }
+
+  @Test
   void attachmentsBeyondTheCapAreTrimmed() {
     List<Map<String, Object>> lots = new ArrayList<>();
     for (int i = 0; i < OptionsChatIngestParser.MAX_CHILDREN + 5; i++) {

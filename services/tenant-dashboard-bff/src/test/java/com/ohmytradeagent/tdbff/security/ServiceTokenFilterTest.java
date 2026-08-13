@@ -154,6 +154,55 @@ class ServiceTokenFilterTest {
   }
 
   @Test
+  void pathParameterTraversal_cannotSmuggleTheIngestTokenIntoATenantRead() throws Exception {
+    // Tomcat strips path parameters (`;x`) BEFORE decoding and normalizing, so `..;a` is not the
+    // literal string ".." when this filter sees it, but IS a ".." by the time the path is
+    // normalized. A guard that only compared segments against ".." let this straight through.
+    MockHttpServletResponse res =
+        run("/internal/options-chat/..;a/..;b/api/positions", "Bearer " + INGEST_TOKEN);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void pathParameterTraversal_isNotExemptViaActuatorEither() throws Exception {
+    assertThat(run("/actuator/..;a/api/positions", null).getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void doubledSlashes_cannotSlipTheSharedTokenIntoTheIngestRoute() throws Exception {
+    // normalize() collapses `//`, so this reaches the ingest handler while failing the prefix test
+    // — which would mean the SHARED token was accepted for an ingest write.
+    MockHttpServletResponse res = run("/internal//options-chat/ingest", "Bearer " + TOKEN);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void encodedSeparatorsAreRejected() throws Exception {
+    for (String uri :
+        new String[] {
+          "/internal/options-chat/%2f%2e%2e/api/positions",
+          "/internal/options-chat/%5c../api/positions",
+          "/internal/options-chat/..%3ba/api/positions"
+        }) {
+      assertThat(run(uri, "Bearer " + INGEST_TOKEN).getStatus()).as(uri).isEqualTo(401);
+    }
+  }
+
+  @Test
+  void aTrailingSlashIsStillAllowed() throws Exception {
+    // The empty-segment rule must not reject an ordinary trailing slash.
+    MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions/");
+    req.addHeader("Authorization", "Bearer " + TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
+  @Test
   void literalDotSegments_areRejectedEvenWithAValidSharedToken() throws Exception {
     assertThat(run("/api/../api/positions", "Bearer " + TOKEN).getStatus()).isEqualTo(401);
     assertThat(run("/api/./positions", "Bearer " + TOKEN).getStatus()).isEqualTo(401);
