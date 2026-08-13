@@ -104,6 +104,19 @@ class OptionsChatMediaControllerWebMvcTest {
   }
 
   @Test
+  void anEmptyBodyWithReasonTooLargeIsRecordedAsSkipped_notAsAnExpiredLink() throws Exception {
+    // The scraper caps BEFORE sending, so an oversized attachment arrives as an empty body. Without
+    // the reason every terminal case collapsed to "failed" and the page told the reader the source
+    // link had expired — which is untrue and unactionable.
+    mvc.perform(
+            put("/internal/options-chat/media/7").param("reason", "too_large").content(new byte[0]))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.reason").value("skipped_too_large"));
+
+    verify(repo).markMediaTerminal(7L, "skipped_too_large");
+  }
+
+  @Test
   void storedBytesGetTheTypeSniffedFromTheBytes_neverTheCallersHeader() throws Exception {
     when(repo.storeMedia(eq(7L), any(), eq("image/png"))).thenReturn(true);
 

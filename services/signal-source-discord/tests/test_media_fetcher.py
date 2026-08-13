@@ -90,12 +90,15 @@ async def test_an_oversized_declared_body_is_skipped_without_being_buffered():
 
     def bff(request):
         put["body"] = request.content
+        put["reason"] = request.url.params.get("reason")
         return httpx.Response(200, json={"stored": False})
 
     f = _fetcher(bff, cdn)
     await f._fetch_one({"id": "8", "source_url": "https://cdn.discordapp.com/big.png"})
 
     assert put["body"] == b""
+    # Distinguished from "gone" so the page does not tell the reader the link expired.
+    assert put["reason"] == "too_large"
 
 
 @pytest.mark.asyncio
@@ -108,12 +111,14 @@ async def test_a_body_exceeding_the_cap_without_content_length_is_still_stopped(
 
     def bff(request):
         put["body"] = request.content
+        put["reason"] = request.url.params.get("reason")
         return httpx.Response(200, json={"stored": False})
 
     f = _fetcher(bff, cdn)
     await f._fetch_one({"id": "9", "source_url": "https://cdn.discordapp.com/huge.png"})
 
     assert put["body"] == b""
+    assert put["reason"] == "too_large"
 
 
 @pytest.mark.asyncio

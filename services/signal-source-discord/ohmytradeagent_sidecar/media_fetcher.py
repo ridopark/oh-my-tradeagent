@@ -34,6 +34,10 @@ MAX_BYTES = 10 * 1024 * 1024
 # either a loop or someone walking us somewhere.
 MAX_REDIRECTS = 3
 
+
+class _TooLarge(Exception):
+    """The attachment exceeds the cap. Terminal, and distinct from "gone" so the page can say so."""
+
 # HOSTS THIS PROCESS WILL FETCH FROM. `source_url` originates in an untrusted third-party Discord
 # DOM, so without this the scraper is a confused deputy: a crafted message could point it at an
 # internal address it can reach and the dashboard cannot (the BFF itself, the k8s API, a cloud
@@ -160,6 +164,10 @@ class MediaFetcher:
 
         try:
             data = await self._download(url)
+        except _TooLarge:
+            self._log.info("options-chat media too large id=%s — marking skipped", attachment_id)
+            await self._mark_unavailable(attachment_id, reason="too_large")
+            return
         except Exception:  # noqa: BLE001 - transient: leave this row pending and move on
             # Isolated per attachment on purpose. Letting one flaky download abort the batch would
             # stall every OTHER pending image behind it for a full backoff — and they are all on a
@@ -188,12 +196,17 @@ class MediaFetcher:
             # Leave it pending; the next sweep retries while the url is still alive.
             self._log.debug("media PUT failed id=%s: %r", attachment_id, exc)
 
-    async def _mark_unavailable(self, attachment_id) -> None:
-        """Tell the BFF this attachment will never arrive (empty body = terminal)."""
+    async def _mark_unavailable(self, attachment_id, reason: str | None = None) -> None:
+        """Tell the BFF this attachment will never arrive (empty body = terminal).
+
+        ``reason`` distinguishes WHY. Without it every terminal case collapsed to "failed" and the
+        page told the reader an oversized image was an expired link — which is simply untrue.
+        """
         try:
             await self._client.put(
                 f"{MEDIA_PATH}/{attachment_id}",
                 content=b"",
+                params={"reason": reason} if reason else None,
                 headers={**self._auth, "Content-Type": "application/octet-stream"},
             )
         except Exception as exc:  # noqa: BLE001
@@ -235,20 +248,15 @@ class MediaFetcher:
 
                     declared = resp.headers.get("content-length")
                     if declared and int(declared) > MAX_BYTES:
-                        self._log.info(
-                            "options-chat media too large (%s bytes), skipping", declared
-                        )
-                        return None
+                        raise _TooLarge(declared)
 
                     buf = bytearray()
                     async for chunk in resp.aiter_bytes():
                         buf.extend(chunk)
                         if len(buf) > MAX_BYTES:
                             # Servers may omit Content-Length; do not trust it alone.
-                            self._log.info(
-                                "options-chat media exceeded cap mid-stream, skipping"
-                            )
-                            return None
+                            # Content-Length may be absent or a lie; the stream is the real check.
+                            raise _TooLarge("stream")
                     return bytes(buf)
             except Exception as exc:  # noqa: BLE001 - transient; leave the row pending for a retry
                 self._log.debug("media download failed: %r", exc)

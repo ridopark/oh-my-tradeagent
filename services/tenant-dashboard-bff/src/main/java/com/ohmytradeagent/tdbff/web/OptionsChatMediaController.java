@@ -5,6 +5,8 @@ import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.Media;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.PendingMedia;
 import jakarta.servlet.http.HttpServletRequest;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -16,7 +18,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -85,23 +86,61 @@ public class OptionsChatMediaController {
   /**
    * Store one attachment's bytes.
    *
-   * <p>The Content-Type header the caller sends is IGNORED — the stored type is sniffed from the
-   * bytes ({@link MediaTypes}), so a hostile upload cannot get itself served back as {@code
-   * text/html} and become stored XSS on the dashboard's own origin.
+   * <p>READS THE BODY AS A CAPPED STREAM rather than taking {@code @RequestBody byte[]}. That
+   * binding buffers the ENTIRE request into memory before any handler code runs, so a size check
+   * inside the method guards nothing — this service has a 768Mi limit and a ~192MB default heap,
+   * and a large enough PUT would OOM it before the check executed. The cap is enforced twice: an
+   * early reject on a declared Content-Length, then on the stream itself, because Content-Length
+   * can be absent or a lie.
+   *
+   * <p>An EMPTY body is the scraper's agreed signal for "this attachment will never arrive", with
+   * {@code reason} distinguishing why so the page can say something true. Without it every terminal
+   * case collapsed to "failed" and an oversized image was reported to the reader as an expired
+   * link.
+   *
+   * <p>The Content-Type header is IGNORED — the stored type is sniffed from the bytes ({@link
+   * MediaTypes}), so a hostile upload cannot get itself served back as {@code text/html} and become
+   * stored XSS on the dashboard's own origin.
    */
   @PutMapping("/internal/options-chat/media/{id}")
   public ResponseEntity<Map<String, Object>> put(
-      @PathVariable("id") long id, @RequestBody(required = false) byte[] bytes) {
-    if (bytes == null || bytes.length == 0) {
-      repo.markMediaTerminal(id, "failed");
-      return ResponseEntity.ok(Map.of("stored", false, "reason", "empty"));
-    }
-    if (bytes.length > MAX_BYTES) {
+      @PathVariable("id") long id,
+      @RequestParam(value = "reason", required = false) String reason,
+      HttpServletRequest request)
+      throws IOException {
+    // Cheap reject before a single byte is buffered.
+    if (request.getContentLengthLong() > MAX_BYTES) {
       repo.markMediaTerminal(id, "skipped_too_large");
       return ResponseEntity.ok(Map.of("stored", false, "reason", "too_large"));
     }
+
+    byte[] bytes = readCapped(request.getInputStream());
+    if (bytes == null) {
+      // Exceeded the cap mid-stream (no or lying Content-Length).
+      repo.markMediaTerminal(id, "skipped_too_large");
+      return ResponseEntity.ok(Map.of("stored", false, "reason", "too_large"));
+    }
+    if (bytes.length == 0) {
+      String state = "too_large".equals(reason) ? "skipped_too_large" : "failed";
+      repo.markMediaTerminal(id, state);
+      return ResponseEntity.ok(Map.of("stored", false, "reason", state));
+    }
     boolean stored = repo.storeMedia(id, bytes, MediaTypes.sniff(bytes));
     return ResponseEntity.ok(Map.of("stored", stored));
+  }
+
+  /** The body, or {@code null} once it exceeds {@link #MAX_BYTES}. Stops reading at the cap. */
+  private static byte[] readCapped(InputStream in) throws IOException {
+    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+    byte[] chunk = new byte[8192];
+    int n;
+    while ((n = in.read(chunk)) != -1) {
+      if (out.size() + n > MAX_BYTES) {
+        return null;
+      }
+      out.write(chunk, 0, n);
+    }
+    return out.toByteArray();
   }
 
   /** Serve one attachment to the browser. */
