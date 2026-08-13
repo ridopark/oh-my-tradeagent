@@ -15,7 +15,9 @@ import org.springframework.mock.web.MockHttpServletResponse;
 class ServiceTokenFilterTest {
 
   private static final String TOKEN = "s3cr3t-shared-token";
-  private final ServiceTokenFilter filter = new ServiceTokenFilter(TOKEN, new MockEnvironment());
+  private static final String INGEST_TOKEN = "s3cr3t-options-chat-ingest";
+  private final ServiceTokenFilter filter =
+      new ServiceTokenFilter(TOKEN, INGEST_TOKEN, new MockEnvironment());
 
   @Test
   void missingAuthorizationHeader_is401_andDoesNotInvokeChain() throws Exception {
@@ -65,14 +67,74 @@ class ServiceTokenFilterTest {
   void wellKnownDefaultToken_underProdProfile_failsBoot() {
     MockEnvironment prod = new MockEnvironment();
     prod.setActiveProfiles("prod");
-    assertThatThrownBy(() -> new ServiceTokenFilter("dev-shared-token", prod))
+    assertThatThrownBy(() -> new ServiceTokenFilter("dev-shared-token", INGEST_TOKEN, prod))
         .isInstanceOf(IllegalStateException.class);
   }
 
   @Test
   void wellKnownDefaultToken_withoutProdProfile_isAllowedForLocalDev() {
-    assertThatCode(() -> new ServiceTokenFilter("dev-shared-token", new MockEnvironment()))
+    assertThatCode(
+            () -> new ServiceTokenFilter("dev-shared-token", INGEST_TOKEN, new MockEnvironment()))
         .doesNotThrowAnyException();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // options-chat ingest: a SEPARATE token, and the two must not substitute for each other.
+  //
+  // The caller of this route is the Discord chat-mirror pod, which renders an untrusted third-party
+  // room. If it held the shared token it could set any X-Tenant-Id and read positions/orders for
+  // real-money tenants. These tests are the enforcement of that isolation in BOTH directions — the
+  // reverse case matters just as much, since a leaked ingest token must not open the tenant reads.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void ingestRoute_withItsOwnToken_passesThrough() throws Exception {
+    MockHttpServletRequest req =
+        new MockHttpServletRequest("POST", "/internal/options-chat/ingest");
+    req.addHeader("Authorization", "Bearer " + INGEST_TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
+  @Test
+  void ingestRoute_withTheSharedToken_is401() throws Exception {
+    MockHttpServletResponse res = run("/internal/options-chat/ingest", "Bearer " + TOKEN);
+    assertThat(res.getStatus())
+        .as("holding BFF_SHARED_TOKEN must NOT open the options-chat ingest")
+        .isEqualTo(401);
+  }
+
+  @Test
+  void tenantReadRoute_withTheIngestToken_is401() throws Exception {
+    MockHttpServletResponse res = run("/api/positions", "Bearer " + INGEST_TOKEN);
+    assertThat(res.getStatus())
+        .as("a leaked options-chat ingest token must NOT open tenant reads")
+        .isEqualTo(401);
+  }
+
+  @Test
+  void ingestRoute_withoutBearer_is401() throws Exception {
+    MockHttpServletResponse res = run("/internal/options-chat/ingest", null);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void ingestRoute_whenIngestTokenIsUnprovisioned_is401_evenWithAnEmptyBearer() throws Exception {
+    // Fail-closed: a blank configured token must match NOTHING, not "any empty bearer".
+    ServiceTokenFilter unprovisioned = new ServiceTokenFilter(TOKEN, "", new MockEnvironment());
+    MockHttpServletRequest req =
+        new MockHttpServletRequest("POST", "/internal/options-chat/ingest");
+    req.addHeader("Authorization", "Bearer ");
+    MockHttpServletResponse res = new MockHttpServletResponse();
+
+    unprovisioned.doFilter(req, res, new MockFilterChain());
+
+    assertThat(res.getStatus()).isEqualTo(401);
   }
 
   // The operator tenant-user-invite routes (Phase 2) are NOT actuator paths, so the always-on

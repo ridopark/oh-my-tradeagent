@@ -24,3 +24,9 @@ CREATE ROLE dashboard_readonly LOGIN INHERIT PASSWORD 'dashboard_readonly_dev';
 GRANT CONNECT ON DATABASE dashboard TO dashboard_readonly;
 GRANT USAGE  ON SCHEMA public       TO dashboard_readonly;
 GRANT SELECT ON dashboard_user      TO dashboard_readonly;
+
+-- V9 (options_chat_message / _attachment / _embed) is INTENTIONALLY NOT mirrored here. This file
+-- exists so the Next.js app can connect with the BFF absent, and Next.js only ever reads
+-- dashboard_user through dashboard_readonly — /options-chat data is served by the BFF, which
+-- creates those tables itself via Flyway. Mirroring V9's grants would also abort this whole script
+-- on a fresh volume: they target dashboard_writer (V5), a role this file never creates.

@@ -84,6 +84,24 @@ dashboard:
   writer:
     enabled: ${DASHBOARD_WRITER_ENABLED:false}
 
+# Dark gate for the read-only /options-chat Discord mirror (V9 store + the scraper's ingest).
+# Default OFF: both the read controller and the ingest controller are absent (a two-name
+# @ConditionalOnProperty requiring BOTH this flag AND dashboard.writer.enabled, because both go
+# through the dashboard_writer DSL), so the routes 404 until a deployment sets BOTH
+# OPTIONS_CHAT_ENABLED=true and DASHBOARD_WRITER_ENABLED=true. The ingest is gated too, not just the
+# read: a live write endpoint taking untrusted third-party content with nothing consuming it is
+# worse than no endpoint.
+options-chat:
+  enabled: ${OPTIONS_CHAT_ENABLED:false}
+  # The ONE Discord channel this mirror accepts. Ingest rejects any other channel_id outright, so
+  # the store cannot become a general-purpose blob sink for whoever holds the ingest token.
+  channel-id: ${OPTIONS_CHAT_CHANNEL_ID:786109983065505792}
+  # SEPARATE credential from bff.service-token, enforced by ServiceTokenFilter's route scoping on
+  # /internal/options-chat/**. The caller is the Discord-scraping pod; with the shared token it
+  # could spoof any X-Tenant-Id and read real-money positions. NO default — blank fails closed and
+  # the ingest route rejects everything until the secret is provisioned.
+  ingest-token: ${OPTIONS_CHAT_INGEST_TOKEN:}
+
 # Read-only application datasources. Credentials are the dedicated bff_readonly role per DB (see the
 # operator runbook); SELECT-only grants mean even a query bug cannot mutate trading state.
 bff:

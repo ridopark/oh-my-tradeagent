@@ -141,4 +141,76 @@ class DashboardMigrationSqlStructureTest {
         .as("V7 must not reference dashboard_readonly")
         .doesNotContain("dashboard_readonly");
   }
+
+  @Test
+  void v9CreatesTheThreeOptionsChatTablesWithBigintIdsAndIdentityChildKeys() throws IOException {
+    String sql = executableSql("/db/dashboard/V9__options_chat.sql");
+
+    assertThat(sql).contains("CREATE TABLE options_chat_message");
+    assertThat(sql).contains("CREATE TABLE options_chat_attachment");
+    assertThat(sql).contains("CREATE TABLE options_chat_embed");
+
+    // Snowflakes are BIGINT, never TEXT: a TEXT id sorts lexicographically, which only matches
+    // chronological order while every id has the same digit count (Discord crossed 18->19 digits in
+    // 2021). Getting this wrong mis-orders rows at a page boundary.
+    assertThat(sql).containsPattern(Pattern.compile("message_id\\s+BIGINT\\s+PRIMARY KEY"));
+    assertThat(sql).containsPattern(Pattern.compile("channel_id\\s+BIGINT\\s+NOT NULL"));
+
+    // Child PKs use IDENTITY, not BIGSERIAL — a non-owner INSERT into a BIGSERIAL column also needs
+    // USAGE on the backing sequence, a grant no existing migration here models and which fails only
+    // at runtime. IDENTITY attaches the sequence to the column, removing the failure mode.
+    assertThat(sql)
+        .as("child tables use GENERATED ALWAYS AS IDENTITY, never BIGSERIAL")
+        .doesNotContainIgnoringCase("BIGSERIAL");
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "id\\s+BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY.*"
+                    + "id\\s+BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY",
+                Pattern.DOTALL));
+
+    // The pagination index must match the read cursor exactly, and be NAMED (V1/V4 convention, and
+    // the migration IT asserts on index names).
+    assertThat(sql)
+        .as("named index matching the (channel_id, message_id DESC) read cursor")
+        .containsPattern(
+            Pattern.compile(
+                "CREATE INDEX options_chat_message_channel_id_message_id_idx\\s+"
+                    + "ON options_chat_message \\(channel_id, message_id DESC\\)",
+                Pattern.DOTALL));
+
+    // Media bytes are nullable — Phase 1 stores descriptors only; Phase 4 fills them in.
+    assertThat(sql).containsPattern(Pattern.compile("bytes\\s+BYTEA"));
+    assertThat(sql).containsPattern(Pattern.compile("ON DELETE CASCADE"));
+  }
+
+  @Test
+  void v9GrantsSelectInsertUpdateToWriterOnly_neverDeleteNeverReadonly() throws IOException {
+    String sql = executableSql("/db/dashboard/V9__options_chat.sql");
+
+    // SELECT is load-bearing on a WRITE path here, not just for reads: `ON CONFLICT (message_id) DO
+    // NOTHING` reads the arbiter index and `UPDATE ... WHERE content_hash <> ?` reads the existing
+    // row. Without SELECT both raise 42501 (the same PG rule V7 documents for its DELETE).
+    assertThat(privilegesGrantedOn(sql, "options_chat_message"))
+        .isEqualTo("SELECT, INSERT, UPDATE");
+    // Phase 4 fills in `bytes` / `fetch_state`, hence UPDATE.
+    assertThat(privilegesGrantedOn(sql, "options_chat_attachment"))
+        .isEqualTo("SELECT, INSERT, UPDATE");
+    // Embeds are replaced wholesale with their message, never mutated in place.
+    assertThat(privilegesGrantedOn(sql, "options_chat_embed")).isEqualTo("SELECT, INSERT");
+
+    // No DELETE: Phase 6's retention job adds it in its own migration, exactly as V5 withheld
+    // DELETE
+    // until V7 needed it. Granting a privilege nothing uses is how least-privilege rots.
+    assertThat(sql)
+        .as("V9 never grants DELETE — retention is a later migration")
+        .doesNotContainPattern(
+            Pattern.compile("GRANT\\s+[A-Z, ]*DELETE", Pattern.CASE_INSENSITIVE));
+    // dashboard_readonly is the browser-facing Next.js pool (dashboard/lib/db.ts). /options-chat is
+    // served through the BFF, so granting that role SELECT on untrusted third-party content would
+    // widen a Next.js compromise for no benefit.
+    assertThat(sql)
+        .as("V9 must not grant or even reference dashboard_readonly")
+        .doesNotContain("dashboard_readonly");
+  }
 }

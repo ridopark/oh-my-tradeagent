@@ -1,0 +1,256 @@
+package com.ohmytradeagent.tdbff.optionschat;
+
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.IngestAttachment;
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.IngestEmbed;
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.IngestMessage;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Turns the scraper's raw JSON body into validated {@link IngestMessage} records.
+ *
+ * <p>This is the ONLY validation point for the whole feature: everything downstream of it — the
+ * store, the read endpoint, the page — treats the data as already-safe. The content is an untrusted
+ * third-party Discord room being rendered inside a dashboard whose server actions can force-exit
+ * real-money positions, so the rules here are the security boundary, not hygiene.
+ *
+ * <p>Two failure modes, deliberately different:
+ *
+ * <ul>
+ *   <li><b>Structural problems reject the batch (400)</b> — wrong channel, unparseable snowflake,
+ *       missing timestamp. These mean the caller is broken or is not our scraper; failing loudly is
+ *       correct and the caller can be fixed.
+ *   <li><b>Content problems are sanitized, not rejected</b> — an over-long string is truncated, an
+ *       attachment with a non-http(s) URL is dropped, arrays past their cap are trimmed. Rejecting
+ *       the batch instead would let one permanently-malformed message wedge the feed forever, and
+ *       this is a display-only mirror where dropping one image beats stalling the room.
+ * </ul>
+ */
+public final class OptionsChatIngestParser {
+
+  /** Discord's own per-message ceiling; anything longer did not come from Discord. */
+  static final int MAX_CONTENT = 4000;
+
+  static final int MAX_AUTHOR = 128;
+  static final int MAX_FILENAME = 256;
+  static final int MAX_URL = 2048;
+  static final int MAX_EMBED_TEXT = 2048;
+
+  /** Discord caps attachments and embeds at 10 apiece. */
+  static final int MAX_CHILDREN = 10;
+
+  /** Bounds one request; the scraper's reconcile sweep sends far fewer. */
+  static final int MAX_MESSAGES = 200;
+
+  private static final Set<String> ALLOWED_KINDS = Set.of("image", "video", "file", "embed_image");
+
+  private OptionsChatIngestParser() {}
+
+  /** Thrown for structural problems; the controller maps this to 400. */
+  public static class InvalidIngestException extends RuntimeException {
+    public InvalidIngestException(String message) {
+      super(message);
+    }
+  }
+
+  /**
+   * Parse and validate, rejecting anything not addressed to {@code expectedChannelId}.
+   *
+   * <p>The channel check is the reason this endpoint is not a general-purpose blob sink: without it
+   * anyone holding the ingest token could write arbitrary rows under any channel id.
+   */
+  public static List<IngestMessage> parse(Map<String, Object> body, long expectedChannelId) {
+    if (body == null) {
+      throw new InvalidIngestException("body is required");
+    }
+    long channelId = requireLong(body, "channel_id");
+    if (channelId != expectedChannelId) {
+      throw new InvalidIngestException("channel_id is not the configured options-chat channel");
+    }
+    Object raw = body.get("messages");
+    if (!(raw instanceof List<?> list)) {
+      throw new InvalidIngestException("messages must be an array");
+    }
+    if (list.size() > MAX_MESSAGES) {
+      throw new InvalidIngestException("messages exceeds " + MAX_MESSAGES);
+    }
+    List<IngestMessage> out = new ArrayList<>(list.size());
+    for (Object o : list) {
+      if (!(o instanceof Map<?, ?> m)) {
+        throw new InvalidIngestException("each message must be an object");
+      }
+      out.add(parseMessage(castMap(m)));
+    }
+    return out;
+  }
+
+  private static IngestMessage parseMessage(Map<String, Object> m) {
+    long messageId = requireLong(m, "message_id");
+    String authorName = truncate(requireString(m, "author_name"), MAX_AUTHOR);
+    OffsetDateTime postedAt = requireTimestamp(m, "posted_at");
+    // Content may legitimately be empty — an image-only post has no text.
+    String content = truncate(optionalString(m, "content", ""), MAX_CONTENT);
+    Long replyToId = optionalLong(m, "reply_to_id");
+    boolean edited = Boolean.TRUE.equals(m.get("edited"));
+    String avatar = safeUrl(optionalString(m, "author_avatar_url", null));
+
+    return new IngestMessage(
+        messageId,
+        authorName,
+        avatar,
+        postedAt,
+        content,
+        replyToId,
+        edited,
+        parseAttachments(m.get("attachments")),
+        parseEmbeds(m.get("embeds")));
+  }
+
+  private static List<IngestAttachment> parseAttachments(Object raw) {
+    List<IngestAttachment> out = new ArrayList<>();
+    for (Map<String, Object> a : childObjects(raw)) {
+      // A dropped URL is the whole attachment: without a source there is nothing to fetch later.
+      String url = safeUrl(optionalString(a, "source_url", null));
+      if (url == null) {
+        continue;
+      }
+      String kind = optionalString(a, "kind", "file").toLowerCase(Locale.ROOT);
+      if (!ALLOWED_KINDS.contains(kind)) {
+        kind = "file";
+      }
+      out.add(
+          new IngestAttachment(
+              kind,
+              url,
+              truncate(optionalString(a, "filename", null), MAX_FILENAME),
+              // content_type is NOT taken from the caller: /media/{id} serves it as a response
+              // header, so a caller-chosen value would be a content-sniffing lever. Phase 4 sets it
+              // from our own transcode.
+              null,
+              optionalInt(a, "width"),
+              optionalInt(a, "height"),
+              optionalInt(a, "byte_size")));
+      if (out.size() == MAX_CHILDREN) {
+        break;
+      }
+    }
+    return out;
+  }
+
+  private static List<IngestEmbed> parseEmbeds(Object raw) {
+    List<IngestEmbed> out = new ArrayList<>();
+    for (Map<String, Object> e : childObjects(raw)) {
+      out.add(
+          new IngestEmbed(
+              truncate(optionalString(e, "title", null), MAX_EMBED_TEXT),
+              truncate(optionalString(e, "description", null), MAX_EMBED_TEXT),
+              safeUrl(optionalString(e, "url", null)),
+              truncate(optionalString(e, "author", null), MAX_AUTHOR),
+              truncate(optionalString(e, "footer", null), MAX_EMBED_TEXT),
+              safeUrl(optionalString(e, "thumbnail_url", null))));
+      if (out.size() == MAX_CHILDREN) {
+        break;
+      }
+    }
+    return out;
+  }
+
+  private static List<Map<String, Object>> childObjects(Object raw) {
+    if (!(raw instanceof List<?> list)) {
+      return List.of();
+    }
+    List<Map<String, Object>> out = new ArrayList<>();
+    for (Object o : list) {
+      if (o instanceof Map<?, ?> m) {
+        out.add(castMap(m));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * {@code null} unless this is an {@code http}/{@code https} URL within the length cap. Everything
+   * else — {@code javascript:}, {@code data:}, {@code file:}, a relative path — collapses to null
+   * so it can never reach an {@code href} or {@code src} in the renderer.
+   */
+  static String safeUrl(String s) {
+    if (s == null || s.isBlank() || s.length() > MAX_URL) {
+      return null;
+    }
+    String lower = s.toLowerCase(Locale.ROOT);
+    return (lower.startsWith("http://") || lower.startsWith("https://")) ? s : null;
+  }
+
+  private static String truncate(String s, int max) {
+    if (s == null) {
+      return null;
+    }
+    return s.length() <= max ? s : s.substring(0, max);
+  }
+
+  private static long requireLong(Map<String, Object> m, String key) {
+    Long v = optionalLong(m, key);
+    if (v == null) {
+      throw new InvalidIngestException(key + " is required and must be a snowflake");
+    }
+    return v;
+  }
+
+  /** Snowflakes arrive as JSON strings — a 19-digit JSON number loses precision in JavaScript. */
+  private static Long optionalLong(Map<String, Object> m, String key) {
+    Object v = m.get(key);
+    if (v == null) {
+      return null;
+    }
+    try {
+      long parsed = v instanceof Number n ? n.longValue() : Long.parseLong(v.toString().trim());
+      return parsed > 0 ? parsed : null;
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  private static Integer optionalInt(Map<String, Object> m, String key) {
+    Object v = m.get(key);
+    if (v instanceof Number n) {
+      return n.intValue();
+    }
+    try {
+      return v == null ? null : Integer.valueOf(v.toString().trim());
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  private static String requireString(Map<String, Object> m, String key) {
+    Object v = m.get(key);
+    if (v == null || v.toString().isBlank()) {
+      throw new InvalidIngestException(key + " is required");
+    }
+    return v.toString();
+  }
+
+  private static String optionalString(Map<String, Object> m, String key, String fallback) {
+    Object v = m.get(key);
+    return v == null ? fallback : v.toString();
+  }
+
+  private static OffsetDateTime requireTimestamp(Map<String, Object> m, String key) {
+    String s = requireString(m, key);
+    try {
+      return OffsetDateTime.parse(s);
+    } catch (DateTimeParseException e) {
+      throw new InvalidIngestException(key + " must be an ISO-8601 timestamp with an offset");
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> castMap(Map<?, ?> m) {
+    return (Map<String, Object>) m;
+  }
+}
