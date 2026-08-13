@@ -134,6 +134,42 @@ class OptionsChatMigrationIT {
   }
 
   @Test
+  void writerCanBackfillChildrenOntoAnAlreadyStoredMessage() throws SQLException {
+    // Discord resolves link previews and image accessories seconds AFTER the message element
+    // appears, so a message caught on first render is stored bare. The ingest backfills children
+    // onto an existing parent whose child set is empty; this proves V9's grants allow that shape
+    // (count(*) then INSERT) with no UPDATE and no new privilege.
+    long msg = MSG + 3;
+    try (Connection w = asRole("dashboard_writer", WRITER_PW);
+        var st = w.createStatement()) {
+      insertMessage(st, msg, "chart incoming");
+      // Replay finds the parent present...
+      assertThat(insertMessage(st, msg, "chart incoming")).isEqualTo(0);
+
+      try (var rs =
+          st.executeQuery(
+              "SELECT count(*) FROM options_chat_attachment WHERE message_id = " + msg)) {
+        rs.next();
+        assertThat(rs.getInt(1)).as("no children yet").isZero();
+      }
+      assertThat(
+              st.executeUpdate(
+                  "INSERT INTO options_chat_attachment (message_id, ordinal, kind, source_url) "
+                      + "VALUES ("
+                      + msg
+                      + ", 0, 'image', 'https://cdn.discordapp.com/late.png')"))
+          .isEqualTo(1);
+
+      try (var rs =
+          st.executeQuery(
+              "SELECT count(*) FROM options_chat_attachment WHERE message_id = " + msg)) {
+        rs.next();
+        assertThat(rs.getInt(1)).isEqualTo(1);
+      }
+    }
+  }
+
+  @Test
   void writerCanRunThePaginatedRead() throws SQLException {
     try (Connection w = asRole("dashboard_writer", WRITER_PW);
         var st = w.createStatement()) {

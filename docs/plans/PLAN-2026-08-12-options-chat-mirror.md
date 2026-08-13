@@ -439,14 +439,12 @@ threads.
 - Reconcile handles **edits** (`content_hash` differs → `UPDATE`, set `edited`) and **deletes**
   (present in a prior scrape, absent now, still inside the visible window → set `deleted_at`;
   render as *"message deleted"*).
-- **Backfill late-resolving children.** Phase 1's ingest writes attachments and embeds only on the
-  winning parent insert, so anything Discord had not yet rendered is lost permanently: a re-scrape
-  finds the parent present and skips the children. Discord resolves link previews and embed images
-  asynchronously, seconds after the post, so a scraper that catches a message on first render can
-  store it with zero embeds — and it would then render without its chart forever, which in a trading
-  room is the content. The reconcile therefore needs a "parent exists but has no children" path, not
-  just `content_hash` comparison. (Uploaded attachments are usually in the DOM immediately; link
-  previews are the exposed case.)
+- ~~Backfill late-resolving children.~~ **PULLED FORWARD INTO PHASE 2.** Leaving it here would have
+  shipped a mirror that renders messages without their charts — in a trading room, the content. It
+  needed no migration and no new grant (V9 already grants INSERT on both child tables), so the
+  ingest now backfills children onto an existing parent whose child set is empty, and the scraper
+  uses a 1.5s settle window after each mutation so most accessories have resolved before the first
+  write.
 - `docs/ops/options-chat-mirror.md`: session-expiry recovery (mirrors
   `docs/ops/discord-session-expired.md` — scale to 0, bootstrap pod against the new PVC, scale back),
   and the "page is empty / extraction regressed" runbook keyed off the Phase 2 counter.

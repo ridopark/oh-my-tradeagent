@@ -64,6 +64,13 @@ kubectl -n copytrade run --rm -it sidecar-bootstrap \
 
 # Re-scale the deployment back up:
 kubectl -n copytrade scale deployment/signal-source-discord --replicas=1
+
+# REQUIRED since PLAN-2026-08-12 Phase 2: the /options-chat mirror SHARES this one
+# storage_state.json (mounted read-only from the same PVC), and Playwright reads it ONCE at
+# context creation. Without this restart that pod keeps the STALE session in memory, silently
+# redirects to /login, times out waiting for the message list, burns its 5-crash rebuild budget
+# and dies — minutes to hours after you thought the incident was closed.
+kubectl -n copytrade rollout restart deployment/discord-chat-mirror
 ```
 
 Verify the sidecar recovers:
