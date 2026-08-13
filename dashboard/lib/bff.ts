@@ -636,10 +636,30 @@ export interface OptionsChatPage {
   items: OptionsChatMessage[];
 }
 
-export const getOptionsChatMessages = (opts: { before?: string; limit?: number } = {}) => {
+/**
+ * Fetch a page, distinguishing "the feature is switched off" from "the read failed".
+ *
+ * Uses the non-throwing bffGetRaw because a 404 here is an EXPECTED state, not an outage: the BFF
+ * gates both options-chat routes on a two-name @ConditionalOnProperty, so until an operator sets
+ * OPTIONS_CHAT_ENABLED the controller bean does not exist and there is no route at all. Collapsing
+ * that into a generic failure is what made the page report "Unable to reach the mirror" when in
+ * fact the mirror was fine and the feature simply was not enabled yet.
+ */
+export const getOptionsChatMessages = async (
+  opts: { before?: string; limit?: number } = {},
+): Promise<{ page: OptionsChatPage | null; disabled: boolean }> => {
   const params = new URLSearchParams();
   if (opts.before) params.set("before", opts.before);
   if (opts.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
-  return bffGet<OptionsChatPage>(`/api/options-chat/messages${qs ? `?${qs}` : ""}`);
+  const { status, body } = await bffGetRaw(
+    `/api/options-chat/messages${qs ? `?${qs}` : ""}`,
+  );
+  if (status === 404) {
+    return { page: null, disabled: true };
+  }
+  if (status < 200 || status >= 300) {
+    throw new Error(`BFF options-chat -> ${status}`);
+  }
+  return { page: body as OptionsChatPage, disabled: false };
 };

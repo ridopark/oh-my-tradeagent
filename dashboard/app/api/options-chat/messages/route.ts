@@ -15,14 +15,19 @@ export async function GET(request: Request) {
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
 
   try {
-    return NextResponse.json(await getOptionsChatMessages({ before, limit }));
+    const { page, disabled } = await getOptionsChatMessages({ before, limit });
+    if (disabled) {
+      // NOT an error: the BFF gates this route on OPTIONS_CHAT_ENABLED, so a 404 means the feature
+      // is simply not switched on in this environment. Reported distinctly so the page can say so
+      // instead of blaming connectivity.
+      return NextResponse.json({ error: "options_chat_disabled" }, { status: 503 });
+    }
+    return NextResponse.json(page);
   } catch (e) {
     if (e instanceof NotAuthenticatedError) {
       return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
     }
     // Degrade rather than 500 — the island keeps its last good frame and shows a stale banner.
-    // This is also the expected response while the feature is still dark on the BFF (the route
-    // 404s there), so it must not be noisy.
     return NextResponse.json({ error: "options_chat_unavailable" }, { status: 502 });
   }
 }
