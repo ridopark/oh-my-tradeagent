@@ -116,6 +116,10 @@ export function OptionsChat() {
   // Keyed by snowflake so a poll overlapping a page-up merges instead of duplicating.
   const [byId, setById] = useState<Map<string, OptionsChatMessage>>(new Map());
   const [stale, setStale] = useState(false);
+  // Distinct from `stale`: the feature is simply not switched on in this environment (the BFF gates
+  // the route on OPTIONS_CHAT_ENABLED). Reporting that as a connectivity problem sent a reader
+  // chasing the scraper when nothing was wrong with it.
+  const [disabled, setDisabled] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [exhausted, setExhausted] = useState(false);
@@ -137,10 +141,18 @@ export function OptionsChat() {
     const poll = async () => {
       try {
         const res = await fetch(`/api/options-chat/messages?limit=${PAGE}`, { cache: "no-store" });
+        if (res.status === 503) {
+          if (active) {
+            setDisabled(true);
+            setStale(false);
+          }
+          return;
+        }
         if (!res.ok) throw new Error(String(res.status));
         const json = (await res.json()) as OptionsChatPage;
         if (!active) return;
         merge(json.items);
+        setDisabled(false);
         setStale(false);
       } catch {
         if (active) setStale(true);
@@ -207,17 +219,27 @@ export function OptionsChat() {
 
   return (
     <div className="flex h-[calc(100vh-12rem)] flex-col rounded border border-slate-800 bg-slate-900/40">
-      {stale && (
+      {disabled && (
+        <div className="border-b border-slate-700 bg-slate-800/60 px-3 py-1 text-xs text-slate-300">
+          The mirror is not enabled in this environment yet. Nothing is wrong with the scraper —
+          an operator needs to switch the feature on.
+        </div>
+      )}
+      {stale && !disabled && (
         <div className="border-b border-amber-900/60 bg-amber-950/40 px-3 py-1 text-xs text-amber-300">
-          Unable to reach the mirror. Showing the last received messages.
+          {messages.length > 0
+            ? "Unable to reach the mirror. Showing the last received messages."
+            : "Unable to reach the mirror. Retrying…"}
         </div>
       )}
       <div ref={scroller} onScroll={onScroll} className="flex-1 overflow-y-auto py-2">
         {messages.length === 0 ? (
           <p className="px-3 py-6 text-sm text-slate-400">
-            {loaded
-              ? "No messages mirrored yet. The scraper stores messages as they are posted; nothing is backfilled from before it started."
-              : "Loading…"}
+            {!loaded
+              ? "Loading…"
+              : disabled
+                ? "Waiting for the mirror to be enabled."
+                : "No messages mirrored yet. The scraper stores messages as they are posted; nothing is backfilled from before it started."}
           </p>
         ) : (
           <>
