@@ -46,6 +46,24 @@ const ICONS: Record<string, ReactNode> = {
       />
     </svg>
   ),
+  // Chat bubble. Required because /options-chat is in the primary four — without an entry here the
+  // mobile tab renders as a bare label while its neighbours have icons.
+  "/options-chat": (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      className="h-5 w-5"
+      aria-hidden="true"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M8.25 18.75 12 22.5l3.75-3.75M4.5 4.5h15a1.5 1.5 0 0 1 1.5 1.5v11.25a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.25V6a1.5 1.5 0 0 1 1.5-1.5Z"
+      />
+    </svg>
+  ),
   "/positions": (
     <svg
       viewBox="0 0 24 24"
