@@ -7,14 +7,13 @@ const LINKS = [
   { href: "/status", label: "Status" },
   { href: "/live", label: "Live" },
   { href: "/portfolio", label: "Portfolio" },
-  { href: "/positions", label: "Positions" },
+  // Chat sits in the first 4, which means it lands in the MOBILE PRIMARY BAR — MobileBottomNav
+  // keys its ICONS map by href, so this entry requires an icon there or it renders iconless.
+  { href: "/options-chat", label: "Chat" },
   { href: "/trades", label: "Trades" },
   { href: "/orders", label: "Order History" },
   { href: "/config", label: "Config" },
-  // Read-only Discord mirror (PLAN-2026-08-12). Deliberately placed AFTER the first 4 entries:
-  // Nav slices links[0..4) into the mobile primary bar, and MobileBottomNav keys its ICONS map by
-  // href — a new primary link without an icon entry renders iconless.
-  { href: "/options-chat", label: "Options Chat" },
+  { href: "/positions", label: "Positions" },
   { href: "/settings", label: "Settings" },
 ];
 

@@ -18,7 +18,7 @@ export default async function OptionsChatPage() {
       <Nav tenantId={session?.tenantId} />
       <main className="mx-auto max-w-6xl px-4 py-6">
         <div className="mb-3 flex items-baseline gap-3">
-          <h1 className="text-xl font-semibold text-slate-100">Options Chat</h1>
+          <h1 className="text-xl font-semibold text-slate-100">Chat</h1>
           {/* Native <details> rather than a client-side toggle: this is a server component, and a
               disclosure widget does not justify shipping JS or turning the page into a client
               island. Collapsed by default — the caveats matter once, the messages matter every
