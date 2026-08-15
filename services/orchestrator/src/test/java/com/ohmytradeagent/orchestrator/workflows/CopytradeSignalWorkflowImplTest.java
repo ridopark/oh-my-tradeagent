@@ -2065,18 +2065,18 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
-  void repeg_fillArrivingDuringTheCancelRoundTripIsDiscarded() {
-    // The narrowest window in the whole feature. A fill for the original order can be signalled
-    // while the workflow is blocked inside cancelOrder — at that instant the order is not yet
-    // marked superseded, so onFill accepts it. If it were left standing, the await after the
-    // re-peg would see fillEvent != null, wake immediately, and emit EntryFilled for an order the
-    // broker just told us it CANCELLED — starting a PositionWorkflow against a lot that does not
-    // exist. The broker's cancel ack is authoritative, so the raced fill is dropped.
+  void repeg_fillArrivingDuringTheCancelRoundTripIsAdoptedNotDiscarded() {
+    // A fill signalled while the cancel is in flight means the contracts were REALLY BOUGHT — the
+    // dispatcher only signals against a broker fill event. An earlier version of this test asserted
+    // the fill was DISCARDED, which was wrong in the dangerous direction: it orphans a real
+    // position and then stacks a full-size replacement on top of it. The re-peg must stand down.
+    //
+    // This is also the only way a PARTIAL fill can be seen here: markFilled terminalizes only at
+    // filledQty >= qty, so a partial leaves the journal row CANCELLED with filled_qty null and is
+    // invisible to the cancel result — but the dispatcher signals partials deliberately.
     setupRepegMocks(null);
     when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
-    when(exec.placeOrder(any()))
-        .thenReturn(submittedResult("intent-K", "brk-initial"))
-        .thenReturn(submittedResult("intent-K:repeg-1", "brk-repeg"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-initial"));
     when(exec.cancelOrder(anyString()))
         .thenAnswer(
             invocation -> {
@@ -2084,16 +2084,41 @@ class CopytradeSignalWorkflowImplTest {
                   .newWorkflowStub(CopytradeSignalWorkflow.class, "repeg-cancel-race")
                   .onFill(fillFor("brk-initial"));
               return cancelledResult("intent-K", "brk-initial");
-            })
-        .thenReturn(cancelledResult("intent-K:repeg-1", "brk-repeg"));
+            });
 
     runWorkflowWithId(btoPayload(), "repeg-cancel-race");
 
-    // The replacement was still placed, and the phantom fill never became an entry.
-    verify(exec, times(2)).placeOrder(any());
-    assertNoAudit("EntryFilled");
+    // NO replacement, and the fill became the entry rather than an orphan.
+    verify(exec, times(1)).placeOrder(any());
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(filled.getSubject()).containsEntry("broker_order_id", "brk-initial");
+    assertNoAudit("EntryExpired");
+  }
+
+  @Test
+  void repeg_cancelRejectedByBroker_placesNoSecondOrder() {
+    // THE DOUBLE-ORDER HAZARD. A broker cancel rejection (404 stale id, 422 "not cancelable")
+    // does NOT throw: ExecActivitiesImpl routes it to markCancelFailed, which writes only
+    // last_error and leaves the journal row SUBMITTED, then returns normally. The original order
+    // is STILL LIVE. Placing a replacement here is how one signal ends up with two working orders
+    // and, if both fill, double the sized position.
+    setupRepegMocks(null);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-initial"));
+    // state stays SUBMITTED — neither CANCELLED nor FILLED, and no exception.
+    OrderIntentResult cancelRejected = submittedResult("intent-K", "brk-initial");
+    cancelRejected.setLastError("422 order is not cancelable");
+    when(exec.cancelOrder(anyString())).thenReturn(cancelRejected);
+
+    runWorkflowWithId(btoPayload(), "repeg-cancel-rejected");
+
+    verify(exec, times(1)).placeOrder(any());
+    AuditEvent failed =
+        captureWithEntry("OrderCancelFailed", "note", "repeg_abandoned_original_order_still_live");
+    assertThat(failed.getSubject()).containsEntry("severity", "ERROR");
+    // The original still stands and rides to its normal TTL expiry.
     AuditEvent expired = capture("EntryExpired");
-    assertThat(expired.getSubject()).containsEntry("broker_order_id", "brk-repeg");
+    assertThat(expired.getSubject()).containsEntry("broker_order_id", "brk-initial");
   }
 
   @Test

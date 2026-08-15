@@ -2034,6 +2034,16 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    */
   private record RepegOutcome(OrderIntentResult replacement, boolean adopted) {}
 
+  /** True when {@code t} is, or wraps, a workflow cancellation — which must always propagate. */
+  private static boolean isCancellation(Throwable t) {
+    for (Throwable c = t; c != null; c = c.getCause()) {
+      if (c instanceof CanceledFailure) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Audit label for why a re-peg had no usable quote: the status, or the failure that replaced it.
    */
@@ -2082,9 +2092,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     String quoteError = null;
     try {
       quote = optionQuote.getOptionQuote(qreq);
-    } catch (CanceledFailure cf) {
-      throw cf;
     } catch (RuntimeException e) {
+      // Workflow cancellation must NEVER be swallowed. With an activity in flight the SDK wraps it
+      // as ActivityFailure(cause=CanceledFailure), so testing the top-level type alone misses it.
+      if (isCancellation(e)) {
+        throw e;
+      }
       quote = null;
       quoteError = e.getClass().getSimpleName();
     }
@@ -2158,6 +2171,37 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       return new RepegOutcome(null, true);
     }
 
+    if (cancelResult.getState() != OrderIntentResult.State.CANCELLED) {
+      // THE CANCEL FAILED WITHOUT THROWING, so the catch above does not cover this. A broker
+      // cancel rejection (404 on a stale broker_order_id, 422 "not cancelable" while pending_new)
+      // routes to ExecActivitiesImpl's FAILED branch -> JooqOrderIntentJournal#markCancelFailed,
+      // which writes only last_error and LEAVES THE ROW SUBMITTED. The activity returns normally
+      // with state=SUBMITTED and the original order is STILL LIVE at the broker.
+      //
+      // Placing a replacement here is how one signal ends up with two working orders and, if both
+      // fill, double the sized position. Abandon instead: no supersede, no replacement. The
+      // original keeps standing and handleTtlExpired cancels and audits it as it always has --
+      // that method has had this exact CANCELLED/else split all along; the re-peg copied its
+      // FILLED branch and missed this one.
+      logAudit(
+          payload,
+          KIND_ORDER_CANCEL_FAILED,
+          subject(
+              "intent_key",
+              intentKey,
+              "broker_order_id",
+              placed.getBrokerOrderId(),
+              "broker_reason",
+              cancelResult.getLastError(),
+              "reason",
+              "repeg",
+              "severity",
+              "ERROR",
+              "note",
+              "repeg_abandoned_original_order_still_live"));
+      return new RepegOutcome(null, false);
+    }
+
     logAudit(
         payload,
         KIND_ORDER_CANCELLED,
@@ -2169,16 +2213,33 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
             "reason",
             "repeg"));
 
-    // From here on, a fill claiming the cancelled order is stale — the broker's cancel ack is
-    // authoritative that it did not fill. Mark it BEFORE placing the replacement so the guard is
-    // armed for the whole window, and drop any fill that slipped in during the cancel round-trip;
-    // otherwise the await below would wake on it and adopt an order that never filled.
-    supersededEntryOrderIds.add(placed.getBrokerOrderId());
-    if (fillEvent != null
-        && fillEvent.getBrokerOrderId() != null
-        && supersededEntryOrderIds.contains(fillEvent.getBrokerOrderId())) {
-      fillEvent = null;
+    if (fillEvent != null) {
+      // A fill signal landed while the cancel was in flight. Those contracts were REALLY BOUGHT --
+      // the dispatcher only signals against a broker fill event -- so this is evidence, not noise.
+      // An earlier version of this method DISCARDED it to avoid threading the wrong order id. That
+      // was wrong in the dangerous direction: discarding orphans a real position AND stacks a
+      // full-size replacement on top of it. Abandon the re-peg and let the caller's await adopt
+      // the fill exactly as it would have without this feature.
+      //
+      // This also covers the PARTIAL fill the journal cannot see: markFilled only terminalizes at
+      // filledQty >= qty, so a partial leaves the row CANCELLED with filled_qty null, invisible to
+      // cancelResult -- but the dispatcher signals partials deliberately, so it surfaces here.
+      logAudit(
+          payload,
+          KIND_ORDER_CANCEL_FAILED,
+          subject(
+              "intent_key", intentKey,
+              "broker_order_id", placed.getBrokerOrderId(),
+              "reason", "repeg",
+              "severity", "WARN",
+              "note", "repeg_abandoned_fill_landed_during_cancel"));
+      return new RepegOutcome(null, false);
     }
+
+    // Only now is the original definitively dead: broker-confirmed CANCELLED, and no fill was
+    // signalled. Mark it superseded BEFORE placing the replacement so a LATER fill claiming it --
+    // which would contradict the cancel ack -- cannot be adopted in place of the replacement's.
+    supersededEntryOrderIds.add(placed.getBrokerOrderId());
 
     // Distinct intent key: the original was cancelled and exec is idempotent BY intent key, so
     // reusing it would collide with the cancelled client_order_id. Mirrors the exit ladder's
