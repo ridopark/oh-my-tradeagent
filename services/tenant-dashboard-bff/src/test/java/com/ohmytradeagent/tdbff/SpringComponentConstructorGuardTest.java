@@ -9,9 +9,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.ClassPathScanningCandidateComponentProvider;
-import org.springframework.core.env.PropertySource;
-import org.springframework.core.env.StandardEnvironment;
-import org.springframework.core.type.filter.AnnotationTypeFilter;
+import org.springframework.core.type.classreading.MetadataReader;
 import org.springframework.stereotype.Component;
 
 /**
@@ -45,32 +43,33 @@ class SpringComponentConstructorGuardTest {
 
   @Test
   void everyComponentWithMoreThanOneConstructorDeclaresExactlyOneAutowired() throws Exception {
-    // false = no default filters, so only the @Component filter below applies. AnnotationTypeFilter
-    // follows meta-annotations by default, so @Service/@RestController/@Repository/@Configuration
-    // are all included — they are all @Component underneath, and all fail refresh the same way.
-    var provider = new ClassPathScanningCandidateComponentProvider(false);
-    provider.addIncludeFilter(new AnnotationTypeFilter(Component.class));
-
-    // EVERY PROPERTY READS "true", AND WITHOUT THIS THE GUARD IS WORSE THAN ABSENT. The scanner
-    // evaluates @Conditional as it goes, so against an empty Environment every
-    // @ConditionalOnProperty bean is silently dropped from the scan — the guard then passes with a
-    // confident green while checking none of the beans it exists to check. Verified: removing
-    // @Autowired from OptionsChatRetention left this test passing until this block was added.
+    // CONDITION EVALUATION IS BYPASSED ENTIRELY, AND THAT IS THE WHOLE TRICK. The scanner normally
+    // evaluates @Conditional as it walks, so against a default Environment every
+    // @ConditionalOnProperty bean is silently dropped and the guard passes a confident green while
+    // checking none of the beans it exists to check. That category is not incidental — it is the
+    // target. Both real incidents were beans behind flags that are false by default and true only
+    // on the cluster, which is exactly why neither CI nor the context smoke tests caught them.
     //
-    // That category is not incidental, it is the whole target. Both real incidents were beans
-    // behind flags that are false by default and true only on the cluster, which is precisely why
-    // neither CI nor the context smoke tests caught them.
-    StandardEnvironment allFlagsOn = new StandardEnvironment();
-    allFlagsOn
-        .getPropertySources()
-        .addFirst(
-            new PropertySource<Object>("every-condition-satisfied") {
-              @Override
-              public Object getProperty(String name) {
-                return "true";
-              }
-            });
-    provider.setEnvironment(allFlagsOn);
+    // Overriding the candidate test is what makes this independent of every condition FORM. The
+    // obvious alternative — an Environment answering "true" to every property — only satisfies
+    // @ConditionalOnProperty(havingValue = "true"), and measurably backfires elsewhere: it drops
+    // beans whose havingValue is something else (exec's "db"/"file"/"stub" sources, market-data's
+    // AlpacaMarketData at havingValue = "alpaca" — the very class the sibling per-class guard
+    // exists to protect), scoring 17/33 on exec where even an empty Environment scores 18/33. It
+    // also cannot see past @ConditionalOnExpression, which the standalone provider skips silently
+    // because it has no BeanFactory (7 such classes in api-gateway).
+    //
+    // Measured coverage this way: 48/48 here, and 33/33, 33/33, 12/12 in api-gateway, exec and
+    // market-data — so this is copy-pasteable to the modules where the bug actually shipped.
+    var provider =
+        new ClassPathScanningCandidateComponentProvider(false) {
+          @Override
+          protected boolean isCandidateComponent(MetadataReader reader) {
+            var metadata = reader.getAnnotationMetadata();
+            return metadata.hasAnnotation(Component.class.getName())
+                || metadata.hasMetaAnnotation(Component.class.getName());
+          }
+        };
 
     List<String> violations = new ArrayList<>();
     var candidates = provider.findCandidateComponents(SCANNED_PACKAGE);
@@ -98,11 +97,17 @@ class SpringComponentConstructorGuardTest {
         .as("component scan of %s found no components — the scan itself is broken", SCANNED_PACKAGE)
         .isNotEmpty();
 
+    // The rule is deliberately TIGHTER than Spring's, so it can over-report but never under-report.
+    // Spring's own behaviour: at most one @Autowired(required=true), any number of required=false,
+    // and with none annotated it falls back to the no-arg constructor — fatal only when there is no
+    // no-arg constructor. Both shapes this rejects but Spring tolerates (two required=false
+    // constructors; a no-arg sitting beside an injectable one) are absent here and are poor style
+    // anyway, so the message says what to do rather than asserting one mechanism.
     assertThat(violations)
         .as(
-            "Spring cannot choose between multiple constructors unless exactly one is @Autowired; "
-                + "it falls back to a no-arg constructor that does not exist and aborts context "
-                + "refresh. Annotate the injectable constructor.")
+            "Spring will not pick between multiple constructors on its own. Annotate the injectable "
+                + "one with @Autowired — otherwise it falls back to a no-arg constructor, and where "
+                + "none exists the context fails to start.")
         .isEmpty();
   }
 }
