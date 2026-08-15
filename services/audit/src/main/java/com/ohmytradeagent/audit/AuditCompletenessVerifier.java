@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
@@ -29,6 +30,16 @@ public final class AuditCompletenessVerifier {
   private final AuditEventSource source;
   private final LedgerRederiver rederiver;
 
+  /**
+   * {@code @Autowired} is required here, not decorative. Two constructors are declared (the one
+   * below injects a {@link LedgerRederiver} for tests), and with more than one candidate and none
+   * annotated, Spring stops choosing: it falls back to a no-arg constructor, finds none, and aborts
+   * context refresh with {@code NoSuchMethodException: <init>()}. This is the same defect as PR
+   * #486 and PR #683; it went unnoticed here only because the audit-completeness CronJob has never
+   * been applied to the cluster, so the application has not had to start. {@code
+   * SpringComponentConstructorGuardTest} in this module now catches it.
+   */
+  @Autowired
   public AuditCompletenessVerifier(AuditEventSource source) {
     this(source, new LedgerRederiver());
   }
