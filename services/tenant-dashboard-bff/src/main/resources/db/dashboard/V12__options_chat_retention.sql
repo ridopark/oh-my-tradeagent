@@ -1,0 +1,41 @@
+-- Phase 6 of the /options-chat mirror: bounded retention.
+--
+-- Nothing has ever deleted from this store. Messages accumulate forever and, since Phase 4, so do
+-- attachment BYTEA blobs — the only part of this feature with no ceiling. On a homelab node whose
+-- single local-path volume also backs the orchestrator and every exec_* database, and which cannot
+-- be expanded online, "grows forever" eventually becomes an outage rather than a chore.
+--
+-- THE THIRD DELIBERATE WIDENING. V9 granted SELECT + INSERT and asserted UPDATE and DELETE were
+-- DENIED; V10 widened UPDATE on attachments alone for the media fill. Each phase widened exactly
+-- what its shipped code issues, so that the privilege a bug could reach is always the smallest one
+-- that works. This is the phase that actually deletes, so it is the phase that gets DELETE.
+--
+-- ONLY ON THE PARENT TABLE. options_chat_attachment and options_chat_embed reference
+-- options_chat_message with ON DELETE CASCADE, and PostgreSQL executes referential actions through
+-- the constraint's own internal triggers rather than as the invoking role — so removing a message
+-- takes its media with it WITHOUT the writer ever holding DELETE on the child tables. That keeps
+-- the blast radius of this grant to "can remove a message and, transitively, its own children",
+-- never "can empty the attachment table". OptionsChatMigrationIT proves the cascade actually works
+-- under this exact grant rather than assuming it.
+--
+-- A NOTE ON DISK: deleting rows does not hand space back to the operating system. Autovacuum makes
+-- it reusable by this table, so the file stops GROWING, but it does not shrink without a VACUUM
+-- FULL (which takes an ACCESS EXCLUSIVE lock and needs free space equal to the table). Reclaiming
+-- an existing bulge is a deliberate operator action, not something a nightly job should do.
+GRANT DELETE ON options_chat_message TO dashboard_writer;
+
+-- The index the retention query needs, without which the grant above is a foot-gun.
+--
+-- V9 indexed (channel_id, message_id DESC) for the READ cursor; nothing indexes posted_at. The
+-- sweep runs `WHERE posted_at < ? ORDER BY posted_at ASC LIMIT 500`, so without this every batch is
+-- a full sequential scan plus a sort — and the job runs up to 200 batches per night. That is
+-- unnoticeable on today's few hundred rows and progressively worse on exactly the backlog this
+-- feature exists to clear, which is the wrong way round: the query would get slower precisely as it
+-- got more necessary.
+--
+-- With it, each batch is an index scan of the 500 oldest rows and stops. Ascending order matches the
+-- sweep's ORDER BY so no sort is needed at all.
+--
+-- Cost is one more btree maintained on insert. Worth it: messages arrive a handful at a time, and
+-- the alternative is 200 seq scans a night over an ever-growing table.
+CREATE INDEX options_chat_message_posted_at_idx ON options_chat_message (posted_at);

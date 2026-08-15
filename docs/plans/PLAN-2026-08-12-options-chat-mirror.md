@@ -434,8 +434,15 @@ threads.
 
 ### Phase 6 — Retention, edits/deletes, ops
 
-- Nightly CronJob (pattern: `infra/k8s/57-audit-completeness-check-cron.yaml`) deleting messages
-  older than `OPTIONS_CHAT_RETENTION_DAYS` (default 30); `ON DELETE CASCADE` clears media.
+- ~~Nightly CronJob~~ **SHIPPED as a `@Scheduled` bean in the BFF, not a CronJob.** The BFF already
+  owns this schema, holds the only writer DSL and runs a single replica, so a job needs no new
+  image, manifest, HTTP surface, credential or leader election. The audit-completeness CronJob earns
+  its own pod because it runs a different image against a different database; this does not.
+  Deletes messages older than `OPTIONS_CHAT_RETENTION_DAYS` (default 30) at 03:30 UTC, media
+  cascading with them. V12 grants DELETE on the PARENT ONLY — the cascade carries the children, and
+  an IT proves that works under exactly that grant rather than assuming it.
+  **A retention below 1 day DISABLES the sweep** rather than meaning "keep nothing": a 0 would
+  compute a cutoff of "now" and wipe the mirror on the first tick.
 - Reconcile handles **edits** (`content_hash` differs → `UPDATE`, set `edited`) and **deletes**
   (present in a prior scrape, absent now, still inside the visible window → set `deleted_at`;
   render as *"message deleted"*).

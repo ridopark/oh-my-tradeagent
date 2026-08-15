@@ -85,6 +85,9 @@ class OptionsChatMigrationIT {
       assertThat(indexExists(c, "options_chat_message_channel_id_message_id_idx"))
           .as("the named index backing the read cursor")
           .isTrue();
+      assertThat(indexExists(c, "options_chat_message_posted_at_idx"))
+          .as("the named index backing the retention sweep")
+          .isTrue();
     }
   }
 
@@ -191,10 +194,98 @@ class OptionsChatMigrationIT {
   }
 
   @Test
-  void writerIsDeniedDelete_soRetentionMustShipItsOwnMigration() throws SQLException {
+  void retentionCanDeleteAMessageAndItsChildrenCascade_withoutAnyChildDeleteGrant()
+      throws SQLException {
+    // V12 grants DELETE on the PARENT ONLY, on the claim that PostgreSQL runs a foreign key's
+    // ON DELETE CASCADE through the constraint's own internal triggers rather than as the invoking
+    // role. If that were wrong, retention would 42501 in production every night at 03:30 and the
+    // store would grow forever while looking configured. Proven here rather than assumed.
+    long msg = MSG + 20;
     try (Connection w = asRole("dashboard_writer", WRITER_PW);
         var st = w.createStatement()) {
-      assertDenied(() -> st.executeUpdate("DELETE FROM options_chat_message"));
+      insertMessage(st, msg, "expires");
+      st.executeUpdate(
+          "INSERT INTO options_chat_attachment (message_id, ordinal, kind, source_url) VALUES ("
+              + msg
+              + ", 0, 'image', 'https://cdn.discordapp.com/old.png')");
+      st.executeUpdate(
+          "INSERT INTO options_chat_embed (message_id, ordinal, title) VALUES ("
+              + msg
+              + ", 0, 'old')");
+
+      assertThat(st.executeUpdate("DELETE FROM options_chat_message WHERE message_id = " + msg))
+          .isEqualTo(1);
+
+      try (var rs =
+          st.executeQuery(
+              "SELECT (SELECT count(*) FROM options_chat_attachment WHERE message_id = "
+                  + msg
+                  + ") + (SELECT count(*) FROM options_chat_embed WHERE message_id = "
+                  + msg
+                  + ")")) {
+        rs.next();
+        assertThat(rs.getInt(1)).as("children cascaded with the parent").isZero();
+      }
+    }
+  }
+
+  @Test
+  void theRetentionSweepsExactQueryCanUseThePostedAtIndex() throws SQLException {
+    // An index EXISTING does not mean the sweep BENEFITS from it: ordering by posted_at pays off
+    // only because the index already holds that order, so the batch streams off the front and stops
+    // at 500. A plan that sorts first touches every expired row on the way to picking 500 — what
+    // the index was added to avoid, and it degrades exactly when the table is big.
+    //
+    // THE ROWS ARE THE TEST. On the dozen rows the sibling tests leave behind the whole table sits
+    // under the 500 limit, so sorting the lot is genuinely cheaper and Postgres is right to pick
+    // it; asserting against that measured nothing. Loading the table to production shape is what
+    // gives the choice a cost, and so gives the answer meaning. Chronological insert order matches
+    // how the mirror actually fills, keeping posted_at correlated with physical order the way
+    // production's is — that correlation is what buys the plan, so preserve it if the count
+    // changes.
+    //
+    // The statement mirrors the inner SELECT of OptionsChatRepository.deleteOlderThan. THAT is the
+    // source of truth; re-check this copy if the sweep's SQL is ever reshaped, or this will happily
+    // keep proving a plan for SQL production no longer runs.
+    try (Connection c = asSuperuser();
+        var st = c.createStatement()) {
+      // Its own channel AND its own id range, so these rows can neither be seen by a channel-scoped
+      // sibling assertion nor collide with a snowflake a later test picks.
+      st.executeUpdate(
+          "INSERT INTO options_chat_message (message_id, channel_id, author_name, posted_at,"
+              + " content, content_hash) SELECT 8000000000000000000 + g, 1, 'bulk',"
+              + " now() - (5000 - g) * interval '1 minute', 'c', 'h'"
+              + " FROM generate_series(1, 5000) g");
+      // Without stats the planner works off a default estimate and the choice is not a real one.
+      st.execute("ANALYZE options_chat_message");
+
+      StringBuilder plan = new StringBuilder();
+      try (var rs =
+          st.executeQuery(
+              "EXPLAIN SELECT message_id FROM options_chat_message"
+                  + " WHERE posted_at < now() ORDER BY posted_at ASC LIMIT 500")) {
+        while (rs.next()) {
+          plan.append(rs.getString(1)).append('\n');
+        }
+      }
+
+      // Deliberately NOT coerced with enable_seqscan=off: at this size the planner reaches for the
+      // index on its own, so this pins a decision it really makes rather than one forced in a test.
+      assertThat(plan.toString())
+          .as("the sweep's filter+order must be servable by the posted_at index")
+          .contains("options_chat_message_posted_at_idx");
+      assertThat(plan.toString())
+          .as("and with no sort step, because the index is already in posted_at order")
+          .doesNotContain("Sort");
+    }
+  }
+
+  @Test
+  void writerStillCannotDeleteChildrenDirectly_onlyViaTheCascade() throws SQLException {
+    // The grant's blast radius: removing a message takes its own media with it, but the writer can
+    // never empty the attachment table outright.
+    try (Connection w = asRole("dashboard_writer", WRITER_PW);
+        var st = w.createStatement()) {
       assertDenied(() -> st.executeUpdate("DELETE FROM options_chat_attachment"));
       assertDenied(() -> st.executeUpdate("DELETE FROM options_chat_embed"));
     }

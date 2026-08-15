@@ -67,6 +67,34 @@ class OptionsChatRepositoryIT {
   }
 
   private static IngestMessage message(long id, String content) {
+    return message(
+        id,
+        content,
+        OffsetDateTime.of(2026, 8, 13, 14, 3, 11, 0, ZoneOffset.UTC),
+        List.of(),
+        List.of());
+  }
+
+  /**
+   * The same author fixture posted at a chosen time, carrying one attachment and one embed — so a
+   * row built this way exercises the child-cascade as well as the parent.
+   */
+  private static IngestMessage messageAt(long id, OffsetDateTime postedAt) {
+    return message(
+        id,
+        "old news",
+        postedAt,
+        List.of(
+            new IngestAttachment("image", "https://cdn.discordapp.com/o.png", "o.png", 1, 1, 1)),
+        List.of(new IngestEmbed("t", "d", "https://example.com", "au", "f", null)));
+  }
+
+  private static IngestMessage message(
+      long id,
+      String content,
+      OffsetDateTime postedAt,
+      List<IngestAttachment> attachments,
+      List<IngestEmbed> embeds) {
     return new IngestMessage(
         id,
         "TradingTheTrend",
@@ -77,12 +105,12 @@ class OptionsChatRepositoryIT {
         // the avatar column — the page then renders <img src="#ff0004"> and every name loses its
         // colour. Leaving avatar null here made that swap undetectable.
         "https://cdn.discordapp.com/avatars/1/av.png",
-        OffsetDateTime.of(2026, 8, 13, 14, 3, 11, 0, ZoneOffset.UTC),
+        postedAt,
         content,
         null,
         false,
-        List.of(),
-        List.of());
+        attachments,
+        embeds);
   }
 
   @Test
@@ -188,6 +216,67 @@ class OptionsChatRepositoryIT {
                 .orElseThrow()
                 .attachments())
         .hasSize(1);
+  }
+
+  // THE RETENTION TESTS SHARE ONE TABLE AND deleteOlderThan HAS NO CHANNEL PREDICATE, so time is
+  // the only axis that can separate them. Two rules keep them independent, and a third test must
+  // follow both: every non-retention row in this class is dated 2026 (see message() above), and
+  // each retention test owns a disjoint pre-2021 era that it drains before it returns. The test
+  // asserting an exact "and nothing else" count deliberately owns the OLDEST era, so no sibling's
+  // rows can ever fall below its cutoff regardless of execution order.
+
+  @Test
+  void retentionDeletesOnlyRowsPastTheCutoff_andBindsTheCutoffAsATimestamp() {
+    // deleteOlderThan binds an OffsetDateTime — the SAME bind that 500'd every ingest until it was
+    // cast (see this class's header). An uncast cutoff here would not fail at build time and would
+    // not fail any mocked test; it would fail silently at 03:30 every night, and the only visible
+    // symptom would be a store that quietly never stops growing. So the sweep's real SQL runs here.
+    long old1 = 9_200_000_000_000_000_001L;
+    long old2 = 9_200_000_000_000_000_002L;
+    long keep = 9_200_000_000_000_000_003L;
+    OffsetDateTime era = OffsetDateTime.of(2018, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    repo.ingest(
+        CHANNEL,
+        List.of(
+            messageAt(old1, era),
+            messageAt(old2, era.plusDays(1)),
+            messageAt(keep, OffsetDateTime.now(ZoneOffset.UTC))));
+
+    // Both aged rows carry an attachment and an embed, so this also runs the ON DELETE CASCADE as
+    // dashboard_writer: V12 grants DELETE on the parent only, and a missing child grant would
+    // surface right here as 42501 rather than as a wrong count.
+    OffsetDateTime cutoff = OffsetDateTime.of(2018, 6, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    assertThat(repo.deleteOlderThan(cutoff, 500))
+        .as("the aged rows, and nothing else")
+        .isEqualTo(2);
+
+    assertThat(repo.recent(CHANNEL, null, 500))
+        .extracting(StoredMessage::messageId)
+        .doesNotContain(old1, old2)
+        .contains(keep);
+  }
+
+  @Test
+  void retentionNeverDeletesMoreThanTheBatchLimit_soOneSweepCannotStallTheDatabase() {
+    // The sweep is batched precisely so a first run against a long-neglected table takes many small
+    // locks instead of one enormous one. If LIMIT were dropped or misbound, this is the only place
+    // that notices before production does.
+    long base = 9_210_000_000_000_000_000L;
+    OffsetDateTime era = OffsetDateTime.of(2019, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    repo.ingest(
+        CHANNEL,
+        List.of(
+            messageAt(base, era),
+            messageAt(base + 1, era.plusMinutes(1)),
+            messageAt(base + 2, era.plusMinutes(2)),
+            messageAt(base + 3, era.plusMinutes(3)),
+            messageAt(base + 4, era.plusMinutes(4))));
+
+    OffsetDateTime cutoff = OffsetDateTime.of(2019, 6, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    assertThat(repo.deleteOlderThan(cutoff, 2)).isEqualTo(2);
+    assertThat(repo.deleteOlderThan(cutoff, 2)).isEqualTo(2);
+    assertThat(repo.deleteOlderThan(cutoff, 2)).as("the tail").isEqualTo(1);
+    assertThat(repo.deleteOlderThan(cutoff, 2)).as("and then it is drained").isZero();
   }
 
   @Test

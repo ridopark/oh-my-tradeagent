@@ -449,4 +449,32 @@ public class OptionsChatRepository {
     byte[] bytes = r.get("bytes", byte[].class);
     return bytes == null ? null : new Media(bytes, r.get("content_type", String.class));
   }
+
+  /**
+   * Delete up to {@code batchLimit} messages posted before {@code cutoff}, oldest first. Returns
+   * how many rows went.
+   *
+   * <p>BOUNDED ON PURPOSE. An unbounded {@code DELETE ... WHERE posted_at < ?} on a first run after
+   * months of accumulation would be one enormous transaction holding row locks and inflating WAL —
+   * on the same volume the trading databases live on. A capped batch keeps each statement small;
+   * the caller loops, and anything left simply drains on the next night.
+   *
+   * <p>NOT scoped by channel: this table holds nothing but the mirror, so a channel filter would
+   * add a dependency without adding safety.
+   *
+   * <p>Children are NOT deleted here — the FK cascade removes them, which is why this needs DELETE
+   * on the parent table only.
+   */
+  public int deleteOlderThan(OffsetDateTime cutoff, int batchLimit) {
+    if (batchLimit <= 0) {
+      return 0;
+    }
+    // Oldest first, so a backlog drains in a predictable order rather than at random.
+    return writerDsl.execute(
+        "DELETE FROM options_chat_message WHERE message_id IN ("
+            + " SELECT message_id FROM options_chat_message WHERE posted_at < ?::timestamptz"
+            + " ORDER BY posted_at ASC LIMIT ?)",
+        cutoff,
+        batchLimit);
+  }
 }
