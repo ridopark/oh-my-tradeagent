@@ -1,5 +1,6 @@
 package com.ohmytradeagent.tdbff.web;
 
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatChannels;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.StoredAttachment;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.StoredEmbed;
@@ -10,7 +11,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -45,20 +45,19 @@ public class OptionsChatController {
 
   private final OptionsChatRepository repo;
   private final TenantContext ctx;
-  private final long channelId;
+  private final OptionsChatChannels channels;
 
   public OptionsChatController(
-      OptionsChatRepository repo,
-      TenantContext ctx,
-      @Value("${options-chat.channel-id}") long channelId) {
+      OptionsChatRepository repo, TenantContext ctx, OptionsChatChannels channels) {
     this.repo = repo;
     this.ctx = ctx;
-    this.channelId = channelId;
+    this.channels = channels;
   }
 
   @GetMapping("/messages")
   public ResponseEntity<Map<String, Object>> messages(
       HttpServletRequest req,
+      @RequestParam(value = "channel", required = false) String channel,
       @RequestParam(value = "before", required = false) String before,
       @RequestParam(value = "limit", required = false, defaultValue = "50") int limit) {
     // Authentication only — the value is intentionally unused (see the class javadoc).
@@ -67,12 +66,23 @@ public class OptionsChatController {
     // A malformed cursor falls back to the newest page rather than 400ing: it is opaque to the
     // client, so the only ways to get one wrong are a bug or a hand-edited URL, and neither is
     // worth an error page instead of the newest messages.
+    // Resolved through the ALLOWLIST, never used as given: an unknown or malformed channel falls
+    // back to the default rather than reaching the query, so this parameter cannot be used to read
+    // rows from a channel the operator did not configure.
+    long channelId = channels.resolve(channel);
     List<StoredMessage> rows =
         repo.recent(channelId, Snowflakes.parse(before), Math.clamp(limit, 1, MAX_LIMIT));
 
     List<Map<String, Object>> items = rows.stream().map(OptionsChatController::toJson).toList();
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("channel_id", Long.toString(channelId));
+    // The page builds its tabs from this rather than hardcoding ids, so adding a channel is a
+    // config change on one side only.
+    body.put(
+        "channels",
+        channels.ordered().stream()
+            .map(c -> Map.of("id", Long.toString(c.id()), "label", c.label()))
+            .toList());
     body.put("count", items.size());
     body.put("items", items);
     return ResponseEntity.ok(body);

@@ -81,15 +81,16 @@ public final class OptionsChatIngestParser {
    * Parse and validate, rejecting anything not addressed to {@code expectedChannelId}.
    *
    * <p>The channel check is the reason this endpoint is not a general-purpose blob sink: without it
-   * anyone holding the ingest token could write arbitrary rows under any channel id.
+   * anyone holding the ingest token could write arbitrary rows under any channel id. It is an
+   * ALLOWLIST — membership, never a range or a prefix.
    */
-  public static List<IngestMessage> parse(Map<String, Object> body, long expectedChannelId) {
+  public static List<IngestMessage> parse(Map<String, Object> body, java.util.Set<Long> allowed) {
     if (body == null) {
       throw new InvalidIngestException("body is required");
     }
     long channelId = requireSnowflake(body, "channel_id");
-    if (channelId != expectedChannelId) {
-      throw new InvalidIngestException("channel_id is not the configured options-chat channel");
+    if (!allowed.contains(channelId)) {
+      throw new InvalidIngestException("channel_id is not an allowed options-chat channel");
     }
     Object raw = body.get("messages");
     if (!(raw instanceof List<?> list)) {

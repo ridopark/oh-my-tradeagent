@@ -6,6 +6,7 @@ import { DiscordMarkdown } from "@/components/DiscordMarkdown";
 // data arrives over the /api/options-chat/messages route handler, never a direct BFF call.
 import type {
   OptionsChatAttachment,
+  OptionsChatChannel,
   OptionsChatEmbed,
   OptionsChatMessage,
   OptionsChatPage,
@@ -209,7 +210,13 @@ function Message({ m, prev }: { m: OptionsChatMessage; prev?: OptionsChatMessage
 
 export function OptionsChat() {
   // Keyed by snowflake so a poll overlapping a page-up merges instead of duplicating.
-  const [byId, setById] = useState<Map<string, OptionsChatMessage>>(new Map());
+  // Per-channel message state. Keyed by channel so switching tabs does not discard what the other
+  // already loaded — and so a poll that lands mid-switch cannot write into the wrong tab.
+  const [byChannel, setByChannel] = useState<Map<string, Map<string, OptionsChatMessage>>>(
+    new Map(),
+  );
+  const [channels, setChannels] = useState<OptionsChatChannel[]>([]);
+  const [active, setActive] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
   // Distinct from `stale`: the feature is simply not switched on in this environment (the BFF gates
   // the route on OPTIONS_CHAT_ENABLED). Reporting that as a connectivity problem sent a reader
@@ -221,23 +228,26 @@ export function OptionsChat() {
   const scroller = useRef<HTMLDivElement | null>(null);
   const stick = useRef(true);
 
-  const merge = useCallback((items: OptionsChatMessage[]) => {
-    setById((prev) => {
+  const merge = useCallback((channel: string, items: OptionsChatMessage[]) => {
+    setByChannel((prev) => {
       const next = new Map(prev);
-      for (const m of items) next.set(m.message_id, m);
+      const bucket = new Map(next.get(channel) ?? []);
+      for (const m of items) bucket.set(m.message_id, m);
+      next.set(channel, bucket);
       return next;
     });
   }, []);
 
   // Newest page, on an interval. Keeps the last good frame on failure.
   useEffect(() => {
-    let active = true;
+    let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        const res = await fetch(`/api/options-chat/messages?limit=${PAGE}`, { cache: "no-store" });
+        const qs = active ? `?limit=${PAGE}&channel=${active}` : `?limit=${PAGE}`;
+        const res = await fetch(`/api/options-chat/messages${qs}`, { cache: "no-store" });
         if (res.status === 503) {
-          if (active) {
+          if (alive) {
             setDisabled(true);
             setStale(false);
           }
@@ -245,14 +255,18 @@ export function OptionsChat() {
         }
         if (!res.ok) throw new Error(String(res.status));
         const json = (await res.json()) as OptionsChatPage;
-        if (!active) return;
-        merge(json.items);
+        if (!alive) return;
+        if (json.channels?.length) setChannels(json.channels);
+        // The response echoes the channel it actually served, so a reply that arrives after a tab
+        // switch lands in ITS OWN bucket instead of polluting the newly selected tab.
+        merge(json.channel_id, json.items);
+        setActive((cur) => cur ?? json.channel_id);
         setDisabled(false);
         setStale(false);
       } catch {
-        if (active) setStale(true);
+        if (alive) setStale(true);
       } finally {
-        if (active) {
+        if (alive) {
           setLoaded(true);
           timer = setTimeout(poll, POLL_MS);
         }
@@ -260,13 +274,13 @@ export function OptionsChat() {
     };
     poll();
     return () => {
-      active = false;
+      alive = false;
       clearTimeout(timer);
     };
-  }, [merge]);
+  }, [merge, active]);
 
   // Ascending (oldest first) for reading order; the API returns newest-first.
-  const messages = Array.from(byId.values()).sort((a, b) =>
+  const messages = Array.from((active ? byChannel.get(active) : undefined)?.values() ?? []).sort((a, b) =>
     a.message_id.length === b.message_id.length
       ? a.message_id.localeCompare(b.message_id)
       : a.message_id.length - b.message_id.length,
@@ -279,13 +293,14 @@ export function OptionsChat() {
     const before = messages[0].message_id;
     const heightBefore = el?.scrollHeight ?? 0;
     try {
-      const res = await fetch(`/api/options-chat/messages?limit=${PAGE}&before=${before}`, {
-        cache: "no-store",
-      });
+      const res = await fetch(
+        `/api/options-chat/messages?limit=${PAGE}&before=${before}${active ? `&channel=${active}` : ""}`,
+        { cache: "no-store" },
+      );
       if (res.ok) {
         const json = (await res.json()) as OptionsChatPage;
         if (json.items.length === 0) setExhausted(true);
-        else merge(json.items);
+        else merge(json.channel_id, json.items);
         // Preserve the reading position: without this, prepending yanks the viewport upward.
         requestAnimationFrame(() => {
           if (el) el.scrollTop += el.scrollHeight - heightBefore;
@@ -296,7 +311,7 @@ export function OptionsChat() {
     } finally {
       setLoadingOlder(false);
     }
-  }, [exhausted, loadingOlder, merge, messages]);
+  }, [active, exhausted, loadingOlder, merge, messages]);
 
   // Follow the conversation only while the reader is already at the bottom — auto-scrolling someone
   // who has scrolled up to read history is the single most annoying thing a chat view can do.
@@ -318,6 +333,35 @@ export function OptionsChat() {
     // pushes the page slightly past the viewport, which is the right trade — it is a
     // read-once-then-collapse affordance, not something that stays open.
     <div className="flex h-[calc(100vh-10rem)] flex-col rounded border border-slate-800 bg-slate-900/40">
+      {channels.length > 1 && (
+        <div className="flex gap-1 border-b border-slate-800 px-2 pt-2">
+          {channels.map((c) => {
+            const on = c.id === active;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => {
+                  if (c.id === active) return;
+                  // Reset only the paging flags; the other tab's messages are kept in byChannel so
+                  // switching back is instant rather than re-fetching from scratch.
+                  setActive(c.id);
+                  setExhausted(false);
+                  stick.current = true;
+                }}
+                aria-current={on ? "page" : undefined}
+                className={`rounded-t px-3 py-1.5 text-sm ${
+                  on
+                    ? "border-b-2 border-sky-400 font-medium text-slate-100"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {c.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {disabled && (
         <div className="border-b border-slate-700 bg-slate-800/60 px-3 py-1 text-xs text-slate-300">
           The mirror is not enabled in this environment yet. Nothing is wrong with the scraper —

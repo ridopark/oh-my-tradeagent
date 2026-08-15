@@ -11,6 +11,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatChannels;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.StoredAttachment;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.StoredEmbed;
@@ -34,12 +35,12 @@ import org.springframework.test.web.servlet.MockMvc;
  */
 @WebMvcTest(OptionsChatController.class)
 @AutoConfigureMockMvc(addFilters = false)
-@Import(TenantContext.class)
+@Import({TenantContext.class, OptionsChatChannels.class})
 @TestPropertySource(
     properties = {
       "options-chat.enabled=true",
       "dashboard.writer.enabled=true",
-      "options-chat.channel-id=786109983065505792"
+      "options-chat.channel-ids=786109983065505792,769797179992571914"
     })
 class OptionsChatControllerWebMvcTest {
 

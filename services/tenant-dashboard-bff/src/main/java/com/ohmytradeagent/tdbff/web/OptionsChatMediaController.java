@@ -1,6 +1,7 @@
 package com.ohmytradeagent.tdbff.web;
 
 import com.ohmytradeagent.tdbff.optionschat.MediaTypes;
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatChannels;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.Media;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.PendingMedia;
@@ -11,7 +12,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
@@ -54,22 +54,20 @@ public class OptionsChatMediaController {
 
   private final OptionsChatRepository repo;
   private final TenantContext ctx;
-  private final long channelId;
+  private final OptionsChatChannels channels;
 
   public OptionsChatMediaController(
-      OptionsChatRepository repo,
-      TenantContext ctx,
-      @Value("${options-chat.channel-id}") long channelId) {
+      OptionsChatRepository repo, TenantContext ctx, OptionsChatChannels channels) {
     this.repo = repo;
     this.ctx = ctx;
-    this.channelId = channelId;
+    this.channels = channels;
   }
 
   /** Attachments still awaiting bytes, oldest first (closest to CDN-url expiry). */
   @GetMapping("/internal/options-chat/pending-media")
   public ResponseEntity<Map<String, Object>> pending(
       @RequestParam(value = "limit", required = false, defaultValue = "25") int limit) {
-    List<PendingMedia> rows = repo.pendingMedia(channelId, Math.clamp(limit, 1, MAX_PENDING));
+    List<PendingMedia> rows = repo.pendingMedia(channels.ids(), Math.clamp(limit, 1, MAX_PENDING));
     List<Map<String, Object>> items = new ArrayList<>(rows.size());
     for (PendingMedia p : rows) {
       Map<String, Object> j = new LinkedHashMap<>();
@@ -150,7 +148,7 @@ public class OptionsChatMediaController {
     // (same contract as the messages read).
     ctx.tenantId(req);
 
-    Media m = repo.media(channelId, id);
+    Media m = repo.media(channels.ids(), id);
     if (m == null) {
       return ResponseEntity.notFound().build();
     }

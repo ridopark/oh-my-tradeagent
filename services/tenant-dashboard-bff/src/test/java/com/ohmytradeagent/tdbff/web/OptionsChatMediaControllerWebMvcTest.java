@@ -11,6 +11,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatChannels;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.Media;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.PendingMedia;
@@ -27,12 +28,12 @@ import org.springframework.test.web.servlet.MockMvc;
 /** Web-layer contract for the Phase 4 media routes. */
 @WebMvcTest(OptionsChatMediaController.class)
 @AutoConfigureMockMvc(addFilters = false)
-@Import(TenantContext.class)
+@Import({TenantContext.class, OptionsChatChannels.class})
 @TestPropertySource(
     properties = {
       "options-chat.enabled=true",
       "dashboard.writer.enabled=true",
-      "options-chat.channel-id=786109983065505792"
+      "options-chat.channel-ids=786109983065505792,769797179992571914"
     })
 class OptionsChatMediaControllerWebMvcTest {
 
@@ -44,7 +45,7 @@ class OptionsChatMediaControllerWebMvcTest {
 
   @Test
   void pendingListsOldestFirstForTheConfiguredChannel() throws Exception {
-    when(repo.pendingMedia(eq(CHANNEL), anyInt()))
+    when(repo.pendingMedia(anyCollection(), anyInt()))
         .thenReturn(List.of(new PendingMedia(7L, "https://cdn.discordapp.com/a.png")));
 
     mvc.perform(get("/internal/options-chat/pending-media"))
@@ -57,7 +58,7 @@ class OptionsChatMediaControllerWebMvcTest {
 
   @Test
   void servingMediaUsesOurSniffedTypeAndForbidsSniffing() throws Exception {
-    when(repo.media(CHANNEL, 7L)).thenReturn(new Media(PNG, "image/png"));
+    when(repo.media(anyCollection(), eq(7L))).thenReturn(new Media(PNG, "image/png"));
 
     mvc.perform(get("/api/options-chat/media/7").header("X-Tenant-Id", "prod_real"))
         .andExpect(status().isOk())
@@ -77,7 +78,7 @@ class OptionsChatMediaControllerWebMvcTest {
 
   @Test
   void unknownOrUnfetchedMediaIs404() throws Exception {
-    when(repo.media(CHANNEL, 999L)).thenReturn(null);
+    when(repo.media(anyCollection(), eq(999L))).thenReturn(null);
 
     mvc.perform(get("/api/options-chat/media/999").header("X-Tenant-Id", "t"))
         .andExpect(status().isNotFound());
@@ -136,5 +137,9 @@ class OptionsChatMediaControllerWebMvcTest {
 
   private static byte[] any() {
     return org.mockito.ArgumentMatchers.any();
+  }
+
+  private static java.util.Collection<Long> anyCollection() {
+    return org.mockito.ArgumentMatchers.anyCollection();
   }
 }

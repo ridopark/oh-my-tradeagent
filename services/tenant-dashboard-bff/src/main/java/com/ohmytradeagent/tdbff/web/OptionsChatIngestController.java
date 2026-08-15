@@ -1,12 +1,12 @@
 package com.ohmytradeagent.tdbff.web;
 
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatChannels;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatIngestParser;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.IngestMessage;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -35,12 +35,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class OptionsChatIngestController {
 
   private final OptionsChatRepository repo;
-  private final long channelId;
+  private final OptionsChatChannels channels;
 
-  public OptionsChatIngestController(
-      OptionsChatRepository repo, @Value("${options-chat.channel-id}") long channelId) {
+  public OptionsChatIngestController(OptionsChatRepository repo, OptionsChatChannels channels) {
     this.repo = repo;
-    this.channelId = channelId;
+    this.channels = channels;
   }
 
   @PostMapping("/ingest")
@@ -49,7 +48,10 @@ public class OptionsChatIngestController {
     // A structural rejection throws InvalidIngestException (an IllegalArgumentException), which
     // GlobalExceptionHandler turns into the service's standard 400 envelope. Content-level problems
     // never reach here — the parser sanitizes those.
-    List<IngestMessage> messages = OptionsChatIngestParser.parse(body, channelId);
+    List<IngestMessage> messages = OptionsChatIngestParser.parse(body, channels.allowed());
+    // The batch's channel is re-read here rather than trusted from a field: parse() already
+    // rejected anything outside the allowlist, so this is the validated value.
+    long channelId = Long.parseLong(String.valueOf(body.get("channel_id")).trim());
     int stored = repo.ingest(channelId, messages);
 
     Map<String, Object> out = new LinkedHashMap<>();

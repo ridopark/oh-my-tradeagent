@@ -93,9 +93,13 @@ dashboard:
 # worse than no endpoint.
 options-chat:
   enabled: ${OPTIONS_CHAT_ENABLED:false}
-  # The ONE Discord channel this mirror accepts. Ingest rejects any other channel_id outright, so
-  # the store cannot become a general-purpose blob sink for whoever holds the ingest token.
-  channel-id: ${OPTIONS_CHAT_CHANNEL_ID:786109983065505792}
+  # The Discord channels this mirror accepts, comma-separated. Ingest rejects any other channel_id
+  # outright, so the store cannot become a general-purpose blob sink for whoever holds the ingest
+  # token — an ALLOWLIST, not a filter.
+  #
+  # Entries are `id` or `id:Label`; the label is what the page's tab shows, so the page has no
+  # channel ids compiled into it. The FIRST entry is the default the page opens on.
+  channel-ids: ${OPTIONS_CHAT_CHANNEL_IDS:786109983065505792:Discussion,769797179992571914:Signals}
   # SEPARATE credential from bff.service-token, enforced by ServiceTokenFilter's route scoping on
   # /internal/options-chat/**. The caller is the Discord-scraping pod; with the shared token it
   # could spoof any X-Tenant-Id and read real-money positions. NO default — blank fails closed and
