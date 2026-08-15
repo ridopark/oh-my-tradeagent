@@ -13,7 +13,11 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
  * web layer and <em>mock</em> their collaborators, so a real wiring fault never gets exercised —
  * the gap that let a {@code PortfolioHistoryClient} multi-constructor/no-{@code @Autowired} bug
  * ship green and {@code CrashLoopBackOff} the pod on the homelab deploy (PR #486). If the context
- * loads here, every real {@code @Component} was constructable.
+ * loads here, every {@code @Component} <em>whose conditions hold under these properties</em> was
+ * constructable — which is NOT all of them. Beans behind a {@code @ConditionalOnProperty} that is
+ * false here are never constructed and so are never checked; reading that limitation as "every
+ * component" is exactly how {@code OptionsChatRetention} shipped with the identical PR #486 defect.
+ * The writer-gated ones are covered by {@link ApplicationContextWriterEnabledSmokeTest}.
  *
  * <p>Hermetic — nothing reaches the network at context init:
  *

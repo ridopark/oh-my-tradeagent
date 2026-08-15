@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.OffsetDateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -52,9 +53,40 @@ public class OptionsChatRetention {
   private final int retentionDays;
   private final Clock clock;
 
+  /**
+   * {@code @Autowired} is LOAD-BEARING, not decoration: this class declares two constructors, and
+   * with more than one candidate and none annotated Spring stops choosing and aborts context
+   * refresh. {@code ApplicationContextWriterEnabledSmokeTest} carries the full account and is what
+   * fails if this is removed.
+   */
+  @Autowired
   public OptionsChatRetention(
-      OptionsChatRepository repo, @Value("${options-chat.retention-days:30}") int retentionDays) {
-    this(repo, retentionDays, Clock.systemUTC());
+      OptionsChatRepository repo,
+      @Value("${options-chat.retention-days:30}") String retentionDays) {
+    this(repo, parseRetentionDays(retentionDays), Clock.systemUTC());
+  }
+
+  /**
+   * A value that is not a number DISABLES the sweep instead of refusing to start.
+   *
+   * <p>The {@code :30} default only covers an ABSENT property. An env var that is present and blank
+   * — {@code OPTIONS_CHAT_RETENTION_DAYS: ""}, the ordinary way to clear a ConfigMap entry —
+   * resolves to the empty string, and binding that straight to an {@code int} throws during context
+   * refresh. That would make the one misconfiguration this class does not already tolerate the one
+   * that takes the whole BFF down, when the contract above is that a bad ConfigMap is inert.
+   * Non-positive is already handled downstream, so returning 0 routes a junk value into the same
+   * loud, safe path.
+   */
+  static int parseRetentionDays(String raw) {
+    try {
+      return Integer.parseInt(raw.trim());
+    } catch (NumberFormatException e) {
+      log.error(
+          "options-chat retention-days is not a number ({}) — DISABLING the sweep; the mirror will"
+              + " grow without bound until this is corrected",
+          raw);
+      return 0;
+    }
   }
 
   OptionsChatRetention(OptionsChatRepository repo, int retentionDays, Clock clock) {

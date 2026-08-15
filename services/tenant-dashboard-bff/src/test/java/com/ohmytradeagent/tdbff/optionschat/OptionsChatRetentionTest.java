@@ -101,6 +101,28 @@ class OptionsChatRetentionTest {
     verify(repo, never()).ingest(anyLong(), any());
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"", "   ", "thirty", "30d", "1e3"})
+  void aRetentionDaysThatIsNotANumberDisablesTheSweepInsteadOfRefusingToStart(String raw) {
+    // Through the SPRING constructor, because that is the one that takes the raw property value.
+    // The `:30` default only fires when the property is absent; a ConfigMap entry that is present
+    // and blank resolves to "" and, bound straight to an int, aborts context refresh — turning a
+    // typo into a BFF outage rather than a disabled sweep.
+    OptionsChatRepository repo = mock(OptionsChatRepository.class);
+
+    assertThat(new OptionsChatRetention(repo, raw).runOnce()).isZero();
+    verify(repo, never()).deleteOlderThan(any(), anyInt());
+  }
+
+  @Test
+  void aWellFormedRetentionDaysParsesToItsValue_soTheParseIsNotSwallowingGoodConfig() {
+    // Asserted on the VALUE, not merely on "a sweep happened": going through runOnce() only proves
+    // the result was positive, so a parse returning 1 or 9999 would pass just as happily. Padding
+    // is included because a ConfigMap scalar routinely carries surrounding whitespace.
+    assertThat(OptionsChatRetention.parseRetentionDays(" 7 ")).isEqualTo(7);
+    assertThat(OptionsChatRetention.parseRetentionDays("30")).isEqualTo(30);
+  }
+
   private static long anyLong() {
     return org.mockito.ArgumentMatchers.anyLong();
   }
