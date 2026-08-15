@@ -54,14 +54,10 @@ public class OptionsChatRetention {
   private final Clock clock;
 
   /**
-   * {@code @Autowired} is LOAD-BEARING, not decoration. This class declares two constructors (the
-   * one below takes an injected Clock), and with more than one candidate and none annotated, Spring
-   * stops choosing: it falls back to a no-arg constructor, finds none, and aborts context refresh
-   * with {@code NoSuchMethodException: <init>()}. Since this bean only exists when both
-   * options-chat.enabled and dashboard.writer.enabled are true — the cluster's configuration — the
-   * failure lands nowhere except production, where it CrashLoopBackOffs the BFF and takes /live and
-   * /config down with it. PR #486 did precisely this; {@code
-   * ApplicationContextWriterEnabledSmokeTest} is the guard that now catches it.
+   * {@code @Autowired} is LOAD-BEARING, not decoration: this class declares two constructors, and
+   * with more than one candidate and none annotated Spring stops choosing and aborts context
+   * refresh. {@code ApplicationContextWriterEnabledSmokeTest} carries the full account and is what
+   * fails if this is removed.
    */
   @Autowired
   public OptionsChatRetention(
@@ -81,10 +77,10 @@ public class OptionsChatRetention {
    * Non-positive is already handled downstream, so returning 0 routes a junk value into the same
    * loud, safe path.
    */
-  private static int parseRetentionDays(String raw) {
+  static int parseRetentionDays(String raw) {
     try {
       return Integer.parseInt(raw.trim());
-    } catch (RuntimeException e) {
+    } catch (NumberFormatException e) {
       log.error(
           "options-chat retention-days is not a number ({}) — DISABLING the sweep; the mirror will"
               + " grow without bound until this is corrected",

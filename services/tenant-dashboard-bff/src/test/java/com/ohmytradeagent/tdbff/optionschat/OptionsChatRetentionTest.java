@@ -115,12 +115,12 @@ class OptionsChatRetentionTest {
   }
 
   @Test
-  void aWellFormedRetentionDaysStillSweeps_soTheParseIsNotSwallowingGoodConfig() {
-    OptionsChatRepository repo = mock(OptionsChatRepository.class);
-    when(repo.deleteOlderThan(any(), anyInt())).thenReturn(0);
-
-    assertThat(new OptionsChatRetention(repo, " 7 ").runOnce()).isZero();
-    verify(repo, times(1)).deleteOlderThan(any(), anyInt());
+  void aWellFormedRetentionDaysParsesToItsValue_soTheParseIsNotSwallowingGoodConfig() {
+    // Asserted on the VALUE, not merely on "a sweep happened": going through runOnce() only proves
+    // the result was positive, so a parse returning 1 or 9999 would pass just as happily. Padding
+    // is included because a ConfigMap scalar routinely carries surrounding whitespace.
+    assertThat(OptionsChatRetention.parseRetentionDays(" 7 ")).isEqualTo(7);
+    assertThat(OptionsChatRetention.parseRetentionDays("30")).isEqualTo(30);
   }
 
   private static long anyLong() {
