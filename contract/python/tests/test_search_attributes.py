@@ -34,6 +34,28 @@ SCAN_ROOTS = (
     REPO_ROOT / "scripts" / "harness",
 )
 
+# Directories that are not first-party source. The scan roots are walked
+# recursively, and ``services/signal-source-discord`` carries a local ``.venv``
+# with this very package installed into it — so the canonical module reappears
+# under a second path and reads as an offender, failing the guard on any
+# developer machine that has run ``uv sync`` (CI, with no venv on disk, passes).
+# The identity check below cannot catch it: it is the same file, at a different
+# resolved path. Vendored/installed trees are out of scope by definition — this
+# guard polices what we write, not what we install.
+EXCLUDED_DIR_NAMES = frozenset(
+    {
+        ".venv",
+        "venv",
+        "site-packages",
+        "node_modules",
+        "__pycache__",
+        ".tox",
+        ".mypy_cache",
+        "build",
+        "dist",
+    }
+)
+
 # The literals are assembled from parts so this test file itself doesn't match
 # the regression scan and become a false-positive offender.
 _FOR_KEYWORD = "SearchAttributeKey" + "." + "for_keyword"
@@ -55,11 +77,14 @@ def test_constants_are_keyword_search_attribute_keys() -> None:
 def _scan_for_literal(literal: str) -> list[str]:
     """Return the relative-to-repo-root paths that contain ``literal``."""
     hits: list[str] = []
+    canonical = CANONICAL_MODULE.resolve()
     for root in SCAN_ROOTS:
         for py in root.rglob("*.py"):
+            if EXCLUDED_DIR_NAMES.intersection(py.parts):
+                continue
             # Skip the canonical module itself — it is allowed (and required)
             # to construct the keys.
-            if py.resolve() == CANONICAL_MODULE.resolve():
+            if py.resolve() == canonical:
                 continue
             if literal in py.read_text():
                 hits.append(str(py.relative_to(REPO_ROOT)))
