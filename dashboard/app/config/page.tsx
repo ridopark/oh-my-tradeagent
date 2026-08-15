@@ -556,6 +556,13 @@ export default async function ConfigPage({
       if (!isEditableField(klass, kind)) continue;
       const raw = formData.get(inputName(strategyId, field));
       if (raw === null) continue;
+      // A BLANKED box means "leave this alone", never "set it to zero" — Number("") is 0, so
+      // without this guard clearing an input silently writes 0. The insert loop below already
+      // treats blank as skip; these two loops disagreeing is how an operator clearing a field to
+      // "reset it" instead zeroes a live risk setting (capital_weight, max_slippage_pct), and how
+      // clearing repeg_after_ms silently DISABLES the entry re-peg rather than restoring its
+      // default.
+      if (String(raw).trim() === "") continue;
       if (kind === "number") {
         const n = Number(raw);
         // Reject a non-numeric edit before it reaches the gateway.

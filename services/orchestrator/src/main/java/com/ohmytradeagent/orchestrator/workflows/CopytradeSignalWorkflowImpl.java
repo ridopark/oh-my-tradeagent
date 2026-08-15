@@ -425,6 +425,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    */
   private final Set<String> supersededEntryOrderIds = new HashSet<>();
 
+  /**
+   * A fill signal for a superseded order that {@link #onFill} refused. Non-null means contracts may
+   * be held with no PositionWorkflow managing them, which recon cannot auto-adopt (the journal row
+   * is CANCELLED). Audited by the main path so it pages instead of vanishing.
+   */
+  private FillSignalPayload droppedSupersededFill;
+
   private boolean riskBreachReceived;
   private String riskBreachReason;
   private String riskBreachActor;
@@ -503,6 +510,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     if (event != null
         && event.getBrokerOrderId() != null
         && supersededEntryOrderIds.contains(event.getBrokerOrderId())) {
+      // Contradicts the broker's own cancel ack, so it cannot be adopted in place of the
+      // replacement's fill. But a fill event means contracts may really have been bought, and a
+      // silently dropped fill is a live options position with no stop, no trail and no time-stop:
+      // recon will NOT auto-adopt it either, because the journal row is CANCELLED and
+      // maybeAutoAdopt only runs for a FILLED row. Record it so the main path can page a human.
+      // Signal handlers must not dispatch Activities, hence the flag rather than a logAudit here.
+      droppedSupersededFill = event;
       return;
     }
     this.fillEvent = event;
@@ -981,6 +995,27 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
                 Duration.ofSeconds(ttlSecs).minus(Duration.ofMillis(repegAfterMs)),
                 () -> fillEvent != null || riskBreachReceived);
       }
+    }
+
+    if (droppedSupersededFill != null) {
+      logAudit(
+          payload,
+          KIND_ORDER_CANCEL_FAILED,
+          subject(
+              "intent_key",
+              intentKey,
+              "broker_order_id",
+              droppedSupersededFill.getBrokerOrderId(),
+              "filled_qty",
+              droppedSupersededFill.getFilledQty(),
+              "avg_fill_price",
+              droppedSupersededFill.getAvgFillPrice(),
+              "reason",
+              "repeg",
+              "severity",
+              "ERROR",
+              "note",
+              "superseded_order_fill_dropped_possible_unmanaged_lot"));
     }
 
     if (riskBreachReceived && fillEvent == null) {
@@ -2233,6 +2268,24 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               "reason", "repeg",
               "severity", "WARN",
               "note", "repeg_abandoned_fill_landed_during_cancel"));
+      return new RepegOutcome(null, false);
+    }
+
+    if (riskBreachReceived) {
+      // A kill-switch / daily-loss cascade landed while we were cancelling. The risk decision that
+      // authorised this entry is now void, and the original order is already cancelled, so the
+      // safe move is to stop here rather than open a NEW real-money position into a breach. The
+      // caller's breach branch handles the abort. Without this check the re-peg is a hole in the
+      // cascade: the gates only ran at t=0.
+      logAudit(
+          payload,
+          KIND_ORDER_CANCEL_FAILED,
+          subject(
+              "intent_key", intentKey,
+              "broker_order_id", placed.getBrokerOrderId(),
+              "reason", "repeg",
+              "severity", "WARN",
+              "note", "repeg_abandoned_risk_breach"));
       return new RepegOutcome(null, false);
     }
 

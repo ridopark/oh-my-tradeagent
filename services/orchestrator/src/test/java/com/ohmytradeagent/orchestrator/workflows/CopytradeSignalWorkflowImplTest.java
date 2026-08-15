@@ -2122,6 +2122,34 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
+  void repeg_riskBreachDuringTheCancelStopsTheReplacement() {
+    // The re-peg would otherwise be a hole in the kill-switch cascade: the risk gates run once, at
+    // t=0, so a breach arriving mid-re-peg must not let a NEW real-money order through. The
+    // original is already cancelled by this point, so standing down is also the cheap outcome.
+    setupRepegMocks(null);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-initial"));
+    when(exec.cancelOrder(anyString()))
+        .thenAnswer(
+            invocation -> {
+              RiskBreachPayload breach = new RiskBreachPayload();
+              breach.setSchemaVersion(1L);
+              breach.setReason("account_daily_loss");
+              breach.setActor("kill-switch");
+              env.getWorkflowClient()
+                  .newWorkflowStub(CopytradeSignalWorkflow.class, "repeg-breach")
+                  .riskBreach(breach);
+              return cancelledResult("intent-K", "brk-initial");
+            });
+
+    runWorkflowWithId(btoPayload(), "repeg-breach");
+
+    verify(exec, times(1)).placeOrder(any());
+    assertThat(captureWithEntry("OrderCancelFailed", "note", "repeg_abandoned_risk_breach"))
+        .isNotNull();
+  }
+
+  @Test
   void repeg_gatesAndSizingBudgetAgainstTheCeilingNotTheInitialPeg() {
     // The re-peg may reach the ceiling, so the notional-cap / buying-power gate must be told the
     // ceiling up front. That is what lets the re-peg itself skip a re-check. Consequence the

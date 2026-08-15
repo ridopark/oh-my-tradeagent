@@ -214,6 +214,19 @@ actions are now post-deploy verification and the override path.
    apply the merged ConfigMap.
 3. **Deploy gate + homelab verify** after each code phase (deploy targets the k3s homelab). Since
    Phase 3 is behavior-live on arrival, prefer rolling it outside RTH.
+
+   **ROLL THE ORCHESTRATOR FIRST — this one is ordered, not a preference.** There is no custom
+   Temporal `DataConverter`, so the SDK default applies with `FAIL_ON_UNKNOWN_PROPERTIES` on, and
+   the generated `StrategyConfig` carries no `@JsonIgnoreProperties(ignoreUnknown = true)` (the
+   schema is `additionalProperties: false`). `StrategyConfig` crosses the Temporal wire inside
+   `StrategyConfigUpdateRequest`, so if the dashboard/api-gateway rolls first and an operator sets
+   `repeg_ceiling_pct` in that window, the write fails with `DataConverterException`. The READ path
+   is safe either way — `DbStrategyRegistry` uses the Spring-injected `ObjectMapper`, which Boot
+   configures unknown-property-tolerant.
+
+   Note also that `.github/workflows/deploy.yml` lists `market-data` as RESTART_ONLY, so CI does a
+   rollout restart and skips `kubectl apply` for it. Nothing here needs a market-data manifest
+   change, but its task queue is now on the entry path, so its health matters more than it did.
 4. Leave `max_slippage_abs = 0` / `max_slippage_pct = 0.05` as-is. The wider budget lives entirely in
    `repeg_ceiling_pct`, so the *initial* peg stays exactly as tight as it is today.
 
