@@ -638,8 +638,17 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // replay regardless of which branches the config happens to take.
     int repegVersion = Workflow.getVersion(VERSION_BTO_ENTRY_REPEG, Workflow.DEFAULT_VERSION, 1);
     long repegAfterMs = repegAfterMs(config);
+    // 0 DISABLES on BOTH fields. Without this, zeroing repeg_ceiling_pct would fall through
+    // BtoPricing's null/ZERO-means-unset convention and silently grant the 10% DEFAULT — i.e. an
+    // operator zeroing the budget to remove it would get the widest budget instead. Same sentinel,
+    // same meaning, on both halves of the feature.
+    BigDecimal repegCeilingPct = config.getRepegCeilingPct();
+    boolean ceilingDisabled = repegCeilingPct != null && repegCeilingPct.signum() == 0;
     boolean repegActive =
-        repegVersion >= 1 && repegAfterMs > 0 && repegAfterMs < pendingTtlSecs(config) * 1000L;
+        repegVersion >= 1
+            && repegAfterMs > 0
+            && !ceilingDisabled
+            && repegAfterMs < pendingTtlSecs(config) * 1000L;
     // The TRUE max cost of this entry: the re-peg may reach the ceiling, so the risk gates and
     // sizing must budget against the ceiling rather than the (tighter) initial peg. Gating against
     // the max is what lets the re-peg itself skip a re-check — it is already covered by the

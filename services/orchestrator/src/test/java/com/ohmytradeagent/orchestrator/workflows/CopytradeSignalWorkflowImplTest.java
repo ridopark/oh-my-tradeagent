@@ -2122,6 +2122,38 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
+  void repegCeilingPctZero_alsoDisablesTheRepeg() {
+    // Same sentinel, same meaning on both fields. Zeroing the ceiling is the intuitive way to
+    // remove the extra budget; without this it would fall through BtoPricing's null/ZERO-means-
+    // unset convention and grant the 10% DEFAULT — handing the operator the WIDEST budget when
+    // they asked for none.
+    StrategyConfig cfg = config();
+    cfg.setPendingTtlPaperSecs(90L);
+    cfg.setRepegCeilingPct(BigDecimal.ZERO);
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-initial"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-initial"));
+
+    runWorkflow(btoPayload());
+
+    verify(exec, times(1)).placeOrder(any());
+    verify(optionQuote, never()).getOptionQuote(any());
+  }
+
+  @Test
   void repeg_riskBreachDuringTheCancelStopsTheReplacement() {
     // The re-peg would otherwise be a hole in the kill-switch cascade: the risk gates run once, at
     // t=0, so a breach arriving mid-re-peg must not let a NEW real-money order through. The

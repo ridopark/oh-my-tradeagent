@@ -287,7 +287,7 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "repeg_ceiling_pct",
     kind: "number",
-    description: "Fractional cap above the signal price that the BTO entry re-peg may reach (e.g. 0.10 = 10%). The re-peg targets min(live ask + one penny tick, payload.price * (1 + repeg_ceiling_pct)) — it walks to the market, never blindly to this cap, and never past it. Unset: the 0.10 code default applies. This is deliberately WIDER than max_slippage_pct: the initial order still goes out at the tighter max_slippage limit, and this budget is spent only after that peg has failed to fill. Ignored when repeg_after_ms = 0.",
+    description: "Fractional cap above the signal price that the BTO entry re-peg may reach (e.g. 0.10 = 10%). The re-peg targets min(live ask + one penny tick, payload.price * (1 + repeg_ceiling_pct)) — it walks to the market, never blindly to this cap, and never past it. Unset: the 0.10 code default applies. 0: DISABLED, same sentinel as repeg_after_ms = 0 (either one at 0 turns the re-peg off). This is deliberately WIDER than max_slippage_pct: the initial order still goes out at the tighter max_slippage limit, and this budget is spent only after that peg has failed to fill. Ignored when repeg_after_ms = 0.",
   },
   {
     field: "reset_cooldown_secs",
