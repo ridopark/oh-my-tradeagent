@@ -23,3 +23,19 @@
 -- FULL (which takes an ACCESS EXCLUSIVE lock and needs free space equal to the table). Reclaiming
 -- an existing bulge is a deliberate operator action, not something a nightly job should do.
 GRANT DELETE ON options_chat_message TO dashboard_writer;
+
+-- The index the retention query needs, without which the grant above is a foot-gun.
+--
+-- V9 indexed (channel_id, message_id DESC) for the READ cursor; nothing indexes posted_at. The
+-- sweep runs `WHERE posted_at < ? ORDER BY posted_at ASC LIMIT 500`, so without this every batch is
+-- a full sequential scan plus a sort — and the job runs up to 200 batches per night. That is
+-- unnoticeable on today's few hundred rows and progressively worse on exactly the backlog this
+-- feature exists to clear, which is the wrong way round: the query would get slower precisely as it
+-- got more necessary.
+--
+-- With it, each batch is an index scan of the 500 oldest rows and stops. Ascending order matches the
+-- sweep's ORDER BY so no sort is needed at all.
+--
+-- Cost is one more btree maintained on insert. Worth it: messages arrive a handful at a time, and
+-- the alternative is 200 seq scans a night over an ever-growing table.
+CREATE INDEX options_chat_message_posted_at_idx ON options_chat_message (posted_at);

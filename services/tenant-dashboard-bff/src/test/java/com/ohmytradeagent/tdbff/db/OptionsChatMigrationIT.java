@@ -85,6 +85,9 @@ class OptionsChatMigrationIT {
       assertThat(indexExists(c, "options_chat_message_channel_id_message_id_idx"))
           .as("the named index backing the read cursor")
           .isTrue();
+      assertThat(indexExists(c, "options_chat_message_posted_at_idx"))
+          .as("the named index backing the retention sweep")
+          .isTrue();
     }
   }
 
@@ -223,6 +226,39 @@ class OptionsChatMigrationIT {
         rs.next();
         assertThat(rs.getInt(1)).as("children cascaded with the parent").isZero();
       }
+    }
+  }
+
+  @Test
+  void theRetentionSweepsExactQueryCanUseThePostedAtIndex() throws SQLException {
+    // An index EXISTING does not mean the planner can use it for this query — the column order and
+    // the ORDER BY have to line up. Asserted against the sweep's real statement rather than a
+    // paraphrase.
+    //
+    // enable_seqscan=off because on a table this small a seq scan is genuinely cheaper and the
+    // planner would rightly pick it, which would tell us nothing. Forcing it off answers the
+    // question we actually care about: IS this index usable for this shape, or would the sweep fall
+    // back to a scan-and-sort once the table is big enough for it to matter?
+    try (Connection c = asSuperuser();
+        var st = c.createStatement()) {
+      st.execute("SET enable_seqscan = off");
+      StringBuilder plan = new StringBuilder();
+      try (var rs =
+          st.executeQuery(
+              "EXPLAIN SELECT message_id FROM options_chat_message"
+                  + " WHERE posted_at < now() ORDER BY posted_at ASC LIMIT 500")) {
+        while (rs.next()) {
+          plan.append(rs.getString(1)).append('\n');
+        }
+      }
+      st.execute("SET enable_seqscan = on");
+
+      assertThat(plan.toString())
+          .as("the sweep's filter+order must be servable by the posted_at index")
+          .contains("options_chat_message_posted_at_idx");
+      assertThat(plan.toString())
+          .as("and with no sort step, because the index is already in posted_at order")
+          .doesNotContain("Sort");
     }
   }
 

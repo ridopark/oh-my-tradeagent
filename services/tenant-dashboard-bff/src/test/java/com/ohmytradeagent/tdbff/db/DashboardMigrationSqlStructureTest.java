@@ -264,5 +264,15 @@ class DashboardMigrationSqlStructureTest {
     assertThat(sql)
         .as("V12 must not reference dashboard_readonly")
         .doesNotContain("dashboard_readonly");
+
+    // The DELETE grant without this index would degrade exactly as the backlog it exists to clear
+    // grows: 200 sequential scans a night over an ever-larger table.
+    assertThat(sql)
+        .as("V12 indexes posted_at, which the retention sweep orders and filters on")
+        .containsPattern(
+            Pattern.compile(
+                "CREATE INDEX options_chat_message_posted_at_idx\\s+"
+                    + "ON options_chat_message \\(posted_at\\)",
+                Pattern.DOTALL));
   }
 }
