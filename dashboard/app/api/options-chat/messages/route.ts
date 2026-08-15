@@ -11,11 +11,14 @@ export async function GET(request: Request) {
   // `before` is an opaque cursor (a Discord snowflake). Forwarded as a string: it exceeds 2^53, so
   // parsing it to a JS number here would silently corrupt it.
   const before = url.searchParams.get("before") ?? undefined;
+  // Forwarded as-is; the BFF resolves it through its allowlist and falls back to the default, so an
+  // unknown channel here can never read rows the operator did not configure.
+  const channel = url.searchParams.get("channel") ?? undefined;
   const limitRaw = Number(url.searchParams.get("limit") ?? "50");
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
 
   try {
-    const { page, disabled } = await getOptionsChatMessages({ before, limit });
+    const { page, disabled } = await getOptionsChatMessages({ before, limit, channel });
     if (disabled) {
       // NOT an error: the BFF gates this route on OPTIONS_CHAT_ENABLED, so a 404 means the feature
       // is simply not switched on in this environment. Reported distinctly so the page can say so

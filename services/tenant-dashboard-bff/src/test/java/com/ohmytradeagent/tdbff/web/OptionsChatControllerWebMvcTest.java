@@ -11,6 +11,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatChannels;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.StoredAttachment;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.StoredEmbed;
@@ -34,16 +35,18 @@ import org.springframework.test.web.servlet.MockMvc;
  */
 @WebMvcTest(OptionsChatController.class)
 @AutoConfigureMockMvc(addFilters = false)
-@Import(TenantContext.class)
+@Import({TenantContext.class, OptionsChatChannels.class})
 @TestPropertySource(
     properties = {
       "options-chat.enabled=true",
       "dashboard.writer.enabled=true",
-      "options-chat.channel-id=786109983065505792"
+      // Labelled form, matching production config, so the tests exercise the real shape.
+      "options-chat.channel-ids=786109983065505792:Discussion,769797179992571914:Signals"
     })
 class OptionsChatControllerWebMvcTest {
 
   private static final long CHANNEL = 786109983065505792L;
+  private static final long SIGNALS = 769797179992571914L;
 
   @Autowired private MockMvc mvc;
   @MockitoBean private OptionsChatRepository repo;
@@ -150,5 +153,79 @@ class OptionsChatControllerWebMvcTest {
         .andExpect(status().isOk());
 
     verify(repo).recent(CHANNEL, null, 200);
+  }
+
+  // --- multi-channel ----------------------------------------------------------------------------
+
+  @Test
+  void advertisesTheConfiguredChannelsSoThePageNeedsNoHardcodedIds() throws Exception {
+    when(repo.recent(anyLong(), isNull(), anyInt())).thenReturn(List.of());
+
+    mvc.perform(get("/api/options-chat/messages").header("X-Tenant-Id", "t"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.channels[0].id").value(Long.toString(CHANNEL)))
+        .andExpect(jsonPath("$.channels[0].label").value("Discussion"))
+        .andExpect(jsonPath("$.channels[1].id").value(Long.toString(SIGNALS)))
+        .andExpect(jsonPath("$.channels[1].label").value("Signals"));
+  }
+
+  @Test
+  void readsTheRequestedChannelWhenItIsConfigured() throws Exception {
+    when(repo.recent(eq(SIGNALS), isNull(), anyInt())).thenReturn(List.of());
+
+    mvc.perform(
+            get("/api/options-chat/messages")
+                .param("channel", Long.toString(SIGNALS))
+                .header("X-Tenant-Id", "t"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.channel_id").value(Long.toString(SIGNALS)));
+
+    verify(repo).recent(SIGNALS, null, 50);
+  }
+
+  @Test
+  void anUnconfiguredChannelFallsBackToTheDefault_neverReachingTheQuery() throws Exception {
+    // The parameter is caller-supplied. If it reached the query unchecked, anyone with a session
+    // could read a channel the operator never configured.
+    when(repo.recent(eq(CHANNEL), isNull(), anyInt())).thenReturn(List.of());
+
+    mvc.perform(
+            get("/api/options-chat/messages")
+                .param("channel", "999999999999999999")
+                .header("X-Tenant-Id", "t"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.channel_id").value(Long.toString(CHANNEL)));
+
+    verify(repo).recent(CHANNEL, null, 50);
+  }
+
+  @Test
+  void aMalformedChannelFallsBackRatherThan500ing() throws Exception {
+    when(repo.recent(eq(CHANNEL), isNull(), anyInt())).thenReturn(List.of());
+
+    mvc.perform(
+            get("/api/options-chat/messages")
+                .param("channel", "not-a-number")
+                .header("X-Tenant-Id", "t"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.channel_id").value(Long.toString(CHANNEL)));
+
+    verify(repo).recent(CHANNEL, null, 50);
+  }
+
+  @Test
+  void theCursorAndTheChannelAreCarriedTogetherWhenPagingASecondaryChannel() throws Exception {
+    // Paging up on a non-default tab must keep BOTH: dropping the channel would silently page the
+    // default channel's history into the wrong tab.
+    when(repo.recent(eq(SIGNALS), eq(1273987654321098765L), anyInt())).thenReturn(List.of());
+
+    mvc.perform(
+            get("/api/options-chat/messages")
+                .param("channel", Long.toString(SIGNALS))
+                .param("before", "1273987654321098765")
+                .header("X-Tenant-Id", "t"))
+        .andExpect(status().isOk());
+
+    verify(repo).recent(SIGNALS, 1273987654321098765L, 50);
   }
 }

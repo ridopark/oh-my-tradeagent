@@ -4,6 +4,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatChannels;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -55,12 +56,13 @@ class OptionsChatDarkGateWebMvcTest {
   @Nested
   @WebMvcTest({OptionsChatController.class, OptionsChatIngestController.class})
   @AutoConfigureMockMvc(addFilters = false)
-  @Import(TenantContext.class)
+  @Import({TenantContext.class, OptionsChatChannels.class})
   @TestPropertySource(
       properties = {
         "options-chat.enabled=false",
         "dashboard.writer.enabled=true",
-        "options-chat.channel-id=786109983065505792"
+        // Labelled form, matching production config, so the tests exercise the real shape.
+        "options-chat.channel-ids=786109983065505792:Discussion,769797179992571914:Signals"
       })
   class FeatureFlagOff extends BothRoutesAre404 {}
 
@@ -76,12 +78,13 @@ class OptionsChatDarkGateWebMvcTest {
   @Nested
   @WebMvcTest({OptionsChatController.class, OptionsChatIngestController.class})
   @AutoConfigureMockMvc(addFilters = false)
-  @Import(TenantContext.class)
+  @Import({TenantContext.class, OptionsChatChannels.class})
   @TestPropertySource(
       properties = {
         "options-chat.enabled=true",
         "dashboard.writer.enabled=false",
-        "options-chat.channel-id=786109983065505792"
+        // Labelled form, matching production config, so the tests exercise the real shape.
+        "options-chat.channel-ids=786109983065505792:Discussion,769797179992571914:Signals"
       })
   class WriterFlagOff extends BothRoutesAre404 {}
 }

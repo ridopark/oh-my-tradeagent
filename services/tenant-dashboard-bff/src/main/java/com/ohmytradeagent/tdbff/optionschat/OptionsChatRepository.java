@@ -5,6 +5,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HexFormat;
@@ -361,15 +362,26 @@ public class OptionsChatRepository {
    * roughly 24h, so the longest-waiting row is the one closest to becoming permanently unfetchable.
    * Scoped to the channel so this can never hand out rows belonging to anything else.
    */
-  public List<PendingMedia> pendingMedia(long channelId, int limit) {
+  public List<PendingMedia> pendingMedia(Collection<Long> channelIds, int limit) {
+    if (channelIds.isEmpty()) {
+      return List.of();
+    }
+    // Spans every mirrored channel: the fetcher is channel-agnostic, and scoping it to one would
+    // strand the other channel's images pending until their CDN urls expired.
+    Object[] binds = new Object[channelIds.size() + 1];
+    int i = 0;
+    for (Long c : channelIds) {
+      binds[i++] = c;
+    }
+    binds[i] = limit;
     Result<Record> rows =
         writerDsl.fetch(
             "SELECT a.id, a.source_url FROM options_chat_attachment a"
                 + " JOIN options_chat_message m ON m.message_id = a.message_id"
-                + " WHERE m.channel_id = ? AND a.fetch_state = 'pending'"
-                + " ORDER BY a.id ASC LIMIT ?",
-            channelId,
-            limit);
+                + " WHERE m.channel_id IN ("
+                + String.join(", ", Collections.nCopies(channelIds.size(), "?"))
+                + ") AND a.fetch_state = 'pending' ORDER BY a.id ASC LIMIT ?",
+            binds);
     List<PendingMedia> out = new ArrayList<>(rows.size());
     for (Record r : rows) {
       out.add(new PendingMedia(r.get("id", Long.class), r.get("source_url", String.class)));
@@ -411,14 +423,26 @@ public class OptionsChatRepository {
    * runs on a 768Mi limit with a ~192MB default heap, and detoasting a page of images would exhaust
    * it.
    */
-  public Media media(long channelId, long attachmentId) {
+  public Media media(Collection<Long> channelIds, long attachmentId) {
+    if (channelIds.isEmpty()) {
+      return null;
+    }
+    // The channel join is not decoration: it keeps an id from outside the configured channels
+    // unreadable even if a row for it somehow existed.
+    Object[] binds = new Object[channelIds.size() + 1];
+    int i = 0;
+    for (Long c : channelIds) {
+      binds[i++] = c;
+    }
+    binds[i] = attachmentId;
     Record r =
         writerDsl.fetchOne(
             "SELECT a.bytes, a.content_type FROM options_chat_attachment a"
                 + " JOIN options_chat_message m ON m.message_id = a.message_id"
-                + " WHERE m.channel_id = ? AND a.id = ? AND a.fetch_state = 'ok'",
-            channelId,
-            attachmentId);
+                + " WHERE m.channel_id IN ("
+                + String.join(", ", Collections.nCopies(channelIds.size(), "?"))
+                + ") AND a.id = ? AND a.fetch_state = 'ok'",
+            binds);
     if (r == null) {
       return null;
     }

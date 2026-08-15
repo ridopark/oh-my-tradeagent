@@ -1,38 +1,27 @@
-# /options-chat Discord mirror — PLAN-2026-08-12 Phase 2.
+# Read-only mirror of the TRADING SIGNAL channel, rendered as a second tab on /options-chat
+# (PLAN-2026-08-12, follow-up). Same image and same code as 62-discord-chat-mirror.yaml — only the
+# channel differs — so this is a second Deployment rather than a second entrypoint.
 #
-# The SAME image as 55-signal-source-discord.yaml with an overridden `command`: one artifact, two
-# processes. Display-only — no Temporal, no tenant/strategy scope, nothing on the trading path. An
-# OOM or crash here makes the mirror stale; it can never drop a trading signal.
+# A SEPARATE POD RATHER THAN A SECOND TAB IN THE CHAT MIRROR. A tab would have been ~300Mi cheaper,
+# but it would put both channels in one failure domain: a renderer crash or an OOM takes down BOTH
+# mirrors at once. That is the same reasoning that put the chat mirror in its own pod instead of a
+# third tab in signal-source-discord, and it also means this needs NO multi-channel scraper code —
+# no shared observer binding, no dual run-loop, no second heartbeat. Each pod runs the existing
+# single-channel entrypoint with different env.
 #
-# NO PVC OF ITS OWN. The operator chose (2026-08-13) to SHARE the trading Discord account, so there
-# must be exactly ONE storage_state.json: two copies means a session rotation that updates one and
-# not the other leaves a pod that dies silently at some later reconnect. This pod mounts the
-# EXISTING signal-source-discord-state PVC READ-ONLY for the session, and writes its heartbeat to
-# its own emptyDir.
+# NOTE ON THE CHANNEL: this is the channel signal-source-discord already reads for BTO/STC. This pod
+# does NOT parse or trade it — it only stores messages for display. The trading path is entirely
+# separate and is not affected if this pod dies.
 #
-# Sharing an RWO local-path PVC across two Deployments is SAFE here (verified against the live
-# cluster 2026-08-13), and an earlier draft of the plan was wrong to call it fragile:
-#   - ReadWriteOnce is NODE-scoped, not pod-scoped (ReadWriteOncePod is the pod-scoped mode; this
-#     PV is plain RWO).
-#   - The local-path PV carries nodeAffinity `kubernetes.io/hostname In [homelab]`, so the scheduler
-#     CANNOT split the two pods across nodes even if a node is added. No podAffinity pin is needed —
-#     and adding one would be harmful, since it would make this pod unschedulable whenever the
-#     signal pod is scaled to 0, which is step 1 of docs/ops/discord-session-expired.md.
-#   - local-path has no CSI attacher, so there is no attach/detach controller to raise Multi-Attach.
-#   - Empirically: every RollingUpdate of signal-source-discord ALREADY runs two pods mounting this
-#     PVC read-WRITE at once. A readOnly reader is strictly safer than what ships today.
-#
-# RUNBOOK CONSEQUENCE: Playwright reads storage_state.json ONCE, at context creation. After a
-# session cutover swaps the file, this pod keeps the stale session in memory until restarted — add
-# `kubectl rollout restart deployment/discord-chat-mirror` to docs/ops/sidecar-session-cutover.md
-# and docs/ops/discord-session-expired.md.
+# Shares the session PVC read-only and writes its heartbeat to an emptyDir, exactly as the chat
+# mirror does; see 62-discord-chat-mirror.yaml for why sharing that RWO volume is safe here.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: discord-chat-mirror
+  name: discord-signals-mirror
   namespace: copytrade
   labels:
-    app: discord-chat-mirror
+    app: discord-signals-mirror
 spec:
   replicas: 1
   # Recreate, not RollingUpdate: a surge pod would run a SECOND chat Chromium (~+1Gi on a node
@@ -42,11 +31,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: discord-chat-mirror
+      app: discord-signals-mirror
   template:
     metadata:
       labels:
-        app: discord-chat-mirror
+        app: discord-signals-mirror
     spec:
       # Startup stagger: a node reboot restarts both Discord pods at once, and the shared account
       # must not reconnect in lockstep from one IP. Same image, so it is already on the node — no
@@ -57,7 +46,7 @@ spec:
         - name: stagger
           image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
           imagePullPolicy: Always
-          command: ["/bin/sh", "-c", "sleep 45"]
+          command: ["/bin/sh", "-c", "sleep 90"]
           resources:
             requests:
               cpu: 10m
@@ -92,7 +81,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: sidecar-config
-                  key: DISCORD_OPTIONS_CHAT_CHANNEL_URL
+                  key: DISCORD_SIGNALS_MIRROR_CHANNEL_URL
             - name: BFF_INTERNAL_URL
               value: http://tenant-dashboard-bff:8083
             # Route-scoped ingest credential — NOT BFF_SHARED_TOKEN. ServiceTokenFilter accepts
@@ -106,7 +95,7 @@ spec:
                   key: OPTIONS_CHAT_INGEST_TOKEN
             # In-process stagger backstop for the crashloop case (see the initContainer note).
             - name: CHAT_STARTUP_DELAY_SECS
-              value: "15"
+              value: "30"
           volumeMounts:
             - name: state
               mountPath: /app/state
@@ -121,10 +110,10 @@ spec:
                 - -c
                 - test -f /app/state/heartbeat && test $(( $(date +%s) - $(stat -c %Y /app/state/heartbeat) )) -lt 120
             # initialDelaySeconds counts from when THIS container starts, and initContainers have
-            # already completed by then — so it does NOT need to cover the 45s stagger, contrary
+            # already completed by then — so it does NOT need to cover the 90s stagger, contrary
             # to what an earlier version of this comment claimed. What it must cover is what happens
             # INSIDE the container before the first heartbeat is written:
-            #   CHAT_STARTUP_DELAY_SECS (15s) + Chromium launch + Discord load (~40s) ~= 55s.
+            #   CHAT_STARTUP_DELAY_SECS (30s) + Chromium launch + Discord load (~40s) ~= 70s.
             # 120s leaves margin for a slow Discord render without letting a genuinely dead tab sit
             # undetected for long.
             initialDelaySeconds: 120
@@ -154,7 +143,9 @@ spec:
             # in this pod can corrupt the trading session file.
             readOnly: true
 ---
-# ADDITIVE ingress rule for the BFF. NetworkPolicies selecting the same pod are UNIONed, not
+# ADDITIVE ingress rule for the BFF, a sibling of the chat mirror's. Kept as its OWN policy rather
+# than adding a second `from` entry to 62-*.yaml's, so that deleting either mirror deletes exactly
+# its own access. NetworkPolicies selecting the same pod are UNIONed, not
 # overridden, so this grants discord-chat-mirror -> BFF:8083 WITHOUT touching
 # `tenant-dashboard-bff-allow-dashboard-only` in 58-tenant-dashboard-bff.yaml — which matters,
 # because that manifest is drifted from live (it lacks DASHBOARD_WRITER_* / OPERATOR_* env and
@@ -164,7 +155,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: tenant-dashboard-bff-allow-chat-mirror
+  name: tenant-dashboard-bff-allow-signals-mirror
   namespace: copytrade
 spec:
   podSelector:
@@ -176,7 +167,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app: discord-chat-mirror
+              app: discord-signals-mirror
       ports:
         - protocol: TCP
           port: 8083

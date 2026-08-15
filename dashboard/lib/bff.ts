@@ -637,8 +637,16 @@ export interface OptionsChatMessage {
   embeds: OptionsChatEmbed[];
 }
 
+/** One mirrored channel, as the page's tab. Labels come from BFF config, not the page. */
+export interface OptionsChatChannel {
+  id: string;
+  label: string;
+}
+
 export interface OptionsChatPage {
   channel_id: string;
+  /** Optional: absent when talking to a BFF that predates multi-channel. */
+  channels?: OptionsChatChannel[];
   count: number;
   items: OptionsChatMessage[];
 }
@@ -653,9 +661,10 @@ export interface OptionsChatPage {
  * fact the mirror was fine and the feature simply was not enabled yet.
  */
 export const getOptionsChatMessages = async (
-  opts: { before?: string; limit?: number } = {},
+  opts: { before?: string; limit?: number; channel?: string } = {},
 ): Promise<{ page: OptionsChatPage | null; disabled: boolean }> => {
   const params = new URLSearchParams();
+  if (opts.channel) params.set("channel", opts.channel);
   if (opts.before) params.set("before", opts.before);
   if (opts.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();

@@ -3,6 +3,7 @@ package com.ohmytradeagent.tdbff.web;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -10,6 +11,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.ohmytradeagent.tdbff.optionschat.OptionsChatChannels;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.IngestMessage;
 import java.util.List;
@@ -31,16 +33,18 @@ import org.springframework.test.web.servlet.MockMvc;
  */
 @WebMvcTest(OptionsChatIngestController.class)
 @AutoConfigureMockMvc(addFilters = false)
-@Import(TenantContext.class)
+@Import({TenantContext.class, OptionsChatChannels.class})
 @TestPropertySource(
     properties = {
       "options-chat.enabled=true",
       "dashboard.writer.enabled=true",
-      "options-chat.channel-id=786109983065505792"
+      // Labelled form, matching production config, so the tests exercise the real shape.
+      "options-chat.channel-ids=786109983065505792:Discussion,769797179992571914:Signals"
     })
 class OptionsChatIngestControllerWebMvcTest {
 
   private static final long CHANNEL = 786109983065505792L;
+  private static final long SIGNALS = 769797179992571914L;
 
   @Autowired private MockMvc mvc;
   @MockitoBean private OptionsChatRepository repo;
@@ -137,5 +141,43 @@ class OptionsChatIngestControllerWebMvcTest {
                 .content("{\"channel_id\":\"786109983065505792\",\"messages\":[]}"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.received").value(0));
+  }
+
+  @Test
+  void acceptsTheSecondConfiguredChannelAndStoresUnderIt() throws Exception {
+    // The allowlist is what makes a second mirror pod possible; storing under the wrong channel
+    // would put signal messages in the discussion tab.
+    when(repo.ingest(anyLong(), anyList())).thenReturn(1);
+
+    mvc.perform(
+            post("/internal/options-chat/ingest")
+                .contentType("application/json")
+                .content(
+                    """
+                    {"channel_id":"769797179992571914","messages":[
+                      {"message_id":"1273987654321098765","author_name":"TradingTheTrend",
+                       "posted_at":"2026-08-15T14:03:11Z","content":"BTO MU 8/21 1050C @ 2.42"}
+                    ]}"""))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.stored").value(1));
+
+    // The channel comes from the PARSER's validated value, not a re-read of the raw body.
+    verify(repo).ingest(eq(SIGNALS), anyList());
+  }
+
+  @Test
+  void stillRejectsAChannelOutsideTheAllowlist() throws Exception {
+    mvc.perform(
+            post("/internal/options-chat/ingest")
+                .contentType("application/json")
+                .content(
+                    """
+                    {"channel_id":"111111111111111111","messages":[
+                      {"message_id":"1273987654321098765","author_name":"a",
+                       "posted_at":"2026-08-15T14:03:11Z","content":"x"}
+                    ]}"""))
+        .andExpect(status().isBadRequest());
+
+    verify(repo, never()).ingest(anyLong(), anyList());
   }
 }
