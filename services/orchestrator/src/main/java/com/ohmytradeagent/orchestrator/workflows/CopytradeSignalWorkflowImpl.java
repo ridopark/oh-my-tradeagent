@@ -7,6 +7,8 @@ import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CopytradeEntryStatus;
 import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.FillSignalPayload;
+import com.ohmytradeagent.contract.GetOptionQuoteRequest;
+import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialExitRequest;
@@ -23,6 +25,7 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
+import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.LivePromotionStatus;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
@@ -53,9 +56,11 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
@@ -299,6 +304,16 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // workflows are terminal (never replay). Only v>=1 emits the audit.
   private static final String VERSION_ENTRY_FAILURE_AUDIT = "entry-workflow-failure-audit-v1";
 
+  // PLAN-2026-08-04-bto-entry-repeg Phase 3: the single bounded re-peg of the BTO entry toward the
+  // live ask. NEW commands behind this marker — the re-peg-delay timer, the GetOptionQuote
+  // dispatch, the cancel/place pair, and their audits — so a workflow already mid-entry when the
+  // pod rolls replays its recorded stream (one placeOrder, one await(ttl), one handleTtlExpired).
+  //
+  // This marker is NOT a feature flag. The feature ships ACTIVE on the defaults below; the marker
+  // exists solely so in-flight histories stay deterministic. Removing it wedges live entries.
+  // Read UNCONDITIONALLY at a stable scope, mirroring VERSION_NOTIONAL_CAP_CLAMP.
+  private static final String VERSION_BTO_ENTRY_REPEG = "bto-entry-repeg-v1";
+
   // Edited-signal supersede (F1) correction window: a prior leg may be auto-superseded ONLY when
   // its
   // confirmed entry is within this window of the corrected signal's posted_at. A CODE CONSTANT by
@@ -311,6 +326,14 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   /** Used when StrategyConfig.pending_ttl_paper_secs is null. */
   static final long DEFAULT_PENDING_TTL_PAPER_SECS = 90L;
+
+  /**
+   * Used when {@code StrategyConfig.repeg_after_ms} is null. 30s of the 90s TTL at the tight
+   * initial limit, then the balance at the re-peg. Unset means "use this", NOT "disabled" — the
+   * re-peg ships active; {@code repeg_after_ms = 0} is the per-tenant off-switch (see {@link
+   * #repegAfterMs}).
+   */
+  static final long DEFAULT_REPEG_AFTER_MS = 30_000L;
 
   /** Used when StrategyConfig.default_stc_fraction is null. */
   static final double DEFAULT_STC_FRACTION = 0.5;
@@ -345,6 +368,21 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       Workflow.newActivityStub(AccountSnapshotMetricsActivities.class, DEFAULT_OPTIONS);
 
   /**
+   * PLAN-2026-08-04-bto-entry-repeg: the live-ask snapshot the entry re-peg anchors on. Lives on
+   * the market-data task queue, mirroring the exit-side ladder's stub in {@link
+   * PositionWorkflowImpl}. The Activity returns {@code status=FAILED/UNAVAILABLE} rather than
+   * throwing, so a market-data hiccup degrades to "no re-peg" instead of wedging the entry in
+   * Temporal retry.
+   */
+  private final GetOptionQuoteActivity optionQuote =
+      Workflow.newActivityStub(
+          GetOptionQuoteActivity.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE)
+              .setStartToCloseTimeout(Duration.ofSeconds(5))
+              .build());
+
+  /**
    * Phase 2c.2: built lazily inside {@link #handleBto} / {@link #handleStc} from the loaded {@code
    * StrategyConfig.broker_target}, so a paper BTO with {@code broker_target=alpaca-paper} routes to
    * {@code broker-alpaca-paper}. Determinism: factory input comes from a deterministic Activity
@@ -353,6 +391,15 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private ExecActivities exec;
 
   private FillSignalPayload fillEvent;
+
+  /**
+   * Broker order ids of entry orders this workflow cancelled in order to re-peg.
+   * PLAN-2026-08-04-bto-entry-repeg: the re-peg makes a workflow carry TWO entry orders over its
+   * life, so {@link #onFill} needs to tell a fill for the standing order from a late fill for the
+   * superseded one. Deterministic: only ever tested with {@code contains}, never iterated.
+   */
+  private final Set<String> supersededEntryOrderIds = new HashSet<>();
+
   private boolean riskBreachReceived;
   private String riskBreachReason;
   private String riskBreachActor;
@@ -411,6 +458,28 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   @Override
   public void onFill(FillSignalPayload event) {
+    // PLAN-2026-08-04-bto-entry-repeg: drop a fill that belongs to a SUPERSEDED entry order.
+    //
+    // Before the re-peg a workflow had exactly one entry order, so accepting any fill was safe.
+    // The re-peg cancels the first order and places a second, and the fill signal is at-least-once
+    // and asynchronous — so a late (or duplicated) fill for the cancelled order can arrive AFTER
+    // the replacement is standing. Adopting it would thread the wrong broker_order_id and
+    // avg_fill_price into EntryFilled and into the PositionWorkflow that manages the exit, i.e. the
+    // position would be tracked against an order that never filled.
+    //
+    // The synchronous cancel-on-filled path (cancelOrder returning FILLED) covers the case where
+    // the broker reports the fill AT cancel time; this guard covers the signal that races past it.
+    //
+    // Fail-safe by construction, and deliberately NOT versioned: signal handlers must not call
+    // Workflow.getVersion. The set is empty unless a re-peg actually superseded an order, so with
+    // no re-peg every fill is accepted exactly as before. A fill carrying no broker order id is
+    // likewise accepted rather than dropped — a listener that omits the field must never silently
+    // strand a filled position.
+    if (event != null
+        && event.getBrokerOrderId() != null
+        && supersededEntryOrderIds.contains(event.getBrokerOrderId())) {
+      return;
+    }
     this.fillEvent = event;
   }
 
@@ -525,6 +594,22 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // Computed once at the top: the same limit feeds pre-trade notional, sizing, and the
     // OrderIntent/audit subject — guarantees those three views agree on max-acceptable cost.
     PricedLimit priced = BtoPricing.computeBtoLimit(payload, config);
+    // PLAN-2026-08-04-bto-entry-repeg: read UNCONDITIONALLY at this stable scope (the same
+    // discipline as VERSION_NOTIONAL_CAP_CLAMP below) so the marker resolves identically on every
+    // replay regardless of which branches the config happens to take.
+    int repegVersion = Workflow.getVersion(VERSION_BTO_ENTRY_REPEG, Workflow.DEFAULT_VERSION, 1);
+    long repegAfterMs = repegAfterMs(config);
+    boolean repegActive =
+        repegVersion >= 1 && repegAfterMs > 0 && repegAfterMs < pendingTtlSecs(config) * 1000L;
+    // The TRUE max cost of this entry: the re-peg may reach the ceiling, so the risk gates and
+    // sizing must budget against the ceiling rather than the (tighter) initial peg. Gating against
+    // the max is what lets the re-peg itself skip a re-check — it is already covered by the
+    // decision taken here. On the inactive path this is priced.limit(), byte-identical to before.
+    //
+    // These flow into Activity INPUTS only, so they add no command to the history and need no
+    // marker of their own (Temporal compares command type/ordering, not payloads).
+    BigDecimal maxEntryCost =
+        repegActive ? BtoPricing.computeRepegCeiling(payload, config) : priced.limit();
     // Issue #112: Version gate retires the PR #111 deploy-time-drain mitigation. Pre-#111
     // in-flight workflows replay through the v=DEFAULT_VERSION branch (single checkEntry with
     // null preTradeResult); new executions take v>=1 and run the full assert → dispatch →
@@ -563,15 +648,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         int accountEquityVersion =
             Workflow.getVersion(VERSION_ACCOUNT_EQUITY_DISPATCH, Workflow.DEFAULT_VERSION, 1);
         if (accountEquityVersion == Workflow.DEFAULT_VERSION) {
-          decision =
-              risk.checkEntryWithLimit(payload, config, preTradeResult, priced.limit(), null);
+          decision = risk.checkEntryWithLimit(payload, config, preTradeResult, maxEntryCost, null);
         } else {
           // One dispatch feeds BOTH the notional-cap gate AND account_cash sizing — the cash read
           // is fetched once and reused at the sizing block below, never dispatched twice.
           accountCash = dispatchAccountSnapshot(payload, config);
           decision =
-              risk.checkEntryWithLimit(
-                  payload, config, preTradeResult, priced.limit(), accountCash);
+              risk.checkEntryWithLimit(payload, config, preTradeResult, maxEntryCost, accountCash);
         }
       }
     }
@@ -624,7 +707,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // pre-scale-in base and the matched cue, so the audit below reads them from Sizing's actual
     // decision rather than re-deriving (which could drift). scale-in reduces the qty by
     // entry_scale_in_fraction when the BTO tail carries a scale-in cue (see Sizing#computeEntry).
-    Sizing.EntrySizing sized = Sizing.computeEntry(payload, config, capital, priced.limit());
+    Sizing.EntrySizing sized = Sizing.computeEntry(payload, config, capital, maxEntryCost);
     long contracts = sized.contracts();
 
     // PLAN-2026-08-10-live-manual-bto: an operator-typed contract count REPLACES capital-weight
@@ -690,7 +773,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     if (clampVersion >= 1 && StrategyConfigs.notionalCapConfigured(config)) {
       long headroom =
           risk.notionalCapHeadroomContracts(
-              config, priced.limit(), accountCash, payload.getTenantId(), payload.getStrategyId());
+              config, maxEntryCost, accountCash, payload.getTenantId(), payload.getStrategyId());
       // MIN(cash-weight sizing, cap-headroom, max_contracts). The max_contracts term is
       // redundant-but-defensive: Sizing.computeContracts already clamped `contracts` to
       // max_contracts, so it is a no-op today — kept as belt-and-suspenders against a future Sizing
@@ -842,8 +925,38 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
     long ttlSecs = pendingTtlSecs(config);
     // Phase 5: also wake on risk_breach so the cascade can short-circuit the BTO.
-    boolean filled =
-        Workflow.await(Duration.ofSeconds(ttlSecs), () -> fillEvent != null || riskBreachReceived);
+    boolean filled;
+    if (!repegActive) {
+      filled =
+          Workflow.await(
+              Duration.ofSeconds(ttlSecs), () -> fillEvent != null || riskBreachReceived);
+    } else {
+      // PLAN-2026-08-04-bto-entry-repeg: split the TTL into [initial peg | re-peg] windows. The
+      // first window is today's behavior verbatim — the tight limit gets first refusal. Only if it
+      // has NOT filled do we spend the wider budget, and then only as far as the live ask.
+      filled =
+          Workflow.await(
+              Duration.ofMillis(repegAfterMs), () -> fillEvent != null || riskBreachReceived);
+      if (!filled) {
+        RepegOutcome outcome =
+            repegEntry(payload, config, resolved, contracts, intentKey, placed, priced.limit());
+        if (outcome.adopted()) {
+          // The original order filled in the cancel race; repegEntry already emitted EntryFilled
+          // and started the PositionWorkflow. No replacement was placed — nothing left to await.
+          return payload.getSignalId();
+        }
+        if (outcome.replacement() != null) {
+          // The replacement is now the order of record: the TTL-expiry and cancel-on-filled paths
+          // below must act on ITS key/broker id, not the cancelled original's.
+          placed = outcome.replacement();
+          intentKey = placed.getIntentKey();
+        }
+        filled =
+            Workflow.await(
+                Duration.ofSeconds(ttlSecs).minus(Duration.ofMillis(repegAfterMs)),
+                () -> fillEvent != null || riskBreachReceived);
+      }
+    }
 
     if (riskBreachReceived && fillEvent == null) {
       // Cascade arrived before the onFill signal landed — but the broker may have already filled
@@ -1874,6 +1987,187 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private long pendingTtlSecs(StrategyConfig config) {
     Long configured = config.getPendingTtlPaperSecs();
     return configured != null ? configured : DEFAULT_PENDING_TTL_PAPER_SECS;
+  }
+
+  /**
+   * Delay before the single entry re-peg. Unset applies {@link #DEFAULT_REPEG_AFTER_MS} — the
+   * feature is ACTIVE by default, so null means "use the default", not "off". {@code 0} is the
+   * explicit per-tenant off-switch and restores the one-shot entry with no redeploy.
+   */
+  private long repegAfterMs(StrategyConfig config) {
+    Long configured = config.getRepegAfterMs();
+    return configured != null ? configured : DEFAULT_REPEG_AFTER_MS;
+  }
+
+  /**
+   * Result of the single entry re-peg attempt.
+   *
+   * @param replacement the newly placed order when the re-peg went through, else {@code null} (the
+   *     original order still stands and should ride out the rest of the TTL)
+   * @param adopted {@code true} when the original filled in the cancel race and was adopted — the
+   *     entry is COMPLETE and no replacement exists
+   */
+  private record RepegOutcome(OrderIntentResult replacement, boolean adopted) {}
+
+  /**
+   * PLAN-2026-08-04-bto-entry-repeg: cancel the unfilled entry and re-place it one penny past the
+   * live ask, bounded by the re-peg ceiling. At most ONE of these runs per entry — the ceiling is
+   * where the chase stops, by design.
+   *
+   * <p>Skips the re-peg (returning a null replacement, leaving the original order standing) when
+   * the quote is unavailable or the ask offers nothing above the initial peg. That is the ENTRY
+   * fail-safe and it is the inverse of the exit path's: a force-close with no quote falls back to a
+   * marketable order because the position must be closed, whereas an entry with no quote simply
+   * does not buy.
+   *
+   * <p>No risk re-check here: the gates and sizing already ran against the ceiling this walks
+   * toward (see {@code maxEntryCost} in {@link #handleBto}), so the higher limit is pre-approved.
+   */
+  private RepegOutcome repegEntry(
+      CopytradeSignalPayload payload,
+      StrategyConfig config,
+      ContractResolveResult resolved,
+      long contracts,
+      String intentKey,
+      OrderIntentResult placed,
+      BigDecimal initialPeg) {
+
+    GetOptionQuoteRequest qreq = new GetOptionQuoteRequest();
+    qreq.setSchemaVersion(1L);
+    qreq.setTenantId(payload.getTenantId());
+    qreq.setStrategyId(payload.getStrategyId());
+    qreq.setContractSymbol(resolved.optionSymbol());
+    OptionQuoteResult quote = optionQuote.getOptionQuote(qreq);
+
+    BigDecimal ask =
+        quote != null && quote.getStatus() == OptionQuoteResult.Status.OK ? quote.getAsk() : null;
+    BigDecimal ceiling = BtoPricing.computeRepegCeiling(payload, config);
+    BigDecimal repegLimit = BtoPricing.computeRepegLimit(ask, ceiling, initialPeg);
+
+    if (repegLimit == null) {
+      // Explains an EntryExpired that never re-pegged, which would otherwise look identical to the
+      // pre-change behavior in the audit trail. Rides the already-registered OrderCancelRequested
+      // kind (no KindRegistryGuard change) with reason=repeg_skipped and NO cancel following it —
+      // the distinguishing detail is that no OrderCancelled/OrderSubmitted pair comes after.
+      logAudit(
+          payload,
+          KIND_ORDER_CANCEL_REQUESTED,
+          subject(
+              "intent_key",
+              intentKey,
+              "broker_order_id",
+              placed.getBrokerOrderId(),
+              "reason",
+              "repeg_skipped",
+              "quote_status",
+              quote == null ? "NULL" : quote.getStatus().value(),
+              "ask",
+              ask,
+              "ceiling",
+              ceiling,
+              "initial_peg",
+              initialPeg,
+              "note",
+              "no_repeg_original_order_stands"));
+      return new RepegOutcome(null, false);
+    }
+
+    logAudit(
+        payload,
+        KIND_ORDER_CANCEL_REQUESTED,
+        subject(
+            "intent_key",
+            intentKey,
+            "broker_order_id",
+            placed.getBrokerOrderId(),
+            "reason",
+            "repeg"));
+
+    OrderIntentResult cancelResult;
+    try {
+      cancelResult = exec.cancelOrder(intentKey);
+    } catch (RuntimeException e) {
+      // Cancel failed: do NOT place a second order — that is how a workflow ends up long twice.
+      // Leave the original standing; the TTL path below still cancels and audits it.
+      logAudit(
+          payload,
+          KIND_ORDER_CANCEL_FAILED,
+          subject(
+              "intent_key", intentKey,
+              "broker_order_id", placed.getBrokerOrderId(),
+              "reason", "repeg",
+              "severity", "WARN",
+              "note", "repeg_abandoned_original_order_stands"));
+      return new RepegOutcome(null, false);
+    }
+
+    if (cancelResult.getState() == OrderIntentResult.State.FILLED) {
+      // The tight peg filled while we were cancelling it — the good outcome. Adopt the lot through
+      // the SAME recovery path the TTL branch uses, and place NO replacement.
+      handleCancelOnFilled(payload, config, resolved, cancelResult, RECOVERY_CANCEL_ON_FILLED);
+      return new RepegOutcome(null, true);
+    }
+
+    logAudit(
+        payload,
+        KIND_ORDER_CANCELLED,
+        subject(
+            "intent_key",
+            intentKey,
+            "broker_order_id",
+            placed.getBrokerOrderId(),
+            "reason",
+            "repeg"));
+
+    // From here on, a fill claiming the cancelled order is stale — the broker's cancel ack is
+    // authoritative that it did not fill. Mark it BEFORE placing the replacement so the guard is
+    // armed for the whole window, and drop any fill that slipped in during the cancel round-trip;
+    // otherwise the await below would wake on it and adopt an order that never filled.
+    supersededEntryOrderIds.add(placed.getBrokerOrderId());
+    if (fillEvent != null
+        && fillEvent.getBrokerOrderId() != null
+        && supersededEntryOrderIds.contains(fillEvent.getBrokerOrderId())) {
+      fillEvent = null;
+    }
+
+    // Distinct intent key: the original was cancelled and exec is idempotent BY intent key, so
+    // reusing it would collide with the cancelled client_order_id. Mirrors the exit ladder's
+    // :reprice-N suffix.
+    String repegKey = intentKey + ":repeg-1";
+    OrderIntent repegIntent = newIntent(payload, config, resolved, contracts, repegKey, repegLimit);
+    OrderIntentResult repegPlaced = exec.placeOrder(repegIntent);
+
+    logAudit(
+        payload,
+        KIND_ORDER_SUBMITTED,
+        subject(
+            "intent_key",
+            repegPlaced.getIntentKey(),
+            "broker_order_id",
+            repegPlaced.getBrokerOrderId(),
+            "option_symbol",
+            resolved.optionSymbol(),
+            "side",
+            "BUY",
+            "qty",
+            contracts,
+            "broker_target",
+            config.getBrokerTarget().value(),
+            "limit_price_strategy",
+            "repeg",
+            "limit_price",
+            repegLimit,
+            "ask",
+            ask,
+            "ceiling",
+            ceiling,
+            "initial_peg",
+            initialPeg,
+            "source_premium",
+            "live_quote"));
+
+    entryStatus.setBrokerOrderId(repegPlaced.getBrokerOrderId());
+    return new RepegOutcome(repegPlaced, false);
   }
 
   /**

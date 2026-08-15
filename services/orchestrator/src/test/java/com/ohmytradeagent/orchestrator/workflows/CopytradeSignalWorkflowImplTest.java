@@ -17,6 +17,7 @@ import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
+import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialCloseRequest;
@@ -32,6 +33,7 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
+import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.LivePromotionStatus;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
@@ -77,6 +79,7 @@ class CopytradeSignalWorkflowImplTest {
   private PositionLookupActivities positionLookup;
   private MarketCalendarActivities calendar;
   private SubscribePremiumActivity marketData;
+  private GetOptionQuoteActivity optionQuote;
 
   @BeforeEach
   void setUp() {
@@ -128,7 +131,12 @@ class CopytradeSignalWorkflowImplTest {
     Worker brokerLiveWorker = env.newWorker("broker-alpaca-live");
     brokerLiveWorker.registerActivitiesImplementations(exec);
     Worker mdWorker = env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
-    mdWorker.registerActivitiesImplementations(marketData);
+    // PLAN-2026-08-04-bto-entry-repeg: the entry re-peg anchors on a live ask from this queue.
+    // Default to UNAVAILABLE so every pre-existing test keeps its one-shot entry — the re-peg
+    // fail-safe skips on a missing quote — and only the re-peg tests below opt into an OK quote.
+    optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteUnavailable());
+    mdWorker.registerActivitiesImplementations(marketData, optionQuote);
 
     env.start();
   }
@@ -1809,6 +1817,327 @@ class CopytradeSignalWorkflowImplTest {
     OrderIntentResult r = submittedResult(intentKey, brokerOrderId);
     r.setState(OrderIntentResult.State.CANCELLED);
     return r;
+  }
+
+  private OrderIntentResult filledCancelResult(
+      String intentKey, String brokerOrderId, long qty, BigDecimal avgPrice) {
+    OrderIntentResult r = submittedResult(intentKey, brokerOrderId);
+    r.setState(OrderIntentResult.State.FILLED);
+    r.setFilledQty(qty);
+    r.setAvgFillPrice(avgPrice);
+    return r;
+  }
+
+  /**
+   * Approved-entry mocks with a REALISTIC 90s pending TTL, so the 30s re-peg window actually opens.
+   * {@link #setupApprovedMocks()} pins a 1s TTL to keep the older tests quick, which leaves {@code
+   * repeg_after_ms=30000 >= ttl} and therefore disables the re-peg — correct for those tests,
+   * useless for these.
+   *
+   * @param repegAfterMs value for the config field; {@code null} exercises the code default
+   */
+  private void setupRepegMocks(Long repegAfterMs) {
+    StrategyConfig cfg = config();
+    cfg.setPendingTtlPaperSecs(90L);
+    cfg.setRepegAfterMs(repegAfterMs);
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+  }
+
+  // ===============================================================================================
+  // Bounded single BTO entry re-peg (PLAN-2026-08-04-bto-entry-repeg Phase 3).
+  //
+  // The entry limit is anchored to the signal's already-stale price and never reaches toward the
+  // live market, so an option that ticked past it expires unfilled. These pin the one bounded
+  // re-peg toward the live ask, and — just as importantly — where it refuses to go.
+  // ===============================================================================================
+
+  @Test
+  void repeg_fillsAtTheLiveAsk_aaplIncident() {
+    // AAPL 8/14 315C, 2026-08-04: the limit was 2.51 while the option was ALREADY 2.55-2.61 at
+    // submit, so the order was never marketable and expired for nothing. Signal price here is 2.30
+    // (MIRROR, no slippage caps in config()), ceiling = 2.30 * 1.10 = 2.53.
+    setupRepegMocks(null);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-initial"));
+    // Fill the REPLACEMENT the moment it is placed. Signalling from inside the activity keeps the
+    // client blocked in getResult, which is what lets the test env skip the 30s re-peg timer.
+    stubPlaceOrderFillingTheRepeg("repeg-aapl", "brk-repeg");
+
+    runWorkflowWithId(btoPayload(), "repeg-aapl");
+
+    ArgumentCaptor<OrderIntent> intents = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(2)).placeOrder(intents.capture());
+    assertThat(intents.getAllValues().get(0).getLimitPrice()).isEqualByComparingTo("2.30");
+    // One penny past the ask, NOT a jump to the 2.53 ceiling — the re-peg walks to the market and
+    // pays only what it must.
+    assertThat(intents.getAllValues().get(1).getLimitPrice()).isEqualByComparingTo("2.46");
+    assertThat(intents.getAllValues().get(1).getIntentKey()).endsWith(":entry:repeg-1");
+
+    // The re-peg's own cancel, not the TTL one — capture() returns the LAST event of a kind, and
+    // an expiring entry logs a second OrderCancelRequested with reason=ttl_expired.
+    assertThat(captureWithEntry("OrderCancelRequested", "reason", "repeg")).isNotNull();
+    AuditEvent submitted = capture("OrderSubmitted");
+    assertThat(submitted.getSubject()).containsEntry("limit_price_strategy", "repeg");
+    assertThat(submitted.getSubject()).containsEntry("source_premium", "live_quote");
+
+    // The incident outcome, inverted: AAPL now fills instead of expiring unfilled.
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(filled.getSubject()).containsEntry("broker_order_id", "brk-repeg");
+    assertNoAudit("EntryExpired");
+  }
+
+  @Test
+  void repeg_isBoundedByTheCeiling_andDoesNotChase_nvdaIncident() {
+    // NVDA 8/10 212.5C ran 2.95 -> 3.25 (+16% over the signal price) in two minutes. The re-peg
+    // stops at the ceiling and lets the runner go. If someone later widens the default far enough
+    // to chase this, THIS assertion is what should fail.
+    setupRepegMocks(null);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("9.99")));
+    when(exec.placeOrder(any()))
+        .thenReturn(submittedResult("intent-K", "brk-initial"))
+        .thenReturn(submittedResult("intent-K:repeg-1", "brk-repeg"));
+    when(exec.cancelOrder(anyString()))
+        .thenReturn(cancelledResult("intent-K", "brk-initial"))
+        .thenReturn(cancelledResult("intent-K:repeg-1", "brk-repeg"));
+
+    runWorkflow(btoPayload());
+
+    ArgumentCaptor<OrderIntent> intents = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(2)).placeOrder(intents.capture());
+    // Ceiling = 2.30 * 1.10 = 2.53, nowhere near the 10.00 the ask would have justified.
+    assertThat(intents.getAllValues().get(1).getLimitPrice()).isEqualByComparingTo("2.53");
+
+    // Exactly ONE re-peg, then the entry expires at TTL against the re-pegged order.
+    AuditEvent expired = capture("EntryExpired");
+    assertThat(expired.getSubject()).containsEntry("outcome", "EXPIRED");
+    assertThat(expired.getSubject()).containsEntry("broker_order_id", "brk-repeg");
+  }
+
+  @Test
+  void repeg_skippedWhenQuoteUnavailable_leavesTheOriginalOrderStanding() {
+    // Entry fail-safe, and the INVERSE of the exit path: a force-close with no quote falls back to
+    // a marketable order because the position must close; an entry with no quote simply does not
+    // buy. No cancel, no second order — the original rides to its normal TTL expiry.
+    setupRepegMocks(null);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteUnavailable());
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-initial"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-initial"));
+
+    runWorkflow(btoPayload());
+
+    verify(exec, times(1)).placeOrder(any());
+    AuditEvent skipped = capture("OrderCancelRequested");
+    assertThat(skipped.getSubject()).containsEntry("reason", "ttl_expired");
+    AuditEvent expired = capture("EntryExpired");
+    assertThat(expired.getSubject()).containsEntry("broker_order_id", "brk-initial");
+  }
+
+  @Test
+  void repeg_notAttemptedWhenTheEntryFillsInsideTheFirstWindow() throws Exception {
+    // The tight peg still gets first refusal: a normal fill must cost no quote call, no cancel and
+    // no second order.
+    setupRepegMocks(null);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-1"));
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("repeg-fast-fill")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+    awaitPlaceOrder();
+    wf.onFill(fillFor("brk-1"));
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    verify(exec, times(1)).placeOrder(any());
+    verify(exec, never()).cancelOrder(anyString());
+    verify(optionQuote, never()).getOptionQuote(any());
+    assertNoAudit("EntryExpired");
+  }
+
+  @Test
+  void repegAfterMsZero_disablesTheRepegEntirely() {
+    // The per-tenant off-switch. Since the feature ships ACTIVE on code defaults rather than dark,
+    // this is the only way to get today's one-shot behavior back without a redeploy — so it is
+    // exercised, not assumed. An OK quote is stubbed to prove the skip is the CONFIG's doing.
+    setupRepegMocks(0L);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-initial"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-initial"));
+
+    runWorkflow(btoPayload());
+
+    verify(exec, times(1)).placeOrder(any());
+    verify(optionQuote, never()).getOptionQuote(any());
+    AuditEvent expired = capture("EntryExpired");
+    assertThat(expired.getSubject()).containsEntry("broker_order_id", "brk-initial");
+  }
+
+  @Test
+  void repeg_cancelOnFilledRace_adoptsAndPlacesNoReplacement() {
+    // The tight peg filled while we were cancelling it — the good outcome. Adopt the lot through
+    // the existing recovery path; placing the replacement anyway would leave the workflow long
+    // twice.
+    setupRepegMocks(null);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-initial"));
+    when(exec.cancelOrder(anyString()))
+        .thenReturn(filledCancelResult("intent-K", "brk-initial", 3L, new BigDecimal("2.31")));
+
+    runWorkflow(btoPayload());
+
+    verify(exec, times(1)).placeOrder(any());
+    AuditEvent entryFilled = capture("EntryFilled");
+    assertThat(entryFilled.getSubject()).containsEntry("recovery", "cancel_on_filled");
+    assertThat(entryFilled.getSubject()).containsEntry("broker_order_id", "brk-initial");
+    assertNoAudit("EntryExpired");
+  }
+
+  @Test
+  void repeg_lateFillForTheCancelledOrderIsDropped() throws Exception {
+    // The fill signal is at-least-once and asynchronous, so a fill for the SUPERSEDED order can
+    // land after the replacement is standing. Adopting it would hand the PositionWorkflow an order
+    // id that never filled. Before the re-peg this could not happen (one order per workflow), which
+    // is exactly why onFill accepted anything.
+    setupRepegMocks(null);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
+    when(exec.cancelOrder(anyString()))
+        .thenReturn(cancelledResult("intent-K", "brk-initial"))
+        .thenReturn(cancelledResult("intent-K:repeg-1", "brk-repeg"));
+
+    // Deliver the stale fill exactly when the replacement is placed — i.e. after the original was
+    // cancelled, which is the window the synchronous cancel-on-filled check cannot cover.
+    stubPlaceOrderFillingTheRepeg("repeg-late-fill", "brk-initial");
+
+    runWorkflowWithId(btoPayload(), "repeg-late-fill");
+
+    assertNoAudit("EntryFilled");
+    AuditEvent expired = capture("EntryExpired");
+    assertThat(expired.getSubject()).containsEntry("broker_order_id", "brk-repeg");
+  }
+
+  @Test
+  void repeg_gatesAndSizingBudgetAgainstTheCeilingNotTheInitialPeg() {
+    // The re-peg may reach the ceiling, so the notional-cap / buying-power gate must be told the
+    // ceiling up front. That is what lets the re-peg itself skip a re-check. Consequence the
+    // operator should expect: sizing reserves for the worst case, so positions run slightly
+    // smaller than before this change.
+    setupRepegMocks(null);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-initial"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-initial"));
+
+    runWorkflow(btoPayload());
+
+    ArgumentCaptor<BigDecimal> limitSeen = ArgumentCaptor.forClass(BigDecimal.class);
+    verify(risk, atLeastOnce())
+        .checkEntryWithLimit(any(), any(), any(), limitSeen.capture(), any());
+    // 2.30 * 1.10 = 2.53, the ceiling — NOT the 2.30 initial peg.
+    assertThat(limitSeen.getValue()).isEqualByComparingTo("2.53");
+  }
+
+  /**
+   * Stubs {@code placeOrder} so the FIRST call returns the initial order and the SECOND (the
+   * re-peg) signals {@code onFill} for {@code fillBrokerOrderId} before returning.
+   *
+   * <p>Why a signal from inside the activity rather than a poll loop: {@link
+   * TestWorkflowEnvironment} only skips time while the client is blocked, so a test thread polling
+   * for an audit event never lets the 30s re-peg timer fire and simply times out.
+   */
+  private void stubPlaceOrderFillingTheRepeg(String workflowId, String fillBrokerOrderId) {
+    when(exec.placeOrder(any()))
+        .thenReturn(submittedResult("intent-K", "brk-initial"))
+        .thenAnswer(
+            invocation -> {
+              env.getWorkflowClient()
+                  .newWorkflowStub(CopytradeSignalWorkflow.class, workflowId)
+                  .onFill(fillFor(fillBrokerOrderId));
+              return submittedResult("intent-K:repeg-1", "brk-repeg");
+            });
+  }
+
+  private String runWorkflowWithId(CopytradeSignalPayload payload, String workflowId) {
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId(workflowId)
+                    .build());
+    return wf.process(payload);
+  }
+
+  /**
+   * Like {@link #capture(String)} but selects by a subject entry rather than taking the last event
+   * of the kind — needed where one kind is emitted more than once per run (e.g. the re-peg's
+   * OrderCancelRequested followed by the TTL's).
+   */
+  private AuditEvent captureWithEntry(String kind, String key, String value) {
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(captor.capture());
+    return captor.getAllValues().stream()
+        .filter(e -> kind.equals(e.getKind()))
+        .filter(e -> value.equals(e.getSubject().get(key)))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("no audit " + kind + " with " + key + "=" + value));
+  }
+
+  private static OptionQuoteResult quoteWithAsk(BigDecimal ask) {
+    OptionQuoteResult q = new OptionQuoteResult();
+    q.setSchemaVersion(1L);
+    q.setContractSymbol("NVDA  260516C00140000");
+    q.setStatus(OptionQuoteResult.Status.OK);
+    q.setAsk(ask);
+    q.setBid(ask.subtract(new BigDecimal("0.05")));
+    q.setMid(ask.subtract(new BigDecimal("0.025")));
+    q.setRetrievedAt(OffsetDateTime.parse("2026-05-24T17:00:00Z"));
+    return q;
+  }
+
+  private static OptionQuoteResult quoteUnavailable() {
+    OptionQuoteResult q = new OptionQuoteResult();
+    q.setSchemaVersion(1L);
+    q.setContractSymbol("NVDA  260516C00140000");
+    q.setStatus(OptionQuoteResult.Status.UNAVAILABLE);
+    q.setRetrievedAt(OffsetDateTime.parse("2026-05-24T17:00:00Z"));
+    return q;
+  }
+
+  private static FillSignalPayload fillFor(String brokerOrderId) {
+    return new FillSignalPayload()
+        .withBrokerOrderId(brokerOrderId)
+        .withFilledQty(5L)
+        .withAvgFillPrice(new BigDecimal("2.31"))
+        .withFilledAt(OffsetDateTime.parse("2026-05-24T17:00:00Z"));
+  }
+
+  /** Blocks until the workflow has placed its first order (the test env time-skips). */
+  private void awaitPlaceOrder() throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, atLeastOnce()).placeOrder(any());
+        return;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+    verify(exec, atLeastOnce()).placeOrder(any());
   }
 
   private String runWorkflow(CopytradeSignalPayload payload) {
