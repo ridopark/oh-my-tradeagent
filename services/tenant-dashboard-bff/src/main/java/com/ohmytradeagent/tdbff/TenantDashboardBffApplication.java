@@ -2,6 +2,7 @@ package com.ohmytradeagent.tdbff;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * Tenant-facing read-only BFF. Off-ingress ClusterIP service: the only caller is the Next.js
@@ -12,6 +13,10 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * worker and owns no trading-state schema.
  */
 @SpringBootApplication
+// Enables the nightly /options-chat retention sweep (OptionsChatRetention). No other scheduled
+// bean exists in this service, and that one is @ConditionalOnProperty-gated, so this is inert on a
+// deployment with the mirror dark.
+@EnableScheduling
 public class TenantDashboardBffApplication {
 
   public static void main(String[] args) {

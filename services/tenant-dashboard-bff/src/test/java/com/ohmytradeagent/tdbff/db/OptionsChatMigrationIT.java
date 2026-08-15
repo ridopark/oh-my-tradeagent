@@ -191,10 +191,47 @@ class OptionsChatMigrationIT {
   }
 
   @Test
-  void writerIsDeniedDelete_soRetentionMustShipItsOwnMigration() throws SQLException {
+  void retentionCanDeleteAMessageAndItsChildrenCascade_withoutAnyChildDeleteGrant()
+      throws SQLException {
+    // V12 grants DELETE on the PARENT ONLY, on the claim that PostgreSQL runs a foreign key's
+    // ON DELETE CASCADE through the constraint's own internal triggers rather than as the invoking
+    // role. If that were wrong, retention would 42501 in production every night at 03:30 and the
+    // store would grow forever while looking configured. Proven here rather than assumed.
+    long msg = MSG + 20;
     try (Connection w = asRole("dashboard_writer", WRITER_PW);
         var st = w.createStatement()) {
-      assertDenied(() -> st.executeUpdate("DELETE FROM options_chat_message"));
+      insertMessage(st, msg, "expires");
+      st.executeUpdate(
+          "INSERT INTO options_chat_attachment (message_id, ordinal, kind, source_url) VALUES ("
+              + msg
+              + ", 0, 'image', 'https://cdn.discordapp.com/old.png')");
+      st.executeUpdate(
+          "INSERT INTO options_chat_embed (message_id, ordinal, title) VALUES ("
+              + msg
+              + ", 0, 'old')");
+
+      assertThat(st.executeUpdate("DELETE FROM options_chat_message WHERE message_id = " + msg))
+          .isEqualTo(1);
+
+      try (var rs =
+          st.executeQuery(
+              "SELECT (SELECT count(*) FROM options_chat_attachment WHERE message_id = "
+                  + msg
+                  + ") + (SELECT count(*) FROM options_chat_embed WHERE message_id = "
+                  + msg
+                  + ")")) {
+        rs.next();
+        assertThat(rs.getInt(1)).as("children cascaded with the parent").isZero();
+      }
+    }
+  }
+
+  @Test
+  void writerStillCannotDeleteChildrenDirectly_onlyViaTheCascade() throws SQLException {
+    // The grant's blast radius: removing a message takes its own media with it, but the writer can
+    // never empty the attachment table outright.
+    try (Connection w = asRole("dashboard_writer", WRITER_PW);
+        var st = w.createStatement()) {
       assertDenied(() -> st.executeUpdate("DELETE FROM options_chat_attachment"));
       assertDenied(() -> st.executeUpdate("DELETE FROM options_chat_embed"));
     }

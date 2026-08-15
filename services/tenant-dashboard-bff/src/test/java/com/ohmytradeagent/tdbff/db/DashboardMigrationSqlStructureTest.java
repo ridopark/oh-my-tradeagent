@@ -238,4 +238,31 @@ class DashboardMigrationSqlStructureTest {
         .as("V10 must not reference dashboard_readonly")
         .doesNotContain("dashboard_readonly");
   }
+
+  @Test
+  void v12GrantsDeleteOnTheParentTableOnly_soTheCascadeIsTheOnlyWayChildrenGo() throws IOException {
+    String sql = executableSql("/db/dashboard/V12__options_chat_retention.sql");
+
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+DELETE\\s+ON\\s+options_chat_message\\s+TO\\s+dashboard_writer"));
+
+    // The blast radius of this grant is "can remove a message and, transitively, its own children",
+    // never "can empty the attachment table". The FK cascade does the rest, and V12 relies on that
+    // rather than widening further.
+    assertThat(sql)
+        .as("V12 must not grant DELETE on the child tables")
+        .doesNotContainPattern(Pattern.compile("GRANT[^;]*options_chat_attachment"));
+    assertThat(sql)
+        .as("V12 must not grant DELETE on the child tables")
+        .doesNotContainPattern(Pattern.compile("GRANT[^;]*options_chat_embed"));
+    assertThat(sql)
+        .as("V12 widens DELETE only — never UPDATE or SELECT")
+        .doesNotContainPattern(
+            Pattern.compile("GRANT\\s+[A-Z, ]*(UPDATE|SELECT)", Pattern.CASE_INSENSITIVE));
+    assertThat(sql)
+        .as("V12 must not reference dashboard_readonly")
+        .doesNotContain("dashboard_readonly");
+  }
 }

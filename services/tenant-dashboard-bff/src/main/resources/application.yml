@@ -101,6 +101,13 @@ options-chat:
   # could spoof any X-Tenant-Id and read real-money positions. NO default — blank fails closed and
   # the ingest route rejects everything until the secret is provisioned.
   ingest-token: ${OPTIONS_CHAT_INGEST_TOKEN:}
+  # Nightly retention (Phase 6). Messages posted longer ago than this are deleted at 03:30 UTC and
+  # their attachments cascade with them — the only thing bounding this store's growth.
+  #
+  # A value below 1 DISABLES the sweep rather than meaning "keep nothing": a 0 here (unset, typo,
+  # bad ConfigMap) would compute a cutoff of "now" and delete the entire mirror on the first tick,
+  # which is unrecoverable. Failing to delete is the safe direction; deleting everything is not.
+  retention-days: ${OPTIONS_CHAT_RETENTION_DAYS:30}
 
 # Read-only application datasources. Credentials are the dedicated bff_readonly role per DB (see the
 # operator runbook); SELECT-only grants mean even a query bug cannot mutate trading state.
