@@ -2032,6 +2032,38 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
+  void repeg_fillArrivingDuringTheCancelRoundTripIsDiscarded() {
+    // The narrowest window in the whole feature. A fill for the original order can be signalled
+    // while the workflow is blocked inside cancelOrder — at that instant the order is not yet
+    // marked superseded, so onFill accepts it. If it were left standing, the await after the
+    // re-peg would see fillEvent != null, wake immediately, and emit EntryFilled for an order the
+    // broker just told us it CANCELLED — starting a PositionWorkflow against a lot that does not
+    // exist. The broker's cancel ack is authoritative, so the raced fill is dropped.
+    setupRepegMocks(null);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
+    when(exec.placeOrder(any()))
+        .thenReturn(submittedResult("intent-K", "brk-initial"))
+        .thenReturn(submittedResult("intent-K:repeg-1", "brk-repeg"));
+    when(exec.cancelOrder(anyString()))
+        .thenAnswer(
+            invocation -> {
+              env.getWorkflowClient()
+                  .newWorkflowStub(CopytradeSignalWorkflow.class, "repeg-cancel-race")
+                  .onFill(fillFor("brk-initial"));
+              return cancelledResult("intent-K", "brk-initial");
+            })
+        .thenReturn(cancelledResult("intent-K:repeg-1", "brk-repeg"));
+
+    runWorkflowWithId(btoPayload(), "repeg-cancel-race");
+
+    // The replacement was still placed, and the phantom fill never became an entry.
+    verify(exec, times(2)).placeOrder(any());
+    assertNoAudit("EntryFilled");
+    AuditEvent expired = capture("EntryExpired");
+    assertThat(expired.getSubject()).containsEntry("broker_order_id", "brk-repeg");
+  }
+
+  @Test
   void repeg_gatesAndSizingBudgetAgainstTheCeilingNotTheInitialPeg() {
     // The re-peg may reach the ceiling, so the notional-cap / buying-power gate must be told the
     // ceiling up front. That is what lets the re-peg itself skip a re-check. Consequence the
