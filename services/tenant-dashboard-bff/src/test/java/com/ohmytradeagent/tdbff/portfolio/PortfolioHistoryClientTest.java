@@ -19,13 +19,11 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.springframework.beans.factory.annotation.Autowired;
 
 class PortfolioHistoryClientTest {
 
@@ -155,24 +153,5 @@ class PortfolioHistoryClientTest {
     // Intraday ranges already carry a live last point → no extra equity read.
     assertThat(c.usesDailyBars("1D")).isFalse();
     assertThat(c.usesDailyBars("1W")).isFalse();
-  }
-
-  @Test
-  void exposesExactlyOneAutowiredConstructorForSpring() {
-    // @Component with TWO constructors (the @Value production one + a package-private Clock one for
-    // tests). Spring cannot choose between multiple constructors unless exactly one is @Autowired —
-    // otherwise it falls back to a no-arg default and the context fails to start (the bff
-    // CrashLoopBackOff on 2026-06-28).
-    //
-    // Now REDUNDANT, and kept only until someone decides to remove it: this named exactly one
-    // class,
-    // which is why the identical defect shipped again in OptionsChatRetention (#683) unseen.
-    // SpringComponentConstructorGuardTest asserts the same invariant across every component in the
-    // package, and PortfolioHistoryClient is inside its scan.
-    long autowired =
-        Arrays.stream(PortfolioHistoryClient.class.getDeclaredConstructors())
-            .filter(ctor -> ctor.isAnnotationPresent(Autowired.class))
-            .count();
-    assertThat(autowired).isEqualTo(1L);
   }
 }
