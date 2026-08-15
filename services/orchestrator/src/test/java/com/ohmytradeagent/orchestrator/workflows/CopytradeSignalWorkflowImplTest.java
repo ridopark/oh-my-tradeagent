@@ -2032,6 +2032,31 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
+  void repeg_quoteActivityFailureStillExpiresTheEntryCleanly() {
+    // The risk this feature ADDS. Today's entry path touches market-data not at all, so an outage
+    // there cannot affect a BTO. The re-peg introduces that dependency onto a path holding a LIVE
+    // limit order whose only cancel is this workflow's own TTL — and these workflows are started
+    // with no run timeout. If a quote failure escaped, the workflow would die with the order still
+    // working at the broker, free to fill hours later against a stale anchor and with nothing left
+    // to cancel it. It must degrade to exactly today's behavior instead: one order, normal expiry.
+    setupRepegMocks(null);
+    when(optionQuote.getOptionQuote(any()))
+        .thenThrow(new IllegalStateException("market-data down"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-initial"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-initial"));
+
+    runWorkflow(btoPayload());
+
+    verify(exec, times(1)).placeOrder(any());
+    AuditEvent expired = capture("EntryExpired");
+    assertThat(expired.getSubject()).containsEntry("outcome", "EXPIRED");
+    assertThat(expired.getSubject()).containsEntry("broker_order_id", "brk-initial");
+    // The skip is auditable, and names the failure rather than looking like a normal quote miss.
+    AuditEvent skipped = captureWithEntry("OrderCancelRequested", "reason", "repeg_skipped");
+    assertThat((String) skipped.getSubject().get("quote_status")).startsWith("ERROR:");
+  }
+
+  @Test
   void repeg_fillArrivingDuringTheCancelRoundTripIsDiscarded() {
     // The narrowest window in the whole feature. A fill for the original order can be signalled
     // while the workflow is blocked inside cancelOrder — at that instant the order is not yet

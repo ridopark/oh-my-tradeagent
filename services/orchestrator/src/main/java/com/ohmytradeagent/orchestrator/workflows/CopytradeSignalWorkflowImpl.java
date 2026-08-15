@@ -335,6 +335,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    */
   static final long DEFAULT_REPEG_AFTER_MS = 30_000L;
 
+  /**
+   * Total wall-clock the re-peg will spend trying to get a live ask, across every attempt. Small on
+   * purpose: it is spent out of the remaining TTL, and giving up merely costs the re-peg, whereas
+   * over-waiting risks the un-cancellable working order described on {@link #optionQuote}.
+   */
+  private static final Duration REPEG_QUOTE_BUDGET = Duration.ofSeconds(10);
+
   /** Used when StrategyConfig.default_stc_fraction is null. */
   static final double DEFAULT_STC_FRACTION = 0.5;
 
@@ -368,11 +375,27 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       Workflow.newActivityStub(AccountSnapshotMetricsActivities.class, DEFAULT_OPTIONS);
 
   /**
-   * PLAN-2026-08-04-bto-entry-repeg: the live-ask snapshot the entry re-peg anchors on. Lives on
-   * the market-data task queue, mirroring the exit-side ladder's stub in {@link
-   * PositionWorkflowImpl}. The Activity returns {@code status=FAILED/UNAVAILABLE} rather than
-   * throwing, so a market-data hiccup degrades to "no re-peg" instead of wedging the entry in
-   * Temporal retry.
+   * PLAN-2026-08-04-bto-entry-repeg: the live-ask snapshot the entry re-peg anchors on, on the
+   * market-data task queue.
+   *
+   * <p>HARD-BOUNDED ON PURPOSE. A BTO entry holds a LIVE limit order at the broker whose only
+   * cancel is this workflow's own TTL path, and the sidecar starts these workflows with NO run
+   * timeout. An unbounded wait here is therefore not merely "slow": it leaves real money working at
+   * the broker with nothing left to cancel it, free to fill hours later against an anchor that has
+   * long gone stale. Two Temporal defaults would each cause exactly that:
+   *
+   * <ul>
+   *   <li>{@code ScheduleToStart} is unlimited by default, so if the market-data worker is not
+   *       polling the task is never STARTED and {@code StartToCloseTimeout} never begins counting.
+   *   <li>{@code RetryOptions} default to unlimited attempts, so a throwing Activity retries with
+   *       backoff forever.
+   * </ul>
+   *
+   * <p>{@code ScheduleToClose} bounds the whole attempt chain whichever one bites, and {@link
+   * #repegEntry} treats ANY failure as "no quote" → no re-peg → today's plain TTL expiry. The
+   * exit-side stub in {@link PositionWorkflowImpl} is deliberately NOT the model here: a stuck
+   * flatten holds a POSITION, which reconciliation can still see and settle, whereas a stuck entry
+   * holds an un-cancellable WORKING ORDER.
    */
   private final GetOptionQuoteActivity optionQuote =
       Workflow.newActivityStub(
@@ -380,6 +403,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
           ActivityOptions.newBuilder()
               .setTaskQueue(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE)
               .setStartToCloseTimeout(Duration.ofSeconds(5))
+              .setScheduleToCloseTimeout(REPEG_QUOTE_BUDGET)
+              .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(2).build())
               .build());
 
   /**
@@ -2010,6 +2035,16 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private record RepegOutcome(OrderIntentResult replacement, boolean adopted) {}
 
   /**
+   * Audit label for why a re-peg had no usable quote: the status, or the failure that replaced it.
+   */
+  private static String quoteStatusLabel(OptionQuoteResult quote, String quoteError) {
+    if (quote != null) {
+      return quote.getStatus().value();
+    }
+    return quoteError != null ? "ERROR:" + quoteError : "NULL";
+  }
+
+  /**
    * PLAN-2026-08-04-bto-entry-repeg: cancel the unfilled entry and re-place it one penny past the
    * live ask, bounded by the re-peg ceiling. At most ONE of these runs per entry — the ceiling is
    * where the chase stops, by design.
@@ -2037,7 +2072,22 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     qreq.setTenantId(payload.getTenantId());
     qreq.setStrategyId(payload.getStrategyId());
     qreq.setContractSymbol(resolved.optionSymbol());
-    OptionQuoteResult quote = optionQuote.getOptionQuote(qreq);
+    // Any failure = no quote = no re-peg. The Activity is contracted to RETURN FAILED/UNAVAILABLE
+    // rather than throw, but this catch is what makes the guarantee hold when that contract does
+    // not: a ScheduleToClose timeout (market-data not polling) and a retries-exhausted failure both
+    // arrive here as exceptions, and letting either escape would fail the workflow and strand the
+    // live entry order with no TTL cancel. CanceledFailure is rethrown so workflow cancellation is
+    // never swallowed.
+    OptionQuoteResult quote;
+    String quoteError = null;
+    try {
+      quote = optionQuote.getOptionQuote(qreq);
+    } catch (CanceledFailure cf) {
+      throw cf;
+    } catch (RuntimeException e) {
+      quote = null;
+      quoteError = e.getClass().getSimpleName();
+    }
 
     BigDecimal ask =
         quote != null && quote.getStatus() == OptionQuoteResult.Status.OK ? quote.getAsk() : null;
@@ -2060,7 +2110,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               "reason",
               "repeg_skipped",
               "quote_status",
-              quote == null ? "NULL" : quote.getStatus().value(),
+              quoteStatusLabel(quote, quoteError),
               "ask",
               ask,
               "ceiling",
