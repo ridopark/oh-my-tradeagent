@@ -190,6 +190,84 @@ class OptionsChatRepositoryIT {
         .hasSize(1);
   }
 
+  /** Old enough that no other test's rows are anywhere near the cutoff. */
+  private static IngestMessage aged(long id, OffsetDateTime postedAt) {
+    return new IngestMessage(
+        id,
+        "TradingTheTrend",
+        "#ff0004",
+        null,
+        postedAt,
+        "old news",
+        null,
+        false,
+        List.of(
+            new IngestAttachment("image", "https://cdn.discordapp.com/o.png", "o.png", 1, 1, 1)),
+        List.of(new IngestEmbed("t", "d", "https://example.com", "au", "f", null)));
+  }
+
+  @Test
+  void retentionDeletesOnlyRowsPastTheCutoff_andBindsTheCutoffAsATimestamp() {
+    // deleteOlderThan binds an OffsetDateTime — the SAME bind that 500'd every ingest until it was
+    // cast (see this class's header). An uncast cutoff here would not fail at build time and would
+    // not fail any mocked test; it would fail silently at 03:30 every night, and the only visible
+    // symptom would be a store that quietly never stops growing. So the sweep's real SQL runs here.
+    long old1 = 9_200_000_000_000_000_001L;
+    long old2 = 9_200_000_000_000_000_002L;
+    long keep = 9_200_000_000_000_000_003L;
+    OffsetDateTime ancient = OffsetDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    repo.ingest(CHANNEL, List.of(aged(old1, ancient), aged(old2, ancient.plusDays(1))));
+    repo.ingest(CHANNEL, List.of(aged(keep, OffsetDateTime.now(ZoneOffset.UTC))));
+
+    OffsetDateTime cutoff = OffsetDateTime.of(2021, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    assertThat(repo.deleteOlderThan(cutoff, 500))
+        .as("both aged rows, and nothing else")
+        .isEqualTo(2);
+
+    List<Long> left =
+        repo.recent(CHANNEL, null, 500).stream().map(StoredMessage::messageId).toList();
+    assertThat(left).doesNotContain(old1, old2).contains(keep);
+  }
+
+  @Test
+  void retentionNeverDeletesMoreThanTheBatchLimit_soOneSweepCannotStallTheDatabase() {
+    // The sweep is batched precisely so a first run against a long-neglected table takes many small
+    // locks instead of one enormous one. If LIMIT were dropped or misbound, this is the only place
+    // that notices before production does.
+    long base = 9_210_000_000_000_000_000L;
+    OffsetDateTime ancient = OffsetDateTime.of(2019, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    for (int i = 0; i < 5; i++) {
+      repo.ingest(CHANNEL, List.of(aged(base + i, ancient.plusMinutes(i))));
+    }
+
+    OffsetDateTime cutoff = OffsetDateTime.of(2019, 6, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    assertThat(repo.deleteOlderThan(cutoff, 2)).isEqualTo(2);
+    assertThat(repo.deleteOlderThan(cutoff, 2)).isEqualTo(2);
+    assertThat(repo.deleteOlderThan(cutoff, 2)).as("the tail").isEqualTo(1);
+    assertThat(repo.deleteOlderThan(cutoff, 2)).as("and then it is drained").isZero();
+  }
+
+  @Test
+  void retentionTakesChildRowsWithTheMessage_provingTheCascadeUnderTheWriterRole() {
+    // V12 grants DELETE on the parent only, on the claim that ON DELETE CASCADE runs through the
+    // constraint rather than as dashboard_writer. Asserted through the repository, as the role the
+    // scheduler really uses — a missing child grant would surface here as 42501, not as a wrong
+    // count.
+    long id = 9_220_000_000_000_000_001L;
+    OffsetDateTime ancient = OffsetDateTime.of(2018, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    repo.ingest(CHANNEL, List.of(aged(id, ancient)));
+    StoredMessage before =
+        repo.recent(CHANNEL, null, 500).stream()
+            .filter(m -> m.messageId() == id)
+            .findFirst()
+            .orElseThrow();
+    assertThat(before.attachments()).hasSize(1);
+    assertThat(before.embeds()).hasSize(1);
+
+    assertThat(repo.deleteOlderThan(ancient.plusDays(1), 500)).isEqualTo(1);
+    assertThat(repo.recent(CHANNEL, null, 500).stream().filter(m -> m.messageId() == id)).isEmpty();
+  }
+
   @Test
   void theCursorPagesBackwardsWithoutRepeatingARow() {
     long base = 9_100_000_000_000_000_000L;
