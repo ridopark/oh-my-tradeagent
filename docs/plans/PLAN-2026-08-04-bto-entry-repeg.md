@@ -26,13 +26,24 @@ The order is submitted **once** at that limit (`exec.placeOrder`,
 `:1876` → `DEFAULT_PENDING_TTL_PAPER_SECS = 90L` at `:313`). On timeout `handleTtlExpired` (`:919` →
 `:1547`) cancels and emits `EntryExpired`. **No re-peg, no chase, no retry.**
 
-Real-money misses:
-- NVDA 8/10 212.5C — limit 2.95, option ran 2.95→3.25 within 2 min → expired unfilled.
-- AAPL 8/14 315C — limit 2.51 while the option was already 2.55–2.61 **at submit** → never
-  marketable → expired.
+Real-money misses (figures below CORRECTED 2026-08-15 from the audit trail — see the forensic note):
+- NVDA 8/10 212.5C, 10:25 ET — signal price **2.90**, limit 2.95 (`slip_min`, the `abs=0.05`
+  branch), option traded 2.98–3.20 inside the TTL → expired unfilled.
+- AAPL 8/14 315C, 12:24 ET — signal price **2.46**, limit 2.51, first print inside the TTL 2.55 →
+  never marketable → expired.
 
-**Interim mitigation already shipped (config only):** `max_slippage_abs = 0` on all copytrade
-tenants, so the effective limit is `price × (1 + max_slippage_pct)` = `price × 1.05`.
+> **The original plan back-solved these prices as `limit / 1.05` (2.81 and 2.39), assuming the
+> percentage branch.** Both orders were actually `slip_min` on `max_slippage_abs = 0.05`, so the
+> real prices are `limit − 0.05`. Every ceiling figure derived from the old numbers was wrong: the
+> true ceilings at the 10% default are **3.19** (not 3.09) and **2.71** (not 2.63).
+
+**The `abs = 0` mitigation POSTDATES both incidents.** `strategy_config` was updated at
+**13:02 ET on 2026-08-04** — after NVDA (10:25) and after AAPL (12:24). Confirmed independently:
+orders submitted that morning carry `limit_price_strategy=slip_min`, while a 14:31 order the same
+day carries `slip_pct`. Under the config now in force the limits would have been 3.05 and 2.58,
+both above the first print within seconds of submit — **so both cited incidents would fill today at
+t≈0 and never reach a re-peg.** They motivate the work but do NOT justify it; see the measured
+business case below.
 
 **Target field is present but inert.** `contract/schemas/strategy-config.json:179` defines
 `repeg_after_ms` (*"Spec-only: no orchestrator/exec code consumes this field"*). Confirmed: the only
@@ -107,10 +118,43 @@ was considered and **rejected**: those are live real-money fields on every tenan
 currently means *unset* (`isSet` tests `signum() != 0`), so the semantics would silently change
 underneath the shipped mitigation.
 
-**Forks A and B stand as resolved.** Fork A: `repeg_after_ms = 30000` (30s of the 90s TTL) — and
-under the revised Fork C this delay is **no longer a regression window**, because the initial peg now
-equals today's limit, so the wait costs nothing relative to current behavior. Fork B: BTO-only for
-v1; symmetric STC re-peg deferred to Phase 4.
+**Forks A and B stand as resolved.** Fork A: `repeg_after_ms = 30000` (30s of the 90s TTL). Because
+the initial peg now equals today's limit, the wait is very nearly free — but **not literally free**,
+as the original revision claimed. Measured over 120 days of live BUY fills (n=47): p50 **0.09s**,
+p90 12.3s, and **2 of 47 (4.3%) filled after 30s** — both exactly AT the limit (NVDA 7/16 at 45.1s,
+NVDA 7/20 at 33.9s). Those are orders a 30s re-peg cancels and re-places higher; they would very
+likely still fill, but at a worse price having surrendered queue position. Accepted: the regression
+is ~4% of entries, price-worse rather than fill-worse. Do NOT recalibrate this on `staging_paper`
+(12% fill past 30s) — that is Alpaca's paper fill simulator, not live microstructure. Fork B:
+BTO-only for v1; symmetric STC re-peg deferred to Phase 4.
+
+---
+
+## Measured business case (forensics, 2026-08-15) — read before judging the value
+
+Both cited incidents are already fixed by the `abs = 0` mitigation, so the real question is what
+this buys on top of TODAY's config. Measured across the live tenants:
+
+- **Headline expiry rate ~27%** (`prod_real` 6/22 over 30 days; 12/45 over 120 days) — but that does
+  NOT decompose into 27% of addressable loss.
+- Of `prod_real`'s **12 expiries in 120 days**: 3 had **zero trade prints** in the entire 90s window
+  (no market to re-peg into, one submitted 00:13 ET with the market shut), 1 was a **stale signal
+  price** at +93% (correctly refused, see the ceiling rationale), 1 was a **benign artifact** (a
+  wrong-expiry edited signal whose corrected sibling filled 14s later — zero economic loss). That
+  leaves **8 genuine "market moved slightly away" misses**, i.e. roughly **2/month** across live
+  tenants, not 27% of entries.
+- **Today's config already catches 6 of those 8** against the full 90s window. **The re-peg adds
+  exactly 2** over 120 days, and only one of them (MU 8/13 260817C1050, needing +8.26%) postdates
+  the mitigation.
+
+**So the honest value is ~1–2 additional filled entries per quarter, not a fix for a 27% failure
+rate.** That is still worth shipping — the mechanism is bounded, fail-safe and cheap — but it does
+not justify loosening anything further, and it should not be sold internally as an outage fix.
+
+**Caveat on all of the above:** historical options **NBBO quotes** are not on the current data plan
+(`/v1beta1/options/quotes` → `Not Found`); trades and bars are. Every ask-side figure is therefore
+inferred from **trade prints, which sit at or below the ask**, making the required-ceiling numbers
+lower bounds. This does not change the ranking of 10% over 12/15%.
 
 ---
 
@@ -122,12 +166,18 @@ v1; symmetric STC re-peg deferred to Phase 4.
 | field | default | rationale |
 |---|---|---|
 | `repeg_after_ms` | `30000` | 30s at today's limit, then ~60s of the 90s TTL at the re-peg |
-| `repeg_ceiling_pct` | `0.10` | doubles today's 5% cap; covers the AAPL miss (needed +7.1%) |
+| `repeg_ceiling_pct` | `0.10` | smallest ceiling capturing **all 8** real historical misses |
 
-Against the two incidents: **AAPL is fixed** (ceiling $2.63 ≥ the $2.56 needed). **NVDA is bounded,
-not chased** — its peak needed **+16%** over the signal price; the bot re-pegs to $3.09 and fills
-only if the option trades back through it. Declining to chase a +16% runner is the ceiling working
-as intended, not a gap.
+**Calibrated, not picked.** Replaying every genuine live miss over 120 days against its own trade
+tape gives the ceiling each needed: +1.95%, +2.11%, +2.11%, +2.86%, +3.66%, +5.17%, +6.85%, +8.26%.
+So **+5% captures 5/8, +8% captures 7/8, +10% captures 8/8**, and 12% or 15% capture nothing more
+while raising the worst price payable. Hence 0.10.
+
+Both 2026-08-04 incidents are **captured**, not bounded out: NVDA needed +5.17% against its real
+2.90 signal price (ceiling 3.19) and AAPL +3.66% (ceiling 2.71). The earlier claim that NVDA
+"needed +16% and is deliberately not chased" came from the back-solved price and is **false**. The
+genuine bounded-out case is the **stale-signal-price** class — MSFT 7/07 posted at 3.65 while
+trading ~7.05 (+93%) — which the ceiling correctly refuses.
 
 **Off-switch without a redeploy:** `repeg_after_ms = 0` disables the re-peg for that tenant,
 restoring today's exact one-shot behavior. Schema `minimum` relaxes from `1` to `0` and `0` is
@@ -320,9 +370,10 @@ audit in (3) and the dropped-fill audit in (4) must likewise reuse registered ki
 1. **`repeg_fills_at_live_ask` (AAPL repro):** initial limit 2.51, live ask 2.55, ceiling 2.75 →
    re-pegs to 2.56 and fills. Assert a second `OrderSubmitted` at 2.56 then `EntryFilled`. *This is
    the test the original plan could not have passed.*
-2. **`repeg_bounded_at_ceiling` (NVDA repro):** ask runs to 3.25 with ceiling 3.10 → re-pegs to
-   exactly 3.10, does **not** chase further, `EntryExpired` at TTL. Assert exactly **one** re-peg
-   `OrderSubmitted`.
+2. **`repeg_bounded_at_ceiling` (stale-signal-price repro):** ask far above the ceiling → re-pegs
+   to exactly the ceiling, does **not** chase further, `EntryExpired` at TTL. Assert exactly **one**
+   re-peg `OrderSubmitted`. Anchored on MSFT 7/07 (posted 3.65, trading ~7.05) — NOT on NVDA
+   8/04, which the audit trail shows the 10% ceiling would have CAPTURED.
 3. **`repeg_skipped_when_quote_unavailable`:** quote returns `UNAVAILABLE`/`FAILED` → **no** cancel,
    **no** second order; the original order rides to `EntryExpired`. (Entry fail-safe.)
 4. **`normal_fill_no_repeg`:** fills at the initial peg before `repeg_after_ms` → no second
@@ -396,3 +447,9 @@ suite and the replay harness, so treat Phase 3's review bar as correspondingly h
   deploy with no `staging_paper` canary. Added `repeg_after_ms = 0` as the no-redeploy off-switch
   (schema `minimum` 1 → 0). The version marker is retained — it guards in-flight replay, not
   darkness. Tests inverted accordingly: the unset case now asserts the re-peg *fires*.
+- **2026-08-15 (c)** — forensic validation against production. Corrected the incident prices
+  (`slip_min`/`abs=0.05`, not the back-solved `limit/1.05`), established that the `abs = 0`
+  mitigation POSTDATES and independently resolves both cited incidents, replaced the false
+  "NVDA needed +16%" rationale with a calibration over 8 real misses (which **confirms** 0.10),
+  added the measured business case (~2 extra fills per 120 days, not a 27% failure rate), and
+  corrected "the wait costs nothing" to the measured 4.3% price-worse regression.

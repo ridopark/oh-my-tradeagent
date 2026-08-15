@@ -39,10 +39,27 @@ public final class BtoPricing {
   private static final BigDecimal ONE = BigDecimal.ONE;
 
   /**
-   * Applied when {@code repeg_ceiling_pct} is unset. 0.10 doubles the 5% cap the copytrade tenants
-   * carry today, which covers the 2026-08-04 AAPL miss (it needed +7.1% to become marketable). The
-   * same day's NVDA runner needed +16% and is deliberately NOT covered — declining to chase that
-   * far is the bound working as intended.
+   * Applied when {@code repeg_ceiling_pct} is unset.
+   *
+   * <p>Calibrated against production, NOT chosen for roundness. Every copytrade BTO entry that
+   * expired unfilled across the live tenants over a 120-day window was replayed against the option
+   * trade tape for its own 90s TTL, giving the ceiling each one would have needed:
+   *
+   * <pre>
+   *   +1.95%  +2.11%  +2.11%  +2.86%  +3.66%  +5.17%  +6.85%  +8.26%
+   * </pre>
+   *
+   * <p>So +5% (today's effective cap) captures 5 of 8, +8% captures 7 of 8, and <b>+10% captures
+   * all 8</b>. 12% and 15% capture nothing further and only raise the worst price payable, which is
+   * why this is 0.10 and not higher.
+   *
+   * <p>The bound still matters: it is what refuses a signal whose posted price has gone badly stale
+   * (a real case sat at +93% of the signal price), where chasing is simply wrong rather than merely
+   * expensive.
+   *
+   * <p>Trade prints sit at or below the ask, so those percentages are lower bounds — historical
+   * options NBBO quotes are not on the current data plan. That shifts the figures by a cent or two,
+   * not the choice between 10% and 12%.
    */
   static final BigDecimal DEFAULT_REPEG_CEILING_PCT = new BigDecimal("0.10");
 

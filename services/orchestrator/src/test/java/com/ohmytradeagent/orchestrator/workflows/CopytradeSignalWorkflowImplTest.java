@@ -1865,9 +1865,11 @@ class CopytradeSignalWorkflowImplTest {
 
   @Test
   void repeg_fillsAtTheLiveAsk_aaplIncident() {
-    // AAPL 8/14 315C, 2026-08-04: the limit was 2.51 while the option was ALREADY 2.55-2.61 at
-    // submit, so the order was never marketable and expired for nothing. Signal price here is 2.30
-    // (MIRROR, no slippage caps in config()), ceiling = 2.30 * 1.10 = 2.53.
+    // AAPL 8/14 315C, 2026-08-04 12:24 ET: audit trail shows SignalReceived price 2.46 and limit
+    // 2.51, while the option's first trade print inside the TTL was 2.55 — never marketable, so it
+    // expired for nothing. Modelled here on this suite's synthetic 2.30 payload (config() sets no
+    // slippage caps, so the initial peg MIRRORs the price at 2.30 and the ceiling is 2.53); the
+    // shape under test — ask above the initial peg, inside the ceiling — is the incident's.
     setupRepegMocks(null);
     when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
     when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-initial"));
@@ -1899,10 +1901,16 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
-  void repeg_isBoundedByTheCeiling_andDoesNotChase_nvdaIncident() {
-    // NVDA 8/10 212.5C ran 2.95 -> 3.25 (+16% over the signal price) in two minutes. The re-peg
-    // stops at the ceiling and lets the runner go. If someone later widens the default far enough
-    // to chase this, THIS assertion is what should fail.
+  void repeg_isBoundedByTheCeiling_andDoesNotChase() {
+    // A signal whose posted price has gone badly stale — the case the ceiling exists for. Real
+    // occurrence: MSFT 7/17 400C on 2026-07-07, posted at 3.65 while the contract traded ~7.05
+    // (+93%). The re-peg stops at the ceiling and lets it go; chasing that far would be a
+    // different trade from the one the signal described. If someone later widens the default
+    // enough to chase this, THIS assertion is what should fail.
+    //
+    // NOT the 2026-08-04 NVDA miss: the audit trail puts that signal at 2.90 needing ~+5.2%, which
+    // the default ceiling COVERS. The +16% figure this test used to cite was back-solved from the
+    // wrong slippage branch.
     setupRepegMocks(null);
     when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("9.99")));
     when(exec.placeOrder(any()))
