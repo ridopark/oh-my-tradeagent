@@ -67,6 +67,34 @@ class OptionsChatRepositoryIT {
   }
 
   private static IngestMessage message(long id, String content) {
+    return message(
+        id,
+        content,
+        OffsetDateTime.of(2026, 8, 13, 14, 3, 11, 0, ZoneOffset.UTC),
+        List.of(),
+        List.of());
+  }
+
+  /**
+   * The same author fixture posted at a chosen time, carrying one attachment and one embed — so a
+   * row built this way exercises the child-cascade as well as the parent.
+   */
+  private static IngestMessage messageAt(long id, OffsetDateTime postedAt) {
+    return message(
+        id,
+        "old news",
+        postedAt,
+        List.of(
+            new IngestAttachment("image", "https://cdn.discordapp.com/o.png", "o.png", 1, 1, 1)),
+        List.of(new IngestEmbed("t", "d", "https://example.com", "au", "f", null)));
+  }
+
+  private static IngestMessage message(
+      long id,
+      String content,
+      OffsetDateTime postedAt,
+      List<IngestAttachment> attachments,
+      List<IngestEmbed> embeds) {
     return new IngestMessage(
         id,
         "TradingTheTrend",
@@ -77,12 +105,12 @@ class OptionsChatRepositoryIT {
         // the avatar column — the page then renders <img src="#ff0004"> and every name loses its
         // colour. Leaving avatar null here made that swap undetectable.
         "https://cdn.discordapp.com/avatars/1/av.png",
-        OffsetDateTime.of(2026, 8, 13, 14, 3, 11, 0, ZoneOffset.UTC),
+        postedAt,
         content,
         null,
         false,
-        List.of(),
-        List.of());
+        attachments,
+        embeds);
   }
 
   @Test
@@ -190,21 +218,12 @@ class OptionsChatRepositoryIT {
         .hasSize(1);
   }
 
-  /** Old enough that no other test's rows are anywhere near the cutoff. */
-  private static IngestMessage aged(long id, OffsetDateTime postedAt) {
-    return new IngestMessage(
-        id,
-        "TradingTheTrend",
-        "#ff0004",
-        null,
-        postedAt,
-        "old news",
-        null,
-        false,
-        List.of(
-            new IngestAttachment("image", "https://cdn.discordapp.com/o.png", "o.png", 1, 1, 1)),
-        List.of(new IngestEmbed("t", "d", "https://example.com", "au", "f", null)));
-  }
+  // THE RETENTION TESTS SHARE ONE TABLE AND deleteOlderThan HAS NO CHANNEL PREDICATE, so time is
+  // the only axis that can separate them. Two rules keep them independent, and a third test must
+  // follow both: every non-retention row in this class is dated 2026 (see message() above), and
+  // each retention test owns a disjoint pre-2021 era that it drains before it returns. The test
+  // asserting an exact "and nothing else" count deliberately owns the OLDEST era, so no sibling's
+  // rows can ever fall below its cutoff regardless of execution order.
 
   @Test
   void retentionDeletesOnlyRowsPastTheCutoff_andBindsTheCutoffAsATimestamp() {
@@ -215,18 +234,26 @@ class OptionsChatRepositoryIT {
     long old1 = 9_200_000_000_000_000_001L;
     long old2 = 9_200_000_000_000_000_002L;
     long keep = 9_200_000_000_000_000_003L;
-    OffsetDateTime ancient = OffsetDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
-    repo.ingest(CHANNEL, List.of(aged(old1, ancient), aged(old2, ancient.plusDays(1))));
-    repo.ingest(CHANNEL, List.of(aged(keep, OffsetDateTime.now(ZoneOffset.UTC))));
+    OffsetDateTime era = OffsetDateTime.of(2018, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    repo.ingest(
+        CHANNEL,
+        List.of(
+            messageAt(old1, era),
+            messageAt(old2, era.plusDays(1)),
+            messageAt(keep, OffsetDateTime.now(ZoneOffset.UTC))));
 
-    OffsetDateTime cutoff = OffsetDateTime.of(2021, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    // Both aged rows carry an attachment and an embed, so this also runs the ON DELETE CASCADE as
+    // dashboard_writer: V12 grants DELETE on the parent only, and a missing child grant would
+    // surface right here as 42501 rather than as a wrong count.
+    OffsetDateTime cutoff = OffsetDateTime.of(2018, 6, 1, 0, 0, 0, 0, ZoneOffset.UTC);
     assertThat(repo.deleteOlderThan(cutoff, 500))
-        .as("both aged rows, and nothing else")
+        .as("the aged rows, and nothing else")
         .isEqualTo(2);
 
-    List<Long> left =
-        repo.recent(CHANNEL, null, 500).stream().map(StoredMessage::messageId).toList();
-    assertThat(left).doesNotContain(old1, old2).contains(keep);
+    assertThat(repo.recent(CHANNEL, null, 500))
+        .extracting(StoredMessage::messageId)
+        .doesNotContain(old1, old2)
+        .contains(keep);
   }
 
   @Test
@@ -235,37 +262,21 @@ class OptionsChatRepositoryIT {
     // locks instead of one enormous one. If LIMIT were dropped or misbound, this is the only place
     // that notices before production does.
     long base = 9_210_000_000_000_000_000L;
-    OffsetDateTime ancient = OffsetDateTime.of(2019, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
-    for (int i = 0; i < 5; i++) {
-      repo.ingest(CHANNEL, List.of(aged(base + i, ancient.plusMinutes(i))));
-    }
+    OffsetDateTime era = OffsetDateTime.of(2019, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    repo.ingest(
+        CHANNEL,
+        List.of(
+            messageAt(base, era),
+            messageAt(base + 1, era.plusMinutes(1)),
+            messageAt(base + 2, era.plusMinutes(2)),
+            messageAt(base + 3, era.plusMinutes(3)),
+            messageAt(base + 4, era.plusMinutes(4))));
 
     OffsetDateTime cutoff = OffsetDateTime.of(2019, 6, 1, 0, 0, 0, 0, ZoneOffset.UTC);
     assertThat(repo.deleteOlderThan(cutoff, 2)).isEqualTo(2);
     assertThat(repo.deleteOlderThan(cutoff, 2)).isEqualTo(2);
     assertThat(repo.deleteOlderThan(cutoff, 2)).as("the tail").isEqualTo(1);
     assertThat(repo.deleteOlderThan(cutoff, 2)).as("and then it is drained").isZero();
-  }
-
-  @Test
-  void retentionTakesChildRowsWithTheMessage_provingTheCascadeUnderTheWriterRole() {
-    // V12 grants DELETE on the parent only, on the claim that ON DELETE CASCADE runs through the
-    // constraint rather than as dashboard_writer. Asserted through the repository, as the role the
-    // scheduler really uses — a missing child grant would surface here as 42501, not as a wrong
-    // count.
-    long id = 9_220_000_000_000_000_001L;
-    OffsetDateTime ancient = OffsetDateTime.of(2018, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
-    repo.ingest(CHANNEL, List.of(aged(id, ancient)));
-    StoredMessage before =
-        repo.recent(CHANNEL, null, 500).stream()
-            .filter(m -> m.messageId() == id)
-            .findFirst()
-            .orElseThrow();
-    assertThat(before.attachments()).hasSize(1);
-    assertThat(before.embeds()).hasSize(1);
-
-    assertThat(repo.deleteOlderThan(ancient.plusDays(1), 500)).isEqualTo(1);
-    assertThat(repo.recent(CHANNEL, null, 500).stream().filter(m -> m.messageId() == id)).isEmpty();
   }
 
   @Test

@@ -46,9 +46,6 @@ class OptionsChatMigrationIT {
   private static final long CHANNEL = 786109983065505792L;
   private static final long MSG = 1273987654321098765L;
 
-  /** Holds the planner-shaping bulk rows, off in a channel nothing else reads. */
-  private static final long BULK_CHANNEL = 1L;
-
   @Container
   static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
 
@@ -234,28 +231,30 @@ class OptionsChatMigrationIT {
 
   @Test
   void theRetentionSweepsExactQueryCanUseThePostedAtIndex() throws SQLException {
-    // An index EXISTING does not mean the sweep BENEFITS from it: the point of ordering by
-    // posted_at is that the index already holds that order, so the delete batch streams off the
-    // front and stops at 500. If the plan sorts first, the sweep touches every expired row on the
-    // way to picking 500 — precisely the behaviour the index was added to avoid, and it degrades
-    // exactly when the table is big, which is when it matters.
+    // An index EXISTING does not mean the sweep BENEFITS from it: ordering by posted_at pays off
+    // only because the index already holds that order, so the batch streams off the front and stops
+    // at 500. A plan that sorts first touches every expired row on the way to picking 500 — what
+    // the index was added to avoid, and it degrades exactly when the table is big.
     //
-    // THE ROWS ARE THE TEST. Loaded to production shape first, deliberately: on the dozen rows the
-    // sibling tests leave behind, the whole table is under the 500 limit, so "sort everything" is
-    // genuinely cheaper and Postgres is right to choose it. Asserting against that tiny table
-    // measured nothing and failed — the honest question is which plan wins once the table is large
-    // enough for the choice to have a cost, so the table is made large enough to ask it.
+    // THE ROWS ARE THE TEST. On the dozen rows the sibling tests leave behind the whole table sits
+    // under the 500 limit, so sorting the lot is genuinely cheaper and Postgres is right to pick
+    // it; asserting against that measured nothing. Loading the table to production shape is what
+    // gives the choice a cost, and so gives the answer meaning. Chronological insert order matches
+    // how the mirror actually fills, keeping posted_at correlated with physical order the way
+    // production's is — that correlation is what buys the plan, so preserve it if the count
+    // changes.
     //
-    // Chronological insert order matches how a chat mirror actually fills (append-only, in time
-    // order), which keeps posted_at correlated with physical order the way production's is.
+    // The statement mirrors the inner SELECT of OptionsChatRepository.deleteOlderThan. THAT is the
+    // source of truth; re-check this copy if the sweep's SQL is ever reshaped, or this will happily
+    // keep proving a plan for SQL production no longer runs.
     try (Connection c = asSuperuser();
         var st = c.createStatement()) {
-      // A channel of its own, so these rows cannot perturb any channel-scoped sibling assertion.
+      // Its own channel AND its own id range, so these rows can neither be seen by a channel-scoped
+      // sibling assertion nor collide with a snowflake a later test picks.
       st.executeUpdate(
           "INSERT INTO options_chat_message (message_id, channel_id, author_name, posted_at,"
-              + " content, content_hash) SELECT g, "
-              + BULK_CHANNEL
-              + ", 'bulk', now() - ((5000 - g) || ' minutes')::interval, 'c', 'h'"
+              + " content, content_hash) SELECT 8000000000000000000 + g, 1, 'bulk',"
+              + " now() - (5000 - g) * interval '1 minute', 'c', 'h'"
               + " FROM generate_series(1, 5000) g");
       // Without stats the planner works off a default estimate and the choice is not a real one.
       st.execute("ANALYZE options_chat_message");
@@ -270,8 +269,8 @@ class OptionsChatMigrationIT {
         }
       }
 
-      // No enable_seqscan coercion: at this size the planner reaches for the index unprompted, so
-      // this asserts the decision production will actually get rather than one forced in a test.
+      // Deliberately NOT coerced with enable_seqscan=off: at this size the planner reaches for the
+      // index on its own, so this pins a decision it really makes rather than one forced in a test.
       assertThat(plan.toString())
           .as("the sweep's filter+order must be servable by the posted_at index")
           .contains("options_chat_message_posted_at_idx");
