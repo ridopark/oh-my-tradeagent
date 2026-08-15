@@ -120,7 +120,13 @@ spec:
                 - /bin/sh
                 - -c
                 - test -f /app/state/heartbeat && test $(( $(date +%s) - $(stat -c %Y /app/state/heartbeat) )) -lt 120
-            # Covers the 45s initContainer stagger plus Chromium + Discord warm-up.
+            # initialDelaySeconds counts from when THIS container starts, and initContainers have
+            # already completed by then — so it does NOT need to cover the 45s stagger, contrary
+            # to what an earlier version of this comment claimed. What it must cover is what happens
+            # INSIDE the container before the first heartbeat is written:
+            #   CHAT_STARTUP_DELAY_SECS (15s) + Chromium launch + Discord load (~40s) ~= 55s.
+            # 120s leaves margin for a slow Discord render without letting a genuinely dead tab sit
+            # undetected for long.
             initialDelaySeconds: 120
             periodSeconds: 30
             failureThreshold: 3
