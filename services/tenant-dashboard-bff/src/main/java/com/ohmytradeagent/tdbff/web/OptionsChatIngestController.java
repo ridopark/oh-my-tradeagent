@@ -3,9 +3,7 @@ package com.ohmytradeagent.tdbff.web;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatChannels;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatIngestParser;
 import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository;
-import com.ohmytradeagent.tdbff.optionschat.OptionsChatRepository.IngestMessage;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
@@ -48,14 +46,15 @@ public class OptionsChatIngestController {
     // A structural rejection throws InvalidIngestException (an IllegalArgumentException), which
     // GlobalExceptionHandler turns into the service's standard 400 envelope. Content-level problems
     // never reach here — the parser sanitizes those.
-    List<IngestMessage> messages = OptionsChatIngestParser.parse(body, channels.allowed());
-    // The batch's channel is re-read here rather than trusted from a field: parse() already
-    // rejected anything outside the allowlist, so this is the validated value.
-    long channelId = Long.parseLong(String.valueOf(body.get("channel_id")).trim());
-    int stored = repo.ingest(channelId, messages);
+    // The channel comes back from the parser already validated against the allowlist — never
+    // re-read from the raw body, which would duplicate snowflake handling and re-derive a trusted
+    // value from untrusted input.
+    OptionsChatIngestParser.ParsedBatch batch =
+        OptionsChatIngestParser.parse(body, channels.allowed());
+    int stored = repo.ingest(batch.channelId(), batch.messages());
 
     Map<String, Object> out = new LinkedHashMap<>();
-    out.put("received", messages.size());
+    out.put("received", batch.messages().size());
     // received - stored = replays the scraper re-sent; a healthy steady state has stored > 0 only
     // when the room is actually active.
     out.put("stored", stored);

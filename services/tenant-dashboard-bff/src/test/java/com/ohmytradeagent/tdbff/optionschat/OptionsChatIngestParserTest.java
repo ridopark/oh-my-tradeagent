@@ -84,7 +84,8 @@ class OptionsChatIngestParserTest {
             "vbscript:msgbox(1)")) {
       Map<String, Object> m = message();
       m.put("attachments", List.of(attachment(hostile)));
-      List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+      List<IngestMessage> out =
+          OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
       assertThat(out).hasSize(1);
       assertThat(out.get(0).attachments())
@@ -100,7 +101,8 @@ class OptionsChatIngestParserTest {
         "attachments",
         List.of(
             attachment("https://cdn.discordapp.com/a.png"), attachment("http://example.com/b")));
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out.get(0).attachments()).hasSize(2);
   }
@@ -109,7 +111,8 @@ class OptionsChatIngestParserTest {
   void aHostileAvatarUrlBecomesNullButTheMessageSurvives() {
     Map<String, Object> m = message();
     m.put("author_avatar_url", "javascript:alert(1)");
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out).hasSize(1);
     assertThat(out.get(0).authorAvatarUrl()).isNull();
@@ -125,7 +128,8 @@ class OptionsChatIngestParserTest {
     Map<String, Object> m = message();
     m.put("attachments", List.of(a));
 
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out.get(0).attachments()).hasSize(1);
     assertThat(out.get(0).attachments().get(0).kind()).isEqualTo("image");
@@ -136,7 +140,8 @@ class OptionsChatIngestParserTest {
     Map<String, Object> m = message();
     m.put("author_color", "#ff0004");
 
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out.get(0).authorColor()).isEqualTo("#ff0004");
   }
@@ -158,7 +163,8 @@ class OptionsChatIngestParserTest {
       Map<String, Object> m = message();
       m.put("author_color", hostile);
 
-      List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+      List<IngestMessage> out =
+          OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
       assertThat(out.get(0).authorColor()).as(hostile).isNull();
     }
@@ -180,7 +186,8 @@ class OptionsChatIngestParserTest {
     Map<String, Object> m = message();
     m.put("attachments", List.of(a));
 
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out.get(0).attachments().get(0).kind()).isEqualTo("file");
   }
@@ -190,7 +197,8 @@ class OptionsChatIngestParserTest {
     Map<String, Object> m = message();
     m.put("content", "x".repeat(OptionsChatIngestParser.MAX_CONTENT + 500));
 
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out.get(0).content()).hasSize(OptionsChatIngestParser.MAX_CONTENT);
   }
@@ -204,7 +212,10 @@ class OptionsChatIngestParserTest {
     m.put("content", "x".repeat(OptionsChatIngestParser.MAX_CONTENT - 1) + emoji);
 
     String content =
-        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).get(0).content();
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED)
+            .messages()
+            .get(0)
+            .content();
 
     assertThat(content).hasSize(OptionsChatIngestParser.MAX_CONTENT - 1);
     assertThat(Character.isHighSurrogate(content.charAt(content.length() - 1)))
@@ -221,7 +232,8 @@ class OptionsChatIngestParserTest {
     Map<String, Object> m = message();
     m.put("attachments", List.of(a));
 
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out.get(0).attachments().get(0).byteSize()).isNull();
   }
@@ -233,7 +245,8 @@ class OptionsChatIngestParserTest {
     Map<String, Object> m = message();
     m.put("attachments", List.of(a));
 
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out.get(0).attachments().get(0).width()).isNull();
   }
@@ -247,7 +260,8 @@ class OptionsChatIngestParserTest {
     Map<String, Object> m = message();
     m.put("attachments", lots);
 
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out.get(0).attachments()).hasSize(OptionsChatIngestParser.MAX_CHILDREN);
   }
@@ -258,7 +272,8 @@ class OptionsChatIngestParserTest {
     m.remove("content");
     m.put("attachments", List.of(attachment("https://cdn.discordapp.com/a.png")));
 
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out).hasSize(1);
     assertThat(out.get(0).content()).isEmpty();
@@ -271,7 +286,8 @@ class OptionsChatIngestParserTest {
     m.put("message_id", "1273987654321098765");
     m.put("reply_to_id", "1273987654321098700");
 
-    List<IngestMessage> out = OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED);
+    List<IngestMessage> out =
+        OptionsChatIngestParser.parse(body(CHANNEL, List.of(m)), ALLOWED).messages();
 
     assertThat(out.get(0).messageId()).isEqualTo(1273987654321098765L);
     assertThat(out.get(0).replyToId()).isEqualTo(1273987654321098700L);

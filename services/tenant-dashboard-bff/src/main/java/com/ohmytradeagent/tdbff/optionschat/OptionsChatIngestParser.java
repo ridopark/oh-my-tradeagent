@@ -78,13 +78,23 @@ public final class OptionsChatIngestParser {
   }
 
   /**
+   * One validated batch: the channel it is for, and its messages.
+   *
+   * <p>The channel is RETURNED rather than left for the caller to re-read from the raw body.
+   * Re-parsing it there would duplicate snowflake handling — the exact duplication {@link
+   * Snowflakes} exists to prevent — and would re-derive from untrusted input a value this class had
+   * already validated against the allowlist.
+   */
+  public record ParsedBatch(long channelId, List<IngestMessage> messages) {}
+
+  /**
    * Parse and validate, rejecting anything not addressed to {@code expectedChannelId}.
    *
    * <p>The channel check is the reason this endpoint is not a general-purpose blob sink: without it
    * anyone holding the ingest token could write arbitrary rows under any channel id. It is an
    * ALLOWLIST — membership, never a range or a prefix.
    */
-  public static List<IngestMessage> parse(Map<String, Object> body, java.util.Set<Long> allowed) {
+  public static ParsedBatch parse(Map<String, Object> body, java.util.Set<Long> allowed) {
     if (body == null) {
       throw new InvalidIngestException("body is required");
     }
@@ -106,7 +116,7 @@ public final class OptionsChatIngestParser {
       }
       out.add(parseMessage(castMap(m)));
     }
-    return out;
+    return new ParsedBatch(channelId, out);
   }
 
   private static IngestMessage parseMessage(Map<String, Object> m) {

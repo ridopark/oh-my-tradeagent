@@ -61,7 +61,8 @@ class OptionsChatDarkGateWebMvcTest {
       properties = {
         "options-chat.enabled=false",
         "dashboard.writer.enabled=true",
-        "options-chat.channel-ids=786109983065505792,769797179992571914"
+        // Labelled form, matching production config, so the tests exercise the real shape.
+        "options-chat.channel-ids=786109983065505792:Discussion,769797179992571914:Signals"
       })
   class FeatureFlagOff extends BothRoutesAre404 {}
 
@@ -82,7 +83,8 @@ class OptionsChatDarkGateWebMvcTest {
       properties = {
         "options-chat.enabled=true",
         "dashboard.writer.enabled=false",
-        "options-chat.channel-ids=786109983065505792,769797179992571914"
+        // Labelled form, matching production config, so the tests exercise the real shape.
+        "options-chat.channel-ids=786109983065505792:Discussion,769797179992571914:Signals"
       })
   class WriterFlagOff extends BothRoutesAre404 {}
 }
