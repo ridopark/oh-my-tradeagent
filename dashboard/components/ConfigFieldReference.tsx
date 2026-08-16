@@ -127,6 +127,22 @@ const CONFIG_FIELDS: ConfigField[] = [
     example: "0.05 (5%) with a signal price of $2.00 → a $2.10 ceiling from this term.",
   },
   {
+    field: "repeg_after_ms",
+    what: "How long the BTO entry order sits at its initial limit before it re-pegs ONCE toward the live ask.",
+    effect:
+      "The tight limit gets first refusal for this long. If it has not filled by then, the order is cancelled and re-placed one cent above the live ask, capped by repeg_ceiling_pct. Only ever one re-peg — it never chases past the cap. Set 0 to DISABLE the re-peg entirely and get the old one-shot entry back (no redeploy needed); leave it blank to use the 30s default. A value at or above the pending TTL also disables it, since the window would never open.",
+    example:
+      "30000 (30s) on a 90s TTL — 30s at the tight limit, then up to 60s at the re-pegged one. Most entries fill in well under a second, so the wait is rarely reached.",
+  },
+  {
+    field: "repeg_ceiling_pct",
+    what: "The most the re-peg may ever pay, as a fraction over the signal price.",
+    effect:
+      "Deliberately WIDER than max_slippage_pct: the first order still goes out at the tighter max_slippage limit, and this larger budget is only reachable after that one has failed to fill. The re-peg walks to the live ask and stops there, so this cap is a ceiling, not a target — it is only paid if the market actually demands it. Set 0 to DISABLE the re-peg (same meaning as repeg_after_ms = 0); blank uses the 10% default. NOTE: editing this voids the live promotion, so the strategy must be re-Activated afterwards.",
+    example:
+      "0.10 (10%) with a signal price of $2.46 → the re-peg may reach $2.71. If the live ask is $2.55 it pays $2.56, not $2.71. The 10% default is calibrated: it covers every historical missed fill, and 12% or 15% would capture no more while raising the worst price payable.",
+  },
+  {
     field: "trail_on_partial",
     what: "When true, arms the chandelier trailing stop after the first partial exit.",
     effect:

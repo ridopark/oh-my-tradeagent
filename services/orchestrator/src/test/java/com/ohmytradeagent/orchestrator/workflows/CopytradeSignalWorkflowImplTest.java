@@ -2093,6 +2093,10 @@ class CopytradeSignalWorkflowImplTest {
     AuditEvent filled = capture("EntryFilled");
     assertThat(filled.getSubject()).containsEntry("broker_order_id", "brk-initial");
     assertNoAudit("EntryExpired");
+    // And it must not PAGE. OrderCancelFailed is in the alert allowlist, so using it here would
+    // fire an "order FAILED" alert for an entry that filled — the fastest way to teach an operator
+    // to ignore the kind that does mean a live order is stuck.
+    assertNoAudit("OrderCancelFailed");
   }
 
   @Test
@@ -2154,6 +2158,50 @@ class CopytradeSignalWorkflowImplTest {
   }
 
   @Test
+  void auditOutageDoesNotStrandALiveOrder() {
+    // THE STRAND. AuditActivitiesImpl writes to Postgres in-process, and the default audit stub has
+    // no retry cap, so a database outage means unlimited retries and the workflow parks on whatever
+    // audit call it reached — with a limit order live at the broker and the TTL cancel further down
+    // the same method, never reached. The order then sits past its TTL until the outage clears or
+    // Alpaca expires it at the close, free to fill against a stale anchor.
+    //
+    // Models the DB dying AFTER the order is placed — the only shape that can strand one. The
+    // PRE-order audits still succeed here, deliberately: those keep the unbounded stub, because
+    // blocking before any order exists risks nothing and refusing to trade while unable to audit is
+    // the right fail-closed behaviour. (Failing those too just hangs the workflow before
+    // placeOrder, which is what an earlier version of this test did.)
+    //
+    // The events are not lost either way: AuditActivitiesImpl logs each one to the application log
+    // before it touches the database.
+    Set<String> orderHoldingKinds =
+        Set.of(
+            "OrderSubmitted",
+            "OrderCancelRequested",
+            "OrderCancelled",
+            "OrderCancelFailed",
+            "EntryExpired");
+    setupRepegMocks(null);
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.45")));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-K", "brk-initial"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-K", "brk-initial"));
+    Mockito.doAnswer(
+            inv -> {
+              AuditEvent e = inv.getArgument(0);
+              if (orderHoldingKinds.contains(e.getKind())) {
+                throw new IllegalStateException("audit db down");
+              }
+              return null;
+            })
+        .when(audit)
+        .log(any());
+
+    runWorkflow(btoPayload());
+
+    // The order-safety path ran to completion despite every audit write failing.
+    verify(exec, atLeastOnce()).cancelOrder(anyString());
+  }
+
+  @Test
   void repeg_riskBreachDuringTheCancelStopsTheReplacement() {
     // The re-peg would otherwise be a hole in the kill-switch cascade: the risk gates run once, at
     // t=0, so a breach arriving mid-re-peg must not let a NEW real-money order through. The
@@ -2177,8 +2225,11 @@ class CopytradeSignalWorkflowImplTest {
     runWorkflowWithId(btoPayload(), "repeg-breach");
 
     verify(exec, times(1)).placeOrder(any());
-    assertThat(captureWithEntry("OrderCancelFailed", "note", "repeg_abandoned_risk_breach"))
+    // OrderCancelRequested, not OrderCancelFailed: OrderCancelFailed pages, and a kill-switch
+    // standing the re-peg down is the cascade working, not an order failure.
+    assertThat(captureWithEntry("OrderCancelRequested", "note", "repeg_abandoned_risk_breach"))
         .isNotNull();
+    assertNoAudit("OrderCancelFailed");
   }
 
   @Test

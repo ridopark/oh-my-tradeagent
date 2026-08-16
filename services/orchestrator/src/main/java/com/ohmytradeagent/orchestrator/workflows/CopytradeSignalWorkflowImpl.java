@@ -359,6 +359,20 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   private final AuditActivities audit =
       Workflow.newActivityStub(AuditActivities.class, DEFAULT_OPTIONS);
+
+  /**
+   * Hard-bounded audit stub for {@link #logAuditWhileOrderLive}. Total budget across every attempt,
+   * so neither an unlimited retry chain nor an unstarted task can hold a live order hostage.
+   */
+  private final AuditActivities auditBounded =
+      Workflow.newActivityStub(
+          AuditActivities.class,
+          ActivityOptions.newBuilder()
+              .setStartToCloseTimeout(Duration.ofSeconds(10))
+              .setScheduleToCloseTimeout(Duration.ofSeconds(45))
+              .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
+              .build());
+
   // P3-a: the live-promotion safety-gate verify. On the orchestrator-core queue (DEFAULT_OPTIONS),
   // same as the other read-side stubs.
   private final AuditQueryActivities auditQuery =
@@ -431,6 +445,13 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    * is CANCELLED). Audited by the main path so it pages instead of vanishing.
    */
   private FillSignalPayload droppedSupersededFill;
+
+  /**
+   * Intent key of the order {@link #droppedSupersededFill} belongs to. Captured at supersede time
+   * because {@code handleBto}'s local {@code intentKey} is REASSIGNED to the replacement — pointing
+   * an unmanaged-lot page at the replacement would send the operator to the wrong order.
+   */
+  private String supersededEntryIntentKey;
 
   private boolean riskBreachReceived;
   private String riskBreachReason;
@@ -954,7 +975,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     OrderIntent intent = newIntent(payload, config, resolved, contracts, intentKey, priced.limit());
     OrderIntentResult placed = exec.placeOrder(intent);
 
-    logAudit(
+    logAuditWhileOrderLive(
         payload,
         KIND_ORDER_SUBMITTED,
         subject(
@@ -1007,12 +1028,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     }
 
     if (droppedSupersededFill != null) {
-      logAudit(
+      logAuditWhileOrderLive(
           payload,
           KIND_ORDER_CANCEL_FAILED,
           subject(
               "intent_key",
-              intentKey,
+              supersededEntryIntentKey,
               "broker_order_id",
               droppedSupersededFill.getBrokerOrderId(),
               "filled_qty",
@@ -1733,7 +1754,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       OrderIntentResult placed,
       String intentKey,
       long ttlSecs) {
-    logAudit(
+    logAuditWhileOrderLive(
         payload,
         KIND_ORDER_CANCEL_REQUESTED,
         subject(
@@ -1783,7 +1804,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     }
 
     if (cancelResult.getState() == OrderIntentResult.State.CANCELLED) {
-      logAudit(
+      logAuditWhileOrderLive(
           payload,
           KIND_ORDER_CANCELLED,
           subject(
@@ -1794,7 +1815,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       // Issue #165 phase 2: drop the `orphan_position_until_phase_3` note value. The orphan case
       // is now either recovered by the FILLED branch above or detected by Phase 3 reconciliation.
       // Keep the `note` key so audit consumers don't break.
-      logAudit(
+      logAuditWhileOrderLive(
           payload,
           KIND_ORDER_CANCEL_FAILED,
           subject(
@@ -1805,7 +1826,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               "note", "cancel_failed"));
     }
 
-    logAudit(
+    logAuditWhileOrderLive(
         payload,
         KIND_ENTRY_EXPIRED,
         subject(
@@ -2156,7 +2177,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       // pre-change behavior in the audit trail. Rides the already-registered OrderCancelRequested
       // kind (no KindRegistryGuard change) with reason=repeg_skipped and NO cancel following it —
       // the distinguishing detail is that no OrderCancelled/OrderSubmitted pair comes after.
-      logAudit(
+      logAuditWhileOrderLive(
           payload,
           KIND_ORDER_CANCEL_REQUESTED,
           subject(
@@ -2179,7 +2200,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       return new RepegOutcome(null, false);
     }
 
-    logAudit(
+    logAuditWhileOrderLive(
         payload,
         KIND_ORDER_CANCEL_REQUESTED,
         subject(
@@ -2196,7 +2217,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     } catch (RuntimeException e) {
       // Cancel failed: do NOT place a second order — that is how a workflow ends up long twice.
       // Leave the original standing; the TTL path below still cancels and audits it.
-      logAudit(
+      logAuditWhileOrderLive(
           payload,
           KIND_ORDER_CANCEL_FAILED,
           subject(
@@ -2227,7 +2248,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       // original keeps standing and handleTtlExpired cancels and audits it as it always has --
       // that method has had this exact CANCELLED/else split all along; the re-peg copied its
       // FILLED branch and missed this one.
-      logAudit(
+      logAuditWhileOrderLive(
           payload,
           KIND_ORDER_CANCEL_FAILED,
           subject(
@@ -2246,7 +2267,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       return new RepegOutcome(null, false);
     }
 
-    logAudit(
+    logAuditWhileOrderLive(
         payload,
         KIND_ORDER_CANCELLED,
         subject(
@@ -2268,14 +2289,18 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       // This also covers the PARTIAL fill the journal cannot see: markFilled only terminalizes at
       // filledQty >= qty, so a partial leaves the row CANCELLED with filled_qty null, invisible to
       // cancelResult -- but the dispatcher signals partials deliberately, so it surfaces here.
-      logAudit(
+      // OrderCancelRequested, NOT OrderCancelFailed: OrderCancelFailed pages (it is in the alert
+      // allowlist) and NOTHING FAILED HERE — the entry filled, which is the outcome we wanted.
+      // Paging on it would train the operator to ignore the kind that does mean a live order is
+      // stuck. Same reasoning as the repeg_skipped note above.
+      logAuditWhileOrderLive(
           payload,
-          KIND_ORDER_CANCEL_FAILED,
+          KIND_ORDER_CANCEL_REQUESTED,
           subject(
               "intent_key", intentKey,
               "broker_order_id", placed.getBrokerOrderId(),
               "reason", "repeg",
-              "severity", "WARN",
+              "outcome", "filled_during_cancel",
               "note", "repeg_abandoned_fill_landed_during_cancel"));
       return new RepegOutcome(null, false);
     }
@@ -2286,14 +2311,17 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       // safe move is to stop here rather than open a NEW real-money position into a breach. The
       // caller's breach branch handles the abort. Without this check the re-peg is a hole in the
       // cascade: the gates only ran at t=0.
-      logAudit(
+      // Also NOT a failure: the cascade did exactly what it exists to do. The breach itself is
+      // already audited and alerted on its own path; a second "order FAILED" page here would be
+      // duplicate noise attached to the wrong story.
+      logAuditWhileOrderLive(
           payload,
-          KIND_ORDER_CANCEL_FAILED,
+          KIND_ORDER_CANCEL_REQUESTED,
           subject(
               "intent_key", intentKey,
               "broker_order_id", placed.getBrokerOrderId(),
               "reason", "repeg",
-              "severity", "WARN",
+              "outcome", "risk_breach",
               "note", "repeg_abandoned_risk_breach"));
       return new RepegOutcome(null, false);
     }
@@ -2302,6 +2330,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // signalled. Mark it superseded BEFORE placing the replacement so a LATER fill claiming it --
     // which would contradict the cancel ack -- cannot be adopted in place of the replacement's.
     supersededEntryOrderIds.add(placed.getBrokerOrderId());
+    supersededEntryIntentKey = intentKey;
 
     // Distinct intent key: the original was cancelled and exec is idempotent BY intent key, so
     // reusing it would collide with the cancelled client_order_id. Mirrors the exit ladder's
@@ -2310,7 +2339,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     OrderIntent repegIntent = newIntent(payload, config, resolved, contracts, repegKey, repegLimit);
     OrderIntentResult repegPlaced = exec.placeOrder(repegIntent);
 
-    logAudit(
+    logAuditWhileOrderLive(
         payload,
         KIND_ORDER_SUBMITTED,
         subject(
@@ -2405,6 +2434,42 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   private void logAudit(CopytradeSignalPayload payload, String kind, Map<String, Object> subject) {
     audit.log(auditEvent(payload, kind, subject));
+  }
+
+  /**
+   * Audit an event emitted WHILE A LIVE ORDER IS WORKING AT THE BROKER, where the write must never
+   * be allowed to wedge the workflow.
+   *
+   * <p>The default audit stub carries only a start-to-close timeout, so Temporal's default retry
+   * policy applies: UNLIMITED attempts. {@link
+   * com.ohmytradeagent.orchestrator.activities.AuditActivitiesImpl} writes to Postgres in-process,
+   * so a database outage makes every attempt fail and the workflow blocks — indefinitely — at
+   * whichever audit call it happened to be on. On this path that is not a stalled workflow, it is
+   * an un-cancellable working order: the TTL cancel lives further down the same method, so it never
+   * runs, and the order stays live at the broker until the outage clears or Alpaca expires it at
+   * the close. The worst instance is the {@code OrderCancelRequested} write that IMMEDIATELY
+   * PRECEDES {@code exec.cancelOrder} — an audit outage there is precisely what stops the cancel.
+   *
+   * <p>Giving up on the row is the right trade because the event is NOT lost: {@code
+   * AuditActivitiesImpl.log} writes the full event to the application log BEFORE it touches the
+   * database, so a dropped write costs the queryable, hash-chained copy while forensics keeps the
+   * log line. Nor does a skipped insert corrupt the chain — {@code prev_hash}/{@code row_hash} are
+   * computed at insert time under an advisory lock, so the chain over the rows that DID land stays
+   * valid and verifiable. A completeness gap, not a validity break.
+   *
+   * <p>Cancellation still propagates: only a genuine activity failure is swallowed.
+   */
+  private void logAuditWhileOrderLive(
+      CopytradeSignalPayload payload, String kind, Map<String, Object> subject) {
+    try {
+      auditBounded.log(auditEvent(payload, kind, subject));
+    } catch (RuntimeException e) {
+      if (isCancellation(e)) {
+        throw e;
+      }
+      // Swallowed deliberately — see the javadoc. Reaching the order-safety path below matters
+      // more than this row, and the event is already in the application log.
+    }
   }
 
   /**
