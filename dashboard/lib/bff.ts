@@ -214,6 +214,70 @@ export async function forcePositionExit(
   return { ok: false };
 }
 
+// Typed result of arming a per-position trailing stop (POST /api/positions/arm-trail). Same
+// non-throwing contract as its siblings, with one extra outcome that matters more here than
+// anywhere else on the page:
+//   ok           — 202 ARMED. `givebackPct`/`stopPrice` echo what the WORKFLOW resolved (it picks
+//                  the anchor itself), not what was requested.
+//   alreadyArmed — 200 ALREADY_ARMED: a trail was already running and this did not loosen it.
+//   rejected     — 422: the workflow REFUSED. Nothing is armed and the position is unprotected, so
+//                  this must never be reported as success. `reason` is the workflow's own
+//                  (subscription_failed / anchor_unresolvable / invalid_giveback).
+//   disabled     — 404 {"error":"arm_trail_disabled"}: the BFF dark flag is off.
+export type ArmTrailResult = {
+  ok: boolean;
+  disabled?: boolean;
+  alreadyArmed?: boolean;
+  rejected?: boolean;
+  reason?: string;
+  givebackPct?: number;
+  stopPrice?: number | null;
+};
+
+// Drive PositionWorkflow.arm_trail via the dark-gated BFF endpoint: arm the existing chandelier
+// trail on THIS position only. `givebackPct` must be in (0, 0.5]; the BFF pre-validates it so an
+// out-of-range value is a 400 rather than a Temporal update-rejected 409. peak_premium is
+// deliberately NOT sent — the workflow resolves the anchor from its own bid / a fresh quote, which
+// is strictly better than a page value that is already seconds stale.
+export async function armPositionTrail(
+  workflowId: string,
+  givebackPct: number,
+  operatorId?: string,
+): Promise<ArmTrailResult> {
+  const { status, body } = await bffPost(
+    "/api/positions/arm-trail",
+    { workflow_id: workflowId, giveback_pct: givebackPct },
+    operatorId ? { "X-Operator-Id": operatorId } : undefined,
+  );
+  const b = body as {
+    error?: string;
+    reason?: string;
+    giveback_pct?: number;
+    stop_price?: number | null;
+  } | null;
+  if (status === 404 && b?.error === "arm_trail_disabled") {
+    return { ok: false, disabled: true };
+  }
+  // 422 is the load-bearing case: a refused arm must not read as success anywhere up the stack.
+  if (status === 422) {
+    return { ok: false, rejected: true, reason: b?.reason };
+  }
+  // 202 ⟺ ARMED, 200 ⟺ ALREADY_ARMED. Branch on the STATUS for the same reason trimPosition does:
+  // collapsing them would paint a green "stop set" over a request that changed nothing.
+  if (status === 202) {
+    return { ok: true, givebackPct: b?.giveback_pct, stopPrice: b?.stop_price ?? null };
+  }
+  if (status === 200) {
+    return {
+      ok: false,
+      alreadyArmed: true,
+      givebackPct: b?.giveback_pct,
+      stopPrice: b?.stop_price ?? null,
+    };
+  }
+  return { ok: false };
+}
+
 // Typed result of a per-position partial close / "Trim" (POST /api/positions/partial-close). Same
 // shape and non-throwing contract as forcePositionExit — the /live button needs to SHOW the outcome:
 //   ok            — 202 ACCEPTED (trim placed) or 200 (benign no-op on an already-drained position).

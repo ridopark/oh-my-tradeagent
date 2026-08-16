@@ -13,6 +13,10 @@ import {
 } from "@/components/ForceExitButton";
 import { TrimButton, type TrimActionResult } from "@/components/TrimButton";
 import {
+  StopLossButton,
+  type StopLossActionResult,
+} from "@/components/StopLossButton";
+import {
   ManualEntryPanel,
   type QuoteActionResult,
   type SubmitActionResult,
@@ -29,6 +33,7 @@ import {
   getOptionQuote,
   submitManualEntry,
   getEntryStatus,
+  armPositionTrail,
   forcePositionExit,
   trimPosition,
   NotAuthenticatedError,
@@ -56,6 +61,11 @@ const FORCE_EXIT_WRITE_ENABLED =
 // without the other. With both off the actions column is absent and /live is byte-identical to
 // before this feature.
 const TRIM_WRITE_ENABLED = process.env.TRIM_WRITE_ENABLED === "true";
+
+// PLAN-2026-08-16: the per-position operator trailing stop. Its OWN flag, paired with the BFF's
+// positions.arm-trail.write-enabled — enabling Trim or Force exit must never surface this too.
+const STOP_LOSS_WRITE_ENABLED =
+  process.env.STOP_LOSS_WRITE_ENABLED === "true";
 
 // PLAN-2026-08-10-live-manual-bto. Dark-by-default gate for the operator "Manual entry" panel,
 // paired with the BFF's own `entries.manual.write-enabled` server flag (which 404s all three
@@ -131,6 +141,45 @@ async function trimAction(
   }
   if (r.disabled) {
     return { ok: false, kind: "disabled" };
+  }
+  return { ok: false, kind: "error" };
+}
+
+// PLAN-2026-08-16: arm the existing chandelier trail on ONE position. Unlike trim/force-exit this
+// sells nothing — it installs a stop that fires later — so a failure is not "the trade didn't
+// happen" but "the position you believe is protected is not". The result carries the workflow's
+// own rejection reason through to the button for that reason.
+//
+// Revalidates on a successful arm so the row can re-render with its armed state; a rejection
+// leaves the page untouched so the failure note survives.
+async function armTrailAction(
+  workflowId: string,
+  givebackPct: number,
+): Promise<StopLossActionResult> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return { ok: false, kind: "error" };
+  }
+  const operator = s.user?.email ?? s.user?.name ?? undefined;
+  const r = await armPositionTrail(workflowId, givebackPct, operator);
+  if (r.ok) {
+    revalidatePath("/live");
+    return {
+      ok: true,
+      givebackPct: r.givebackPct ?? givebackPct,
+      stopPrice: r.stopPrice ?? null,
+    };
+  }
+  if (r.alreadyArmed) {
+    revalidatePath("/live");
+    return { ok: false, kind: "already-armed" };
+  }
+  if (r.disabled) {
+    return { ok: false, kind: "disabled" };
+  }
+  if (r.rejected) {
+    return { ok: false, kind: "rejected", reason: r.reason };
   }
   return { ok: false, kind: "error" };
 }
@@ -327,7 +376,7 @@ export default async function LivePage() {
     { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
     { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
   ];
-  if (FORCE_EXIT_WRITE_ENABLED || TRIM_WRITE_ENABLED) {
+  if (FORCE_EXIT_WRITE_ENABLED || TRIM_WRITE_ENABLED || STOP_LOSS_WRITE_ENABLED) {
     holdingsColumns.push({
       key: "actions",
       label: "",
@@ -337,6 +386,18 @@ export default async function LivePage() {
       // (no fraction can trim it), in which case only Force exit shows.
       render: (_v, row) => (
         <div className="flex items-center justify-end gap-2">
+          {/* Stop-loss reads FIRST: it is the only non-selling action here, so it sits left of the
+              two that do sell, and the destructive full exit stays rightmost and unmoved. */}
+          {STOP_LOSS_WRITE_ENABLED && (
+            <StopLossButton
+              workflowId={String(row.workflow_id)}
+              symbol={String(row.contract_symbol)}
+              currentPrice={
+                row.current_price == null ? null : Number(row.current_price)
+              }
+              action={armTrailAction}
+            />
+          )}
           {TRIM_WRITE_ENABLED && (
             <TrimButton
               workflowId={String(row.workflow_id)}
