@@ -139,9 +139,79 @@ Two consequences:
    future WS work that trusts the default inherits a bid $3.39 wide of truth** on a path whose whole
    job is deciding when to sell. Change the default to `opra` as part of step 3, not after.
 
-## Measurement: what 500ms actually buys
+## ⟲⟲ SUPERSEDED — "500ms buys nothing" was WRONG
 
-**Answer: measurably nothing.** Reproduce with `scripts/research/option_poll_interval_sweep.py`.
+**Retracted 2026-08-16 after the operator pushed back: "in 2 seconds the price of a contract can
+change wildly in a volatile market — wouldn't it be better to poll shorter to react faster?"**
+That intuition is correct and my measurement was not capable of detecting it. See
+[Corrected measurement](#corrected-measurement-detection-delay-is-the-right-metric) below. The
+original section is kept intact underneath because the *reasoning error* is the useful part.
+
+### Why the original result was an artifact
+
+1. **The replay data could not resolve 500ms.** Median gap between consecutive trade prints is
+   **1520ms**, and **45.6% of gaps exceed 2000ms**. A 500ms poll of that series re-reads the same
+   value three or four times. **The experiment could not have shown a benefit even if one existed.**
+2. **The "blind spot" metric was partly tautological.** A longer window contains more price movement
+   *by construction*; that is not the same as reacting worse. It should never have been presented as
+   evidence of equivalence.
+3. **Averaging over whole trading days was the wrong frame.** A stop does not fire on an average day
+   — it fires during a fast move. 18 trail exits mostly landed in ordinary conditions, so the cases
+   that matter were washed out by the calm majority.
+4. **I dismissed my own signal.** The 4 sweep cases that *did* differ ranged −1.43% to +0.71%. I
+   called that noise. It is the right order of magnitude for the effect measured below.
+
+---
+
+## Corrected measurement: detection delay is the right metric
+
+The cost of a slow poll is not "movement inside a window." It is **how late you observe the stop
+being crossed.** A poll at interval *I* observes a crossing on average *I*/2 late:
+
+| poll | avg detection delay |
+|---|---|
+| 2000ms | 1.000s |
+| 500ms | 0.250s |
+
+So 2s costs **0.75s of extra exposure** while the price keeps moving. The question reduces to: how
+fast does premium actually move per second? Measured over 127,193 samples, 1s look-ahead, 52
+contract-days (`scripts/research/option_velocity.py`):
+
+| downward velocity | %/s | cost of the extra 0.75s |
+|---|---|---|
+| median | 0.224 | 0.17% |
+| p90 | 0.799 | 0.60% |
+| p99 | 2.313 | **1.74%** |
+| p99.9 | 4.718 | **3.54%** |
+| max | 16.021 | 12.02% |
+
+**In the tail — which is exactly when a stop fires — a 2s poll costs roughly 1.7–3.5% of premium
+versus 500ms.** And this **understates** it: trade prints arrive with a 1520ms median gap while
+quotes update far more often, so true premium velocity is higher than this proxy can show.
+
+### What survives from the original result
+
+- **Temporal history is still safe:** 4× polling produced only **+9.2%** more emitted signals. That
+  measurement was not resolution-limited in the same way and still holds. The 1% throttle binds
+  during calm periods (most of the day) — which is *why* the whole-day average washed out — but not
+  during a fast move, where a 1% move takes under half a second at p99 velocity.
+- **The gap-risk point still holds** for moves that happen between two consecutive prints. It just
+  does not generalise to "sampling rate doesn't matter."
+
+### Consequences
+
+- **Step 1 flips back ON, and is now the strongest recommendation in this doc.** Dropping
+  `premium-poll-interval-ms` 2000 → 500 costs nothing (we use a fraction of 10,000 req/min), grows
+  history ~9%, and plausibly saves 1.7–3.5% of premium on the exits that matter.
+- **The WS case is strengthened too.** If 2s → 500ms is worth ~1.7–3.5% in the tail, 500ms →
+  streaming removes a further ~0.25s of average delay, worth roughly another 0.6–1.2% at p99–p99.9.
+  The "faster updates buy nothing" argument I wrote earlier is withdrawn.
+
+---
+
+## ~~Measurement: what 500ms actually buys~~ (SUPERSEDED — see above)
+
+~~**Answer: measurably nothing.**~~ Reproduce with `scripts/research/option_poll_interval_sweep.py`.
 
 Method: replay real OPRA trade prints through the **actual** pipeline — sample at interval *I* →
 1% min-move throttle (`SubscribePremiumActivityImpl`) → 35% trailing stop (the `/live` default).
@@ -341,10 +411,11 @@ that the JDK `WebSocket.Listener` + Jackson-msgpack path works in Java. That is 
 **Step 1 — spend the plan we already own. No new code.** Drop `premium-poll-interval-ms` 2000 → ~500
 (REST is 10,000 req/min, not 200) and correct the stale `~200 req/min` comment. Measure what a 4×
 faster poll alone does to trail behaviour. Reversible by one config value.
-✅ **DONE 2026-08-16 — MEASURED, AND IT BUYS NOTHING.** See
-[Measurement](#measurement-what-500ms-actually-buys). 14 of 18 replayed contract-days exit at an
-*identical* price; mean difference −0.065%. **Do not ship the interval change for performance.** The
-stale `~200 req/min` comment is still worth correcting as a plain doc fix.
+⭐ **STRONGEST RECOMMENDATION IN THIS DOC.** An initial replay said it bought nothing; that result was
+an artifact of trade-print resolution and has been **retracted** — see
+[Corrected measurement](#corrected-measurement-detection-delay-is-the-right-metric). A 2s poll costs
+~**1.7–3.5% of premium** versus 500ms on the fast moves that actually trigger stops, for ~9% more
+Temporal history and no meaningful REST cost. *(not started)*
 
 **Step 2 — probe, no product code.** ✅ **DONE 2026-08-16 with markets closed.** Added
 `scripts/alpaca-options-ws-probe.py` (options endpoint only, so safe at any hour). msgpack decode,
@@ -479,6 +550,32 @@ Turned out most of it doesn't.
 - **Remaining work needing RTH is now one thing:** a passive recorder logging WS quotes against 2s
   REST snapshots for a handful of contracts, to answer whether the socket surfaces bid withdrawals
   the snapshot misses. Capture live; analyse offline.
+
+### 2026-08-16 (night) — ⟲⟲ the operator was right; "500ms buys nothing" RETRACTED
+
+Operator: *"in 2 seconds while polling, the price of contract change wildly in volatile market.
+wouldn't it be better to poll shorter to react faster?"* Tested rather than defended, and the
+pushback was correct.
+
+- **My replay could not resolve 500ms.** Median gap between trade prints is **1520ms**; **45.6% of
+  gaps exceed 2000ms**. A 500ms poll of that data re-reads the same value 3–4×. The experiment was
+  incapable of detecting the effect it was asked about — the "14/18 identical" result measured my
+  proxy's resolution, not the market.
+- **My blind-spot metric was partly tautological** — longer window ⇒ more movement inside it, by
+  construction. It should never have been offered as evidence of equivalence.
+- **Averaging over whole days was the wrong frame.** Stops fire during fast moves, not on average
+  days. The calm majority washed out the cases that matter.
+- **I dismissed my own signal:** the 4 sweep cases that differed spanned −1.43%…+0.71%, which is the
+  right magnitude for the effect below. I called it noise.
+- **Corrected metric — detection delay.** A poll at interval *I* sees a stop crossing ~*I*/2 late, so
+  2000ms costs 0.75s more exposure than 500ms. Measured premium velocity (127,193 samples): p99
+  downward **2.31%/s**, p99.9 **4.72%/s** ⇒ the extra 0.75s costs **1.74%–3.54% of premium**, and
+  that understates it because quotes move faster than trades.
+- **Recommendation flipped:** step 1 goes from "don't bother" to the strongest item in this doc, and
+  the WS case is *strengthened* rather than weakened — streaming removes a further ~0.25s, worth
+  roughly another 0.6–1.2% at the same percentiles.
+- **Lesson worth keeping:** a negative result from a proxy dataset needs a resolution check *before*
+  it is believed. I had the print-gap data in hand the whole time and did not look at it.
 
 ## Sources
 
