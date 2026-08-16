@@ -2137,8 +2137,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
 
     // Anchor: the operator's override if they pinned one, else resolved HERE rather than trusted
-    // from the browser. A page-rendered premium is seconds stale, and an anchor that is too low
-    // sets the stop too low on a real-money position.
+    // from the browser, because a page-rendered premium is seconds stale.
+    //
+    // The original rationale added "and an anchor that is too low sets the stop too low", which
+    // reads as a preference for erring HIGH. Do not extend that reasoning: this file's own
+    // asymmetry is the opposite way round. A low anchor is ratcheted away by the first tick and
+    // self-heals; a high one never does, because peakPremium never falls. Erring high is the
+    // unrecoverable direction. The max(lastBid, freshBid) in resolveTrailAnchor is NOT an instance
+    // of that mistake — a chandelier peak IS the high-water mark of observed prices, and lastBid is
+    // a real observation, not a phantom — but its hazard is staleness rather than bias: with no
+    // rolling feed-staleness backstop, a quiet feed lets an old bid anchor a stop above where the
+    // market now is. That belongs with the staleness work, not here.
     BigDecimal peak =
         request.getPeakPremium() != null ? request.getPeakPremium() : resolveTrailAnchor();
     BigDecimal gb = request.getGivebackPct();
