@@ -2139,18 +2139,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // Anchor: the operator's override if they pinned one, else resolved HERE rather than trusted
     // from the browser. A page-rendered premium is seconds stale, and an anchor that is too low
     // sets the stop too low on a real-money position.
-    Anchor anchor = request.getPeakPremium() != null ? null : resolveTrailAnchor();
-    BigDecimal peak = anchor != null ? anchor.price() : request.getPeakPremium();
+    BigDecimal peak =
+        request.getPeakPremium() != null ? request.getPeakPremium() : resolveTrailAnchor();
     BigDecimal gb = request.getGivebackPct();
 
     String rejection = chandelierArmRejection(peak, gb);
-    if (rejection == null && alreadyBreached(anchor, peak, gb)) {
-      // The anchor path is UNFILTERED (see resolveTrailAnchor), so a phantom snapshot can put the
-      // peak above anything real. Rather than guess at which side of the book lied, refuse to arm a
-      // stop that is ALREADY breached at the moment of arming: peakPremium never falls, so such a
-      // stop is not a trail, it is an immediate market flatten wearing the operator's name.
-      rejection = "anchor_implausible";
-    }
     if (rejection != null) {
       // peak == null here means no anchor could be resolved at all — name that precisely rather
       // than reporting it as a bad peak, because the operator's remedy is different (retry when a
@@ -2253,40 +2246,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * @return the anchor, or {@code null} when no source yields a usable price — the caller then
    *     REJECTS rather than arming at a guessed level
    */
-  /**
-   * The resolved anchor plus the live bid it was resolved against, so the caller can sanity-check
-   * the two together without spending a second quote activity.
-   *
-   * @param price the anchor, or {@code null} when nothing usable was found
-   * @param bid the fresh quote's bid, or {@code null} when there was no usable quote
-   */
-  private record Anchor(BigDecimal price, BigDecimal bid) {}
-
-  /**
-   * Would this arm produce a stop that is ALREADY breached? {@code peakPremium} never falls, so
-   * such a stop cannot trail — the next honest tick fires it and flattens the position at market,
-   * audited as an operator action.
-   *
-   * <p>Checked against the bid from the SAME quote, which costs nothing extra and catches the
-   * realistic phantom: a blown ask inflates the mid while the bid stays honest. A crossed book (bid
-   * above ask) is refused outright, because that is never a book worth anchoring on and it is how a
-   * blown BID would otherwise slip past a bid-referenced check.
-   *
-   * <p><b>Irreducible residual:</b> a phantom that moves BOTH sides coherently is indistinguishable
-   * from a genuine repricing without a filtered reference to compare against, and no such reference
-   * exists at arm time on a copytrade position (no premium subscription runs until this very call).
-   * Closing that needs the market-data guard's own last-accepted price exposed across the service
-   * boundary — deliberately out of scope here.
-   */
-  private static boolean alreadyBreached(Anchor anchor, BigDecimal peak, BigDecimal gb) {
-    if (anchor == null || anchor.bid() == null || anchor.bid().signum() <= 0) {
-      return false; // operator-pinned peak, or no quote — nothing to cross-check against
-    }
-    BigDecimal stop = trailStopPrice(peak, gb);
-    return stop != null && stop.compareTo(anchor.bid()) >= 0;
-  }
-
-  private Anchor resolveTrailAnchor() {
+  private BigDecimal resolveTrailAnchor() {
     boolean bidSpace = exitArmed || exitTargetFired;
     BigDecimal best = bidSpace && lastBid != null && lastBid.signum() > 0 ? lastBid : null;
     GetOptionQuoteRequest qreq = new GetOptionQuoteRequest();
@@ -2295,18 +2255,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     qreq.setStrategyId(input.getStrategyId());
     qreq.setContractSymbol(input.getContractSymbol());
     OptionQuoteResult quote = optionQuote.getOptionQuote(qreq);
-    BigDecimal liveBid = null;
     if (quote != null && quote.getStatus() == OptionQuoteResult.Status.OK) {
       if (crossed(quote)) {
-        return new Anchor(best, null); // never anchor on a crossed book, and do not vouch for it
+        return best; // never anchor on a crossed book
       }
-      liveBid = quote.getBid();
-      BigDecimal fresh = bidSpace ? quote.getBid() : trustedMid(quote);
+      BigDecimal fresh = bidSpace ? quote.getBid() : usableMid(quote);
       if (fresh != null && fresh.signum() > 0 && (best == null || fresh.compareTo(best) > 0)) {
         best = fresh;
       }
     }
-    return new Anchor(best, liveBid);
+    return best;
   }
 
   /** A bid above the ask is not a book. Never anchor on it, and never vouch for its bid. */
@@ -2317,45 +2275,48 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   }
 
   /**
-   * The quote's mid, or its bid when the book is too wide to trust the ask.
+   * The quote's mid, or {@code null} when there is no bid to make it a price.
    *
-   * <p><b>This exists because the anchor path is UNFILTERED.</b> The market-data outlier guard runs
-   * in the premium POLL only; {@code snapshotQuote} — which {@code getOptionQuote} reads — is
-   * deliberately unguarded, because it is shared with the kill-switch MTM read that fail-closes on
-   * a missing quote. So this method sees quotes the tick stream would reject.
+   * <p><b>A BLOWN ASK IS NOT GUARDED HERE, AND CANNOT BE.</b> This path is unfiltered — the
+   * market-data outlier guard runs in the premium POLL only, and {@code snapshotQuote} (which
+   * {@code getOptionQuote} reads) is deliberately unguarded because the kill-switch MTM read shares
+   * it and fail-closes on a missing quote. A phantom ask inflates the mid, {@code peakPremium}
+   * never falls, and the trail is then permanently anchored above the market. No single-snapshot
+   * test detects it soundly: the true mid can only be bounded BELOW (by the bid), so "is this
+   * anchor inflated" is unanswerable from one quote, and every proxy tried was worse than the
+   * disease — a ratio test is scale-dependent and fires on ordinary cheap books, a
+   * threshold-versus-bid test compares a mid-space threshold against a bid and rejects any book
+   * whose relative half-spread exceeds the giveback, and an entry-premium band rejects exactly the
+   * big winners a trail is most wanted on.
    *
-   * <p>That matters asymmetrically, and the asymmetry is the whole design. {@code peakPremium} is a
-   * running max, so an anchor BELOW tick space is ratcheted away by the first tick — self-healing,
-   * costing only display precision. An anchor ABOVE tick space is never corrected, because nothing
-   * ever lowers a peak: the threshold stays computed off a phantom, and the next honest tick fires
-   * the trail and flattens a live position — attributed to the operator who pressed the button. A
-   * blown ask inflates the mid without touching the bid, so it errs in precisely the direction that
-   * cannot heal.
+   * <p>Two things actually close it, both out of scope here: the feed guard, which stops a phantom
+   * from reaching the tick stream at all, and giving this method a FILTERED price to anchor on
+   * rather than a raw snapshot. Note the tick stream is the larger exposure regardless — {@code
+   * processTick} ratchets the peak on any tick that exceeds it with no plausibility test, so a
+   * phantom refused here would walk in two seconds later anyway.
    *
-   * <p>Hence: prefer the mid (the space the copytrade tick loop compares in), but when the ask is
-   * more than {@link #MAX_TRUSTED_ASK_TO_BID} times the bid, fall back to the bid and accept a
-   * transiently low anchor. That is the recoverable error. Note this is a plausibility check on ONE
-   * snapshot, not a spread policy — {@code max_spread_pct} is the configured notion of an
-   * admissible spread and is a separate, opt-in BTO-time gate.
+   * <p>Deliberately NOT a plausibility test. An earlier version fell back to the bid when the ask
+   * exceeded twice it, which is a RATIO test on a series with a fixed $0.01 tick and is therefore
+   * scale-dependent: at $5.00 a 2x ask means a $5 spread and is absurd, but at $0.05 it means a
+   * $0.05 spread — one to five ticks, and an entirely healthy book. 0.05 x 0.11, 0.10 x 0.25 and
+   * 0.20 x 0.45 are all ordinary quotes on the cheap decayed contracts a 0DTE copytrade position
+   * turns into, and all three tripped it. It fired constantly where premium is small and
+   * essentially never where it is large, which is inverted.
+   *
+   * <p>The silent substitution was the worse half. Falling back to the bid corrupts the operator-
+   * facing stop price — 0.05 x 0.11 at 35% returns 0.03 and then ratchets to a real stop of 0.052 —
+   * and that number being honest is the entire reason the anchor is resolved here instead of
+   * trusted from the browser. Implausible books are now REJECTED rather than quietly re-anchored,
+   * which is this feature's own stated principle and makes the failure visible instead of degrading
+   * in silence. See {@link #crossed}.
    */
-  private static BigDecimal trustedMid(OptionQuoteResult quote) {
+  private static BigDecimal usableMid(OptionQuoteResult quote) {
     BigDecimal bid = quote.getBid();
-    BigDecimal ask = quote.getAsk();
     if (bid == null || bid.signum() <= 0) {
       return null; // no bid: the mid is an arithmetic artifact, and nothing here is anchorable
     }
-    if (ask == null || ask.compareTo(bid.multiply(MAX_TRUSTED_ASK_TO_BID)) > 0) {
-      return bid;
-    }
     return quote.getMid();
   }
-
-  /**
-   * An ask above this multiple of the bid is treated as a phantom rather than a wide market. 2x is
-   * deliberately permissive — real 0DTE books get wide — because a false trigger costs only the
-   * self-healing direction, while a missed one can flatten a position.
-   */
-  private static final BigDecimal MAX_TRUSTED_ASK_TO_BID = new BigDecimal("2");
 
   /** {@code peak * (1 - giveback)}, penny-rounded — the same threshold the tick loop fires on. */
   private static BigDecimal trailStopPrice(BigDecimal peak, BigDecimal giveback) {

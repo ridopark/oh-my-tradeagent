@@ -4180,57 +4180,27 @@ class PositionWorkflowImplTest {
   }
 
   @Test
-  void armTrail_blownAsk_fallsBackToTheBidRatherThanAnchoringOnAPhantomMid() throws Exception {
-    // The anchor path is UNFILTERED: the market-data outlier guard runs in the premium poll only,
-    // and snapshotQuote (which getOptionQuote reads) is deliberately unguarded because the
-    // kill-switch MTM read shares it. So a one-snapshot blown ask reaches this code.
-    //
-    // Direction is everything here, because peakPremium is a running max. Anchoring on the phantom
-    // mid (2.00 x 12.00 -> 7.00) sets a peak NOTHING can ever lower, so the very next honest tick
-    // at ~2.05 sits under the 4.55 threshold and fires the trail — flattening a live position and
-    // attributing it to the operator who pressed the button. Falling back to the bid anchors LOW
-    // instead, and a low anchor is ratcheted away by the first real tick.
+  void armTrail_cheapWideBook_isNormalAndMustStillArmOnTheMid() throws Exception {
+    // The regression the removed ratio test would have caused. 0.05 x 0.11 is a healthy quote on
+    // the cheap decayed contracts a 0DTE copytrade position turns into — but ask/bid is 2.2, so a
+    // 2x fallback re-anchored it on the bid and handed the operator 0.03 for a stop that would
+    // ratchet to 0.052 on the first tick. 73% wrong, routinely, on the number this feature exists
+    // to make honest. Scale-dependence is the defect: at $5 a 2x ask is a $5 spread; at $0.05 it is
+    // five ticks.
     when(optionQuote.getOptionQuote(any()))
         .thenReturn(
-            quoteOk(new BigDecimal("2.00"), new BigDecimal("7.00"), new BigDecimal("12.00")));
+            quoteOk(new BigDecimal("0.05"), new BigDecimal("0.08"), new BigDecimal("0.11")));
 
-    PositionWorkflow stub = newStub("pos-armtrail-blownask");
+    PositionWorkflow stub = newStub("pos-armtrail-cheapwide");
     WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
 
     ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.35")));
 
     assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
-    // The bid, not the 7.00 phantom mid.
-    assertThat(r.getPeakPremium()).isEqualByComparingTo("2.00");
-    assertThat(r.getStopPrice()).isEqualByComparingTo("1.30");
-  }
-
-  @Test
-  void armTrail_tightGiveback_rejectsAnAnchorThatWouldArmAnAlreadyBreachedStop() throws Exception {
-    // The 2x ask/bid fallback is NOT sufficient on its own, and the gap lands on a shipped preset.
-    // With anchor <= 1.5*bid and the next honest tick >= bid, an immediate fire needs
-    // 1.5*(1-gb) >= 1, i.e. gb <= 1/3 — so 35% and 45% are provably safe but the 25% preset is not.
-    //
-    // Here: bid 4.00, ask 7.00 (1.75x, under the 2x cap), mid 5.50. At 25% the stop is 4.125, which
-    // is ALREADY above the 4.00 bid. peakPremium never falls, so that is not a trail — the next
-    // honest tick flattens the position at market, audited as an operator action. Refuse instead;
-    // the operator retries against a clean snapshot.
-    when(optionQuote.getOptionQuote(any()))
-        .thenReturn(
-            quoteOk(new BigDecimal("4.00"), new BigDecimal("5.50"), new BigDecimal("7.00")));
-
-    PositionWorkflow stub = newStub("pos-armtrail-breached");
-    WorkflowStub.fromTyped(stub).start(futureInput(5));
-    confirmEntry(stub, 5L);
-
-    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.25")));
-
-    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.REJECTED);
-    assertThat(r.getReason()).isEqualTo("anchor_implausible");
-    assertThat(r.getStopPrice()).isNull();
-    assertThat(captureKind("ChandelierArmRejected").getSubject())
-        .containsEntry("reason", "anchor_implausible");
+    assertThat(r.getPeakPremium()).isEqualByComparingTo("0.08");
+    // 0.08 * 0.65 = 0.052 -> 0.05. The bid-substituted answer would have been 0.03.
+    assertThat(r.getStopPrice()).isEqualByComparingTo("0.05");
   }
 
   @Test
