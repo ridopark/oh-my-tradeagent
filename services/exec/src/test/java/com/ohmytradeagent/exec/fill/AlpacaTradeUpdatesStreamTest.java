@@ -2,6 +2,10 @@ package com.ohmytradeagent.exec.fill;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
@@ -30,6 +34,7 @@ import org.java_websocket.server.WebSocketServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 /**
  * Drives {@link AlpacaTradeUpdatesStream} against an in-process Java-WebSocket server. Pins the
@@ -395,6 +400,102 @@ class AlpacaTradeUpdatesStreamTest {
   // reconnect builds a new one with a fresh accumulator. The reset is unobservable by construction
   // (the same is true of the onText path's setLength(0)); a test asserting it would pass no matter
   // what the code did. The recovery that IS observable is covered by the abort test above.
+
+  @Test
+  void authorizedHandshakeIsLoggedAtInfo() throws Exception {
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary(
+          "{\"stream\":\"authorization\",\"data\":"
+              + "{\"status\":\"authorized\",\"action\":\"authenticate\"}}");
+
+      ILoggingEvent event = awaitLog(logs, "authorization reply");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel()).isEqualTo(Level.INFO);
+      assertThat(event.getFormattedMessage()).contains("status=authorized");
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
+  @Test
+  void unauthorizedHandshakeIsLoggedAtWarn() throws Exception {
+    // #693's own failure mode, applied to the fix: an unauthorized socket stays OPEN and simply
+    // honors no subscriptions, so it is indistinguishable from a healthy quiet one. Logging that
+    // at INFO — the same level as success — would recreate exactly the silence this PR removes.
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary(
+          "{\"stream\":\"authorization\",\"data\":"
+              + "{\"status\":\"unauthorized\",\"action\":\"authenticate\"}}");
+
+      ILoggingEvent event = awaitLog(logs, "authorization reply");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel())
+          .as("a refused handshake must not be indistinguishable from a successful one")
+          .isEqualTo(Level.WARN);
+      assertThat(event.getFormattedMessage()).contains("status=unauthorized");
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
+  @Test
+  void unrecognizedAuthorizationShapeIsLoggedAtWarn() throws Exception {
+    // Fail loud on an unknown reply shape rather than assume success. Alpaca's error payload
+    // carries a message rather than a status, so "no status field" must not read as authorized.
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary(
+          "{\"stream\":\"authorization\",\"data\":{\"message\":\"access key verification failed\"}}");
+
+      ILoggingEvent event = awaitLog(logs, "authorization reply");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel()).isEqualTo(Level.WARN);
+      assertThat(event.getFormattedMessage()).contains("access key verification failed");
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
+  private static ListAppender<ILoggingEvent> attachLogCapture() {
+    Logger streamLogger = (Logger) LoggerFactory.getLogger(AlpacaTradeUpdatesStream.class);
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    streamLogger.addAppender(appender);
+    streamLogger.setLevel(Level.TRACE);
+    return appender;
+  }
+
+  private static void detachLogCapture(ListAppender<ILoggingEvent> appender) {
+    ((Logger) LoggerFactory.getLogger(AlpacaTradeUpdatesStream.class)).detachAppender(appender);
+  }
+
+  /** Frames arrive on a WS thread, so the log lands asynchronously; poll rather than race it. */
+  private static ILoggingEvent awaitLog(ListAppender<ILoggingEvent> logs, String needle)
+      throws InterruptedException {
+    long deadline = System.currentTimeMillis() + AWAIT_MS;
+    while (System.currentTimeMillis() < deadline) {
+      synchronized (logs) {
+        for (ILoggingEvent e : new ArrayList<>(logs.list)) {
+          if (e.getFormattedMessage().contains(needle)) {
+            return e;
+          }
+        }
+      }
+      Thread.sleep(20L);
+    }
+    return null;
+  }
 
   @Test
   void malformedBinaryFrameIsSwallowed() throws Exception {

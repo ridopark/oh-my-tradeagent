@@ -538,12 +538,26 @@ public class AlpacaTradeUpdatesStream {
       // secret reaches the log.
       if ("authorization".equals(streamNode.asText())) {
         JsonNode authData = root.path("data");
-        log.info(
-            "fill-listener[{}] authorization reply status={} action={} message={}",
-            tenant,
-            authData.path("status").asText(""),
-            authData.path("action").asText(""),
-            authData.path("message").asText(""));
+        String status = authData.path("status").asText("");
+        // An unauthorized socket stays OPEN and simply honors no subscriptions — indistinguishable
+        // from a healthy quiet one, which is how the June header-auth bug (#471) hid. Anything that
+        // is not explicitly "authorized" warns, including a reply with no status at all: an
+        // unrecognized shape must fail loud rather than be assumed successful.
+        if ("authorized".equals(status)) {
+          log.info(
+              "fill-listener[{}] authorization reply status={} action={}",
+              tenant,
+              status,
+              authData.path("action").asText(""));
+        } else {
+          log.warn(
+              "fill-listener[{}] authorization reply NOT authorized status={} action={} message={}"
+                  + " — the socket will stay open and deliver nothing",
+              tenant,
+              status,
+              authData.path("action").asText(""),
+              authData.path("message").asText(""));
+        }
         return;
       }
       if (!"trade_updates".equals(streamNode.asText())) {
