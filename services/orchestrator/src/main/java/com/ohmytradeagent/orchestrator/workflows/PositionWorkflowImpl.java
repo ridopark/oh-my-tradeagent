@@ -1,6 +1,8 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
+import com.ohmytradeagent.contract.ArmTrailRequest;
+import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
@@ -2034,26 +2036,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
     BigDecimal peak = p.getPeakPremium();
     BigDecimal gb = p.getGivebackPct();
-    if (peak == null || peak.signum() <= 0) {
+    String rejection = chandelierArmRejection(peak, gb);
+    if (rejection != null) {
       auditLog(
           KIND_CHANDELIER_ARM_REJECTED,
           subject(
               "reason",
-              "invalid_peak",
+              rejection,
               "source_signal_id",
               p.getSourceSignalId(),
               "peak_premium",
-              peak));
-      return;
-    }
-    if (gb == null || gb.signum() <= 0 || gb.compareTo(MAX_GIVEBACK) > 0) {
-      auditLog(
-          KIND_CHANDELIER_ARM_REJECTED,
-          subject(
-              "reason",
-              "invalid_giveback",
-              "source_signal_id",
-              p.getSourceSignalId(),
+              peak,
               "giveback_pct",
               gb));
       return;
@@ -2090,6 +2083,276 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             gb,
             "subscription_id",
             res.getSubscriptionId()));
+  }
+
+  /**
+   * What makes a chandelier arm ILLEGAL, shared by the automatic signal path ({@link #processArm})
+   * and the operator Update ({@link #armTrail}). Extracted so the two can never diverge on what
+   * they accept: a giveback the operator's button offers but the automatic path would refuse is
+   * exactly the kind of split that gets discovered in production.
+   *
+   * @return the rejection reason, or {@code null} when the arm is legal
+   */
+  private static String chandelierArmRejection(BigDecimal peak, BigDecimal giveback) {
+    if (peak == null || peak.signum() <= 0) {
+      return "invalid_peak";
+    }
+    if (giveback == null || giveback.signum() <= 0 || giveback.compareTo(MAX_GIVEBACK) > 0) {
+      return "invalid_giveback";
+    }
+    return null;
+  }
+
+  @Override
+  public void armTrailValidator(ArmTrailRequest request) {
+    // Validator rejections never enter history — the cheapest possible refusal, and it keeps a
+    // malformed operator request from costing a workflow task.
+    if (request == null || request.getOperatorId() == null || request.getOperatorId().isBlank()) {
+      throw new IllegalArgumentException("operator_id is required");
+    }
+    BigDecimal gb = request.getGivebackPct();
+    if (gb == null || gb.signum() <= 0 || gb.compareTo(MAX_GIVEBACK) > 0) {
+      throw new IllegalArgumentException(
+          "giveback_pct must be in (0, " + MAX_GIVEBACK + "]: " + gb);
+    }
+    if (request.getPeakPremium() != null && request.getPeakPremium().signum() <= 0) {
+      throw new IllegalArgumentException("peak_premium must be > 0 when supplied");
+    }
+  }
+
+  @Override
+  public ArmTrailResult armTrail(ArmTrailRequest request) {
+    // No Workflow.getVersion gate, for the same reason partial_close has none: this Update is brand
+    // new, so no recorded history contains an arm_trail invocation and a legacy replay never
+    // reaches this handler. A marker here would be inert.
+    ArmTrailResult result = new ArmTrailResult();
+    result.setSchemaVersion(1L);
+
+    if (trailingArmed) {
+      // Idempotent, and deliberately does NOT re-arm: a double-click (or two operators, or two
+      // tabs) must never widen a stop that is already protecting this lot. Echoes what is actually
+      // in force, not what was asked for. Mirrors processArm's armed-path no-op.
+      result.setStatus(ArmTrailResult.Status.ALREADY_ARMED);
+      result.setPeakPremium(peakPremium);
+      result.setGivebackPct(givebackPct);
+      result.setStopPrice(trailStopPrice(peakPremium, givebackPct));
+      return result;
+    }
+
+    // Anchor: the operator's override if they pinned one, else resolved HERE rather than trusted
+    // from the browser, because a page-rendered premium is seconds stale.
+    //
+    // The original rationale added "and an anchor that is too low sets the stop too low", which
+    // reads as a preference for erring HIGH. Do not extend that reasoning: this file's own
+    // asymmetry is the opposite way round. A low anchor is ratcheted away by the first tick and
+    // self-heals; a high one never does, because peakPremium never falls. Erring high is the
+    // unrecoverable direction.
+    //
+    // The max(lastBid, freshBid) in resolveTrailAnchor is not that mistake either, but NOT because
+    // it is a high-water mark — it is not one. `lastBid` is assigned unconditionally on every exit
+    // tick, so it is the PREVIOUS bid, and the max is over two adjacent observations ~2s apart.
+    // The genuine running max is `exitBidMfe`, and the anchor deliberately does NOT read it: a
+    // position that has come off its lifetime high by more than the giveback would arm with a stop
+    // above the current bid every time, which fires on the next honest tick. Anchoring on a RECENT
+    // price is the point. Do not "tidy" this into exitBidMfe to match a high-water-mark reading.
+    //
+    // Its real hazard is staleness: with no rolling feed-staleness backstop, a quiet feed freezes
+    // lastBid at an arbitrarily old value and it can anchor a stop above where the market now is.
+    // Bounded by tick cadence while the feed is alive; unbounded when it is not. That is the
+    // silence gap in another guise and closes when that does, not here.
+    BigDecimal peak =
+        request.getPeakPremium() != null ? request.getPeakPremium() : resolveTrailAnchor();
+    BigDecimal gb = request.getGivebackPct();
+
+    String rejection = chandelierArmRejection(peak, gb);
+    if (rejection != null) {
+      // peak == null here means no anchor could be resolved at all — name that precisely rather
+      // than reporting it as a bad peak, because the operator's remedy is different (retry when a
+      // quote is available, vs. nothing they can do about a malformed value).
+      String reason = peak == null ? "anchor_unresolvable" : rejection;
+      auditLog(
+          KIND_CHANDELIER_ARM_REJECTED,
+          subject(
+              "reason", reason,
+              "source", "operator",
+              "operator_id", request.getOperatorId(),
+              "peak_premium", peak,
+              "giveback_pct", gb));
+      result.setStatus(ArmTrailResult.Status.REJECTED);
+      result.setReason(reason);
+      return result;
+    }
+
+    SubscribePremiumRequest req = new SubscribePremiumRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId(input.getTenantId());
+    req.setStrategyId(input.getStrategyId());
+    req.setContractSymbol(input.getContractSymbol());
+    req.setPositionWorkflowId(Workflow.getInfo().getWorkflowId());
+    SubscribePremiumResult res = marketData.subscribePremium(req);
+    if (res.getStatus() == SubscribePremiumResult.Status.FAILED) {
+      // Without a tick feed the trail can never fire, so this MUST reject rather than arm. The
+      // signal path only audits here and returns silently; the operator path has someone waiting
+      // on an answer, and telling them a stop exists when no feed backs it is the one outcome
+      // this feature must never produce.
+      auditLog(
+          KIND_CHANDELIER_SUBSCRIPTION_FAILED,
+          subject(
+              "source", "operator",
+              "operator_id", request.getOperatorId(),
+              "error", res.getError()));
+      result.setStatus(ArmTrailResult.Status.REJECTED);
+      result.setReason("subscription_failed");
+      return result;
+    }
+
+    trailingArmed = true;
+    peakPremium = peak;
+    givebackPct = gb;
+    auditLog(
+        KIND_CHANDELIER_ARMED,
+        subject(
+            "source",
+            "operator",
+            "operator_id",
+            request.getOperatorId(),
+            "peak_premium",
+            peak,
+            "giveback_pct",
+            gb,
+            "subscription_id",
+            res.getSubscriptionId()));
+
+    result.setStatus(ArmTrailResult.Status.ARMED);
+    result.setPeakPremium(peak);
+    result.setGivebackPct(gb);
+    result.setStopPrice(trailStopPrice(peak, gb));
+    return result;
+  }
+
+  /**
+   * Best anchor this workflow can justify, IN THE PRICE SPACE THE TICK LOOP WILL COMPARE AGAINST.
+   *
+   * <p><b>The invariant, which is the whole reason this method is not simply "the bid".</b> The
+   * peak must be in the same price space as the ticks it will be compared against. The main loop
+   * routes a tick to {@link #processExitTick} — which trails on the BID via {@code
+   * bidAsPremiumTick} — when {@code exitArmed || (exitTargetFired && trailingArmed)}, and otherwise
+   * to {@link #processTick}, which compares the raw premium: the MID. So a copytrade position,
+   * which is what the operator Stop-loss button mostly targets, evaluates the mid.
+   *
+   * <p>Anchoring on the bid regardless would be wrong in a way the operator can see. Since ask >=
+   * bid, the mid always exceeds a bid anchor, so the FIRST tick ratchets the peak into mid space
+   * and the stop silently moves up from the number the Update returned. On a wide 0DTE book 2.00 x
+   * 3.00 at 35% giveback that is 1.30 promised and 1.625 delivered — tighter, so safe for money,
+   * but a stop that did not do what the operator was told is the exact failure this feature exists
+   * to prevent.
+   *
+   * <p>The route predicate is re-evaluated per tick, but {@code trailingArmed} is still false here
+   * (we are arming it), so the condition to mirror is what it WILL be once armed: {@code exitArmed
+   * || exitTargetFired}.
+   *
+   * <p>The space can change mid-life, but only in the harmless direction. BID to MID is reachable:
+   * {@code exitArmed} is cleared in the flatten branch and a flatten leaving a residual keeps the
+   * position open, so a bid-anchored peak starts meeting mid ticks — and since mids exceed bids,
+   * the first tick ratchets the peak into the new space. Self-correcting. MID to BID would be
+   * permanent (a bid never ratchets a mid-anchored peak), but it needs the fork to go false to
+   * true, which means either {@code armWatchlistExit} on first fill — before any trail exists, and
+   * never on a copytrade position — or {@code fireExitTarget}, which sets both flags AND re-anchors
+   * the peak on the target bid in the same step. No stale peak crosses that boundary.
+   *
+   * <p>{@code lastBid} tracks every exit tick (unlike {@code lastTickPremium}, which only moves
+   * once the trail is armed), so it is usually populated even before any arm — but it is bid-space,
+   * so it only seeds the anchor when the ticks will also be bid-space.
+   *
+   * @return the anchor, or {@code null} when no source yields a usable price — the caller then
+   *     REJECTS rather than arming at a guessed level
+   */
+  private BigDecimal resolveTrailAnchor() {
+    boolean bidSpace = exitArmed || exitTargetFired;
+    BigDecimal best = bidSpace && lastBid != null && lastBid.signum() > 0 ? lastBid : null;
+    GetOptionQuoteRequest qreq = new GetOptionQuoteRequest();
+    qreq.setSchemaVersion(1L);
+    qreq.setTenantId(input.getTenantId());
+    qreq.setStrategyId(input.getStrategyId());
+    qreq.setContractSymbol(input.getContractSymbol());
+    OptionQuoteResult quote = optionQuote.getOptionQuote(qreq);
+    if (quote != null && quote.getStatus() == OptionQuoteResult.Status.OK) {
+      if (crossed(quote)) {
+        // Discard the crossed QUOTE, but keep whatever was already established. On a copytrade
+        // position best is null here, so the arm is refused outright with anchor_unresolvable; on
+        // the watchlist path best is lastBid — the most RECENT real observation, in the right bid
+        // space — and falling back to one honest tick ago beats refusing on a book that is merely
+        // momentarily crossed. Not "refuse everything": only one of the two paths refuses.
+        return best;
+      }
+      BigDecimal fresh = bidSpace ? quote.getBid() : usableMid(quote);
+      if (fresh != null && fresh.signum() > 0 && (best == null || fresh.compareTo(best) > 0)) {
+        best = fresh;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * A bid above the ask is not a book. Its mid is inflated relative to anything realisable, and its
+   * bid cannot be used as a sanity reference either — a blown bid would be vouching for itself.
+   */
+  private static boolean crossed(OptionQuoteResult quote) {
+    return quote.getBid() != null
+        && quote.getAsk() != null
+        && quote.getBid().compareTo(quote.getAsk()) > 0;
+  }
+
+  /**
+   * The quote's mid, or {@code null} when there is no bid to make it a price.
+   *
+   * <p><b>A BLOWN ASK IS NOT GUARDED HERE, AND CANNOT BE.</b> This path is unfiltered — the
+   * market-data outlier guard runs in the premium POLL only, and {@code snapshotQuote} (which
+   * {@code getOptionQuote} reads) is deliberately unguarded because the kill-switch MTM read shares
+   * it and fail-closes on a missing quote. A phantom ask inflates the mid, {@code peakPremium}
+   * never falls, and the trail is then permanently anchored above the market. No single-snapshot
+   * test detects it soundly: the true mid can only be bounded BELOW (by the bid), so "is this
+   * anchor inflated" is unanswerable from one quote, and every proxy tried was worse than the
+   * disease — a ratio test is scale-dependent and fires on ordinary cheap books, a
+   * threshold-versus-bid test compares a mid-space threshold against a bid and rejects any book
+   * whose relative half-spread exceeds the giveback, and an entry-premium band rejects exactly the
+   * big winners a trail is most wanted on.
+   *
+   * <p>Two things actually close it, both out of scope here: the feed guard, which stops a phantom
+   * from reaching the tick stream at all, and giving this method a FILTERED price to anchor on
+   * rather than a raw snapshot. Note the tick stream is the larger exposure regardless — {@code
+   * processTick} ratchets the peak on any tick that exceeds it with no plausibility test, so a
+   * phantom refused here would walk in two seconds later anyway.
+   *
+   * <p>Deliberately NOT a plausibility test. An earlier version fell back to the bid when the ask
+   * exceeded twice it, which is a RATIO test on a series with a fixed $0.01 tick and is therefore
+   * scale-dependent: at $5.00 a 2x ask means a $5 spread and is absurd, but at $0.05 it means a
+   * $0.05 spread — one to five ticks, and an entirely healthy book. 0.05 x 0.11, 0.10 x 0.25 and
+   * 0.20 x 0.45 are all ordinary quotes on the cheap decayed contracts a 0DTE copytrade position
+   * turns into, and all three tripped it. It fired constantly where premium is small and
+   * essentially never where it is large, which is inverted.
+   *
+   * <p>The silent substitution was the worse half. Falling back to the bid corrupts the operator-
+   * facing stop price — 0.05 x 0.11 at 35% returns 0.03 and then ratchets to a real stop of 0.052 —
+   * and that number being honest is the entire reason the anchor is resolved here instead of
+   * trusted from the browser. Implausible books are now REJECTED rather than quietly re-anchored,
+   * which is this feature's own stated principle and makes the failure visible instead of degrading
+   * in silence. See {@link #crossed}.
+   */
+  private static BigDecimal usableMid(OptionQuoteResult quote) {
+    BigDecimal bid = quote.getBid();
+    if (bid == null || bid.signum() <= 0) {
+      return null; // no bid: the mid is an arithmetic artifact, and nothing here is anchorable
+    }
+    return quote.getMid();
+  }
+
+  /** {@code peak * (1 - giveback)}, penny-rounded — the same threshold the tick loop fires on. */
+  private static BigDecimal trailStopPrice(BigDecimal peak, BigDecimal giveback) {
+    if (peak == null || giveback == null) {
+      return null;
+    }
+    return OptionTick.round(peak.multiply(BigDecimal.ONE.subtract(giveback)));
   }
 
   /**

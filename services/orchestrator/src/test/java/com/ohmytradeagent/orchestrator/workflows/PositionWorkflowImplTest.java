@@ -14,6 +14,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
+import com.ohmytradeagent.contract.ArmTrailRequest;
+import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
@@ -4118,6 +4120,189 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(qty);
     in.setContractSymbol(FUTURE_OCC_SYMBOL);
     return in;
+  }
+
+  // ---------- PLAN-2026-08-16: operator-set trailing stop (arm_trail Update) ----------
+
+  @Test
+  void armTrail_operatorArmsAndStopIsPeakAnchored() throws Exception {
+    // This is a copytrade position (no watchlist exit armed), so the tick loop routes to
+    // processTick and compares the MID. The anchor must be in that same space: the default quote's
+    // mid is 2.55, so a 20% giveback anchors at 2.55 and stops at 2.04. It is deliberately NOT the
+    // bid (2.50 -> 2.00); see armTrail_copytradePosition_anchorsOnTheMid... for why that matters.
+    PositionWorkflow stub = newStub("pos-armtrail-ok");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
+    assertThat(r.getPeakPremium()).isEqualByComparingTo("2.55");
+    assertThat(r.getGivebackPct()).isEqualByComparingTo("0.20");
+    // stop = peak * (1 - giveback). Echoed so the UI never re-derives the workflow's arithmetic.
+    assertThat(r.getStopPrice()).isEqualByComparingTo("2.04");
+
+    AuditEvent armed = captureKind("ChandelierArmed");
+    assertThat(armed.getSubject())
+        .containsEntry("source", "operator")
+        .containsEntry("operator_id", "ops-1");
+  }
+
+  @Test
+  void armTrail_copytradePosition_anchorsOnTheMidTheTickLoopWillCompare() throws Exception {
+    // THE invariant: the peak must be in the same price space as the ticks it will be compared
+    // against. The main loop routes to processExitTick (which trails on the BID) only when
+    // exitArmed || (exitTargetFired && trailingArmed); otherwise processTick compares the raw
+    // premium, the MID. All three real-money tenants are copytrade, so this is the primary path
+    // for the operator Stop-loss button, not an edge case.
+    //
+    // A bid anchor here is visibly wrong, not merely imprecise. Since ask >= bid, the mid always
+    // exceeds it, so the FIRST tick ratchets the peak into mid space and the stop silently moves
+    // up from the number the Update returned. A wide 0DTE book makes the gap impossible to write
+    // off as rounding: 2.00 x 3.00 at 35% giveback promises 1.30 and delivers 1.625 — tighter, so
+    // safe for money, but a stop that did not do what the operator was told is exactly the failure
+    // this feature exists to prevent.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            quoteOk(new BigDecimal("2.00"), new BigDecimal("2.50"), new BigDecimal("3.00")));
+
+    PositionWorkflow stub = newStub("pos-armtrail-midspace");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.35")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
+    assertThat(r.getPeakPremium()).isEqualByComparingTo("2.50");
+    // 2.50 * 0.65 = 1.625, penny-rounded. The bid-anchored answer would have been 1.30.
+    assertThat(r.getStopPrice()).isEqualByComparingTo("1.63");
+    assertThat(r.getStopPrice()).isNotEqualByComparingTo("1.30");
+  }
+
+  @Test
+  void armTrail_cheapWideBook_isNormalAndMustStillArmOnTheMid() throws Exception {
+    // The regression the removed ratio test would have caused. 0.05 x 0.11 is a healthy quote on
+    // the cheap decayed contracts a 0DTE copytrade position turns into — but ask/bid is 2.2, so a
+    // 2x fallback re-anchored it on the bid and handed the operator 0.03 for a stop that would
+    // ratchet to 0.052 on the first tick. 73% wrong, routinely, on the number this feature exists
+    // to make honest. Scale-dependence is the defect: at $5 a 2x ask is a $5 spread; at $0.05 it is
+    // five ticks.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            quoteOk(new BigDecimal("0.05"), new BigDecimal("0.08"), new BigDecimal("0.11")));
+
+    PositionWorkflow stub = newStub("pos-armtrail-cheapwide");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.35")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
+    assertThat(r.getPeakPremium()).isEqualByComparingTo("0.08");
+    // 0.08 * 0.65 = 0.052 -> 0.05. The bid-substituted answer would have been 0.03.
+    assertThat(r.getStopPrice()).isEqualByComparingTo("0.05");
+  }
+
+  @Test
+  void armTrail_crossedBook_isNeverAnchoredOn() throws Exception {
+    // A blown BID inflates the mid exactly as a blown ask does, and it would slip past a check that
+    // references the bid — the phantom would be vouching for itself. A crossed NBBO is never a real
+    // book, so it is refused before it can anchor anything.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            quoteOk(new BigDecimal("12.00"), new BigDecimal("8.05"), new BigDecimal("4.10")));
+
+    PositionWorkflow stub = newStub("pos-armtrail-crossed");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.35")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.REJECTED);
+    assertThat(r.getReason()).isEqualTo("anchor_unresolvable");
+  }
+
+  @Test
+  void armTrail_rejectsWhenSubscriptionFails_andDoesNotArm() throws Exception {
+    // THE failure this feature must never get wrong. Without a tick feed the trail can never fire,
+    // so reporting success would leave the operator believing a real-money position is protected.
+    when(marketData.subscribePremium(any())).thenReturn(failedSubscription("upstream down"));
+
+    PositionWorkflow stub = newStub("pos-armtrail-subfail");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.REJECTED);
+    assertThat(r.getReason()).isEqualTo("subscription_failed");
+    // No stop was armed, and the operator is told so rather than shown a price.
+    assertThat(r.getStopPrice()).isNull();
+    captureKind("ChandelierSubscriptionFailed");
+  }
+
+  @Test
+  void armTrail_rejectsWhenNoAnchorResolvable() throws Exception {
+    // No live bid anywhere: arming at a guessed level would put the stop at the wrong price on a
+    // real-money position, so the arm is refused instead.
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteFailed("provider 503"));
+
+    PositionWorkflow stub = newStub("pos-armtrail-noanchor");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.REJECTED);
+    // Named precisely: the operator's remedy (retry when a quote returns) differs from a malformed
+    // value they could correct.
+    assertThat(r.getReason()).isEqualTo("anchor_unresolvable");
+  }
+
+  @Test
+  void armTrail_alreadyArmedIsIdempotentAndNeverLoosens() throws Exception {
+    PositionWorkflow stub = newStub("pos-armtrail-idem");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.10")));
+    // A second, LOOSER request — a double-click, two tabs, or a second operator.
+    ArmTrailResult second = stub.armTrail(armTrailRequest("ops-2", new BigDecimal("0.40")));
+
+    assertThat(second.getStatus()).isEqualTo(ArmTrailResult.Status.ALREADY_ARMED);
+    // Echoes what is IN FORCE, not what was asked for: the tight 10% stop still protects the lot.
+    assertThat(second.getGivebackPct()).isEqualByComparingTo("0.10");
+    // 2.55 (the mid — this is a copytrade position, so the tick loop compares mids) * 0.90.
+    assertThat(second.getStopPrice()).isEqualByComparingTo("2.30");
+  }
+
+  @Test
+  void armTrail_validatorRejectsGivebackAboveMax() throws Exception {
+    // MAX_GIVEBACK is 0.5. A validator rejection never enters history, and it must agree with what
+    // the automatic signal path would refuse — that is what chandelierArmRejection() shares.
+    PositionWorkflow stub = newStub("pos-armtrail-maxgb");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+
+    assertThatThrownBy(() -> stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.60"))))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("giveback_pct");
+  }
+
+  @Test
+  void armTrail_validatorRejectsBlankOperator() throws Exception {
+    PositionWorkflow stub = newStub("pos-armtrail-noop-id");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+
+    assertThatThrownBy(() -> stub.armTrail(armTrailRequest("", new BigDecimal("0.20"))))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("operator_id");
+  }
+
+  private ArmTrailRequest armTrailRequest(String operatorId, BigDecimal giveback) {
+    ArmTrailRequest r = new ArmTrailRequest();
+    r.setSchemaVersion(1L);
+    r.setOperatorId(operatorId);
+    r.setGivebackPct(giveback);
+    return r;
   }
 
   private ForceCloseRequest forceCloseRequest(String operatorId, String reason) {

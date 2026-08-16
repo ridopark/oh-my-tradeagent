@@ -1,6 +1,8 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
+import com.ohmytradeagent.contract.ArmTrailRequest;
+import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
@@ -134,4 +136,27 @@ public interface PositionWorkflow {
 
   @UpdateMethod(name = "partial_close")
   PartialCloseResult partialClose(PartialCloseRequest request);
+
+  /**
+   * Operator-initiated trailing stop ("Stop-loss" on the dashboard /live holdings table):
+   * PLAN-2026-08-16-live-operator-trailing-stop. Arms the EXISTING chandelier trail on THIS
+   * position only — it adds no second stop mechanism, and it does not touch {@code
+   * strategy_config.trail_giveback_pct}, so no other or future position is affected.
+   *
+   * <p>Deliberately an Update rather than reusing the {@code armChandelier} SIGNAL. An arm can be
+   * refused — bad giveback, an anchor that cannot be resolved, or a market-data subscribe failure —
+   * and a signal cannot report that back. The operator would be shown "stop set" for a real-money
+   * position that is in fact unprotected, a failure indistinguishable from success on screen and
+   * discovered only when the stop does not fire.
+   *
+   * <p>The validator rejects an out-of-range giveback synchronously, which never enters history.
+   * The handler is idempotent in the same way {@code processArm} is: a position that is already
+   * trailing returns {@code ALREADY_ARMED} unchanged, so a double-click can never LOOSEN a stop
+   * that is already protecting the lot.
+   */
+  @UpdateValidatorMethod(updateName = "arm_trail")
+  void armTrailValidator(ArmTrailRequest request);
+
+  @UpdateMethod(name = "arm_trail")
+  ArmTrailResult armTrail(ArmTrailRequest request);
 }

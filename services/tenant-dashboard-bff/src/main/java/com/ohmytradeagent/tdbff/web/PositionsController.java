@@ -1,6 +1,8 @@
 package com.ohmytradeagent.tdbff.web;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.ohmytradeagent.contract.ArmTrailRequest;
+import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.PartialCloseRequest;
@@ -70,17 +72,32 @@ public class PositionsController {
    */
   private final boolean partialCloseWriteEnabled;
 
+  /**
+   * PLAN-2026-08-16 operator trailing stop. A THIRD parameter on the SAME constructor, deliberately
+   * — a second constructor is the Spring two-@Autowired-candidate trap that has aborted context
+   * refresh here twice. Unlike its two siblings this ships ENABLED by default ({@code
+   * positions.arm-trail.write-enabled}, operator decision) — set {@code
+   * POSITIONS_ARM_TRAIL_WRITE_ENABLED=false} to disable per cluster. Still gated IN-METHOD rather
+   * than with {@code @ConditionalOnProperty}: that annotation removes the whole controller bean,
+   * which would also 404 {@code GET /api/positions} and the two existing writes — and that matters
+   * MORE now the flag is normally on, because the off state is the exceptional one someone will
+   * reach for in a hurry.
+   */
+  private final boolean armTrailWriteEnabled;
+
   public PositionsController(
       PositionsReader reader,
       TenantContext ctx,
       WorkflowClient client,
       @Value("${positions.force-close.write-enabled:false}") boolean forceCloseWriteEnabled,
-      @Value("${positions.partial-close.write-enabled:false}") boolean partialCloseWriteEnabled) {
+      @Value("${positions.partial-close.write-enabled:false}") boolean partialCloseWriteEnabled,
+      @Value("${positions.arm-trail.write-enabled:true}") boolean armTrailWriteEnabled) {
     this.reader = reader;
     this.ctx = ctx;
     this.client = client;
     this.forceCloseWriteEnabled = forceCloseWriteEnabled;
     this.partialCloseWriteEnabled = partialCloseWriteEnabled;
+    this.armTrailWriteEnabled = armTrailWriteEnabled;
   }
 
   @GetMapping
@@ -189,6 +206,79 @@ public class PositionsController {
   }
 
   /**
+   * PLAN-2026-08-16: arm the trailing stop (the existing chandelier trail) on ONE position — the
+   * /live "Stop-loss" control. Scope is a single PositionWorkflow; this does not touch {@code
+   * strategy_config.trail_giveback_pct}, so no other or future position is affected.
+   *
+   * <p>Status mapping, and why the three-way split matters: {@code ARMED} → 202, {@code
+   * ALREADY_ARMED} → 200, {@code REJECTED} → 422. Collapsing 202/200 would paint a green "stop set"
+   * over a request that changed nothing (the same trap {@code trimPosition} calls out in {@code
+   * bff.ts}), and letting REJECTED ride back on any 2xx is the silent-success failure this feature
+   * exists to avoid — an operator believing a real-money position is protected when it is not. 422
+   * here means "the workflow refused"; that is distinct from the 409 {@code update_rejected} a
+   * validator rejection produces, and from the 409/404 a vanished workflow produces.
+   */
+  @PostMapping("/arm-trail")
+  public ResponseEntity<Map<String, Object>> armTrail(
+      HttpServletRequest req, @RequestBody(required = false) ArmTrailPayload body) {
+    if (!armTrailWriteEnabled) {
+      return ResponseEntity.status(HttpStatus.NOT_FOUND)
+          .body(Map.of("error", "arm_trail_disabled"));
+    }
+    String tenant = ctx.tenantId(req); // fail-closed 401 — the tenant is NEVER a client parameter
+
+    String workflowId = body == null ? null : body.workflowId();
+    if (workflowId == null || workflowId.isBlank()) {
+      throw new IllegalArgumentException("workflow_id is required");
+    }
+
+    // Pre-validated HERE, not left to the workflow validator: a rejection there returns 409
+    // update_rejected, which reads to an operator as a system fault rather than a value they can
+    // correct. Same reasoning as partial_close's fraction check above.
+    //
+    // MAX_GIVEBACK now lives in three places — PositionWorkflowImpl.MAX_GIVEBACK,
+    // contract/schemas/arm-trail-request.json, and this bound. They must not drift: a value this
+    // controller accepts but the workflow refuses turns an operator's stop into a 409.
+    Double giveback = body.givebackPct();
+    if (giveback == null || giveback <= 0.0 || giveback > 0.5) {
+      throw new IllegalArgumentException(
+          "giveback_pct must be between 0 and 0.5 (0 exclusive, 0.5 inclusive)");
+    }
+
+    ResponseEntity<Map<String, Object>> refusal = guardWorkflowId(tenant, workflowId);
+    if (refusal != null) {
+      return refusal;
+    }
+
+    ArmTrailRequest ar = new ArmTrailRequest();
+    ar.setSchemaVersion(1L);
+    ar.setOperatorId(operatorId(req, tenant));
+    ar.setGivebackPct(BigDecimal.valueOf(giveback));
+    // peak_premium is deliberately NOT threaded from the client. The workflow resolves the anchor
+    // itself from its own tracked bid / a fresh quote; a page-rendered premium is seconds stale,
+    // and an anchor that is too low sets the stop too low on a real-money position.
+
+    WorkflowStub stub = client.newUntypedWorkflowStub(workflowId);
+    ArmTrailResult result = stub.update("arm_trail", ArmTrailResult.class, ar);
+
+    HttpStatus status;
+    if (result.getStatus() == ArmTrailResult.Status.ARMED) {
+      status = HttpStatus.ACCEPTED;
+    } else if (result.getStatus() == ArmTrailResult.Status.ALREADY_ARMED) {
+      status = HttpStatus.OK;
+    } else {
+      status = HttpStatus.UNPROCESSABLE_ENTITY;
+    }
+    Map<String, Object> respBody = new LinkedHashMap<>();
+    respBody.put("status", result.getStatus());
+    respBody.put("reason", result.getReason());
+    respBody.put("peak_premium", result.getPeakPremium());
+    respBody.put("giveback_pct", result.getGivebackPct());
+    respBody.put("stop_price", result.getStopPrice());
+    return ResponseEntity.status(status).body(respBody);
+  }
+
+  /**
    * Both position-lifecycle writes address a workflow and audit an operator reason; neither the
    * force_close nor the partial_close validator accepts a blank one, so reject early (400) rather
    * than round-tripping a doomed Update to Temporal.
@@ -241,4 +331,15 @@ public class PositionsController {
    */
   public record PartialClosePayload(
       @JsonProperty("workflow_id") String workflowId, String reason, Double fraction) {}
+
+  /**
+   * {@code {"workflow_id": "...", "giveback_pct": 0.15}} — the /live Stop-loss body. No {@code
+   * reason} field: {@code ArmTrailRequest} has none, so {@code requireWorkflowIdAndReason} is
+   * deliberately NOT reused here. {@code @JsonProperty} is load-bearing on both fields — without it
+   * the wire names would be {@code workflowId}/{@code givebackPct} and the snake_case body the
+   * dashboard sends would bind null silently.
+   */
+  public record ArmTrailPayload(
+      @JsonProperty("workflow_id") String workflowId,
+      @JsonProperty("giveback_pct") Double givebackPct) {}
 }
