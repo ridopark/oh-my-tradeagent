@@ -1,10 +1,9 @@
 package com.ohmytradeagent.orchestrator.activities;
 
+import com.ohmytradeagent.contract.identity.RiskRelevantConfigKeys;
 import java.sql.Timestamp;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.Set;
-import java.util.stream.Collectors;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.slf4j.Logger;
@@ -29,64 +28,17 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
   private static final Logger log = LoggerFactory.getLogger(AuditQueryActivitiesImpl.class);
 
   /**
-   * P3-b: the risk-relevant {@code StrategyConfig} JSON field keys whose post-approval change voids
-   * a {@code LivePromotionApproved} sign-off. The CORE set is exactly the P0c-a DANGEROUS +
-   * EXPOSURE classes from {@code StrategyConfigWriter.checkFieldClasses} (the single source of
-   * truth for what counts as a risk-envelope edit):
-   *
-   * <ul>
-   *   <li>DANGEROUS (must-equal-stored): {@code broker_target}, {@code
-   *       notional_cap_pct_of_capital_base}. (single-account-loss-rule Phase 4a: {@code
-   *       daily_loss_threshold} is a dead field — the account cap is the sole daily-loss breaker —
-   *       so it is no longer risk-relevant and a change to it no longer voids a live promotion.)
-   *   <li>EXPOSURE (tighten-only): {@code max_contracts}, {@code min_contracts}, {@code
-   *       max_positions}, {@code capital_weight}, {@code max_notional_per_signal}, {@code
-   *       max_daily_notional_deployed}.
-   * </ul>
-   *
-   * <p>risk-manager-suggested additions, verified against {@code
-   * contract/schemas/strategy-config.json} — INCLUDED because each exists as a real schema
-   * property: {@code notional_cap_pct_of_equity} (the deprecated cap alias, schema line ~191),
-   * {@code same_underlying_count}, {@code sector_concentration_cap}, {@code daily_trade_count},
-   * {@code drawdown_velocity_threshold}. None were excluded-because-absent — all five risk-manager
-   * fields are present in the schema. (A non-existent key here would be a silent no-op; a real risk
-   * field missing would be a detection hole, so each was confirmed against the exact snake_case
-   * schema key.)
+   * P3-b: the {@code StrategyConfig} keys whose post-approval change voids a {@code
+   * LivePromotionApproved} sign-off now live in {@link RiskRelevantConfigKeys} (contract-java),
+   * shared with tenant-dashboard-bff's {@code LivePromotionStateReader}. See that class for the
+   * membership rationale — including why {@code daily_loss_threshold} is deliberately absent, which
+   * this file's own {@code AuditQueryLivePromotionIT} pins.
    */
-  private static final Set<String> RISK_RELEVANT_CONFIG_KEYS =
-      Set.of(
-          // CORE — DANGEROUS (StrategyConfigWriter.checkFieldClasses)
-          "broker_target",
-          "notional_cap_pct_of_capital_base",
-          // CORE — EXPOSURE (StrategyConfigWriter.checkFieldClasses)
-          "max_contracts",
-          "min_contracts",
-          "max_positions",
-          "capital_weight",
-          "max_notional_per_signal",
-          "max_daily_notional_deployed",
-          // risk-manager additions (all verified present in strategy-config.json)
-          "notional_cap_pct_of_equity",
-          "same_underlying_count",
-          "sector_concentration_cap",
-          "daily_trade_count",
-          "drawdown_velocity_threshold",
-          // PLAN-2026-08-04-bto-entry-repeg: raises the MAX PRICE PAYABLE on a real-money entry
-          // above the max_slippage_pct cap, so editing it changes risk exposure in the same way the
-          // notional_cap_* keys do. Deliberately listed; repeg_after_ms is deliberately NOT, so the
-          // emergency off-switch stays a fast edit that does not void a live promotion.
-          "repeg_ceiling_pct");
-
-  /**
-   * {@link #RISK_RELEVANT_CONFIG_KEYS} rendered ONCE as a Postgres {@code text[]} array literal for
-   * inlining into a plain-SQL {@code jsonb_exists_any(target, text[])} call. The keys are
-   * compile-time code constants (never user input), so inlining is injection-safe; building from
-   * the constant keeps it the single source of truth. Element order is irrelevant (set membership).
-   */
+  // Single source of truth in contract-java: this set and the tenant-dashboard-bff's copy DRIFTED
+  // on 2026-08-15 (repeg_ceiling_pct added here and not there), which halted live trading behind an
+  // admin page still showing "valid until". See RiskRelevantConfigKeys for the full account.
   private static final String RISK_KEYS_SQL_ARRAY_LITERAL =
-      RISK_RELEVANT_CONFIG_KEYS.stream()
-          .map(k -> "'" + k + "'")
-          .collect(Collectors.joining(",", "ARRAY[", "]::text[]"));
+      RiskRelevantConfigKeys.sqlArrayLiteral();
 
   private final DSLContext dsl;
 
@@ -353,7 +305,7 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
    * </ul>
    *
    * <p>P3-b config-change invalidation: after confirming a fresh (not-stale) approval, this also
-   * checks whether any {@code TenantConfigChanged} touching a {@link #RISK_RELEVANT_CONFIG_KEYS}
+   * checks whether any {@code TenantConfigChanged} touching a {@link RiskRelevantConfigKeys#ALL}
    * key landed AFTER that approval — if so the risk envelope the approvers signed off on no longer
    * holds and the gate returns {@link LivePromotionStatus#CONFIG_CHANGED}. It inherits this
    * method's fail-CLOSED posture: the 2nd query runs inside the same try/catch, so any DB error

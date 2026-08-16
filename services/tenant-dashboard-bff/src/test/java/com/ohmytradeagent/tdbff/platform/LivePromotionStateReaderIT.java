@@ -197,8 +197,14 @@ class LivePromotionStateReaderIT {
   void riskRelevantConfigChangeAfterApproval_isConfigChanged() {
     // A risk-relevant TenantConfigChanged strictly after the approval voids it (the gate refuses
     // live orders) — the dashboard must NOT show VALID.
+    //
+    // Uses capital_weight, a LIVE exposure key. This previously used daily_loss_threshold, which
+    // the orchestrator had already dropped as a dead field — so this test and the orchestrator's
+    // AuditQueryLivePromotionIT asserted OPPOSITE answers for the same key, and neither failed
+    // because both are RUN_DB_ITS-gated in separate modules. The key here is incidental to the
+    // behaviour under test; what matters is that it is genuinely risk-relevant.
     seed("LivePromotionApproved", TENANT, STRATEGY, BROKER, "-1 hour");
-    seedConfigChange(TENANT, STRATEGY, "0 seconds", "daily_loss_threshold");
+    seedConfigChange(TENANT, STRATEGY, "0 seconds", "capital_weight");
 
     assertThat(read().state()).isEqualTo(State.CONFIG_CHANGED);
   }
@@ -215,7 +221,7 @@ class LivePromotionStateReaderIT {
   @Test
   void riskConfigChangeBeforeApproval_doesNotVoid() {
     // Only a change strictly AFTER the matched approval voids it.
-    seedConfigChange(TENANT, STRATEGY, "-2 hours", "daily_loss_threshold");
+    seedConfigChange(TENANT, STRATEGY, "-2 hours", "capital_weight");
     seed("LivePromotionApproved", TENANT, STRATEGY, BROKER, "-1 hour");
 
     assertThat(read().state()).isEqualTo(State.VALID);
