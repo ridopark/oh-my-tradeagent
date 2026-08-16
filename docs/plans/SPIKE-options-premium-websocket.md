@@ -15,12 +15,13 @@ OPRA WebSocket — and, separately, whether buying the OPRA entitlement is worth
 
 The spike is done when all four are answered with evidence, not assumption:
 
-1. **Entitlement** — is the data key entitled to `opra`, and does the redistribution question below
-   have an answer from Alpaca? *(open)*
+1. **Entitlement** — ✅ **ANSWERED 2026-08-16: Algo Trader Plus is ACTIVE and the exit path is
+   already on OPRA.** The redistribution question remains *(open, and now urgent rather than
+   hypothetical — see [Open questions](#open-questions))*.
 2. **One decoded quote** — a real OPRA option quote received and decoded from the WS. The June 2026
    attempt never got a single frame; this is the gate everything else waits behind. *(open)*
 3. **Does the socket beat a 500ms OPRA poll?** Measured in shadow, not argued. The honest possible
-   answer is "no." *(open)*
+   answer is "no." *(open — and now the spike's central question)*
 4. **Backpressure** — does an ATM 0DTE at the open trigger Alpaca's 407 slow-client disconnect
    under our consumer design? *(open)*
 
@@ -65,17 +66,22 @@ same file. Bug (2) is a missing method plus a decoder.
 
 Researched 2026-08-16 — see [Sources](#sources).
 
-| | Basic (we are here) | Algo Trader Plus ($99/mo) |
+| | Basic (free) | **Algo Trader Plus ($99/mo) — WE ARE HERE ✅** |
 |---|---|---|
 | options feed | `indicative` | **`opra`** |
 | stocks feed | IEX | all US exchanges (SIP) |
-| REST data | **200 req/min** | **10,000 req/min** |
+| REST data | 200 req/min | **10,000 req/min** |
 | options WS symbols | 200 quotes | **1000 quotes** |
 | equity WS symbols | 30 | unlimited |
 | **connections per endpoint** | **1** | **1** |
 
-We are on **Basic**: `application.yml:23` defaults to `.../v1beta1/indicative`, and the poll interval
-is explicitly "sized against Alpaca's data-REST limit (~200 req/min)".
+**Verified 2026-08-16** by read-only REST probe on the `_DATA` key (`AK…`, live):
+`feed=opra` → 200 with real data; `feed=sip` → 200 with real data (SPY daily volume **31.4M** vs
+IEX's 1.25M — genuine consolidated tape, not a silently-downgraded response).
+
+> ⚠ **`application.yml`'s "sized against Alpaca's data-REST limit (~200 req/min)" comment is stale
+> and wrong.** The real limit is 10,000 req/min. The 2s poll interval is calibrated against a
+> constraint this account has never had.
 
 ### The connection limit does not go away with money
 
@@ -107,37 +113,78 @@ key, and a second connection to the *same* endpoint is 406'd while the existing 
   only available in msgpack format." JSON in the docs is for readability.
 - Quote message `T="q"`: symbol, timestamp, bid exchange/price/size, ask exchange/price/size, condition.
 
-## ⚠ A live bug this research exposed (unrelated to options)
+## Established: which feed we actually receive (measured)
 
-`infra/k8s/53-market-data.yaml` has **no `strategy:` block**, so it defaults to `RollingUpdate` with
-`maxSurge` 25% → **1** at `replicas: 1`. The new pod starts **before** the old terminates, so every
-deploy briefly runs two pods against the same data endpoint — a guaranteed 406 collision on the
-**stocks WS that is live today**. `strategy: {type: Recreate}` is the fix, and it is worth doing
-**whether or not this spike proceeds**.
+`snapshotQuote` sends **no `feed` parameter** — just
+`/v1beta1/options/snapshots?symbols={s}`. Alpaca defaults an entitled account to OPRA, so **the exit
+path has been on OPRA all along.** Measured on `SPY260817C00500000`, 2026-08-16:
 
-## ⟲ Retraction — the REST-ceiling argument was wrong
+| request | bid | ask | spread |
+|---|---|---|---|
+| **no feed param** (what `pollOnce` sends) | **275.02** ×10 | **277.80** ×20 | 2.78 |
+| `feed=opra` | 275.02 ×10 | 277.80 ×20 | 2.78 |
+| `feed=indicative` | 271.63 ×10 | 281.92 ×1 | **10.29** |
 
-Originally listed: "the REST budget caps you at ~6 concurrently-trailed contracts, and only streaming
-can raise it." **Wrong.** Algo Trader Plus takes REST from 200 → **10,000 req/min**, which at
-30 req/min/contract supports **~330 concurrently-polled contracts**. Buying OPRA raises the *polling*
-ceiling ~55× by itself.
+Same contract, same quote timestamp. The default is **byte-identical to OPRA**.
 
-This **separates two decisions that looked like one**:
+Two consequences:
 
-1. **Buy Algo Trader Plus.** Real OPRA prices, ~6-contract ceiling gone, and — REST no longer being
-   scarce — the poll interval can simply drop 2s → ~500ms for a 4× latency win. **Zero new code, zero
-   new failure modes, reversible by one config value.**
-2. **Then, separately, switch to the WS.** Sub-second granularity, no resample artifact, honest
-   silence detection. Costs a msgpack dependency, a binary frame path, a compact/padded symbol map, a
-   permanent single-replica pin, and 407 backpressure risk.
+1. **The price-quality argument for the purchase is already realised on the exit path.** The trail
+   arms and stops on OPRA bids today. Good news, and it removes a motivation the spike was leaning on.
+2. **`indicative` is materially wrong, and the config still defaults to it.** The indicative bid is
+   **$3.39 low** and the spread **3.7× wider** on this contract. `application.yml:23` still defaults
+   `data-ws-url` to `.../v1beta1/indicative`. Nothing consumes it today (the WS is dead), but **any
+   future WS work that trusts the default inherits a bid $3.39 wide of truth** on a path whose whole
+   job is deciding when to sell. Change the default to `opra` as part of step 3, not after.
 
-Decision 1 delivers most of the value at a fraction of the risk and is a prerequisite for 2 anyway.
+## ⚠ Live findings this research exposed
 
-## The price-quality argument (independent of transport)
+### 1. Every market-data deploy 406-collides its own stocks WS
 
-Per `reference_premium_tick_mid_vs_bid`, the exit path **trades on the bid**. Today the trail is armed
-off an **indicative** bid on the display path and a REST snapshot on the exit path. OPRA improves both.
-This is a correctness argument for the *purchase*, and it holds even if the socket never ships.
+`infra/k8s/53-market-data.yaml` has **no `strategy:` block**. Confirmed on the live cluster:
+
+```
+{"rollingUpdate":{"maxSurge":"25%","maxUnavailable":"25%"},"type":"RollingUpdate"}
+```
+
+`maxSurge` 25% → **1** at `replicas: 1`, so the new pod starts **before** the old terminates and two
+pods briefly hold connections to the same data endpoint — a guaranteed 406 on the **stocks WS that is
+live today**. `strategy: {type: Recreate}` is the fix, and it is worth doing **whether or not this
+spike proceeds**.
+
+### 2. `ALPACA_STOCK_FEED=sip` exists only on the cluster, not in the repo
+
+The live deployment carries `ALPACA_STOCK_FEED=sip` — correct, and it is what makes the equity feed
+work at all (`effectiveStockDataWsUrl()` returns empty without it and `subscribeEquity` fail-closes
+with `StockFeedGatedException`). But:
+
+- It is **absent from `infra/k8s/53-market-data.yaml`**, which declares only `TEMPORAL_TARGET`,
+  `TEMPORAL_NAMESPACE`, `MARKET_DATA_PROVIDER`.
+- It is **absent from `last-applied-configuration`**, i.e. it was set imperatively.
+
+It survives `kubectl apply` only by an accident of strategic-merge semantics (env has patchMergeKey
+`name`, and a field in neither the new config nor last-applied is preserved). It does **not** survive
+a delete/recreate, a namespace rebuild, a restore to a fresh cluster, or a switch to server-side
+apply. And nobody reading the repo can tell that live watchlist triggers depend on it. Same class as
+the tenants-ConfigMap trap. **Declare it in the manifest.**
+
+## ⟲ Retractions
+
+**⟲ 1 — the REST-ceiling argument was wrong, twice over.** Originally: "the REST budget caps you at
+~6 concurrently-trailed contracts, and only streaming can raise it." The first correction was that
+Algo Trader Plus takes REST to 10,000 req/min (~330 polled contracts). The second, on verifying the
+account, is that **the ceiling never existed at all** — this account has been on Plus. The
+`application.yml` comment that produced the claim is simply stale. A ~500ms poll is available
+**today**, at no cost and no code.
+
+**⟲ 2 — "buy Algo Trader Plus" was not a step.** It was already bought. The price-quality argument I
+built for the purchase is moot on the exit path, which has been receiving OPRA all along. What
+remains of the case for the socket is **latency and granularity only** — a materially narrower case
+than the spike opened with.
+
+**⟲ 3 — one motivation strengthened, not weakened.** The purchase being live means the redistribution
+question is not a "before you pay" checkbox. We are *already* on OPRA and *already* rendering premium
+into other tenants' dashboards. If there is an entitlement problem, it exists today.
 
 ## What a real WS attempt needs
 
@@ -174,39 +221,53 @@ This is a correctness argument for the *purchase*, and it holds even if the sock
 
 ## Plan of record
 
-**Step 0 — free, do it regardless.** `strategy: {type: Recreate}` on the market-data Deployment. Fixes
-a live 406 collision on the existing stocks WS at every deploy. *(not started)*
+**Step 0 — free, do it regardless, unrelated to the socket.** Two config fixes, both live bugs:
+`strategy: {type: Recreate}` on the market-data Deployment, and declare `ALPACA_STOCK_FEED=sip` in
+`infra/k8s/53-market-data.yaml`. Neither depends on this spike's outcome. *(not started)*
 
-**Step 1 — buy Algo Trader Plus, change no code.** Resolve the entitlement question first. Then point
-the feeds at `opra` and drop `premium-poll-interval-ms` 2000 → ~500. Measure what that alone does.
-Reversible by one config value. *(blocked on entitlement answer)*
+**Step 1 — spend the plan we already own. No new code.** Drop `premium-poll-interval-ms` 2000 → ~500
+(REST is 10,000 req/min, not 200) and correct the stale `~200 req/min` comment. Measure what a 4×
+faster poll alone does to trail behaviour. Reversible by one config value. **This is now the cheapest
+remaining win and it should be taken before any socket work.** *(not started — no longer blocked)*
 
-**Step 2 — probe, no product code.** Re-run `scripts/alpaca-ws-conn-check.py` to confirm `/v1beta1`
-auth and OPRA entitlement, then extend it to `subscribe` one live OCC and print decoded quotes.
-**⚠ Do not run during RTH:** steps B and C deliberately open competing connections and will 406 or kick
-the live stocks WS that watchlist triggers depend on. *(not started)*
+**Step 2 — probe, no product code.** Extend `scripts/alpaca-ws-conn-check.py` to `subscribe` one live
+OCC on `/v1beta1/opra` and print decoded quotes. Entitlement is already confirmed, so this is purely
+about getting **one decoded msgpack frame** — the thing June never achieved.
+**⚠ Do not run during RTH:** its steps B and C deliberately open competing connections and will 406 or
+kick the live stocks WS that watchlist triggers depend on. *(not started)*
 
 **Step 3 — decode-only, dark.** msgpack + `onBinary` + `dispatchOptionWsMessage` + tests against
-captured frames. No subscriber wiring, no behaviour. *(not started)*
+captured frames. Flip the `data-ws-url` default `indicative` → `opra` here. No subscriber wiring, no
+behaviour. *(not started)*
 
-**Step 4 — shadow.** WS alongside the poll, fan out nothing, log divergence: rate, latency, bid
-agreement, any 407. Produces the data to re-tune the 35% band and answers exit criterion 3.
-*(not started)*
+**Step 4 — shadow.** WS alongside the (now 500ms) poll, fan out nothing, log divergence: rate,
+latency, bid agreement, any 407. Answers exit criterion 3 and produces the data to re-tune the 35%
+band. *(not started)*
 
 **Step 5 — cut over per-tenant**, poll retained as fallback. *(not started)*
 
 Steps 0–4 are reversible and touch no live exit path. **Step 5 is trading-critical.**
 
+> **The spike may correctly end at step 1.** If a 500ms OPRA poll closes most of the latency gap,
+> steps 2–5 buy sub-second granularity at the price of a msgpack dependency, a binary frame path, the
+> compact/padded OCC trap, a permanent single-replica pin, and 407 backpressure. Do not treat
+> finishing the spike as the goal.
+
 ## Open questions
 
-- **For Alpaca:** does one pod-global OPRA key feeding premium into *other tenants'* dashboards count
-  as redistribution, or flip the classification to professional? OPRA requires a signed Subscriber
-  Agreement classifying each recipient professional/non-professional. We hold one pod-global data key
-  (`replicas: 1`), and `/live` **displays** option premium to tenant users (`ccdd073`) — and
-  `prod-kipark` / `prod-jinchul` are **other people's** accounts. Today that data is `indicative`
-  (derived, free), so it's uninteresting; real-time OPRA changes the question. Ask before paying.
-- **Is the socket still worth it after a 500ms OPRA poll?** Genuinely open. Step 4 answers it.
+- **For Alpaca — now live, not hypothetical.** Does one pod-global OPRA key feeding premium into
+  *other tenants'* dashboards count as redistribution, or flip the classification to professional?
+  OPRA requires a signed Subscriber Agreement classifying each recipient professional/non-professional.
+  We hold one pod-global data key (`replicas: 1`), `/live` **displays** option premium to tenant users
+  (`ccdd073`), and `prod-kipark` / `prod-jinchul` are **other people's** accounts. I originally framed
+  this as "ask before paying" — the plan is already active and the exit path is already on OPRA, so
+  whatever the answer is, it applies to production **today**. Not a blocker for the spike; is a
+  question worth asking Alpaca support plainly.
+- **Is the socket worth it after a 500ms OPRA poll?** The spike's central question now. Step 4
+  answers it; "no" is a legitimate and cheap outcome.
 - Is 2s latency demonstrably costing money today, or is this a correctness/complexity win only?
+- Does anything else in the estate silently assume the 200 req/min Basic limit the way
+  `application.yml` did?
 
 ---
 
@@ -232,6 +293,27 @@ Newest last. One entry per working session; record what was *learned*, including
   pods → 406 collision on the live stocks WS every deploy.
 - **Not done:** did not run `alpaca-ws-conn-check.py` — it opens competing connections and would kick
   the live stocks feed during RTH.
+
+### 2026-08-16 (later) — verified the subscription; it changed the spike's shape
+
+Operator: "we should have the paid account, verify that." Verified by read-only REST probe
+(`scratchpad/alpaca-entitlement-check.sh`) — no WebSocket, so no risk to the live stocks feed.
+
+- **✅ Algo Trader Plus is ACTIVE.** `feed=opra` → 200 with data; `feed=sip` → 200 with data. Not a
+  soft downgrade: SPY daily volume came back 31.4M on SIP vs 1.25M on IEX.
+- **The exit path has been on OPRA all along.** `snapshotQuote` sends no `feed` param and Alpaca
+  defaults entitled accounts to OPRA — verified byte-identical to an explicit `feed=opra`.
+- **Measured what `indicative` actually costs:** on `SPY260817C00500000`, indicative bid 271.63 vs
+  OPRA 275.02 — **$3.39 low**, with a 3.7× wider spread. The `data-ws-url` default still points at
+  `indicative`; harmless today only because nothing consumes it.
+- **⟲ Retracted two things** (see Retractions): the REST ceiling never existed, and "buy the plan"
+  was never a step. The case for the socket narrows to latency/granularity alone, and the cheapest
+  remaining win — a 500ms poll — needs no code at all.
+- **Confirmed the 406 rollout hazard on the live cluster:** `RollingUpdate`, `maxSurge: 25%`.
+- **New drift finding:** `ALPACA_STOCK_FEED=sip` is live-only — absent from the repo manifest *and*
+  from `last-applied-configuration`. It survives `apply` by merge-semantics accident; it would not
+  survive a recreate, and the repo gives no hint that live watchlist triggers depend on it.
+- **Reframe:** the spike may now correctly end at step 1. That is a good outcome, not a failed spike.
 
 ## Sources
 
