@@ -6,10 +6,13 @@ import com.ohmytradeagent.exec.broker.BrokerCredentialSource;
 import com.ohmytradeagent.exec.broker.BrokerCredentials;
 import com.ohmytradeagent.exec.broker.alpaca.AlpacaProperties;
 import jakarta.annotation.PreDestroy;
+import java.io.ByteArrayOutputStream;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -40,6 +43,12 @@ import org.springframework.stereotype.Component;
  * sends the {@code authenticate} + {@code listen} handshake frames, parses incoming JSON, filters
  * to {@code fill} / {@code partial_fill}, dedupes on {@code (broker_order_id, filled_qty)}, and
  * hands each surviving event to a {@link FillDispatcher}.
+ *
+ * <p><b>Frames arrive on BOTH channels.</b> Alpaca sends trade_updates as <b>binary</b> frames
+ * carrying JSON, so {@link Listener#onBinary} is load-bearing, not defensive — see #693, where its
+ * absence meant the JDK default silently discarded every frame for 11 weeks and the polling
+ * fallback quietly covered for it. {@code onText} is retained because the channel choice is not
+ * contractual and paper/live may differ; both route into the same {@code handleFrame}.
  *
  * <p><b>Single-socket vs. per-tenant.</b> Default ({@code exec.fill-listener.per-tenant.enabled =
  * false}) opens ONE pod-wide socket on {@code props.wsUrl()} authenticated with the pod-wide env
@@ -518,7 +527,40 @@ public class AlpacaTradeUpdatesStream {
         return;
       }
       JsonNode streamNode = root.get("stream");
-      if (streamNode == null || !"trade_updates".equals(streamNode.asText())) {
+      if (streamNode == null) {
+        return;
+      }
+      // #693: log the handshake reply. This frame was previously dropped by the filter below along
+      // with everything else that isn't trade_updates, which is WHY a mute socket was invisible —
+      // there was no positive evidence of a working stream to be absent. Mirrors the stocks-WS
+      // `authenticated` line from 9ec7387. Alpaca's authorization payload carries status/action/
+      // message only; the request echo (and the API key in it) is never returned, so nothing
+      // secret reaches the log.
+      if ("authorization".equals(streamNode.asText())) {
+        JsonNode authData = root.path("data");
+        String status = authData.path("status").asText("");
+        // An unauthorized socket stays OPEN and simply honors no subscriptions — indistinguishable
+        // from a healthy quiet one, which is how the June header-auth bug (#471) hid. Anything that
+        // is not explicitly "authorized" warns, including a reply with no status at all: an
+        // unrecognized shape must fail loud rather than be assumed successful.
+        if ("authorized".equals(status)) {
+          log.info(
+              "fill-listener[{}] authorization reply status={} action={}",
+              tenant,
+              status,
+              authData.path("action").asText(""));
+        } else {
+          log.warn(
+              "fill-listener[{}] authorization reply NOT authorized status={} action={} message={}"
+                  + " — the socket will stay open and deliver nothing",
+              tenant,
+              status,
+              authData.path("action").asText(""),
+              authData.path("message").asText(""));
+        }
+        return;
+      }
+      if (!"trade_updates".equals(streamNode.asText())) {
         return;
       }
       JsonNode data = root.get("data");
@@ -587,6 +629,21 @@ public class AlpacaTradeUpdatesStream {
     private final TenantRunner owner;
     private final StringBuilder partialFrame = new StringBuilder();
 
+    /**
+     * #693: Alpaca delivers trade_updates as <b>binary</b> frames carrying JSON. Before this
+     * accumulator existed the JDK's default {@code onBinary} silently {@code request(1)}'d and
+     * discarded every frame, so no fill ever reached the dispatcher over the WebSocket and the 30s
+     * poller behind a 60s grace window discovered all of them (observe lag: BUY p50 69.2s, SELL p50
+     * 30.2s).
+     *
+     * <p>This accumulates <b>bytes</b>, deliberately — not chars like {@link #partialFrame}. A
+     * UTF-8 multi-byte sequence can straddle a fragment boundary, so decoding each fragment
+     * independently corrupts the character at the seam. Decode happens exactly once, on {@code
+     * last}. Kept separate from {@link #partialFrame} because RFC 6455 forbids interleaving the
+     * fragments of two data messages, so the two accumulators can never be live simultaneously.
+     */
+    private final ByteArrayOutputStream partialBinaryFrame = new ByteArrayOutputStream();
+
     Listener(CountDownLatch closed, TenantRunner owner) {
       this.closed = closed;
       this.owner = owner;
@@ -613,6 +670,31 @@ public class AlpacaTradeUpdatesStream {
       if (last) {
         String frame = partialFrame.toString();
         partialFrame.setLength(0);
+        owner.handleFrame(frame);
+      }
+      webSocket.request(1);
+      return null;
+    }
+
+    @Override
+    public CompletionStage<?> onBinary(WebSocket webSocket, ByteBuffer data, boolean last) {
+      if (partialBinaryFrame.size() + data.remaining() > MAX_FRAME_BYTES) {
+        log.warn(
+            "fill-listener[{}] binary frame exceeds {} bytes; aborting socket to recover via"
+                + " reconnect",
+            owner.tenant,
+            MAX_FRAME_BYTES);
+        partialBinaryFrame.reset();
+        webSocket.abort();
+        closed.countDown();
+        return null;
+      }
+      byte[] chunk = new byte[data.remaining()];
+      data.get(chunk);
+      partialBinaryFrame.writeBytes(chunk);
+      if (last) {
+        String frame = partialBinaryFrame.toString(StandardCharsets.UTF_8);
+        partialBinaryFrame.reset();
         owner.handleFrame(frame);
       }
       webSocket.request(1);
