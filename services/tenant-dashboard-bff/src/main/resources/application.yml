@@ -203,6 +203,13 @@ positions:
   # Flip to true (alongside the dashboard's TRIM_WRITE_ENABLED) to enable the Trim button.
   partial-close:
     write-enabled: ${POSITIONS_PARTIAL_CLOSE_WRITE_ENABLED:false}
+  # PLAN-2026-08-16: per-position operator trailing stop (POST /api/positions/arm-trail), which
+  # drives PositionWorkflow.arm_trail and arms the EXISTING chandelier trail on ONE position. Dark
+  # by default and flagged SEPARATELY from the other two — arming a stop is an independent
+  # capability from trimming or flattening, and unlike those it does not sell anything itself.
+  # Flip to true (alongside the dashboard's STOP_LOSS_WRITE_ENABLED) to enable the Stop-loss button.
+  arm-trail:
+    write-enabled: ${POSITIONS_ARM_TRAIL_WRITE_ENABLED:false}
 
 management:
   endpoints:
