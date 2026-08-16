@@ -2257,7 +2257,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     OptionQuoteResult quote = optionQuote.getOptionQuote(qreq);
     if (quote != null && quote.getStatus() == OptionQuoteResult.Status.OK) {
       if (crossed(quote)) {
-        return best; // never anchor on a crossed book
+        // Discard the crossed QUOTE, but keep whatever was already established. On a copytrade
+        // position best is null here, so the arm is refused outright with anchor_unresolvable; on
+        // the watchlist path best is lastBid, a genuine earlier observation in the same bid space,
+        // and falling back to it is what a high-water mark is for. Not "refuse everything" — the
+        // distinction matters because only one of those two paths refuses.
+        return best;
       }
       BigDecimal fresh = bidSpace ? quote.getBid() : usableMid(quote);
       if (fresh != null && fresh.signum() > 0 && (best == null || fresh.compareTo(best) > 0)) {
@@ -2267,7 +2272,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     return best;
   }
 
-  /** A bid above the ask is not a book. Never anchor on it, and never vouch for its bid. */
+  /**
+   * A bid above the ask is not a book. Its mid is inflated relative to anything realisable, and its
+   * bid cannot be used as a sanity reference either — a blown bid would be vouching for itself.
+   */
   private static boolean crossed(OptionQuoteResult quote) {
     return quote.getBid() != null
         && quote.getAsk() != null
