@@ -24,15 +24,19 @@ or a live-tenant YAML edit.
 
 ### Do first
 
-- [ ] **1. Fill listener `onBinary`** — `#693` Phase 1, plan:
-      `docs/plans/PLAN-2026-08-16-fill-listener-binary-frames.md`.
-      `services/exec/.../AlpacaTradeUpdatesStream.java:585` — add `onBinary` with a **byte**
-      accumulator (UTF-8 splits across fragments), route into the existing `handleFrame:512`, keep
-      `onText`, add the `authorization`-ack log. → **PR 1, `Closes #693`**
-      ⚠ Assert WS×poll cross-source dedup explicitly — that path has been dead since June and this
-      wakes it.
+- [x] ~~**1. Fill listener `onBinary`**~~ — ✅ **SHIPPED in [#694](https://github.com/ridopark/oh-my-tradeagent/pull/694)**
+      (`b86d948` + `2e0e974`), merged to `main` 2026-08-16 from a parallel session working off
+      `docs/plans/PLAN-2026-08-16-fill-listener-binary-frames.md`. Implementation matches the plan:
+      byte accumulator decoded once on `last`, `onText` retained with both channels routed into
+      `handleFrame`, `MAX_FRAME_BYTES` parity, and the `authorization` reply logged. The
+      cross-source dedup flag was discharged rather than assumed — the poller only selects
+      `SUBMITTED` rows past the grace window, so a WS-terminalized row is never polled.
+      **Not yet verified in production — step 2 is now the live gate.**
 
-- [ ] **2. Verify in production** *(operator, during RTH — gate on this before step 3)*
+- [ ] **2. Verify in production** ⬅ **NEXT ACTION.** *(operator, during RTH — gate on this before
+      step 3. #694 is merged but unproven against a live Alpaca socket, which is exactly how the
+      original bug survived: `#167` validated the transport against a `NoopFillDispatcher` and
+      shipped.)*
       ```bash
       kubectl -n copytrade exec deploy/exec-alpaca-live -- wget -qO- localhost:8080/actuator/prometheus \
         | grep -E 'fill_listener_(events_received|poll_fills_detected)'
