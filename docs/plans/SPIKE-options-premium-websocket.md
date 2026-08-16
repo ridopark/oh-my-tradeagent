@@ -577,6 +577,64 @@ pushback was correct.
 - **Lesson worth keeping:** a negative result from a proxy dataset needs a resolution check *before*
   it is believed. I had the print-gap data in hand the whole time and did not look at it.
 
+## ⚠ Out-of-scope finding: the copytrade latency budget is 96% broker-fill wait
+
+Traced 2026-08-16 from `audit_log` on the live cluster, prompted by the operator asking whether the
+2s premium poll caused missed BTOs / weak STC fills. **It does not — it is not in that path at all.**
+BTO entry limits come from `BtoPricing` (author's posted price + slippage cap, no live quote); STC
+exits use a one-shot `GetOptionQuoteActivity`. The premium poll only feeds trail/chandelier.
+
+`audit_log.subject->>'posted_at'` carries the **author's Discord message timestamp**, so true
+end-to-end is measurable. Median, BTO (n=203 detect / 131 place / 89 fill):
+
+| stage | p50 |
+|---|---|
+| author posts → we detect | **0.751s** (p95 1.185s) |
+| detect → pre-trade checks pass | 0.847s |
+| checks → order submitted | 0.464s |
+| **order submitted → fill observed** | **74.366s** |
+| **total** | **77.457s** (p95 92.201s) |
+
+STC: detect 0.803s → exit requested 0.450s ≈ **1.25s to get the order out.**
+
+**Our software is ~2s of a ~77s pipeline.** This *retracts* my earlier suggestion that porting
+`chat_watcher.py`'s MutationObserver to the signal path is a big win — it would optimise <1% of the
+budget. The 1.0s Discord poll is real but nearly irrelevant.
+
+### The suspicious part
+
+Weekly BTO fill times, June→August: **the fastest fill in every single week is ~60s. Zero fills under
+60.4s across 89 fills and 11 weeks.**
+
+```
+week        n   fill_p50  fill_p95  fastest  under_5s
+2026-08-10  21     79.4      87.9     60.5      0
+2026-07-27  14     73.0      89.6     61.5      0
+2026-06-29  11     76.9      88.3     60.8      0
+...
+```
+
+A market process would sometimes fill instantly. A hard floor that never varies is a *system*
+constant — and `exec.fill-listener.poll.grace-ms` is **exactly 60000**: the poller deliberately skips
+orders younger than 60s, deferring to the trade-updates WebSocket. **A 60s floor is the signature of
+the WS never winning, with the 30s poller silently covering for it.**
+
+Corroborating but not conclusive: `AlpacaTradeUpdatesStream`'s `Listener` implements `onText` only —
+**no `onBinary`** — which is the *identical* shape to the two bugs already found here (the June
+options WS, and the stocks WS before `9ec7387`). Startup logs show `sockets_started` but **no
+`authenticated` line**.
+
+**Not proven.** Live metrics were read on a Saturday after a pod restart, so every counter is 0 and
+proves nothing either way. The clean confirmation is one line during Monday's session:
+
+```
+kubectl -n copytrade exec deploy/exec-alpaca-live -- wget -qO- localhost:8080/actuator/prometheus \
+  | grep -E 'fill_listener_(events_received|poll_fills_detected)'
+```
+
+If `events_received{event="fill"}` stays 0 while `poll_fills_detected` climbs, the WS is dead and
+every fill is being discovered up to 60s late. **This belongs in its own issue, not this spike.**
+
 ## Sources
 
 - [Streaming Market Data (connection limits, error codes, auth)](https://docs.alpaca.markets/us/docs/streaming-market-data)
