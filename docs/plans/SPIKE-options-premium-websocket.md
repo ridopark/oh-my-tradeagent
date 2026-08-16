@@ -11,6 +11,80 @@ OPRA WebSocket — and, separately, whether buying the OPRA entitlement is worth
 > retraction** — a spike doc that quietly rewrites itself teaches nothing. Retractions so far are
 > marked ⟲.
 
+---
+
+## TODO — what to actually do, in order
+
+Ranked by value × confidence ÷ effort. **The largest finding of this spike is not about the options
+WebSocket at all** — it is [#693](https://github.com/ridopark/oh-my-tradeagent/issues/693), and it
+outranks everything the spike set out to investigate.
+
+None of these need a Temporal version gate, a `contract/schemas` change, a ConfigMap drift re-sync,
+or a live-tenant YAML edit.
+
+### Do first
+
+- [ ] **1. Fill listener `onBinary`** — `#693` Phase 1, plan:
+      `docs/plans/PLAN-2026-08-16-fill-listener-binary-frames.md`.
+      `services/exec/.../AlpacaTradeUpdatesStream.java:585` — add `onBinary` with a **byte**
+      accumulator (UTF-8 splits across fragments), route into the existing `handleFrame:512`, keep
+      `onText`, add the `authorization`-ack log. → **PR 1, `Closes #693`**
+      ⚠ Assert WS×poll cross-source dedup explicitly — that path has been dead since June and this
+      wakes it.
+
+- [ ] **2. Verify in production** *(operator, during RTH — gate on this before step 3)*
+      ```bash
+      kubectl -n copytrade exec deploy/exec-alpaca-live -- wget -qO- localhost:8080/actuator/prometheus \
+        | grep -E 'fill_listener_(events_received|poll_fills_detected)'
+      ```
+      Success = `events_received{event="fill"}` climbing, `poll_fills_detected` near zero. Then
+      re-run `scripts/research/fill_observation_lag.sql`: p50 should collapse from 30–69s to
+      sub-second. The ack log also finally reveals whether auth was succeeding all along.
+
+- [ ] **3. Alert on the invariant** — `#693` Phase 2. Poller finding fills the socket never
+      reported ⇒ mute socket. Only meaningful once the socket *can* succeed. → **PR 2**
+
+- [ ] **4. market-data manifest** — `infra/k8s/53-market-data.yaml`. `strategy: {type: Recreate}`
+      (every deploy currently 406-collides the live stocks WS) **and** declare
+      `ALPACA_STOCK_FEED=sip` (cluster-only today; absent from the manifest *and* from
+      `last-applied-configuration`). ~4 lines, one file, one PR — splitting is ceremony.
+      Independent of 1–3, run in parallel. → **PR 3**
+
+### Do next
+
+- [ ] **5. Premium poll 2000ms → 500ms** + correct the stale "~200 req/min" comment (it is 10,000).
+      Worth ~1.7–3.5% of premium in the tail. **Sequence after step 2, not alongside** — change two
+      latency things at once and neither improvement is attributable. → **PR 4**
+
+- [ ] **6. Doc corrections** (zero risk): `AlpacaMarketData`'s javadoc claims the options WS "never
+      delivered ticks" as a property of Alpaca's feed — it was our bug, twice; and the `data-ws-url`
+      default still points at `indicative`, measured **$3.39 low on the bid** with a 3.7× wider
+      spread. Fold into PR 4 or ship alone.
+
+- [ ] **7. Ask Alpaca the OPRA redistribution question** *(not code, do in parallel)* — one
+      pod-global key feeds real-time OPRA into other tenants' dashboards. Live today, not
+      hypothetical.
+
+### Do later, or decide not to
+
+- [ ] **8. Revisit the #686 entry re-peg** — after step 2 has been live a few sessions. Its 30s
+      timer has been asking "am I still unfilled?" against a journal 69s behind; its behaviour under
+      *accurate* fill state has never been observed.
+
+- [ ] **9. Options WS — one RTH capture session.** Passive recorder: WS quotes vs 2s REST snapshots,
+      a few contracts, one day; analysis offline afterwards. Answers the only surviving question —
+      does the socket surface bid withdrawals the REST snapshot misses (exit criterion 3)?
+      **Decide whether you still care after 1–5. "No" is a legitimate outcome and closes the spike.**
+
+### Systemic note
+
+Three `WebSocket.Listener`s in this repo; **two shipped broken the same way** — the options WS (June:
+header auth + no `onBinary`) and trade-updates (no `onBinary`) — and the third, stocks, needed
+`9ec7387` to fix the same class. That is a pattern, not bad luck. Worth a standing check on any
+WebSocket listener here: **does it handle both frame types, and does it log the auth ack?**
+
+---
+
 ## Exit criteria
 
 The spike is done when all four are answered with evidence, not assumption:
