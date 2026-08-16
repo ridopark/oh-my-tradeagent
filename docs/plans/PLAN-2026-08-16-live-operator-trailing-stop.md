@@ -100,11 +100,11 @@ percentage — but the percentage is still what is stored, and the label must sa
 
 ## P0 / operator follow-ups (NOT code phases)
 
-1. **Flip the dark flag** (`positions.arm-trail.enabled=true` on api-gateway, plus the dashboard's
-   own feature flag) once Phase 4 is deployed. Ships dark; every phase merges inert.
+1. **Flip the dark flag** (`POSITIONS_ARM_TRAIL_WRITE_ENABLED=true` on tenant-dashboard-bff, plus
+   the dashboard's own feature flag) once Phase 4 is deployed. Ships dark; every phase merges inert.
 2. **Canary on `staging_paper` first** — arm a trail on one paper position, confirm `ChandelierArmed`
    in the audit trail and that the stop rises with the peak, before enabling for live tenants.
-3. **Deploy order:** orchestrator BEFORE api-gateway/dashboard. The Update must exist on the worker
+3. **Deploy order:** orchestrator BEFORE tenant-dashboard-bff/dashboard. The Update must exist on the worker
    before anything can call it; a call to an unknown Update name fails at the server.
 4. No tenant-YAML or ConfigMap change in this plan → **no `40-tenants-config.yaml` re-sync needed**,
    and no live-cluster-only YAML edits.
@@ -177,23 +177,57 @@ history, so a legacy replay never reaches the handler and the command stream is 
 
 ---
 
-## Phase 3 — `POST /positions/arm-trail` (`services/api-gateway`)
+## Phase 3 — `POST /api/positions/arm-trail` (`services/tenant-dashboard-bff`)
 
-**Goal:** operator endpoint, modelled exactly on `force-close` (`PositionsController.java:85`).
+**Goal:** operator endpoint on the BFF, modelled on **`partial_close`** (`tdbff/web/PositionsController.java:146`).
 
-**Changes:**
-- `PositionsController.java` — new `@PostMapping("/arm-trail")`. **Copy the tenant-scoping guard
-  verbatim** (`:96-101`): reject any `workflow_id` not prefixed
-  `WorkflowIds.tenantStrategy(tenant, strategy) + "/"`. That check is what stops one tenant arming
-  a stop on another tenant's position — it is the security control of this endpoint, not a
-  formality.
-- `operator_id` from `ctx.operatorId(req)`, never from the body.
-- Dark flag `@ConditionalOnProperty("positions.arm-trail.enabled")`, default false; add the default
-  to `application.yml` (the IMAGE default — env is not applied by deploy on homelab).
-- Map `ACCEPTED` → 202, `ALREADY_ARMED` → 200, `REJECTED` → 422 with the reason.
+> **CORRECTED 2026-08-16 — this phase originally targeted `services/api-gateway`. That was wrong
+> and the endpoint would have been unreachable from the button.** `/live` calls the BFF:
+> `dashboard/lib/bff.ts:200` posts `/api/positions/force-close` and `:241` posts
+> `/api/positions/partial-close`, both served by `tdbff/web/PositionsController` (`:98`, `:146`).
+> The api-gateway `force-close` is an older operator/script surface `/live` never touches — and it
+> is the WRONG model besides: no `/pos/` kind guard, a strategy-scoped prefix that would reject
+> every watchlist position, no dark flag, and a body record with no `@JsonProperty` (so a snake_case
+> `workflow_id` silently binds null). Model on `partial_close`, which is also the closer sibling
+> because it likewise pre-validates a numeric body field.
 
-**Tests:** `PositionsControllerTest` — cross-tenant `workflow_id` → 400 and **no Update dispatched**;
-flag-off → 404; REJECTED → 422 carrying the reason.
+**Changes** (`services/tenant-dashboard-bff/.../web/PositionsController.java`):
+- New `@PostMapping("/arm-trail")`. Order: flag → tenant → body → workflow-id guard → request →
+  Temporal.
+- **Tenant guard: call `WorkflowWriteGuards.refuseUnlessTenantOwned(tenant, workflowId, "/pos/",
+  "not_a_position_workflow_id")` via the private `guardWorkflowId` (`:213-216`) — do not hand-roll
+  it.** That file is deliberately the single implementation of the tenant boundary. It **returns**
+  a `ResponseEntity` (it does not throw) and yields **403 `cross_tenant_workflow_id`**, not 400.
+  The `/pos/` kind guard matters: a bare tenant prefix would also admit the caller's own
+  killswitch/recon workflow ids.
+- `operator_id` from `WorkflowWriteGuards.operatorId(req, tenant)` (`:219-221`), never the body.
+- Body record needs `@JsonProperty("workflow_id")` — without it the wire field is `workflowId` and
+  the snake_case body `/live` sends binds **null silently**.
+- Do NOT reuse `requireWorkflowIdAndReason` (`:196-203`): `ArmTrailRequest` has no `reason` field.
+- **Pre-validate `giveback_pct` in the controller** (null / <= 0 / > `MAX_GIVEBACK`) →
+  `IllegalArgumentException` → **400 naming the field**. Without this an operator typo returns the
+  workflow validator's **409 `update_rejected`**, which reads as a system fault rather than a
+  correctable input. `partial_close` does exactly this and says why at `:159-161`. The 0.5 bound now
+  exists in three places (workflow `MAX_GIVEBACK`, the JSON schema, this controller) — comment the
+  coupling so it cannot drift.
+- **Dark flag: a constructor `@Value("${positions.arm-trail.write-enabled:false}")` boolean plus an
+  in-method 404 with a JSON body** (`{"error":"arm_trail_disabled"}`), matching `:77-78` and
+  `:101-106`. **NOT `@ConditionalOnProperty`** — that removes the whole controller bean and would
+  404 `GET /api/positions` and both existing writes. Add it to the EXISTING constructor: a second
+  constructor is the Spring two-ctor context-refresh trap this repo has hit twice. Default in
+  `tdbff/src/main/resources/application.yml` (the IMAGE default; env is not applied by deploy).
+- Response: hand-built `LinkedHashMap` (`status`, `reason`, `peak_premium`, `giveback_pct`,
+  `stop_price`) as at `:132-135`, not the raw DTO — keeps the wire shape off contract regen.
+- Map `ARMED` → 202, `ALREADY_ARMED` → 200, `REJECTED` → 422 + reason. The 202/200 split is
+  load-bearing, not cosmetic: `bff.ts:252-259` already branches on status rather than "any 2xx",
+  precisely so a green "placed" is never painted over an action that did nothing. 422 is new to this
+  codebase — document that 422 = "the workflow refused" as distinct from 409 = "validator rejected /
+  workflow gone".
+
+**Tests** (model on `PositionsPartialCloseControllerWebMvcTest` / `PositionsPartialCloseDarkLaunchTest`):
+cross-tenant `workflow_id` → **403** and **no Update dispatched** (`verify(stub, never())` — the
+assertion that actually matters); flag-off → 404 `arm_trail_disabled`; out-of-range giveback → 400
+naming the field; REJECTED → 422 carrying the reason; ALREADY_ARMED → 200.
 
 **Verify:** `mvn -pl services/api-gateway -am spotless:apply && mvn -pl services/api-gateway test`.
 
