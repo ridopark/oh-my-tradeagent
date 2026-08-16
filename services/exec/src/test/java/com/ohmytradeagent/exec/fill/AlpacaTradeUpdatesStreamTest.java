@@ -240,6 +240,184 @@ class AlpacaTradeUpdatesStreamTest {
     assertThat(fill.filledQty()).isEqualTo(2L);
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // #693 — Alpaca delivers trade_updates as BINARY frames carrying JSON. `onBinary` was never
+  // implemented, so the JDK default silently request(1)'d and discarded every frame: no fill has
+  // ever reached the dispatcher over the WS, and the 30s poller behind a 60s grace window quietly
+  // discovered all of them (measured: BUY observe lag p50 69.2s, SELL 30.2s).
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void binaryFrameIsParsedAndDispatched() throws Exception {
+    // The incident reproduction: byte-for-byte the payload Alpaca sends, delivered on the BINARY
+    // channel instead of TEXT. Fails before onBinary exists.
+    stream.start();
+    awaitHandshake();
+
+    server.broadcastBinary(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-bin\",\"client_order_id\":\"ck-bin\","
+            + "\"filled_qty\":\"7\",\"filled_avg_price\":\"1.23\","
+            + "\"filled_at\":\"2026-08-16T14:30:00Z\"}}}");
+
+    BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(fill).isNotNull();
+    assertThat(fill.brokerOrderId()).isEqualTo("brk-bin");
+    assertThat(fill.clientOrderId()).isEqualTo("ck-bin");
+    assertThat(fill.filledQty()).isEqualTo(7L);
+    assertThat(fill.avgFillPrice()).isEqualByComparingTo(new BigDecimal("1.23"));
+    assertThat(fill.filledAt()).isEqualTo(OffsetDateTime.parse("2026-08-16T14:30:00Z"));
+    assertThat(fill.source()).isEqualTo(BrokerFillEvent.Source.WS);
+    assertThat(registry.counter("fill_listener.events_received", "event", "fill").count())
+        .isEqualTo(1.0);
+  }
+
+  @Test
+  void binaryFrameSplitAcrossFragmentsIsReassembled() throws Exception {
+    stream.start();
+    awaitHandshake();
+
+    String payload =
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-binmf\",\"client_order_id\":\"ck-binmf\","
+            + "\"filled_qty\":\"2\",\"filled_avg_price\":\"3.30\","
+            + "\"filled_at\":\"2026-08-16T15:00:00Z\"}}}";
+    byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+    int mid = bytes.length / 2;
+    server.sendFragmentedBinary(
+        java.util.Arrays.copyOfRange(bytes, 0, mid),
+        java.util.Arrays.copyOfRange(bytes, mid, bytes.length));
+
+    BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(fill).isNotNull();
+    assertThat(fill.brokerOrderId()).isEqualTo("brk-binmf");
+    assertThat(fill.filledQty()).isEqualTo(2L);
+  }
+
+  @Test
+  void binaryFrameSplitMidUtf8SequenceDoesNotCorrupt() throws Exception {
+    // The reason the accumulator must hold BYTES, not chars. "é" is 2 bytes in UTF-8; splitting
+    // between them and decoding each fragment independently yields two replacement characters,
+    // so the client_order_id no longer round-trips. A byte accumulator decoded once on `last`
+    // reassembles the character intact.
+    stream.start();
+    awaitHandshake();
+
+    String clientOrderId = "ck-café-bin";
+    String payload =
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-utf8\",\"client_order_id\":\""
+            + clientOrderId
+            + "\",\"filled_qty\":\"1\",\"filled_avg_price\":\"0.55\","
+            + "\"filled_at\":\"2026-08-16T15:30:00Z\"}}}";
+    byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+
+    // Split exactly between the two bytes of the 'é' continuation sequence.
+    int accentStart = payload.indexOf("café") + 3;
+    int splitAt = clientOrderIdByteOffset(payload, accentStart) + 1;
+    assertThat(splitAt).isBetween(1, bytes.length - 1);
+
+    server.sendFragmentedBinary(
+        java.util.Arrays.copyOfRange(bytes, 0, splitAt),
+        java.util.Arrays.copyOfRange(bytes, splitAt, bytes.length));
+
+    BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(fill).isNotNull();
+    assertThat(fill.brokerOrderId()).isEqualTo("brk-utf8");
+    assertThat(fill.clientOrderId())
+        .as("multi-byte character split across fragments must survive reassembly")
+        .isEqualTo(clientOrderId);
+  }
+
+  @Test
+  void binaryAndTextFramesBothDispatchExactlyOnce() throws Exception {
+    // Alpaca's channel choice is not contractual and paper/live may differ, so both are handled.
+    // Guards the obvious way to get this wrong: routing binary through a second code path that
+    // also re-handles text, double-dispatching every fill.
+    stream.start();
+    awaitHandshake();
+
+    server.broadcastBinary(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-b\",\"client_order_id\":\"ck-b\","
+            + "\"filled_qty\":\"1\",\"filled_avg_price\":\"1.00\","
+            + "\"filled_at\":\"2026-08-16T16:00:00Z\"}}}");
+    server.broadcast(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-t\",\"client_order_id\":\"ck-t\","
+            + "\"filled_qty\":\"1\",\"filled_avg_price\":\"1.00\","
+            + "\"filled_at\":\"2026-08-16T16:00:01Z\"}}}");
+
+    List<String> ids = new ArrayList<>();
+    for (int i = 0; i < 2; i++) {
+      BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+      assertThat(fill).isNotNull();
+      ids.add(fill.brokerOrderId());
+    }
+    assertThat(ids).containsExactlyInAnyOrder("brk-b", "brk-t");
+    assertThat(dispatcher.events.poll(500, TimeUnit.MILLISECONDS))
+        .as("neither channel may dispatch twice")
+        .isNull();
+  }
+
+  @Test
+  void binaryFrameExceedingMaxBytesAbortsSocketAndReconnects() throws Exception {
+    // Parity with the onText guard at MAX_FRAME_BYTES: a runaway continuation must abort the
+    // socket and recover via the reconnect loop rather than accumulating until OOM.
+    stream.start();
+    awaitHandshake();
+
+    byte[] oversized = new byte[(1 << 20) + 1024];
+    java.util.Arrays.fill(oversized, (byte) 'x');
+    server.broadcastBinaryBytes(oversized);
+
+    assertThat(dispatcher.events.poll(500, TimeUnit.MILLISECONDS)).isNull();
+    // Recovery is observable as a fresh handshake on the reconnect.
+    String auth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    String listen = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(auth).isNotNull();
+    assertThat(auth).contains("\"action\":\"authenticate\"");
+    assertThat(listen).isNotNull();
+
+    // And the recovered socket still works.
+    server.broadcastBinary(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-recov\",\"client_order_id\":\"ck-recov\","
+            + "\"filled_qty\":\"1\",\"filled_avg_price\":\"0.75\","
+            + "\"filled_at\":\"2026-08-16T17:00:00Z\"}}}");
+    BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(fill).isNotNull();
+    assertThat(fill.brokerOrderId()).isEqualTo("brk-recov");
+  }
+
+  // Deliberately NOT tested: "the byte accumulator is reset on the oversize path." Mutation-checked
+  // — deleting the reset leaves every test green, because abort() discards the Listener and the
+  // reconnect builds a new one with a fresh accumulator. The reset is unobservable by construction
+  // (the same is true of the onText path's setLength(0)); a test asserting it would pass no matter
+  // what the code did. The recovery that IS observable is covered by the abort test above.
+
+  @Test
+  void malformedBinaryFrameIsSwallowed() throws Exception {
+    stream.start();
+    awaitHandshake();
+
+    server.broadcastBinary("not json at all {{{");
+    server.broadcastBinary(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-binok\",\"client_order_id\":\"ck-binok\","
+            + "\"filled_qty\":\"1\",\"filled_avg_price\":\"2.00\","
+            + "\"filled_at\":\"2026-08-16T18:00:00Z\"}}}");
+
+    BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(fill).isNotNull();
+    assertThat(fill.brokerOrderId()).isEqualTo("brk-binok");
+  }
+
+  /** Byte offset of {@code charIndex} within {@code s} once encoded as UTF-8. */
+  private static int clientOrderIdByteOffset(String s, int charIndex) {
+    return s.substring(0, charIndex).getBytes(StandardCharsets.UTF_8).length;
+  }
+
   @Test
   void missingRequiredFieldIsSkipped() throws Exception {
     stream.start();
@@ -710,6 +888,33 @@ class AlpacaTradeUpdatesStreamTest {
             Opcode.TEXT, ByteBuffer.wrap(first.getBytes(StandardCharsets.UTF_8)), false);
         c.sendFragmentedFrame(
             Opcode.TEXT, ByteBuffer.wrap(second.getBytes(StandardCharsets.UTF_8)), true);
+      }
+    }
+
+    /** Sends {@code payload} as a single BINARY frame — the channel Alpaca actually uses. */
+    void broadcastBinary(String payload) {
+      broadcastBinaryBytes(payload.getBytes(StandardCharsets.UTF_8));
+    }
+
+    void broadcastBinaryBytes(byte[] payload) {
+      List<WebSocket> snapshot;
+      synchronized (clients) {
+        snapshot = new ArrayList<>(clients);
+      }
+      for (WebSocket c : snapshot) {
+        c.send(ByteBuffer.wrap(payload));
+      }
+    }
+
+    /** BINARY counterpart of {@link #sendFragmented}, split at an arbitrary BYTE boundary. */
+    void sendFragmentedBinary(byte[] first, byte[] second) {
+      List<WebSocket> snapshot;
+      synchronized (clients) {
+        snapshot = new ArrayList<>(clients);
+      }
+      for (WebSocket c : snapshot) {
+        c.sendFragmentedFrame(Opcode.BINARY, ByteBuffer.wrap(first), false);
+        c.sendFragmentedFrame(Opcode.BINARY, ByteBuffer.wrap(second), true);
       }
     }
   }

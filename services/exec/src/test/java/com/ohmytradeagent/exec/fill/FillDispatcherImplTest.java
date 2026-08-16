@@ -142,6 +142,40 @@ class FillDispatcherImplTest {
     when(workflowClient.newUntypedWorkflowStub(anyString())).thenReturn(workflowStub);
   }
 
+  // #693: until onBinary shipped, the WS delivered NOTHING and the poller found every fill, so the
+  // WS×poll cooperation these two tests describe had never actually run in production despite being
+  // documented on FillDispatcherImpl. Phase 1 turns it on — so assert it rather than trust the
+  // javadoc.
+  @Test
+  void dispatch_sameFillFromWsThenPoll_terminalizesOnceAndIsHarmlessTwice() {
+    when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
+    // markFilled is conditional on state in (RECORDED, SUBMITTED): the WS wins the race and
+    // terminalizes; the poll repeat finds the row already FILLED and returns false.
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true, false);
+
+    BrokerFillEvent viaPoll =
+        new BrokerFillEvent(
+            FILL.brokerOrderId(),
+            FILL.clientOrderId(),
+            FILL.filledQty(),
+            FILL.avgFillPrice(),
+            FILL.filledAt(),
+            BrokerFillEvent.Source.POLL);
+
+    dispatcher.dispatch(FILL);
+    dispatcher.dispatch(viaPoll);
+
+    // Both sources attempt terminalization. This asserts the DISPATCHER's half of the contract —
+    // that it re-attempts rather than short-circuiting. The journal is mocked here, so the guard
+    // that actually makes the repeat safe (UPDATE ... WHERE state IN (RECORDED, SUBMITTED)) is
+    // proven against a real database in JooqOrderIntentJournalIT#markFilled_onTerminalState_noOp,
+    // not by this test.
+    verify(journal, times(2)).markFilled(eq("ck-42"), eq(5L), any(), any());
+    // Both signal — onFill is idempotent by structure (single field assign, read once through
+    // Workflow.await), which is what makes the at-least-once contract safe.
+    verify(workflowStub, times(2)).signal(eq("onFill"), any());
+  }
+
   @Test
   void dispatch_routesFillToWorkflowSignal() {
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
