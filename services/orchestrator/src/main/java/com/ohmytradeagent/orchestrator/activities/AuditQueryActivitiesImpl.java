@@ -70,7 +70,12 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
           "same_underlying_count",
           "sector_concentration_cap",
           "daily_trade_count",
-          "drawdown_velocity_threshold");
+          "drawdown_velocity_threshold",
+          // PLAN-2026-08-04-bto-entry-repeg: raises the MAX PRICE PAYABLE on a real-money entry
+          // above the max_slippage_pct cap, so editing it changes risk exposure in the same way the
+          // notional_cap_* keys do. Deliberately listed; repeg_after_ms is deliberately NOT, so the
+          // emergency off-switch stays a fast edit that does not void a live promotion.
+          "repeg_ceiling_pct");
 
   /**
    * {@link #RISK_RELEVANT_CONFIG_KEYS} rendered ONCE as a Postgres {@code text[]} array literal for

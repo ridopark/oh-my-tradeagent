@@ -127,7 +127,7 @@ public class OrderFailureAlerter {
   private static final String DEFAULT_FAILURE_KINDS =
       "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
           + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,"
-          + "BtoCorrectionSuperseded,EntryWorkflowFailed";
+          + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 

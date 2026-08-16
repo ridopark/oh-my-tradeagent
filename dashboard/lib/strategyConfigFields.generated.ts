@@ -282,7 +282,12 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   {
     field: "repeg_after_ms",
     kind: "number",
-    description: "Issue #4: Milliseconds the BTO limit sits at its initial price before a single re-peg toward the slippage-capped ceiling, after which the order is cancelled if still unfilled. Symmetric STC behavior: re-peg aggressively toward bid as the BTO-TTL window elapses. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation. Spec-only: no orchestrator/exec code consumes this field — it has no runtime effect regardless of value.",
+    description: "Milliseconds the BTO entry limit sits at its initial price (computeBtoLimit, unchanged) before a SINGLE re-peg toward the live ask, bounded by repeg_ceiling_pct. Unset: the 30000 (30s) code default applies — the re-peg is ACTIVE by default. 0: DISABLED, restoring the one-shot entry (the per-tenant off-switch, no redeploy). A value >= the pending TTL also disables it, since the window would never open. BTO only; the symmetric STC re-peg toward bid is not implemented.",
+  },
+  {
+    field: "repeg_ceiling_pct",
+    kind: "number",
+    description: "Fractional cap above the signal price that the BTO entry re-peg may reach (e.g. 0.10 = 10%). The re-peg targets min(live ask + one penny tick, payload.price * (1 + repeg_ceiling_pct)) — it walks to the market, never blindly to this cap, and never past it. Unset: the 0.10 code default applies. 0: DISABLED, same sentinel as repeg_after_ms = 0 (either one at 0 turns the re-peg off). This is deliberately WIDER than max_slippage_pct: the initial order still goes out at the tighter max_slippage limit, and this budget is spent only after that peg has failed to fill. Ignored when repeg_after_ms = 0.",
   },
   {
     field: "reset_cooldown_secs",

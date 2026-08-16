@@ -188,6 +188,134 @@ class BtoPricingTest {
     assertThat(Strategy.SLIP_MIN.wireKey()).isEqualTo("slip_min");
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // Re-peg ceiling + limit (PLAN-2026-08-04-bto-entry-repeg Phase 2).
+  //
+  // The incident these model: the entry limit is anchored to the signal's already-stale price and
+  // never reaches toward the live market, so an option that has ticked past it expires unfilled.
+  // computeBtoLimit stays the INITIAL peg (its coverage above is the no-regression guard); these
+  // two helpers describe the single bounded re-peg toward the live ask.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void repegCeiling_appliesTenPercentDefaultWhenUnset() {
+    // Unset means "use the default", NOT "disabled" — the feature ships active. The off-switch is
+    // repeg_after_ms=0, resolved in the workflow, not here.
+    CopytradeSignalPayload p = payloadWithPrice(new BigDecimal("2.46"));
+
+    BigDecimal ceiling = BtoPricing.computeRepegCeiling(p, configWithSlippage(null, null));
+
+    assertThat(ceiling).isEqualByComparingTo(new BigDecimal("2.71"));
+  }
+
+  @Test
+  void repegCeiling_usesConfiguredPctWhenSet() {
+    CopytradeSignalPayload p = payloadWithPrice(new BigDecimal("2.46"));
+    StrategyConfig cfg = configWithSlippage(null, null);
+    cfg.setRepegCeilingPct(new BigDecimal("0.20"));
+
+    assertThat(BtoPricing.computeRepegCeiling(p, cfg)).isEqualByComparingTo(new BigDecimal("2.95"));
+  }
+
+  @Test
+  void repegCeiling_treatsZeroAsUnsetLikeTheSlippageCaps() {
+    // Mirrors BtoPricing's existing null/ZERO equivalence so a parser-emitted "0.00" cannot
+    // collapse the ceiling to the signal price and silently disable the re-peg.
+    CopytradeSignalPayload p = payloadWithPrice(new BigDecimal("2.46"));
+    StrategyConfig cfg = configWithSlippage(null, null);
+    cfg.setRepegCeilingPct(BigDecimal.ZERO);
+
+    assertThat(BtoPricing.computeRepegCeiling(p, cfg)).isEqualByComparingTo(new BigDecimal("2.71"));
+  }
+
+  @Test
+  void repegCeiling_isPennyRounded() {
+    // 2.37 * 1.10 = 2.607 — a 3rd decimal Alpaca rejects with a non-retryable 422 (Issue #263).
+    CopytradeSignalPayload p = payloadWithPrice(new BigDecimal("2.37"));
+
+    BigDecimal ceiling = BtoPricing.computeRepegCeiling(p, configWithSlippage(null, null));
+
+    assertThat(ceiling.scale()).isEqualTo(2);
+    assertThat(ceiling).isEqualByComparingTo(new BigDecimal("2.61"));
+  }
+
+  @Test
+  void repegLimit_stepsOnePennyAboveTheAsk_aaplIncident() {
+    // AAPL 8/14 315C, 2026-08-04 12:24 ET. Numbers taken from the audit trail, NOT back-solved:
+    // SignalReceived price 2.46, limit 2.51 (slip_min, the abs=0.05 branch), and the option's first
+    // trade print inside the TTL was 2.55 — so the order was never marketable and expired.
+    // Ceiling = 2.46 * 1.10 = 2.71 (penny-rounded); the re-peg reaches 2.56 and fills well inside
+    // it.
+    BigDecimal limit =
+        BtoPricing.computeRepegLimit(
+            new BigDecimal("2.55"), new BigDecimal("2.71"), new BigDecimal("2.51"));
+
+    assertThat(limit).isEqualByComparingTo(new BigDecimal("2.56"));
+  }
+
+  @Test
+  void repegLimit_isBoundedByTheCeiling_staleSignalPrice() {
+    // The case the ceiling actually exists for: a signal whose posted price has gone badly stale.
+    // Real occurrence — MSFT 7/17 400C on 2026-07-07 was posted at 3.65 while the contract was
+    // trading 7.05-7.16, roughly +93%. Chasing that is not "expensive", it is a different trade
+    // from the one the signal described, so the re-peg stops dead at the ceiling.
+    //
+    // Deliberately NOT modelled on the 2026-08-04 NVDA miss: the audit trail puts that signal at
+    // 2.90 needing ~+5.2%, which the 10% ceiling COVERS. An earlier version of this test claimed
+    // NVDA needed +16%, a figure back-solved from the wrong slippage branch. See
+    // BtoPricing#DEFAULT_REPEG_CEILING_PCT for the calibration this replaces it with.
+    BigDecimal ceiling = new BigDecimal("4.02"); // 3.65 * 1.10, penny-rounded
+    BigDecimal limit =
+        BtoPricing.computeRepegLimit(new BigDecimal("7.05"), ceiling, new BigDecimal("3.83"));
+
+    assertThat(limit).isEqualByComparingTo(ceiling);
+  }
+
+  @Test
+  void repegLimit_nullWhenAskIsAtOrBelowTheInitialPeg() {
+    // Nothing to gain: the standing order is already at least as marketable. Degrade to one-shot
+    // rather than burn a cancel/replace round-trip.
+    assertThat(
+            BtoPricing.computeRepegLimit(
+                new BigDecimal("2.40"), new BigDecimal("2.71"), new BigDecimal("2.51")))
+        .isNull();
+  }
+
+  @Test
+  void repegLimit_nullWhenTheCeilingIsAtOrBelowTheInitialPeg() {
+    // A tenant configuring repeg_ceiling_pct BELOW max_slippage_pct must not re-peg DOWNWARD.
+    assertThat(
+            BtoPricing.computeRepegLimit(
+                new BigDecimal("3.00"), new BigDecimal("2.45"), new BigDecimal("2.51")))
+        .isNull();
+  }
+
+  @Test
+  void repegLimit_nullWhenAskIsMissingOrNonPositive() {
+    // Entry fail-safe: no live ask means no re-peg at all. Never buy at a cap that could not be
+    // priced against a live market — the inverse of the exit path, where a missing quote degrades
+    // to a marketable order because the position MUST be closed.
+    BigDecimal ceiling = new BigDecimal("2.71");
+    BigDecimal peg = new BigDecimal("2.51");
+
+    assertThat(BtoPricing.computeRepegLimit(null, ceiling, peg)).isNull();
+    assertThat(BtoPricing.computeRepegLimit(BigDecimal.ZERO, ceiling, peg)).isNull();
+    assertThat(BtoPricing.computeRepegLimit(new BigDecimal("-1.00"), ceiling, peg)).isNull();
+  }
+
+  @Test
+  void repegLimit_isPennyRoundedAndNeverExceedsTheCeiling() {
+    // A 3dp ask (mid-derived quotes can carry one) must not leak a >2dp limit into placeOrder, and
+    // rounding must not step over the ceiling.
+    BigDecimal limit =
+        BtoPricing.computeRepegLimit(
+            new BigDecimal("2.555"), new BigDecimal("2.71"), new BigDecimal("2.51"));
+
+    assertThat(limit.scale()).isEqualTo(2);
+    assertThat(limit).isEqualByComparingTo(new BigDecimal("2.57"));
+    assertThat(limit).isLessThanOrEqualTo(new BigDecimal("2.71"));
+  }
+
   private static CopytradeSignalPayload payloadWithPrice(BigDecimal price) {
     CopytradeSignalPayload p = new CopytradeSignalPayload();
     p.setPrice(price);

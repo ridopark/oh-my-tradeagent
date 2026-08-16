@@ -124,6 +124,20 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
           "src/test/resources/temporal/replay/"
               + "copytrade-signal-pre-165-ttl-expiry-legacy-history.json");
 
+  // PLAN-2026-08-04-bto-entry-repeg: legacy TTL-expiry fixture with a REALISTIC 90s pending TTL.
+  //
+  // The pre-#165 fixture above pins pendingTtlPaperSecs=1, which makes it TOOTHLESS for the entry
+  // re-peg: repeg_after_ms (30000) is >= a 1s TTL, so the re-peg branch is disabled by the TTL
+  // check alone and the version marker is never load-bearing. Deleting the gate leaves that fixture
+  // green. This one uses a 90s TTL, so the ONLY thing keeping the replay deterministic is
+  // getVersion(VERSION_BTO_ENTRY_REPEG) resolving to DEFAULT_VERSION on a marker-less history.
+  private static final String REPEG_TTL_FIXTURE_RESOURCE =
+      "temporal/replay/copytrade-signal-pre-repeg-ttl90-legacy-history.json";
+  private static final Path REPEG_TTL_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "copytrade-signal-pre-repeg-ttl90-legacy-history.json");
+
   // P3-a: legacy (no live-promotion-gate-v1 marker) LIVE-BTO dispatch fixture. A faithful pre-P3a
   // live BTO that placed an order WITHOUT the gate. Replaying it under the current impl must take
   // the v=DEFAULT_VERSION branch (gate skipped) — proving in-flight pre-P3a live executions stay
@@ -156,6 +170,7 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
   private static final String LEGACY_EMULATOR_WORKFLOW_ID = "legacy-pre-111-emulator";
   private static final String BREACH_ABORT_EMULATOR_WORKFLOW_ID = "legacy-pre-274-breach-emulator";
   private static final String TTL_EXPIRY_EMULATOR_WORKFLOW_ID = "legacy-pre-165-ttl-emulator";
+  private static final String REPEG_TTL_EMULATOR_WORKFLOW_ID = "legacy-pre-repeg-ttl90-emulator";
   private static final String LIVE_PROMOTION_EMULATOR_WORKFLOW_ID = "legacy-pre-p3a-live-emulator";
   private static final String NOTIONAL_CAP_EMULATOR_WORKFLOW_ID = "legacy-pre-427-notional-cap-emu";
 
@@ -240,6 +255,26 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
         CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_BTO_CORRECTION_SUPERSEDE");
     marker.setAccessible(true);
     assertThat((String) marker.get(null)).isEqualTo("bto-correction-supersede-v1");
+  }
+
+  /**
+   * PLAN-2026-08-04-bto-entry-repeg: the bounded entry re-peg's timer, GetOptionQuote dispatch,
+   * cancel/place pair and audits are fenced behind {@code
+   * Workflow.getVersion(VERSION_BTO_ENTRY_REPEG, DEFAULT, 1)}. Pins the constant so a rename fails
+   * loudly — a renamed marker reads as ABSENT on every recorded history, which would silently flip
+   * in-flight entries onto the new branch and wedge them.
+   *
+   * <p>Unlike the other markers here, this one is NOT a feature flag: the re-peg ships active on
+   * code defaults. The marker exists purely for in-flight replay, so "the feature is already on" is
+   * never a reason to remove it. {@link
+   * #legacyPreRepegTtl90HistoryReplaysAgainstCurrentImplWithoutNonDeterminism()} is the test with
+   * teeth here.
+   */
+  @Test
+  void versionBtoEntryRepegConstantNameIsStable() throws Exception {
+    Field marker = CopytradeSignalWorkflowImpl.class.getDeclaredField("VERSION_BTO_ENTRY_REPEG");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("bto-entry-repeg-v1");
   }
 
   /**
@@ -542,6 +577,86 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
     assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
     Files.createDirectories(BREACH_ABORT_FIXTURE_SOURCE_PATH.getParent());
     Files.writeString(BREACH_ABORT_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
+  /**
+   * PLAN-2026-08-04-bto-entry-repeg: a pre-re-peg entry that sat the FULL 90s TTL must still replay
+   * clean. At v>=1 this config activates the re-peg, so the current impl would schedule a re-peg
+   * timer, a GetOptionQuote, a cancel and a second placeOrder — none of which are in the recorded
+   * history. Only the marker-less history resolving to DEFAULT_VERSION keeps it deterministic.
+   *
+   * <p>Teeth check (do this by hand if the gate is ever refactored): replace the {@code
+   * getVersion(VERSION_BTO_ENTRY_REPEG, ...)} call in {@code handleBto} with a literal {@code 1}
+   * and this test MUST fail. It does — unlike the pre-#165 fixture, whose 1s TTL disables the
+   * re-peg on its own and stays green either way.
+   */
+  @Test
+  void legacyPreRepegTtl90HistoryReplaysAgainstCurrentImplWithoutNonDeterminism() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(REPEG_TTL_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. Regenerate with"
+                + " `mvn -pl services/orchestrator test -Dgenerate.legacy.fixture=true"
+                + " -Dtest=CopytradeSignalWorkflowImplLegacyReplayTest#regenerateRepegTtl90Fixture`",
+            REPEG_TTL_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    WorkflowReplayer.replayWorkflowExecutionFromResource(
+        REPEG_TTL_FIXTURE_RESOURCE, CopytradeSignalWorkflowImpl.class);
+  }
+
+  /**
+   * One-shot generator for the 90s-TTL legacy fixture. Disabled by default; run via {@code
+   * -Dgenerate.legacy.fixture=true}. Identical to {@link #regenerateTtlExpiryFixture()} except for
+   * the TTL — which is the entire point, since the 1s TTL is what makes the older fixture blind to
+   * the entry re-peg.
+   */
+  @Test
+  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
+  void regenerateRepegTtl90Fixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(LegacyTtlExpiryEmulatorWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      StrategyActivities strategy = Mockito.mock(StrategyActivities.class);
+      LegacyRiskActivities legacyRisk = Mockito.mock(LegacyRiskActivities.class);
+      LegacyExecActivities legacyExec = Mockito.mock(LegacyExecActivities.class);
+      LegacyContractActivities legacyContract = Mockito.mock(LegacyContractActivities.class);
+
+      StrategyConfig cfg = legacyStrategyConfig();
+      cfg.setPendingTtlPaperSecs(90L); // realistic TTL: long enough for the re-peg window to open
+      when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+      when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+      when(legacyRisk.checkEntry(any(), any())).thenReturn(RiskDecision.approved());
+      when(legacyContract.resolve(any())).thenReturn(LEGACY_OCC);
+      when(legacyExec.placeOrder(any())).thenReturn(submitted("intent-K", "brk-1"));
+      when(legacyExec.cancelOrder(any())).thenReturn(cancelled("intent-K", "brk-1"));
+
+      worker.registerActivitiesImplementations(audit, strategy, legacyRisk, legacyContract);
+      Worker brokerWorker = env.newWorker("broker-alpaca-paper");
+      brokerWorker.registerActivitiesImplementations(legacyExec);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      CopytradeSignalWorkflow wf =
+          client.newWorkflowStub(
+              CopytradeSignalWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(REPEG_TTL_EMULATOR_WORKFLOW_ID)
+                  .build());
+      wf.process(btoPayload());
+
+      json = client.fetchHistory(REPEG_TTL_EMULATOR_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
+    Files.createDirectories(REPEG_TTL_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(REPEG_TTL_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
   }
 
   /**
