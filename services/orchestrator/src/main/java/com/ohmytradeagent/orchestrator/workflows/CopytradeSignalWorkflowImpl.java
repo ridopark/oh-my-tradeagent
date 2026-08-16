@@ -1032,6 +1032,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
           payload,
           KIND_ORDER_CANCEL_FAILED,
           subject(
+              "signal_id",
+              payload.getSignalId(),
+              "option_symbol",
+              resolved.optionSymbol(),
               "intent_key",
               supersededEntryIntentKey,
               "broker_order_id",
@@ -1819,6 +1823,8 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
           payload,
           KIND_ORDER_CANCEL_FAILED,
           subject(
+              "signal_id", payload.getSignalId(),
+              "option_symbol", resolved.optionSymbol(),
               "intent_key", placed.getIntentKey(),
               "broker_order_id", placed.getBrokerOrderId(),
               "broker_reason", cancelResult.getLastError(),
@@ -2221,11 +2227,20 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
           payload,
           KIND_ORDER_CANCEL_FAILED,
           subject(
-              "intent_key", intentKey,
-              "broker_order_id", placed.getBrokerOrderId(),
-              "reason", "repeg",
-              "severity", "WARN",
-              "note", "repeg_abandoned_original_order_stands"));
+              "signal_id",
+              payload.getSignalId(),
+              "option_symbol",
+              resolved.optionSymbol(),
+              "intent_key",
+              intentKey,
+              "broker_order_id",
+              placed.getBrokerOrderId(),
+              "reason",
+              "repeg",
+              "severity",
+              "WARN",
+              "note",
+              "repeg_abandoned_original_order_stands"));
       return new RepegOutcome(null, false);
     }
 
@@ -2252,6 +2267,10 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
           payload,
           KIND_ORDER_CANCEL_FAILED,
           subject(
+              "signal_id",
+              payload.getSignalId(),
+              "option_symbol",
+              resolved.optionSymbol(),
               "intent_key",
               intentKey,
               "broker_order_id",

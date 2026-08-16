@@ -2120,6 +2120,13 @@ class CopytradeSignalWorkflowImplTest {
     AuditEvent failed =
         captureWithEntry("OrderCancelFailed", "note", "repeg_abandoned_original_order_still_live");
     assertThat(failed.getSubject()).containsEntry("severity", "ERROR");
+    // OrderCancelFailed now PAGES (it is in the alert allowlist), and
+    // OrderFailureAlerter.buildEmbed
+    // renders `symbol` from option_symbol plus a `signal_id` field. Without both, the operator gets
+    // "Copytrade order FAILED" with symbol=n/a and signal_id=n/a — an alarm naming neither the
+    // contract still working at the broker nor the signal it came from.
+    assertThat(failed.getSubject()).containsEntry("option_symbol", "NVDA  260516C00140000");
+    assertThat(failed.getSubject()).containsEntry("signal_id", "111:0");
     // The original still stands and rides to its normal TTL expiry.
     AuditEvent expired = capture("EntryExpired");
     assertThat(expired.getSubject()).containsEntry("broker_order_id", "brk-initial");
