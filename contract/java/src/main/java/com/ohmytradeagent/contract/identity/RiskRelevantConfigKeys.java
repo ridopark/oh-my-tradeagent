@@ -41,6 +41,20 @@ public final class RiskRelevantConfigKeys {
           // CORE — DANGEROUS (StrategyConfigWriter.checkFieldClasses)
           "broker_target",
           "notional_cap_pct_of_capital_base",
+          // Routes real orders to a SPECIFIC brokerage account, so a change re-points live trading
+          // at different money — the same blast radius as broker_target, which sits beside it in
+          // the DANGEROUS class. It was absent here while this javadoc claimed to mirror
+          // DANGEROUS + EXPOSURE exactly, so the claim was false.
+          //
+          // Defense-in-depth rather than an active hole:
+          // StrategyConfigWriter#requireDangerousUnchanged
+          // already REJECTS any change (including null -> value) on the API path, so a
+          // TenantConfigChanged carrying this key should not normally arise. It costs nothing and
+          // makes the stated invariant true.
+          //
+          // The test that excluded daily_loss_threshold — "is the field dead?" — answers the
+          // opposite way here: broker_account_id is load-bearing for real-money routing.
+          "broker_account_id",
           // CORE — EXPOSURE (StrategyConfigWriter.checkFieldClasses)
           "max_contracts",
           "min_contracts",

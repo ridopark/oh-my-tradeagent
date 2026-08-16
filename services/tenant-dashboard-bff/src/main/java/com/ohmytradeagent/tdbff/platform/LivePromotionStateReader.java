@@ -42,9 +42,6 @@ public class LivePromotionStateReader {
   private static final String KIND_APPROVED = "LivePromotionApproved";
   private static final String KIND_DEACTIVATED = "LivePromotionDeactivated";
 
-  // Mirrors AuditQueryActivitiesImpl.RISK_RELEVANT_CONFIG_KEYS — the strategy_config keys whose
-  // post-approval change voids a live promotion (the gate returns CONFIG_CHANGED and refuses live
-  // orders). Kept local so the BFF read does not depend on orchestrator Java; keep in sync.
   // Single source of truth in contract-java. This file previously kept its OWN copy, and on
   // 2026-08-15 it drifted from the orchestrator's: repeg_ceiling_pct was added to the trading gate
   // and not here, so live BTOs failed closed while this page still rendered "● live — valid until

@@ -305,7 +305,7 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
    * </ul>
    *
    * <p>P3-b config-change invalidation: after confirming a fresh (not-stale) approval, this also
-   * checks whether any {@code TenantConfigChanged} touching a {@link #RISK_RELEVANT_CONFIG_KEYS}
+   * checks whether any {@code TenantConfigChanged} touching a {@link RiskRelevantConfigKeys#ALL}
    * key landed AFTER that approval — if so the risk envelope the approvers signed off on no longer
    * holds and the gate returns {@link LivePromotionStatus#CONFIG_CHANGED}. It inherits this
    * method's fail-CLOSED posture: the 2nd query runs inside the same try/catch, so any DB error

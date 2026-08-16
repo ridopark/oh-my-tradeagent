@@ -43,6 +43,9 @@ class RiskRelevantConfigKeysTest {
     assertThat(RiskRelevantConfigKeys.ALL)
         .contains(
             "broker_target",
+            // Re-points live trading at a different brokerage account — same blast radius as
+            // broker_target. Was missing while the set claimed to mirror DANGEROUS + EXPOSURE.
+            "broker_account_id",
             "notional_cap_pct_of_capital_base",
             "max_contracts",
             "min_contracts",
