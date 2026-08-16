@@ -624,16 +624,38 @@ Corroborating but not conclusive: `AlpacaTradeUpdatesStream`'s `Listener` implem
 options WS, and the stocks WS before `9ec7387`). Startup logs show `sockets_started` but **no
 `authenticated` line**.
 
-**Not proven.** Live metrics were read on a Saturday after a pod restart, so every counter is 0 and
-proves nothing either way. The clean confirmation is one line during Monday's session:
+### ✅ PROVEN — and it did not need RTH after all
 
-```
-kubectl -n copytrade exec deploy/exec-alpaca-live -- wget -qO- localhost:8080/actuator/prometheus \
-  | grep -E 'fill_listener_(events_received|poll_fills_detected)'
-```
+The exec journal carries the **broker's own** `filled_at` alongside our `last_state_at`, which
+separates real fill latency from our observation lag. From `order_intent_journal` in
+`exec_alpaca_live`:
 
-If `events_received{event="fill"}` stays 0 while `poll_fills_detected` climbs, the WS is dead and
-every fill is being discovered up to 60s late. **This belongs in its own issue, not this spike.**
+| side | n | broker fill p50 | broker fill p95 | **our observe lag p50** | observe lag p95 | observed <5s |
+|---|---|---|---|---|---|---|
+| SELL | 129 | **0.06s** | 18.10s | **30.21s** | 30.34s | 4 |
+| BUY | 47 | **0.05s** | 17.07s | **69.24s** | 89.51s | **0** |
+
+**Orders fill in ~50 milliseconds. We find out 30–69 seconds later.**
+
+The SELL lag is p50 30.21s / p95 30.34s — a spread of 0.13s across 129 fills. That is a timer, not a
+market, and it is exactly `poll.interval-ms: 30000`. The BUY lag centres on 69s = `grace-ms: 60000`
+plus up to one poll cycle. **The trade-updates WebSocket is delivering nothing; the poller discovers
+every fill.**
+
+So the 74s "fill wait" in the table above is ~100% *our* blindness, not the market.
+
+Two consequences that matter more than the latency:
+
+- **Positions are unprotected for 60–90s after they are actually open** — the exit path cannot arm a
+  stop or trail on a position it does not know is filled. This spike has been tuning a 2s premium
+  poll to protect a position that is invisible for over a minute.
+- **The #686 entry re-peg fires at 30s on stale knowledge**, evaluating "am I still unfilled?"
+  against a journal that has not caught up.
+
+Filed as **[#693](https://github.com/ridopark/oh-my-tradeagent/issues/693)**. Probable cause is
+`AlpacaTradeUpdatesStream.Listener` implementing `onText` with **no `onBinary`** — the identical
+shape to the June options-WS bug and the pre-`9ec7387` stocks-WS bug — but which of the two (binary
+frames vs auth) is still unconfirmed.
 
 ## Sources
 
