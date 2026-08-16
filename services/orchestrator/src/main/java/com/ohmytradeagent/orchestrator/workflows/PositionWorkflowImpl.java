@@ -2143,11 +2143,20 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // reads as a preference for erring HIGH. Do not extend that reasoning: this file's own
     // asymmetry is the opposite way round. A low anchor is ratcheted away by the first tick and
     // self-heals; a high one never does, because peakPremium never falls. Erring high is the
-    // unrecoverable direction. The max(lastBid, freshBid) in resolveTrailAnchor is NOT an instance
-    // of that mistake — a chandelier peak IS the high-water mark of observed prices, and lastBid is
-    // a real observation, not a phantom — but its hazard is staleness rather than bias: with no
-    // rolling feed-staleness backstop, a quiet feed lets an old bid anchor a stop above where the
-    // market now is. That belongs with the staleness work, not here.
+    // unrecoverable direction.
+    //
+    // The max(lastBid, freshBid) in resolveTrailAnchor is not that mistake either, but NOT because
+    // it is a high-water mark — it is not one. `lastBid` is assigned unconditionally on every exit
+    // tick, so it is the PREVIOUS bid, and the max is over two adjacent observations ~2s apart.
+    // The genuine running max is `exitBidMfe`, and the anchor deliberately does NOT read it: a
+    // position that has come off its lifetime high by more than the giveback would arm with a stop
+    // above the current bid every time, which fires on the next honest tick. Anchoring on a RECENT
+    // price is the point. Do not "tidy" this into exitBidMfe to match a high-water-mark reading.
+    //
+    // Its real hazard is staleness: with no rolling feed-staleness backstop, a quiet feed freezes
+    // lastBid at an arbitrarily old value and it can anchor a stop above where the market now is.
+    // Bounded by tick cadence while the feed is alive; unbounded when it is not. That is the
+    // silence gap in another guise and closes when that does, not here.
     BigDecimal peak =
         request.getPeakPremium() != null ? request.getPeakPremium() : resolveTrailAnchor();
     BigDecimal gb = request.getGivebackPct();
@@ -2268,9 +2277,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       if (crossed(quote)) {
         // Discard the crossed QUOTE, but keep whatever was already established. On a copytrade
         // position best is null here, so the arm is refused outright with anchor_unresolvable; on
-        // the watchlist path best is lastBid, a genuine earlier observation in the same bid space,
-        // and falling back to it is what a high-water mark is for. Not "refuse everything" — the
-        // distinction matters because only one of those two paths refuses.
+        // the watchlist path best is lastBid — the most RECENT real observation, in the right bid
+        // space — and falling back to one honest tick ago beats refusing on a book that is merely
+        // momentarily crossed. Not "refuse everything": only one of the two paths refuses.
         return best;
       }
       BigDecimal fresh = bidSpace ? quote.getBid() : usableMid(quote);
