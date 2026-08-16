@@ -2235,10 +2235,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    *
    * <p>The route predicate is re-evaluated per tick, but {@code trailingArmed} is still false here
    * (we are arming it), so the condition to mirror is what it WILL be once armed: {@code exitArmed
-   * || exitTargetFired}. Note the space is not stable for the life of a position — {@code
-   * exitArmed} is cleared in the flatten branch, and a flatten that leaves a residual can move a
-   * position from bid ticks to mid ticks mid-life. That is pre-existing and affects {@code
-   * fireExitTarget}'s anchor too; it is not something this arm site can fix.
+   * || exitTargetFired}.
+   *
+   * <p>The space can change mid-life, but only in the harmless direction. BID to MID is reachable:
+   * {@code exitArmed} is cleared in the flatten branch and a flatten leaving a residual keeps the
+   * position open, so a bid-anchored peak starts meeting mid ticks — and since mids exceed bids,
+   * the first tick ratchets the peak into the new space. Self-correcting. MID to BID would be
+   * permanent (a bid never ratchets a mid-anchored peak), but it needs the fork to go false to
+   * true, which means either {@code armWatchlistExit} on first fill — before any trail exists, and
+   * never on a copytrade position — or {@code fireExitTarget}, which sets both flags AND re-anchors
+   * the peak on the target bid in the same step. No stale peak crosses that boundary.
    *
    * <p>{@code lastBid} tracks every exit tick (unlike {@code lastTickPremium}, which only moves
    * once the trail is armed), so it is usually populated even before any arm — but it is bid-space,
