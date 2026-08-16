@@ -204,12 +204,15 @@ positions:
   partial-close:
     write-enabled: ${POSITIONS_PARTIAL_CLOSE_WRITE_ENABLED:false}
   # PLAN-2026-08-16: per-position operator trailing stop (POST /api/positions/arm-trail), which
-  # drives PositionWorkflow.arm_trail and arms the EXISTING chandelier trail on ONE position. Dark
-  # by default and flagged SEPARATELY from the other two — arming a stop is an independent
-  # capability from trimming or flattening, and unlike those it does not sell anything itself.
-  # Flip to true (alongside the dashboard's STOP_LOSS_WRITE_ENABLED) to enable the Stop-loss button.
+  # drives PositionWorkflow.arm_trail and arms the EXISTING chandelier trail on ONE position.
+  #
+  # ENABLED BY DEFAULT, unlike its two siblings — operator decision, shipped live rather than dark.
+  # The asymmetry is deliberate and defensible: force-close and partial-close SELL, this one only
+  # installs a stop that fires later, and it cannot be triggered without an operator choosing a
+  # position and a percentage. Set POSITIONS_ARM_TRAIL_WRITE_ENABLED=false to turn it off per
+  # cluster; the kill path is the env var, not a redeploy.
   arm-trail:
-    write-enabled: ${POSITIONS_ARM_TRAIL_WRITE_ENABLED:false}
+    write-enabled: ${POSITIONS_ARM_TRAIL_WRITE_ENABLED:true}
 
 management:
   endpoints:

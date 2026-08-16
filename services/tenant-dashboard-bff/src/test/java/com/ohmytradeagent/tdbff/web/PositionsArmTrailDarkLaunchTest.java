@@ -26,9 +26,12 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
- * Dark-launch: with the arm-trail write flag OFF (the default), {@code POST
- * /api/positions/arm-trail} 404s server-side. The other two write flags are ON here to prove all
- * three are INDEPENDENT — enabling force-close or trim must not silently arm the stop-loss.
+ * The OFF switch. Unlike its two siblings the arm-trail flag ships ENABLED, so this pins the
+ * DISABLE path rather than a dark launch: with {@code positions.arm-trail.write-enabled=false} (set
+ * explicitly here, since it is no longer the default) {@code POST /api/positions/arm-trail} 404s
+ * server-side. That path matters MORE now the flag is normally on — it is the one an operator
+ * reaches for in a hurry, so it must be known to work rather than assumed. The other two flags are
+ * ON here so all three are proven INDEPENDENT in both directions.
  *
  * <p>Also pins the reason the flag is checked IN-METHOD rather than with
  * {@code @ConditionalOnProperty}: that annotation would remove the whole controller bean, taking
@@ -40,6 +43,8 @@ import org.springframework.test.web.servlet.MockMvc;
 @Import(TenantContext.class)
 @TestPropertySource(
     properties = {
+      // Explicitly OFF — arm-trail now defaults to ON, so the disable path must be stated.
+      "positions.arm-trail.write-enabled=false",
       "positions.force-close.write-enabled=true",
       "positions.partial-close.write-enabled=true"
     })
@@ -56,7 +61,7 @@ class PositionsArmTrailDarkLaunchTest {
   }
 
   @Test
-  void armTrail_whenWriteFlagOff_returns404_andNeverAddressesWorkflow() throws Exception {
+  void armTrail_whenExplicitlyDisabled_returns404_andNeverAddressesWorkflow() throws Exception {
     String ownWorkflowId =
         WorkflowIds.position("acme", "copytrade-v1", "AAPL260727C00330000", "sig1");
 
@@ -74,7 +79,7 @@ class PositionsArmTrailDarkLaunchTest {
   }
 
   @Test
-  void positionsRead_staysAvailableWhileArmTrailIsDark() throws Exception {
+  void positionsRead_staysAvailableWhileArmTrailIsDisabled() throws Exception {
     // The whole point of gating in-method: turning the stop-loss write off must not take the
     // holdings table down with it.
     when(reader.openPositions(anyString())).thenReturn(List.of());

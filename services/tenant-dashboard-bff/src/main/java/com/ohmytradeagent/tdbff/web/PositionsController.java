@@ -75,10 +75,13 @@ public class PositionsController {
   /**
    * PLAN-2026-08-16 operator trailing stop. A THIRD parameter on the SAME constructor, deliberately
    * — a second constructor is the Spring two-@Autowired-candidate trap that has aborted context
-   * refresh here twice. Dark-launch gated ({@code positions.arm-trail.write-enabled}) like both
-   * siblings, and gated IN-METHOD rather than with {@code @ConditionalOnProperty}: that annotation
-   * removes the whole controller bean, which would also 404 {@code GET /api/positions} and the two
-   * existing writes.
+   * refresh here twice. Unlike its two siblings this ships ENABLED by default ({@code
+   * positions.arm-trail.write-enabled}, operator decision) — set {@code
+   * POSITIONS_ARM_TRAIL_WRITE_ENABLED=false} to disable per cluster. Still gated IN-METHOD rather
+   * than with {@code @ConditionalOnProperty}: that annotation removes the whole controller bean,
+   * which would also 404 {@code GET /api/positions} and the two existing writes — and that matters
+   * MORE now the flag is normally on, because the off state is the exceptional one someone will
+   * reach for in a hurry.
    */
   private final boolean armTrailWriteEnabled;
 
@@ -88,7 +91,7 @@ public class PositionsController {
       WorkflowClient client,
       @Value("${positions.force-close.write-enabled:false}") boolean forceCloseWriteEnabled,
       @Value("${positions.partial-close.write-enabled:false}") boolean partialCloseWriteEnabled,
-      @Value("${positions.arm-trail.write-enabled:false}") boolean armTrailWriteEnabled) {
+      @Value("${positions.arm-trail.write-enabled:true}") boolean armTrailWriteEnabled) {
     this.reader = reader;
     this.ctx = ctx;
     this.client = client;

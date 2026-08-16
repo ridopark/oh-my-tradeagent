@@ -64,8 +64,13 @@ const TRIM_WRITE_ENABLED = process.env.TRIM_WRITE_ENABLED === "true";
 
 // PLAN-2026-08-16: the per-position operator trailing stop. Its OWN flag, paired with the BFF's
 // positions.arm-trail.write-enabled — enabling Trim or Force exit must never surface this too.
+//
+// Note the inverted sense vs the two flags above: this one is ON unless explicitly disabled
+// (operator decision to ship live rather than dark). Set STOP_LOSS_WRITE_ENABLED=false to hide it.
+// Both halves must agree — the UI flag only hides the button; the BFF flag is what actually refuses
+// the write, so disabling the UI alone leaves the endpoint reachable.
 const STOP_LOSS_WRITE_ENABLED =
-  process.env.STOP_LOSS_WRITE_ENABLED === "true";
+  process.env.STOP_LOSS_WRITE_ENABLED !== "false";
 
 // PLAN-2026-08-10-live-manual-bto. Dark-by-default gate for the operator "Manual entry" panel,
 // paired with the BFF's own `entries.manual.write-enabled` server flag (which 404s all three

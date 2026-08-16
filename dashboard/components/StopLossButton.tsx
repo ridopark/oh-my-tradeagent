@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 // Same interaction model as TrimButton, with the same three states, because arming a stop needs a
 // SIZE-equivalent choice (the trailing percentage) as well as a confirmation:
 //   "Stop-loss" -> a row of trailing percentages labelled with the stop price each implies
-//               -> "Set — trails 15%, stop now ≈ $3.19"
+//               -> "Set — trails 35%, stop now ≈ $1.63"
 // The picker and the confirm both auto-disarm after a few seconds or on blur, so a stray click never
 // leaves a primed action sitting in the table.
 //
@@ -35,7 +35,20 @@ const CONFIRM_TIMEOUT_MS = 5000;
 
 // The offered trailing percentages. Fractions (not prices) because that is what the workflow stores
 // and what the trail is actually defined by — the price is a consequence, recomputed on every tick.
-const PRESET_GIVEBACKS = [0.1, 0.15, 0.2, 0.25];
+//
+// Centred on 35%, NOT the 10-25% band a stock-trading instinct suggests. These are short-dated
+// options, whose premium can move tens of percent on an underlying move of one or two: a 10% trail
+// on a $2 contract fires at $1.80, which is inside ordinary intraday noise for this instrument. A
+// stop that tight does not protect the position, it just sells it early and calls that protection —
+// and the operator's first experience of the feature would be a runner cut for no reason.
+//
+// 0.5 (MAX_GIVEBACK) is deliberately not offered: it is the workflow's hard ceiling, and a control
+// whose widest preset is also the absolute limit invites clicking straight to the edge.
+const PRESET_GIVEBACKS = [0.25, 0.35, 0.45];
+
+// Pre-selected preset — the one the picker focuses, so Enter arms it. Chosen for the volatility of
+// the instrument, not as a midpoint of the list.
+const DEFAULT_GIVEBACK = 0.35;
 
 // PositionWorkflowImpl.MAX_GIVEBACK. The workflow REJECTS anything above this, and the
 // strategy-config schema caps trail_giveback_pct at the same value. Offering a preset the workflow
@@ -261,15 +274,22 @@ export function StopLossButton({
         onMouseDown={keepFocus}
       >
         <span className="pr-1 text-[11px] text-slate-400">Trail</span>
-        {presets.map((giveback, i) => {
+        {presets.map((giveback) => {
           const stop = stopPriceFor(currentPrice, giveback);
+          const isDefault = giveback === DEFAULT_GIVEBACK;
           return (
             <button
               key={giveback}
               type="button"
-              autoFocus={i === 0}
+              // Focus the DEFAULT rather than the first preset: Enter should arm 35%, and the
+              // autofocused button is also the one a mouse click cannot blur (see handleBlur).
+              autoFocus={isDefault}
               onClick={() => pick(giveback)}
-              className="rounded border border-emerald-500/50 bg-emerald-600/10 px-2 py-1 text-xs font-medium text-emerald-200 hover:bg-emerald-600/20"
+              className={
+                isDefault
+                  ? "rounded border border-emerald-400 bg-emerald-600/25 px-2 py-1 text-xs font-semibold text-emerald-100 hover:bg-emerald-600/35"
+                  : "rounded border border-emerald-500/50 bg-emerald-600/10 px-2 py-1 text-xs font-medium text-emerald-200 hover:bg-emerald-600/20"
+              }
             >
               {Math.round(giveback * 100)}%
               {stop != null && ` · $${stop.toFixed(2)}`}
