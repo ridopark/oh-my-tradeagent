@@ -18,8 +18,10 @@ The spike is done when all four are answered with evidence, not assumption:
 1. **Entitlement** — ✅ **ANSWERED 2026-08-16: Algo Trader Plus is ACTIVE and the exit path is
    already on OPRA.** The redistribution question remains *(open, and now urgent rather than
    hypothetical — see [Open questions](#open-questions))*.
-2. **One decoded quote** — a real OPRA option quote received and decoded from the WS. The June 2026
-   attempt never got a single frame; this is the gate everything else waits behind. *(open)*
+2. **One decoded quote** — ✅ **TRANSPORT CLEARED 2026-08-16, markets closed.**
+   `scripts/alpaca-options-ws-probe.py` authenticated in-band, decoded msgpack, and got a subscribe
+   ack for a compact OCC. The June failure mode is **refuted**. *(only live quote FLOW remains, and
+   that needs RTH — see [Does this need RTH?](#does-this-need-rth))*
 3. **Does the socket beat a 500ms OPRA poll?** Measured in shadow, not argued. The honest possible
    answer is "no." *(open — and now the spike's central question)*
 4. **Backpressure** — does an ATM 0DTE at the open trigger Alpaca's 407 slow-client disconnect
@@ -192,6 +194,57 @@ capture (steps 2/4).
 So the honest state of the case: **the "faster price updates" argument for streaming is dead.** What
 survives is narrower and unmeasured — *quote-level events the REST snapshot misses entirely.*
 
+## Does this need RTH?
+
+Mostly **no**. The work splits three ways, and only one part waits for Monday.
+
+| work | needs RTH? | status |
+|---|---|---|
+| Poll-interval replay (the 500ms measurement) | **No** — historical trade prints | ✅ done Saturday |
+| WS transport gate: auth + msgpack decode + subscribe | **No** — control frames arrive at any hour | ✅ done Saturday |
+| Live quote/bid capture and comparison | **Yes** — needs a live session | ⏳ Monday |
+
+### The transport gate cleared with markets closed
+
+The June failure was header-auth and dropped binary frames. **Both manifest on control frames** —
+the msgpack-encoded `connected` / `authenticated` / `subscription` replies — which Alpaca sends
+regardless of market hours. So the whole "can we even talk to this endpoint" question was answerable
+on a Saturday. Run 2026-08-16, markets closed:
+
+```
+1. greeting              : BINARY (msgpack)
+   decoded               : [{'T': 'success', 'msg': 'connected'}]
+2. in-band auth          : AUTHENTICATED
+3. subscription ack      : quotes=['SPY260817C00776000']
+4. quote frames in 20s   : 0
+
+  msgpack frames decode        : YES
+  in-band auth accepted        : YES
+  compact OCC subscribe ok     : YES
+  live quotes observed         : NO (expected outside RTH)
+```
+
+That also settles the **compact-vs-padded OCC** question on the subscribe leg: Alpaca accepted the
+compact form and echoed it back in the ack. The inbound `S`-field mapping still has to be handled.
+
+**Safety note:** this probe touches **only** `/v1beta1/<feed>`, which nothing in the estate has used
+since June, and Alpaca's limit is per endpoint — so it cannot 406 or kick the live stocks stream on
+`/v2/<feed>`. That is why it is safe at any hour, unlike `scripts/alpaca-ws-conn-check.py`, which
+deliberately opens a **second stocks** connection and must not be run during RTH.
+
+### What genuinely waits for Monday
+
+Only live quote capture — and it is now the **sole** remaining open question, because there is no
+historical options quotes endpoint (confirmed against four candidate routes; `v1beta2` answers
+"endpoint not found", `v1beta1/options/quotes` does not exist, and `snapshots` rejects `start`/`end`).
+**Option bid history cannot be reconstructed after the fact. It can only be recorded live.**
+
+The right shape for step 4 is therefore a **passive recorder**, not an experiment: during one RTH
+session, log the WS quote stream and the 2s REST snapshots side by side for a handful of contracts.
+The comparison itself is then offline analysis, runnable any time. The specific question it must
+answer: **does the WS surface bid withdrawals / book widenings that the REST snapshot misses?** That
+is the only surviving argument for the socket.
+
 ## ⚠ Live findings this research exposed
 
 ### 1. Every market-data deploy 406-collides its own stocks WS
@@ -253,6 +306,11 @@ into other tenants' dashboards. If there is an entitlement problem, it exists to
    inbound `S` arrives compact, and `bySymbol` is keyed on the **padded** canonical symbol. Needs an
    explicit compact→padded map or every inbound quote silently finds no listeners. Same class as
    `JooqOrderIntentJournal` / `16e4c6e`; it has bitten this repo twice.
+   *(2026-08-16: the **subscribe** leg is confirmed — Alpaca accepted the compact form and echoed it
+   in the ack. The inbound `S`→padded mapping is still unhandled.)*
+
+Items 1 and 2 are now **de-risked but not done**: the probe proves the protocol works in Python, not
+that the JDK `WebSocket.Listener` + Jackson-msgpack path works in Java. That is step 3.
 
 ## What streaming does NOT fix
 
@@ -288,7 +346,12 @@ faster poll alone does to trail behaviour. Reversible by one config value.
 *identical* price; mean difference −0.065%. **Do not ship the interval change for performance.** The
 stale `~200 req/min` comment is still worth correcting as a plain doc fix.
 
-**Step 2 — probe, no product code.** Extend `scripts/alpaca-ws-conn-check.py` to `subscribe` one live
+**Step 2 — probe, no product code.** ✅ **DONE 2026-08-16 with markets closed.** Added
+`scripts/alpaca-options-ws-probe.py` (options endpoint only, so safe at any hour). msgpack decode,
+in-band auth, and compact-OCC subscribe all confirmed; the June failure mode is refuted. Live quote
+flow is the only untested part and needs RTH. *~~Original text below, kept for the record:~~*
+
+> ~~Extend `scripts/alpaca-ws-conn-check.py` to `subscribe` one live
 OCC on `/v1beta1/opra` and print decoded quotes. Entitlement is already confirmed, so this is purely
 about getting **one decoded msgpack frame** — the thing June never achieved.
 **⚠ Do not run during RTH:** its steps B and C deliberately open competing connections and will 406 or
@@ -392,6 +455,30 @@ argument. Scripts committed under `scripts/research/`.
   print and that this method structurally cannot see.
 - **Recommendation shifting toward: do step 0, drop steps 1 and 5, and treat steps 2–4 as a
   *measurement* of bid-event visibility rather than a path to a cutover.**
+
+### 2026-08-16 (evening) — cleared the transport gate with markets closed
+
+Operator: "we can't really do this simulation outside RTH, can we? do we need to wait for RTH?"
+Turned out most of it doesn't.
+
+- **Confirmed there is genuinely no historical option quotes route** — probed four candidates.
+  `v1beta2` → "endpoint not found"; `v1beta1/options/quotes` and two other shapes → route missing;
+  `snapshots` rejects `start`/`end` (current-only). **Option bid history cannot be reconstructed; it
+  can only be recorded live.** This is the reason step 4 needs RTH at all.
+- **Realised the June failure mode is testable without market data.** Header-auth and dropped binary
+  frames both manifest on *control* frames, which arrive at any hour. Wrote
+  `scripts/alpaca-options-ws-probe.py` and ran it on a Saturday: msgpack greeting decoded, in-band
+  auth accepted, compact-OCC subscribe acked, 0 quotes as expected. **The `#471` failure mode is
+  refuted empirically.**
+- **Bonus:** the subscribe leg of the padded/compact OCC trap is settled — Alpaca takes the compact
+  form and echoes it. Only the inbound `S`-field mapping remains.
+- **Safety distinction worth keeping:** an options-only probe cannot collide with the live stocks WS,
+  because the connection limit is per endpoint and nothing has used `/v1beta1` since June. The RTH
+  warning belongs to `alpaca-ws-conn-check.py` specifically, which opens a second *stocks*
+  connection. I had previously stated that warning too broadly.
+- **Remaining work needing RTH is now one thing:** a passive recorder logging WS quotes against 2s
+  REST snapshots for a handful of contracts, to answer whether the socket surfaces bid withdrawals
+  the snapshot misses. Capture live; analyse offline.
 
 ## Sources
 
