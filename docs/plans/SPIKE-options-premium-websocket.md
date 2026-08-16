@@ -137,6 +137,61 @@ Two consequences:
    future WS work that trusts the default inherits a bid $3.39 wide of truth** on a path whose whole
    job is deciding when to sell. Change the default to `opra` as part of step 3, not after.
 
+## Measurement: what 500ms actually buys
+
+**Answer: measurably nothing.** Reproduce with `scripts/research/option_poll_interval_sweep.py`.
+
+Method: replay real OPRA trade prints through the **actual** pipeline — sample at interval *I* →
+1% min-move throttle (`SubscribePremiumActivityImpl`) → 35% trailing stop (the `/live` default).
+18 (contract, day) pairs, SPY, 3 expiry weeks (2026-07-28 → 2026-08-14), calls and puts. Only
+contracts that **ran up ≥5% then fell** are counted — a trail is only ever armed on a winner.
+
+### Exit price, 500ms vs 2000ms
+
+| | |
+|---|---|
+| identical exit price | **14 / 18** |
+| better | 2 |
+| worse | 2 |
+| mean | **−0.065%** |
+| median | **+0.000%** |
+| range | −1.43% … +0.71% |
+
+Two better, two worse, mean slightly *negative*. That is noise, not an improvement.
+
+### Why it can't help — three independent reasons
+
+1. **The throttle absorbs it.** 4× the polling produced only **+9.2%** more emitted signals
+   (14,713 → 16,072). The workflow does not receive materially more information, by design — the 1%
+   min-move gate is coarser than the sampling gain.
+2. **Premium is quantised in pennies.** At a $0.20–$5 premium one tick is 0.2–5%. Sub-second timing
+   differences have nowhere to express themselves on a price grid that coarse.
+3. **The tail is gap risk, not sampling risk.** Pooled blind spot — adverse move *inside* one
+   sampling interval:
+
+   | interval | p95 | p99 | max |
+   |---|---|---|---|
+   | 2000ms | 3.268% | 6.667% | **20.000%** |
+   | 500ms | 3.030% | 6.250% | **20.000%** |
+
+   **The max is identical.** The worst adverse excursion happens between two consecutive prints — no
+   polling rate sees it, and neither would a WebSocket. The scary tail is not an observation problem.
+
+### ⚠ What this measurement CANNOT see — and it is the important caveat
+
+**There is no historical options quotes endpoint** (`/v1beta1/options/quotes` → 404; only `trades`,
+`bars`, `quotes/latest` exist). So this replays **trade prints**, while the exit path evaluates the
+**bid**.
+
+That means the measurement is structurally blind to exactly the pathology that motivated `#690`: a
+**withdrawn or widening bid** produces no trade print at all. A book going 2.70×2.90 → 1.35×4.25
+walks the bid through a stop while trades may not print. Whether a WS sees that materially sooner
+than a 2s snapshot is **not answered here and cannot be answered from history** — it needs live quote
+capture (steps 2/4).
+
+So the honest state of the case: **the "faster price updates" argument for streaming is dead.** What
+survives is narrower and unmeasured — *quote-level events the REST snapshot misses entirely.*
+
 ## ⚠ Live findings this research exposed
 
 ### 1. Every market-data deploy 406-collides its own stocks WS
@@ -227,8 +282,11 @@ into other tenants' dashboards. If there is an entitlement problem, it exists to
 
 **Step 1 — spend the plan we already own. No new code.** Drop `premium-poll-interval-ms` 2000 → ~500
 (REST is 10,000 req/min, not 200) and correct the stale `~200 req/min` comment. Measure what a 4×
-faster poll alone does to trail behaviour. Reversible by one config value. **This is now the cheapest
-remaining win and it should be taken before any socket work.** *(not started — no longer blocked)*
+faster poll alone does to trail behaviour. Reversible by one config value.
+✅ **DONE 2026-08-16 — MEASURED, AND IT BUYS NOTHING.** See
+[Measurement](#measurement-what-500ms-actually-buys). 14 of 18 replayed contract-days exit at an
+*identical* price; mean difference −0.065%. **Do not ship the interval change for performance.** The
+stale `~200 req/min` comment is still worth correcting as a plain doc fix.
 
 **Step 2 — probe, no product code.** Extend `scripts/alpaca-ws-conn-check.py` to `subscribe` one live
 OCC on `/v1beta1/opra` and print decoded quotes. Entitlement is already confirmed, so this is purely
@@ -314,6 +372,26 @@ Operator: "we should have the paid account, verify that." Verified by read-only 
   from `last-applied-configuration`. It survives `apply` by merge-semantics accident; it would not
   survive a recreate, and the repo gives no hint that live watchlist triggers depend on it.
 - **Reframe:** the spike may now correctly end at step 1. That is a good outcome, not a failed spike.
+
+### 2026-08-16 (later still) — measured step 1, and it buys nothing
+
+Operator: "with 500ms, what kind of improvement could we see?" Answered by replay rather than
+argument. Scripts committed under `scripts/research/`.
+
+- **Discovered there is no historical options QUOTES endpoint** — `/v1beta1/options/quotes` 404s;
+  only `trades`, `bars`, `quotes/latest` exist. Forced the replay onto trade prints, which is the
+  measurement's main limitation (see the caveat above). Worth knowing independently: any future
+  backtest of a bid-driven exit cannot reconstruct historical bids from Alpaca.
+- **Result: 500ms ≈ 2000ms.** 14/18 contract-days identical, 2 better, 2 worse, mean −0.065%.
+- **Three independent reasons it can't help:** the 1% throttle absorbs the extra sampling (+9.2%
+  signals for 4× polling), premium is penny-quantised so sub-second timing has nowhere to land, and
+  the blind-spot **max is identical** at both rates because the tail is gap risk between consecutive
+  prints.
+- **This transitively weakens the WS case**, which rested on the same latency premise. The remaining
+  argument is narrower: quote-level events (bid withdrawal, book widening) that produce no trade
+  print and that this method structurally cannot see.
+- **Recommendation shifting toward: do step 0, drop steps 1 and 5, and treat steps 2–4 as a
+  *measurement* of bid-event visibility rather than a path to a cutover.**
 
 ## Sources
 
