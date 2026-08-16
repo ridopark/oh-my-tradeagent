@@ -4126,7 +4126,10 @@ class PositionWorkflowImplTest {
 
   @Test
   void armTrail_operatorArmsAndStopIsPeakAnchored() throws Exception {
-    // The default quote bid is 2.50, so a 20% giveback must anchor at 2.50 and stop at 2.00.
+    // This is a copytrade position (no watchlist exit armed), so the tick loop routes to
+    // processTick and compares the MID. The anchor must be in that same space: the default quote's
+    // mid is 2.55, so a 20% giveback anchors at 2.55 and stops at 2.04. It is deliberately NOT the
+    // bid (2.50 -> 2.00); see armTrail_copytradePosition_anchorsOnTheMid... for why that matters.
     PositionWorkflow stub = newStub("pos-armtrail-ok");
     WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);
@@ -4134,15 +4137,73 @@ class PositionWorkflowImplTest {
     ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20")));
 
     assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
-    assertThat(r.getPeakPremium()).isEqualByComparingTo("2.50");
+    assertThat(r.getPeakPremium()).isEqualByComparingTo("2.55");
     assertThat(r.getGivebackPct()).isEqualByComparingTo("0.20");
     // stop = peak * (1 - giveback). Echoed so the UI never re-derives the workflow's arithmetic.
-    assertThat(r.getStopPrice()).isEqualByComparingTo("2.00");
+    assertThat(r.getStopPrice()).isEqualByComparingTo("2.04");
 
     AuditEvent armed = captureKind("ChandelierArmed");
     assertThat(armed.getSubject())
         .containsEntry("source", "operator")
         .containsEntry("operator_id", "ops-1");
+  }
+
+  @Test
+  void armTrail_copytradePosition_anchorsOnTheMidTheTickLoopWillCompare() throws Exception {
+    // THE invariant: the peak must be in the same price space as the ticks it will be compared
+    // against. The main loop routes to processExitTick (which trails on the BID) only when
+    // exitArmed || (exitTargetFired && trailingArmed); otherwise processTick compares the raw
+    // premium, the MID. All three real-money tenants are copytrade, so this is the primary path
+    // for the operator Stop-loss button, not an edge case.
+    //
+    // A bid anchor here is visibly wrong, not merely imprecise. Since ask >= bid, the mid always
+    // exceeds it, so the FIRST tick ratchets the peak into mid space and the stop silently moves
+    // up from the number the Update returned. A wide 0DTE book makes the gap impossible to write
+    // off as rounding: 2.00 x 3.00 at 35% giveback promises 1.30 and delivers 1.625 — tighter, so
+    // safe for money, but a stop that did not do what the operator was told is exactly the failure
+    // this feature exists to prevent.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            quoteOk(new BigDecimal("2.00"), new BigDecimal("2.50"), new BigDecimal("3.00")));
+
+    PositionWorkflow stub = newStub("pos-armtrail-midspace");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.35")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
+    assertThat(r.getPeakPremium()).isEqualByComparingTo("2.50");
+    // 2.50 * 0.65 = 1.625, penny-rounded. The bid-anchored answer would have been 1.30.
+    assertThat(r.getStopPrice()).isEqualByComparingTo("1.63");
+    assertThat(r.getStopPrice()).isNotEqualByComparingTo("1.30");
+  }
+
+  @Test
+  void armTrail_blownAsk_fallsBackToTheBidRatherThanAnchoringOnAPhantomMid() throws Exception {
+    // The anchor path is UNFILTERED: the market-data outlier guard runs in the premium poll only,
+    // and snapshotQuote (which getOptionQuote reads) is deliberately unguarded because the
+    // kill-switch MTM read shares it. So a one-snapshot blown ask reaches this code.
+    //
+    // Direction is everything here, because peakPremium is a running max. Anchoring on the phantom
+    // mid (2.00 x 12.00 -> 7.00) sets a peak NOTHING can ever lower, so the very next honest tick
+    // at ~2.05 sits under the 4.55 threshold and fires the trail — flattening a live position and
+    // attributing it to the operator who pressed the button. Falling back to the bid anchors LOW
+    // instead, and a low anchor is ratcheted away by the first real tick.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            quoteOk(new BigDecimal("2.00"), new BigDecimal("7.00"), new BigDecimal("12.00")));
+
+    PositionWorkflow stub = newStub("pos-armtrail-blownask");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.35")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
+    // The bid, not the 7.00 phantom mid.
+    assertThat(r.getPeakPremium()).isEqualByComparingTo("2.00");
+    assertThat(r.getStopPrice()).isEqualByComparingTo("1.30");
   }
 
   @Test
@@ -4194,7 +4255,8 @@ class PositionWorkflowImplTest {
     assertThat(second.getStatus()).isEqualTo(ArmTrailResult.Status.ALREADY_ARMED);
     // Echoes what is IN FORCE, not what was asked for: the tight 10% stop still protects the lot.
     assertThat(second.getGivebackPct()).isEqualByComparingTo("0.10");
-    assertThat(second.getStopPrice()).isEqualByComparingTo("2.25");
+    // 2.55 (the mid — this is a copytrade position, so the tick loop compares mids) * 0.90.
+    assertThat(second.getStopPrice()).isEqualByComparingTo("2.30");
   }
 
   @Test
