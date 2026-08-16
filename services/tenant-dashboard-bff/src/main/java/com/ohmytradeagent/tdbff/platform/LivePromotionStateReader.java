@@ -1,11 +1,10 @@
 package com.ohmytradeagent.tdbff.platform;
 
+import com.ohmytradeagent.contract.identity.RiskRelevantConfigKeys;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.Set;
-import java.util.stream.Collectors;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -46,30 +45,13 @@ public class LivePromotionStateReader {
   // Mirrors AuditQueryActivitiesImpl.RISK_RELEVANT_CONFIG_KEYS — the strategy_config keys whose
   // post-approval change voids a live promotion (the gate returns CONFIG_CHANGED and refuses live
   // orders). Kept local so the BFF read does not depend on orchestrator Java; keep in sync.
-  private static final Set<String> RISK_RELEVANT_CONFIG_KEYS =
-      Set.of(
-          "broker_target",
-          "daily_loss_threshold",
-          "notional_cap_pct_of_capital_base",
-          "max_contracts",
-          "min_contracts",
-          "max_positions",
-          "capital_weight",
-          "max_notional_per_signal",
-          "max_daily_notional_deployed",
-          "notional_cap_pct_of_equity",
-          "same_underlying_count",
-          "sector_concentration_cap",
-          "daily_trade_count",
-          "drawdown_velocity_threshold");
-
-  // RISK_RELEVANT_CONFIG_KEYS as a Postgres text[] literal for inlining into the plain-SQL
-  // jsonb_exists_any(target, text[]) call (the `?|` operator can't be used — jOOQ plain SQL treats
-  // every `?` as a JDBC bind). Compile-time constants (never user input) → injection-safe.
+  // Single source of truth in contract-java. This file previously kept its OWN copy, and on
+  // 2026-08-15 it drifted from the orchestrator's: repeg_ceiling_pct was added to the trading gate
+  // and not here, so live BTOs failed closed while this page still rendered "● live — valid until
+  // <date>" and offered only Deactivate. The operator could neither see the halt nor clear it.
+  // Whatever the gate treats as promotion-voiding, this reader MUST treat identically.
   private static final String RISK_KEYS_SQL_ARRAY_LITERAL =
-      RISK_RELEVANT_CONFIG_KEYS.stream()
-          .map(k -> "'" + k + "'")
-          .collect(Collectors.joining(",", "ARRAY[", "]::text[]"));
+      RiskRelevantConfigKeys.sqlArrayLiteral();
 
   private final DSLContext orchestratorDsl;
 
