@@ -4122,6 +4122,64 @@ class PositionWorkflowImplTest {
     return in;
   }
 
+  // ---------- PLAN-2026-08-16 Phase 1: premium-feed silence observability ----------
+
+  @Test
+  void trailingState_lastTickObservedAt_isNullBeforeAnyTick() throws Exception {
+    PositionWorkflow stub = newStub("pos-silence-none");
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
+    confirmEntry(stub, 3L);
+
+    assertThat(stub.trailingState().lastTickObservedAt()).isNull();
+  }
+
+  @Test
+  void tickDrain_stampsObservedAt_evenWhenTheTrailIsNotArmed() throws Exception {
+    // THE gap this phase exists to close. processTick early-returns on !trailingArmed, so
+    // lastTickAt
+    // is stamped ONLY while armed — there is no record anywhere of "when did we last hear
+    // anything".
+    // A staleness detector cannot be built on a field that is blank exactly when the position is
+    // unarmed, and the stamp must therefore live at the DRAIN point, before the route fork.
+    PositionWorkflow stub = newStub("pos-silence-unarmed");
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
+    confirmEntry(stub, 3L);
+
+    stub.chandelierTick(tick(new BigDecimal("1.00")));
+
+    TrailingState st = waitForTickObserved(stub);
+    assertThat(st.armed()).isFalse();
+    // lastTickAt stays null (processTick never ran) — that is the pre-existing behaviour,
+    // unchanged.
+    assertThat(st.lastTickAt()).isNull();
+    // ...but we DID hear a tick, and that must now be recorded.
+    assertThat(st.lastTickObservedAt()).isNotNull();
+  }
+
+  @Test
+  void tickDrain_observedAtAdvancesWithEachTick_whileLastTickAtTracksQuoteTime() throws Exception {
+    // The two stamps answer different questions and must not be conflated: lastTickAt is the
+    // QUOTE's
+    // own timestamp (how fresh the market data was), lastTickObservedAt is workflow time (when we
+    // last heard anything at all). A staleness check needs the second; the gap between them is
+    // itself diagnostic.
+    PositionWorkflow stub = newStub("pos-silence-armed");
+    WorkflowStub.fromTyped(stub).start(futureInput(3));
+    confirmEntry(stub, 3L);
+    stub.armChandelier(
+        armPayload("pos-silence-armed", "sig-arm", new BigDecimal("3.00"), new BigDecimal("0.20")));
+
+    stub.chandelierTick(tick(new BigDecimal("3.10")));
+    TrailingState first = waitForTickObserved(stub);
+
+    assertThat(first.armed()).isTrue();
+    assertThat(first.lastTickObservedAt()).isNotNull();
+    // Armed, so the quote stamp is populated too — and it is the QUOTE's time, not the
+    // observation's.
+    assertThat(first.lastTickAt()).isNotNull();
+    assertThat(first.lastTickAt()).isNotEqualTo(first.lastTickObservedAt());
+  }
+
   // ---------- PLAN-2026-08-16: operator-set trailing stop (arm_trail Update) ----------
 
   @Test
@@ -4397,6 +4455,23 @@ class PositionWorkflowImplTest {
     r.setLastError("benign over-exit: broker-confirmed flat");
     r.setLastStateAt(OffsetDateTime.now());
     return r;
+  }
+
+  /**
+   * Polls until a drained tick has been stamped. A tick is delivered as a SIGNAL, so it is enqueued
+   * and drained by the main loop on a later workflow task — a query issued straight after the
+   * signal legitimately races it. Same shape and deadline as {@link #waitForPlaceOrderCount(int)};
+   * a timeout returns the still-null state so the caller's assertion reports the real failure
+   * rather than the wait.
+   */
+  private TrailingState waitForTickObserved(PositionWorkflow stub) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 50_000;
+    TrailingState st = stub.trailingState();
+    while (System.currentTimeMillis() < deadline && st.lastTickObservedAt() == null) {
+      Thread.sleep(50);
+      st = stub.trailingState();
+    }
+    return st;
   }
 
   private void waitForPlaceOrderCount(int n) throws InterruptedException {

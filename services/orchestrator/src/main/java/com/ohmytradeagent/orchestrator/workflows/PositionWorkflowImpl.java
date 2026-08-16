@@ -922,6 +922,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private OffsetDateTime lastTickAt;
 
   /**
+   * Workflow-clock time a tick was last DRAINED, stamped at the route fork regardless of what is
+   * armed — distinct from {@link #lastTickAt}, which is the quote's own timestamp and is only
+   * written while the trail is armed. Observation-only: nothing reads it yet. See {@link
+   * TrailingState#lastTickObservedAt()} for why the age must be computed by the caller.
+   */
+  private OffsetDateTime lastTickObservedAt;
+
+  /**
    * Buffered arm payloads. Signal handlers only enqueue (no activity calls); the main loop drains
    * and executes the subscribe activity. Keeps signal-processing deterministic and avoids two
    * concurrent arm signals racing through {@code marketData.subscribePremium}.
@@ -1355,6 +1363,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // tick.
       while (!pendingTicks.isEmpty()) {
         PremiumTick t = pendingTicks.poll();
+        // Stamp BEFORE the route fork and regardless of what is armed. This is the only point both
+        // paths pass through, and it is deliberately not inside either handler: processTick
+        // early-returns on !trailingArmed, so lastTickAt is blank exactly when a position is
+        // unarmed, and processExitTick records only a boolean. Nothing else answers "when did we
+        // last hear anything at all" — which is the question a staleness backstop has to ask.
+        // Observation-only in this phase: no timer reads it yet.
+        lastTickObservedAt = workflowNow();
         if (exitArmed || (exitTargetFired && trailingArmed)) {
           processExitTick(t);
         } else {
@@ -2647,6 +2662,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         threshold,
         lastTickPremium,
         lastTickAt,
+        lastTickObservedAt,
         ticksReceived);
   }
 

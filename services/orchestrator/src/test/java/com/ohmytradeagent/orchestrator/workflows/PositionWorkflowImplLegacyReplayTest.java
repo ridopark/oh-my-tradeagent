@@ -550,7 +550,7 @@ class PositionWorkflowImplLegacyReplayTest {
 
     @Override
     public TrailingState trailingState() {
-      return new TrailingState(false, null, null, null, null, null, 0L);
+      return new TrailingState(false, null, null, null, null, null, null, 0L);
     }
 
     @Override
