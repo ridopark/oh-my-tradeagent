@@ -122,6 +122,31 @@ spec:
             # only symptom would have been fills quietly arriving 30-69s late again.
             - name: EXEC_FILL_LISTENER_PER_TENANT_ENABLED
               value: "true"
+            # Same drift, same reason: set IMPERATIVELY on the running pod, absent from this
+            # manifest and from last-applied-configuration. Declared here, no behaviour change.
+            #
+            # BROKER_CREDS_SOURCE is the dangerous one on a REAL-MONEY pod: without it the source
+            # falls back to `env` (matchIfMissing) and every tenant would resolve the single
+            # pod-wide alpaca-credentials-live key instead of its own row — prod-kipark and
+            # prod-jinchul orders would route to prod_real's account. The
+            # BrokerAccountIdentityVerifier cross-check should catch that and fail closed, but
+            # relying on a downstream assertion to save a misconfiguration is not a design.
+            #
+            # NOTE: unlike exec-alpaca-paper, this pod KEEPS its `envFrom` secretRef. The same
+            # analysis says it is unread here too, but removing a real-money credential is a
+            # separate change that deserves its own verification rather than riding along.
+            - name: BROKER_CREDS_SOURCE
+              value: db
+            - name: EXEC_BOOTSTRAP_TENANT_ID
+              value: prod_real
+            - name: BROKER_CREDS_DB_LIVE_ENABLED
+              value: "true"
+            # Operator-provisioned; NOT optional (see the paper manifest for the rationale).
+            - name: EXEC_ADMIN_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: exec-admin-credentials
+                  key: EXEC_ADMIN_SHARED_TOKEN
             # Issue #297 / #295: non-blocking Discord alert on a broker rejection in placeOrder.
             # The webhook URL is an operator-provisioned secret. `optional: true` so the pod still
             # boots when the secret is absent — the alerter is then a no-op (logs the would-be
