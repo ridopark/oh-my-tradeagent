@@ -1,6 +1,8 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
+import com.ohmytradeagent.contract.ArmTrailRequest;
+import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
@@ -2031,26 +2033,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
     BigDecimal peak = p.getPeakPremium();
     BigDecimal gb = p.getGivebackPct();
-    if (peak == null || peak.signum() <= 0) {
+    String rejection = chandelierArmRejection(peak, gb);
+    if (rejection != null) {
       auditLog(
           KIND_CHANDELIER_ARM_REJECTED,
           subject(
               "reason",
-              "invalid_peak",
+              rejection,
               "source_signal_id",
               p.getSourceSignalId(),
               "peak_premium",
-              peak));
-      return;
-    }
-    if (gb == null || gb.signum() <= 0 || gb.compareTo(MAX_GIVEBACK) > 0) {
-      auditLog(
-          KIND_CHANDELIER_ARM_REJECTED,
-          subject(
-              "reason",
-              "invalid_giveback",
-              "source_signal_id",
-              p.getSourceSignalId(),
+              peak,
               "giveback_pct",
               gb));
       return;
@@ -2087,6 +2080,167 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             gb,
             "subscription_id",
             res.getSubscriptionId()));
+  }
+
+  /**
+   * What makes a chandelier arm ILLEGAL, shared by the automatic signal path ({@link #processArm})
+   * and the operator Update ({@link #armTrail}). Extracted so the two can never diverge on what
+   * they accept: a giveback the operator's button offers but the automatic path would refuse is
+   * exactly the kind of split that gets discovered in production.
+   *
+   * @return the rejection reason, or {@code null} when the arm is legal
+   */
+  private static String chandelierArmRejection(BigDecimal peak, BigDecimal giveback) {
+    if (peak == null || peak.signum() <= 0) {
+      return "invalid_peak";
+    }
+    if (giveback == null || giveback.signum() <= 0 || giveback.compareTo(MAX_GIVEBACK) > 0) {
+      return "invalid_giveback";
+    }
+    return null;
+  }
+
+  @Override
+  public void armTrailValidator(ArmTrailRequest request) {
+    // Validator rejections never enter history — the cheapest possible refusal, and it keeps a
+    // malformed operator request from costing a workflow task.
+    if (request == null || request.getOperatorId() == null || request.getOperatorId().isBlank()) {
+      throw new IllegalArgumentException("operator_id is required");
+    }
+    BigDecimal gb = request.getGivebackPct();
+    if (gb == null || gb.signum() <= 0 || gb.compareTo(MAX_GIVEBACK) > 0) {
+      throw new IllegalArgumentException(
+          "giveback_pct must be in (0, " + MAX_GIVEBACK + "]: " + gb);
+    }
+    if (request.getPeakPremium() != null && request.getPeakPremium().signum() <= 0) {
+      throw new IllegalArgumentException("peak_premium must be > 0 when supplied");
+    }
+  }
+
+  @Override
+  public ArmTrailResult armTrail(ArmTrailRequest request) {
+    // No Workflow.getVersion gate, for the same reason partial_close has none: this Update is brand
+    // new, so no recorded history contains an arm_trail invocation and a legacy replay never
+    // reaches this handler. A marker here would be inert.
+    ArmTrailResult result = new ArmTrailResult();
+    result.setSchemaVersion(1L);
+
+    if (trailingArmed) {
+      // Idempotent, and deliberately does NOT re-arm: a double-click (or two operators, or two
+      // tabs) must never widen a stop that is already protecting this lot. Echoes what is actually
+      // in force, not what was asked for. Mirrors processArm's armed-path no-op.
+      result.setStatus(ArmTrailResult.Status.ALREADY_ARMED);
+      result.setPeakPremium(peakPremium);
+      result.setGivebackPct(givebackPct);
+      result.setStopPrice(trailStopPrice(peakPremium, givebackPct));
+      return result;
+    }
+
+    // Anchor: the operator's override if they pinned one, else resolved HERE rather than trusted
+    // from the browser. A page-rendered premium is seconds stale, and an anchor that is too low
+    // sets the stop too low on a real-money position.
+    BigDecimal peak =
+        request.getPeakPremium() != null ? request.getPeakPremium() : resolveTrailAnchor();
+    BigDecimal gb = request.getGivebackPct();
+
+    String rejection = chandelierArmRejection(peak, gb);
+    if (rejection != null) {
+      // peak == null here means no anchor could be resolved at all — name that precisely rather
+      // than reporting it as a bad peak, because the operator's remedy is different (retry when a
+      // quote is available, vs. nothing they can do about a malformed value).
+      String reason = peak == null ? "anchor_unresolvable" : rejection;
+      auditLog(
+          KIND_CHANDELIER_ARM_REJECTED,
+          subject(
+              "reason", reason,
+              "source", "operator",
+              "operator_id", request.getOperatorId(),
+              "peak_premium", peak,
+              "giveback_pct", gb));
+      result.setStatus(ArmTrailResult.Status.REJECTED);
+      result.setReason(reason);
+      return result;
+    }
+
+    SubscribePremiumRequest req = new SubscribePremiumRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId(input.getTenantId());
+    req.setStrategyId(input.getStrategyId());
+    req.setContractSymbol(input.getContractSymbol());
+    req.setPositionWorkflowId(Workflow.getInfo().getWorkflowId());
+    SubscribePremiumResult res = marketData.subscribePremium(req);
+    if (res.getStatus() == SubscribePremiumResult.Status.FAILED) {
+      // Without a tick feed the trail can never fire, so this MUST reject rather than arm. The
+      // signal path only audits here and returns silently; the operator path has someone waiting
+      // on an answer, and telling them a stop exists when no feed backs it is the one outcome
+      // this feature must never produce.
+      auditLog(
+          KIND_CHANDELIER_SUBSCRIPTION_FAILED,
+          subject(
+              "source", "operator",
+              "operator_id", request.getOperatorId(),
+              "error", res.getError()));
+      result.setStatus(ArmTrailResult.Status.REJECTED);
+      result.setReason("subscription_failed");
+      return result;
+    }
+
+    trailingArmed = true;
+    peakPremium = peak;
+    givebackPct = gb;
+    auditLog(
+        KIND_CHANDELIER_ARMED,
+        subject(
+            "source",
+            "operator",
+            "operator_id",
+            request.getOperatorId(),
+            "peak_premium",
+            peak,
+            "giveback_pct",
+            gb,
+            "subscription_id",
+            res.getSubscriptionId()));
+
+    result.setStatus(ArmTrailResult.Status.ARMED);
+    result.setPeakPremium(peak);
+    result.setGivebackPct(gb);
+    result.setStopPrice(trailStopPrice(peak, gb));
+    return result;
+  }
+
+  /**
+   * Best anchor this workflow can justify: the highest of the last evaluated exit price and a fresh
+   * quote bid. {@code lastBid} tracks every exit tick (unlike {@code lastTickPremium}, which only
+   * moves once the trail is armed), so it is usually populated even before any arm.
+   *
+   * @return the anchor, or {@code null} when neither source yields a usable price — the caller then
+   *     REJECTS rather than arming at a guessed level
+   */
+  private BigDecimal resolveTrailAnchor() {
+    BigDecimal best = lastBid != null && lastBid.signum() > 0 ? lastBid : null;
+    GetOptionQuoteRequest qreq = new GetOptionQuoteRequest();
+    qreq.setSchemaVersion(1L);
+    qreq.setTenantId(input.getTenantId());
+    qreq.setStrategyId(input.getStrategyId());
+    qreq.setContractSymbol(input.getContractSymbol());
+    OptionQuoteResult quote = optionQuote.getOptionQuote(qreq);
+    if (quote != null
+        && quote.getStatus() == OptionQuoteResult.Status.OK
+        && quote.getBid() != null
+        && quote.getBid().signum() > 0
+        && (best == null || quote.getBid().compareTo(best) > 0)) {
+      best = quote.getBid();
+    }
+    return best;
+  }
+
+  /** {@code peak * (1 - giveback)}, penny-rounded — the same threshold the tick loop fires on. */
+  private static BigDecimal trailStopPrice(BigDecimal peak, BigDecimal giveback) {
+    if (peak == null || giveback == null) {
+      return null;
+    }
+    return OptionTick.round(peak.multiply(BigDecimal.ONE.subtract(giveback)));
   }
 
   /**

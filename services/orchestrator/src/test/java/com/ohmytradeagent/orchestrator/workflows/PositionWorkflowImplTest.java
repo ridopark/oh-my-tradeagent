@@ -14,6 +14,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
+import com.ohmytradeagent.contract.ArmTrailRequest;
+import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
@@ -4118,6 +4120,111 @@ class PositionWorkflowImplTest {
     PositionWorkflowInput in = input(qty);
     in.setContractSymbol(FUTURE_OCC_SYMBOL);
     return in;
+  }
+
+  // ---------- PLAN-2026-08-16: operator-set trailing stop (arm_trail Update) ----------
+
+  @Test
+  void armTrail_operatorArmsAndStopIsPeakAnchored() throws Exception {
+    // The default quote bid is 2.50, so a 20% giveback must anchor at 2.50 and stop at 2.00.
+    PositionWorkflow stub = newStub("pos-armtrail-ok");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
+    assertThat(r.getPeakPremium()).isEqualByComparingTo("2.50");
+    assertThat(r.getGivebackPct()).isEqualByComparingTo("0.20");
+    // stop = peak * (1 - giveback). Echoed so the UI never re-derives the workflow's arithmetic.
+    assertThat(r.getStopPrice()).isEqualByComparingTo("2.00");
+
+    AuditEvent armed = captureKind("ChandelierArmed");
+    assertThat(armed.getSubject())
+        .containsEntry("source", "operator")
+        .containsEntry("operator_id", "ops-1");
+  }
+
+  @Test
+  void armTrail_rejectsWhenSubscriptionFails_andDoesNotArm() throws Exception {
+    // THE failure this feature must never get wrong. Without a tick feed the trail can never fire,
+    // so reporting success would leave the operator believing a real-money position is protected.
+    when(marketData.subscribePremium(any())).thenReturn(failedSubscription("upstream down"));
+
+    PositionWorkflow stub = newStub("pos-armtrail-subfail");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.REJECTED);
+    assertThat(r.getReason()).isEqualTo("subscription_failed");
+    // No stop was armed, and the operator is told so rather than shown a price.
+    assertThat(r.getStopPrice()).isNull();
+    captureKind("ChandelierSubscriptionFailed");
+  }
+
+  @Test
+  void armTrail_rejectsWhenNoAnchorResolvable() throws Exception {
+    // No live bid anywhere: arming at a guessed level would put the stop at the wrong price on a
+    // real-money position, so the arm is refused instead.
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteFailed("provider 503"));
+
+    PositionWorkflow stub = newStub("pos-armtrail-noanchor");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.REJECTED);
+    // Named precisely: the operator's remedy (retry when a quote returns) differs from a malformed
+    // value they could correct.
+    assertThat(r.getReason()).isEqualTo("anchor_unresolvable");
+  }
+
+  @Test
+  void armTrail_alreadyArmedIsIdempotentAndNeverLoosens() throws Exception {
+    PositionWorkflow stub = newStub("pos-armtrail-idem");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.10")));
+    // A second, LOOSER request — a double-click, two tabs, or a second operator.
+    ArmTrailResult second = stub.armTrail(armTrailRequest("ops-2", new BigDecimal("0.40")));
+
+    assertThat(second.getStatus()).isEqualTo(ArmTrailResult.Status.ALREADY_ARMED);
+    // Echoes what is IN FORCE, not what was asked for: the tight 10% stop still protects the lot.
+    assertThat(second.getGivebackPct()).isEqualByComparingTo("0.10");
+    assertThat(second.getStopPrice()).isEqualByComparingTo("2.25");
+  }
+
+  @Test
+  void armTrail_validatorRejectsGivebackAboveMax() throws Exception {
+    // MAX_GIVEBACK is 0.5. A validator rejection never enters history, and it must agree with what
+    // the automatic signal path would refuse — that is what chandelierArmRejection() shares.
+    PositionWorkflow stub = newStub("pos-armtrail-maxgb");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+
+    assertThatThrownBy(() -> stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.60"))))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("giveback_pct");
+  }
+
+  @Test
+  void armTrail_validatorRejectsBlankOperator() throws Exception {
+    PositionWorkflow stub = newStub("pos-armtrail-noop-id");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+
+    assertThatThrownBy(() -> stub.armTrail(armTrailRequest("", new BigDecimal("0.20"))))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasStackTraceContaining("operator_id");
+  }
+
+  private ArmTrailRequest armTrailRequest(String operatorId, BigDecimal giveback) {
+    ArmTrailRequest r = new ArmTrailRequest();
+    r.setSchemaVersion(1L);
+    r.setOperatorId(operatorId);
+    r.setGivebackPct(giveback);
+    return r;
   }
 
   private ForceCloseRequest forceCloseRequest(String operatorId, String reason) {

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/arm-trail-result.json",
+  "title": "ArmTrailResult",
+  "description": "Synchronous return value of PositionWorkflow.arm_trail. Echoes what was ACTUALLY armed rather than what was requested, because the workflow resolves the anchor itself when peak_premium is omitted — the operator needs to see the stop that now exists, not the one they asked for. REJECTED is the load-bearing case: it is what stops the UI reporting success for an arm that never happened.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.ArmTrailResult",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ARMED", "ALREADY_ARMED", "REJECTED"],
+      "description": "ARMED: the trail is now live on this position. ALREADY_ARMED: a trail was already running and this request did not LOOSEN it (the workflow never widens an existing stop). REJECTED: nothing was armed — the position remains unprotected and `reason` says why."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Why the arm was refused. Mirrors the existing ChandelierArmRejected reasons (invalid_peak, invalid_giveback) plus subscription_failed and anchor_unresolvable. Surfaced verbatim to the operator; absent when status != REJECTED."
+    },
+    "peak_premium": {
+      "type": "number",
+      "description": "The anchor the trail is actually pegged at — the workflow's resolved value, not necessarily the requested one. Absent on REJECTED."
+    },
+    "giveback_pct": {
+      "type": "number",
+      "description": "The giveback actually in force. On ALREADY_ARMED this is the PRE-EXISTING (tighter) value, not the requested one. Absent on REJECTED."
+    },
+    "stop_price": {
+      "type": "number",
+      "description": "peak_premium * (1 - giveback_pct) at arm time, so the UI can echo a concrete number without re-deriving the workflow's arithmetic. A LIVE value that rises with the peak — never render it as a fixed floor the operator set. Absent on REJECTED."
+    }
+  }
+}

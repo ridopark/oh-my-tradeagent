@@ -10,6 +10,8 @@ import static org.mockito.Mockito.when;
 import com.ohmytradeagent.contract.AdoptionResult;
 import com.ohmytradeagent.contract.AdoptionWorkflowInput;
 import com.ohmytradeagent.contract.ArmChandelierPayload;
+import com.ohmytradeagent.contract.ArmTrailRequest;
+import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.FillSignalPayload;
@@ -475,6 +477,16 @@ class AdoptionWorkflowImplLegacyReplayTest {
 
     @Override
     public PartialCloseResult partialClose(PartialCloseRequest request) {
+      return null;
+    }
+
+    // PLAN-2026-08-16 arm_trail: test double only — never invoked by these suites. Returning null
+    // is the same convention the sibling Updates above use.
+    @Override
+    public void armTrailValidator(ArmTrailRequest request) {}
+
+    @Override
+    public ArmTrailResult armTrail(ArmTrailRequest request) {
       return null;
     }
   }
