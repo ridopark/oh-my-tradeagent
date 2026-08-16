@@ -109,6 +109,19 @@ spec:
             # REST poller only. The AlpacaConfig base-url guard does NOT cover this.
             - name: EXEC_FILL_LISTENER_WS_URL
               value: wss://api.alpaca.markets/stream
+            # DECLARED 2026-08-16 to close a drift, not to change behaviour — the running pod
+            # already had this set IMPERATIVELY (absent from both this manifest and
+            # last-applied-configuration). It survived `kubectl apply` only by strategic-merge
+            # accident, exactly like ALPACA_STOCK_FEED=sip on market-data.
+            #
+            # It is load-bearing for REAL MONEY: this pod serves prod_real / prod-kipark /
+            # prod-jinchul, three DISTINCT Alpaca accounts. Reverting to the single-socket default
+            # would authenticate one pod-wide credential and silently stop delivering fills for the
+            # others — the exact failure exec-alpaca-paper is in today. A delete/recreate, a
+            # namespace rebuild, or a switch to server-side apply would have done that, and the
+            # only symptom would have been fills quietly arriving 30-69s late again.
+            - name: EXEC_FILL_LISTENER_PER_TENANT_ENABLED
+              value: "true"
             # Issue #297 / #295: non-blocking Discord alert on a broker rejection in placeOrder.
             # The webhook URL is an operator-provisioned secret. `optional: true` so the pod still
             # boots when the secret is absent — the alerter is then a no-op (logs the would-be
