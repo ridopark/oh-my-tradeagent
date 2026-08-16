@@ -90,7 +90,18 @@ export function StopLossButton({
   // stale or missing price here can mislead the preview but can never set the stop wrong.
   currentPrice: number | null;
   // Non-null when this position already has a trail armed — the control then reports it instead of
-  // offering to arm again, so the operator can see a stop exists without opening the audit log.
+  // offering to arm again.
+  //
+  // NOTHING SUPPLIES THIS YET. /live cannot: the BFF's PositionsReader maps only
+  // (contractSymbol, remainingQty, entryPremium) off the PositionState query, which carries no
+  // trailing state, so surfacing it needs that query record, the BFF's reflective mapping, the API
+  // shape and the page all extended — a separate change from this one. Stated here rather than left
+  // implicit, because a prop that looks wired and is not is the same trap as the schema claiming a
+  // "smoothed mid" that never existed.
+  //
+  // The degradation is safe, not silent: after a refresh an armed position renders as un-armed, so
+  // an operator may arm again — and that returns ALREADY_ARMED (200), which this control shows as
+  // "Already trailing" without touching the existing stop.
   armedGivebackPct?: number | null;
   action: (
     workflowId: string,
