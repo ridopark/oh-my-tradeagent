@@ -268,8 +268,6 @@ jobs:
           # re-pulls :latest while preserving the live spec. Apply genuine manifest changes for
           # them BY HAND. (Footgun confirmed 2026-06-15 and 2026-06-16 — see ops notes.)
           #   - orchestrator: tenants volume items → prod_real/ + staging_paper/ (repo = dev/)
-          #   - exec-alpaca-paper: BROKER_CREDS_SOURCE=db + EXEC_BOOTSTRAP_TENANT_ID=staging_paper
-          #     (absent in repo → apply strips them → staging_paper's encrypted-DB creds break)
           #   - dashboard + api-gateway: STRATEGY_CONFIG_WRITE_ENABLED=true (repo keeps the
           #     config-write path DARK by default → absent in repo → apply re-darks the config page)
           #   - orchestrator (also): STRATEGY_CONFIG_SOURCE=db (configs read from the strategy_config
@@ -284,7 +282,24 @@ jobs:
           #     (operator Add-Tenant admin-read enablement; repo keeps admin-read DARK by default →
           #     absent in repo → apply re-darks the /api/admin/tenants route and the operator can no
           #     longer see the tenant list). Same class as api-gateway's operator overrides.
-          RESTART_ONLY="orchestrator exec-alpaca-paper dashboard api-gateway market-data signal-source-discord tenant-dashboard-bff"
+          #
+          # exec-alpaca-paper was REMOVED from this list 2026-08-16. Its two listed overrides
+          # (BROKER_CREDS_SOURCE=db + EXEC_BOOTSTRAP_TENANT_ID=staging_paper) are now DECLARED in
+          # 52-exec-alpaca-paper.yaml, along with the other three that were never listed here at
+          # all (BROKER_CREDENTIALS_DELETE_ENABLED, EXEC_ADMIN_SHARED_TOKEN,
+          # EXEC_FILL_LISTENER_PER_TENANT_ENABLED) — so apply no longer strips anything.
+          # Verified: `kubectl diff -f 52-exec-alpaca-paper.yaml` exits 0 against the live cluster,
+          # i.e. a full-object apply is a genuine no-op, not merely an env-var match.
+          #
+          # This matters beyond tidiness. While it sat here, manifest edits for this service
+          # reached the cluster ONLY by hand, so the manifest was decorative and drifted silently
+          # — which is precisely how the fill-listener 401 (#695) went unnoticed. Skipping apply
+          # to protect undeclared state keeps the state undeclared.
+          #
+          # ORDER MATTERS: this removal is only safe because the declarations merged with it. Do
+          # not remove another service from this list without first declaring its overrides AND
+          # confirming `kubectl diff` exits 0 for its manifest.
+          RESTART_ONLY="orchestrator dashboard api-gateway market-data signal-source-discord tenant-dashboard-bff"
           for s in $RESTART_ONLY; do
             if [ "$s" = "${{ matrix.service }}" ]; then
               echo "::notice::${{ matrix.service }} has live-only overrides — skipping apply (rollout restart below still re-pulls :latest)."
