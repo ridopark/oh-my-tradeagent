@@ -28,29 +28,11 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
   private static final Logger log = LoggerFactory.getLogger(AuditQueryActivitiesImpl.class);
 
   /**
-   * P3-b: the risk-relevant {@code StrategyConfig} JSON field keys whose post-approval change voids
-   * a {@code LivePromotionApproved} sign-off. The CORE set is exactly the P0c-a DANGEROUS +
-   * EXPOSURE classes from {@code StrategyConfigWriter.checkFieldClasses} (the single source of
-   * truth for what counts as a risk-envelope edit):
-   *
-   * <ul>
-   *   <li>DANGEROUS (must-equal-stored): {@code broker_target}, {@code
-   *       notional_cap_pct_of_capital_base}. (single-account-loss-rule Phase 4a: {@code
-   *       daily_loss_threshold} is a dead field — the account cap is the sole daily-loss breaker —
-   *       so it is no longer risk-relevant and a change to it no longer voids a live promotion.)
-   *   <li>EXPOSURE (tighten-only): {@code max_contracts}, {@code min_contracts}, {@code
-   *       max_positions}, {@code capital_weight}, {@code max_notional_per_signal}, {@code
-   *       max_daily_notional_deployed}.
-   * </ul>
-   *
-   * <p>risk-manager-suggested additions, verified against {@code
-   * contract/schemas/strategy-config.json} — INCLUDED because each exists as a real schema
-   * property: {@code notional_cap_pct_of_equity} (the deprecated cap alias, schema line ~191),
-   * {@code same_underlying_count}, {@code sector_concentration_cap}, {@code daily_trade_count},
-   * {@code drawdown_velocity_threshold}. None were excluded-because-absent — all five risk-manager
-   * fields are present in the schema. (A non-existent key here would be a silent no-op; a real risk
-   * field missing would be a detection hole, so each was confirmed against the exact snake_case
-   * schema key.)
+   * P3-b: the {@code StrategyConfig} keys whose post-approval change voids a {@code
+   * LivePromotionApproved} sign-off now live in {@link RiskRelevantConfigKeys} (contract-java),
+   * shared with tenant-dashboard-bff's {@code LivePromotionStateReader}. See that class for the
+   * membership rationale — including why {@code daily_loss_threshold} is deliberately absent, which
+   * this file's own {@code AuditQueryLivePromotionIT} pins.
    */
   // Single source of truth in contract-java: this set and the tenant-dashboard-bff's copy DRIFTED
   // on 2026-08-15 (repeg_ceiling_pct added here and not there), which halted live trading behind an

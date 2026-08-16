@@ -23,6 +23,20 @@ class RiskRelevantConfigKeysTest {
   }
 
   @Test
+  void deadDailyLossThresholdDoesNotVoidAPromotion() {
+    // Reversing a drift toward the STRICTER side is the wrong instinct when the stricter side
+    // guards nothing. single-account-loss-rule Phase 4a made the per-strategy daily_loss_threshold
+    // dead (the account cap is the sole breaker), so voiding a promotion on it forces a re-Activate
+    // for zero safety gain — and a voided promotion fails live BTOs closed until an operator acts.
+    // The orchestrator's exclusion is the deliberate position, pinned by
+    // AuditQueryLivePromotionIT#dailyLossThresholdConfigChangedAfterApproval_returnsValid; the
+    // BFF's inclusion was residue. This test exists so it cannot drift back in unnoticed — those
+    // two ITs asserted opposite answers for months without either failing, because both are
+    // RUN_DB_ITS-gated in separate modules.
+    assertThat(RiskRelevantConfigKeys.ALL).doesNotContain("daily_loss_threshold");
+  }
+
+  @Test
   void coversEveryDangerousAndExposureFieldClass() {
     // These are the StrategyConfigWriter DANGEROUS/EXPOSURE fields. A promotion must not survive a
     // change to any of them.

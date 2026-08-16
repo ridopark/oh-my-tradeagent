@@ -58,13 +58,25 @@ public final class RiskRelevantConfigKeys {
           // above the max_slippage_pct cap, the same category as the notional_cap_* keys.
           // repeg_after_ms is deliberately NOT here, so the emergency off-switch stays a fast edit
           // that does not void a promotion.
-          "repeg_ceiling_pct",
-          // Retained deliberately: the per-strategy daily-loss breaker is a dead field (the account
-          // cap superseded it), but it stayed in the BFF's copy while the orchestrator dropped it.
-          // Keeping it is the SAFE direction — an edit to a dead field merely forces a harmless
-          // re-Activate, whereas dropping it would silently widen what can change under a live
-          // promotion.
-          "daily_loss_threshold");
+          "repeg_ceiling_pct");
+
+  // DELIBERATELY ABSENT — daily_loss_threshold.
+  //
+  // It was the other half of the 2026-08-15 drift, in the opposite direction: present in the BFF's
+  // copy, absent from the orchestrator's. The first instinct is to resolve a drift toward the
+  // STRICTER side, and that is wrong here. single-account-loss-rule Phase 4a made the per-strategy
+  // daily_loss_threshold a DEAD field — the account cap (account_daily_loss_pct) is the sole
+  // daily-loss breaker, and nothing reads this key at runtime. A change to it cannot alter the risk
+  // envelope, so voiding a promotion on it guards nothing and only forces a re-Activate.
+  //
+  // That is not free. A voided promotion fails live BTOs closed until an operator re-Activates, and
+  // on 2026-08-15 exactly that sequence halted three real-money tenants. Gratuitous voiding
+  // triggers are an availability risk with no matching safety gain.
+  //
+  // The orchestrator's exclusion was the DELIBERATE, documented, test-pinned position
+  // (AuditQueryLivePromotionIT#dailyLossThresholdConfigChangedAfterApproval_returnsValid); the
+  // BFF's inclusion was residue. Aligned to the deliberate side. Pinned by
+  // RiskRelevantConfigKeysTest so it cannot drift back in unnoticed.
 
   /**
    * The set rendered as a Postgres {@code text[]} literal for inlining into a plain-SQL {@code
