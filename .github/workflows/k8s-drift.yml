@@ -22,9 +22,20 @@ name: k8s drift check (advisory)
 # The job also defends against an empty secret value in case the var
 # gets flipped prematurely.
 #
-# Read-only safety: the SA bound to KUBECONFIG_READONLY has verbs
-# [get, list, watch] only — `kubectl diff` cannot mutate, even by
-# accident. See infra/k8s/56-ci-readonly-sa.yaml.
+# Read-only safety: NOT RBAC-enforced, despite what this comment used to
+# claim. `kubectl diff` performs a server-side DRY-RUN apply and the
+# apiserver authorizes the underlying write verb even for a dry run, so the
+# SA necessarily holds create/patch/update on the diffed namespaced kinds —
+# a leaked token COULD mutate them. The no-mutation guarantee is PROCEDURAL
+# (this workflow only ever runs `kubectl diff`, never `apply`) plus the
+# layered defenses below. 56-ci-readonly-sa.yaml has always documented this
+# correctly; this header contradicted it, which is the worse of the two
+# failure modes for a security claim. Corrected 2026-08-16.
+#
+# The SA is scoped to namespace `copytrade`, and deliberately holds NO
+# access to `secrets` — the diff output is posted verbatim into a PR
+# comment on a PUBLIC repo, so read access to a Secret is an exfiltration
+# path. See 56-ci-readonly-sa.yaml before widening any grant.
 #
 # Public-repo safety: three layered defenses make a self-hosted runner
 # safe here — `pull_request_target` trigger, required-reviewer
