@@ -2139,11 +2139,18 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // Anchor: the operator's override if they pinned one, else resolved HERE rather than trusted
     // from the browser. A page-rendered premium is seconds stale, and an anchor that is too low
     // sets the stop too low on a real-money position.
-    BigDecimal peak =
-        request.getPeakPremium() != null ? request.getPeakPremium() : resolveTrailAnchor();
+    Anchor anchor = request.getPeakPremium() != null ? null : resolveTrailAnchor();
+    BigDecimal peak = anchor != null ? anchor.price() : request.getPeakPremium();
     BigDecimal gb = request.getGivebackPct();
 
     String rejection = chandelierArmRejection(peak, gb);
+    if (rejection == null && alreadyBreached(anchor, peak, gb)) {
+      // The anchor path is UNFILTERED (see resolveTrailAnchor), so a phantom snapshot can put the
+      // peak above anything real. Rather than guess at which side of the book lied, refuse to arm a
+      // stop that is ALREADY breached at the moment of arming: peakPremium never falls, so such a
+      // stop is not a trail, it is an immediate market flatten wearing the operator's name.
+      rejection = "anchor_implausible";
+    }
     if (rejection != null) {
       // peak == null here means no anchor could be resolved at all — name that precisely rather
       // than reporting it as a bad peak, because the operator's remedy is different (retry when a
@@ -2240,7 +2247,40 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * @return the anchor, or {@code null} when no source yields a usable price — the caller then
    *     REJECTS rather than arming at a guessed level
    */
-  private BigDecimal resolveTrailAnchor() {
+  /**
+   * The resolved anchor plus the live bid it was resolved against, so the caller can sanity-check
+   * the two together without spending a second quote activity.
+   *
+   * @param price the anchor, or {@code null} when nothing usable was found
+   * @param bid the fresh quote's bid, or {@code null} when there was no usable quote
+   */
+  private record Anchor(BigDecimal price, BigDecimal bid) {}
+
+  /**
+   * Would this arm produce a stop that is ALREADY breached? {@code peakPremium} never falls, so
+   * such a stop cannot trail — the next honest tick fires it and flattens the position at market,
+   * audited as an operator action.
+   *
+   * <p>Checked against the bid from the SAME quote, which costs nothing extra and catches the
+   * realistic phantom: a blown ask inflates the mid while the bid stays honest. A crossed book (bid
+   * above ask) is refused outright, because that is never a book worth anchoring on and it is how a
+   * blown BID would otherwise slip past a bid-referenced check.
+   *
+   * <p><b>Irreducible residual:</b> a phantom that moves BOTH sides coherently is indistinguishable
+   * from a genuine repricing without a filtered reference to compare against, and no such reference
+   * exists at arm time on a copytrade position (no premium subscription runs until this very call).
+   * Closing that needs the market-data guard's own last-accepted price exposed across the service
+   * boundary — deliberately out of scope here.
+   */
+  private static boolean alreadyBreached(Anchor anchor, BigDecimal peak, BigDecimal gb) {
+    if (anchor == null || anchor.bid() == null || anchor.bid().signum() <= 0) {
+      return false; // operator-pinned peak, or no quote — nothing to cross-check against
+    }
+    BigDecimal stop = trailStopPrice(peak, gb);
+    return stop != null && stop.compareTo(anchor.bid()) >= 0;
+  }
+
+  private Anchor resolveTrailAnchor() {
     boolean bidSpace = exitArmed || exitTargetFired;
     BigDecimal best = bidSpace && lastBid != null && lastBid.signum() > 0 ? lastBid : null;
     GetOptionQuoteRequest qreq = new GetOptionQuoteRequest();
@@ -2249,13 +2289,25 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     qreq.setStrategyId(input.getStrategyId());
     qreq.setContractSymbol(input.getContractSymbol());
     OptionQuoteResult quote = optionQuote.getOptionQuote(qreq);
+    BigDecimal liveBid = null;
     if (quote != null && quote.getStatus() == OptionQuoteResult.Status.OK) {
+      if (crossed(quote)) {
+        return new Anchor(best, null); // never anchor on a crossed book, and do not vouch for it
+      }
+      liveBid = quote.getBid();
       BigDecimal fresh = bidSpace ? quote.getBid() : trustedMid(quote);
       if (fresh != null && fresh.signum() > 0 && (best == null || fresh.compareTo(best) > 0)) {
         best = fresh;
       }
     }
-    return best;
+    return new Anchor(best, liveBid);
+  }
+
+  /** A bid above the ask is not a book. Never anchor on it, and never vouch for its bid. */
+  private static boolean crossed(OptionQuoteResult quote) {
+    return quote.getBid() != null
+        && quote.getAsk() != null
+        && quote.getBid().compareTo(quote.getAsk()) > 0;
   }
 
   /**

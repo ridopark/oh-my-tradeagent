@@ -4207,6 +4207,52 @@ class PositionWorkflowImplTest {
   }
 
   @Test
+  void armTrail_tightGiveback_rejectsAnAnchorThatWouldArmAnAlreadyBreachedStop() throws Exception {
+    // The 2x ask/bid fallback is NOT sufficient on its own, and the gap lands on a shipped preset.
+    // With anchor <= 1.5*bid and the next honest tick >= bid, an immediate fire needs
+    // 1.5*(1-gb) >= 1, i.e. gb <= 1/3 — so 35% and 45% are provably safe but the 25% preset is not.
+    //
+    // Here: bid 4.00, ask 7.00 (1.75x, under the 2x cap), mid 5.50. At 25% the stop is 4.125, which
+    // is ALREADY above the 4.00 bid. peakPremium never falls, so that is not a trail — the next
+    // honest tick flattens the position at market, audited as an operator action. Refuse instead;
+    // the operator retries against a clean snapshot.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            quoteOk(new BigDecimal("4.00"), new BigDecimal("5.50"), new BigDecimal("7.00")));
+
+    PositionWorkflow stub = newStub("pos-armtrail-breached");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.25")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.REJECTED);
+    assertThat(r.getReason()).isEqualTo("anchor_implausible");
+    assertThat(r.getStopPrice()).isNull();
+    assertThat(captureKind("ChandelierArmRejected").getSubject())
+        .containsEntry("reason", "anchor_implausible");
+  }
+
+  @Test
+  void armTrail_crossedBook_isNeverAnchoredOn() throws Exception {
+    // A blown BID inflates the mid exactly as a blown ask does, and it would slip past a check that
+    // references the bid — the phantom would be vouching for itself. A crossed NBBO is never a real
+    // book, so it is refused before it can anchor anything.
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(
+            quoteOk(new BigDecimal("12.00"), new BigDecimal("8.05"), new BigDecimal("4.10")));
+
+    PositionWorkflow stub = newStub("pos-armtrail-crossed");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.35")));
+
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.REJECTED);
+    assertThat(r.getReason()).isEqualTo("anchor_unresolvable");
+  }
+
+  @Test
   void armTrail_rejectsWhenSubscriptionFails_andDoesNotArm() throws Exception {
     // THE failure this feature must never get wrong. Without a tick feed the trail can never fire,
     // so reporting success would leave the operator believing a real-money position is protected.
