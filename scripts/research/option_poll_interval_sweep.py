@@ -1,6 +1,23 @@
 #!/usr/bin/env python3
 """Sweep many (contract, day) pairs: does 500ms beat 2000ms consistently?
 
+⚠⚠ THIS SCRIPT'S HEADLINE RESULT IS RETRACTED. DO NOT QUOTE IT. ⚠⚠
+
+It reports "500ms and 2000ms exit at the same price" (14 of 18 identical). That
+result is an ARTIFACT, not a finding: it replays TRADE PRINTS, whose median gap
+is 1520ms, and 45.6% of gaps exceed 2000ms. A 500ms poll of that series re-reads
+the same value three or four times, so this method CANNOT detect the effect it
+is asked about. Run option_print_resolution.py to see the gap distribution.
+
+The corrected analysis is option_velocity.py, which measures detection delay
+instead: a poll at interval I observes a stop crossing ~I/2 late, and at the
+measured p99 downward velocity of 2.31%/s that 0.75s difference is worth
+1.7-3.5% of premium. See docs/plans/SPIKE-options-premium-websocket.md.
+
+Kept in the tree because the reasoning error is instructive, not because the
+number is usable.
+
+
 Focuses on the case that actually matters: a contract that RISES then FALLS,
 because a trailing stop is only armed on a position that has gone profitable.
 Contracts whose peak is the first print are skipped -- a trail would never have

@@ -1,3 +1,13 @@
+-- ⚠ USE PERCENTILES, NEVER avg(). `last_state_at` is bumped by ANY later update,
+-- including ones that do not change state (OrderIntentJournal:141), so a row that
+-- was touched repeatedly carries a stamp long after the fill was observed.
+-- Verified 2026-08-16 on exec_alpaca_live: of 176 FILLED rows only 2 are
+-- contaminated, both pathological (version=18 -> 1409s, version=470 -> 15849s);
+-- the other 174 sit at version 2-4 where last_state_at IS the fill-observation
+-- write, with a max lag of 30.58s inside version=3. Medians are therefore sound
+-- and a mean is not -- the version=470 row alone would wreck it.
+-- Add `AND version <= 4` if you need to be strict.
+--
 -- DECISIVE: separate the BROKER's real fill latency from OUR observation lag.
 --   broker_fill_s   = filled_at - submitted_at   (how long the market took)
 --   observe_lag_s   = last_state_at - filled_at  (how long WE took to notice)
