@@ -108,7 +108,12 @@ class SubscribePremiumActivityImplTest {
     stream = new InMemoryMarketData();
     SubscribePremiumActivityImpl activity =
         new SubscribePremiumActivityImpl(
-            stream, env.getWorkflowClient(), Executors.newSingleThreadExecutor());
+            stream,
+            env.getWorkflowClient(),
+            Executors.newSingleThreadExecutor(),
+            // 0% = emit every tick, preserving what these wiring tests were written to assert.
+            // The throttle's own behaviour is covered by SubscribePremiumThrottleTest.
+            BigDecimal.ZERO);
     Worker mdWorker = env.newWorker(MARKET_DATA_QUEUE);
     mdWorker.registerActivitiesImplementations(activity);
 

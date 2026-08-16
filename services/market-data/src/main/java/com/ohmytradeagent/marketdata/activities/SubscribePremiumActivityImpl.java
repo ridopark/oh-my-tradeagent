@@ -9,13 +9,16 @@ import com.ohmytradeagent.marketdata.provider.Subscription;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -29,6 +32,30 @@ import org.springframework.stereotype.Component;
  *
  * <p>{@code subscribePremium} swallows source-side exceptions and returns FAILED so the workflow
  * can audit and proceed without a trail (instead of going into Temporal retry).
+ *
+ * <p><b>Min-move throttle.</b> Every tick signalled here becomes a Temporal history event on the
+ * target PositionWorkflow, and that workflow — uniquely among the long-lived ones here — has NO
+ * continue-as-new. At the premium feed's fixed ~2s poll an armed position generates ~11,700 signals
+ * per RTH day, past this repo's own 10,000-event watermark inside a single trading day, on a
+ * workflow that is explicitly multi-day (it sleeps overnight and resumes when {@code
+ * eod_force_flatten=false}). So the throttle is not a performance nicety: without it an armed trail
+ * walks a real-money position into Temporal's history limits.
+ *
+ * <p>It emits the first tick (seeding the baseline) and thereafter only when the mid OR the bid has
+ * moved at least {@code premium-emit-delta-pct} from the LAST EMITTED value of that same side —
+ * delta from last emitted, not per-tick delta, so a slow monotonic drift still emits every step
+ * rather than never. Both sides are gated because the tick carries the mid but the watchlist exit
+ * path evaluates the bid; see {@link #shouldEmit}.
+ *
+ * <p><b>The residual, stated precisely.</b> A move INSIDE the band is not observed until the price
+ * leaves the band — bounded in price, unbounded in TIME. It cannot compound past one step, because
+ * the baseline advances on every emission, so a breach is acted on within {@code delta} of the true
+ * threshold rather than missed outright. For a stop that is a bounded worse fill (~2.7 cents on a
+ * $2.70 contract at the 1% default), which is small against a 35% giveback — but it is a real cost,
+ * not a free one.
+ *
+ * <p>This mirrors {@code SubscribeEquityActivityImpl}, whose javadoc already named this activity as
+ * the one lacking it.
  */
 @Component
 public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
@@ -40,16 +67,94 @@ public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
   private final ExecutorService dispatcher;
 
   /**
+   * Fraction of the last emitted premium a tick must move before it is signalled. 1% by default:
+   * small enough that it cannot mask a trail breach in any meaningful way (the tightest giveback
+   * the workflow accepts is far wider), large enough to collapse the flat stretches that dominate a
+   * poll-driven feed. Configurable so it can be tightened without a redeploy of judgement.
+   */
+  private final BigDecimal emitDeltaPct;
+
+  /**
    * Subscription registry keyed by subscription_id. Phase 4 had no explicit unsubscribe path beyond
    * the workflow-not-found self-tear-down; we keep that pattern here.
    */
   private final ConcurrentHashMap<String, Subscription> active = new ConcurrentHashMap<>();
 
   public SubscribePremiumActivityImpl(
-      MarketDataProvider provider, WorkflowClient workflowClient, ExecutorService dispatcher) {
+      MarketDataProvider provider,
+      WorkflowClient workflowClient,
+      ExecutorService dispatcher,
+      @Value("${market-data.premium-emit-delta-pct:0.01}") BigDecimal emitDeltaPct) {
     this.provider = provider;
     this.workflowClient = workflowClient;
     this.dispatcher = dispatcher;
+    this.emitDeltaPct = emitDeltaPct;
+  }
+
+  /**
+   * The last emitted mid AND bid, advanced together. One reference rather than two so the pair can
+   * never tear: two independent CAS'd fields would let one thread advance the mid while another
+   * advances the bid, leaving a baseline that was never an actual quote.
+   */
+  record Baseline(BigDecimal mid, BigDecimal bid) {}
+
+  /** Per-subscription emit baseline. */
+  static final class ThrottleState {
+    final AtomicReference<Baseline> lastEmitted = new AtomicReference<>();
+  }
+
+  private final ConcurrentHashMap<String, ThrottleState> throttles = new ConcurrentHashMap<>();
+
+  /**
+   * Emit the first tick, then only when the mid OR the bid has moved at least {@code emitDeltaPct}
+   * from ITS OWN last emitted value.
+   *
+   * <p><b>Why the bid is gated separately.</b> The premium carried on a tick is the MID ({@code
+   * AlpacaMarketData} builds it from {@code q.mid()}), but {@code PositionWorkflowImpl
+   * .processExitTick} evaluates {@code tick.getBid()} — the -1R stop, the +2R target and the
+   * post-target trail are all bid-driven. A widening book moves the bid a long way while the mid
+   * sits still, because the mid is the average of the two sides moving apart: 2.70x2.90 drifting to
+   * 1.35x4.25 holds the mid at 2.80 throughout while the bid falls through a 1.40 stop. Gating on
+   * the mid alone would suppress every one of those ticks and the stop would never fire, with the
+   * error unbounded in bid terms. So the throttle must gate on what the workflow actually
+   * evaluates, not merely on a price that summarises it.
+   *
+   * <p>Emitting on EITHER keeps the history-ceiling argument intact: a tick is still only emitted
+   * when something the workflow reads has genuinely moved.
+   *
+   * <p>The compare-and-set is load-bearing rather than defensive: the provider drives this from a
+   * feed thread, and two ticks racing the same baseline would otherwise both read the old value and
+   * both emit — reintroducing exactly the history growth being bounded. Only the thread that
+   * successfully advances the baseline emits. Same shape as the equity throttle.
+   */
+  boolean shouldEmit(ThrottleState throttle, BigDecimal mid, BigDecimal bid) {
+    if (mid == null || mid.signum() <= 0) {
+      return false; // a non-positive premium is not a price; never seed or emit on it
+    }
+    while (true) {
+      Baseline prev = throttle.lastEmitted.get();
+      if (prev != null && !movedEnough(prev.mid(), mid) && !movedEnough(prev.bid(), bid)) {
+        return false;
+      }
+      if (throttle.lastEmitted.compareAndSet(prev, new Baseline(mid, bid))) {
+        return true;
+      }
+    }
+  }
+
+  /**
+   * Has {@code now} moved at least {@code emitDeltaPct} from {@code prev}?
+   *
+   * <p>An unmeasurable side (absent or non-positive baseline, absent current value) answers "no
+   * reason to emit" rather than "emit": it is not evidence of movement, and the other side still
+   * governs. A vanishing bid is not silently tolerated here — {@code AlpacaMarketData} rejects a
+   * no-bid quote outright, so one never reaches this throttle.
+   */
+  private boolean movedEnough(BigDecimal prev, BigDecimal now) {
+    if (prev == null || prev.signum() <= 0 || now == null) {
+      return false;
+    }
+    return now.subtract(prev).abs().compareTo(prev.multiply(emitDeltaPct).abs()) >= 0;
   }
 
   @Override
@@ -63,9 +168,16 @@ public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
       Subscription sub =
           provider.subscribePremium(
               req.getContractSymbol(),
-              tick ->
-                  dispatcher.submit(
-                      () -> dispatchTick(posWfId, subIdHolder[0], toPremiumTick(tick))));
+              tick -> {
+                // Throttle on the FEED thread, before the dispatcher hop: a suppressed tick must
+                // cost nothing downstream, and the CAS is what makes that safe under concurrency.
+                ThrottleState throttle =
+                    throttles.computeIfAbsent(posWfId, k -> new ThrottleState());
+                if (!shouldEmit(throttle, tick.premium(), tick.bid())) {
+                  return;
+                }
+                dispatcher.submit(() -> dispatchTick(posWfId, subIdHolder[0], toPremiumTick(tick)));
+              });
       subIdHolder[0] = sub.subscriptionId();
       active.put(sub.subscriptionId(), sub);
       result.setSubscriptionId(sub.subscriptionId());
@@ -96,6 +208,10 @@ public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
         if (sub != null) {
           sub.close();
         }
+        // Drop the baseline too, or every closed position leaks one entry for the worker's life.
+        // Note this is the ONLY teardown path (Phase 4 has no explicit unsubscribe), so a baseline
+        // is reclaimed when a later dispatch discovers the workflow is gone — not at close itself.
+        throttles.remove(posWfId);
       }
     } catch (Exception ignored) {
       // Best-effort tick dispatch — Phase 4 deliberately does not surface transient errors.

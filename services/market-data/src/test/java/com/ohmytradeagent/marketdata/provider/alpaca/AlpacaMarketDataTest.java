@@ -161,6 +161,21 @@ class AlpacaMarketDataTest {
     return optionSnapshotFor("NVDA260516C00140000", bid, ask);
   }
 
+  /** Snapshot with an explicit quote timestamp — the resample guard keys on it. */
+  private static MockResponse optionSnapshotAt(String bid, String ask, String stamp) {
+    return new MockResponse()
+        .setResponseCode(200)
+        .setHeader("Content-Type", "application/json")
+        .setBody(
+            "{\"snapshots\":{\"NVDA260516C00140000\":{\"latestQuote\":{\"bp\":"
+                + bid
+                + ",\"ap\":"
+                + ask
+                + ",\"t\":\""
+                + stamp
+                + "\"}}}}");
+  }
+
   private static MockResponse optionSnapshotFor(String compactOcc, String bid, String ask) {
     return new MockResponse()
         .setResponseCode(200)
@@ -173,6 +188,159 @@ class AlpacaMarketDataTest {
                 + ",\"ap\":"
                 + ask
                 + ",\"t\":\"2026-05-15T17:22:31.123Z\"}}}}");
+  }
+
+  // --- option-premium outlier guard (the F1 equity guard's sibling; premium had none) ---
+
+  private static final String OCC = "NVDA  260516C00140000";
+  private static final String T1 = "2026-05-15T17:22:31.100Z";
+  private static final String T2 = "2026-05-15T17:22:33.100Z";
+  private static final String T3 = "2026-05-15T17:22:35.100Z";
+
+  @Test
+  void resampledQuote_sameTimestamp_isNotASecondObservation() {
+    // THE break that falsified a workflow-side debounce. pollOnce emits on EVERY poll with no
+    // dedup, and the timestamp comes from the QUOTE, not the poll. When the NBBO stops updating —
+    // definitionally what happens when a bid is withdrawn and nothing requotes — consecutive polls
+    // return the SAME quote. Counting that as two agreeing observations proves nothing.
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1)); // identical quote, resampled
+    p.pollOnce(OCC);
+
+    assertThat(rx).hasSize(1);
+  }
+
+  @Test
+  void withdrawnBid_isRejected() {
+    // The realistic blown book. mid = (0 + 1.30)/2 = 0.65 is an arithmetic artifact, not a price
+    // anything can be sold into — and it halves the premium in one tick.
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+    // ask 2.00 with NO bid gives mid 1.00 — only 20% from the 1.25 reference, so it sails through
+    // the outlier band. Only the no-bid check can reject it, which is what makes this test pin that
+    // check rather than the band. (An earlier version used ask 1.30 -> mid 0.65, rejected by the
+    // band regardless, so it passed with the bid check deleted.)
+    server.enqueue(optionSnapshotAt("0", "2.00", T2));
+    p.pollOnce(OCC);
+
+    assertThat(rx).hasSize(1);
+    assertThat(rx.get(0).premium()).isEqualByComparingTo("1.25");
+  }
+
+  @Test
+  void uncorroboratedOutlier_isHeldAndNeverFansOut() {
+    // 1.25 -> 0.30 is a 76% collapse, past the 35% band. Held, not emitted. The market then proves
+    // it was a phantom by quoting normally again.
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+    server.enqueue(optionSnapshotAt("0.25", "0.35", T2)); // phantom, out of band
+    p.pollOnce(OCC);
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T3)); // back to reality
+    p.pollOnce(OCC);
+
+    assertThat(rx).hasSize(2);
+    assertThat(rx.get(0).premium()).isEqualByComparingTo("1.25");
+    assertThat(rx.get(1).premium()).isEqualByComparingTo("1.25");
+  }
+
+  @Test
+  void corroboratedMove_isAdmittedOnePollLate() {
+    // A genuine violent move must NOT be lost — only delayed by one poll. Out-of-band means held
+    // for corroboration, not dropped.
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+    server.enqueue(optionSnapshotAt("0.25", "0.35", T2)); // held
+    p.pollOnce(OCC);
+    server.enqueue(optionSnapshotAt("0.26", "0.34", T3)); // agrees with the CANDIDATE -> admitted
+    p.pollOnce(OCC);
+
+    assertThat(rx).hasSize(2);
+    assertThat(rx.get(1).premium()).isEqualByComparingTo("0.30");
+  }
+
+  @Test
+  void twoDisagreeingPhantomsDoNotCorroborateEachOther() {
+    // The hole a workflow-side rule had: it required only that the second print also differ from
+    // the stale reference, so any two outliers blessed each other. Agreement must be against the
+    // CANDIDATE. 0.30 and 0.90 are both far from 1.25 AND far from each other -> neither admitted.
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+    server.enqueue(optionSnapshotAt("0.25", "0.35", T2)); // candidate 0.30
+    p.pollOnce(OCC);
+    // 0.60 is 52% from the 1.25 reference AND 100% from the 0.30 candidate — genuinely far from
+    // both. (0.90 would NOT work: it is only 28% from the reference, inside the band, so it is
+    // legitimately accepted on the reference test and never reaches the corroboration branch.)
+    server.enqueue(optionSnapshotAt("0.55", "0.65", T3));
+    p.pollOnce(OCC);
+
+    assertThat(rx).hasSize(1);
+  }
+
+  @Test
+  void ordinaryFastMoveWithinTheBandIsNotDelayed() {
+    // The band must not fight the real market: option premium routinely moves tens of percent
+    // between 2s polls, and an equity-tight band would reject that constantly.
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+    server.enqueue(optionSnapshotAt("1.55", "1.65", T2)); // +28%, inside the 35% band
+    p.pollOnce(OCC);
+
+    assertThat(rx).hasSize(2);
+    assertThat(rx.get(1).premium()).isEqualByComparingTo("1.60");
+  }
+
+  @Test
+  void rallyThenReverse_bothTicksReachTheWorkflow_soTheRunnerStillExits() {
+    // The exact sequence from watchlistTimeStop_afterTarget_runnerExitsViaChandelier — the
+    // PLAN-2026-07-23 Fork A regression test, which encodes "post-target the time-stop is ignored
+    // and the trail governs the runner". On eod_force_flatten=false tenants that trail is the ONLY
+    // automatic exit, so a filter that swallows either of these ticks strands a real-money runner.
+    //
+    // An earlier WORKFLOW-side version of this guard broke exactly here: it corroborated the
+    // RATCHET, so the tick confirming a new high was the pullback itself, and min() then set the
+    // peak to the reversal price instead of the high — loosening the giveback AND failing to fire.
+    // A feed-layer guard cannot do that: it decides only whether a QUOTE IS REAL, and never touches
+    // the peak. Both moves here are ordinary (+25%, -10%), well inside the band, so both pass
+    // through untouched and the workflow sees precisely what it saw before the guard existed.
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("3.15", "3.25", T1)); // arm at 3.20
+    p.pollOnce(OCC);
+    server.enqueue(optionSnapshotAt("3.95", "4.05", T2)); // rally to 4.00, the high
+    p.pollOnce(OCC);
+    server.enqueue(optionSnapshotAt("3.55", "3.65", T3)); // reverse to 3.60, which must FIRE
+    p.pollOnce(OCC);
+
+    assertThat(rx).hasSize(3);
+    assertThat(rx.get(1).premium()).isEqualByComparingTo("4.00");
+    assertThat(rx.get(2).premium()).isEqualByComparingTo("3.60");
   }
 
   @Test

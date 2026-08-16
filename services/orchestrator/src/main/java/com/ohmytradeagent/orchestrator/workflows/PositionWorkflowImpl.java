@@ -1347,7 +1347,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // Then drain ticks. For a watchlist-exit-active position (exit armed, or the target already
       // armed the runner's trail) processExitTick owns the tick: it evaluates the bid-based stop /
       // target AND feeds the chandelier trail on the BID (per spec). Otherwise processTick runs the
-      // copytrade chandelier path unchanged on the smoothed mid.
+      // copytrade chandelier path unchanged on the mid. NOT a smoothed mid — the schema claimed a
+      // 5-10s smoothing window that has never existed (corrected 2026-08-16); this is a plain
+      // (bid+ask)/2 from one REST snapshot, so a one-sided NBBO collapse halves it in a single
+      // tick.
       while (!pendingTicks.isEmpty()) {
         PremiumTick t = pendingTicks.poll();
         if (exitArmed || (exitTargetFired && trailingArmed)) {
@@ -2187,7 +2190,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   /**
    * Phase 3 main-loop exit-tick processor. Evaluates against the BID ({@link
-   * PremiumTick#getBid()}); when the bid is null it falls back to the smoothed mid ({@link
+   * PremiumTick#getBid()}); when the bid is null it falls back to the mid ({@link
    * PremiumTick#getPremium()}) and emits a one-time degradation audit. STOP (debounced, {@link
    * #EXIT_STOP_DEBOUNCE_TICKS} consecutive sub-threshold ticks): latch a stop_loss flatten. TARGET
    * (single-shot): partial-close {@code tp_partial_fraction}, move the remainder stop to breakeven,
@@ -2245,7 +2248,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
 
     // After the target armed the runner's trail, feed the chandelier on the BID (per spec the trail
-    // comparison for THIS flow uses bid, not the smoothed mid). Reuses the existing processTick
+    // comparison for THIS flow uses bid, not the mid). Reuses the existing processTick
     // ratchet/fire by handing it a tick whose premium IS the evaluated bid.
     if (trailingArmed && !exitStopFireRequested) {
       processTick(bidAsPremiumTick(tick, evalBid));

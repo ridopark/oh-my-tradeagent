@@ -100,6 +100,41 @@ public class AlpacaMarketData implements MarketDataProvider {
   private final ConcurrentHashMap<String, BigDecimal> pendingCandidate = new ConcurrentHashMap<>();
   private static final BigDecimal MAX_DEVIATION_PCT = new BigDecimal("0.02");
 
+  // ---- Option-premium outlier guard (the F1 equity guard's sibling; premium had NONE) ----
+  //
+  // Keyed by OCC, deliberately separate from the equity maps above: those are keyed by TICKER and a
+  // shared map would collide an option with its underlying.
+  private final ConcurrentHashMap<String, BigDecimal> lastAcceptedPremium =
+      new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, BigDecimal> pendingPremiumCandidate =
+      new ConcurrentHashMap<>();
+
+  /**
+   * The retrieved_at of the last quote we ACTED on, per OCC. This is the load-bearing half of the
+   * guard, and the reason the equity shape alone is not enough here.
+   *
+   * <p>{@link #pollOnce} emits on EVERY poll with no dedup, and {@link #snapshotQuote} takes the
+   * timestamp from Alpaca's `latestQuote.t` — the QUOTE's own stamp, not the poll's. So when the
+   * NBBO stops updating, consecutive polls return the SAME quote and produce byte-identical ticks.
+   * That is not a rare case: it is definitionally what happens when a bid is withdrawn and nothing
+   * requotes — exactly the blown book this guard exists to reject. Without this check, "two
+   * agreeing prints" degenerates into resampling one print twice, and corroboration proves nothing.
+   */
+  private final ConcurrentHashMap<String, OffsetDateTime> lastQuoteStamp =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Deviation band for option PREMIUM, far wider than the equity 2%. Option premium legitimately
+   * moves tens of percent between two 2s polls on a short-dated contract, so an equity-tight band
+   * would reject the real market constantly. 35% is chosen to sit ABOVE ordinary fast-move
+   * behaviour and BELOW the blown-book signature this is built for: a withdrawn bid on a 3.90x4.10
+   * book takes the mid from 4.00 to ~2.08, a ~48% collapse.
+   *
+   * <p>Out-of-band does NOT mean dropped forever — it means held for corroboration, so a genuine
+   * violent move is admitted one poll (~2s) later rather than lost.
+   */
+  private static final BigDecimal MAX_PREMIUM_DEVIATION_PCT = new BigDecimal("0.35");
+
   private final Object stockWsLock = new Object();
 
   // CONNECTION-LIMIT CAVEAT: this stock stream is the ONLY market-data WS now (the options premium
@@ -457,6 +492,85 @@ public class AlpacaMarketData implements MarketDataProvider {
     return false;
   }
 
+  /**
+   * Feed-layer acceptance for an option-premium quote — the sibling {@link #acceptEquityPrice} has
+   * had since the 2026-07-29 false-trigger incident, and premium never did.
+   *
+   * <p>Placed HERE, in the poll fan-out, and deliberately NOT in {@link #snapshotQuote}: that
+   * method is shared with {@code GetOptionQuoteActivity}, whose consumers include the account
+   * kill-switch's MTM read — and that path fail-closes on a single missing quote. Withholding a
+   * quote there would re-create a known outage. Filtering the TICK stream affects only trail/stop
+   * evaluation.
+   *
+   * @return true when the tick should fan out to subscribers
+   */
+  private boolean acceptPremiumQuote(String occSymbol, Quote q) {
+    BigDecimal premium = q.mid();
+    // A non-positive premium is not a price, and must never seed the reference: a zero reference
+    // makes every later deviation() divide by zero and silently blinds the contract's feed.
+    if (premium == null || premium.signum() <= 0) {
+      log.warn(
+          "AUDIT premium-tick-rejected: occ={} reason=non-positive-premium premium={}",
+          occSymbol,
+          premium);
+      return false;
+    }
+    // A withdrawn/absent bid is the realistic degenerate case, not a crossed book. The mid is then
+    // (0+ask)/2 — an arithmetic artifact, not a price anything could be sold into, and it halves
+    // the premium in one tick. Reject before it can anchor a trail or a stop.
+    if (q.bid() == null || q.bid().signum() <= 0) {
+      log.warn(
+          "AUDIT premium-tick-rejected: occ={} reason=no-bid bid={} ask={} mid={}",
+          occSymbol,
+          q.bid(),
+          q.ask(),
+          premium);
+      return false;
+    }
+    // Same quote, resampled by the next poll — one observation, not two. See lastQuoteStamp.
+    OffsetDateTime prevStamp = lastQuoteStamp.get(occSymbol);
+    if (prevStamp != null && q.retrievedAt() != null && prevStamp.isEqual(q.retrievedAt())) {
+      return false;
+    }
+
+    BigDecimal ref = lastAcceptedPremium.get(occSymbol);
+    if (ref == null) {
+      acceptPremium(occSymbol, premium, q.retrievedAt());
+      return true;
+    }
+    if (deviation(premium, ref).compareTo(MAX_PREMIUM_DEVIATION_PCT) <= 0) {
+      acceptPremium(occSymbol, premium, q.retrievedAt());
+      return true;
+    }
+    // Out of band. Admit it only if a LATER, DISTINCT quote agrees with the held candidate — the
+    // agreement is against the CANDIDATE, not the stale reference. Requiring only "also far from
+    // the reference" would let two unrelated phantoms corroborate each other.
+    BigDecimal pending = pendingPremiumCandidate.get(occSymbol);
+    if (pending != null && deviation(premium, pending).compareTo(MAX_PREMIUM_DEVIATION_PCT) <= 0) {
+      acceptPremium(occSymbol, premium, q.retrievedAt());
+      return true;
+    }
+    pendingPremiumCandidate.put(occSymbol, premium);
+    // Stamp it even though it was rejected: the candidate came from THIS quote, so the next poll
+    // resampling the same quote must not be mistaken for the corroborating second observation.
+    lastQuoteStamp.put(occSymbol, q.retrievedAt());
+    log.warn(
+        "AUDIT premium-tick-rejected: occ={} reason=outlier premium={} ref={} devPct={}",
+        occSymbol,
+        premium,
+        ref,
+        deviation(premium, ref).movePointRight(2).setScale(4, java.math.RoundingMode.HALF_UP));
+    return false;
+  }
+
+  private void acceptPremium(String occSymbol, BigDecimal premium, OffsetDateTime stamp) {
+    lastAcceptedPremium.put(occSymbol, premium);
+    pendingPremiumCandidate.remove(occSymbol);
+    if (stamp != null) {
+      lastQuoteStamp.put(occSymbol, stamp);
+    }
+  }
+
   private void acceptEquity(String ticker, BigDecimal price) {
     lastAcceptedPrice.put(ticker, price);
     pendingCandidate.remove(ticker);
@@ -713,9 +827,14 @@ public class AlpacaMarketData implements MarketDataProvider {
         return;
       }
       Quote q = snapshot.get();
-      Tick tick = new Tick(q.occSymbol(), q.mid(), q.bid(), q.ask(), q.retrievedAt());
+      // Feed health and the failure counter reflect CONNECTIVITY, so they are updated for any
+      // successful snapshot — a rejected outlier still proves the feed is alive.
       feedHealth.recordTick(FeedHealth.Feed.OPTION);
       optionPollFailures.remove(occSymbol);
+      if (!acceptPremiumQuote(occSymbol, q)) {
+        return;
+      }
+      Tick tick = new Tick(q.occSymbol(), q.mid(), q.bid(), q.ask(), q.retrievedAt());
       List<Consumer<Tick>> listeners = bySymbol.get(occSymbol);
       if (listeners == null) {
         return;
@@ -787,6 +906,12 @@ public class AlpacaMarketData implements MarketDataProvider {
           return null;
         });
     optionPollFailures.remove(occSymbol);
+    // Drop the outlier-guard state with the poll, or every closed contract leaks three entries for
+    // the worker's lifetime — and a re-subscribe to the same OCC days later would resume against a
+    // stale reference price, rejecting the entire live market as an outlier until it corroborated.
+    lastAcceptedPremium.remove(occSymbol);
+    pendingPremiumCandidate.remove(occSymbol);
+    lastQuoteStamp.remove(occSymbol);
     if (premiumPolls.isEmpty()) {
       feedHealth.markDisconnected(FeedHealth.Feed.OPTION);
     }
