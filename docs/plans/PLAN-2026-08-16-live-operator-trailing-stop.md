@@ -14,6 +14,29 @@ Anchors below were read at authoring time.
 
 ---
 
+## STATUS (updated 2026-08-16 — read this before executing anything)
+
+Branch `feat/live-operator-trailing-stop`, commit `71d34bb`.
+
+| Phase | State |
+|---|---|
+| **Phase 1** — contract DTOs | ✅ **DONE** — `arm-trail-request.json` / `arm-trail-result.json` + Java/pydantic regen |
+| **Phase 2** — `arm_trail` Update | ✅ **DONE** — handler, validator, shared `chandelierArmRejection()`, `resolveTrailAnchor()`, 6 tests, both money-guards mutation-verified |
+| **Phase 3** — `POST /positions/arm-trail` | ⬜ **TODO — this is the work** |
+| **Phase 4** — /live wiring | 🟡 **PARTIAL** — `dashboard/components/StopLossButton.tsx` is written and typechecks; the server action + render site are NOT done and depend on Phase 3 |
+
+**Correction to Phase 2 as originally written: it does NOT need a version gate,
+and none was added.** The original text said "REQUIRED". That was wrong.
+`partial_close` documents the reasoning at `PositionWorkflowImpl.java:1873` — a
+brand-new Update cannot appear in any recorded history, so a legacy replay never
+reaches the handler and a marker would be inert. `force_close` carries one only
+because it predates that reasoning. Do not add a gate to `arm_trail`.
+
+Verified at that commit: orchestrator 1318, contract 50, python 44, dashboard
+`tsc` clean.
+
+---
+
 ## What already exists (read before designing anything)
 
 | Piece | Anchor | Note |
@@ -112,10 +135,11 @@ percentage — but the percentage is still what is stored, and the label must sa
 
 **Goal:** synchronous operator arm that reuses the existing chandelier path.
 
-**Replay gate: REQUIRED.** A new `@UpdateMethod` + its validator + the quote dispatch for anchor
-resolution are new commands on a workflow with in-flight histories. Add
-`VERSION_OPERATOR_ARM_TRAIL = "operator-arm-trail-v1"`, read **once, unconditionally**, at stable
-scope — mirroring `VERSION_CHANDELIER` (`:252`).
+**Replay gate: NOT required — do not add one.** (Corrected during implementation; the original
+text here said REQUIRED and was wrong.) A brand-new `@UpdateMethod` cannot appear in any recorded
+history, so a legacy replay never reaches the handler and the command stream is unchanged. See
+`PositionWorkflowImpl.java:1873`, where `partial_close` states exactly this and calls a gate there
+"an inert marker". `force_close` has one only because it predates the reasoning.
 
 **Changes (anchors):**
 1. `PositionWorkflow.java:135` — add `@UpdateMethod(name = "arm_trail")` beside `partial_close`,
