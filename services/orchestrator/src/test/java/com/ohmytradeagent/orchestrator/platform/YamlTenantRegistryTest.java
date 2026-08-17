@@ -169,4 +169,42 @@ class YamlTenantRegistryTest {
 
     assertThat(cfg.getAccountDailyLossThreshold()).isNull();
   }
+
+  // ---- list() ----
+
+  @Test
+  void listReturnsTenantSubdirectories(@TempDir Path tenantsDir) throws Exception {
+    Files.createDirectories(tenantsDir.resolve("acme"));
+    Files.createDirectories(tenantsDir.resolve("globex"));
+    Files.writeString(tenantsDir.resolve("not-a-tenant.txt"), "ignored");
+
+    assertThat(new YamlTenantRegistry(tenantsDir.toString()).list())
+        .containsExactly("acme", "globex");
+  }
+
+  /**
+   * Kubernetes ConfigMap atomic-write plumbing must NOT be enumerated as tenants.
+   *
+   * <p>A ConfigMap mount contains {@code ..data} (a symlink, which {@code Files.isDirectory}
+   * follows) and a timestamped {@code ..2026_08_17_07_34_10.NNN} directory alongside the real
+   * entries. Counting them is why the boot gate logged "validated for 5 tenant(s)" against a mount
+   * holding 3 on 2026-08-17, and then called {@code get("..data")}.
+   */
+  @Test
+  void listExcludesKubernetesAtomicWriteArtifacts(@TempDir Path tenantsDir) throws Exception {
+    Path real = tenantsDir.resolve("..2026_08_17_07_34_10.3332253454");
+    Files.createDirectories(real.resolve("acme"));
+    Files.createDirectories(real.resolve("staging_paper"));
+    Files.createDirectories(tenantsDir.resolve("acme"));
+    Files.createDirectories(tenantsDir.resolve("staging_paper"));
+    Files.createSymbolicLink(tenantsDir.resolve("..data"), real);
+
+    assertThat(new YamlTenantRegistry(tenantsDir.toString()).list())
+        .containsExactly("acme", "staging_paper");
+  }
+
+  @Test
+  void listIsEmptyWhenTenantsDirMissing(@TempDir Path parent) {
+    assertThat(new YamlTenantRegistry(parent.resolve("nope").toString()).list()).isEmpty();
+  }
 }

@@ -23,7 +23,17 @@ class TenantConfigActivitiesImplTest {
     TenantConfig cfg = new TenantConfig();
     cfg.setAccountDailyLossThreshold(threshold);
     cfg.setAccountDailyLossPct(pct);
-    return tenantId -> cfg;
+    return new TenantRegistry() {
+      @Override
+      public TenantConfig get(String tenantId) {
+        return cfg;
+      }
+
+      @Override
+      public java.util.List<String> list() {
+        return java.util.List.of("acme");
+      }
+    };
   }
 
   @Test
