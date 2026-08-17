@@ -361,8 +361,9 @@ def main():
     # nothing deduped, we sampled SLOWER than OPRA updated and every p50 below is
     # an artifact of the sampling rate — the same mistake that made the spike's
     # first 500ms result worthless (trade-print resolution, 1520ms median).
+    decision_buckets = ("near", "manual")
     undersampled = [c["symbol"] for c in chosen
-                    if report[c["symbol"]]["bucket"] == "near"
+                    if report[c["symbol"]]["bucket"] in decision_buckets
                     and report[c["symbol"]]["samples"]
                     and report[c["symbol"]]["dup_pct"] < 10.0]
     if undersampled:
@@ -372,10 +373,11 @@ def main():
         print(f"    bound set by --interval-ms, not a measurement. True gap <= {a.interval_ms}ms.")
         print("    Re-run with a smaller --interval-ms until dup% climbs well above zero.")
 
-    near = [r for r in report.values() if r["bucket"] == "near" and r["p50"] is not None]
+    near = [r for r in report.values()
+            if r["bucket"] in decision_buckets and r["p50"] is not None]
     if near:
         worst = max(r["p50"] for r in near)
-        print(f"\nDECISION RULE (plan Phase 3) — 0DTE/near-expiry p50 gap = {worst:.0f}ms"
+        print(f"\nDECISION RULE (plan Phase 3) — slowest measured p50 gap = {worst:.0f}ms"
               + ("  [UPPER BOUND — sampling-limited]" if undersampled else ""))
         if worst < 200:
             print("  -> p50 < 200ms: 200ms IS justified. Expected further saving")
@@ -389,7 +391,7 @@ def main():
             print("  -> p50 > 500ms: 500ms may already be over-polling. Do not go below;")
             print("     consider whether Phase 2 itself was past the knee.")
     else:
-        print("\nNo near-expiry contract produced quote updates — cannot apply the rule.")
+        print("\nNo contract produced quote updates — cannot apply the rule.")
 
     if errors:
         print(f"\n{len(errors)} request error(s) out of {nreq}: "
