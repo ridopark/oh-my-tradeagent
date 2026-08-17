@@ -4,7 +4,9 @@ package com.ohmytradeagent.tdbff.web;
 // Deliberately diverged: the operator gateway falls back to a `dev` default when X-Tenant-Id is
 // absent (single-tenant operator convenience). A TENANT-FACING read must NEVER silently fall back
 // to `dev` — an absent X-Tenant-Id is a 401, not "show me dev's positions". Strategy ids are NOT a
-// header here either: they are resolved server-side from the mounted tenants tree
+// header here either: they are resolved server-side from the orchestrator's strategy_config
+// table (DbStrategyConfigReader) — NOT from a mounted tenants tree, which this service stopped
+// reading before the mount was removed on 2026-08-17.
 // (TenantStrategyResolver, querying strategy_config) so a caller can never widen its own scope.
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Arrays;

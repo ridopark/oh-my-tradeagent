@@ -117,7 +117,6 @@ options-chat:
 # operator runbook); SELECT-only grants mean even a query bug cannot mutate trading state.
 bff:
   service-token: ${BFF_SHARED_TOKEN:dev-shared-token}
-  tenants-dir: ${BFF_TENANTS_DIR:tenants}
   portfolio:
     # Per-section budget for the concurrent portfolio sub-reads (position-state queries + account
     # snapshots). Part of an ordering invariant that MUST hold or /status 500s instead of degrading:
