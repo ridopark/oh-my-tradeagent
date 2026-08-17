@@ -94,6 +94,41 @@ registers the `TenantStrategy` + `ContractSymbol` Search Attributes. Idempotent.
    This walks the Playwright bootstrap flow once; cookies land in
    `/app/state/storage_state.json` (PVC-backed).
 
+## Fresh cluster / disaster recovery — tenants do NOT self-seed
+
+**A brand-new cluster with an empty database comes up with zero tenants.** Nothing
+seeds them at boot; you onboard through the api-gateway `/strategy-config` write
+path or the `/config` UI.
+
+This is deliberate (2026-08-17). Two `ApplicationRunner`s used to back-fill
+`strategy_config` / `tenant_config` from the mounted `tenants-config` ConfigMap,
+insert-if-absent. They are now gated to yaml-mode only, so with
+`STRATEGY_CONFIG_SOURCE=db` / `TENANT_CONFIG_SOURCE=db` (the live setting) they do
+not exist. They had stopped doing anything long before that — both logged
+`seeded 0` on every boot, and every live `strategy_config` row was written by the
+api-gateway or an operator, none by `seed:boot`. Keeping them alive tied the
+orchestrator to a ConfigMap that no longer reflected the tenant roster.
+
+Recovery order after a Postgres PV loss:
+
+1. **Restore the volume from backup if you have one.** That returns every tenant,
+   strategy, cap and audit row at once and skips the rest of this section. This is
+   the intended path — the steps below are the fallback.
+2. Bring up `postgres` and let Flyway create the schema (orchestrator boots and
+   migrates even with no tenants; the boot gates iterate an empty registry and pass).
+3. Onboard each tenant through `/config`, or POST to the api-gateway
+   `/strategy-config` endpoint. `TenantReconcileLoop` picks up each new
+   `(tenant, strategy)` pair within one tick (default 60s) and starts its
+   kill-switch + reconciliation schedule — no orchestrator restart needed.
+4. Re-arm account caps (`account_daily_loss_pct`) per tenant. **Do this before
+   enabling any live strategy**: `LiveRequiredGateBootstrapper` fails boot closed on
+   a `-live` strategy with no armed cap, which is the intended guard, not a bug to
+   work around.
+
+`tenants/dev/*` remains in the repo and is still the source for local development
+and tests (`strategy.config.source` unset → `YamlStrategyRegistry`). It is no longer
+mounted into the production orchestrator.
+
 ## Tenant dashboard (adding to an already-running cluster)
 
 The deploy pipeline applies the Deployments/Services/Ingress and rolls pods, but it

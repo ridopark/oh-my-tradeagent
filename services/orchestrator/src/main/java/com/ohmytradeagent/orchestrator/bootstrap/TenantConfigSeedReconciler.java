@@ -14,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
@@ -37,6 +38,14 @@ import org.springframework.stereotype.Component;
  * operator opts into {@link com.ohmytradeagent.orchestrator.platform.DbTenantRegistry}. So this
  * runner is a behavior-neutral warm-up, safe to ship well ahead of the read-source cutover.
  *
+ * <p><b>yaml-mode ONLY as of 2026-08-17.</b> Gated on {@code tenant.config.source=yaml}
+ * (matchIfMissing), so in db-mode this bean does not exist — the cutover it was built to precede is
+ * long done, and on the live cluster it seeded 0 on every boot. Retiring it in db-mode is what lets
+ * the mounted ConfigMap go away (docs/plans/PLAN-2026-08-17-retire-tenants-configmap.md, Phase 3).
+ * CONSEQUENCE, accepted by the operator: a brand-new cluster with an EMPTY DB no longer self-seeds;
+ * tenants are onboarded through the api-gateway write path or the /config UI. See "Fresh cluster /
+ * disaster recovery" in infra/k8s/README.md.
+ *
  * <p>{@code @Profile("!test")} mirrors {@link StrategyConfigSeedReconciler}: this runner touches
  * the DB and walks the tenants tree, neither of which the unit-test profile provides. Ordered
  * {@code Ordered.HIGHEST_PRECEDENCE} for the same reason — the DB store is warm before any
@@ -46,6 +55,7 @@ import org.springframework.stereotype.Component;
  */
 @Component
 @Profile("!test")
+@ConditionalOnProperty(name = "tenant.config.source", havingValue = "yaml", matchIfMissing = true)
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class TenantConfigSeedReconciler implements ApplicationRunner {
 
