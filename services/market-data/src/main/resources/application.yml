@@ -49,6 +49,11 @@ market-data:
     # matches the previous one, so polling faster than OPRA updates yields rejected duplicates —
     # REST cost, zero information. Measure the quote update rate before going below 500ms
     # (PLAN-2026-08-17-premium-poll-latency Phase 3).
+    #
+    # ROLLBACK IS GENUINELY THIS ONE VALUE. Nothing else was retuned for 500ms — in particular the
+    # RestClient timeouts in AlpacaMarketDataConfig were deliberately left at 1s/1500ms, because
+    # that client is SHARED with the account kill-switch MTM path, which is fail-CLOSED. Read the
+    # comment there before "fixing" the read-timeout-vs-interval relationship.
     premium-poll-interval-ms: ${ALPACA_PREMIUM_POLL_INTERVAL_MS:500}
     # LIVE-USE GATE for the real-time STOCK trade stream that drives watchlist-trigger entries.
     # Intentionally UNSET by default: when both are blank, subscribeEquity FAILS CLOSED (loud audit,
