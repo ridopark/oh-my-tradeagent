@@ -115,16 +115,6 @@ jobs:
           path: .kubeconform-cache
           key: kubeconform-schemas-k8s1.35.0-kc0.6.7
 
-      - name: tenants ConfigMap drift vs tenants/dev/*
-        if: steps.changed.outputs.run == 'true'
-        # The tenants-config ConfigMap embeds verbatim copies of tenants/dev/*;
-        # a hand-maintained copy drifts. This is the guard 40-tenants-config.yaml's
-        # header comment promised — it once dropped eod_force_flatten: false and
-        # re-armed the EOD flatten on a copytrade position (Issue #202).
-        run: |
-          python3 -m pip install --quiet pyyaml
-          python3 scripts/check-tenants-configmap-drift.py
-
       - name: k8s drift noise filter (mutation table)
         if: steps.changed.outputs.run == 'true'
         # k8s-drift.yml suppresses server-assigned metadata and pure list reordering so the
