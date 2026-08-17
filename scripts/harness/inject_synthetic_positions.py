@@ -25,7 +25,7 @@ Usage:
 Each spawned workflow is started with:
   workflow_id  = t-<tenant>/s-<strategy>/pos/<OCC>/harness-<N>
   search_attrs = TenantStrategy + ContractSymbol (the two custom SAs
-                 registered by infra/k8s/31-temporal-bootstrap.yaml)
+                 registered by scripts/ops/temporal-copytrade-namespace-bootstrap.sh)
 
 Workflows started by this harness will sit at their first EOD/expiry timer
 await until either:

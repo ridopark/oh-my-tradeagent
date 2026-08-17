@@ -337,9 +337,10 @@ flowchart TB
   `(broker, env)` deployments (e.g. `exec-alpaca-live`, `exec-tradier-paper`) are added by
   copying `52-exec-alpaca-paper.yaml` and pointing it at a separate Postgres DB on the same
   StatefulSet. Live promotion is gated by `LivePromotionActivities.approve` (Phase 7).
-- The Temporal-cluster boxes (`30-temporal.yaml`, `31-temporal-bootstrap.yaml`) are marked
-  **deprecated in-tree** as of Phase 5b.E — current workloads point at a shared cluster but
-  the diagram keeps the components visible because that's still the runtime topology.
+- The Temporal-cluster boxes are drawn because Temporal is still the runtime topology, but it
+  runs in the **`temporal` namespace**, not `copytrade`. The old in-`copytrade` manifests
+  (`30-temporal.yaml`, `31-temporal-bootstrap.yaml`) were deprecated in Phase 5b.E and deleted
+  on 2026-08-17; nothing in `infra/k8s/` creates a Temporal cluster today.
 - Local-dev `infra/docker-compose.yml` is not shown; it mirrors the k8s view minus
   ingress + RBAC.
 
