@@ -202,8 +202,19 @@ broadcast reaches `FillDispatcher`; without the fix, it does not.
 
 **Only if Phases 1-2 leave a residual silent-failure mode.** `fill_listener_last_event_age_seconds`
 at `+Inf` across a full RTH session with fills in the journal is a hard anomaly and should page.
-Prefer a Grafana alert on the existing gauge over new code. If code is needed, a new audit kind must
-be registered in `AuditEventKinds.ALL_KINDS` or the pre-push `KindRegistryGuardTest` blocks the push.
+
+**A Grafana alert is NOT currently an option, contrary to an earlier draft of this phase.** There is
+no ServiceMonitor or PodMonitor for the `copytrade` namespace (verified 2026-08-17: cluster-wide only
+`monitoring/*` and `temporal/*` exist; `infra/k8s/` defines none), so Prometheus never scrapes exec
+and *no* `fill_listener_*` series reaches it. Every metric quoted in #715 was read by hand off the
+pod. This phase therefore forks:
+
+- **3a — add a ServiceMonitor for `copytrade`** (labelled `release: kube-prometheus-stack` to match
+  the operator's `serviceMonitorSelector`). This is the prerequisite for alerting on *any* of the
+  twelve `fill_listener_*` meters, not just this one, and it is cheap. Almost certainly the right
+  first move, and it is not specific to this plan.
+- **3b — in-process alerting.** Only if 3a is rejected. A new audit kind must be registered in
+  `AuditEventKinds.ALL_KINDS` or the pre-push `KindRegistryGuardTest` blocks the push.
 
 ---
 

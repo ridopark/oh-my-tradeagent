@@ -46,7 +46,20 @@ Test profiles leave both unset → both beans are absent from the context.
 
 ## Health metrics
 
-All emitted on the standard `/actuator/prometheus` scrape:
+All exposed on the pod's `/actuator/prometheus` endpoint — but **nothing collects
+them.** There is no ServiceMonitor or PodMonitor for the `copytrade` namespace
+(verified 2026-08-17: cluster-wide only `monitoring/*` and `temporal/*` exist, and
+`infra/k8s/` defines none), so Prometheus never scrapes this service. These are
+read by hand and **cannot currently back a Grafana panel or an alert rule**:
+
+```sh
+kubectl exec -n copytrade deploy/exec-alpaca-live -- \
+  wget -qO- localhost:8080/actuator/prometheus | grep fill_listener
+```
+
+Treat the log lines, not the metrics, as the operable signal until a ServiceMonitor
+exists.
+
 
 | Metric | Type | Meaning |
 |---|---|---|
@@ -82,11 +95,28 @@ market hours, `events_received_total` flat.
    ```
    Repeated rapid closes → Alpaca rejecting the auth frame. Check
    `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` in the `alpaca-credentials` Secret.
-3. **Confirm the socket actually SUBSCRIBED, not merely authenticated** (#715):
+3. **Confirm the socket actually SUBSCRIBED, not merely authenticated** (#715).
+
+   **First check the pod actually HAS this logging**, or you will misdiagnose:
+   `exec-alpaca-live` is excluded from CI deploy and rolls only by hand, so it
+   routinely runs an older image than `exec-alpaca-paper`. On such a pod the grep
+   below returns nothing because *the code is absent*, which looks identical to
+   "authenticated but not subscribed".
+   ```sh
+   # same image as paper? if these differ, live is behind — roll it before reading anything below
+   kubectl get deploy/exec-alpaca-live  -n copytrade -o jsonpath='{.spec.template.spec.containers[0].image}'
+   kubectl -n copytrade get pod -l app=exec-alpaca-live  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+   kubectl -n copytrade get pod -l app=exec-alpaca-paper -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+   ```
+   Then:
    ```sh
    kubectl logs deploy/exec-alpaca-live -n copytrade | grep "subscription confirmed\|subscription ack\|authorization reply"
    ```
    Expect one `subscription confirmed streams=["trade_updates"]` per tenant.
+
+   **Capture this soon after a roll.** The confirmation is emitted once per socket
+   at connect, so on a pod with days of uptime it rotates out of the log buffer and
+   absence stops being readable at all.
    - `authorization reply status=authorized` but **no** `subscription confirmed`
      → the socket is authenticated and NOT subscribed. It will sit open and
      mute forever; reconnects will be zero and nothing will go red.
