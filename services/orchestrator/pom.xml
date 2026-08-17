@@ -139,6 +139,14 @@
           -->
           <forkCount>2</forkCount>
           <reuseForks>true</reuseForks>
+          <!--
+            Backstop for a hang that the per-test timeout CANNOT see: one inside @BeforeAll, a
+            static initialiser, or fork startup, where there is no test method to attribute the
+            timeout to. src/test/resources/junit-platform.properties covers the common case (60s
+            per test method, named in the failure); this covers the rest by killing the fork.
+            900s is ~3x the module's whole ~4-5min suite, so it only fires on a genuine wedge.
+          -->
+          <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
         </configuration>
       </plugin>
       <plugin>

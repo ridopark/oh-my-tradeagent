@@ -138,6 +138,18 @@ jobs:
     # to match, or the merge gate silently stops enforcing.
     name: Java (${{ matrix.module }})
     runs-on: ubuntu-latest
+    # Outermost backstop against a hung suite. Without this a wedged job runs to GitHub's
+    # 360-MINUTE default: on 2026-08-16/17 the orchestrator leg hung twice, once for 21+ minutes
+    # against a 3m42s-4m02s norm, and was only stopped by cancelling it by hand. 20 minutes is
+    # ~4x the slowest observed leg (orchestrator, ~5min including the upstream build), so it
+    # cannot fire on a healthy run, and it bounds the damage for EVERY module — including the
+    # ones with no per-test timeout of their own.
+    #
+    # This is the crudest of three layers and should be the one that never fires: prefer the
+    # per-test timeout (names the test) and surefire's forkedProcessTimeoutInSeconds (names the
+    # fork). A job-level kill tells you only "something hung", which is exactly the uninformative
+    # signal this change exists to replace.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
