@@ -26,6 +26,7 @@ public class FillListenerMetrics {
   private final AtomicLong lastEventEpochMs = new AtomicLong(0L);
   private final Map<String, Counter> receivedByEvent;
   private final Counter eventsDispatched;
+  private final Counter subscriptionConfirmed;
   private final Counter eventsDroppedDedup;
   private final Counter reconnects;
   private final Counter eventsUnknownOrder;
@@ -58,6 +59,15 @@ public class FillListenerMetrics {
             .description(
                 "Events successfully signalled to the target workflow (post journal-lookup). "
                     + "Bumped inside FillDispatcherImpl so WS and poll paths share one count.")
+            .register(registry);
+    this.subscriptionConfirmed =
+        Counter.builder("fill_listener.subscription_confirmed")
+            .description(
+                "Sockets that received a `listening` ack naming trade_updates. The POSITIVE"
+                    + " evidence a subscription exists (#715) — a socket can authenticate"
+                    + " successfully and still never subscribe, and this counter is the only"
+                    + " signal that distinguishes the two. Expect one per open socket per"
+                    + " (re)connect, so a pod serving N tenants should reach N shortly after boot.")
             .register(registry);
     this.eventsDroppedDedup =
         Counter.builder("fill_listener.events_dropped_dedup")
@@ -122,6 +132,10 @@ public class FillListenerMetrics {
 
   public void recordDispatched() {
     eventsDispatched.increment();
+  }
+
+  public void recordSubscriptionConfirmed() {
+    subscriptionConfirmed.increment();
   }
 
   public void recordDroppedDedup() {

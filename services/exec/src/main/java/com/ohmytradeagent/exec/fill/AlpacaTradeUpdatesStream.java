@@ -24,6 +24,7 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -86,6 +87,13 @@ public class AlpacaTradeUpdatesStream {
    * than letting the listener OOM.
    */
   private static final int MAX_FRAME_BYTES = 1 << 20;
+
+  /**
+   * Cap on distinct unmodelled {@code stream} values warned about per connection. The values are
+   * remote input, so the damping set must not grow unbounded on a server that emits novel stream
+   * names.
+   */
+  private static final int MAX_UNHANDLED_STREAMS_WARNED = 8;
 
   private final FillListenerProperties props;
   private final AlpacaProperties alpacaProps;
@@ -389,6 +397,16 @@ public class AlpacaTradeUpdatesStream {
     private final EndpointSupplier endpointSupplier;
     private final Map<String, Boolean> dedup;
     private final AtomicReference<WebSocket> currentSocket = new AtomicReference<>();
+    // Distinct unmodelled `stream` values already warned about on the CURRENT connection. Damping
+    // is per-value so an unmodelled keepalive warns once instead of once per frame, and cleared on
+    // every (re)connect (see connectAndRun) so a shape that appears only after a reconnect is not
+    // permanently hidden by a warning emitted hours earlier.
+    //
+    // Everything stays at WARN rather than falling back to DEBUG: prod runs at the Spring default
+    // root level of INFO, so a DEBUG line is invisible exactly when it is needed. Size-capped
+    // because the values are remote input — a server emitting unbounded distinct stream names must
+    // not grow this set without bound.
+    private final Set<String> unhandledStreamsWarned = ConcurrentHashMap.newKeySet();
     private Thread runner;
 
     TenantRunner(String tenant, String threadName, EndpointSupplier endpointSupplier) {
@@ -481,6 +499,9 @@ public class AlpacaTradeUpdatesStream {
         throw new RuntimeException("ws connect failed: " + cause, cause);
       }
       currentSocket.set(ws);
+      // Fresh connection => re-arm the unhandled-stream warnings, so a frame shape that only shows
+      // up after a reconnect is not silenced by a warning emitted on the previous socket.
+      unhandledStreamsWarned.clear();
       sendAuth(ws, endpoint);
       sendListen(ws);
       closed.await();
@@ -518,6 +539,11 @@ public class AlpacaTradeUpdatesStream {
       }
     }
 
+    // MUST NOT THROW. Both call sites (Listener#onText / #onBinary) invoke webSocket.request(1)
+    // AFTER this returns, so an escaping exception skips the request and the socket stops being fed
+    // frames entirely — permanently mute, strictly worse than the bug this logging exists to find.
+    // Hence the `path()`-only idiom below: path() yields MissingNode rather than null, so no
+    // traversal here can NPE. Never reach for `root.get(...).path(...)` in this method.
     private void handleFrame(String frame) {
       JsonNode root;
       try {
@@ -530,13 +556,14 @@ public class AlpacaTradeUpdatesStream {
       if (streamNode == null) {
         return;
       }
+      String streamName = streamNode.asText();
       // #693: log the handshake reply. This frame was previously dropped by the filter below along
       // with everything else that isn't trade_updates, which is WHY a mute socket was invisible —
       // there was no positive evidence of a working stream to be absent. Mirrors the stocks-WS
       // `authenticated` line from 9ec7387. Alpaca's authorization payload carries status/action/
       // message only; the request echo (and the API key in it) is never returned, so nothing
       // secret reaches the log.
-      if ("authorization".equals(streamNode.asText())) {
+      if ("authorization".equals(streamName)) {
         JsonNode authData = root.path("data");
         String status = authData.path("status").asText("");
         // An unauthorized socket stays OPEN and simply honors no subscriptions — indistinguishable
@@ -560,7 +587,61 @@ public class AlpacaTradeUpdatesStream {
         }
         return;
       }
-      if (!"trade_updates".equals(streamNode.asText())) {
+      // #715: the subscription ack. Alpaca answers a successful `listen` with
+      // {"stream":"listening","data":{"streams":["trade_updates"]}}. This frame used to hit the
+      // catch-all `return` below, which meant there was NO positive evidence that a subscription
+      // had ever succeeded — an authorized-but-unsubscribed socket looked exactly like a healthy
+      // quiet one. That is the same blind spot #693 closed for the auth frame, one step downstream,
+      // and it is why a full RTH session delivered zero trade_updates without anything going red.
+      if ("listening".equals(streamName)) {
+        JsonNode streams = root.path("data").path("streams");
+        boolean subscribed = false;
+        for (JsonNode s : streams) {
+          if ("trade_updates".equals(s.asText())) {
+            subscribed = true;
+            break;
+          }
+        }
+        // Alpaca echoes the EFFECTIVE subscription: "if any of the requested streams are not
+        // available, they will not appear in the streams list in the acknowledgement". So an ack
+        // that omits trade_updates is a FAILED subscription in a success-shaped frame, and must not
+        // be logged at the same level as the real thing. A missing data/streams node iterates zero
+        // times and lands here too — an unrecognized shape fails loud rather than reading as
+        // success, matching the authorization branch above.
+        //
+        // This is NOT the pre-auth-race signature: Alpaca answers a `listen` sent before
+        // authorization on the AUTHORIZATION stream (status=unauthorized, action=listen), which the
+        // branch above already logs. Two distinct failures, deliberately kept distinguishable.
+        if (subscribed) {
+          metrics.recordSubscriptionConfirmed();
+          log.info(
+              "fill-listener[{}] subscription confirmed data={} — the socket IS subscribed",
+              tenant,
+              root.path("data"));
+        } else {
+          log.warn(
+              "fill-listener[{}] subscription ack does NOT name trade_updates data={} — the stream"
+                  + " is not available/entitled, so the socket is authorized but will deliver"
+                  + " nothing. This is NOT the pre-auth race (that reports on the authorization"
+                  + " stream as action=listen).",
+              tenant,
+              root.path("data"));
+        }
+        return;
+      }
+      if (!"trade_updates".equals(streamName)) {
+        // Never discard an unmodelled frame silently again — a server-side error reply arriving
+        // here is exactly the evidence a mute socket needs, and it used to be dropped without
+        // trace. Damped to one WARN per distinct stream value per connection; see
+        // unhandledStreamsWarned for why it is not per-process and not DEBUG.
+        if (unhandledStreamsWarned.size() < MAX_UNHANDLED_STREAMS_WARNED
+            && unhandledStreamsWarned.add(streamName)) {
+          log.warn(
+              "fill-listener[{}] unhandled stream={} — not modelled by this listener; logged once"
+                  + " per distinct stream per connection",
+              tenant,
+              streamName);
+        }
         return;
       }
       JsonNode data = root.get("data");
