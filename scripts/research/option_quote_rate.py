@@ -231,13 +231,25 @@ def sample(symbols, seconds, interval_ms, concurrency=8, verbose=True):
 
     with cf.ThreadPoolExecutor(max_workers=concurrency) as pool:
         pending = []
+        skipped = 0
         while time.time() < deadline:
             t0 = time.time()
-            pending.append(pool.submit(one))
             pending = [f for f in pending if not f.done()]
+            # Back-pressure. Submitting on a fixed cadence regardless of how much
+            # is already in flight means a latency spike queues work unboundedly
+            # and the run overshoots its request rate — against a budget shared
+            # with the live market-data poll and kill-switch MTM. Skip the tick
+            # instead: a gap in sampling costs one data point, overshooting costs
+            # someone else's quotes.
+            if len(pending) >= 2 * concurrency:
+                skipped += 1
+            else:
+                pending.append(pool.submit(one))
             lag = interval_ms / 1000.0 - (time.time() - t0)
             if lag > 0:
                 time.sleep(lag)
+        if skipped and verbose:
+            print(f"  {skipped} tick(s) skipped for back-pressure (latency > cadence)")
         cf.wait(pending, timeout=30)
 
     n = counter["n"]
