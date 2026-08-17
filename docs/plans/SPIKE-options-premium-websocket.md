@@ -1,7 +1,8 @@
 # SPIKE — option premium over WebSocket (OPRA)
 
-**Status:** open, research only. **No code changed.** Worktree `options-ws-streaming`.
-**Opened:** 2026-08-16.
+**Status:** open. Research only *on this branch* — but the spike's findings have since shipped as
+code in **#694, #695, #700 and #701**, all merged to `main` and live. Worktree `options-ws-streaming`.
+**Opened:** 2026-08-16. **Last reconciled against production:** 2026-08-17 02:00 CDT.
 
 **Goal:** decide whether option premium should move from the current 2s REST poll to a real-time
 OPRA WebSocket — and, separately, whether buying the OPRA entitlement is worth it on its own.
@@ -33,10 +34,22 @@ or a live-tenant YAML edit.
       `SUBMITTED` rows past the grace window, so a WS-terminalized row is never polled.
       **Not yet verified in production — step 2 is now the live gate.**
 
-- [ ] **2. Verify in production** ⬅ **NEXT ACTION.** *(operator, during RTH — gate on this before
-      step 3. #694 is merged but unproven against a live Alpaca socket, which is exactly how the
-      original bug survived: `#167` validated the transport against a `NoopFillDispatcher` and
-      shipped.)*
+- [ ] **2. Verify in production** ⬅ **STILL THE NEXT ACTION — needs a live fill, so 2026-08-17 RTH.**
+      *(operator, during RTH — gate on this before step 3. #694 is merged and deployed but unproven
+      against a real fill, which is exactly how the original bug survived: `#167` validated the
+      transport against a `NoopFillDispatcher` and shipped.)*
+
+      **Half of it is already answered.** As of 2026-08-17 02:00 CDT the live pod runs the #694/#695
+      image and the ack line #694 added prints for all three live tenants:
+      ```
+      fill-listener[prod_real]    authorization reply status=authorized action=authenticate
+      fill-listener[prod-kipark]  authorization reply status=authorized action=authenticate
+      fill-listener[prod-jinchul] authorization reply status=authorized action=authenticate
+      ```
+      **Auth was succeeding all along**, so dropped binary frames were the *entire* bug — the
+      "auth vs binary frames, still unconfirmed" caveat in #693 is now resolved in favour of binary
+      frames. Counters read 0 with `last_event_age_seconds=+Inf`, correct with markets closed; that
+      is the pre-open baseline. What remains is purely whether a real fill arrives on the socket.
       ```bash
       kubectl -n copytrade exec deploy/exec-alpaca-live -- wget -qO- localhost:8080/actuator/prometheus \
         | grep -E 'fill_listener_(events_received|poll_fills_detected)'
@@ -48,17 +61,34 @@ or a live-tenant YAML edit.
 - [ ] **3. Alert on the invariant** — `#693` Phase 2. Poller finding fills the socket never
       reported ⇒ mute socket. Only meaningful once the socket *can* succeed. → **PR 2**
 
-- [ ] **4. market-data manifest** — `infra/k8s/53-market-data.yaml`. `strategy: {type: Recreate}`
-      (every deploy currently 406-collides the live stocks WS) **and** declare
-      `ALPACA_STOCK_FEED=sip` (cluster-only today; absent from the manifest *and* from
-      `last-applied-configuration`). ~4 lines, one file, one PR — splitting is ceremony.
-      Independent of 1–3, run in parallel. → **PR 3**
+- [x] ~~**4. market-data manifest**~~ — ✅ **SHIPPED in [#700](https://github.com/ridopark/oh-my-tradeagent/pull/700)**
+      (`b5d1d47`). Verified live 2026-08-17: `strategy` is `{"type":"Recreate"}` and
+      `ALPACA_STOCK_FEED=sip` is declared in the Deployment's env. market-data was also removed from
+      `RESTART_ONLY` in `deploy.yml`, so CI applies the manifest again.
 
 ### Do next
 
-- [ ] **5. Premium poll 2000ms → 500ms** + correct the stale "~200 req/min" comment (it is 10,000).
-      Worth ~1.7–3.5% of premium in the tail. **Sequence after step 2, not alongside** — change two
-      latency things at once and neither improvement is attributable. → **PR 4**
+- [x] ~~**5. Premium poll 2000ms → 500ms**~~ — ✅ **SHIPPED in [#701](https://github.com/ridopark/oh-my-tradeagent/pull/701)**
+      (`d79a5a4`), merged 01:36Z 2026-08-17, deploy run green 01:48:06Z. **500ms is the live cadence
+      now** — established by digest lineage, not by the deploy timeline: the running market-data
+      image `sha256:c21099f1` is tagged `01d1862`, and that tree carries the 500ms default while the
+      cluster leaves `ALPACA_PREMIUM_POLL_INTERVAL_MS` unset. The stale "~200 req/min" comment is
+      corrected in **both** places that carried a default (`application.yml` *and*
+      `AlpacaMarketDataProperties`, which still returned 2000L).
+
+      ⚠ **The sequencing warning above was not honoured** — #694 and #701 both land in the same RTH
+      session, so a change in exit quality on 2026-08-17 is **not attributable** to either one alone.
+      Noted rather than hidden; it is the cost of shipping both on a Sunday night.
+
+      ⚠ Its adversarial review surfaced three things this doc did not anticipate, all live now and
+      **none covered by a test**: the snapshot read timeout was tightened 1500ms → 400ms to preserve
+      the documented `read < interval` invariant (an over-budget snapshot is fail-soft, so it now
+      costs a *sample*); the real concurrency ceiling is the **4-thread pool**, ~20 contracts at
+      500ms, past which `scheduleAtFixedRate` silently degrades the realized cadence while feed
+      health stays green; and **`peakPremium` ratchets higher** at a faster sample rate, because a
+      discretely-sampled running max is a downward-biased estimator of the continuous max. That last
+      one means this was **not** a pure "react sooner" change — it shifts the realized exit
+      distribution earlier. Watch it in the first session.
 
 - [ ] **6. Doc corrections** (zero risk): `AlpacaMarketData`'s javadoc claims the options WS "never
       delivered ticks" as a property of Alpaca's feed — it was our bug, twice; and the `data-ws-url`
@@ -424,6 +454,54 @@ a delete/recreate, a namespace rebuild, a restore to a fresh cluster, or a switc
 apply. And nobody reading the repo can tell that live watchlist triggers depend on it. Same class as
 the tenants-ConfigMap trap. **Declare it in the manifest.**
 
+### 3. A market-data roll silently orphans every armed trailing stop
+
+Surfaced by #701's review, not by this spike directly, but it is the reason #701 carries a
+"deploy pre-open or with no armed trails" instruction that exists nowhere in the repo.
+
+**Verified in code 2026-08-17**, rather than taken from the PR body that asserted it:
+
+- `AlpacaMarketData:75` — `bySymbol` is a plain in-process `ConcurrentHashMap`.
+- There is **no `@PostConstruct` anywhere in `services/market-data`**, so nothing rebuilds it on boot.
+- The activity does not self-heal either. `SubscribePremiumActivityImpl`'s own javadoc: *"swallows
+  source-side exceptions and returns FAILED so the workflow can audit and proceed without a trail
+  (instead of going into Temporal retry)."* It **completes**, so Temporal never re-runs it.
+- All three `subscribePremium` call sites in `PositionWorkflowImpl` (2077, 2207, 2459) are
+  **event-driven** — arm, watchlist-exit setup, trim. None is periodic, and none fires on worker or
+  provider restart.
+
+So any market-data restart leaves an already-armed trailing stop receiving no further ticks, while
+`PositionWorkflow` continues to report `trailingArmed=true`. The position looks protected and is not,
+and nothing anywhere will notice. `strategy: Recreate` (finding 1) makes this *worse* in one narrow
+sense: it guarantees a gap with no pod at all, where RollingUpdate briefly had two.
+
+**It is trading-critical, unfixed, and untracked** — recorded only in a merged PR body until this
+entry. The fix is a re-subscribe-on-boot path; the interim mitigation is a tribal-knowledge deploy
+window, and finding 4 below shows that mitigation is **not sufficient**.
+
+**It did not bite tonight, and the reason is luck.** At 02:00 CDT there are four open
+`PositionWorkflow`s — one DRAM `270319C00100000` LEAP across `prod_real`, `prod-kipark`,
+`prod-jinchul` (19h old) and `staging_paper` (3 days). All four query
+`{"armed":false,...,"ticksReceived":0}`, so none had ever subscribed, so the restart dropped nothing.
+Had any been armed, it would have entered the 2026-08-17 open blind.
+
+### 4. A node reboot is an uncontrolled deploy — and it bypasses the mitigation above
+
+The homelab node rebooted at **06:56Z 2026-08-17** (`up 21 min` at 02:16 CDT; every container in
+`copytrade` *and* `temporal` shows `Error exit=1` at 06:56:12Z — the ungraceful host kill, not an app
+crash). Cause unknown and worth a separate look.
+
+Two consequences the estate does not account for:
+
+- **Every service re-pulled `latest` on restart** (`imagePullPolicy: Always`), so the whole estate
+  silently rolled forward onto `01d1862` — the newest `main` — with **no deploy run involved.** The
+  running version can therefore change without anything in CI recording it. This is *how* the 500ms
+  poll and #694/#695 came to be running in the pods observed above, and it is why the digest, not
+  the deploy timeline, is the thing to trust.
+- **It is a market-data restart**, so it drops premium subscriptions exactly like a deploy — which
+  means "deploy pre-open or with no armed trails" cannot be the whole mitigation for finding 3. A
+  node event does not consult the trading calendar.
+
 ## ⟲ Retractions
 
 **⟲ 1 — the REST-ceiling argument was wrong, twice over.** Originally: "the REST budget caps you at
@@ -484,7 +562,8 @@ that the JDK `WebSocket.Listener` + Jackson-msgpack path works in Java. That is 
 
 **Step 0 — free, do it regardless, unrelated to the socket.** Two config fixes, both live bugs:
 `strategy: {type: Recreate}` on the market-data Deployment, and declare `ALPACA_STOCK_FEED=sip` in
-`infra/k8s/53-market-data.yaml`. Neither depends on this spike's outcome. *(not started)*
+`infra/k8s/53-market-data.yaml`. Neither depends on this spike's outcome.
+✅ **DONE — #700 (`b5d1d47`), verified on the live Deployment 2026-08-17.**
 
 **Step 1 — spend the plan we already own. No new code.** Drop `premium-poll-interval-ms` 2000 → ~500
 (REST is 10,000 req/min, not 200) and correct the stale `~200 req/min` comment. Measure what a 4×
@@ -493,7 +572,13 @@ faster poll alone does to trail behaviour. Reversible by one config value.
 an artifact of trade-print resolution and has been **retracted** — see
 [Corrected measurement](#corrected-measurement-detection-delay-is-the-right-metric). A 2s poll costs
 ~**1.7–3.5% of premium** versus 500ms on the fast moves that actually trigger stops, for ~9% more
-Temporal history and no meaningful REST cost. *(not started)*
+Temporal history and no meaningful REST cost.
+✅ **DONE — #701 (`d79a5a4`), live since 01:47Z 2026-08-17.** See TODO 5 for the three caveats its
+review added, and note that the **+9.2% history figure is not usable evidence** — it comes from
+`option_poll_interval_sweep.py`, whose own header says DO NOT QUOTE, because ~3 of every 4 simulated
+500ms samples were arithmetically incapable of emitting at a 1520ms print gap. It is a floor, not an
+estimate, and history growth is therefore **unmeasured** on a `PositionWorkflow` with no
+continue-as-new.
 
 **Step 2 — probe, no product code.** ✅ **DONE 2026-08-16 with markets closed.** Added
 `scripts/alpaca-options-ws-probe.py` (options endpoint only, so safe at any hour). msgpack decode,
@@ -654,6 +739,44 @@ pushback was correct.
   roughly another 0.6–1.2% at the same percentiles.
 - **Lesson worth keeping:** a negative result from a proxy dataset needs a resolution check *before*
   it is believed. I had the print-gap data in hand the whole time and did not look at it.
+
+### 2026-08-17 (02:00 CDT) — reconciled against production before publishing
+
+The spike branch had never been pushed. Reconciling it against `main` and the live cluster before
+opening a PR turned up that **four of its nine TODO items had shipped** in parallel sessions while
+this document still called them "not started."
+
+- **Shipped since the last entry:** #694 + #695 (fill listener), #700 (market-data manifest, TODO 4),
+  #701 (500ms premium poll, TODO 5). Verified live, not assumed: `strategy` is `Recreate` and
+  `ALPACA_STOCK_FEED=sip` is declared in the Deployment env.
+- **⟲ Two claims in this entry's own first draft were wrong, and checking them found finding 4.**
+  I wrote that the market-data pod "started 01:47Z, 11 minutes after #701's deploy went green." The
+  deploy run actually *ended* 01:48:06Z — the pod came up 10 seconds **before** it went green, not 11
+  minutes after. Worse, the running container is not from that rollout at all: the node rebooted at
+  06:56Z and every container re-pulled `latest`. The correct evidence for "500ms is live" is the
+  **image digest** (`sha256:c21099f1`, tagged `01d1862`), not a deploy timeline. A plausible
+  timeline that happens to sit next to the truth is the easiest kind of claim to publish unchecked.
+- **The auth question is settled.** #694's ack line prints `status=authorized action=authenticate`
+  for all three live tenants. #693 listed "binary frames vs auth" as unconfirmed; **it was binary
+  frames, entirely.** Auth had been succeeding for 11 weeks while every msgpack frame was dropped on
+  the floor. All three of this repo's `WebSocket.Listener`s have now been bitten by the same missing
+  override — see the Systemic note; that is worth a standing check, not another postmortem.
+- **The sequencing rule in TODO 5 was broken.** #694 and #701 both go into the 2026-08-17 open, so
+  neither improvement will be attributable. Recording it rather than quietly hoping.
+- **A trading-critical hazard is untracked** — a market-data restart orphans armed trails. Written up
+  as live finding 3, and **verified in code rather than inherited from the PR body that claimed it**:
+  no `@PostConstruct` in market-data, the subscribe activity completes (so Temporal never retries
+  it), and all three workflow call sites are event-driven. It did not bite tonight only because all
+  four open positions query `armed:false, ticksReceived:0`.
+- **The node rebooted at 06:56Z** and the estate silently rolled itself onto newest `main` with no
+  deploy run — live finding 4. It also means a restart can drop premium subscriptions at an hour
+  nobody chose, so finding 3's "deploy pre-open" mitigation is incomplete.
+- **Lesson about the spike process itself:** a living document held on an unpushed branch in a locked
+  worktree stops being a plan of record within hours, because parallel sessions ship its items
+  faster than it updates. The evidence — 744 doc lines and 12 scripts, including the only
+  reconstruction of option premium velocity we will ever get from trade prints — existed in exactly
+  one place on one disk. Push early next time; the doc's value is as a shared anchor, and it cannot
+  anchor anything nobody can read.
 
 ## ⚠ Out-of-scope finding: the copytrade latency budget is 96% broker-fill wait
 
