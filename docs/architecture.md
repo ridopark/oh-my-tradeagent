@@ -260,7 +260,6 @@ flowchart TB
             end
 
             subgraph CFG["ConfigMaps / Cron"]
-                CM_TEN["40-tenants-config<br/>(mounted to orchestrator)"]
                 CJ_AUDIT["audit-completeness-check<br/>(daily CronJob)"]
             end
 
@@ -305,7 +304,6 @@ flowchart TB
     D_API --> S_PG
     CJ_AUDIT --> S_PG
 
-    CM_TEN -. "/config/tenants" .-> D_ORCH
 
     D_EXEC_PAPER -- "REST" --> ALPACA_API
     D_MD -- "REST" --> ALPACA_API
@@ -328,7 +326,7 @@ flowchart TB
     class D_ORCH,D_EXEC_PAPER,D_MD,D_API,D_SIG svc;
     class S_PG,S_RD data;
     class T_FE,T_HIST,T_MATCH,T_WK,T_UI tmp;
-    class CM_TEN,CJ_AUDIT,O_PROM,O_OTEL,CISA,INGRESS cfg;
+    class CJ_AUDIT,O_PROM,O_OTEL,CISA,INGRESS cfg;
 ```
 
 **What this view omits intentionally**

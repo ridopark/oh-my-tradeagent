@@ -1,5 +1,16 @@
 # Activating the `staging_paper` second tenant (P4-b-3)
 
+> **HISTORICAL — completed. Do not run as written.** `staging_paper` has been live since
+> 2026. Kept as the record of how the second tenant was onboarded.
+>
+> Two steps below are no longer executable. The `tenants-config` ConfigMap and
+> `infra/k8s/40-tenants-config.yaml` were **deleted on 2026-08-17**
+> (docs/plans/PLAN-2026-08-17-retire-tenants-configmap.md): tenant and strategy config live
+> in Postgres, written through the api-gateway `/strategy-config` path or the `/config` UI,
+> and the orchestrator no longer mounts a tenants tree. Anywhere this runbook says to edit or
+> `kubectl apply` that ConfigMap, the modern equivalent is a `strategy_config` /
+> `tenant_config` row. See "Fresh cluster / disaster recovery" in `infra/k8s/README.md`.
+
 Operator runbook for onboarding a second tenant (`staging_paper`, an Alpaca **paper**
 account) onto the shared exec worker, using the per-tenant file-mounted credential
 source. This is a **gated manual step** — none of it is applied by `deploy.yml`.
