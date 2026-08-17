@@ -170,6 +170,8 @@ jobs:
 
           declare -A want
           add_all_java() { for s in orchestrator exec-alpaca-paper market-data api-gateway tenant-dashboard-bff; do want["$s"]=1; done; }
+          # ONE sidecar image, THREE Deployments — see the services/signal-source-discord case below.
+          add_sidecar() { for s in signal-source-discord discord-chat-mirror discord-signals-mirror; do want["$s"]=1; done; }
           add_all() { for s in $SERVICES; do want["$s"]=1; done; }
           while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -191,8 +193,32 @@ jobs:
               services/tenant-dashboard-bff/*)          want[tenant-dashboard-bff]=1 ;;
               services/audit/*)                         : ;;   # no rolled Deployment
               dashboard/*)                              want[dashboard]=1 ;;
-              # Shared Java inputs rebuild every Java image -> roll them all.
-              contract/*|pom.xml|infra/docker/java-service.Dockerfile) add_all_java ;;
+              # contract/ is FOUR independent subtrees with different consumers, and `contract/*`
+              # lumped them together. A change to contract/python/** — which only
+              # services/signal-source-discord depends on — rolled every Java image, INCLUDING
+              # market-data. That is not a harmless extra restart: market-data's premium
+              # subscription registry is in-process and nothing re-subscribes on boot, so any
+              # restart permanently stops the tick feed for every ARMED trailing stop while the
+              # workflow still reports trailingArmed=true (see the ⚠ block in 53-market-data.yaml).
+              #
+              # It fired on 2026-08-17: a one-line DOCSTRING fix in
+              # contract/python/ohmytradeagent_contract/search_attributes.py (PR #704, redirecting
+              # a comment at a deleted file, zero behaviour change, not consumed by any Java image)
+              # rolled market-data. Free that time only because it was pre-open with nothing armed.
+              #
+              # Consumers verified by grep, not assumed:
+              #   contract/java/**    -> all six Maven modules
+              #   contract/python/**  -> services/signal-source-discord ONLY
+              #   contract/schemas/**, contract/fixtures/** -> codegen inputs for BOTH toolchains
+              #
+              # First match wins in `case`, so the specific patterns must precede the catch-all.
+              contract/java/*|pom.xml|infra/docker/java-service.Dockerfile) add_all_java ;;
+              contract/python/*)                        add_sidecar ;;
+              # schemas + fixtures feed both toolchains. An unrecognised contract/ path lands here
+              # too, deliberately rolling MORE rather than less — a missed rebuild ships stale
+              # generated code, which is worse than an extra restart.
+              contract/*)                               add_all_java
+                                                        add_sidecar ;;
               # Other build-context-wide inputs -> roll everything.
               infra/docker/*|.dockerignore)             add_all ;;
               # A bundled manifest edit rolls its own service (NN-<service>.yaml).

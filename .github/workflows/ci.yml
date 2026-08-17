@@ -36,7 +36,7 @@ jobs:
             exit 0
           fi
           if git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-              | grep -qE '^(infra/k8s/|tenants/|scripts/tests/|\.github/workflows/(ci|k8s-drift)\.yml$)'; then
+              | grep -qE '^(infra/k8s/|tenants/|scripts/tests/|\.github/workflows/(ci|deploy|k8s-drift)\.yml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -140,6 +140,22 @@ jobs:
         #
         # Runs on GitHub-hosted infra with no cluster access: pure text in, exit code out.
         run: python3 scripts/tests/test_k8s_drift_noise_filter.py
+
+      - name: deploy.yml matrix routing
+        if: steps.changed.outputs.run == 'true'
+        # deploy.yml decides which pods a merge rolls, from a `case` on the changed files.
+        # Nothing else checks it, and a mis-scoped pattern is invisible until a real merge
+        # rolls the wrong pods — one of which is market-data, where a restart permanently
+        # disarms every ARMED trailing stop (see the ⚠ block in 53-market-data.yaml).
+        #
+        # That fired on 2026-08-17: a one-line docstring change under contract/python/
+        # rolled market-data (#704), free only because it was pre-open with nothing armed.
+        #
+        # The suite extracts the real helpers + case loop from deploy.yml and runs them
+        # under bash, so it tests the shipped routing rather than a restatement of it.
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/tests/test_deploy_matrix_routing.py
 
   java:
     # Per-module matrix: each Maven module verifies on its own runner, in parallel.
