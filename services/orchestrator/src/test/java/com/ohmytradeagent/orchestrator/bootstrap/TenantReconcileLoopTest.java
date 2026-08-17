@@ -13,6 +13,8 @@ import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import io.temporal.client.schedules.ScheduleClient;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -143,5 +145,107 @@ class TenantReconcileLoopTest {
     loop.reconcileTick();
     verifyNoInteractions(killSwitch);
     verify(recon, never()).ensureForTenantStrategy(any(), any(), eq("strat-a"));
+  }
+
+  // --- startup pass -------------------------------------------------------
+
+  /**
+   * The startup pass ensures every pair the REGISTRY knows about, including ones absent from the
+   * mounted tenants tree.
+   *
+   * <p>This is the assertion that lets the tree be retired. On the live cluster the mount held 4 of
+   * 8 {@code (tenant, strategy)} pairs, with {@code prod-jinchul} and {@code paper_jinchiul} absent
+   * from it entirely; before this pass existed those two had no kill switch until the first
+   * scheduled tick, a full minute after boot.
+   */
+  @Test
+  void startupPassEnsuresEveryRegistryPairIncludingThoseNotOnDisk() {
+    TenantStrategy offDisk = new TenantStrategy("prod-jinchul", "copytrade-v1");
+    when(registry.list()).thenReturn(List.of(A, B, offDisk));
+
+    loop.run(null);
+
+    verify(killSwitch).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch).ensureForTenantStrategy("beta", "strat-b");
+    verify(killSwitch).ensureForTenantStrategy("prod-jinchul", "copytrade-v1");
+    verify(recon).ensureForTenantStrategy(scheduleClient, "prod-jinchul", "copytrade-v1");
+  }
+
+  /** Pairs ensured at startup are seen, so the first scheduled tick re-ensures nothing. */
+  @Test
+  void scheduledTickAfterStartupPassIsANoOp() {
+    when(registry.list()).thenReturn(List.of(A, B));
+
+    loop.run(null);
+    loop.reconcileTick();
+
+    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(1)).ensureForTenantStrategy("beta", "strat-b");
+  }
+
+  /** A startup pass that fails a pair must not latch it — the scheduled tick still retries. */
+  @Test
+  void startupPassFailureIsRetriedByTheScheduledTick() {
+    when(registry.list()).thenReturn(List.of(A));
+    when(killSwitch.ensureForTenantStrategy("acme", "strat-a")).thenReturn(false);
+
+    loop.run(null);
+    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
+
+    when(killSwitch.ensureForTenantStrategy("acme", "strat-a")).thenReturn(true);
+    loop.reconcileTick();
+    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
+  }
+
+  /** A registry failure during the startup pass must not abort boot. */
+  @Test
+  void startupPassSurvivesARegistryFailure() {
+    when(registry.list()).thenThrow(new RuntimeException("db not up yet"));
+
+    loop.run(null); // must not throw — boot continues, the tick retries
+
+    verifyNoInteractions(killSwitch);
+  }
+
+  /**
+   * The startup pass and a scheduled tick must never run concurrently.
+   *
+   * <p>Before the startup pass existed, passes were serialized only because Spring's default {@code
+   * fixedDelay} scheduler is single-threaded. {@link TenantReconcileLoop#run} executes on the MAIN
+   * thread during boot, entirely outside that guarantee, so the two entry points could overlap and
+   * double-ensure or interleave. The lock makes the second caller skip.
+   *
+   * <p>Deterministic, not timing-dependent: the startup pass is held inside {@code registry.list()}
+   * until the scheduled tick has been attempted and returned.
+   */
+  @Test
+  void scheduledTickSkipsWhileTheStartupPassIsInFlight() throws Exception {
+    CountDownLatch startupInsidePass = new CountDownLatch(1);
+    CountDownLatch tickAttempted = new CountDownLatch(1);
+
+    when(registry.list())
+        .thenAnswer(
+            inv -> {
+              startupInsidePass.countDown();
+              // Hold the pass open until the competing tick has come and gone.
+              if (!tickAttempted.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("competing tick never attempted");
+              }
+              return List.of(A);
+            });
+
+    Thread startup = new Thread(() -> loop.run(null), "startup-pass");
+    startup.start();
+    if (!startupInsidePass.await(5, TimeUnit.SECONDS)) {
+      throw new AssertionError("startup pass never entered");
+    }
+
+    loop.reconcileTick(); // must return immediately without doing any work
+    tickAttempted.countDown();
+    startup.join(5_000);
+
+    // registry.list() ran exactly ONCE: the tick skipped rather than starting a second pass.
+    verify(registry, times(1)).list();
+    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
   }
 }
