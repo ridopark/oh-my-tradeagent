@@ -36,7 +36,7 @@ jobs:
             exit 0
           fi
           if git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-              | grep -qE '^(infra/k8s/|tenants/|\.github/workflows/ci\.yml$)'; then
+              | grep -qE '^(infra/k8s/|tenants/|scripts/tests/|\.github/workflows/(ci|k8s-drift)\.yml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -124,6 +124,22 @@ jobs:
         run: |
           python3 -m pip install --quiet pyyaml
           python3 scripts/check-tenants-configmap-drift.py
+
+      - name: k8s drift noise filter (mutation table)
+        if: steps.changed.outputs.run == 'true'
+        # k8s-drift.yml suppresses server-assigned metadata and pure list reordering so the
+        # findings that matter aren't buried. A suppression rule nobody has watched FAIL is
+        # worth nothing, so this runs the mutation table: a value changed inside a reorder, an
+        # env var added, one dropped, and a reorder across a $(VAR) expansion must each still
+        # be reported.
+        #
+        # The suite EXTRACTS the filter from k8s-drift.yml's heredoc rather than importing a
+        # module, because that heredoc is deliberately not a script under scripts/ — see the
+        # comment block in k8s-drift.yml. It therefore tests exactly what runs on the homelab
+        # runner, and edits to the filter that skip this file fail here.
+        #
+        # Runs on GitHub-hosted infra with no cluster access: pure text in, exit code out.
+        run: python3 scripts/tests/test_k8s_drift_noise_filter.py
 
   java:
     # Per-module matrix: each Maven module verifies on its own runner, in parallel.
