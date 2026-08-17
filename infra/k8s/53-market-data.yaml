@@ -24,6 +24,31 @@ metadata:
     app: market-data
 spec:
   replicas: 1
+  # Recreate, NOT the default RollingUpdate. At replicas:1 the default maxSurge:25% rounds UP to 1,
+  # so the new pod starts BEFORE the old terminates and two pods briefly hold connections to the
+  # same Alpaca data endpoint. Alpaca's limit is ONE connection per endpoint and does not rise with
+  # the paid plan, so the second connection is a guaranteed 406 — on the stocks WebSocket that is
+  # LIVE TODAY and that watchlist-trigger entries depend on. Confirmed on the live cluster: the
+  # deployment carried {"rollingUpdate":{"maxSurge":"25%","maxUnavailable":"25%"}}.
+  #
+  # Recreate trades feed downtime during a roll for never having two connections. That is the right
+  # trade at replicas:1 — the surge bought no availability anyway, since one replica means the old
+  # pod is going away regardless, and the 406 leaves the NEW pod believing it is subscribed.
+  #
+  # ⚠ ROLLING THIS POD IS NOT FREE, AND Recreate IS NOT WHY. The premium subscription registry is
+  # in-process (`AlpacaMarketData.bySymbol` / `premiumPolls`, :75 / :82) and `subscribePremium` is
+  # called ONCE at arm time from three sites in PositionWorkflowImpl (:2077, :2207, :2459). Nothing
+  # re-subscribes on boot. So after ANY market-data restart — under either strategy — every ARMED
+  # trailing stop on every open position stops receiving ticks permanently, while the workflow
+  # still reports `trailingArmed=true` and a stop price. The one-shot staleness timer (:2422) only
+  # asks "did the feed ever start?", is watchlist-only, and its window closes 90s after arm.
+  #
+  # Until a re-subscribe sweep or a rolling staleness backstop ships, roll market-data ONLY
+  # pre-open or with no armed trails on the book. Downtime is also longer than it looks: there is
+  # no readiness probe, so `kubectl rollout status` reports success as soon as the process starts,
+  # before the Temporal worker or the WS is up.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: market-data
@@ -57,6 +82,21 @@ spec:
             # stream). Flip to 'inmemory' to disable the live feed for triage.
             - name: MARKET_DATA_PROVIDER
               value: alpaca
+            # DECLARED 2026-08-17 to close a drift, not to change behaviour — this was set
+            # IMPERATIVELY on the running pod and was absent from this manifest AND from
+            # last-applied-configuration, surviving `kubectl apply` only by strategic-merge
+            # accident (a field in neither the new config nor last-applied is preserved).
+            #
+            # It is load-bearing: application.yml intentionally leaves `stock-feed` BLANK so that
+            # subscribeEquity FAILS CLOSED (StockFeedGatedException, loud audit, no connect) rather
+            # than letting a delayed or wrong feed silently drive a price-level trigger. With this
+            # var absent, effectiveStockDataWsUrl() returns empty and every watchlist-trigger entry
+            # stops. A delete/recreate, a namespace rebuild, or a switch to server-side apply would
+            # have done exactly that, and nothing in the repo hinted the live feed depended on it.
+            #
+            # Same class as the exec drift in #696.
+            - name: ALPACA_STOCK_FEED
+              value: sip
           # market-data-svc is a Temporal worker but keeps the default servlet web
           # stack so actuator (health / info / prometheus) is reachable on 8080. No
           # business-logic controllers; the worker poll loop is still the implicit

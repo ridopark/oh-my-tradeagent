@@ -272,9 +272,6 @@ jobs:
           #     config-write path DARK by default → absent in repo → apply re-darks the config page)
           #   - orchestrator (also): STRATEGY_CONFIG_SOURCE=db (configs read from the strategy_config
           #     table, not the YAML ConfigMap, so the dashboard enable-toggle is the live control)
-          #   - market-data: ALPACA_STOCK_FEED=sip (repo keeps the equity feed UNSET/fail-closed by
-          #     default → absent in repo → apply re-gates it). Its alpaca-credentials-data secretRef
-          #     IS in repo; only the feed selector is the live override.
           #   - signal-source-discord: SIGNAL_EMIT_ADDITIONAL_TARGETS=staging_paper:copytrade-v1,
           #     staging_paper:watchlist-trigger-v1 (repo has no shadow targets → apply drops them →
           #     staging_paper stops receiving the daily watchlist fan-out)
@@ -299,7 +296,17 @@ jobs:
           # ORDER MATTERS: this removal is only safe because the declarations merged with it. Do
           # not remove another service from this list without first declaring its overrides AND
           # confirming `kubectl diff` exits 0 for its manifest.
-          RESTART_ONLY="orchestrator dashboard api-gateway market-data signal-source-discord tenant-dashboard-bff"
+          #
+          # market-data was REMOVED from this list 2026-08-17. Its listed override
+          # (ALPACA_STOCK_FEED=sip) is now DECLARED in 53-market-data.yaml, so apply no longer
+          # strips it and fail-closes the equity feed. Verified before removal:
+          # `kubectl diff -f infra/k8s/53-market-data.yaml` exits 0 against the live cluster — a
+          # full-object comparison, which also proves no THIRD undeclared override was hiding.
+          #
+          # The same manifest now pins `strategy: Recreate`. That pairing is deliberate: letting CI
+          # apply this manifest is only safe once a roll cannot surge to two pods and 406-collide
+          # the live stocks WebSocket.
+          RESTART_ONLY="orchestrator dashboard api-gateway signal-source-discord tenant-dashboard-bff"
           for s in $RESTART_ONLY; do
             if [ "$s" = "${{ matrix.service }}" ]; then
               echo "::notice::${{ matrix.service }} has live-only overrides — skipping apply (rollout restart below still re-pulls :latest)."
