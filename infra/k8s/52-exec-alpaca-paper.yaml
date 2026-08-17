@@ -51,12 +51,20 @@ spec:
           ports:
             - containerPort: 8080
               name: http
-          envFrom:
-            # Alpaca paper credentials: APCA_API_KEY_ID + APCA_API_SECRET_KEY.
-            # The operator creates this Secret separately (kubectl apply
-            # -f infra/secrets-template/secrets.template.yaml after filling values).
-            - secretRef:
-                name: alpaca-credentials
+          # NO envFrom. The `alpaca-credentials` Secret (APCA_API_KEY_ID /
+          # APCA_API_SECRET_KEY / APCA_API_BASE_URL) was REMOVED 2026-08-16: this pod resolves
+          # every credential per-tenant from the broker_credentials table
+          # (BROKER_CREDS_SOURCE=db), and with the fill listener now per-tenant too, nothing read
+          # those variables at all. Verified before removal — the sources are mutually exclusive
+          # (@ConditionalOnProperty on broker.creds.source), so EnvFallbackBrokerCredentialSource
+          # is never constructed here, and the only remaining reader of AlpacaProperties was
+          # AlpacaTradeUpdatesStream#startSingleSocket, which per-tenant mode never calls.
+          #
+          # It was deleted rather than refreshed because a Secret nobody reads cannot be noticed
+          # when it rots — and this one had: its keys were returning 401 and killing the
+          # trade-updates socket every 60s, invisibly, until #694 started logging the auth reply.
+          # The Secret object itself still exists in the cluster; removing it is an operator step
+          # once this is deployed.
           env:
             # Phase 5b.E: shared Temporal at temporal/temporal-frontend, Temporal-level ns `copytrade`.
             - name: TEMPORAL_TARGET
@@ -79,12 +87,56 @@ spec:
                   key: POSTGRES_PASSWORD
             - name: BROKER_IMPL
               value: alpaca-paper
+            # DECLARED 2026-08-16 to close a drift, not to change behaviour — all four were set
+            # IMPERATIVELY on the running pod and were absent from this manifest AND from
+            # last-applied-configuration, surviving `kubectl apply` only by strategic-merge
+            # accident (a field in neither the new config nor last-applied is preserved). They
+            # would NOT survive a delete/recreate, a namespace rebuild, or a switch to
+            # server-side apply.
+            #
+            # BROKER_CREDS_SOURCE is the load-bearing one: without it the source falls back to
+            # `env` (matchIfMissing), which on this pod means the deleted alpaca-credentials
+            # Secret — every tenant's credential resolution would break at once.
+            - name: BROKER_CREDS_SOURCE
+              value: db
+            - name: EXEC_BOOTSTRAP_TENANT_ID
+              value: staging_paper
+            - name: BROKER_CREDENTIALS_DELETE_ENABLED
+              value: "true"
+            # Operator-provisioned Secret; NOT optional on purpose. Under the prod profile a pod
+            # that boots with application.yml's `dev-admin-token` default crashloops by design
+            # (ExecAdminTokenFilter fail-fast), so a missing Secret must fail loudly here rather
+            # than silently degrade to the insecure default.
+            - name: EXEC_ADMIN_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: exec-admin-credentials
+                  key: EXEC_ADMIN_SHARED_TOKEN
             # Production fill detection: WS trade-updates + 30s polling fallback.
             # docs/ops/fill-listener.md for the cooperation model + single-pod constraint.
             # Both default OFF in application.yml; this manifest opts in.
             - name: EXEC_FILL_LISTENER_ENABLED
               value: "true"
             - name: EXEC_FILL_LISTENER_POLL_ENABLED
+              value: "true"
+            # #693 follow-up. MUST be true on this pod, for two independent reasons:
+            #
+            # 1. Correctness. This pod serves MULTIPLE paper tenants, each a DISTINCT Alpaca
+            #    account with its own credentials in broker_credentials (BROKER_CREDS_SOURCE=db).
+            #    A single pod-wide socket authenticates as ONE account and can therefore only ever
+            #    receive that account's fills — it is structurally incapable of serving the others
+            #    even when its credentials are valid.
+            # 2. It is currently BROKEN. Since the move to db-sourced credentials the pod-wide
+            #    `alpaca-credentials` env Secret has no other consumer, so it rotted unnoticed:
+            #    the socket gets `401 Unauthorized` and Alpaca kills it every 60s (code=1006) in an
+            #    endless reconnect loop. Invisible until #694 started logging the authorization
+            #    reply, because the 30s poller silently covered every fill.
+            #
+            # Per-tenant resolves each socket's key/secret AND ws-url from that tenant's DB row, so
+            # the vestigial env Secret stops mattering. Same configuration exec-alpaca-live has run
+            # since its cutover. Safe here because this deployment is replicas: 1 — the flag
+            # duplicates fills only on a multi-pod deployment (no leader election yet).
+            - name: EXEC_FILL_LISTENER_PER_TENANT_ENABLED
               value: "true"
             # Issue #297 / #295: non-blocking Discord alert on a broker rejection in placeOrder.
             # The webhook URL is an operator-provisioned secret. `optional: true` so the pod still

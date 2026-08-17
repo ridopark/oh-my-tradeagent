@@ -2391,6 +2391,15 @@ class PositionWorkflowImplTest {
     stub.onFill(fill("brk-trim", 2L, new BigDecimal("4.60")));
     waitForAuditKind("PartialExitFilled");
 
+    // Both of these are emitted asynchronously on the partialClose UPDATE path, which returns
+    // ACCEPTED before its audits necessarily flush. Waiting for PartialExitFilled above does NOT
+    // imply they have landed — they are independent emissions with no ordering guarantee between
+    // them, so under CI load the capture could run first. That is exactly how this test failed in
+    // CI on 2026-08-17 ("no audit event with kind=OperatorTrimRequested", 0.885s — a race, not a
+    // timeout). Same fix the file already applies in seven other places.
+    waitForAuditKind("OperatorTrimRequested");
+    waitForAuditKind("PartialExitRequested");
+
     AuditEvent trim = captureKind("OperatorTrimRequested");
     assertThat(trim.getSubject())
         .containsEntry("operator_id", "ops-1")
@@ -2440,6 +2449,10 @@ class PositionWorkflowImplTest {
     waitForPlaceOrderCount(1);
     stub.onFill(fill("brk-trim", 2L, new BigDecimal("4.60")));
     waitForAuditKind("PartialExitFilled");
+    // Waiting for PartialExitFilled does not imply OperatorTrimClamped has landed — different
+    // kind, emitted on the partialClose UPDATE path, no ordering guarantee between them. Same
+    // race that failed partialClose_healthyPosition_... in CI on 2026-08-17.
+    waitForAuditKind("OperatorTrimClamped");
 
     AuditEvent clamped = captureKind("OperatorTrimClamped");
     assertThat(asLong(clamped.getSubject().get("qty_requested"))).isEqualTo(3L);

@@ -52,12 +52,25 @@ metadata:
     app.kubernetes.io/part-of: oh-my-tradeagent
     app.kubernetes.io/component: ci-readonly
 rules:
-  # Core API group: configmaps, secrets, services.
+  # Core API group: configmaps, services.
+  #
+  # `secrets` was REMOVED 2026-08-16. It was never needed — `infra/k8s/` contains no Secret
+  # manifests (every Secret here is operator-provisioned from infra/secrets-template/), so
+  # `kubectl diff` never requests one and the grant was pure attack surface.
+  #
+  # It was also an EXFILTRATION path on a public repo: k8s-drift.yml posts the raw `kubectl diff`
+  # output into a PR comment with no redaction, and a diff of a Secret prints its live values. A
+  # PR that merely ADDED a Secret manifest under infra/k8s/ would have published that Secret's
+  # contents publicly. The required-reviewer environment gates it, but that defence is a human
+  # noticing one small added YAML file among manifest changes — not something to rely on.
+  #
+  # Do NOT add `secrets` back. If a Secret manifest ever legitimately belongs in infra/k8s/, the
+  # diff must redact `data:`/`stringData:` before the comment step, not gain read access.
   - apiGroups: [""]
     resources:
       - configmaps
-      - secrets
       - services
+      - persistentvolumeclaims
     verbs: [get, list, watch, create, patch, update]
   # apps: deployments + statefulsets (used by 51-orchestrator, 10-postgres, etc.)
   - apiGroups: ["apps"]
@@ -71,10 +84,17 @@ rules:
       - jobs
       - cronjobs
     verbs: [get, list, watch, create, patch, update]
-  # networking: Ingress is namespaced (54-api-gateway).
+  # networking: Ingress (54-api-gateway) + NetworkPolicy (52-exec-alpaca-paper,
+  # 58-tenant-dashboard-bff, 62-discord-chat-mirror, 63-discord-signals-mirror).
+  #
+  # networkpolicies added 2026-08-16 after the workflow's FIRST-EVER run failed on it. `kubectl
+  # diff` aborts on the first Forbidden, so a single missing kind meant the job reported one error
+  # and inspected NOTHING else — a green-looking check covering zero objects. The workflow now
+  # diffs per-file so one gap can no longer blind the rest, but the grant is still the right fix.
   - apiGroups: ["networking.k8s.io"]
     resources:
       - ingresses
+      - networkpolicies
     verbs: [get, list, watch, create, patch, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

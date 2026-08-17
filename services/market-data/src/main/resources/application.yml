@@ -23,9 +23,38 @@ market-data:
     data-ws-url: ${ALPACA_DATA_WS_URL:wss://stream.data.alpaca.markets/v1beta1/indicative}
     api-key-id: ${APCA_API_KEY_ID_DATA:${APCA_API_KEY_ID:}}
     api-secret-key: ${APCA_API_SECRET_KEY_DATA:${APCA_API_SECRET_KEY:}}
-    # Option-premium snapshot poll cadence. 2s -> 30 req/min per open OCC; keep total (poll +
-    # flatten/reprice snapshots) under Alpaca's ~200 req/min data-REST limit.
-    premium-poll-interval-ms: ${ALPACA_PREMIUM_POLL_INTERVAL_MS:2000}
+    # Option-premium snapshot poll cadence. 500ms -> 120 req/min per open OCC.
+    #
+    # The budget is 10,000 req/min (Algo Trader Plus), NOT the "~200 req/min" this comment claimed
+    # until 2026-08-17 — that figure is the Basic-plan limit and this account has never been on it.
+    # Verified by read-only REST probe 2026-08-16. The old 2000ms was sized against a constraint
+    # that did not exist.
+    #
+    # The req/min budget is NOT the binding constraint, and an earlier draft of this comment was
+    # wrong to imply it: 10,000/120 would allow ~83 concurrent contracts, but polls run on a FIXED
+    # 4-THREAD pool (AlpacaMarketData#defaultScheduler) making a SYNCHRONOUS snapshotQuote call, so
+    # the real ceiling is ~4/RTT calls per second — order ~20 contracts at 500ms versus ~80 at
+    # 2000ms. Past that, scheduleAtFixedRate delays overrun tasks instead of running them
+    # concurrently, so the realized cadence degrades SILENTLY back toward 1-2s while feed health
+    # stays green (there is no metric on achieved poll interval). Today's concurrency is far below
+    # this; raise the pool before raising position count, and measure the realized interval.
+    # snapshotQuote is also shared with kill-switch MTM, GetOptionQuoteActivity and
+    # resolveTrailAnchor, which adds load but is not the limit.
+    #
+    # WHY 500 AND NOT LOWER: a poll at interval I observes a stop crossing ~I/2 late, so 2000ms
+    # cost 0.75s more exposure than 500ms. Against measured premium velocity (127,193 samples,
+    # scripts/research/option_velocity.py) that is 1.7-3.5% of premium at p99-p99.9 — the tail is
+    # exactly when a stop fires. Going to 200ms would save only a further 0.15s (~0.35-0.71%) and
+    # is bounded by something unmeasured: acceptPremiumQuote REJECTS a quote whose retrievedAt
+    # matches the previous one, so polling faster than OPRA updates yields rejected duplicates —
+    # REST cost, zero information. Measure the quote update rate before going below 500ms
+    # (PLAN-2026-08-17-premium-poll-latency Phase 3).
+    #
+    # ROLLBACK IS GENUINELY THIS ONE VALUE. Nothing else was retuned for 500ms — in particular the
+    # RestClient timeouts in AlpacaMarketDataConfig were deliberately left at 1s/1500ms, because
+    # that client is SHARED with the account kill-switch MTM path, which is fail-CLOSED. Read the
+    # comment there before "fixing" the read-timeout-vs-interval relationship.
+    premium-poll-interval-ms: ${ALPACA_PREMIUM_POLL_INTERVAL_MS:500}
     # LIVE-USE GATE for the real-time STOCK trade stream that drives watchlist-trigger entries.
     # Intentionally UNSET by default: when both are blank, subscribeEquity FAILS CLOSED (loud audit,
     # no connect) so a delayed/wrong feed can never silently drive a price-level trigger. An operator

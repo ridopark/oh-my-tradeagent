@@ -22,9 +22,20 @@ name: k8s drift check (advisory)
 # The job also defends against an empty secret value in case the var
 # gets flipped prematurely.
 #
-# Read-only safety: the SA bound to KUBECONFIG_READONLY has verbs
-# [get, list, watch] only — `kubectl diff` cannot mutate, even by
-# accident. See infra/k8s/56-ci-readonly-sa.yaml.
+# Read-only safety: NOT RBAC-enforced, despite what this comment used to
+# claim. `kubectl diff` performs a server-side DRY-RUN apply and the
+# apiserver authorizes the underlying write verb even for a dry run, so the
+# SA necessarily holds create/patch/update on the diffed namespaced kinds —
+# a leaked token COULD mutate them. The no-mutation guarantee is PROCEDURAL
+# (this workflow only ever runs `kubectl diff`, never `apply`) plus the
+# layered defenses below. 56-ci-readonly-sa.yaml has always documented this
+# correctly; this header contradicted it, which is the worse of the two
+# failure modes for a security claim. Corrected 2026-08-16.
+#
+# The SA is scoped to namespace `copytrade`, and deliberately holds NO
+# access to `secrets` — the diff output is posted verbatim into a PR
+# comment on a PUBLIC repo, so read access to a Secret is an exfiltration
+# path. See 56-ci-readonly-sa.yaml before widening any grant.
 #
 # Public-repo safety: three layered defenses make a self-hosted runner
 # safe here — `pull_request_target` trigger, required-reviewer
@@ -113,16 +124,55 @@ jobs:
         # captured stdout drives the PR comment regardless.
         run: |
           set +e
-          kubectl diff -f infra/k8s/ > "$RUNNER_TEMP/drift.txt" 2>&1
-          rc=$?
+          # PER-FILE, not `kubectl diff -f infra/k8s/`. The whole-directory form ABORTS on the
+          # first Forbidden: the first real run (2026-08-16) hit a missing networkpolicies grant,
+          # reported that single error, and inspected nothing else — a green job covering zero
+          # objects. Per-file means one uncoverable manifest can never blind the rest.
+          #
+          # Two manifests are deliberately NOT diffed, because covering them would require grants
+          # that are worse than the gap:
+          #   - 00-namespace.yaml     — Namespace is cluster-scoped; a dry-run apply needs
+          #                             cluster-wide patch on namespaces.
+          #   - 56-ci-readonly-sa.yaml — contains Role/ClusterRole/RoleBinding. Granting the drift
+          #                             SA create/patch on RBAC kinds would let its own token
+          #                             grant itself cluster-admin — a privilege-escalation
+          #                             primitive reachable from a PUBLIC repo. Never add these.
+          #
+          # Skips are COUNTED AND NAMED in the comment. A check that silently narrows its own
+          # coverage is the failure this workflow exists to catch.
+          EXCLUDE_RE='^(00-namespace|56-ci-readonly-sa)\.yaml$'
+          : > "$RUNNER_TEMP/drift.txt"
+          : > "$RUNNER_TEMP/coverage.txt"
+          clean=0; drifted=0; skipped=0; errored=0
+          for f in infra/k8s/*.yaml; do
+            b=$(basename "$f")
+            if echo "$b" | grep -qE "$EXCLUDE_RE"; then
+              skipped=$((skipped + 1))
+              echo "- \`$b\` — excluded by design (cluster-scoped / RBAC kinds)" >> "$RUNNER_TEMP/coverage.txt"
+              continue
+            fi
+            out=$(kubectl diff -f "$f" 2>&1)
+            rc=$?
+            if [ $rc -eq 0 ]; then
+              clean=$((clean + 1))
+            elif [ $rc -eq 1 ]; then
+              drifted=$((drifted + 1))
+              { echo "### DRIFT — $b"; echo "$out"; echo; } >> "$RUNNER_TEMP/drift.txt"
+            else
+              # NOT silently tolerated: an unreadable manifest is a COVERAGE GAP, and the
+              # comment must say so rather than imply the object was checked and matched.
+              errored=$((errored + 1))
+              { echo "### COVERAGE GAP — $b (kubectl diff exit $rc; this manifest was NOT checked)"; echo "$out"; echo; } >> "$RUNNER_TEMP/drift.txt"
+              echo "- \`$b\` — **NOT CHECKED** (exit $rc, see report)" >> "$RUNNER_TEMP/coverage.txt"
+            fi
+          done
           set -e
-          echo "kubectl diff exit code: $rc"
-          if [ $rc -gt 1 ]; then
-            # rc=0 → no diff, rc=1 → diff present (both expected).
-            # rc>1 → real error (network, auth, etc.) — surface it in the
-            # comment body but still post and succeed (advisory).
-            echo "kubectl diff returned $rc — treating as error in comment body."
-          fi
+          checked=$((clean + drifted))
+          printf 'Coverage: **%d** manifests checked (%d clean, %d drifted), **%d** excluded by design, **%d** unreadable.\n' \
+            "$checked" "$clean" "$drifted" "$skipped" "$errored" > "$RUNNER_TEMP/coverage.head"
+          cat "$RUNNER_TEMP/coverage.txt" >> "$RUNNER_TEMP/coverage.head"
+          mv "$RUNNER_TEMP/coverage.head" "$RUNNER_TEMP/coverage.txt"
+          echo "checked=$checked clean=$clean drifted=$drifted skipped=$skipped errored=$errored"
           # Truncate to keep PR comment under GitHub's 65k limit.
           # 60k leaves room for the markdown wrapper + marker.
           head -c 60000 "$RUNNER_TEMP/drift.txt" > "$RUNNER_TEMP/drift.trimmed.txt"
@@ -135,14 +185,20 @@ jobs:
         uses: actions/github-script@v7
         env:
           DRIFT_FILE: ${{ runner.temp }}/drift.trimmed.txt
+          COVERAGE_FILE: ${{ runner.temp }}/coverage.txt
         with:
           script: |
             const fs = require('fs');
             const marker = '<!-- k8s-drift-report -->';
             const driftRaw = fs.readFileSync(process.env.DRIFT_FILE, 'utf8').trim();
+            // Coverage is ALWAYS rendered, including on the clean path. "No drift detected" with
+            // no statement of what was inspected is exactly how a check that silently stopped
+            // checking passes for a working one.
+            const coverage = fs.readFileSync(process.env.COVERAGE_FILE, 'utf8').trim();
+            const head = `${marker}\n### k8s drift check (advisory)\n\n${coverage}\n`;
             const body = driftRaw.length === 0
-              ? `${marker}\n### k8s drift check (advisory)\n\nNo drift detected against live cluster.`
-              : `${marker}\n### k8s drift check (advisory)\n\n<details><summary>kubectl diff -f infra/k8s/</summary>\n\n\`\`\`diff\n${driftRaw}\n\`\`\`\n\n</details>\n\n_Advisory only — does not block merge. See \`docs/ops/k8s-drift-check.md\`._`;
+              ? `${head}\nNo drift detected in the manifests checked above.`
+              : `${head}\n<details><summary>kubectl diff (per manifest)</summary>\n\n\`\`\`diff\n${driftRaw}\n\`\`\`\n\n</details>\n\n_Advisory only — does not block merge. See \`docs/ops/k8s-drift-check.md\`._`;
 
             const { owner, repo } = context.repo;
             const issue_number = context.payload.pull_request.number;

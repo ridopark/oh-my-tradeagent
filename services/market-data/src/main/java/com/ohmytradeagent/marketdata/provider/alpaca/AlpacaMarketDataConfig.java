@@ -34,9 +34,27 @@ public class AlpacaMarketDataConfig {
           "market-data.provider=alpaca requires APCA_API_SECRET_KEY_DATA; got blank/null. "
               + "Set the alpaca-credentials Secret in your deployment.");
     }
-    // Bounded timeouts so a slow Alpaca snapshot cannot pin a premium-poll thread past the poll
-    // interval (default 2s): read < interval. Without this the default RestClient has no read
-    // timeout.
+    // Bounded timeouts so a slow Alpaca snapshot cannot pin a caller indefinitely. Without this
+    // the default RestClient has no read timeout at all.
+    //
+    // DELIBERATELY NOT TIGHTENED when the premium poll went 2000ms -> 500ms on 2026-08-17, even
+    // though the original comment framed the rule as "read < interval" and 1500ms now exceeds the
+    // 500ms interval. A first attempt did tighten these to 300/400ms; it was reverted, because
+    // THIS CLIENT IS SHARED and the two callers have opposite failure semantics:
+    //
+    //   - pollOnce (premium poll, 2/sec/contract) is fail-SOFT: a timeout emits no tick, the next
+    //     poll is 500ms away, and an over-running poll merely delays its own next run
+    //     (scheduleAtFixedRate defers rather than piling up). Self-limiting.
+    //   - snapshotQuote via GetOptionQuoteActivityImpl feeds the ACCOUNT KILL-SWITCH MTM
+    //     heartbeat, which is fail-CLOSED: an unavailable quote trips the account cap with
+    //     auto:account_mtm_unavailable. That is exactly the 2026-07-21 incident, where a single
+    //     quote miss fail-closed prod_real on a PROFITABLE day.
+    //
+    // So a tighter timeout buys a marginally crisper poll cadence and pays for it with a higher
+    // chance of tripping a real-money safety gate on a slow response. Wrong trade. If poll-thread
+    // starvation ever actually shows up (watch for the realized interval drifting toward 1-2s),
+    // the fix is a SEPARATE RestClient for pollOnce with its own tight timeouts — not tightening
+    // the one the kill switch depends on.
     SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
     requestFactory.setConnectTimeout(Duration.ofSeconds(1));
     requestFactory.setReadTimeout(Duration.ofMillis(1500));
