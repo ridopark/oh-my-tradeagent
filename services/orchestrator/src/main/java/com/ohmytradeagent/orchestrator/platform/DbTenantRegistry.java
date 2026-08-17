@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.platform;
 
 import java.math.BigDecimal;
+import java.util.List;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -54,5 +55,15 @@ public class DbTenantRegistry implements TenantRegistry {
     // Reuses TenantConfig.setAccountDailyLossPct's (0,1] range guard — a bad stored value throws.
     cfg.setAccountDailyLossPct(row.get("account_daily_loss_pct", BigDecimal.class));
     return cfg;
+  }
+
+  /**
+   * Every tenant with a {@code tenant_config} row. This is the enumeration the boot config gate
+   * walks, so it must cover tenants that have declared a cap but not yet any strategy.
+   */
+  @Override
+  public List<String> list() {
+    return dsl.fetch("SELECT tenant_id FROM tenant_config ORDER BY tenant_id")
+        .getValues("tenant_id", String.class);
   }
 }

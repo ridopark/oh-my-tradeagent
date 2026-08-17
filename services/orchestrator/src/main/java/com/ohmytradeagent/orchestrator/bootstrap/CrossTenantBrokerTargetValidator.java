@@ -3,8 +3,6 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -36,18 +34,23 @@ import java.util.Set;
  * runtime is per-tenant would re-open the very cap-loosening this validator exists to prevent. The
  * flag is the structural gate that keeps the relaxation unreachable until then.
  *
- * <p>Wired on the {@link TenantStrategyScanner}-fed boot path (see {@link
- * CrossTenantBrokerTargetBootstrapper}). Strategies with an absent {@code broker_target} are
- * skipped — they cannot collide. Config is resolved through the active {@link StrategyRegistry}; a
- * scanned strategy whose config cannot load throws BEFORE it can be classified (fail closed).
+ * <p>Wired on the boot path (see {@link CrossTenantBrokerTargetBootstrapper}), enumerating pairs
+ * from {@link StrategyRegistry#list()}. Strategies with an absent {@code broker_target} are skipped
+ * — they cannot collide. Config is resolved through the same registry; a strategy whose config
+ * cannot load throws BEFORE it can be classified (fail closed).
+ *
+ * <p>The enumeration used to be a filesystem scan of the mounted {@code tenants/} tree. On the live
+ * cluster that tree held 4 of 8 {@code (tenant, strategy)} pairs, so a collision involving a
+ * DB-only tenant was invisible to this guard — precisely the cap-loosening it exists to prevent. In
+ * yaml-mode {@code list()} is that same scan, so dev behaviour is unchanged.
  */
 public final class CrossTenantBrokerTargetValidator {
 
   private CrossTenantBrokerTargetValidator() {}
 
   /** Strict mode (default): a {@code broker_target} is owned by exactly one tenant. */
-  public static void validate(Path tenantsDir, StrategyRegistry registry) {
-    validate(tenantsDir, registry, false);
+  public static void validate(StrategyRegistry registry) {
+    validate(registry, false);
   }
 
   /**
@@ -57,38 +60,32 @@ public final class CrossTenantBrokerTargetValidator {
    * broker_account_id}). Throws {@link IllegalStateException} on a violation; no-op when the
    * tenants dir does not exist.
    */
-  public static void validate(
-      Path tenantsDir, StrategyRegistry registry, boolean sharedBrokerAccounts) {
-    ownerByBrokerTarget(tenantsDir, registry, sharedBrokerAccounts);
+  public static void validate(StrategyRegistry registry, boolean sharedBrokerAccounts) {
+    ownerByBrokerTarget(registry, sharedBrokerAccounts);
   }
 
-  /** Strict mode (default). See {@link #ownerByBrokerTarget(Path, StrategyRegistry, boolean)}. */
-  public static Map<String, String> ownerByBrokerTarget(
-      Path tenantsDir, StrategyRegistry registry) {
-    return ownerByBrokerTarget(tenantsDir, registry, false);
+  /** Strict mode (default). See {@link #ownerByBrokerTarget(StrategyRegistry, boolean)}. */
+  public static Map<String, String> ownerByBrokerTarget(StrategyRegistry registry) {
+    return ownerByBrokerTarget(registry, false);
   }
 
   /**
    * Builds the {@code broker_target -> owning (first-seen) tenant} map, throwing if the active
-   * mode's invariant is violated. Returns an empty map when the tenants dir is missing. A scanned
+   * mode's invariant is violated. Returns an empty map when the registry enumerates nothing. A
    * strategy whose config cannot load via {@code registry.get} throws (fail closed) before it can
    * be classified.
    */
   public static Map<String, String> ownerByBrokerTarget(
-      Path tenantsDir, StrategyRegistry registry, boolean sharedBrokerAccounts) {
+      StrategyRegistry registry, boolean sharedBrokerAccounts) {
     return sharedBrokerAccounts
-        ? ownerBySharedBrokerAccounts(tenantsDir, registry)
-        : ownerByStrictBrokerTarget(tenantsDir, registry);
+        ? ownerBySharedBrokerAccounts(registry)
+        : ownerByStrictBrokerTarget(registry);
   }
 
   /** The original #323 rule: a {@code broker_target} is owned by exactly one tenant. */
-  private static Map<String, String> ownerByStrictBrokerTarget(
-      Path tenantsDir, StrategyRegistry registry) {
+  private static Map<String, String> ownerByStrictBrokerTarget(StrategyRegistry registry) {
     Map<String, String> ownerByTarget = new LinkedHashMap<>();
-    if (!Files.exists(tenantsDir)) {
-      return ownerByTarget;
-    }
-    for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+    for (TenantStrategy ts : registry.list()) {
       String brokerTarget = brokerTargetOf(registry, ts);
       if (brokerTarget == null) {
         continue;
@@ -115,15 +112,11 @@ public final class CrossTenantBrokerTargetValidator {
    * non-blank, mutually-distinct {@code broker_account_id} (and a single tenant's strategies on one
    * target declare a consistent account).
    */
-  private static Map<String, String> ownerBySharedBrokerAccounts(
-      Path tenantsDir, StrategyRegistry registry) {
+  private static Map<String, String> ownerBySharedBrokerAccounts(StrategyRegistry registry) {
     Map<String, String> firstTenantByTarget = new LinkedHashMap<>();
     // broker_target -> (tenant -> declared account-or-null), first-seen order.
     Map<String, Map<String, String>> accountByTenantByTarget = new LinkedHashMap<>();
-    if (!Files.exists(tenantsDir)) {
-      return firstTenantByTarget;
-    }
-    for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
+    for (TenantStrategy ts : registry.list()) {
       StrategyConfig cfg = registry.get(ts.tenantId(), ts.strategyId());
       String brokerTarget = brokerTargetOf(cfg);
       if (brokerTarget == null) {

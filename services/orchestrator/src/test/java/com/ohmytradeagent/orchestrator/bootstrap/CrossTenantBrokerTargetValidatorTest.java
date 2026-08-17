@@ -8,10 +8,12 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import com.ohmytradeagent.orchestrator.platform.YamlStrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.YamlStrategyRegistry.StrategyNotFoundException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -83,8 +85,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper");
     writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-paper");
 
-    assertThatThrownBy(
-            () -> CrossTenantBrokerTargetValidator.validate(tenantsDir, yamlRegistry(tenantsDir)))
+    assertThatThrownBy(() -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir)))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("alpaca-paper")
         .hasMessageContaining("acme")
@@ -97,8 +98,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper");
     writeStrategy(tenantsDir, "acme", "copytrade-v2", "alpaca-paper");
 
-    assertThatCode(
-            () -> CrossTenantBrokerTargetValidator.validate(tenantsDir, yamlRegistry(tenantsDir)))
+    assertThatCode(() -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir)))
         .doesNotThrowAnyException();
   }
 
@@ -107,8 +107,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper");
     writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-live");
 
-    assertThatCode(
-            () -> CrossTenantBrokerTargetValidator.validate(tenantsDir, yamlRegistry(tenantsDir)))
+    assertThatCode(() -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir)))
         .doesNotThrowAnyException();
   }
 
@@ -116,7 +115,7 @@ class CrossTenantBrokerTargetValidatorTest {
   void noOpWhenTenantsDirMissing(@TempDir Path parent) {
     Path missing = parent.resolve("nope");
     StrategyRegistry registry = mock(StrategyRegistry.class);
-    assertThatCode(() -> CrossTenantBrokerTargetValidator.validate(missing, registry))
+    assertThatCode(() -> CrossTenantBrokerTargetValidator.validate(registry))
         .doesNotThrowAnyException();
   }
 
@@ -126,8 +125,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-live");
     writeStrategy(tenantsDir, "initech", "copytrade-v1", "alpaca-live");
 
-    assertThatThrownBy(
-            () -> CrossTenantBrokerTargetValidator.validate(tenantsDir, yamlRegistry(tenantsDir)))
+    assertThatThrownBy(() -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir)))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("alpaca-live");
   }
@@ -137,9 +135,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper");
     writeStrategy(tenantsDir, "acme", "copytrade-v2", "alpaca-paper");
 
-    assertThat(
-            CrossTenantBrokerTargetValidator.ownerByBrokerTarget(
-                tenantsDir, yamlRegistry(tenantsDir)))
+    assertThat(CrossTenantBrokerTargetValidator.ownerByBrokerTarget(yamlRegistry(tenantsDir)))
         .containsEntry("alpaca-paper", "acme");
   }
 
@@ -151,9 +147,7 @@ class CrossTenantBrokerTargetValidatorTest {
     // single tenant with an account set passes identically to one without.
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live", "847309116");
 
-    assertThat(
-            CrossTenantBrokerTargetValidator.ownerByBrokerTarget(
-                tenantsDir, yamlRegistry(tenantsDir)))
+    assertThat(CrossTenantBrokerTargetValidator.ownerByBrokerTarget(yamlRegistry(tenantsDir)))
         .containsEntry("alpaca-live", "acme");
   }
 
@@ -162,10 +156,7 @@ class CrossTenantBrokerTargetValidatorTest {
     // Even with the flag ON, a single-tenant broker_target needs no account (the live path today).
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-live");
 
-    assertThatCode(
-            () ->
-                CrossTenantBrokerTargetValidator.validate(
-                    tenantsDir, yamlRegistry(tenantsDir), true))
+    assertThatCode(() -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir), true))
         .doesNotThrowAnyException();
   }
 
@@ -175,10 +166,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper", "111");
     writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-paper", "222");
 
-    assertThatCode(
-            () ->
-                CrossTenantBrokerTargetValidator.validate(
-                    tenantsDir, yamlRegistry(tenantsDir), true))
+    assertThatCode(() -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir), true))
         .doesNotThrowAnyException();
   }
 
@@ -188,9 +176,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-paper", "111");
 
     assertThatThrownBy(
-            () ->
-                CrossTenantBrokerTargetValidator.validate(
-                    tenantsDir, yamlRegistry(tenantsDir), true))
+            () -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir), true))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("alpaca-paper")
         .hasMessageContaining("111");
@@ -203,9 +189,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-paper"); // no account
 
     assertThatThrownBy(
-            () ->
-                CrossTenantBrokerTargetValidator.validate(
-                    tenantsDir, yamlRegistry(tenantsDir), true))
+            () -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir), true))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("alpaca-paper")
         .hasMessageContaining("globex");
@@ -222,9 +206,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-live", "\"   \"");
 
     assertThatThrownBy(
-            () ->
-                CrossTenantBrokerTargetValidator.validate(
-                    tenantsDir, yamlRegistry(tenantsDir), true))
+            () -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir), true))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("alpaca-live")
         .hasMessageContaining("globex");
@@ -237,9 +219,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "acme", "copytrade-v2", "alpaca-paper", "222");
 
     assertThatThrownBy(
-            () ->
-                CrossTenantBrokerTargetValidator.validate(
-                    tenantsDir, yamlRegistry(tenantsDir), true))
+            () -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir), true))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("acme")
         .hasMessageContaining("Intra-tenant");
@@ -251,10 +231,7 @@ class CrossTenantBrokerTargetValidatorTest {
     writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper", "111");
     writeStrategy(tenantsDir, "acme", "copytrade-v2", "alpaca-paper", "111");
 
-    assertThatCode(
-            () ->
-                CrossTenantBrokerTargetValidator.validate(
-                    tenantsDir, yamlRegistry(tenantsDir), true))
+    assertThatCode(() -> CrossTenantBrokerTargetValidator.validate(yamlRegistry(tenantsDir), true))
         .doesNotThrowAnyException();
   }
 
@@ -266,27 +243,58 @@ class CrossTenantBrokerTargetValidatorTest {
    * ownership map.
    */
   @Test
-  void dbModeFailsClosedOnMissingRow(@TempDir Path tenantsDir) throws Exception {
-    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper");
+  void dbModeFailsClosedOnMissingRow() {
     StrategyRegistry registry = mock(StrategyRegistry.class);
+    when(registry.list()).thenReturn(List.of(new TenantStrategy("acme", "copytrade-v1")));
     when(registry.get("acme", "copytrade-v1"))
         .thenThrow(new StrategyNotFoundException("Strategy config not found in DB"));
 
-    assertThatThrownBy(() -> CrossTenantBrokerTargetValidator.validate(tenantsDir, registry))
+    assertThatThrownBy(() -> CrossTenantBrokerTargetValidator.validate(registry))
         .isInstanceOf(StrategyNotFoundException.class);
   }
 
   @Test
-  void dbModeBuildsOwnerMapFromValidRows(@TempDir Path tenantsDir) throws Exception {
-    writeStrategy(tenantsDir, "acme", "copytrade-v1", "alpaca-paper");
-    writeStrategy(tenantsDir, "globex", "copytrade-v1", "alpaca-live");
+  void dbModeBuildsOwnerMapFromValidRows() {
     StrategyRegistry registry = mock(StrategyRegistry.class);
+    when(registry.list())
+        .thenReturn(
+            List.of(
+                new TenantStrategy("acme", "copytrade-v1"),
+                new TenantStrategy("globex", "copytrade-v1")));
     when(registry.get("acme", "copytrade-v1")).thenReturn(configWithTarget("alpaca-paper"));
     when(registry.get("globex", "copytrade-v1")).thenReturn(configWithTarget("alpaca-live"));
 
-    assertThat(CrossTenantBrokerTargetValidator.ownerByBrokerTarget(tenantsDir, registry))
+    assertThat(CrossTenantBrokerTargetValidator.ownerByBrokerTarget(registry))
         .containsEntry("alpaca-paper", "acme")
         .containsEntry("alpaca-live", "globex");
+  }
+
+  /**
+   * A collision between two tenants that exist ONLY in the DB must be caught.
+   *
+   * <p>This is the coverage this change adds. The enumeration used to be a scan of the mounted
+   * {@code tenants/} tree, which on the live cluster held 4 of 8 (tenant, strategy) pairs — so a
+   * conflict involving a tenant absent from the mount (prod-jinchul, paper_jinchiul on 2026-08-17)
+   * was invisible to the very guard that exists to stop the account cap being silently loosened.
+   * Neither tenant here has any file on disk.
+   */
+  @Test
+  void detectsCollisionBetweenTenantsThatExistOnlyInTheDb() {
+    StrategyRegistry registry = mock(StrategyRegistry.class);
+    when(registry.list())
+        .thenReturn(
+            List.of(
+                new TenantStrategy("prod-jinchul", "copytrade-v1"),
+                new TenantStrategy("paper_jinchiul", "copytrade-v1")));
+    when(registry.get("prod-jinchul", "copytrade-v1")).thenReturn(configWithTarget("alpaca-live"));
+    when(registry.get("paper_jinchiul", "copytrade-v1"))
+        .thenReturn(configWithTarget("alpaca-live"));
+
+    assertThatThrownBy(() -> CrossTenantBrokerTargetValidator.validate(registry))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("alpaca-live")
+        .hasMessageContaining("prod-jinchul")
+        .hasMessageContaining("paper_jinchiul");
   }
 
   private static StrategyConfig configWithTarget(String brokerTarget) {
