@@ -70,8 +70,14 @@ METADATA_ONLY = """--- /tmp/LIVE/apps.v1.Deployment.copytrade.x
 """
 
 
+# Must match DRIFT_EXIT in the filter. Deliberately not 1: Python exits 1 on an unhandled
+# exception with an EMPTY stdout, so signalling drift with 1 would let any crash render as a
+# DRIFT section with nothing under it — quieter than the truth. See test_drift_exit_code_*.
+DRIFT_EXIT = 10
+
+
 class NoiseFilterTest(unittest.TestCase):
-    """Exit 0 means 'nothing authored differs'; exit 1 means 'report this'."""
+    """Exit 0 means 'nothing authored differs'; exit DRIFT_EXIT means 'report this'."""
 
     @classmethod
     def setUpClass(cls):
@@ -96,7 +102,10 @@ class NoiseFilterTest(unittest.TestCase):
 
     def assertReported(self, diff: str, why: str):
         r = self.run_filter(diff)
-        self.assertEqual(r.returncode, 1, f"{why}: expected REPORTED, got suppressed")
+        self.assertEqual(
+            r.returncode, DRIFT_EXIT,
+            f"{why}: expected REPORTED (exit {DRIFT_EXIT}), got {r.returncode}",
+        )
         self.assertTrue(r.stdout.strip(), f"{why}: reported drift with an EMPTY diff body")
 
     # --- what must go quiet -------------------------------------------------
@@ -132,6 +141,34 @@ class NoiseFilterTest(unittest.TestCase):
             "reordering across a $(VAR) expansion",
         )
 
+    # --- the exit-code contract the caller depends on ------------------------
+    def test_drift_exit_code_is_never_pythons_crash_code(self):
+        """Drift must not be signalled with 1.
+
+        Python exits 1 on an unhandled exception, with the traceback on stderr and an
+        EMPTY stdout. k8s-drift.yml renders `$filtered` for the drift code, so if drift
+        were 1 a crash in this filter would post `### DRIFT — <file>` with nothing under
+        it — which reads as "checked it, nothing to show". Quieter than the truth is the
+        one thing this filter must never be. Reviewed and fixed on PR #705.
+        """
+        r = self.run_filter(REORDER.replace('+          value: "1"', '+          value: "999"'))
+        self.assertNotEqual(r.returncode, 1, "drift must never share Python's crash exit code")
+        self.assertEqual(r.returncode, DRIFT_EXIT)
+
+    def test_a_crashing_filter_does_not_look_like_drift(self):
+        """A filter that throws must be distinguishable from one that found drift."""
+        crashing = self.script.with_name("crashing.py")
+        crashing.write_text("raise ValueError('simulated filter crash')\n")
+        r = subprocess.run(
+            [sys.executable, str(crashing)], input=REORDER, capture_output=True, text=True
+        )
+        self.assertEqual(r.returncode, 1, "sanity: an uncaught exception exits 1")
+        self.assertEqual(r.stdout, "", "sanity: a crash produces no stdout")
+        self.assertNotEqual(
+            r.returncode, DRIFT_EXIT,
+            "a crash must not be mistaken for drift — that is the bug this pins",
+        )
+
     def test_real_drift_survives_alongside_a_suppressed_object(self):
         # Multi-object file: one object is noise, one is real. The real one must survive,
         # and the noise must not be echoed back into the report.
@@ -139,7 +176,9 @@ class NoiseFilterTest(unittest.TestCase):
             "copytrade.x", "copytrade.y"
         ).replace('+          value: "1"', '+          value: "999"')
         r = self.run_filter(REORDER + real)
-        self.assertEqual(r.returncode, 1, "a real object alongside a noisy one must be reported")
+        self.assertEqual(
+            r.returncode, DRIFT_EXIT, "a real object alongside a noisy one must be reported"
+        )
         self.assertIn("copytrade.y", r.stdout)
         self.assertNotIn("copytrade.x", r.stdout)
 
