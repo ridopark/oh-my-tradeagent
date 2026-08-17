@@ -26,7 +26,7 @@ class RepoTenantsBrokerTargetGuardTest {
     assertThatCode(
             () ->
                 CrossTenantBrokerTargetValidator.validate(
-                    tenantsDir, new YamlStrategyRegistry(tenantsDir.toString())))
+                    new YamlStrategyRegistry(tenantsDir.toString())))
         .doesNotThrowAnyException();
   }
 

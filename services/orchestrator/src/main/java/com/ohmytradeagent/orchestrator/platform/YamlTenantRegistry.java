@@ -5,6 +5,8 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.stream.Stream;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -31,6 +33,33 @@ public class YamlTenantRegistry implements TenantRegistry {
 
   public YamlTenantRegistry(@Value("${orchestrator.tenants-dir:tenants}") String tenantsDir) {
     this.tenantsDir = Path.of(tenantsDir);
+  }
+
+  /**
+   * Tenant subdirectories under {@code tenantsDir}.
+   *
+   * <p>Dot-prefixed entries are EXCLUDED. When this directory is a Kubernetes ConfigMap mount it
+   * also contains the atomic-write plumbing — {@code ..data} (a symlink, which {@code isDirectory}
+   * follows) and a timestamped {@code ..2026_08_17_07_34_10.3332253454} directory. Counting those
+   * as tenants is why the boot gate logged "validated for 5 tenant(s)" against a mount holding 3 on
+   * 2026-08-17, and why it then called {@code get("..data")}. It only stayed harmless because a
+   * missing tenant.yaml yields an inert default; a registry that failed closed on an unknown tenant
+   * would have broken boot on a Kubernetes filename.
+   */
+  @Override
+  public List<String> list() {
+    if (!Files.exists(tenantsDir)) {
+      return List.of();
+    }
+    try (Stream<Path> s = Files.list(tenantsDir)) {
+      return s.filter(Files::isDirectory)
+          .map(p -> p.getFileName().toString())
+          .filter(name -> !name.startsWith("."))
+          .sorted()
+          .toList();
+    } catch (IOException e) {
+      throw new IllegalStateException("Failed to list tenants dir " + tenantsDir, e);
+    }
   }
 
   @Override

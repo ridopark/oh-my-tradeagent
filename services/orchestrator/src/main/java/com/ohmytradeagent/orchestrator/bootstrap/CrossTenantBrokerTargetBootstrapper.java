@@ -1,7 +1,6 @@
 package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
-import java.nio.file.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -31,15 +30,12 @@ public class CrossTenantBrokerTargetBootstrapper implements ApplicationRunner {
   private static final Logger log =
       LoggerFactory.getLogger(CrossTenantBrokerTargetBootstrapper.class);
 
-  private final Path tenantsDir;
   private final StrategyRegistry registry;
   private final boolean sharedBrokerAccounts;
 
   public CrossTenantBrokerTargetBootstrapper(
-      @Value("${orchestrator.tenants-dir:tenants}") String tenantsDir,
       @Value("${multitenant.broker-accounts.enabled:false}") boolean sharedBrokerAccounts,
       StrategyRegistry registry) {
-    this.tenantsDir = Path.of(tenantsDir);
     this.sharedBrokerAccounts = sharedBrokerAccounts;
     this.registry = registry;
   }
@@ -50,10 +46,10 @@ public class CrossTenantBrokerTargetBootstrapper implements ApplicationRunner {
     // #323
     // one-tenant-per-broker_target rule holds until P4-c-b makes the runtime account reads
     // per-tenant.
-    CrossTenantBrokerTargetValidator.validate(tenantsDir, registry, sharedBrokerAccounts);
+    CrossTenantBrokerTargetValidator.validate(registry, sharedBrokerAccounts);
     log.info(
-        "cross-tenant broker_target invariant validated for tenants dir {} (sharedBrokerAccounts={})",
-        tenantsDir,
+        "cross-tenant broker_target invariant validated via the active strategy registry"
+            + " (sharedBrokerAccounts={})",
         sharedBrokerAccounts);
   }
 }
