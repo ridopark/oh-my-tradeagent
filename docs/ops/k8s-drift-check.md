@@ -253,6 +253,28 @@ three layered defenses:
    future change adds such a command, the safety guarantee breaks —
    review `pull_request_target` workflow edits with that in mind.
 
+   **This is why the diff noise filter is a heredoc.** The `drift:` job
+   normalises `kubectl diff` output — dropping server-assigned metadata
+   and pure list reordering — with a short Python program embedded in
+   `k8s-drift.yml` as a heredoc. The obvious "cleanup" is to lift it
+   into `scripts/normalize-k8s-diff.py` and call it. **Do not.**
+   `pull_request_target` reads the workflow file from the base branch
+   (trusted) but this job checks out `pull_request.head.sha`, so
+   anything under `scripts/` in the working tree is attacker-controlled.
+   `python3 scripts/<anything>` would hand any fork PR code execution on
+   a LAN runner holding a cluster kubeconfig — turning the one defense
+   in this section into a hole. The heredoc is read from the trusted
+   workflow file and never from the checkout.
+
+   The rigor normally bought by extracting-and-unit-testing is bought
+   instead by `ci.yml`'s **k8s drift noise filter (mutation table)**
+   step: `scripts/tests/test_k8s_drift_noise_filter.py` extracts that
+   heredoc and runs a mutation suite against it (a value changed inside
+   a reorder, an env var added, one dropped, a reorder across a `$(VAR)`
+   expansion — each must still be reported). It runs on GitHub-hosted
+   infra with no cluster access, and it tests the code that actually
+   ships rather than a copy that could drift from it.
+
 The combination is genuinely safe for read-only manifest validation.
 If the workflow ever needs to execute PR-supplied code (run a test
 suite, build an image), this design must be revisited — at that point
