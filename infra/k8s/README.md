@@ -9,8 +9,7 @@ infra/k8s/
 ├── 00-namespace.yaml                # `copytrade` namespace
 ├── 10-postgres.yaml                 # StatefulSet + init SQL ConfigMap
 ├── 20-redis.yaml                    # Deployment + Service
-├── 40-tenants-config.yaml           # ConfigMap mounted into orchestrator
-├── 51-orchestrator.yaml             # orchestrator-svc (+ tenants ConfigMap mount; AuditActivitiesImpl lives here)
+├── 51-orchestrator.yaml             # orchestrator-svc (AuditActivitiesImpl lives here)
 ├── 52-exec-tradier-paper.yaml       # broker worker (stub broker until 5b.D)
 ├── 53-market-data.yaml              # market-data-svc
 ├── 54-api-gateway.yaml              # api-gateway-svc + Traefik Ingress
