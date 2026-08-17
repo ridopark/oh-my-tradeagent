@@ -78,7 +78,7 @@ rules:
       - deployments
       - statefulsets
     verbs: [get, list, watch, create, patch, update]
-  # batch: jobs (31-temporal-bootstrap) + cronjobs (future).
+  # batch: jobs + cronjobs (57-audit-completeness-check-cron, 61-stc-intent-shadow-crons).
   - apiGroups: ["batch"]
     resources:
       - jobs

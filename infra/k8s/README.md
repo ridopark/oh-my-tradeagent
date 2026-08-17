@@ -9,8 +9,6 @@ infra/k8s/
 ├── 00-namespace.yaml                # `copytrade` namespace
 ├── 10-postgres.yaml                 # StatefulSet + init SQL ConfigMap
 ├── 20-redis.yaml                    # Deployment + Service
-├── 30-temporal.yaml                 # auto-setup Deployment + Web UI (deprecated — see 5b.E)
-├── 31-temporal-bootstrap.yaml       # Job: registers SAs on the local Temporal (deprecated — see 5b.E)
 ├── 40-tenants-config.yaml           # ConfigMap mounted into orchestrator
 ├── 51-orchestrator.yaml             # orchestrator-svc (+ tenants ConfigMap mount; AuditActivitiesImpl lives here)
 ├── 52-exec-tradier-paper.yaml       # broker worker (stub broker until 5b.D)
@@ -27,11 +25,14 @@ infra/k8s/
 
 Copy-trade services connect to the shared homelab Temporal cluster at
 `temporal-frontend.temporal.svc.cluster.local:7233`, Temporal-level namespace
-`copytrade`. The in-`copytrade` Temporal Deployment (`30-temporal.yaml`) and
-bootstrap Job (`31-temporal-bootstrap.yaml`) are retained in-repo until the
-operator runs the teardown runbook
-([docs/ops/temporal-consolidation-teardown.md](../../docs/ops/temporal-consolidation-teardown.md));
-after that they should be deleted from the repo in a follow-up PR.
+`copytrade`. There is no Temporal in this namespace and no manifest here that
+would create one: the in-`copytrade` Deployment (`30-temporal.yaml`) and
+bootstrap Job (`31-temporal-bootstrap.yaml`) were torn down per
+[docs/ops/temporal-consolidation-teardown.md](../../docs/ops/temporal-consolidation-teardown.md)
+and deleted from the repo on 2026-08-17. They were removed rather than left
+deprecated because `kubectl apply -f infra/k8s/` would have stood a SECOND
+Temporal up alongside the live one — the k8s drift check reported all four of
+their objects as missing from the cluster on its first real run.
 
 **Before applying the manifests for the first time on a fresh cluster**, run:
 

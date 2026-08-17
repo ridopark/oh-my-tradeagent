@@ -61,10 +61,29 @@ spec:
           env:
             - name: PORT
               value: "3000"
-            # Auth.js. AUTH_URL must match the public https host on the Ingress below — it builds the
-            # OAuth callback URLs and is the trusted origin for the session cookie.
+            # Auth.js. AUTH_URL builds the OAuth callback URLs and is the trusted origin for the
+            # session cookie, so it must name the host the browser actually arrives on. Since the
+            # Cloudflare Tunnel went up (2026-06-18) that is the PUBLIC host, not the LAN Ingress
+            # below — logins come in through cloudflared.
+            #
+            # DECLARED 2026-08-17 to close a drift, not to change behaviour: the live pod has
+            # carried the public value since the tunnel shipped, while this manifest still said
+            # nip.io. Applying the file as written would have repointed Auth.js at the LAN host and
+            # broken public sign-in on redirect_uri mismatch. Same class as the exec drift in #696
+            # and the market-data drift in #700.
+            #
+            # Do NOT "simplify" this by deleting AUTH_URL and leaning on AUTH_TRUST_HOST — that was
+            # tried first and FAILED through the tunnel: Auth.js v5 derived the base URL from the
+            # pod bind address and sent Google `redirect_uri=https://0.0.0.0:3000/...`, which Google
+            # rejected (CallbackRouteError / invalid_request).
+            #
+            # TRADEOFF, accepted: login is pinned to the public host, so signing in at the LAN
+            # nip.io address bounces to tradeagent.ridopark.com and pure-offline LAN login is gone
+            # if the tunnel is down. Emergency controls do not depend on it — the kill switch is
+            # operable over LAN via kubectl/Temporal. Both callback URLs are registered on the
+            # homelab Google OAuth client, so re-pinning to the LAN host is a one-value change.
             - name: AUTH_URL
-              value: https://dashboard.192.168.10.123.nip.io
+              value: https://tradeagent.ridopark.com
             # Auth.js v5 runs behind Traefik (not Vercel), so trust the proxied Host header when
             # constructing callback URLs.
             - name: AUTH_TRUST_HOST
