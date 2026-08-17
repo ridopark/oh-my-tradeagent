@@ -80,8 +80,6 @@ spec:
               value: redis
             - name: REDIS_PORT
               value: "6379"
-            - name: ORCHESTRATOR_TENANTS_DIR
-              value: /etc/copytrade/tenants
             # Issue #88: TenantConfigChangedEmitter writes a per-(tenant, strategy) JSON
             # diff cache so the next boot can detect configmap edits. The configmap
             # projection above is read-only, so the snapshot lives on a separate
@@ -140,9 +138,6 @@ spec:
             - name: ALERT_SIGNAL_FEED_ENABLED
               value: "true"
           volumeMounts:
-            - name: tenants
-              mountPath: /etc/copytrade/tenants
-              readOnly: true
             - name: tenants-snapshot
               mountPath: /var/lib/copytrade/snapshot
           # orchestrator-svc is a pure Temporal worker (no spring-boot-starter-web in its
@@ -160,19 +155,6 @@ spec:
               cpu: 2000m
               memory: 1.5Gi
       volumes:
-        - name: tenants
-          configMap:
-            name: tenants-config
-            # k8s ConfigMap keys can't contain `/`, so we store flat keys in the
-            # ConfigMap (see 40-tenants-config.yaml) and rebuild the nested
-            # tenants/<id>/strategies/<id>.yaml layout the orchestrator walks.
-            items:
-              - key: tenant.yaml
-                path: dev/tenant.yaml
-              - key: copytrade-v1.yaml
-                path: dev/strategies/copytrade-v1.yaml
-              - key: watchlist-trigger-v1.yaml
-                path: dev/strategies/watchlist-trigger-v1.yaml
         # Issue #88: emptyDir for TenantConfigChangedEmitter's snapshot file
         # (one JSON per (tenant, strategy)). Persists across in-pod restarts,
         # resets on pod replacement — re-arms one false-negative on first boot

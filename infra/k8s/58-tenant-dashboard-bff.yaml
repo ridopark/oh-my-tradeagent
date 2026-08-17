@@ -114,10 +114,6 @@ spec:
               value: redis
             - name: REDIS_PORT
               value: "6379"
-            # Strategy/broker_target resolution reads the mounted tenants tree (same ConfigMap as
-            # orchestrator).
-            - name: BFF_TENANTS_DIR
-              value: /etc/copytrade/tenants
             # Shared service token — the only credential the Next.js server presents.
             - name: BFF_SHARED_TOKEN
               valueFrom:
@@ -193,10 +189,6 @@ spec:
             # Do NOT copy this into a real multi-tenant prod manifest.
             - name: BFF_EXPOSE_BROKER_ACCOUNT_NUMBER
               value: "true"
-          volumeMounts:
-            - name: tenants
-              mountPath: /etc/copytrade/tenants
-              readOnly: true
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness
@@ -216,16 +208,6 @@ spec:
             limits:
               cpu: 1000m
               memory: 768Mi
-      volumes:
-        - name: tenants
-          configMap:
-            name: tenants-config
-            # Same flat-key → nested-path rebuild the orchestrator uses (40-tenants-config.yaml).
-            items:
-              - key: tenant.yaml
-                path: dev/tenant.yaml
-              - key: copytrade-v1.yaml
-                path: dev/strategies/copytrade-v1.yaml
 ---
 # Enforce the off-ingress trust boundary at the network layer. ClusterIP already blocks external
 # traffic, but without a policy ANY pod in the namespace could reach the BFF on 8083 and (with the
