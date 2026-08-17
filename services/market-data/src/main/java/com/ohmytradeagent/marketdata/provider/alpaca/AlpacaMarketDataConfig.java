@@ -35,11 +35,21 @@ public class AlpacaMarketDataConfig {
               + "Set the alpaca-credentials Secret in your deployment.");
     }
     // Bounded timeouts so a slow Alpaca snapshot cannot pin a premium-poll thread past the poll
-    // interval (default 2s): read < interval. Without this the default RestClient has no read
-    // timeout.
+    // interval: read < interval. Without this the default RestClient has no read timeout.
+    //
+    // TIGHTENED 2026-08-17 alongside the poll interval 2000ms -> 500ms. The old 1s connect +
+    // 1500ms read were sized for a 2s interval; left unchanged they would have INVERTED the very
+    // invariant this comment states — one slow snapshot could pin a poll thread for 2500ms, five
+    // times the new interval, against a fixed 4-thread pool (AlpacaMarketData#defaultScheduler)
+    // shared by every OCC poll and the stock reconnect. scheduleAtFixedRate delays overrun tasks
+    // rather than running them concurrently, so the symptom would have been the realized cadence
+    // silently drifting back toward 1-2s while feed health still showed green.
+    //
+    // A snapshot that exceeds these is fail-soft by design: pollOnce emits no tick and the poll
+    // continues. Dropping one 500ms sample costs far less than starving the pool.
     SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-    requestFactory.setConnectTimeout(Duration.ofSeconds(1));
-    requestFactory.setReadTimeout(Duration.ofMillis(1500));
+    requestFactory.setConnectTimeout(Duration.ofMillis(300));
+    requestFactory.setReadTimeout(Duration.ofMillis(400));
     return builder
         .baseUrl(props.dataBaseUrl())
         .requestFactory(requestFactory)
