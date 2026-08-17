@@ -14,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
@@ -31,6 +32,19 @@ import org.springframework.stereotype.Component;
  * the active reader), so re-seeding must not clobber any row that a later sub-phase / write path
  * may have already updated.
  *
+ * <p><b>yaml-mode ONLY as of 2026-08-17.</b> Gated on {@code strategy.config.source=yaml}
+ * (matchIfMissing), so in db-mode this bean does not exist. It was the warm-up that back-filled the
+ * DB store from the mounted ConfigMap BEFORE an operator flipped to db-mode; that cutover is long
+ * done. On the live cluster it seeded 0 on every boot — every {@code strategy_config} row was
+ * written by the api-gateway {@code /strategy-config} path or an operator, none by {@code
+ * seed:boot} — so it read a stale ConfigMap subset and inserted nothing.
+ *
+ * <p>Retiring it in db-mode is what lets the mount go away
+ * (docs/plans/PLAN-2026-08-17-retire-tenants-configmap.md, Phase 3). CONSEQUENCE, accepted by the
+ * operator: a brand-new cluster with an EMPTY DB no longer self-seeds. Tenants are onboarded
+ * through the api-gateway write path or the /config UI — which is how every live row was actually
+ * created. See "Fresh cluster / disaster recovery" in infra/k8s/README.md.
+ *
  * <p>{@code @Profile("!test")} mirrors {@link CrossTenantBrokerTargetBootstrapper}: this runner
  * touches the DB and walks the tenants tree, neither of which the unit-test profile provides.
  *
@@ -42,6 +56,7 @@ import org.springframework.stereotype.Component;
  */
 @Component
 @Profile("!test")
+@ConditionalOnProperty(name = "strategy.config.source", havingValue = "yaml", matchIfMissing = true)
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class StrategyConfigSeedReconciler implements ApplicationRunner {
 
