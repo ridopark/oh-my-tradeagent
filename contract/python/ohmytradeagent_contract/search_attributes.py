@@ -3,7 +3,7 @@
 Both the Discord sidecar emitter (``services/signal-source-discord``) and the
 harness scripts (``scripts/harness/inject_synthetic_*.py``) need to start
 workflows tagged with the two custom Search Attributes registered by
-``infra/k8s/31-temporal-bootstrap.yaml``:
+``scripts/ops/temporal-copytrade-namespace-bootstrap.sh``:
 
 * ``TenantStrategy`` — used by visibility queries to fan kill-switch signals
   out to every workflow under a (tenant, strategy), and by the API gateway to

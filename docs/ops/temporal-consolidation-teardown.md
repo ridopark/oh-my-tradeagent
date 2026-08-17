@@ -160,9 +160,18 @@ ssh ridopark@192.168.10.123 'kubectl -n copytrade get deploy,svc,job | grep temp
   echo "no temporal resources remain in copytrade (expected)"
 ```
 
-## 5. Follow-up PR (out of scope for 5b.E)
+## 5. Follow-up PR — DONE 2026-08-17
 
-In a subsequent PR, delete `infra/k8s/30-temporal.yaml` and
-`infra/k8s/31-temporal-bootstrap.yaml` from the repo and update
-`infra/k8s/README.md`'s layout block. That PR is intentionally separate so
-this consolidation PR can be reverted cleanly if the smoke regresses.
+`infra/k8s/30-temporal.yaml` and `infra/k8s/31-temporal-bootstrap.yaml` have
+been deleted from the repo, and `infra/k8s/README.md` + `docs/architecture.md`
+updated. Steps 1–4 above are retained as the historical record of the cutover;
+the manifests they reference no longer exist, so **this runbook is no longer
+runnable end-to-end** and is kept for reference only.
+
+What forced the follow-up: the k8s drift check's first real run against the
+live cluster (2026-08-17) reported all four objects from `30-temporal.yaml`
+plus the `31-temporal-bootstrap.yaml` Job as absent from `copytrade`. Left
+in-tree, `kubectl apply -f infra/k8s/` would have created a second Temporal
+cluster next to the live one in the `temporal` namespace — the rollback path
+these files were kept for had long since stopped being a rollback path and
+become a hazard.
