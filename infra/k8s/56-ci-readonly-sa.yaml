@@ -70,6 +70,7 @@ rules:
     resources:
       - configmaps
       - services
+      - persistentvolumeclaims
     verbs: [get, list, watch, create, patch, update]
   # apps: deployments + statefulsets (used by 51-orchestrator, 10-postgres, etc.)
   - apiGroups: ["apps"]
@@ -83,10 +84,17 @@ rules:
       - jobs
       - cronjobs
     verbs: [get, list, watch, create, patch, update]
-  # networking: Ingress is namespaced (54-api-gateway).
+  # networking: Ingress (54-api-gateway) + NetworkPolicy (52-exec-alpaca-paper,
+  # 58-tenant-dashboard-bff, 62-discord-chat-mirror, 63-discord-signals-mirror).
+  #
+  # networkpolicies added 2026-08-16 after the workflow's FIRST-EVER run failed on it. `kubectl
+  # diff` aborts on the first Forbidden, so a single missing kind meant the job reported one error
+  # and inspected NOTHING else — a green-looking check covering zero objects. The workflow now
+  # diffs per-file so one gap can no longer blind the rest, but the grant is still the right fix.
   - apiGroups: ["networking.k8s.io"]
     resources:
       - ingresses
+      - networkpolicies
     verbs: [get, list, watch, create, patch, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
