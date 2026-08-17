@@ -141,6 +141,104 @@ class NoiseFilterTest(unittest.TestCase):
             "reordering across a $(VAR) expansion",
         )
 
+    def test_two_entries_swapping_values_in_place_is_reported(self):
+        """The case a line-level multiset compare gets wrong.
+
+        A and B keep their positions but exchange VALUES. Both sides then hold the same
+        bag of lines — {name: A, name: B, value: "1", value: "2"} — so a line-level
+        compare suppresses it, while A genuinely changed 1 -> 2. Raised in review on
+        #705 with this exact input; the filter now groups each `- ` item with the lines
+        beneath it, so only intact entries changing POSITION can be suppressed.
+        """
+        self.assertReported(
+            """--- /tmp/LIVE/apps.v1.Deployment.copytrade.x
++++ /tmp/MERGED/apps.v1.Deployment.copytrade.x
+-        - name: A
+-          value: "1"
+-        - name: B
+-          value: "2"
++        - name: A
++          value: "2"
++        - name: B
++          value: "1"
+""",
+            "two entries swapping values without moving",
+        )
+
+    def test_three_entries_rotating_values_is_reported(self):
+        """Same class, one step harder — a 3-cycle rather than a transposition."""
+        self.assertReported(
+            """--- /tmp/LIVE/apps.v1.Deployment.copytrade.x
++++ /tmp/MERGED/apps.v1.Deployment.copytrade.x
+-        - name: A
+-          value: "1"
+-        - name: B
+-          value: "2"
+-        - name: C
+-          value: "3"
++        - name: A
++          value: "3"
++        - name: B
++          value: "1"
++        - name: C
++          value: "2"
+""",
+            "three entries rotating values",
+        )
+
+    def test_multiline_entries_reordered_is_still_suppressed(self):
+        """Grouping must not break the case the filter exists for.
+
+        secretKeyRef-style entries span several lines; moving them as INTACT blocks is
+        still pure reordering and must stay quiet, or the fix would trade one wrong
+        answer for another.
+        """
+        self.assertSuppressed(
+            """--- /tmp/LIVE/apps.v1.Deployment.copytrade.x
++++ /tmp/MERGED/apps.v1.Deployment.copytrade.x
+-        - name: A
+-          valueFrom:
+-            secretKeyRef:
+-              key: KA
+-              name: s
+-        - name: B
+-          value: "2"
++        - name: B
++          value: "2"
++        - name: A
++          valueFrom:
++            secretKeyRef:
++              key: KA
++              name: s
+""",
+            "intact multi-line entries reordered",
+        )
+
+    def test_secret_key_swap_between_entries_is_reported(self):
+        """The multi-line analogue of the value swap: two entries trade secret keys."""
+        self.assertReported(
+            """--- /tmp/LIVE/apps.v1.Deployment.copytrade.x
++++ /tmp/MERGED/apps.v1.Deployment.copytrade.x
+-        - name: A
+-          valueFrom:
+-            secretKeyRef:
+-              key: KA
+-        - name: B
+-          valueFrom:
+-            secretKeyRef:
+-              key: KB
++        - name: A
++          valueFrom:
++            secretKeyRef:
++              key: KB
++        - name: B
++          valueFrom:
++            secretKeyRef:
++              key: KA
+""",
+            "two entries trading secret keys",
+        )
+
     # --- the exit-code contract the caller depends on ------------------------
     def test_drift_exit_code_is_never_pythons_crash_code(self):
         """Drift must not be signalled with 1.

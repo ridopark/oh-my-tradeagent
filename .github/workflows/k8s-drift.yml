@@ -182,7 +182,51 @@ jobs:
           cat > "$RUNNER_TEMP/normalize.py" <<'PYEOF'
           import re, sys
 
+          # ASSUMPTION: these key names only ever appear as server-assigned object metadata.
+          # The match is textual, not depth-aware, so a field literally named `uid` or
+          # `generation` nested inside a ConfigMap's embedded YAML (this repo stores tenant and
+          # strategy config as YAML *strings* in 40-tenants-config.yaml) would also be dropped.
+          # No such key exists today. If one is ever added, anchor this to the object's top-level
+          # metadata block instead of loosening it further.
           NOISE = re.compile(r'^[-+]\s*(generation|creationTimestamp|uid|resourceVersion):')
+
+
+          def group(lines):
+              """Group flat diff lines into YAML list-item units.
+
+              A bag of LINES is not exact. Two entries can swap their VALUES while leaving the
+              line multiset identical — genuine drift that a line-level compare suppresses:
+
+                  -  - name: A        +  - name: A
+                  -    value: "1"     +    value: "2"
+                  -  - name: B        +  - name: B
+                  -    value: "2"     +    value: "1"
+
+              Both sides hold {name: A, name: B, value: "1", value: "2"}, so sorted() matches and
+              the object goes quiet — while A really did change 1 -> 2. Pairing each `- ` item
+              with the lines beneath it makes the comparison structural, so only a genuine
+              position swap of INTACT entries can be suppressed. Found in review on #705.
+              """
+              units, cur, cur_indent = [], None, 0
+
+              def close():
+                  if cur is not None:
+                      units.append('\n'.join(cur))
+
+              for line in lines:
+                  stripped = line.lstrip()
+                  indent = len(line) - len(stripped)
+                  if stripped.startswith('- '):
+                      close()
+                      cur, cur_indent = [line], indent
+                  elif cur is not None and indent > cur_indent:
+                      cur.append(line)          # continuation of the current entry
+                  else:
+                      close()                   # dedented back out of the list
+                      cur = None
+                      units.append(line)        # scalar field change stands alone
+              close()
+              return units
           # Split the file's diff into per-object chunks; each starts with a `--- ` header line.
           chunks, cur = [], []
           for line in sys.stdin.read().splitlines():
@@ -205,7 +249,7 @@ jobs:
                       plus.append(line[1:])
               if '$(' in ''.join(minus + plus):
                   guarded = True
-              if not guarded and sorted(minus) == sorted(plus):
+              if not guarded and sorted(group(minus)) == sorted(group(plus)):
                   continue  # nothing authored actually differs
               kept.append('\n'.join(chunk))
 
