@@ -6,10 +6,15 @@ import io.temporal.client.schedules.ScheduleClient;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -32,6 +37,15 @@ import org.springframework.stereotype.Component;
  * <p><b>Not workflow code.</b> A Spring {@code @Scheduled} bean lives entirely outside Temporal
  * workflow history, so there is NO {@code Workflow.getVersion} marker here — replay determinism
  * does not apply (each tick is a fresh ordinary method invocation).
+ *
+ * <p><b>Also an {@link ApplicationRunner}: one pass runs at STARTUP.</b> The scheduled tick's first
+ * firing is a full {@code fixed-delay-ms} (default 60s) after boot, so for that first minute the
+ * only kill-switch coverage was whatever the boot bootstrappers scanned out of the mounted {@code
+ * tenants/} tree. On the live cluster that tree is a stale SUBSET of the DB — 4 of 8 {@code
+ * (tenant, strategy)} pairs on 2026-08-17, with {@code prod-jinchul} and {@code paper_jinchiul}
+ * absent from it entirely — so those tenants had no kill switch until the first tick. Running one
+ * pass at startup makes this loop the coverage floor rather than a late top-up, which is what lets
+ * the mounted tree be retired (docs/plans/PLAN-2026-08-17-retire-tenants-configmap.md, Phase 1).
  */
 @Component
 @Profile("!test")
@@ -39,7 +53,8 @@ import org.springframework.stereotype.Component;
     name = "orchestrator.tenant-reconcile.enabled",
     havingValue = "true",
     matchIfMissing = true)
-public class TenantReconcileLoop {
+@Order(Ordered.LOWEST_PRECEDENCE)
+public class TenantReconcileLoop implements ApplicationRunner {
 
   private static final Logger log = LoggerFactory.getLogger(TenantReconcileLoop.class);
 
@@ -58,6 +73,19 @@ public class TenantReconcileLoop {
    */
   private final Set<TenantStrategy> seen = ConcurrentHashMap.newKeySet();
 
+  /**
+   * Serializes passes across the TWO entry points. Until the startup pass existed, ticks were
+   * serialized only because Spring's default {@code fixedDelay} scheduler is single-threaded — an
+   * implicit guarantee that does NOT extend to {@link #run}, which executes on the main thread
+   * during boot. Without this lock a slow startup pass could overlap the first scheduled tick.
+   *
+   * <p>{@code tryLock} rather than {@code lock}: the default Spring scheduler pool holds ONE
+   * thread, so blocking it would stall every other {@code @Scheduled} task in the process. A pass
+   * that cannot get the lock simply returns — the work is idempotent and re-run every tick, so
+   * skipping costs at most one interval.
+   */
+  private final ReentrantLock passLock = new ReentrantLock();
+
   public TenantReconcileLoop(
       StrategyRegistry registry,
       KillSwitchBootstrapper killSwitchBootstrapper,
@@ -68,14 +96,46 @@ public class TenantReconcileLoop {
   }
 
   /**
-   * One reconcile pass. {@code initialDelay} mirrors the boot bootstrappers' settle window so the
-   * first tick runs after they have had a chance to start their workflows; the boot path remains
-   * the primary one and this loop is the restart-free superset.
+   * Startup pass. Runs on the main thread during boot, so every {@code (tenant, strategy)} the
+   * registry knows about has its kill-switch and reconciliation schedule ensured before the process
+   * starts serving — not a minute later.
+   *
+   * <p>Ordered {@link Ordered#LOWEST_PRECEDENCE} so the existing boot bootstrappers go first; the
+   * ensures are idempotent ({@code REJECT_DUPLICATE}) so overlapping with them is a no-op either
+   * way, and this only expresses that intent.
+   *
+   * <p>Cannot wedge boot: {@link #reconcileOnce} catches per-pair failures and swallows a failing
+   * {@code registry.list()}, leaving the pair unseen and retried on the next tick.
+   */
+  @Override
+  public void run(ApplicationArguments args) {
+    log.info("tenant reconcile: startup pass");
+    reconcileTick();
+  }
+
+  /**
+   * One reconcile pass on the fixed delay. {@code initialDelay} mirrors the boot bootstrappers'
+   * settle window; {@link #run} now covers the interval before the first firing.
    */
   @Scheduled(
       fixedDelayString = "${orchestrator.tenant-reconcile.fixed-delay-ms:60000}",
       initialDelayString = "${orchestrator.tenant-reconcile.fixed-delay-ms:60000}")
   public void reconcileTick() {
+    if (!passLock.tryLock()) {
+      // Another pass (startup or a previous tick) is mid-flight. Skipping is safe and preferable
+      // to blocking the single-threaded scheduler pool: the work is idempotent and re-run next
+      // tick, and the in-flight pass is already doing it.
+      log.debug("tenant reconcile: a pass is already in flight; skipping this one");
+      return;
+    }
+    try {
+      reconcileOnce();
+    } finally {
+      passLock.unlock();
+    }
+  }
+
+  private void reconcileOnce() {
     List<TenantStrategy> desired;
     try {
       desired = registry.list();
