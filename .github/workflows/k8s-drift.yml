@@ -163,6 +163,22 @@ jobs:
           #
           # Suppressions are COUNTED AND NAMED in the comment, same rule as skips: a check that
           # quietly narrows what it reports is the failure this workflow exists to catch.
+          #
+          # WHY THIS IS A HEREDOC AND NOT scripts/normalize-k8s-diff.py — DO NOT "CLEAN THIS UP".
+          # This workflow is `pull_request_target` on a PUBLIC repo, running on a SELF-HOSTED
+          # runner that holds a cluster kubeconfig, and it checks out the PR HEAD sha. The third
+          # layered defense in docs/ops/k8s-drift-check.md is "no PR-supplied script ever
+          # executes". A heredoc lives in the workflow file, which pull_request_target always
+          # takes from the BASE branch — trusted. A file under scripts/ lives in the checked-out
+          # PR tree — attacker-controlled. Running `python3 scripts/<anything>` here would hand
+          # any fork PR arbitrary code execution on the LAN runner. The rigor normally bought by
+          # extracting-and-unit-testing is bought instead by ci.yml's
+          # "k8s drift noise filter (mutation table)" step, which EXTRACTS this very heredoc and
+          # runs the mutation suite against it on GitHub-hosted infra.
+          #
+          # python3 is a prerequisite of the FILTER, not of the CHECK. If it is missing the loop
+          # below degrades to reporting kubectl diff unfiltered and says so in the comment —
+          # noisier, never quieter. Losing the filter must not look like finding no drift.
           cat > "$RUNNER_TEMP/normalize.py" <<'PYEOF'
           import re, sys
 
@@ -201,6 +217,17 @@ jobs:
 
           : > "$RUNNER_TEMP/drift.txt"
           : > "$RUNNER_TEMP/coverage.txt"
+
+          # Truncation happens ABOVE this line, so the degradation notice below survives into the
+          # posted comment.
+          if command -v python3 >/dev/null 2>&1; then
+            FILTER_AVAILABLE=1
+          else
+            FILTER_AVAILABLE=0
+            echo "::warning::python3 not found on this runner — noise filter disabled; reporting kubectl diff UNFILTERED."
+            echo "- ⚠ **noise filter unavailable** (no python3 on the runner) — every diff below is UNFILTERED, so server-assigned metadata and list reordering appear as drift." >> "$RUNNER_TEMP/coverage.txt"
+          fi
+
           clean=0; drifted=0; skipped=0; errored=0; suppressed=0
           for f in infra/k8s/*.yaml; do
             b=$(basename "$f")
@@ -215,15 +242,29 @@ jobs:
               clean=$((clean + 1))
             elif [ $rc -eq 1 ]; then
               # Re-classify: strip server-assigned metadata and pure reordering, then see whether
-              # anything authored actually differs. Exit 1 = real drift remains, 0 = it was noise.
-              filtered=$(printf '%s\n' "$out" | python3 "$RUNNER_TEMP/normalize.py")
-              if [ $? -eq 0 ]; then
+              # anything authored actually differs. Filter exit 0 = it was all noise, 1 = real
+              # drift remains, anything else = the FILTER failed, which is not the same thing.
+              if [ "$FILTER_AVAILABLE" = "1" ]; then
+                filtered=$(printf '%s\n' "$out" | python3 "$RUNNER_TEMP/normalize.py")
+                frc=$?
+              else
+                filtered="$out"
+                frc=1
+              fi
+              if [ $frc -eq 0 ]; then
                 clean=$((clean + 1))
                 suppressed=$((suppressed + 1))
                 echo "- \`$b\` — clean (differed only by server-assigned metadata / list order)" >> "$RUNNER_TEMP/coverage.txt"
-              else
+              elif [ $frc -eq 1 ]; then
                 drifted=$((drifted + 1))
                 { echo "### DRIFT — $b"; echo "$filtered"; echo; } >> "$RUNNER_TEMP/drift.txt"
+              else
+                # The filter crashed. Report the RAW diff — never the filter's partial stdout, and
+                # never an empty DRIFT section, which would read as "checked, found nothing to
+                # show". Counted as drift so the finding cannot be lost.
+                drifted=$((drifted + 1))
+                { echo "### DRIFT — $b (noise filter FAILED, exit $frc — diff below is UNFILTERED)"; echo "$out"; echo; } >> "$RUNNER_TEMP/drift.txt"
+                echo "- \`$b\` — drift reported UNFILTERED (noise filter exited $frc)" >> "$RUNNER_TEMP/coverage.txt"
               fi
             else
               # NOT silently tolerated: an unreadable manifest is a COVERAGE GAP, and the
