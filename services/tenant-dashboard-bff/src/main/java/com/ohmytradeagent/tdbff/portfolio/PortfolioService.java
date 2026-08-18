@@ -319,6 +319,18 @@ public class PortfolioService {
         m.put("unrealized_intraday_pl", marks.unrealizedIntradayPl());
       }
     }
+    // Armed-trailing-stop state, straight off the position's own workflow. trailing_armed is
+    // ALWAYS present (a row must state its protection status either way, and an absent key would
+    // read the same as "not armed" only by accident); the two numerics follow the marks convention
+    // and are omitted when there is no trail. trail_stop_price is PEAK-anchored — the price the
+    // stop fires at now, NOT a mark-derived estimate the client could compute itself.
+    m.put("trailing_armed", p.trailingArmed());
+    if (p.trailGivebackPct() != null) {
+      m.put("trail_giveback_pct", p.trailGivebackPct());
+    }
+    if (p.trailStopPrice() != null) {
+      m.put("trail_stop_price", p.trailStopPrice());
+    }
     return m;
   }
 }

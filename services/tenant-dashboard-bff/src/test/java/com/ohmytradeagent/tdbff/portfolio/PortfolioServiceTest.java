@@ -387,4 +387,72 @@ class PortfolioServiceTest {
     assertThat(pos).doesNotContainKey("unrealized_intraday_pl");
     assertThat(pos).containsEntry("contract_symbol", "AAPL260116C00200000");
   }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void armedPositionPublishesItsTrailingStopSoTheRowCanShowIt() {
+    // /live's per-position stop badge reads these three keys. Without them an armed position
+    // rendered identically to an unprotected one after a refresh.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                new OpenPosition(
+                    "wf1",
+                    "s1",
+                    "DRAM  270319C00100000",
+                    2,
+                    new BigDecimal("3.28"),
+                    new BigDecimal("656.00"),
+                    true,
+                    new BigDecimal("0.35"),
+                    new BigDecimal("2.63"))));
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
+    when(brokerPositions.marksFor("alpaca-paper", "acme", "s1")).thenReturn(Map.of());
+
+    Map<String, Object> body = service.portfolio("acme");
+
+    var positions = (List<Map<String, Object>>) body.get("open_positions");
+    Map<String, Object> pos = positions.get(0);
+    assertThat(pos).containsEntry("trailing_armed", true);
+    assertThat((BigDecimal) pos.get("trail_giveback_pct")).isEqualByComparingTo("0.35");
+    // Peak-anchored and published verbatim — NOT re-derivable from any other key on this row.
+    assertThat((BigDecimal) pos.get("trail_stop_price")).isEqualByComparingTo("2.63");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void unarmedPositionStatesItIsUnarmedAndOmitsTheTrailNumbers() {
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                new OpenPosition(
+                    "wf1",
+                    "s1",
+                    "AAPL260116C00200000",
+                    1,
+                    new BigDecimal("2.00"),
+                    new BigDecimal("200.00"))));
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
+    when(brokerPositions.marksFor("alpaca-paper", "acme", "s1")).thenReturn(Map.of());
+
+    Map<String, Object> body = service.portfolio("acme");
+
+    var positions = (List<Map<String, Object>>) body.get("open_positions");
+    Map<String, Object> pos = positions.get(0);
+    // Stated explicitly rather than by omission: a missing key and "not protected" must not be the
+    // same signal on a row about a live position.
+    assertThat(pos).containsEntry("trailing_armed", false);
+    assertThat(pos).doesNotContainKey("trail_giveback_pct");
+    assertThat(pos).doesNotContainKey("trail_stop_price");
+  }
 }

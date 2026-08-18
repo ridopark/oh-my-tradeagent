@@ -400,6 +400,18 @@ export default async function LivePage() {
               currentPrice={
                 row.current_price == null ? null : Number(row.current_price)
               }
+              // Armed state survives the refresh: both come from the row, which the BFF reads off
+              // the position's own workflow. Absent (older BFF) => un-armed, and the arm control is
+              // offered again — which the workflow answers with ALREADY_ARMED rather than loosening
+              // the existing stop.
+              armedGivebackPct={
+                row.trail_giveback_pct == null
+                  ? null
+                  : Number(row.trail_giveback_pct)
+              }
+              armedStopPrice={
+                row.trail_stop_price == null ? null : Number(row.trail_stop_price)
+              }
               action={armTrailAction}
             />
           )}

@@ -400,6 +400,17 @@ public class PositionsController {
     m.put("remaining_qty", p.remainingQty());
     m.put("entry_premium", p.entryPremium());
     m.put("open_notional", p.openNotional());
+    // Armed-trailing-stop state, on the same terms as /api/portfolio's open_positions rows (see
+    // PortfolioService#positionItem): the flag always, the two numerics only when armed. The two
+    // endpoints describe the same position, so they must not disagree about whether it is
+    // protected.
+    m.put("trailing_armed", p.trailingArmed());
+    if (p.trailGivebackPct() != null) {
+      m.put("trail_giveback_pct", p.trailGivebackPct());
+    }
+    if (p.trailStopPrice() != null) {
+      m.put("trail_stop_price", p.trailStopPrice());
+    }
     return m;
   }
 
