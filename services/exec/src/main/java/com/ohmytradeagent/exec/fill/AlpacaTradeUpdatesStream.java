@@ -17,6 +17,7 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -94,6 +95,16 @@ public class AlpacaTradeUpdatesStream {
    * names.
    */
   private static final int MAX_UNHANDLED_STREAMS_WARNED = 8;
+
+  /**
+   * Sentinel occupying one slot in {@code unhandledStreamsWarned} for frames that carry no {@code
+   * stream} field at all, so they share the per-connection damping and its cap. Not a legal Alpaca
+   * stream name, so it cannot collide with a real one.
+   */
+  private static final String NO_STREAM_FIELD_KEY = "<no-stream-field>";
+
+  /** Upper bound on field names named in a shape description. */
+  private static final int MAX_SHAPE_FIELDS = 20;
 
   private final FillListenerProperties props;
   private final AlpacaProperties alpacaProps;
@@ -376,6 +387,44 @@ public class AlpacaTradeUpdatesStream {
     return value == null ? "" : value;
   }
 
+  /**
+   * Describes a frame's SHAPE — node type, and field names only — for a frame this listener does
+   * not model.
+   *
+   * <p><b>Never emits values.</b> A frame we cannot classify is, by definition, one whose contents
+   * we cannot reason about, and the handshake this listener sends carries the broker key and secret
+   * ({@code sendAuth}). Dumping an unknown inbound frame verbatim to diagnose a logging gap would
+   * risk writing a credential into the pod log permanently. Field names identify the envelope,
+   * which is the whole diagnostic need; values add nothing and carry all of the risk.
+   *
+   * <p>Arrays are described by size plus the first element's fields because that is the concrete
+   * shape worth catching: Alpaca's v2 streams deliver batched arrays, and {@code
+   * ArrayNode.get("stream")} returns null, so such a frame lands in the caller's branch.
+   */
+  private static String describeShape(JsonNode node) {
+    if (node.isArray()) {
+      String elementFields = node.isEmpty() ? "[]" : fieldNames(node.get(0));
+      return "type=ARRAY size=" + node.size() + " element_fields=" + elementFields;
+    }
+    return "type=" + node.getNodeType() + " fields=" + fieldNames(node);
+  }
+
+  /** Field names of an object node, capped; {@code []} for anything that is not an object. */
+  private static String fieldNames(JsonNode node) {
+    if (node == null || !node.isObject()) {
+      return "[]";
+    }
+    List<String> names = new ArrayList<>();
+    Iterator<String> it = node.fieldNames();
+    while (it.hasNext() && names.size() < MAX_SHAPE_FIELDS) {
+      names.add(it.next());
+    }
+    if (it.hasNext()) {
+      names.add("…");
+    }
+    return names.toString();
+  }
+
   /** Resolved per-(re)connect endpoint: where to connect and which creds to authenticate with. */
   private record Endpoint(String wsUrl, String keyId, String secret) {}
 
@@ -554,6 +603,25 @@ public class AlpacaTradeUpdatesStream {
       }
       JsonNode streamNode = root.get("stream");
       if (streamNode == null) {
+        // The last silent drop in this method. The unhandled-stream WARN below covers unmodelled
+        // stream VALUES but sits after this check, so a frame with no top-level `stream` field at
+        // all used to vanish with no log and no metric — indistinguishable from a healthy quiet
+        // socket, which is the failure mode #693/#694/#720 each closed one layer of. It is the
+        // leading remaining explanation for #715, where the socket is authorized AND subscribed
+        // AND silent: any envelope lacking this field (a schema change, a batched array) would be
+        // discarded here without trace.
+        //
+        // The counter is bumped on EVERY such frame; only the log is damped. Damping that hides
+        // volume is how "a few odd frames" and "every fill for six hours" come to look identical.
+        metrics.recordFrameWithoutStream();
+        if (unhandledStreamsWarned.size() < MAX_UNHANDLED_STREAMS_WARNED
+            && unhandledStreamsWarned.add(NO_STREAM_FIELD_KEY)) {
+          log.warn(
+              "fill-listener[{}] frame has no top-level `stream` field — envelope not modelled by"
+                  + " this listener; {} (shape only, see describeShape)",
+              tenant,
+              describeShape(root));
+        }
         return;
       }
       String streamName = streamNode.asText();

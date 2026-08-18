@@ -577,6 +577,82 @@ class AlpacaTradeUpdatesStreamTest {
     }
   }
 
+  @Test
+  void frameWithoutStreamFieldIsLoggedAtWarnAndCounted() throws Exception {
+    // The last silent drop in handleFrame. #720 added a WARN for unmodelled `stream` VALUES, but it
+    // sits AFTER the null check, so a frame carrying no top-level `stream` field at all still
+    // vanished without log or metric. That is indistinguishable from a healthy quiet socket — the
+    // exact failure mode #693/#694/#720 each closed one layer of — and it is the leading remaining
+    // explanation for #715, where the socket is authorized AND subscribed AND silent.
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary("{\"data\":{\"event\":\"fill\"},\"T\":\"t\"}");
+
+      ILoggingEvent event = awaitLog(logs, "no top-level `stream` field");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel()).isEqualTo(Level.WARN);
+      assertThat(event.getFormattedMessage()).contains("data").contains("T");
+      assertThat(registry.counter("fill_listener.frames_without_stream").count()).isEqualTo(1.0);
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
+  @Test
+  void frameWithoutStreamFieldLogsShapeNeverValues() throws Exception {
+    // A frame we do not model is, by definition, one whose contents we cannot reason about — and
+    // the handshake this listener sends contains the broker key and secret. Dumping an unknown
+    // inbound frame verbatim would risk writing a credential into the pod log, permanently, to
+    // diagnose a logging gap. Field NAMES identify the envelope, which is the entire diagnostic
+    // need here; values add nothing and carry the whole risk.
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary(
+          "{\"secret_key\":\"SUPERSECRET-must-never-be-logged\",\"key_id\":\"AKIDNOPE\"}");
+
+      ILoggingEvent event = awaitLog(logs, "no top-level `stream` field");
+      assertThat(event).isNotNull();
+      assertThat(event.getFormattedMessage())
+          .as("field names are the diagnostic")
+          .contains("secret_key")
+          .contains("key_id");
+      assertThat(event.getFormattedMessage())
+          .as("values must NEVER reach the log — this frame is unmodelled by definition")
+          .doesNotContain("SUPERSECRET-must-never-be-logged")
+          .doesNotContain("AKIDNOPE");
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
+  @Test
+  void arrayEnvelopeWithoutStreamFieldReportsItsShape() throws Exception {
+    // The concrete shape worth catching: Alpaca's v2 streams deliver BATCHED ARRAYS
+    // ([{"T":"t",...}]). ArrayNode.get("stream") returns null, so such a frame lands here. Naming
+    // the element count and the first element's fields is what would let an operator recognise a
+    // schema change rather than merely observe silence.
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary("[{\"T\":\"t\",\"order\":{}},{\"T\":\"t\"}]");
+
+      ILoggingEvent event = awaitLog(logs, "no top-level `stream` field");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel()).isEqualTo(Level.WARN);
+      assertThat(event.getFormattedMessage()).contains("ARRAY").contains("2").contains("T");
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
   private static ListAppender<ILoggingEvent> attachLogCapture() {
     Logger streamLogger = (Logger) LoggerFactory.getLogger(AlpacaTradeUpdatesStream.class);
     ListAppender<ILoggingEvent> appender = new ListAppender<>();

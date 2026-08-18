@@ -65,6 +65,7 @@ exists.
 |---|---|---|
 | `fill_listener_subscription_confirmed_total` | counter | Sockets that received a `listening` ack naming `trade_updates`. **Positive evidence the subscription exists.** Should reach one-per-tenant shortly after boot; short of that, the socket is authenticated but not subscribed. |
 | `fill_listener_events_received_total{event="fill"\|"partial_fill"}` | counter | WS messages received (after auth+listen handshake). |
+| `fill_listener_frames_without_stream_total` | counter | Frames with **no top-level `stream` field** — an envelope this listener does not model and silently discards. **Non-zero while fills are missing is the smoking gun**: trade updates are arriving in a shape we drop. The paired WARN names the field names (never values). |
 | `fill_listener_events_dispatched_total` | counter | Events handed to `FillDispatcher` after filter + dedup. |
 | `fill_listener_events_dropped_dedup_total` | counter | WS reconnect-replays the LRU dedup caught. |
 | `fill_listener_events_unknown_order_total` | counter | Fills whose `broker_order_id` had no matching journal row. |
@@ -124,6 +125,14 @@ market hours, `events_received_total` flat.
      was sent before authentication completed. Distinct failure, distinct fix.
    - `subscription ack does NOT name trade_updates` → Alpaca accepted the
      socket but not the stream (entitlement).
+   - `subscription confirmed` present but still no fills → the subscription is
+     live and something else is eating the frames. Check
+     `fill_listener_frames_without_stream_total` and its `frame has no top-level
+     \`stream\` field` WARN: non-zero means updates are arriving in an envelope
+     this listener discards (a schema change, a batched array). The WARN names
+     the envelope's field names — deliberately **never its values**, since an
+     unmodelled frame is by definition one whose contents we cannot vouch for
+     and the handshake carries the broker key.
 4. Confirm Alpaca's status page; the trade-updates stream has historical outages.
 5. **Do not assume the poller is covering.** It is the intended safety net, but
    on 2026-08-17 `exec-alpaca-live` detected **0 of 15 real fills** while the WS
