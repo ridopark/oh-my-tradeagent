@@ -81,6 +81,16 @@ class AdoptionWorkflowImplTest {
 
   static final Map<String, FillSignalPayload> FILLS = new ConcurrentHashMap<>();
 
+  /**
+   * Bound on how long {@link #awaitEntry} waits for the asynchronously-started child to publish.
+   *
+   * <p>Generous because it only elapses in the failure case: when the child IS scheduled promptly
+   * (the norm) the first read succeeds and nothing sleeps. Kept well under the module's 60s
+   * per-test timeout so a child that genuinely never starts still fails as a named assertion here
+   * rather than as an anonymous timeout.
+   */
+  private static final long ASYNC_CHILD_AWAIT_MS = 5_000L;
+
   private TestWorkflowEnvironment env;
   private ReconciliationExecActivity exec;
   private StrategyActivities strategy;
@@ -210,7 +220,7 @@ class AdoptionWorkflowImplTest {
     assertThat(result.getEntrySignalId()).isEqualTo(SIGNAL_ID);
 
     // The PositionWorkflow child was started with broker-truth qty/premium under the canonical id.
-    PositionWorkflowInput started = STARTED.get(expectedWfId);
+    PositionWorkflowInput started = awaitEntry(STARTED, expectedWfId);
     assertThat(started).isNotNull();
     assertThat(started.getTenantId()).isEqualTo(TENANT);
     assertThat(started.getStrategyId()).isEqualTo(STRATEGY);
@@ -234,7 +244,7 @@ class AdoptionWorkflowImplTest {
         .isEqualTo(PositionWorkflowInput.BrokerTarget.ALPACA_PAPER);
 
     // onFill forwarded so the first-fill gate wakes.
-    FillSignalPayload fill = FILLS.get(expectedWfId);
+    FillSignalPayload fill = awaitEntry(FILLS, expectedWfId);
     assertThat(fill).isNotNull();
     assertThat(fill.getFilledQty()).isEqualTo(5L);
     assertThat(fill.getAvgFillPrice()).isEqualByComparingTo(new BigDecimal("3.40"));
@@ -305,6 +315,72 @@ class AdoptionWorkflowImplTest {
         .isEqualByComparingTo(new BigDecimal("7.84"));
     // Marker distinguishing an adoption-synthesized fill from a normal broker fill.
     assertThat(subject).containsEntry("recovery", "adopted");
+  }
+
+  /**
+   * Reads an entry published by the adopted child workflow, waiting for it to appear.
+   *
+   * <p>The child is started fire-and-forget — {@code AdoptionWorkflowImpl} calls {@code
+   * Async.function(child::run, posInput)} and never awaits it, by design. So {@code adopt()}
+   * returning establishes NO happens-before with the child's first workflow task, which is what
+   * writes {@link #STARTED} (and, after the forwarded signal, {@link #FILLS}). Reading the map
+   * immediately is therefore a race that the test usually wins and occasionally does not: it lost
+   * twice under CPU contention on 2026-08-17, failing at ~0.1s with "Expecting actual not to be
+   * null" — once here and once in {@code compactOperatorOcc_openRowFallback_…}, the only two tests
+   * that read these maps. See #723.
+   *
+   * <p>Returns whatever the final read yields, including {@code null}, so the caller's {@code
+   * isNotNull()} stays the thing that reports the failure. A child that never starts is a real
+   * regression and must still fail — this only removes the spurious loss of the race.
+   */
+  private static <V> V awaitEntry(Map<String, V> map, String workflowId) {
+    long deadline = System.currentTimeMillis() + ASYNC_CHILD_AWAIT_MS;
+    while (System.currentTimeMillis() < deadline) {
+      V value = map.get(workflowId);
+      if (value != null) {
+        return value;
+      }
+      try {
+        Thread.sleep(10L);
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+        break;
+      }
+    }
+    return map.get(workflowId);
+  }
+
+  @Test
+  void awaitEntry_returnsAnEntryPublishedAfterTheFirstReadWouldHaveLost() throws Exception {
+    // Pins the mechanism the two intermittent failures in this class needed (#723). The adopted
+    // child is started fire-and-forget, so the map is empty at the instant adopt() returns and only
+    // fills in once the child's first workflow task runs. This reproduces that ordering
+    // DETERMINISTICALLY — publish strictly after a bare read has already missed — so the helper is
+    // demonstrated to wait rather than assumed to. Setting ASYNC_CHILD_AWAIT_MS to 0 fails it.
+    Map<String, String> published = new ConcurrentHashMap<>();
+    String workflowId = "wf-published-late";
+
+    assertThat(published.get(workflowId))
+        .as("a bare read at this instant is exactly what lost the race in CI")
+        .isNull();
+
+    Thread publisher =
+        new Thread(
+            () -> {
+              try {
+                Thread.sleep(150L);
+              } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+              }
+              published.put(workflowId, "child-started");
+            });
+    publisher.start();
+    try {
+      assertThat(awaitEntry(published, workflowId)).isEqualTo("child-started");
+    } finally {
+      publisher.join(ASYNC_CHILD_AWAIT_MS);
+    }
   }
 
   private static AuditEvent firstOfKind(List<AuditEvent> events, String kind) {
@@ -419,7 +495,7 @@ class AdoptionWorkflowImplTest {
     // Identity + discovery are keyed on the canonical PADDED OCC (not the compact operator input),
     // matching CopytradeSignalWorkflowImpl's spawn so the adopted owner is discoverable by the same
     // ContractSymbol Visibility query + Redis cache key the STC lookup uses.
-    PositionWorkflowInput started = STARTED.get(paddedWfId);
+    PositionWorkflowInput started = awaitEntry(STARTED, paddedWfId);
     assertThat(started).isNotNull();
     assertThat(started.getContractSymbol()).isEqualTo(OCC);
     verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, OCC, paddedWfId);
