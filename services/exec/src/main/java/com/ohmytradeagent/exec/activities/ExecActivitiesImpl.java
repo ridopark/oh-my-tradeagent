@@ -11,7 +11,6 @@ import com.ohmytradeagent.exec.broker.ClientOrderId;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
-import com.ohmytradeagent.exec.broker.alpaca.AlpacaPaperBroker;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
@@ -126,12 +125,21 @@ public class ExecActivitiesImpl implements ExecActivities {
       // non-retryable classification already caps Temporal at a single attempt. All OTHER errors
       // keep the existing markPlaceFailed/RECORDED behaviour so a transient failure can still
       // retry.
-      boolean accountOrdersBlocked =
-          e instanceof ApplicationFailure
-              && AlpacaPaperBroker.ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE.equals(
-                  ((ApplicationFailure) e).getType());
+      // Generalised from the 403-only rule above: ANY non-retryable rejection is terminal for
+      // this intent. Temporal will not retry it, so the order will never be placed — and a row
+      // left RECORDED is indistinguishable to reconciliation from a live orphan, so it re-emits
+      // JournalOrphan/JournalOrphanOngoing on every 5-minute sweep, forever.
+      //
+      // That noise has been cleared BY HAND TWICE (2026-08-04, 2 rows; 2026-08-18, 8 rows across
+      // all three live tenants driving ~32 events/day into the prod_real watchdog page). The first
+      // cleanup was tenant-scoped, so prod-kipark's copies of the same contracts survived and
+      // nagged for another 17 days. The cost is alert fatigue on a real-money pager.
+      //
+      // A RETRYABLE failure still keeps RECORDED so a later attempt can place. A bare
+      // RuntimeException (socket reset, DNS blip) is transient by definition and also stays.
+      boolean terminalRejection = e instanceof ApplicationFailure af && af.isNonRetryable();
       try {
-        if (accountOrdersBlocked) {
+        if (terminalRejection) {
           journal.markErrored(intent.getIntentKey(), e.getMessage());
         } else {
           journal.markPlaceFailed(intent.getIntentKey(), e.getMessage());
