@@ -148,7 +148,41 @@ public final class WorkflowIds {
    */
   public static String position(
       String tenantId, String strategyId, String occSymbol, String entrySignalId) {
-    return tenantStrategy(tenantId, strategyId) + "/pos/" + occSymbol + "/" + entrySignalId;
+    return tenantStrategy(tenantId, strategyId) + POS_SEGMENT + occSymbol + "/" + entrySignalId;
+  }
+
+  /** The {@code /pos/} marker that {@link #position} writes and {@link #occFromPosition} reads. */
+  private static final String POS_SEGMENT = "/pos/";
+
+  /**
+   * The OCC embedded in a {@code PositionWorkflow} id, or {@code null} if this is not one.
+   *
+   * <p>#718: recon adoption mints a NEW workflow id for the SAME position, so an operator's cached
+   * id can be dead while the position is very much open. The dead id still names the contract, and
+   * that is what lets a write surface find the live owner instead of reporting the position closed.
+   * Parsing stops at the first separator after the OCC because an entry signal id may contain
+   * slashes of its own (watchlist ids look like {@code wl/<date>/<sym>/<right>}), while the OCC
+   * never does.
+   *
+   * <p>Returns {@code null} rather than a best guess for anything malformed — a caller that cannot
+   * name the contract with certainty must not act on one.
+   */
+  public static String occFromPosition(String workflowId) {
+    if (workflowId == null) {
+      return null;
+    }
+    int start = workflowId.indexOf(POS_SEGMENT);
+    if (start < 0) {
+      return null;
+    }
+    start += POS_SEGMENT.length();
+    int end = workflowId.indexOf('/', start);
+    if (end < 0) {
+      // No trailing entry-signal-id segment: not a well-formed position id, so refuse to guess.
+      return null;
+    }
+    String occ = workflowId.substring(start, end);
+    return occ.isBlank() ? null : occ;
   }
 
   /** Workflow ID prefix for {@code ReconciliationWorkflow} runs. The scheduler appends a run-id. */

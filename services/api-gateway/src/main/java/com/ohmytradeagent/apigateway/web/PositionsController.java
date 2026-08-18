@@ -9,6 +9,7 @@ import io.temporal.api.enums.v1.WorkflowExecutionStatus;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionAlreadyStarted;
 import io.temporal.client.WorkflowExecutionMetadata;
+import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import jakarta.servlet.http.HttpServletRequest;
@@ -16,6 +17,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -45,6 +48,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/positions")
 public class PositionsController {
+
+  private static final Logger log = LoggerFactory.getLogger(PositionsController.class);
 
   private static final String POSITION_WORKFLOW_TYPE = "PositionWorkflow";
   private static final String ADOPTION_WORKFLOW_TYPE = "AdoptionWorkflow";
@@ -103,13 +108,97 @@ public class PositionsController {
     fr.setOperatorId(operator);
     fr.setReason(body.reason() == null ? "operator_force_close" : body.reason());
 
-    WorkflowStub stub = client.newUntypedWorkflowStub(body.workflowId());
-    ForceCloseResult result = stub.update("force_close", ForceCloseResult.class, fr);
+    ForceCloseResult result = updateResolvingAdoption(tenant, strategy, body.workflowId(), fr);
     HttpStatus status =
         result.getStatus() == ForceCloseResult.Status.ACCEPTED
             ? HttpStatus.ACCEPTED
             : HttpStatus.OK;
     return ResponseEntity.status(status).body(result);
+  }
+
+  /**
+   * Drive {@code force_close}, surviving the id going stale underneath the caller.
+   *
+   * <p>#718: recon ADOPTION mints a new workflow id for the same position, so an id captured before
+   * an adoption addresses a closed workflow while the position itself is still open. Reporting that
+   * verbatim tells the caller the position is gone when it is not. Treat a dead id as "this ID is
+   * dead", resolve the single running owner of the same contract, and retry once; with no match the
+   * original exception stands, so {@code workflow_not_found} stays truthful.
+   *
+   * <p>Mirrors the tenant BFF's {@code PositionsController.updateResolvingAdoption}. The two
+   * gateways deliberately keep their own copies (as they already do for the write guards) rather
+   * than share a module for ~40 lines.
+   */
+  private ForceCloseResult updateResolvingAdoption(
+      String tenant, String strategy, String workflowId, ForceCloseRequest fr) {
+    try {
+      return client
+          .newUntypedWorkflowStub(workflowId)
+          .update("force_close", ForceCloseResult.class, fr);
+    } catch (WorkflowNotFoundException dead) {
+      String live = liveOwnerOf(tenant, strategy, workflowId, dead);
+      if (live == null) {
+        throw dead;
+      }
+      log.warn(
+          "stale workflow_id for force_close tenant={} stale={} -> retrying against {}",
+          tenant,
+          workflowId,
+          live);
+      return client.newUntypedWorkflowStub(live).update("force_close", ForceCloseResult.class, fr);
+    }
+  }
+
+  /**
+   * The single RUNNING PositionWorkflow owning the same contract as {@code staleWorkflowId}, or
+   * null. The OCC is read back out of each running workflow's own id, so no extra query per
+   * candidate is needed. Null unless there is EXACTLY one match — two owners would make the retry a
+   * coin flip over which lot to sell, and this endpoint places real-money orders.
+   */
+  private String liveOwnerOf(
+      String tenant, String strategy, String staleWorkflowId, WorkflowNotFoundException dead) {
+    String occ = WorkflowIds.occFromPosition(staleWorkflowId);
+    if (occ == null) {
+      return null;
+    }
+    String wanted = occ.replace(" ", "");
+    String query =
+        String.format(
+            "TenantStrategy = '%s' AND WorkflowType = '%s' AND ExecutionStatus = '%s'",
+            WorkflowIds.escapeForVisibilityQuery(WorkflowIds.tenantStrategy(tenant, strategy)),
+            POSITION_WORKFLOW_TYPE,
+            WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING.name());
+    List<String> matches;
+    try {
+      matches =
+          client
+              .listExecutions(query)
+              .map(m -> m.getExecution().getWorkflowId())
+              .filter(id -> !staleWorkflowId.equals(id))
+              .filter(
+                  id -> {
+                    String candidate = WorkflowIds.occFromPosition(id);
+                    return candidate != null && wanted.equals(candidate.replace(" ", ""));
+                  })
+              .collect(Collectors.toList());
+    } catch (RuntimeException lookupFailed) {
+      log.warn(
+          "live-owner lookup failed for tenant={} occ={}; reporting the original {}",
+          tenant,
+          occ,
+          dead.getClass().getSimpleName(),
+          lookupFailed);
+      return null;
+    }
+    if (matches.size() > 1) {
+      log.warn(
+          "REFUSING stale-id retry: {} running workflows own tenant={} occ={} — ambiguous",
+          matches.size(),
+          tenant,
+          occ);
+      return null;
+    }
+    return matches.isEmpty() ? null : matches.get(0);
   }
 
   /**

@@ -7,10 +7,11 @@ import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.PartialCloseRequest;
 import com.ohmytradeagent.contract.PartialCloseResult;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import io.temporal.client.WorkflowClient;
-import io.temporal.client.WorkflowStub;
+import io.temporal.client.WorkflowNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
@@ -139,8 +140,8 @@ public class PositionsController {
     fr.setOperatorId(operatorId);
     fr.setReason(reason);
 
-    WorkflowStub stub = client.newUntypedWorkflowStub(workflowId);
-    ForceCloseResult result = stub.update("force_close", ForceCloseResult.class, fr);
+    ForceCloseResult result =
+        updateResolvingAdoption(tenant, workflowId, "force_close", ForceCloseResult.class, fr);
 
     HttpStatus status =
         result.getStatus() == ForceCloseResult.Status.ACCEPTED
@@ -192,8 +193,8 @@ public class PositionsController {
     pr.setReason(reason);
     pr.setFraction(BigDecimal.valueOf(fraction));
 
-    WorkflowStub stub = client.newUntypedWorkflowStub(workflowId);
-    PartialCloseResult result = stub.update("partial_close", PartialCloseResult.class, pr);
+    PartialCloseResult result =
+        updateResolvingAdoption(tenant, workflowId, "partial_close", PartialCloseResult.class, pr);
 
     HttpStatus status =
         result.getStatus() == PartialCloseResult.Status.ACCEPTED
@@ -258,8 +259,8 @@ public class PositionsController {
     // itself from its own tracked bid / a fresh quote; a page-rendered premium is seconds stale,
     // and an anchor that is too low sets the stop too low on a real-money position.
 
-    WorkflowStub stub = client.newUntypedWorkflowStub(workflowId);
-    ArmTrailResult result = stub.update("arm_trail", ArmTrailResult.class, ar);
+    ArmTrailResult result =
+        updateResolvingAdoption(tenant, workflowId, "arm_trail", ArmTrailResult.class, ar);
 
     HttpStatus status;
     if (result.getStatus() == ArmTrailResult.Status.ARMED) {
@@ -276,6 +277,87 @@ public class PositionsController {
     respBody.put("giveback_pct", result.getGivebackPct());
     respBody.put("stop_price", result.getStopPrice());
     return ResponseEntity.status(status).body(respBody);
+  }
+
+  /**
+   * Drive a position Update, surviving the id going stale underneath the operator.
+   *
+   * <p>#718: recon ADOPTION mints a new workflow id for the same position, so the id a /live page
+   * rendered before an adoption addresses a workflow that is closed while the position is still
+   * open. Temporal answers that with {@link WorkflowNotFoundException}, which we used to report
+   * verbatim as {@code position_already_closed} — false, and reassuring enough that an operator
+   * stops trying. Worse, nothing is audited: {@code ForceCloseRequested} is emitted INSIDE the
+   * workflow's update handler, so an update that never lands leaves no trace anywhere.
+   *
+   * <p>So a dead id is treated as "this ID is dead", not "this POSITION is closed": look up the
+   * live owner of the same contract and retry once. If none is found the original exception is
+   * rethrown, which makes {@code position_already_closed} a verified claim rather than an
+   * assumption.
+   */
+  private <T> T updateResolvingAdoption(
+      String tenant, String workflowId, String updateName, Class<T> resultType, Object arg) {
+    try {
+      return client.newUntypedWorkflowStub(workflowId).update(updateName, resultType, arg);
+    } catch (WorkflowNotFoundException dead) {
+      String live = liveOwnerOf(tenant, workflowId, dead);
+      if (live == null) {
+        throw dead;
+      }
+      log.warn(
+          "stale workflow_id for {} tenant={} stale={} -> retrying against live owner {}",
+          updateName,
+          tenant,
+          workflowId,
+          live);
+      return client.newUntypedWorkflowStub(live).update(updateName, resultType, arg);
+    }
+  }
+
+  /**
+   * The single running workflow owning the same contract as {@code staleWorkflowId}, or null.
+   *
+   * <p>Returns null unless there is EXACTLY one match: with two owners a retry would pick one at
+   * random and sell the wrong lot, and a real-money write must not guess. OCCs are compared with
+   * spaces stripped because the padded and compact forms both circulate here (the same
+   * padded-vs-compact hazard {@code WorkflowIds.adoption} normalises away).
+   *
+   * <p>A failure of the lookup itself rethrows nothing: the caller falls back to the original
+   * not-found, so a Visibility outage degrades to the old behaviour instead of masking it with an
+   * unrelated 500.
+   */
+  private String liveOwnerOf(
+      String tenant, String staleWorkflowId, WorkflowNotFoundException dead) {
+    String occ = WorkflowIds.occFromPosition(staleWorkflowId);
+    if (occ == null) {
+      return null;
+    }
+    String wanted = occ.replace(" ", "");
+    List<OpenPosition> matches;
+    try {
+      matches =
+          reader.openPositions(tenant).stream()
+              .filter(p -> p.contractSymbol() != null)
+              .filter(p -> wanted.equals(p.contractSymbol().replace(" ", "")))
+              .filter(p -> !staleWorkflowId.equals(p.workflowId()))
+              .toList();
+    } catch (RuntimeException lookupFailed) {
+      log.warn(
+          "live-owner lookup failed for tenant={} occ={}; reporting the original {}",
+          tenant,
+          occ,
+          dead.getClass().getSimpleName(),
+          lookupFailed);
+      return null;
+    }
+    if (matches.size() > 1) {
+      log.warn(
+          "REFUSING stale-id retry: {} running workflows own tenant={} occ={} — ambiguous",
+          matches.size(),
+          tenant,
+          occ);
+      return null;
+    }
+    return matches.isEmpty() ? null : matches.get(0).workflowId();
   }
 
   /**

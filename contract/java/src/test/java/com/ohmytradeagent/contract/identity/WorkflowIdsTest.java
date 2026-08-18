@@ -90,4 +90,51 @@ class WorkflowIdsTest {
                 "acme", "watchlist-trigger-v1", java.time.LocalDate.of(2026, 6, 24)))
         .isEqualTo("wl-armed:acme:watchlist-trigger-v1:2026-06-24");
   }
+
+  /**
+   * #718: the OCC must be recoverable FROM a position workflow id. When recon adopts a position it
+   * mints a new workflow id, so an operator's cached id goes dead — but the dead id still names the
+   * contract, which is what lets the server find the live owner instead of telling the operator
+   * "position_already_closed" about a position that is still open.
+   */
+  @Test
+  void occFromPositionRoundTripsWhatPositionBuilds() {
+    String occ = "AMD   260819C00530000"; // padded OCC — embedded spaces are the normal case
+    String id = WorkflowIds.position("prod-kipark", "copytrade-v1", occ, "chat-messages-77-15:0");
+    assertThat(WorkflowIds.occFromPosition(id)).isEqualTo(occ);
+  }
+
+  /** The literal id observed live on 2026-08-17, whose entry signal id carries a trailing ":0". */
+  @Test
+  void occFromPositionParsesTheProductionId() {
+    assertThat(
+            WorkflowIds.occFromPosition(
+                "t-prod-kipark/s-copytrade-v1/pos/AMD   260819C00530000/"
+                    + "chat-messages-769797179992571914-1538925306302439515:0"))
+        .isEqualTo("AMD   260819C00530000");
+  }
+
+  /**
+   * A watchlist entry signal id contains slashes of its own, so the parse must stop at the FIRST
+   * separator after the OCC rather than splitting the whole id.
+   */
+  @Test
+  void occFromPositionStopsAtTheOccWhenTheSignalIdContainsSlashes() {
+    assertThat(
+            WorkflowIds.occFromPosition(
+                "t-acme/s-watchlist-trigger-v1/pos/SPY   260817C00500000/wl/2026-08-17/SPY/C"))
+        .isEqualTo("SPY   260817C00500000");
+  }
+
+  /** Anything that is not a position id yields null — the caller must not guess a contract. */
+  @Test
+  void occFromPositionRejectsNonPositionIds() {
+    assertThat(WorkflowIds.occFromPosition(WorkflowIds.killswitch("acme", "copytrade-v1")))
+        .isNull();
+    assertThat(WorkflowIds.occFromPosition("t-acme/s-copytrade-v1/pos/")).isNull();
+    assertThat(WorkflowIds.occFromPosition("t-acme/s-copytrade-v1/pos/SPY   260817C00500000"))
+        .isNull();
+    assertThat(WorkflowIds.occFromPosition(null)).isNull();
+    assertThat(WorkflowIds.occFromPosition("")).isNull();
+  }
 }
