@@ -2675,21 +2675,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
     // F1: entryAt + partialExited let the parent's supersede check enforce the correction-window
     // and not-already-exiting guardrails authoritatively against THIS leg's real state.
-    //
-    // The trailing triple is DISPLAY-only, for /live's per-position stop badge. It is reported from
-    // the SAME fields the fire check reads, through the SAME trailStopPrice() helper the armTrail
-    // Update answers with — so the badge cannot drift from the stop that will actually fire. A
-    // consumer deriving the stop from a live mark instead would understate it whenever the position
-    // sits below its peak, which is exactly when an operator is reading the number.
     return new PositionState(
-        input.getContractSymbol(),
-        remainingQty,
-        input.getEntryPremium(),
-        entryAt,
-        partialExited,
-        trailingArmed,
-        trailingArmed ? givebackPct : null,
-        trailingArmed ? trailStopPrice(peakPremium, givebackPct) : null);
+        input.getContractSymbol(), remainingQty, input.getEntryPremium(), entryAt, partialExited);
   }
 
   @Override

@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.PositionStateView;
+import com.ohmytradeagent.tdbff.positions.PositionsReader.TrailingStateView;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
@@ -130,18 +131,17 @@ class PositionsReaderTest {
 
     wireStrategies("acme", "s1");
     wireListExecutions("wf-armed");
-    wireState(
-        "wf-armed",
-        new PositionStateView(
-            occ, 2, new BigDecimal("3.28"), true, new BigDecimal("0.35"), new BigDecimal("2.63")));
+    wireState("wf-armed", new PositionStateView(occ, 2, new BigDecimal("3.28")));
+    wireTrailing(
+        "wf-armed", new TrailingStateView(true, new BigDecimal("0.35"), new BigDecimal("2.63")));
 
     List<OpenPosition> out = reader.openPositions("acme");
 
     assertThat(out).hasSize(1);
     assertThat(out.get(0).trailingArmed()).isTrue();
     assertThat(out.get(0).trailGivebackPct()).isEqualByComparingTo("0.35");
-    // Passed through verbatim: it is peak-anchored, and 2.63 is NOT derivable from any price the
-    // reader holds (entry 3.28 x 0.65 = 2.13).
+    // Passed through verbatim. 2.63 is PEAK-anchored and is NOT derivable from any price this
+    // reader holds: entry 3.28 x 0.65 = 2.13. A reader that recomputed the stop would fail here.
     assertThat(out.get(0).trailStopPrice()).isEqualByComparingTo("2.63");
   }
 
@@ -153,12 +153,38 @@ class PositionsReaderTest {
     wireStrategies("acme", "s1");
     wireListExecutions("wf-unarmed");
     wireState("wf-unarmed", new PositionStateView(occ, 3, new BigDecimal("2.00")));
+    wireTrailing("wf-unarmed", new TrailingStateView(false, null, null));
 
     List<OpenPosition> out = reader.openPositions("acme");
 
     assertThat(out).hasSize(1);
     assertThat(out.get(0).trailingArmed()).isFalse();
     assertThat(out.get(0).trailGivebackPct()).isNull();
+    assertThat(out.get(0).trailStopPrice()).isNull();
+  }
+
+  @Test
+  void neverDropsThePositionWhenTheTrailingStopQueryFails() {
+    // The badge is decoration; the position is not. An orchestrator too old to answer
+    // trailingState, or a query that races a worker restart, must cost the operator the BADGE and
+    // nothing else — a holdings row vanishing because a stop could not be read would be a far worse
+    // failure than the one this feature fixes.
+    LocalDate today = LocalDate.now(MARKET_TZ);
+    String occ = occFor("NVDA", today.plusDays(7), "C", "00140000");
+
+    wireStrategies("acme", "s1");
+    wireListExecutions("wf-trail-broken");
+    wireState("wf-trail-broken", new PositionStateView(occ, 3, new BigDecimal("2.00")));
+    WorkflowStub stub = client.newUntypedWorkflowStub("wf-trail-broken");
+    when(stub.query(eq("trailingState"), eq(TrailingStateView.class), any(Object[].class)))
+        .thenThrow(new IllegalStateException("query rejected: worker restarting"));
+
+    List<OpenPosition> out = reader.openPositions("acme");
+
+    assertThat(out).hasSize(1);
+    assertThat(out.get(0).contractSymbol()).isEqualTo(occ);
+    assertThat(out.get(0).openNotional()).isEqualByComparingTo("600.00");
+    assertThat(out.get(0).trailingArmed()).isFalse();
     assertThat(out.get(0).trailStopPrice()).isNull();
   }
 
@@ -188,6 +214,17 @@ class PositionsReaderTest {
     when(client.newUntypedWorkflowStub(eq(workflowId))).thenReturn(stub);
     when(stub.query(eq("positionState"), eq(PositionStateView.class), any(Object[].class)))
         .thenReturn(state);
+  }
+
+  /**
+   * Stubs the SECOND per-workflow query. Left unstubbed, the mock answers null, which the reader
+   * reads as "no trail" — the same degradation an orchestrator predating the query produces, and
+   * why every pre-existing test in this class still passes untouched.
+   */
+  private void wireTrailing(String workflowId, TrailingStateView trailing) {
+    WorkflowStub stub = client.newUntypedWorkflowStub(workflowId);
+    when(stub.query(eq("trailingState"), eq(TrailingStateView.class), any(Object[].class)))
+        .thenReturn(trailing);
   }
 
   private static WorkflowExecutionMetadata metadata(String workflowId) {

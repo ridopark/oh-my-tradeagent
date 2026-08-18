@@ -53,6 +53,46 @@ supplies none.
 
 ---
 
+## REVISED after adversarial review — do NOT widen `positionState`
+
+The first implementation extended `PositionState` (the `positionState` query) with the trailing
+triple. Two independent reviewers rejected it, and the second **reproduced** the failure with the
+real `DefaultDataConverter`:
+
+```
+PROBE-A OLD<-NEW: THREW DataConverterException ::
+  UnrecognizedPropertyException: Unrecognized field "trailGivebackPct" ... not marked as ignorable
+```
+
+`PositionState` has **no** `@JsonIgnoreProperties(ignoreUnknown = true)`, and three FAIL-CLOSED
+orchestrator paths deserialize that query with their own copy of the record:
+`VisibilityPortfolioSnapshot:323`, `AccountPnlActivitiesImpl:174`, `PositionLookupActivitiesImpl:226/389`.
+`infra/k8s/51-orchestrator.yaml:22` is `replicas: 1` under default RollingUpdate (maxSurge→1,
+maxUnavailable→0), so during a roll an OLD pod and a NEW pod both poll the queue. An old pod
+querying a workflow served by a new pod throws on every position → `ValueResult.failure()` →
+`AccountKillSwitchWorkflowImpl:887` fail-closes on `combinedFailures` → `auto:account_mtm_unavailable`
+→ **halt + flatten on a live account**. That cap has already tripped once on a profitable day from a
+single miss (2026-07-21). Widening a risk-gate query to paint a dashboard badge is not a trade worth
+making.
+
+**The revised design queries `trailingState` instead** — it already exists on `PositionWorkflow`
+(shipped with the chandelier, live today), is consumed by nothing else, and returns strictly more
+than is needed: `armed`, `givebackPct`, `thresholdPremium` (the exact fire trigger), plus
+`lastTickAt` / `ticksReceived` for a future staleness indicator.
+
+What this buys:
+- **The hazard disappears by construction.** No orchestrator change at all — no risk-gate contract
+  touched, nothing to sequence, and no special no-overlap roll for the operator to remember.
+- **The stop price gets MORE accurate.** `thresholdPremium` is the unrounded `peak × (1 - giveback)`
+  the tick loop actually compares against; `trailStopPrice()` penny-rounds HALF_UP, which would have
+  overstated the stop by up to half a cent.
+- Cost: one extra Temporal query per open position per page load, separately try-caught so a failed
+  badge read can never drop a holdings row.
+
+The phase below is superseded on the orchestrator points; its BFF and dashboard changes stand.
+
+---
+
 ## Phase 1 — carry trailing state from the workflow query to the /live row (single PR)
 
 **Goal:** after a refresh, an armed Holdings row reads

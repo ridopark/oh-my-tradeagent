@@ -27,7 +27,8 @@ import org.springframework.stereotype.Component;
  * Lists a tenant's open positions across all of its strategies. Per strategy it runs the proven
  * {@code TenantStrategy='t-<t>/s-<sid>'} equality Visibility query (Temporal SQL Visibility has no
  * {@code STARTS_WITH} on workflow id) for running {@code PositionWorkflow}s, then fans out a {@code
- * positionState} query per workflow to value it. Cost-basis notional = {@code entryPremium ×
+ * positionState} query per workflow to value it, plus a {@code trailingState} query per workflow
+ * for the armed trailing stop /live shows on the row. Cost-basis notional = {@code entryPremium ×
  * remainingQty × 100} (US equity-options multiplier) — entry premium, NOT live mark (no market-data
  * wired).
  */
@@ -117,6 +118,7 @@ public class PositionsReader {
               .entryPremium()
               .multiply(BigDecimal.valueOf(state.remainingQty()))
               .multiply(CONTRACT_MULTIPLIER);
+      TrailingStateView trail = trailingState(wfId, strategyId);
       return new OpenPosition(
           wfId,
           strategyId,
@@ -124,12 +126,33 @@ public class PositionsReader {
           state.remainingQty(),
           state.entryPremium(),
           openNotional,
-          state.trailingArmed(),
-          state.trailGivebackPct(),
-          state.trailStopPrice());
+          trail != null && trail.armed(),
+          trail != null && trail.armed() ? trail.givebackPct() : null,
+          trail != null && trail.armed() ? trail.thresholdPremium() : null);
     } catch (RuntimeException e) {
       log.warn(
           "positionState query failed wf={} strategy={} err={}", wfId, strategyId, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * The position's armed trailing stop, or {@code null} when it has none / the query fails.
+   *
+   * <p>Separately try-caught from {@link #valuePosition}: a position must NEVER disappear from the
+   * operator's holdings because a decorative badge could not be read. Degrades to "no trail shown",
+   * which is also what an orchestrator too old to answer this query produces.
+   */
+  private TrailingStateView trailingState(String wfId, String strategyId) {
+    try {
+      return client.newUntypedWorkflowStub(wfId).query("trailingState", TrailingStateView.class);
+    } catch (RuntimeException e) {
+      log.warn(
+          "trailingState query failed wf={} strategy={} err={} — rendering position without its"
+              + " trailing stop",
+          wfId,
+          strategyId,
+          e.getMessage());
       return null;
     }
   }
@@ -163,11 +186,16 @@ public class PositionsReader {
   }
 
   /**
-   * One valued open position. The trailing triple is DISPLAY-only, straight off the workflow's own
-   * {@code positionState}: {@code trailingArmed} says whether a chandelier trail is armed, {@code
+   * One valued open position. The trailing triple is DISPLAY-only, off the workflow's own {@code
+   * trailingState} query: {@code trailingArmed} says whether a chandelier trail is armed, {@code
    * trailGivebackPct} at what fraction, and {@code trailStopPrice} where it would fire right now.
    * The stop price is PEAK-anchored and must be passed through as-is — recomputing it from a live
    * mark understates the stop on any position sitting below its high.
+   *
+   * <p>It describes the CHANDELIER trail only. A watchlist-exit position that has already hit its
+   * target also carries a tighter breakeven {@code exitStopLevel} which this does not report, so on
+   * that one route the badge is pessimistic (it names a stop below the level that would really
+   * exit). All real-money tenants are copytrade, where the chandelier IS the stop.
    */
   public record OpenPosition(
       String workflowId,
@@ -222,21 +250,27 @@ public class PositionsReader {
    */
   @JsonIgnoreProperties(ignoreUnknown = true)
   public record PositionStateView(
-      String contractSymbol,
-      long remainingQty,
-      BigDecimal entryPremium,
-      boolean trailingArmed,
-      BigDecimal trailGivebackPct,
-      BigDecimal trailStopPrice) {
+      String contractSymbol, long remainingQty, BigDecimal entryPremium) {}
 
-    /**
-     * Back-compat 3-arg form for fixtures that predate the trailing fields; defaults to un-armed.
-     * Jackson still creates records through the CANONICAL constructor, so this does not affect
-     * deserialization — the same pattern the orchestrator's own {@code PositionState} has carried
-     * through this converter since the {@code entryAt}/{@code partialExited} widening.
-     */
-    public PositionStateView(String contractSymbol, long remainingQty, BigDecimal entryPremium) {
-      this(contractSymbol, remainingQty, entryPremium, false, null, null);
-    }
-  }
+  /**
+   * Transport mirror of the orchestrator's {@code TrailingState} query result — the armed
+   * chandelier/operator trailing stop, which /live renders per position.
+   *
+   * <p>Read from the SEPARATE {@code trailingState} query rather than by widening {@code
+   * positionState}, and that separation is load-bearing, not incidental. {@code positionState} is
+   * deserialized inside the orchestrator by three FAIL-CLOSED consumers ({@code
+   * VisibilityPortfolioSnapshot}, {@code AccountPnlActivitiesImpl}, {@code
+   * PositionLookupActivitiesImpl}) whose own copy of the record has no {@code ignoreUnknown}: on a
+   * rolling deploy an old pod querying a workflow served by a new pod would throw on the added
+   * fields, and those failures feed {@code AccountKillSwitchWorkflowImpl}'s fail-closed count —
+   * i.e. widening it to paint a dashboard badge could halt-and-flatten a live account. {@code
+   * trailingState} is display-only, consumed by nothing else, and already deployed.
+   *
+   * <p>{@code thresholdPremium} is the fire trigger the tick loop compares against — carried
+   * through as-is. It is PEAK-anchored, so it only ever rises; a client re-deriving it from a live
+   * mark would understate the stop on any position below its high.
+   */
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  public record TrailingStateView(
+      boolean armed, BigDecimal givebackPct, BigDecimal thresholdPremium) {}
 }

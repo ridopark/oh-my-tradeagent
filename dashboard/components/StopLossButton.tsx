@@ -94,14 +94,19 @@ export function StopLossButton({
   // offering to arm again.
   //
   // Supplied by /live from the row's `trail_giveback_pct`, which the BFF reads off the workflow's
-  // own `positionState` query. An older BFF (or an older orchestrator behind it) omits the field;
+  // own `trailingState` query. An older BFF (or an older orchestrator behind it) omits the field;
   // the row then renders as un-armed, and re-arming returns ALREADY_ARMED (200), which this control
   // shows as "Already trailing" without touching the existing stop. So the degradation is safe.
   //
-  // WHAT THIS DOES AND DOES NOT MEAN: it reports that the WORKFLOW has a trail armed. It does not
-  // prove ticks are still flowing to it — a market-data restart can orphan the premium subscription
-  // while the workflow still believes it is trailing. Surfacing that needs tick-staleness, which
-  // this control does not have.
+  // WHAT THIS DOES AND DOES NOT MEAN. It reports that the WORKFLOW has a CHANDELIER trail armed.
+  // Two things it does not say:
+  //   - It does not prove ticks are still flowing to it. A market-data restart can orphan the
+  //     premium subscription while the workflow still believes it is trailing. Surfacing that needs
+  //     tick-staleness, which this control does not have.
+  //   - It is not necessarily the TIGHTEST stop on the position. A watchlist-exit leg that has
+  //     already hit its target also carries a breakeven `exitStopLevel` above this trail, so there
+  //     the badge is pessimistic — it names a stop below the level that would really exit. Every
+  //     real-money tenant is copytrade, where the chandelier IS the stop.
   armedGivebackPct?: number | null;
   // The price the armed trail fires at RIGHT NOW, from the workflow: peak x (1 - giveback). Peak-
   // anchored, so it only ever rises. Given precedence over stopPriceFor(currentPrice, ...) in the
