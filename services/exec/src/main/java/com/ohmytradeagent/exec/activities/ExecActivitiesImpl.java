@@ -1,5 +1,6 @@
 package com.ohmytradeagent.exec.activities;
 
+import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.exec.alert.BrokerRejectionAlerter;
@@ -16,6 +17,9 @@ import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
 import io.temporal.failure.ApplicationFailure;
 import java.time.OffsetDateTime;
+import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
@@ -38,6 +42,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class ExecActivitiesImpl implements ExecActivities {
+
+  private static final Logger log = LoggerFactory.getLogger(ExecActivitiesImpl.class);
 
   private final OrderIntentJournal journal;
   private final BrokerClientRegistry brokerRegistry;
@@ -102,7 +108,7 @@ public class ExecActivitiesImpl implements ExecActivities {
                   clientOrderId,
                   intent.getOptionSymbol(),
                   intent.getSide().value(),
-                  intent.getQty(),
+                  reduceOnlyQty(broker, intent, clientOrderId),
                   intent.getLimitPrice()));
     } catch (RuntimeException e) {
       // Issue #295: surface the broker rejection at the DB layer. Without this the row stays
@@ -239,6 +245,100 @@ public class ExecActivitiesImpl implements ExecActivities {
    * the {@code JournalConsistencyError} / {@code InvalidBrokerTargetError} precedents) terminates a
    * malformed intent immediately and names the offending field for the operator.
    */
+  /**
+   * Reduce-only clamp (#716): never ask the broker to sell more of a contract than it says we hold.
+   *
+   * <p>On 2026-08-17 the orchestrator requested SELL 35 while the broker held 24 (and 18 holding
+   * 12), because the flatten was sized inside the ~30s window in which an already-filled partial
+   * exit had not yet been booked. Alpaca refused both with {@code account not eligible to trade
+   * uncovered option contracts} — an account PERMISSION we neither control nor designed as a safety
+   * net, and the only thing standing between that bug and short calls on a real account. This is
+   * the control we do own, and it sits at the one choke point every SELL passes through, so it
+   * covers STC partials, flattens and operator trims alike — unlike the workflow-side trim clamp
+   * from #659, which is reachable only on an operator trim.
+   *
+   * <p><b>Fail-open by construction.</b> The clamp fires ONLY when the contract is actually present
+   * in the broker's open positions AND the held quantity is smaller than the request. Everything
+   * else places as asked. That is deliberate, not laziness:
+   *
+   * <ul>
+   *   <li>{@link OptionsBroker#listOpenPositions()} DEFAULTS TO AN EMPTY LIST, so reading "absent"
+   *       as "flat" would clamp every sell to zero on any broker that does not implement it.
+   *   <li>A positions-API outage must not block a risk-reducing exit. Being unable to sell is a
+   *       worse failure than the tail this prevents, and the broker's own block still backstops the
+   *       naked case.
+   * </ul>
+   *
+   * <p>The consequence of a clamp is deliberately accepted: the journal keeps the REQUESTED qty
+   * while the fill reports the clamped one, which reads downstream as a partial fill, and the
+   * workflow will believe a remainder exists until reconciliation corrects it. That is a phantom to
+   * clean up rather than a short position to buy back.
+   *
+   * <p>OCCs are compared with spaces stripped: the padded form circulates in the journal and
+   * workflow ids while Alpaca returns the compact one, and a raw comparison would silently never
+   * match — leaving a guard that looks present and never fires.
+   */
+  private long reduceOnlyQty(OptionsBroker broker, OrderIntent intent, String clientOrderId) {
+    long requested = intent.getQty();
+    if (intent.getSide() != OrderIntent.Side.SELL) {
+      return requested;
+    }
+    List<BrokerPosition> open;
+    try {
+      open = broker.listOpenPositions();
+    } catch (RuntimeException e) {
+      log.warn(
+          "reduce-only clamp skipped: positions unavailable for {} intent={} — placing as"
+              + " requested qty={}",
+          intent.getOptionSymbol(),
+          intent.getIntentKey(),
+          requested,
+          e);
+      return requested;
+    }
+    if (open == null || open.isEmpty()) {
+      return requested;
+    }
+    String wanted = compactOcc(intent.getOptionSymbol());
+    Long held = null;
+    for (BrokerPosition p : open) {
+      if (p != null && wanted != null && wanted.equals(compactOcc(p.getOptionSymbol()))) {
+        held = p.getQty();
+        break;
+      }
+    }
+    if (held == null || held >= requested) {
+      return requested;
+    }
+    // A clamp means something upstream asked to sell contracts that do not exist. That is a bug
+    // signal, not routine hygiene — page it. Silence is precisely how this class of defect
+    // survived unnoticed.
+    log.error(
+        "REDUCE-ONLY CLAMP {} intent={} requested={} broker_held={} — placing {}",
+        intent.getOptionSymbol(),
+        intent.getIntentKey(),
+        requested,
+        held,
+        held);
+    rejectionAlerter.onBrokerRejection(
+        intent,
+        clientOrderId,
+        "reduce-only clamp: requested SELL "
+            + requested
+            + " but broker holds "
+            + held
+            + " of "
+            + intent.getOptionSymbol()
+            + " — placed "
+            + held);
+    return held;
+  }
+
+  /** Padded and compact OCC forms both circulate; compare on the compact one. */
+  private static String compactOcc(String occ) {
+    return occ == null ? null : occ.replace(" ", "");
+  }
+
   private static void validateIntent(OrderIntent intent) {
     String intentKey = intent.getIntentKey();
     requirePresent(intentKey, "intentKey", intentKey);
