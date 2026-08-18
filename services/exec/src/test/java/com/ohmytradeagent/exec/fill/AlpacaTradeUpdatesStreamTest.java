@@ -467,6 +467,116 @@ class AlpacaTradeUpdatesStreamTest {
     }
   }
 
+  @Test
+  void preAuthListenRejectionIsLoggedAtWarn() throws Exception {
+    // Pins the discriminator the whole #715 investigation turns on. Alpaca answers a `listen` sent
+    // before authorization completes on the AUTHORIZATION stream, not the listening one:
+    // "In the case that the socket connection is not authorized yet, a new message under the
+    // authorization stream is issued in response to the listen request."
+    //
+    // The existing branch already handles this shape — the value here is that no test pinned it.
+    // The other two authorization tests only cover action=authenticate, so nothing stopped a future
+    // refactor from collapsing the action field out of the message, and `action` is the ONLY thing
+    // separating "listen sent too early" (a race, fixable by ordering the handshake) from "bad
+    // credentials" (action=authenticate). Absence of this line on the cluster is what refuted the
+    // race hypothesis; a test that keeps the line honest is what makes that reasoning repeatable.
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary(
+          "{\"stream\":\"authorization\",\"data\":"
+              + "{\"status\":\"unauthorized\",\"action\":\"listen\"}}");
+
+      ILoggingEvent event = awaitLog(logs, "authorization reply");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel()).isEqualTo(Level.WARN);
+      assertThat(event.getFormattedMessage())
+          .as("action= is the only thing separating a pre-auth listen from bad credentials")
+          .contains("action=listen");
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
+  @Test
+  void listeningConfirmationIsLoggedAtInfo() throws Exception {
+    // #715: POSITIVE evidence that the subscription exists. Alpaca acks a successful `listen` with
+    // {"stream":"listening","data":{"streams":["trade_updates"]}}, which this class used to drop on
+    // the floor along with everything else that wasn't authorization/trade_updates. Without it, a
+    // socket that authenticated but never subscribed is indistinguishable from a healthy quiet one
+    // — the SAME blind spot #693 fixed for the auth frame, left in place one step downstream.
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary(
+          "{\"stream\":\"listening\",\"data\":{\"streams\":[\"trade_updates\"]}}");
+
+      ILoggingEvent event = awaitLog(logs, "subscription confirmed");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel()).isEqualTo(Level.INFO);
+      assertThat(event.getFormattedMessage()).contains("trade_updates");
+      assertThat(registry.counter("fill_listener.subscription_confirmed").count()).isEqualTo(1.0);
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
+  @Test
+  void listeningWithoutTradeUpdatesIsLoggedAtWarn() throws Exception {
+    // Alpaca echoes the EFFECTIVE subscription: "if any of the requested streams are not available,
+    // they will not appear in the streams list in the acknowledgement". So an ack that omits
+    // trade_updates is a FAILED subscription wearing a success-shaped frame. Logging it at INFO
+    // alongside the real thing would rebuild the very blind spot this test exists to close.
+    //
+    // NOTE this is NOT the pre-auth-race signature. Alpaca answers a `listen` sent before
+    // authorization on the AUTHORIZATION stream (status=unauthorized, action=listen), which the
+    // existing branch already logs — see unauthorizedHandshakeIsLoggedAtWarn. Two distinct
+    // failures; they must stay distinguishable in the log.
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary("{\"stream\":\"listening\",\"data\":{\"streams\":[]}}");
+
+      ILoggingEvent event = awaitLog(logs, "subscription ack");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel())
+          .as("an ack that does not name trade_updates is a failed subscription, not a success")
+          .isEqualTo(Level.WARN);
+      assertThat(registry.counter("fill_listener.subscription_confirmed").count())
+          .as("a failed subscription must not bump the confirmation counter")
+          .isEqualTo(0.0);
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
+  @Test
+  void unrecognizedStreamIsLoggedAtWarn() throws Exception {
+    // The catch-all. Every frame this class does not understand used to hit a bare `return`, which
+    // is how a server-side error reply could be delivered, parsed, and discarded without trace.
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary(
+          "{\"stream\":\"error\",\"data\":{\"message\":\"something we do not model\"}}");
+
+      ILoggingEvent event = awaitLog(logs, "unhandled stream");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel()).isEqualTo(Level.WARN);
+      assertThat(event.getFormattedMessage()).contains("error");
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
   private static ListAppender<ILoggingEvent> attachLogCapture() {
     Logger streamLogger = (Logger) LoggerFactory.getLogger(AlpacaTradeUpdatesStream.class);
     ListAppender<ILoggingEvent> appender = new ListAppender<>();

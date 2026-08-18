@@ -46,10 +46,24 @@ Test profiles leave both unset → both beans are absent from the context.
 
 ## Health metrics
 
-All emitted on the standard `/actuator/prometheus` scrape:
+All exposed on the pod's `/actuator/prometheus` endpoint — but **nothing collects
+them.** There is no ServiceMonitor or PodMonitor for the `copytrade` namespace
+(verified 2026-08-17: cluster-wide only `monitoring/*` and `temporal/*` exist, and
+`infra/k8s/` defines none), so Prometheus never scrapes this service. These are
+read by hand and **cannot currently back a Grafana panel or an alert rule**:
+
+```sh
+kubectl exec -n copytrade deploy/exec-alpaca-live -- \
+  wget -qO- localhost:8080/actuator/prometheus | grep fill_listener
+```
+
+Treat the log lines, not the metrics, as the operable signal until a ServiceMonitor
+exists.
+
 
 | Metric | Type | Meaning |
 |---|---|---|
+| `fill_listener_subscription_confirmed_total` | counter | Sockets that received a `listening` ack naming `trade_updates`. **Positive evidence the subscription exists.** Should reach one-per-tenant shortly after boot; short of that, the socket is authenticated but not subscribed. |
 | `fill_listener_events_received_total{event="fill"\|"partial_fill"}` | counter | WS messages received (after auth+listen handshake). |
 | `fill_listener_events_dispatched_total` | counter | Events handed to `FillDispatcher` after filter + dedup. |
 | `fill_listener_events_dropped_dedup_total` | counter | WS reconnect-replays the LRU dedup caught. |
@@ -81,10 +95,54 @@ market hours, `events_received_total` flat.
    ```
    Repeated rapid closes → Alpaca rejecting the auth frame. Check
    `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` in the `alpaca-credentials` Secret.
-3. Confirm Alpaca's status page; the trade-updates stream has historical outages.
-4. Don't panic: the poller is the safety net. If `poll_fills_detected_total`
-   is keeping up, fills are still reaching workflows — just at 30s latency
-   rather than sub-second.
+3. **Confirm the socket actually SUBSCRIBED, not merely authenticated** (#715).
+
+   **First check the pod actually HAS this logging**, or you will misdiagnose:
+   `exec-alpaca-live` is excluded from CI deploy and rolls only by hand, so it
+   routinely runs an older image than `exec-alpaca-paper`. On such a pod the grep
+   below returns nothing because *the code is absent*, which looks identical to
+   "authenticated but not subscribed".
+   ```sh
+   # same image as paper? if these differ, live is behind — roll it before reading anything below
+   kubectl get deploy/exec-alpaca-live  -n copytrade -o jsonpath='{.spec.template.spec.containers[0].image}'
+   kubectl -n copytrade get pod -l app=exec-alpaca-live  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+   kubectl -n copytrade get pod -l app=exec-alpaca-paper -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+   ```
+   Then:
+   ```sh
+   kubectl logs deploy/exec-alpaca-live -n copytrade | grep "subscription confirmed\|subscription ack\|authorization reply"
+   ```
+   Expect one `subscription confirmed streams=["trade_updates"]` per tenant.
+
+   **Capture this soon after a roll.** The confirmation is emitted once per socket
+   at connect, so on a pod with days of uptime it rotates out of the log buffer and
+   absence stops being readable at all.
+   - `authorization reply status=authorized` but **no** `subscription confirmed`
+     → the socket is authenticated and NOT subscribed. It will sit open and
+     mute forever; reconnects will be zero and nothing will go red.
+   - `authorization reply NOT authorized ... action=listen` → the `listen`
+     was sent before authentication completed. Distinct failure, distinct fix.
+   - `subscription ack does NOT name trade_updates` → Alpaca accepted the
+     socket but not the stream (entitlement).
+4. Confirm Alpaca's status page; the trade-updates stream has historical outages.
+5. **Do not assume the poller is covering.** It is the intended safety net, but
+   on 2026-08-17 `exec-alpaca-live` detected **0 of 15 real fills** while the WS
+   was dark (#719) — both detectors failed at once and the only symptom was
+   exits sized off stale state. `poll_fills_detected_total = 0` is also the
+   correct value on a genuinely quiet day, so it cannot be read as health on its
+   own. Verify against broker truth:
+   ```sh
+   # journal rows by state for today, PER TENANT (a pod-wide count hides a
+   # single-tenant failure — exec-alpaca-live serves three)
+   psql -d exec_alpaca_live -c "SELECT tenant_id, state, count(*) \
+     FROM order_intent_journal WHERE created_at::date = CURRENT_DATE \
+     GROUP BY tenant_id, state ORDER BY tenant_id;"
+   ```
+   Compare `poll_cycles_total` / `poll_rows_scanned_total` /
+   `poll_fills_detected_total` in that order: zero cycles means the bean never
+   ran; cycles with zero rows scanned means nothing is sitting in `SUBMITTED`;
+   rows scanned with zero fills detected means `getOrderStatus` never returned
+   `FILLED`.
 
 ### "Poller is catching too much"
 
