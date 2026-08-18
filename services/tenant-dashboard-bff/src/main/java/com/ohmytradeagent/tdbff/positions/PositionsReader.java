@@ -119,6 +119,7 @@ public class PositionsReader {
               .multiply(BigDecimal.valueOf(state.remainingQty()))
               .multiply(CONTRACT_MULTIPLIER);
       TrailingStateView trail = trailingState(wfId, strategyId);
+      boolean armed = trail != null && trail.armed();
       return new OpenPosition(
           wfId,
           strategyId,
@@ -126,9 +127,9 @@ public class PositionsReader {
           state.remainingQty(),
           state.entryPremium(),
           openNotional,
-          trail != null && trail.armed(),
-          trail != null && trail.armed() ? trail.givebackPct() : null,
-          trail != null && trail.armed() ? trail.thresholdPremium() : null);
+          armed,
+          armed ? trail.givebackPct() : null,
+          armed ? trail.thresholdPremium() : null);
     } catch (RuntimeException e) {
       log.warn(
           "positionState query failed wf={} strategy={} err={}", wfId, strategyId, e.getMessage());
