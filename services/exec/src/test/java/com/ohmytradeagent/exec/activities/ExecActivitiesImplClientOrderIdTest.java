@@ -128,7 +128,15 @@ class ExecActivitiesImplClientOrderIdTest {
     assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
 
     // Issue #295: the rejection reason is persisted to last_error on the place path.
-    verify(journal).markPlaceFailed(eq(EXIT_INTENT_KEY), anyString());
+    //
+    // This assertion used to expect markPlaceFailed, which leaves the row RECORDED. That is
+    // correct for a RETRYABLE failure, but this rejection is non-retryable: Temporal will never
+    // retry it, so the row could never progress and reconciliation could not tell it apart from a
+    // live orphan — re-emitting JournalOrphan every 5 minutes forever. Those rows were cleared by
+    // hand twice (2026-08-04, 2026-08-18) before the rule was generalised, so a NON-RETRYABLE
+    // rejection now terminalizes via markErrored. last_error is still persisted either way.
+    verify(journal).markErrored(eq(EXIT_INTENT_KEY), anyString());
+    verify(journal, never()).markPlaceFailed(anyString(), anyString());
     // The row is NOT prematurely marked SUBMITTED when the broker call failed.
     verify(journal, never()).markSubmittedIfRecorded(anyString(), anyString());
 
@@ -209,7 +217,8 @@ class ExecActivitiesImplClientOrderIdTest {
 
     assertThatThrownBy(() -> exec.placeOrder(intent)).isSameAs(rejection);
 
-    verify(journal).markPlaceFailed(eq(EXIT_INTENT_KEY), anyString());
+    // Non-retryable -> terminalized (see the note on the rejection test above).
+    verify(journal).markErrored(eq(EXIT_INTENT_KEY), anyString());
   }
 
   @Test
