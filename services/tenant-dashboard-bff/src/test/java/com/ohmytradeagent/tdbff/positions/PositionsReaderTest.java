@@ -120,6 +120,49 @@ class PositionsReaderTest {
   }
 
   // ---------------------------------------------------------------------------
+  // armed trailing-stop state (drives /live's per-position stop badge)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void carriesTheArmedTrailingStopThroughToTheOpenPosition() {
+    LocalDate today = LocalDate.now(MARKET_TZ);
+    String occ = occFor("DRAM", today.plusDays(30), "C", "00100000");
+
+    wireStrategies("acme", "s1");
+    wireListExecutions("wf-armed");
+    wireState(
+        "wf-armed",
+        new PositionStateView(
+            occ, 2, new BigDecimal("3.28"), true, new BigDecimal("0.35"), new BigDecimal("2.63")));
+
+    List<OpenPosition> out = reader.openPositions("acme");
+
+    assertThat(out).hasSize(1);
+    assertThat(out.get(0).trailingArmed()).isTrue();
+    assertThat(out.get(0).trailGivebackPct()).isEqualByComparingTo("0.35");
+    // Passed through verbatim: it is peak-anchored, and 2.63 is NOT derivable from any price the
+    // reader holds (entry 3.28 x 0.65 = 2.13).
+    assertThat(out.get(0).trailStopPrice()).isEqualByComparingTo("2.63");
+  }
+
+  @Test
+  void reportsNoTrailWhenThePositionIsUnarmed() {
+    LocalDate today = LocalDate.now(MARKET_TZ);
+    String occ = occFor("NVDA", today.plusDays(7), "C", "00140000");
+
+    wireStrategies("acme", "s1");
+    wireListExecutions("wf-unarmed");
+    wireState("wf-unarmed", new PositionStateView(occ, 3, new BigDecimal("2.00")));
+
+    List<OpenPosition> out = reader.openPositions("acme");
+
+    assertThat(out).hasSize(1);
+    assertThat(out.get(0).trailingArmed()).isFalse();
+    assertThat(out.get(0).trailGivebackPct()).isNull();
+    assertThat(out.get(0).trailStopPrice()).isNull();
+  }
+
+  // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 

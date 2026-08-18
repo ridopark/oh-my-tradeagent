@@ -38,6 +38,54 @@ class PositionStateViewDriftTest {
           + "\"remainingQty\":7"
           + "}";
 
+  // The 8-field shape the orchestrator returns once it reports the operator trailing stop — what
+  // /live's per-position stop badge reads.
+  private static final String EIGHT_FIELD_ARMED_JSON =
+      "{"
+          + "\"contractSymbol\":\"INTC  260618C00022000\","
+          + "\"entryAt\":\"2026-06-30T14:31:00Z\","
+          + "\"entryPremium\":1.23,"
+          + "\"partialExited\":false,"
+          + "\"remainingQty\":7,"
+          + "\"trailGivebackPct\":0.35,"
+          + "\"trailStopPrice\":2.63,"
+          + "\"trailingArmed\":true"
+          + "}";
+
+  @Test
+  void deserializesTheArmedTrailingStateThroughTheSameConverter() {
+    DefaultDataConverter converter = DefaultDataConverter.newDefaultInstance();
+
+    PositionStateView state =
+        converter.fromPayload(
+            jsonPayload(EIGHT_FIELD_ARMED_JSON), PositionStateView.class, PositionStateView.class);
+
+    assertThat(state.trailingArmed()).isTrue();
+    assertThat(state.trailGivebackPct()).isEqualByComparingTo(new BigDecimal("0.35"));
+    // Peak-anchored, carried through as-is. The BFF must never re-derive it from a live mark.
+    assertThat(state.trailStopPrice()).isEqualByComparingTo(new BigDecimal("2.63"));
+  }
+
+  /**
+   * Mixed-version guard, in the direction a roll actually produces: the orchestrator is still the
+   * OLD 5-field build while the BFF already knows the trailing fields. Jackson leaves the defaults,
+   * so the position renders UN-armed. That is the safe degradation — the dangerous failure would be
+   * a badge asserting a stop the workflow does not hold.
+   */
+  @Test
+  void legacyFiveFieldPayloadStillDeserializesAndReportsNoTrail() {
+    DefaultDataConverter converter = DefaultDataConverter.newDefaultInstance();
+
+    PositionStateView state =
+        converter.fromPayload(
+            jsonPayload(FIVE_FIELD_JSON), PositionStateView.class, PositionStateView.class);
+
+    assertThat(state.contractSymbol()).isEqualTo("INTC  260618C00022000");
+    assertThat(state.trailingArmed()).isFalse();
+    assertThat(state.trailGivebackPct()).isNull();
+    assertThat(state.trailStopPrice()).isNull();
+  }
+
   @Test
   void deserializesPositionStateWithExtraOrchestratorFieldsViaTemporalConverter() {
     DefaultDataConverter converter = DefaultDataConverter.newDefaultInstance();

@@ -123,7 +123,10 @@ public class PositionsReader {
           state.contractSymbol(),
           state.remainingQty(),
           state.entryPremium(),
-          openNotional);
+          openNotional,
+          state.trailingArmed(),
+          state.trailGivebackPct(),
+          state.trailStopPrice());
     } catch (RuntimeException e) {
       log.warn(
           "positionState query failed wf={} strategy={} err={}", wfId, strategyId, e.getMessage());
@@ -159,14 +162,47 @@ public class PositionsReader {
     }
   }
 
-  /** One valued open position. */
+  /**
+   * One valued open position. The trailing triple is DISPLAY-only, straight off the workflow's own
+   * {@code positionState}: {@code trailingArmed} says whether a chandelier trail is armed, {@code
+   * trailGivebackPct} at what fraction, and {@code trailStopPrice} where it would fire right now.
+   * The stop price is PEAK-anchored and must be passed through as-is — recomputing it from a live
+   * mark understates the stop on any position sitting below its high.
+   */
   public record OpenPosition(
       String workflowId,
       String strategyId,
       String contractSymbol,
       long remainingQty,
       BigDecimal entryPremium,
-      BigDecimal openNotional) {}
+      BigDecimal openNotional,
+      boolean trailingArmed,
+      BigDecimal trailGivebackPct,
+      BigDecimal trailStopPrice) {
+
+    /**
+     * Back-compat 6-arg form for call sites that predate the trailing fields. Defaults to UN-armed
+     * — a producer that does not observe a trail must not claim one.
+     */
+    public OpenPosition(
+        String workflowId,
+        String strategyId,
+        String contractSymbol,
+        long remainingQty,
+        BigDecimal entryPremium,
+        BigDecimal openNotional) {
+      this(
+          workflowId,
+          strategyId,
+          contractSymbol,
+          remainingQty,
+          entryPremium,
+          openNotional,
+          false,
+          null,
+          null);
+    }
+  }
 
   /**
    * Transport mirror of the orchestrator's {@code PositionState} query result so the BFF can
@@ -177,8 +213,30 @@ public class PositionsReader {
    * Temporal data converter (Jackson, fail-on-unknown) threw on every query, dropping every
    * position so the dashboard showed 0 open. The BFF intentionally mirrors only the fields it
    * needs.
+   *
+   * <p>The trailing triple ({@code trailingArmed}, {@code trailGivebackPct}, {@code
+   * trailStopPrice}) is what /live's per-position stop badge renders. An orchestrator that predates
+   * those fields simply omits them and Jackson leaves the defaults ({@code false} / {@code null}),
+   * so a mixed-version cluster degrades to "no trail shown" — never to a badge claiming protection
+   * that isn't there.
    */
   @JsonIgnoreProperties(ignoreUnknown = true)
   public record PositionStateView(
-      String contractSymbol, long remainingQty, BigDecimal entryPremium) {}
+      String contractSymbol,
+      long remainingQty,
+      BigDecimal entryPremium,
+      boolean trailingArmed,
+      BigDecimal trailGivebackPct,
+      BigDecimal trailStopPrice) {
+
+    /**
+     * Back-compat 3-arg form for fixtures that predate the trailing fields; defaults to un-armed.
+     * Jackson still creates records through the CANONICAL constructor, so this does not affect
+     * deserialization — the same pattern the orchestrator's own {@code PositionState} has carried
+     * through this converter since the {@code entryAt}/{@code partialExited} widening.
+     */
+    public PositionStateView(String contractSymbol, long remainingQty, BigDecimal entryPremium) {
+      this(contractSymbol, remainingQty, entryPremium, false, null, null);
+    }
+  }
 }

@@ -4220,6 +4220,51 @@ class PositionWorkflowImplTest {
   }
 
   @Test
+  void positionState_reportsTheArmedTrailAndKeepsThePeakAnchoredStop() throws Exception {
+    // /live's per-position stop badge reads THIS query. Before this, positionState carried no
+    // trailing state at all, so an armed position rendered on refresh exactly like an unprotected
+    // one — the operator's only evidence the stop existed was the transient toast at arm time.
+    PositionWorkflow stub = newStub("pos-state-armed");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    assertThat(stub.positionState().trailingArmed()).isFalse();
+
+    // Same fixture as armTrail_operatorArmsAndStopIsPeakAnchored: mid 2.55, 20% -> stop 2.04.
+    stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20")));
+
+    PositionState armed = stub.positionState();
+    assertThat(armed.trailingArmed()).isTrue();
+    assertThat(armed.trailGivebackPct()).isEqualByComparingTo("0.20");
+    assertThat(armed.trailStopPrice()).isEqualByComparingTo("2.04");
+
+    // THE reason the stop price is reported rather than left to the client: it is PEAK-anchored.
+    // Drive the premium down (still above the 2.04 threshold, so nothing fires) and the reported
+    // stop must NOT follow it. A client deriving stop = mark * (1 - giveback) would print 1.76
+    // here and tell the operator they have 20% of room below a stop that actually sits 7% away.
+    stub.chandelierTick(tick(new BigDecimal("2.20")));
+    waitForTickObserved(stub);
+
+    PositionState afterDrop = stub.positionState();
+    assertThat(afterDrop.trailingArmed()).isTrue();
+    assertThat(afterDrop.trailStopPrice()).isEqualByComparingTo("2.04");
+  }
+
+  @Test
+  void positionState_reportsNoTrailWhenNoneIsArmed() throws Exception {
+    // The un-armed contract the badge depends on: null giveback / null stop, so /live offers the
+    // arm control instead of claiming a protection that does not exist.
+    PositionWorkflow stub = newStub("pos-state-unarmed");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+
+    PositionState state = stub.positionState();
+    assertThat(state.trailingArmed()).isFalse();
+    assertThat(state.trailGivebackPct()).isNull();
+    assertThat(state.trailStopPrice()).isNull();
+  }
+
+  @Test
   void armTrail_copytradePosition_anchorsOnTheMidTheTickLoopWillCompare() throws Exception {
     // THE invariant: the peak must be in the same price space as the ticks it will be compared
     // against. The main loop routes to processExitTick (which trails on the BID) only when

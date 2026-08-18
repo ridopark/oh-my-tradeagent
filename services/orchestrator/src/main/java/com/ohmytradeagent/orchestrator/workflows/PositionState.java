@@ -25,13 +25,29 @@ import java.time.OffsetDateTime;
  * @param partialExited {@code true} once any partial-exit fill has decremented {@code remainingQty}
  *     (set in {@code emitExitFill}). The supersede guardrail refuses to auto-cancel a leg that has
  *     already partially exited — only an untouched just-filled leg may be superseded.
+ * @param trailingArmed {@code true} while a chandelier trail is armed on this position (however it
+ *     was armed: config, watchlist target, or the operator {@code armTrail} Update). DISPLAY-ONLY —
+ *     see the note below.
+ * @param trailGivebackPct the armed trail's giveback fraction (0.35 == a 35% trail), {@code null}
+ *     when no trail is armed. DISPLAY-ONLY.
+ * @param trailStopPrice the price the armed trail would fire at RIGHT NOW: {@code peakPremium × (1
+ *     - giveback)}, {@code null} when no trail is armed. PEAK-anchored, so it only ever rises — a
+ *     consumer must NOT re-derive it from a live mark, which understates the stop on any position
+ *     off its high. DISPLAY-ONLY.
+ *     <p>The three trailing fields are DISPLAY-ONLY: they exist so {@code /live} can tell an
+ *     operator whether the position they are looking at is protected, and at what level. No risk
+ *     gate reads them — {@code VisibilityPortfolioSnapshot}, {@code AccountKillSwitchWorkflowImpl}
+ *     and {@code PositionLookupActivitiesImpl} consume the fields above them and nothing here.
  */
 public record PositionState(
     String contractSymbol,
     long remainingQty,
     BigDecimal entryPremium,
     OffsetDateTime entryAt,
-    boolean partialExited) {
+    boolean partialExited,
+    boolean trailingArmed,
+    BigDecimal trailGivebackPct,
+    BigDecimal trailStopPrice) {
 
   /**
    * Back-compat 3-arg form for the many call sites (and test fixtures) that predate the F1
@@ -41,5 +57,19 @@ public record PositionState(
    */
   public PositionState(String contractSymbol, long remainingQty, BigDecimal entryPremium) {
     this(contractSymbol, remainingQty, entryPremium, null, false);
+  }
+
+  /**
+   * Back-compat 5-arg form for the call sites that predate the display-only trailing fields.
+   * Delegates with the UN-ARMED defaults, which is also what every non-{@code PositionWorkflowImpl}
+   * producer of this record means: they do not observe a trail, so they must not claim one.
+   */
+  public PositionState(
+      String contractSymbol,
+      long remainingQty,
+      BigDecimal entryPremium,
+      OffsetDateTime entryAt,
+      boolean partialExited) {
+    this(contractSymbol, remainingQty, entryPremium, entryAt, partialExited, false, null, null);
   }
 }
