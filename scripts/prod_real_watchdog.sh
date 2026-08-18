@@ -98,7 +98,23 @@ check_ks() {
     degraded=1
   elif printf '%s' "$st" | grep -q '"tripped":true'; then
     reason=$(printf '%s' "$st" | grep -o '"reason":"[^"]*"' | head -1)
-    anomalies+=("KILL SWITCH TRIPPED: $1 ${reason:-}")
+    # An operator Deactivate trips the breaker BY DESIGN, and it stays tripped for as
+    # long as the strategy is meant to stay off. prod_real's watchlist-trigger-v1 has
+    # been deliberately deactivated since 2026-08-16 and is NOT to be re-activated, so
+    # this fired every trading morning with nothing for the operator to do. A page that
+    # is always present is a page nobody reads — the same alert-fatigue that let the
+    # fill listener sit broken for eleven weeks.
+    #
+    # Suppress the PAGE, never the VISIBILITY: the state still goes to the log every
+    # run, so a strategy left off by accident is still discoverable. Only this exact
+    # reason is exempt, because it literally means "an operator clicked Deactivate".
+    # An automatic trip (auto:*, risk breach, loss cap) carries a different reason and
+    # still pages.
+    if printf '%s' "$reason" | grep -q 'live_deactivation:one_click'; then
+      log "INFO: $1 tripped by an intentional operator Deactivate (${reason:-}) — not an anomaly"
+    else
+      anomalies+=("KILL SWITCH TRIPPED: $1 ${reason:-}")
+    fi
   fi
 }
 
