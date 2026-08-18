@@ -27,6 +27,7 @@ public class FillListenerMetrics {
   private final Map<String, Counter> receivedByEvent;
   private final Counter eventsDispatched;
   private final Counter subscriptionConfirmed;
+  private final Counter framesWithoutStream;
   private final Counter eventsDroppedDedup;
   private final Counter reconnects;
   private final Counter eventsUnknownOrder;
@@ -68,6 +69,15 @@ public class FillListenerMetrics {
                     + " successfully and still never subscribe, and this counter is the only"
                     + " signal that distinguishes the two. Expect one per open socket per"
                     + " (re)connect, so a pod serving N tenants should reach N shortly after boot.")
+            .register(registry);
+    this.framesWithoutStream =
+        Counter.builder("fill_listener.frames_without_stream")
+            .description(
+                "Frames carrying no top-level `stream` field, i.e. an envelope this listener does"
+                    + " not model. Non-zero means trade updates may be arriving in a shape that is"
+                    + " being discarded — see the accompanying WARN for the field names. Counted"
+                    + " on every occurrence even though the log is damped, so volume stays"
+                    + " visible.")
             .register(registry);
     this.eventsDroppedDedup =
         Counter.builder("fill_listener.events_dropped_dedup")
@@ -136,6 +146,10 @@ public class FillListenerMetrics {
 
   public void recordSubscriptionConfirmed() {
     subscriptionConfirmed.increment();
+  }
+
+  public void recordFrameWithoutStream() {
+    framesWithoutStream.increment();
   }
 
   public void recordDroppedDedup() {
