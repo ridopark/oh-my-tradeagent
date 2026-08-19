@@ -1118,6 +1118,146 @@ class PositionWorkflowImplTest {
         .isEqualTo(5L);
   }
 
+  /**
+   * Issue #735 (cumulative-vs-delta): Alpaca reports {@code filled_qty} as the CUMULATIVE quantity
+   * filled so far on an order, NOT the increment since the last event. A 5-lot flatten that fills 2
+   * then completes reports {@code 2} then {@code 5} on the SAME broker order.
+   *
+   * <p>This is the distinction every other multi-fill test in this file misses: they feed DELTAS
+   * ({@code 2} then {@code 3}) on two DIFFERENT broker order ids, which is the shape a sequence of
+   * separate terminal fills has — not the shape a partially-filled single order has. Feeding deltas
+   * is why a green suite has never seen this bug.
+   *
+   * <p>Booking the second event's cumulative {@code 5} as if it were a delta over-books by 3 and
+   * drives {@code remainingQty} NEGATIVE (5 - 2 - 5 = -2), breaking the R-AA-1 invariant that
+   * PositionClosed is emitted at broker-confirmed zero.
+   */
+  @Test
+  void issue735_cumulativeFilledQtyOnOneOrder_booksDeltasNotCumulative() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-735-cumulative");
+    PositionWorkflowInput in = input(5);
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
+    in.setEodForceFlatten(Boolean.TRUE);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    // Partial fill: 2 of 5 filled so far on order brk-735.
+    stub.onFill(fill("brk-735", 2L, new BigDecimal("2.50")));
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() == 5L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+
+    // SAME order completes: cumulative 5 (i.e. the residual 3). Must book a delta of 3, not 5.
+    stub.onFill(fill("brk-735", 5L, new BigDecimal("2.48")));
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-735-cumulative");
+
+    // Total booked is the lot, never more.
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills.stream().mapToLong(e -> asLong(e.getSubject().get("qty_filled"))).sum())
+        .as("booked qty must equal the 5-lot, not 7 (2 + cumulative 5)")
+        .isEqualTo(5L);
+
+    // R-AA-1: remainingQty must land at exactly zero and never go negative.
+    AuditEvent closed = captureKind("PositionClosed");
+    assertThat(asLong(closed.getSubject().get("remaining_qty")))
+        .as("remainingQty must never be driven negative by a cumulative report")
+        .isEqualTo(0L);
+    assertThat(
+            fills.stream()
+                .mapToLong(e -> asLong(e.getSubject().get("remaining_qty_after")))
+                .min()
+                .orElse(0L))
+        .as("no booking may leave remainingQty below zero")
+        .isGreaterThanOrEqualTo(0L);
+  }
+
+  /**
+   * Issue #735 duplicate guard: the SAME broker fill can reach the workflow via two evidences (a
+   * cancel-on-filled return AND a buffered onFill). Re-reporting a cumulative already booked must
+   * book NOTHING — not a second full decrement.
+   */
+  @Test
+  void issue735_duplicateCumulativeReport_booksOnce() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-735-dup");
+    PositionWorkflowInput in = input(5);
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
+    in.setEodForceFlatten(Boolean.TRUE);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    stub.onFill(fill("brk-dup", 2L, new BigDecimal("2.50")));
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() == 5L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+
+    // The SAME cumulative again — a re-report of one fill, not new progress.
+    stub.onFill(fill("brk-dup", 2L, new BigDecimal("2.50")));
+    Thread.sleep(500);
+    assertThat(stub.positionState().remainingQty())
+        .as("a duplicate cumulative must not decrement the lot a second time")
+        .isEqualTo(3L);
+
+    // Genuine completion of the same order closes it.
+    stub.onFill(fill("brk-dup", 5L, new BigDecimal("2.48")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(
+            captureAll("PartialExitFilled").stream()
+                .mapToLong(e -> asLong(e.getSubject().get("qty_filled")))
+                .sum())
+        .isEqualTo(5L);
+  }
+
+  /**
+   * Issue #735 clamp: a broker report LARGER than the outstanding lot (stale, duplicated, or a
+   * correction) must never drive {@code remainingQty} negative — that would emit PositionClosed
+   * with remaining &lt; 0 and break R-AA-1.
+   */
+  @Test
+  void issue735_oversizedBrokerReport_clampsAndNeverGoesNegative() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-735-oversized");
+    PositionWorkflowInput in = input(5);
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
+    in.setEodForceFlatten(Boolean.TRUE);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    // Broker reports 9 filled against a 5-lot.
+    stub.onFill(fill("brk-oversized", 9L, new BigDecimal("2.40")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills.stream().mapToLong(e -> asLong(e.getSubject().get("qty_filled"))).sum())
+        .as("booking is clamped to the outstanding lot")
+        .isEqualTo(5L);
+    AuditEvent closed = captureKind("PositionClosed");
+    assertThat(asLong(closed.getSubject().get("remaining_qty")))
+        .as("remainingQty must never be negative")
+        .isEqualTo(0L);
+  }
+
   // ---------- Phase 1 (PLAN-2026-06-30): flatten broker-authoritative terminal-state reconcile
   // ----------
 
@@ -1471,12 +1611,15 @@ class PositionWorkflowImplTest {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
     // Cancel #1 (K0 timeout): PARTIAL 2-of-5. Cancel #2 (K1/:retry-1 timeout): the residual 3
     // fills.
+    // #735: K0 and K1 are two DISTINCT broker orders, so they carry distinct broker order ids.
+    // K0 partially fills 2-of-5; the residual 3 is filled by the fresh :retry-1 order K1, whose
+    // OWN cumulative is 3.
     when(exec.cancelOrder(anyString()))
-        .thenReturn(filledCancelResult(2L, new BigDecimal("1.90")))
-        .thenReturn(filledCancelResult(3L, new BigDecimal("1.85")));
+        .thenReturn(filledCancelResult(2L, new BigDecimal("1.90"), "brk-k0"))
+        .thenReturn(filledCancelResult(3L, new BigDecimal("1.85"), "brk-k1"));
     // Only getOrderStatus call is the retry-loop reconcile of K0 -> same cumulative 2 (delta 0).
     when(exec.getOrderStatus(anyString()))
-        .thenReturn(filledCancelResult(2L, new BigDecimal("1.90")));
+        .thenReturn(filledCancelResult(2L, new BigDecimal("1.90"), "brk-k0"));
 
     PositionWorkflow stub = newStub("pos-flatten-residual-fill");
     PositionWorkflowInput in = input(5);
@@ -4443,10 +4586,24 @@ class PositionWorkflowImplTest {
    * terminal state the orchestrator must reconcile rather than discard.
    */
   private OrderIntentResult filledCancelResult(long filledQty, BigDecimal avgFillPrice) {
+    return filledCancelResult(filledQty, avgFillPrice, "brk-cancel-filled");
+  }
+
+  /**
+   * Issue #735: overload taking an explicit broker order id. Two placements of the SAME position
+   * (an original {@code exit-key} and its {@code :retry-1}) are two DISTINCT broker orders and
+   * therefore carry DISTINCT broker order ids — a broker never reissues one. The default overload
+   * hardcodes a single id, which is harmless for tests that place once but silently models the
+   * impossible when a test places twice. The #735 ledger keys on the broker order (the unit Alpaca
+   * reports cumulative filled_qty against), so a test that shares one id across two orders is
+   * asserting on a scenario that cannot occur.
+   */
+  private OrderIntentResult filledCancelResult(
+      long filledQty, BigDecimal avgFillPrice, String brokerOrderId) {
     OrderIntentResult r = new OrderIntentResult();
     r.setSchemaVersion(1L);
     r.setIntentKey("exit-key");
-    r.setBrokerOrderId("brk-cancel-filled");
+    r.setBrokerOrderId(brokerOrderId);
     r.setState(OrderIntentResult.State.FILLED);
     r.setFilledQty(filledQty);
     r.setAvgFillPrice(avgFillPrice);

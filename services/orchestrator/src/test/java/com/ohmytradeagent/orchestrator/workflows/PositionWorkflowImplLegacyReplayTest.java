@@ -98,6 +98,23 @@ class PositionWorkflowImplLegacyReplayTest {
    * test loudly. Mirrors {@link
    * CopytradeSignalWorkflowImplLegacyReplayTest#versionPreTradeDispatchConstantNameIsStable}.
    */
+  /**
+   * Issue #735: the {@code exit-cumulative-ledger-v1} changeId is the ONLY thing standing between
+   * ~12 in-flight real-money PositionWorkflow executions and a non-deterministic replay, because
+   * under v&gt;=1 a duplicate broker report books a delta of 0 and emits NO {@code
+   * PartialExitFilled} where v=0 emitted one — a command-COUNT divergence. Renaming the constant
+   * silently resets every in-flight execution to the new branch, so pin the literal.
+   *
+   * <p>This guards the changeId's IDENTITY, not the gate's replay behaviour. See the class javadoc
+   * note on why no fixture currently discriminates that.
+   */
+  @Test
+  void versionExitCumulativeLedgerConstantNameIsStable() throws Exception {
+    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_EXIT_CUMULATIVE_LEDGER");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("exit-cumulative-ledger-v1");
+  }
+
   @Test
   void versionExitFilledOptionSymbolConstantNameIsStable() throws Exception {
     Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_EXIT_FILLED_OPTION_SYMBOL");

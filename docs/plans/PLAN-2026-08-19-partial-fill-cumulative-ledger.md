@@ -80,9 +80,14 @@ Required even though Temporal 1.27 replay ignores activity *input* payloads: boo
 where v=0 booked a full cumulative emits **zero** `auditLog` commands where the old history has one.
 That is a command-count divergence, not a payload difference — replay-fatal without the gate.
 
-**Ledger bound.** Keyed by `intentKey`, which grows with retries (`:retry-N`) over a workflow's life.
-Cap the map and evict the oldest key on overflow — an unbounded map in workflow state is a history
-bloat vector on a workflow that already has no continue-as-new (see Risks).
+**Ledger bound.** ~~Keyed by `intentKey`~~ **CORRECTED during implementation: keyed by
+`broker_order_id`**, which is the unit Alpaca actually cumulates over (an `intentKey` is a proxy
+that a `:retry-N` placement breaks). Capped at 64 with oldest-first eviction.
+
+~~an unbounded map in workflow state is a history bloat vector~~ — **this claim was wrong.** Workflow
+*fields* are never serialized into Temporal history; history holds commands and events and state is
+reconstructed by replay. An unbounded ledger is a worker-heap concern only. Still bounded, but for
+the right reason.
 
 **Tests (red first):**
 - 11-lot exit reporting cumulative `5` then `11` books `5` then `6`; `remainingQty == 0`, exactly two
@@ -168,7 +173,31 @@ Only after Phases 1-2 are on `main` **and rolled**:
 
 ---
 
-## Replay fixtures — the thing most likely to make this plan toothless
+## Replay fixtures — CONFIRMED TOOTHLESS for Phase 1
+
+**Measured, not predicted.** The existing `position-pre-276-legacy-history.json` does NOT
+discriminate this change:
+
+- with `VERSION_EXIT_CUMULATIVE_LEDGER` **fully defeated** (ledger forced on unconditionally), all
+  14 replay tests still pass — and so does the **entire 1,346-test suite**
+- the reason is structural: that history books exactly ONCE, and the ledger only diverges on a
+  SECOND booking against the same broker order
+
+An attempt to record a discriminating fixture (a 4-lot drained by booking one cumulative twice, the
+stale-`lastFillEvent` defect) reproduced the scenario but would not replay against the real impl —
+it diverges at the cycle-2 `PlaceOrder` on `activityId`, i.e. the emulator does not mirror the real
+`PositionWorkflowImpl`'s internal `Workflow.randomUUID()` consumption. Rather than commit a fixture
+that does not replay, it was removed.
+
+**Consequence, stated plainly: the version gate is NOT verified by any test.** What IS verified is
+that the v=0 branch is reachable and byte-identical for the single-fill path (the pre-#276 fixture
+exercises it), and that the changeId literal is pinned against a silent rename. The replay-safety
+argument otherwise rests on Temporal's documented contract — an unknown changeId on a history with
+no marker returns `DEFAULT_VERSION` — which is how all 27 existing gates in this file already work.
+
+Building a discriminating fixture is required follow-up.
+
+## Replay fixtures — the original guidance
 
 This repo has been burned **twice** by replay fixtures that passed for the wrong reason (a recorded
 config value independently disabled the branch under test). Before trusting any replay test here:
