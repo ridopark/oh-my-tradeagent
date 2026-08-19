@@ -131,6 +131,41 @@ class ExecActivitiesImplPlaceOrderValidationTest {
     assertThat(broker.touched).isFalse();
   }
 
+  /**
+   * #735: a negative or zero qty must never reach the broker.
+   *
+   * <p>`remainingQty` can go NEGATIVE today: the flatten path books a cumulative broker quantity as
+   * if it were a delta, so an 11-lot exit reporting (5, then 11) books 5 and then 11 against an
+   * 11-lot, leaving -5. `flattenIntent` does `setQty(remainingQty)` with no floor, and
+   * `flattenRemaining`'s only early-out is `remainingQty == 0` — which -5 sails straight past. The
+   * intent is then journaled and POSTed, Alpaca 422s it non-retryably, and the failure propagates
+   * out of `run()`, failing the PositionWorkflow and orphaning a LIVE lot.
+   *
+   * <p>This guard is deliberately at the exec boundary rather than in the workflow: it is the last
+   * place every order passes through, it needs no Temporal version gate, and it holds regardless of
+   * which of the eight cumulative-vs-delta sites is fixed first.
+   */
+  @Test
+  void placeOrder_nonPositiveQty_throwsNonRetryable_beforeJournalOrBroker() {
+    for (long bad : new long[] {0L, -5L}) {
+      OrderIntent intent = validIntent();
+      intent.setQty(bad);
+
+      assertThatThrownBy(() -> exec.placeOrder(intent))
+          .as("qty=%s must be rejected", bad)
+          .isInstanceOfSatisfying(
+              ApplicationFailure.class,
+              f -> {
+                assertThat(f.getType()).isEqualTo("InvalidOrderIntentError");
+                assertThat(f.isNonRetryable()).isTrue();
+                assertThat(f.getOriginalMessage()).contains("qty");
+              });
+    }
+
+    assertThat(journal.touched).isFalse();
+    assertThat(broker.touched).isFalse();
+  }
+
   private static OrderIntent validIntent() {
     OrderIntent i = new OrderIntent();
     i.setSchemaVersion(1L);
