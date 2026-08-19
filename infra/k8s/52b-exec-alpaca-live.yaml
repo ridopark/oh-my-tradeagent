@@ -136,6 +136,19 @@ spec:
             # only symptom would have been fills quietly arriving 30-69s late again.
             - name: EXEC_FILL_LISTENER_PER_TENANT_ENABLED
               value: "true"
+            # #715 starvation guard (PR #736). DELIBERATELY DISABLED on real money.
+            #
+            # Declared as an explicit 0 rather than left absent so the armed/disarmed state of a
+            # real-money control is READABLE in the manifest. An absent var and a var set to 0
+            # behave identically and look completely different to an operator: one reads as
+            # "nobody considered this", the other as "considered, and off on purpose".
+            #
+            # Arming this on live is gated on the paper soak proving the mechanism (recycles firing
+            # 1:1 with reconnects, callbacks still climbing after a recycle). #735 P1+P2 are the
+            # OTHER precondition and are already merged: a working socket delivers partial_fill
+            # events, which the pre-#735 exit path mis-booked as deltas.
+            - name: EXEC_FILL_LISTENER_RECYCLE_AFTER_MS
+              value: "0"
             # Same drift, same reason: set IMPERATIVELY on the running pod, absent from this
             # manifest and from last-applied-configuration. Declared here, no behaviour change.
             #
