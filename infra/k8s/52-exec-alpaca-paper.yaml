@@ -152,6 +152,24 @@ spec:
             # duplicates fills only on a multi-pod deployment (no leader election yet).
             - name: EXEC_FILL_LISTENER_PER_TENANT_ENABLED
               value: "true"
+            # #715 starvation guard (PR #736). The socket stops being FED while remaining OPEN —
+            # no close frame, no error, reconnects_total stays 0 — so runForever, which only
+            # reconnects on close/error, never recovers it. This bounds a socket's lifetime so a
+            # starved one is replaced on a schedule instead of never.
+            #
+            # DECLARED to close a drift, not to change behaviour: armed IMPERATIVELY on the running
+            # pod (kubectl set env, 2026-08-19) for the first soak. Absent from this manifest, the
+            # NEXT deploy that applies it would have silently DISARMED the recycle — and the whole
+            # failure mode of #715 is a thing that looks armed and is not. Same class of drift the
+            # PER_TENANT_ENABLED comment above records.
+            #
+            # 900000 = 15 min. Chosen against measurement, not taste: observed starvation ran from
+            # 19 min to 385 min, so the bound sits under the SHORTEST observed starvation. Per-slot
+            # stagger is (interval / 8) * slot, so with 2 paper tenants the sockets live 15.0 and
+            # 16.9 min — deliberately different PERIODS so a shared disconnect cannot phase-lock
+            # them onto one instant. 0 disables; the floor is 10_000.
+            - name: EXEC_FILL_LISTENER_RECYCLE_AFTER_MS
+              value: "900000"
             # Issue #297 / #295: non-blocking Discord alert on a broker rejection in placeOrder.
             # The webhook URL is an operator-provisioned secret. `optional: true` so the pod still
             # boots when the secret is absent — the alerter is then a no-op (logs the would-be
