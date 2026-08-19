@@ -136,19 +136,27 @@ spec:
             # only symptom would have been fills quietly arriving 30-69s late again.
             - name: EXEC_FILL_LISTENER_PER_TENANT_ENABLED
               value: "true"
-            # #715 starvation guard (PR #736). DELIBERATELY DISABLED on real money.
+            # #715 starvation guard (PR #736). ARMED on real money 2026-08-19T23:03Z.
             #
-            # Declared as an explicit 0 rather than left absent so the armed/disarmed state of a
-            # real-money control is READABLE in the manifest. An absent var and a var set to 0
-            # behave identically and look completely different to an operator: one reads as
-            # "nobody considered this", the other as "considered, and off on purpose".
+            # Both preconditions met before arming, in this order:
+            #   1. #735 P1 (#740) + P2 (#743) merged AND rolled. A working socket delivers
+            #      partial_fill events, which the pre-#735 exit path booked as deltas — arming
+            #      first would have turned a dark bug into a live one.
+            #   2. Paper soak PASSED: 2 recycles, reconnects 1:1 with recycles (no leaked socket),
+            #      ws_callbacks still climbing after each recycle (delivery survives), one pod,
+            #      zero restarts. That was the mechanism's first execution anywhere.
             #
-            # Arming this on live is gated on the paper soak proving the mechanism (recycles firing
-            # 1:1 with reconnects, callbacks still climbing after a recycle). #735 P1+P2 are the
-            # OTHER precondition and are already merged: a working socket delivers partial_fill
-            # events, which the pre-#735 exit path mis-booked as deltas.
+            # Value matches paper deliberately — same bound, same evidence. With 3 live tenants the
+            # per-slot stagger ((interval / 8) * slot) gives 15.0 / 16.9 / 18.8 min, all under the
+            # 19-min SHORTEST observed starvation, with three distinct PERIODS so a shared
+            # disconnect cannot phase-lock three real-money accounts onto one instant.
+            #
+            # Declared here rather than left to the imperative `kubectl set env` that armed it:
+            # exec-alpaca-live is excluded from CI deploy, so only a manual `kubectl apply -f` of
+            # this file would reconcile it — and that apply, with this var absent or 0, would have
+            # SILENTLY DISARMED a real-money control. That is the failure mode #715 is made of.
             - name: EXEC_FILL_LISTENER_RECYCLE_AFTER_MS
-              value: "0"
+              value: "900000"
             # Same drift, same reason: set IMPERATIVELY on the running pod, absent from this
             # manifest and from last-applied-configuration. Declared here, no behaviour change.
             #
