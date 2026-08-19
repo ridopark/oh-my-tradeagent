@@ -588,6 +588,19 @@ public class AlpacaTradeUpdatesStream {
       }
     }
 
+    /**
+     * #715 instrumentation delegates. The Listener is a nested type holding only an {@code owner}
+     * reference, so it reaches the shared metrics the same way it already reaches {@link
+     * #handleFrame} — through the runner that owns the tenant identity.
+     */
+    private void recordWsCallback(String channel, boolean last) {
+      metrics.recordWsCallback(channel, last);
+    }
+
+    private void recordPartialBytes(long bytes) {
+      metrics.recordPartialBytes(tenant, bytes);
+    }
+
     // MUST NOT THROW. Both call sites (Listener#onText / #onBinary) invoke webSocket.request(1)
     // AFTER this returns, so an escaping exception skips the request and the socket stops being fed
     // frames entirely — permanently mute, strictly worse than the bug this logging exists to find.
@@ -816,9 +829,12 @@ public class AlpacaTradeUpdatesStream {
         return null;
       }
       partialFrame.append(data);
+      owner.recordWsCallback("text", last);
+      owner.recordPartialBytes(partialFrame.length());
       if (last) {
         String frame = partialFrame.toString();
         partialFrame.setLength(0);
+        owner.recordPartialBytes(0L);
         owner.handleFrame(frame);
       }
       webSocket.request(1);
@@ -841,9 +857,12 @@ public class AlpacaTradeUpdatesStream {
       byte[] chunk = new byte[data.remaining()];
       data.get(chunk);
       partialBinaryFrame.writeBytes(chunk);
+      owner.recordWsCallback("binary", last);
+      owner.recordPartialBytes(partialBinaryFrame.size());
       if (last) {
         String frame = partialBinaryFrame.toString(StandardCharsets.UTF_8);
         partialBinaryFrame.reset();
+        owner.recordPartialBytes(0L);
         owner.handleFrame(frame);
       }
       webSocket.request(1);

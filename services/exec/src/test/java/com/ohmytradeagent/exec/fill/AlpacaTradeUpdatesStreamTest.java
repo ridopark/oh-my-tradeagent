@@ -277,6 +277,75 @@ class AlpacaTradeUpdatesStreamTest {
         .isEqualTo(1.0);
   }
 
+  /**
+   * #715: a frame that ARRIVES but never completes is invisible to every pre-existing signal.
+   *
+   * <p>`handleFrame` is only reached on the final fragment, and every counter in {@link
+   * FillListenerMetrics} lives behind it — so `events_received`, `frames_without_stream`, the
+   * unhandled-stream warn and `last_event_age_seconds` all read exactly as they do when the broker
+   * sends nothing at all. `reconnects` stays zero too: the oversize abort is at 1MB, and a
+   * session's worth of fragments is kilobytes. The two states are indistinguishable, and one of
+   * them is OUR fault.
+   *
+   * <p>This test pins the instrument that tells them apart. It is the whole reason the gauge
+   * exists: bytes sitting in the accumulator while nothing is dispatched means the frames reached
+   * us and we failed to complete them.
+   */
+  @Test
+  void aFrameThatNeverCompletesIsVisibleInTheAccumulatorGauge() throws Exception {
+    stream.start();
+    awaitHandshake();
+
+    byte[] chunk =
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\",\"order\":{\"id\":\"never-ends\""
+            .getBytes(StandardCharsets.UTF_8);
+    server.sendNonFinalBinary(chunk);
+
+    // The accumulator must show the bytes are HERE.
+    long deadline = System.currentTimeMillis() + AWAIT_MS;
+    double buffered = 0.0;
+    while (System.currentTimeMillis() < deadline) {
+      io.micrometer.core.instrument.Gauge g =
+          registry.find("fill_listener.ws_partial_bytes").gauge();
+      if (g != null && g.value() > 0.0) {
+        buffered = g.value();
+        break;
+      }
+      Thread.sleep(25L);
+    }
+    assertThat(buffered).isGreaterThan(0.0);
+
+    // ...and the callback boundary was crossed, on a NON-final fragment.
+    assertThat(registry.counter("fill_listener.ws_callbacks", "channel", "binary").count())
+        .isGreaterThanOrEqualTo(1.0);
+    assertThat(registry.counter("fill_listener.ws_fragments", "channel", "binary").count())
+        .isGreaterThanOrEqualTo(1.0);
+
+    // Meanwhile EVERY pre-existing signal is silent — which is exactly the problem.
+    assertThat(dispatcher.events.poll(200L, TimeUnit.MILLISECONDS)).isNull();
+    assertThat(registry.counter("fill_listener.events_received", "event", "fill").count()).isZero();
+    assertThat(registry.counter("fill_listener.frames_without_stream").count()).isZero();
+    assertThat(registry.counter("fill_listener.reconnects").count()).isZero();
+  }
+
+  /** The completing case must clear the accumulator, or the gauge would read as a false alarm. */
+  @Test
+  void aCompletedFrameClearsTheAccumulatorGauge() throws Exception {
+    stream.start();
+    awaitHandshake();
+
+    server.broadcastBinary(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-clear\",\"client_order_id\":\"ck-clear\","
+            + "\"filled_qty\":\"1\",\"filled_avg_price\":\"1.00\","
+            + "\"filled_at\":\"2026-08-16T14:30:00Z\"}}}");
+
+    assertThat(dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS)).isNotNull();
+    io.micrometer.core.instrument.Gauge g = registry.find("fill_listener.ws_partial_bytes").gauge();
+    assertThat(g).isNotNull();
+    assertThat(g.value()).isZero();
+  }
+
   @Test
   void binaryFrameSplitAcrossFragmentsIsReassembled() throws Exception {
     stream.start();
@@ -1194,6 +1263,17 @@ class AlpacaTradeUpdatesStreamTest {
     }
 
     /** BINARY counterpart of {@link #sendFragmented}, split at an arbitrary BYTE boundary. */
+    /** #715: start a binary message and NEVER set FIN — the frame never completes. */
+    void sendNonFinalBinary(byte[] chunk) {
+      List<WebSocket> snapshot;
+      synchronized (clients) {
+        snapshot = new ArrayList<>(clients);
+      }
+      for (WebSocket c : snapshot) {
+        c.sendFragmentedFrame(Opcode.BINARY, ByteBuffer.wrap(chunk), false);
+      }
+    }
+
     void sendFragmentedBinary(byte[] first, byte[] second) {
       List<WebSocket> snapshot;
       synchronized (clients) {
