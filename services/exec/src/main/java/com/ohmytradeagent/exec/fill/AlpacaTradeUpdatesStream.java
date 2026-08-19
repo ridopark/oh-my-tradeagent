@@ -30,6 +30,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -593,12 +594,44 @@ public class AlpacaTradeUpdatesStream {
      * reference, so it reaches the shared metrics the same way it already reaches {@link
      * #handleFrame} — through the runner that owns the tenant identity.
      */
+    private final AtomicBoolean instrumentationWarned = new AtomicBoolean(false);
+
     private void recordWsCallback(String channel, boolean last) {
-      metrics.recordWsCallback(channel, last);
+      try {
+        metrics.recordWsCallback(channel, last);
+      } catch (RuntimeException e) {
+        instrumentationFailed(e);
+      }
     }
 
     private void recordPartialBytes(long bytes) {
-      metrics.recordPartialBytes(tenant, bytes);
+      try {
+        metrics.recordPartialBytes(tenant, bytes);
+      } catch (RuntimeException e) {
+        instrumentationFailed(e);
+      }
+    }
+
+    /**
+     * Instrumentation MUST NOT THROW, for the same reason {@link #handleFrame} must not: both are
+     * invoked from onText/onBinary BEFORE {@code webSocket.request(1)}, so an escaping exception
+     * skips the request and the socket is never fed another frame — permanently mute.
+     *
+     * <p>That is not hypothetical here. {@link FillListenerMetrics#recordPartialBytes} registers a
+     * Micrometer gauge inside {@code computeIfAbsent} on the first call per tenant, and meter
+     * registration can throw. Diagnostics that silence the very socket they exist to diagnose would
+     * be the worst possible outcome for this change, so the failure is contained and logged rather
+     * than propagated — one WARN per connection, because a broken registry would otherwise log on
+     * every frame.
+     */
+    private void instrumentationFailed(RuntimeException e) {
+      if (instrumentationWarned.compareAndSet(false, true)) {
+        log.warn(
+            "fill-listener[{}] #715 instrumentation failed; metrics for this connection are"
+                + " unreliable but the socket is unaffected: {}",
+            tenant,
+            e.toString());
+      }
     }
 
     // MUST NOT THROW. Both call sites (Listener#onText / #onBinary) invoke webSocket.request(1)

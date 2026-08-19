@@ -328,6 +328,56 @@ class AlpacaTradeUpdatesStreamTest {
     assertThat(registry.counter("fill_listener.reconnects").count()).isZero();
   }
 
+  /**
+   * #715 review finding: the instrumentation must not be able to mute the socket it instruments.
+   *
+   * <p>Both new calls run from onText/onBinary BEFORE {@code webSocket.request(1)}, the same hazard
+   * the {@link AlpacaTradeUpdatesStream} comment on {@code handleFrame} spells out — an escaping
+   * exception skips the request and the connection is never fed another frame. And it is not
+   * hypothetical: {@code recordPartialBytes} registers a Micrometer gauge on the first call per
+   * tenant, and meter registration can throw.
+   *
+   * <p>Diagnostics that silence the very socket they exist to diagnose would be the worst possible
+   * outcome of this change, so a hostile metrics implementation must be survivable.
+   */
+  @Test
+  void instrumentationThatThrowsDoesNotMuteTheSocket() throws Exception {
+    FillListenerMetrics hostile = org.mockito.Mockito.mock(FillListenerMetrics.class);
+    org.mockito.Mockito.doThrow(new IllegalStateException("meter registration failed"))
+        .when(hostile)
+        .recordPartialBytes(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyLong());
+    org.mockito.Mockito.doThrow(new IllegalStateException("counter blew up"))
+        .when(hostile)
+        .recordWsCallback(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyBoolean());
+
+    stream.stop();
+    FillListenerProperties props =
+        new FillListenerProperties(
+            true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32);
+    stream =
+        new AlpacaTradeUpdatesStream(
+            props,
+            new AlpacaProperties("http://unused", "test-key", "test-secret"),
+            new ThrowingCredentialSource(),
+            dispatcher,
+            hostile,
+            new ObjectMapper().registerModule(new JavaTimeModule()));
+    stream.start();
+    awaitHandshake();
+
+    server.broadcastBinary(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-hostile\",\"client_order_id\":\"ck-hostile\","
+            + "\"filled_qty\":\"3\",\"filled_avg_price\":\"2.50\","
+            + "\"filled_at\":\"2026-08-16T14:30:00Z\"}}}");
+
+    BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(fill).isNotNull();
+    assertThat(fill.brokerOrderId()).isEqualTo("brk-hostile");
+  }
+
   /** The completing case must clear the accumulator, or the gauge would read as a false alarm. */
   @Test
   void aCompletedFrameClearsTheAccumulatorGauge() throws Exception {
