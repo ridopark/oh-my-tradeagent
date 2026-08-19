@@ -122,8 +122,18 @@ public class AlpacaTradeUpdatesStream {
 
   /**
    * How long past its nominal lifetime this runner's socket waits, so live tenants never recycle in
-   * the same instant and leave no listener at all. Applied to the FIRST connection only — reconnect
-   * drift separates them thereafter.
+   * the same instant and leave no listener at all.
+   *
+   * <p>Applied to EVERY connection, deliberately. An earlier version consumed it on the first
+   * connection only, on the theory that "reconnect drift separates them thereafter". There is no
+   * drift: every runner would then share the identical period {@code recycleAfterMs}, so phase is
+   * preserved exactly — and any event closing several sockets at once (all live tenants dial the
+   * SAME endpoint, so an Alpaca restart or LB drain is shared fate, not an exotic case) re-phases
+   * them onto the same instant and LOCKS them there for the life of the pod. Measured: 3 tenants
+   * staggered 0/100/200ms collapsed to 0ms spread after one shared disconnect and never
+   * re-separated — exactly the state this exists to prevent. Keeping the offset on every connection
+   * makes the PERIODS differ, so they cannot lock. Cost: slot N's socket lives (1 + N/8)x the
+   * configured bound.
    */
   static long staggerMsFor(long recycleAfterMs, int slot) {
     if (recycleAfterMs <= 0L) {
@@ -466,8 +476,15 @@ public class AlpacaTradeUpdatesStream {
    * cross-account broker_order_id collision.
    */
   private final class TenantRunner {
-    /** #715: consumed by the FIRST connection only; see staggerMsFor. */
-    private long staggerMs;
+    /**
+     * FINAL deliberately: the offset must apply to EVERY connection. Consuming it after the first
+     * (the original bug) left all runners sharing one period, so a single shared disconnect
+     * phase-locked every live tenant onto the same recycle instant, permanently. Making this final
+     * turns re-introducing that into a COMPILE error rather than something a test has to notice — a
+     * stronger guard than any assertion, since the failure only manifests after a disconnect that
+     * unit tests do not naturally produce.
+     */
+    private final long staggerMs;
 
     private final String tenant;
     private final String threadName;
@@ -585,7 +602,6 @@ public class AlpacaTradeUpdatesStream {
       long recycleAfterMs = props.recycleAfterMs();
       if (recycleAfterMs > 0L) {
         long wait = recycleAfterMs + staggerMs;
-        staggerMs = 0L; // first connection only
         if (!closed.await(wait, TimeUnit.MILLISECONDS)) {
           // #715: the socket outlived its bound without closing. Tear it down HERE, on the runner's
           // own thread, because `closed` is a local of this frame — nothing outside can count it
@@ -596,8 +612,13 @@ public class AlpacaTradeUpdatesStream {
           // live socket and closes it normally, or sees null and goes straight to interrupt+join.
           // Metric LAST: this is NOT inside a Listener callback, so the rule documented on that
           // class is inverted here — a throw cannot mute the socket, but it would skip the abort.
-          currentSocket.compareAndSet(ws, null);
-          ws.abort();
+          try {
+            ws.abort();
+          } finally {
+            // Null the handle even if abort() failed. CAS-then-abort would leave a live socket
+            // unreachable by stop() on a throw; this ordering keeps stop() able to find it.
+            currentSocket.compareAndSet(ws, null);
+          }
           recordRecycle();
           log.info(
               "fill-listener[{}] recycling socket after {}ms (planned; #715 starvation guard)",
@@ -751,8 +772,18 @@ public class AlpacaTradeUpdatesStream {
           // "this authentication format is being deprecated..." in `message` on every single
           // connection for eleven weeks and we threw it away, because this line read only
           // status+action. The reply contains no secret — Alpaca never echoes the request.
+          // Log the FIELDS, not the whole node. `message` is where Alpaca carried "this
+          // authentication format is being deprecated" for eleven weeks, so it must surface — but
+          // this class's own describeShape javadoc forbids logging an unmodelled payload verbatim,
+          // because the authorization frame is the one most likely to echo the request (which
+          // carries the key and secret). Named fields get the diagnostic value with none of the
+          // risk, and this now fires once per recycle per tenant, not once per pod lifetime.
           log.info(
-              "fill-listener[{}] authorization reply status={} data={}", tenant, status, authData);
+              "fill-listener[{}] authorization reply status={} action={} message={}",
+              tenant,
+              status,
+              authData.path("action").asText(""),
+              authData.path("message").asText(""));
         } else {
           log.warn(
               "fill-listener[{}] authorization reply NOT authorized status={} action={} message={}"

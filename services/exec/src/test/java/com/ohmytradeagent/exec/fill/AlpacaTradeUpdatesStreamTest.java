@@ -274,6 +274,64 @@ class AlpacaTradeUpdatesStreamTest {
     BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
     assertThat(fill).as("runner died during recycle — socket is permanently mute").isNotNull();
     assertThat(fill.brokerOrderId()).isEqualTo("brk-recycled");
+
+    // The OLD socket must be GONE, not merely superseded. Asserting only that a new socket appeared
+    // is what let a one-leaked-socket-per-recycle mutation pass this test cleanly.
+    assertThat(server.liveClients()).as("old socket leaked across the recycle").isEqualTo(1);
+  }
+
+  /**
+   * The recycle's ordering invariants are load-bearing, and were previously untested: with the
+   * metric moved before the abort and its guard removed, a throwing meter registry skips BOTH the
+   * abort and the handle CAS, unwinds to runForever, reconnects, and overwrites currentSocket —
+   * leaking one LIVE socket per recycle, unbounded, unreachable by stop(). Measured at 15 live
+   * sockets in 3s before the guard existed.
+   */
+  @Test
+  void aThrowingRecycleMetricDoesNotLeakSockets() throws Exception {
+    stream.stop();
+    FillListenerMetrics hostile = org.mockito.Mockito.mock(FillListenerMetrics.class);
+    org.mockito.Mockito.doThrow(new IllegalStateException("meter registry down"))
+        .when(hostile)
+        .recordRecycle();
+    FillListenerProperties recycling =
+        new FillListenerProperties(
+            true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32, 10_000L);
+    stream =
+        new AlpacaTradeUpdatesStream(
+            recycling,
+            new AlpacaProperties("http://unused", "test-key", "test-secret"),
+            new ThrowingCredentialSource(),
+            dispatcher,
+            hostile,
+            new ObjectMapper().registerModule(new JavaTimeModule()));
+    stream.start();
+    awaitHandshake();
+
+    // Let it recycle at least twice; a leak would show as sockets piling up on the server.
+    assertThat(server.frames.poll(20_000L, TimeUnit.MILLISECONDS)).isNotNull();
+    assertThat(server.frames.poll(5_000L, TimeUnit.MILLISECONDS)).isNotNull();
+
+    assertThat(server.liveClients())
+        .as("a throwing recycle metric leaked the aborted socket")
+        .isEqualTo(1);
+  }
+
+  /**
+   * #715 review, REPRODUCED: consuming the stagger on the first connection only left every runner
+   * sharing one period, so a single shared disconnect re-phased all tenants onto the same instant
+   * and locked them there permanently — the exact state the stagger exists to prevent. The offset
+   * must therefore make the PERIODS differ, not just the first deadline.
+   */
+  @Test
+  void staggerMakesPeriodsDifferSoTenantsCannotPhaseLock() {
+    long interval = 900_000L;
+    long p0 = interval + AlpacaTradeUpdatesStream.staggerMsFor(interval, 0);
+    long p1 = interval + AlpacaTradeUpdatesStream.staggerMsFor(interval, 1);
+    long p2 = interval + AlpacaTradeUpdatesStream.staggerMsFor(interval, 2);
+    assertThat(p0).isNotEqualTo(p1);
+    assertThat(p1).isNotEqualTo(p2);
+    assertThat(p0).isNotEqualTo(p2);
   }
 
   /** #715 hygiene: the deprecated handshake must be gone, and the reply logged in full. */
@@ -1424,6 +1482,13 @@ class AlpacaTradeUpdatesStreamTest {
 
     /** BINARY counterpart of {@link #sendFragmented}, split at an arbitrary BYTE boundary. */
     /** #715: start a binary message and NEVER set FIN — the frame never completes. */
+    /** #715 review: without this, a leaked socket per recycle was invisible to every test. */
+    int liveClients() {
+      synchronized (clients) {
+        return clients.size();
+      }
+    }
+
     void sendNonFinalBinary(byte[] chunk) {
       List<WebSocket> snapshot;
       synchronized (clients) {
