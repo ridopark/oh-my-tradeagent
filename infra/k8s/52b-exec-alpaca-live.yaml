@@ -34,6 +34,20 @@ spec:
   # edit, or a rollout that briefly runs 2 pods) double-counts live fills. See
   # docs/ops/fill-listener.md for the constraint + the leader-election follow-up.
   replicas: 1
+  strategy:
+    # #741: MUST be Recreate, not the default RollingUpdate. At replicas:1 the default maxSurge
+    # (25%, rounded UP to 1) starts the new pod BEFORE terminating the old one, so every roll
+    # transiently runs TWO pods — which is precisely the state the replicas:1 comment above
+    # forbids. The surge buys no availability here anyway: with one replica the old pod is going
+    # away regardless.
+    #
+    # The cost of getting this wrong is not a dropped request. Each pod opens a trade-updates
+    # WebSocket per live tenant, so two pods means two sockets on the SAME broker account — the
+    # per-socket WS dedup map cannot suppress a duplicate arriving on the other pod's socket.
+    # It also muddies #715: a roll produces a window where our own new socket may displace the
+    # old one, which is indistinguishable in current telemetry from the socket going mute on its
+    # own. Same reasoning as market-data (PR #700).
+    type: Recreate
   selector:
     matchLabels:
       app: exec-alpaca-live
