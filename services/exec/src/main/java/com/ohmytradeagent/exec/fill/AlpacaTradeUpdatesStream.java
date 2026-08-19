@@ -43,9 +43,9 @@ import org.springframework.stereotype.Component;
 
 /**
  * Long-running Alpaca trade-updates WebSocket listener. Connects to the configured stream URL,
- * sends the {@code authenticate} + {@code listen} handshake frames, parses incoming JSON, filters
- * to {@code fill} / {@code partial_fill}, dedupes on {@code (broker_order_id, filled_qty)}, and
- * hands each surviving event to a {@link FillDispatcher}.
+ * sends the {@code auth} + {@code listen} handshake frames, parses incoming JSON, filters to {@code
+ * fill} / {@code partial_fill}, dedupes on {@code (broker_order_id, filled_qty)}, and hands each
+ * surviving event to a {@link FillDispatcher}.
  *
  * <p><b>Frames arrive on BOTH channels.</b> Alpaca sends trade_updates as <b>binary</b> frames
  * carrying JSON, so {@link Listener#onBinary} is load-bearing, not defensive — see #693, where its
@@ -111,6 +111,40 @@ public class AlpacaTradeUpdatesStream {
   private final AlpacaProperties alpacaProps;
   private final BrokerCredentialSource credentialSource;
   private final FillDispatcher dispatcher;
+
+  /**
+   * #715 stagger buckets. Slot-based rather than hash-based deliberately: {@code String.hashCode()}
+   * can be NEGATIVE, and a negative timeout makes {@code await(t, MS)} return false immediately — a
+   * reconnect hot loop on the live fill path. Slots are also collision-free below {@code
+   * STAGGER_SLOTS} tenants, which a hash is not.
+   */
+  static final int STAGGER_SLOTS = 8;
+
+  /**
+   * How long past its nominal lifetime this runner's socket waits, so live tenants never recycle in
+   * the same instant and leave no listener at all.
+   *
+   * <p>Applied to EVERY connection, deliberately. An earlier version consumed it on the first
+   * connection only, on the theory that "reconnect drift separates them thereafter". There is no
+   * drift: every runner would then share the identical period {@code recycleAfterMs}, so phase is
+   * preserved exactly — and any event closing several sockets at once (all live tenants dial the
+   * SAME endpoint, so an Alpaca restart or LB drain is shared fate, not an exotic case) re-phases
+   * them onto the same instant and LOCKS them there for the life of the pod. Measured: 3 tenants
+   * staggered 0/100/200ms collapsed to 0ms spread after one shared disconnect and never
+   * re-separated — exactly the state this exists to prevent. Keeping the offset on every connection
+   * makes the PERIODS differ, so they cannot lock. Cost: slot N's socket lives (1 + N/8)x the
+   * configured bound.
+   */
+  static long staggerMsFor(long recycleAfterMs, int slot) {
+    if (recycleAfterMs <= 0L) {
+      return 0L;
+    }
+    return (recycleAfterMs / STAGGER_SLOTS) * Math.floorMod(slot, STAGGER_SLOTS);
+  }
+
+  private final java.util.concurrent.atomic.AtomicInteger nextStaggerSlot =
+      new java.util.concurrent.atomic.AtomicInteger();
+
   private final FillListenerMetrics metrics;
   private final ObjectMapper mapper;
   private final HttpClient http;
@@ -442,6 +476,16 @@ public class AlpacaTradeUpdatesStream {
    * cross-account broker_order_id collision.
    */
   private final class TenantRunner {
+    /**
+     * FINAL deliberately: the offset must apply to EVERY connection. Consuming it after the first
+     * (the original bug) left all runners sharing one period, so a single shared disconnect
+     * phase-locked every live tenant onto the same recycle instant, permanently. Making this final
+     * turns re-introducing that into a COMPILE error rather than something a test has to notice — a
+     * stronger guard than any assertion, since the failure only manifests after a disconnect that
+     * unit tests do not naturally produce.
+     */
+    private final long staggerMs;
+
     private final String tenant;
     private final String threadName;
     private final EndpointSupplier endpointSupplier;
@@ -460,6 +504,7 @@ public class AlpacaTradeUpdatesStream {
     private Thread runner;
 
     TenantRunner(String tenant, String threadName, EndpointSupplier endpointSupplier) {
+      this.staggerMs = staggerMsFor(props.recycleAfterMs(), nextStaggerSlot.getAndIncrement());
       this.tenant = tenant;
       this.threadName = threadName;
       this.endpointSupplier = endpointSupplier;
@@ -554,7 +599,40 @@ public class AlpacaTradeUpdatesStream {
       unhandledStreamsWarned.clear();
       sendAuth(ws, endpoint);
       sendListen(ws);
-      closed.await();
+      long recycleAfterMs = props.recycleAfterMs();
+      if (recycleAfterMs > 0L) {
+        long wait = recycleAfterMs + staggerMs;
+        if (!closed.await(wait, TimeUnit.MILLISECONDS)) {
+          // #715: the socket outlived its bound without closing. Tear it down HERE, on the runner's
+          // own thread, because `closed` is a local of this frame — nothing outside can count it
+          // down. An external abort would leave this thread parked in await() forever with the
+          // socket dead: the #715 symptom, self-inflicted and permanent.
+          //
+          // Order matters. Abort FIRST, then null the handle in a finally. Until the abort has
+          // been attempted the socket is still live, so a concurrent stop() that reads the handle
+          // finds it and closes it normally; nulling first would drop the only reference to a
+          // still-live socket, and an abort() that then threw would leave it unreachable by stop()
+          // forever. The finally clears the handle on both paths, so a throwing abort() cannot
+          // strand a stale handle either.
+          // Metric LAST: this is NOT inside a Listener callback, so the rule documented on that
+          // class is inverted here — a throw cannot mute the socket, but it would skip the abort.
+          try {
+            ws.abort();
+          } finally {
+            currentSocket.compareAndSet(ws, null);
+          }
+          recordRecycle();
+          log.info(
+              "fill-listener[{}] recycling socket after {}ms (planned; #715 starvation guard)",
+              tenant,
+              wait);
+          // Clean return => runForever resets backoff to base. A planned recycle must NOT escalate
+          // backoff, or a healthy socket would widen its own gap toward the cap every interval.
+          return;
+        }
+      } else {
+        closed.await();
+      }
       currentSocket.compareAndSet(ws, null);
     }
 
@@ -562,13 +640,11 @@ public class AlpacaTradeUpdatesStream {
       Map<String, Object> frame =
           Map.of(
               "action",
-              "authenticate",
-              "data",
-              Map.of(
-                  "key_id",
-                  nullToEmpty(endpoint.keyId()),
-                  "secret_key",
-                  nullToEmpty(endpoint.secret())));
+              "auth",
+              "key",
+              nullToEmpty(endpoint.keyId()),
+              "secret",
+              nullToEmpty(endpoint.secret()));
       sendTextWithTimeout(ws, serialize(frame));
     }
 
@@ -595,6 +671,15 @@ public class AlpacaTradeUpdatesStream {
      * #handleFrame} — through the runner that owns the tenant identity.
      */
     private final AtomicBoolean instrumentationWarned = new AtomicBoolean(false);
+
+    /** Guarded like the Listener delegates: instrumentation must never break the socket path. */
+    private void recordRecycle() {
+      try {
+        metrics.recordRecycle();
+      } catch (RuntimeException e) {
+        log.warn("fill-listener[{}] recycle metric failed: {}", tenant, e.toString());
+      }
+    }
 
     private void recordWsCallback(String channel, boolean last) {
       try {
@@ -685,11 +770,22 @@ public class AlpacaTradeUpdatesStream {
         // is not explicitly "authorized" warns, including a reply with no status at all: an
         // unrecognized shape must fail loud rather than be assumed successful.
         if ("authorized".equals(status)) {
+          // Log the WHOLE payload, not two extracted fields. Alpaca carried
+          // "this authentication format is being deprecated..." in `message` on every single
+          // connection for eleven weeks and we threw it away, because this line read only
+          // status+action. The reply contains no secret — Alpaca never echoes the request.
+          // Log the FIELDS, not the whole node. `message` is where Alpaca carried "this
+          // authentication format is being deprecated" for eleven weeks, so it must surface — but
+          // this class's own describeShape javadoc forbids logging an unmodelled payload verbatim,
+          // because the authorization frame is the one most likely to echo the request (which
+          // carries the key and secret). Named fields get the diagnostic value with none of the
+          // risk, and this now fires once per recycle per tenant, not once per pod lifetime.
           log.info(
-              "fill-listener[{}] authorization reply status={} action={}",
+              "fill-listener[{}] authorization reply status={} action={} message={}",
               tenant,
               status,
-              authData.path("action").asText(""));
+              authData.path("action").asText(""),
+              authData.path("message").asText(""));
         } else {
           log.warn(
               "fill-listener[{}] authorization reply NOT authorized status={} action={} message={}"

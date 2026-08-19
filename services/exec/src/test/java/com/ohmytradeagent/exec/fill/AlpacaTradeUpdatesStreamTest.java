@@ -1,6 +1,7 @@
 package com.ohmytradeagent.exec.fill;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
@@ -38,8 +39,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Drives {@link AlpacaTradeUpdatesStream} against an in-process Java-WebSocket server. Pins the
- * Alpaca trade-updates handshake shape (authenticate → listen → events) and the listener's filter /
- * dedup / reconnect contracts.
+ * Alpaca trade-updates handshake shape (auth → listen → events) and the listener's filter / dedup /
+ * reconnect contracts.
  */
 class AlpacaTradeUpdatesStreamTest {
 
@@ -66,7 +67,7 @@ class AlpacaTradeUpdatesStreamTest {
 
     FillListenerProperties props =
         new FillListenerProperties(
-            true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32);
+            true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32, 0L);
     AlpacaProperties alpaca = new AlpacaProperties("http://unused", "test-key", "test-secret");
     ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
     // OFF path: the credential source is unused (single socket authenticates with alpacaProps).
@@ -93,9 +94,13 @@ class AlpacaTradeUpdatesStreamTest {
     String listen = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
 
     assertThat(auth).isNotNull();
-    assertThat(auth).contains("\"action\":\"authenticate\"");
-    assertThat(auth).contains("\"key_id\":\"test-key\"");
-    assertThat(auth).contains("\"secret_key\":\"test-secret\"");
+    // #715: Alpaca answered our old {"action":"authenticate","data":{"key_id","secret_key"}}
+    // with "this authentication format is being deprecated" on EVERY connection for eleven
+    // weeks — discarded because the handler logged only status and action. Verified against the
+    // live paper endpoint before switching: the new shape authorizes with no warning.
+    assertThat(auth).contains("\"action\":\"auth\"");
+    assertThat(auth).contains("\"key\":\"test-key\"");
+    assertThat(auth).contains("\"secret\":\"test-secret\"");
     assertThat(listen).isNotNull();
     assertThat(listen).contains("\"action\":\"listen\"");
     assertThat(listen).contains("\"trade_updates\"");
@@ -176,6 +181,169 @@ class AlpacaTradeUpdatesStreamTest {
     assertThat(auth).isNotNull();
     assertThat(listen).isNotNull();
     assertThat(registry.counter("fill_listener.reconnects").count()).isGreaterThanOrEqualTo(1.0);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // #715 — a trade-updates socket stops being fed while staying OPEN: no close frame, no error,
+  // reconnects_total stays 0, and runForever stays parked in closed.await() for the life of the
+  // pod. Measured: one socket delivered 6h25m then went permanently silent; another was already
+  // silent at 19 minutes. A bounded socket lifetime is the only thing that ends that state.
+  // ---------------------------------------------------------------------------------------------
+
+  /** The stagger must be deterministic AND collision-free — two live tenants must not coincide. */
+  @Test
+  void staggerSeparatesTenantsAndNeverGoesNegative() {
+    long interval = 900_000L;
+    java.util.Set<Long> seen = new java.util.HashSet<>();
+    for (int slot = 0; slot < 8; slot++) {
+      long st = AlpacaTradeUpdatesStream.staggerMsFor(interval, slot);
+      assertThat(st).isGreaterThanOrEqualTo(0L).isLessThan(interval);
+      assertThat(seen.add(st)).as("slot %s collided", slot).isTrue();
+    }
+    // Negative slots must not produce a negative wait: a negative timeout makes await() return
+    // false immediately, which is a reconnect hot loop on the live fill path.
+    assertThat(AlpacaTradeUpdatesStream.staggerMsFor(interval, -3)).isGreaterThanOrEqualTo(0L);
+    assertThat(AlpacaTradeUpdatesStream.staggerMsFor(0L, 5)).isZero();
+  }
+
+  /** Guard against a typo'd interval reconnecting continuously on the live fill path. */
+  @Test
+  void propertiesRejectARecycleIntervalBelowTheFloor() {
+    assertThatThrownBy(
+            () ->
+                new FillListenerProperties(
+                    true, "ws://localhost/stream", false, 100L, 1_000L, 32, 5_000L))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("recycle-after-ms");
+    assertThatThrownBy(
+            () ->
+                new FillListenerProperties(
+                    true, "ws://localhost/stream", false, 100L, 1_000L, 32, -1L))
+        .isInstanceOf(IllegalArgumentException.class);
+    // 0 is legal: it disables.
+    new FillListenerProperties(true, "ws://localhost/stream", false, 100L, 1_000L, 32, 0L);
+  }
+
+  /** Disabled is the shipped default; the socket must be left alone. */
+  @Test
+  void recycleDisabledLeavesTheSocketAlone() throws Exception {
+    stream.start();
+    awaitHandshake();
+
+    // No further handshake should appear — the socket is not torn down.
+    assertThat(server.frames.poll(2_000L, TimeUnit.MILLISECONDS)).isNull();
+    assertThat(registry.counter("fill_listener.recycles").count()).isZero();
+  }
+
+  /**
+   * The whole point: the socket is torn down at its lifetime bound, reconnects, and the runner
+   * thread SURVIVES to keep delivering. The runner-survival half is not incidental — the natural
+   * implementation (reusing stop(), or aborting cross-thread) leaves the runner parked forever,
+   * which reproduces #715 deterministically instead of fixing it.
+   */
+  @Test
+  void socketIsRecycledAtItsLifetimeBoundAndKeepsDelivering() throws Exception {
+    stream.stop();
+    FillListenerProperties recycling =
+        new FillListenerProperties(
+            true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32, 10_000L);
+    stream =
+        new AlpacaTradeUpdatesStream(
+            recycling,
+            new AlpacaProperties("http://unused", "test-key", "test-secret"),
+            new ThrowingCredentialSource(),
+            dispatcher,
+            metrics,
+            new ObjectMapper().registerModule(new JavaTimeModule()));
+    stream.start();
+    awaitHandshake();
+
+    // A SECOND handshake proves the socket was torn down and re-established.
+    String auth = server.frames.poll(20_000L, TimeUnit.MILLISECONDS);
+    String listen = server.frames.poll(5_000L, TimeUnit.MILLISECONDS);
+    assertThat(auth).as("no re-auth: the socket was never recycled").isNotNull();
+    assertThat(listen).isNotNull();
+    assertThat(registry.counter("fill_listener.recycles").count()).isGreaterThanOrEqualTo(1.0);
+
+    // And the runner is still alive: a fill on the NEW socket must still reach the dispatcher.
+    server.broadcastBinary(
+        "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+            + "\"order\":{\"id\":\"brk-recycled\",\"client_order_id\":\"ck-recycled\","
+            + "\"filled_qty\":\"4\",\"filled_avg_price\":\"2.00\","
+            + "\"filled_at\":\"2026-08-19T10:00:00Z\"}}}");
+    BrokerFillEvent fill = dispatcher.events.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(fill).as("runner died during recycle — socket is permanently mute").isNotNull();
+    assertThat(fill.brokerOrderId()).isEqualTo("brk-recycled");
+
+    // The OLD socket must be GONE, not merely superseded. Asserting only that a new socket appeared
+    // is what let a one-leaked-socket-per-recycle mutation pass this test cleanly.
+    assertThat(server.liveClients()).as("old socket leaked across the recycle").isEqualTo(1);
+  }
+
+  /**
+   * The recycle's ordering invariants are load-bearing, and were previously untested: with the
+   * metric moved before the abort and its guard removed, a throwing meter registry skips BOTH the
+   * abort and the handle CAS, unwinds to runForever, reconnects, and overwrites currentSocket —
+   * leaking one LIVE socket per recycle, unbounded, unreachable by stop(). Measured at 15 live
+   * sockets in 3s before the guard existed.
+   */
+  @Test
+  void aThrowingRecycleMetricDoesNotLeakSockets() throws Exception {
+    stream.stop();
+    FillListenerMetrics hostile = org.mockito.Mockito.mock(FillListenerMetrics.class);
+    org.mockito.Mockito.doThrow(new IllegalStateException("meter registry down"))
+        .when(hostile)
+        .recordRecycle();
+    FillListenerProperties recycling =
+        new FillListenerProperties(
+            true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32, 10_000L);
+    stream =
+        new AlpacaTradeUpdatesStream(
+            recycling,
+            new AlpacaProperties("http://unused", "test-key", "test-secret"),
+            new ThrowingCredentialSource(),
+            dispatcher,
+            hostile,
+            new ObjectMapper().registerModule(new JavaTimeModule()));
+    stream.start();
+    awaitHandshake();
+
+    // Let it recycle at least twice; a leak would show as sockets piling up on the server.
+    assertThat(server.frames.poll(20_000L, TimeUnit.MILLISECONDS)).isNotNull();
+    assertThat(server.frames.poll(5_000L, TimeUnit.MILLISECONDS)).isNotNull();
+
+    assertThat(server.liveClients())
+        .as("a throwing recycle metric leaked the aborted socket")
+        .isEqualTo(1);
+  }
+
+  /**
+   * #715 review, REPRODUCED: consuming the stagger on the first connection only left every runner
+   * sharing one period, so a single shared disconnect re-phased all tenants onto the same instant
+   * and locked them there permanently — the exact state the stagger exists to prevent. The offset
+   * must therefore make the PERIODS differ, not just the first deadline.
+   */
+  @Test
+  void staggerMakesPeriodsDifferSoTenantsCannotPhaseLock() {
+    long interval = 900_000L;
+    long p0 = interval + AlpacaTradeUpdatesStream.staggerMsFor(interval, 0);
+    long p1 = interval + AlpacaTradeUpdatesStream.staggerMsFor(interval, 1);
+    long p2 = interval + AlpacaTradeUpdatesStream.staggerMsFor(interval, 2);
+    assertThat(p0).isNotEqualTo(p1);
+    assertThat(p1).isNotEqualTo(p2);
+    assertThat(p0).isNotEqualTo(p2);
+  }
+
+  /** #715 hygiene: the deprecated handshake must be gone, and the reply logged in full. */
+  @Test
+  void authUsesTheNonDeprecatedFormat() throws Exception {
+    stream.start();
+    String auth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(auth).isNotNull();
+    // Alpaca: "this authentication format is being deprecated. Please use the format:
+    // {"action": "auth", "key": "x", "secret": "x"}" — observed on every connection for 11 weeks.
+    assertThat(auth).contains("\"action\":\"auth\"").contains("\"key\"").contains("\"secret\"");
+    assertThat(auth).doesNotContain("authenticate").doesNotContain("key_id");
   }
 
   @Test
@@ -355,7 +523,7 @@ class AlpacaTradeUpdatesStreamTest {
     stream.stop();
     FillListenerProperties props =
         new FillListenerProperties(
-            true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32);
+            true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32, 0L);
     stream =
         new AlpacaTradeUpdatesStream(
             props,
@@ -500,7 +668,7 @@ class AlpacaTradeUpdatesStreamTest {
     String auth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
     String listen = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
     assertThat(auth).isNotNull();
-    assertThat(auth).contains("\"action\":\"authenticate\"");
+    assertThat(auth).contains("\"action\":\"auth\"");
     assertThat(listen).isNotNull();
 
     // And the recovered socket still works.
@@ -855,7 +1023,7 @@ class AlpacaTradeUpdatesStreamTest {
     stream =
         new AlpacaTradeUpdatesStream(
             new FillListenerProperties(
-                true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32),
+                true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32, 0L),
             new com.ohmytradeagent.exec.broker.alpaca.AlpacaProperties(
                 "http://unused", "test-key", "test-secret"),
             new ThrowingCredentialSource(),
@@ -904,14 +1072,14 @@ class AlpacaTradeUpdatesStreamTest {
     for (int i = 0; i < 4; i++) {
       String frame = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
       assertThat(frame).isNotNull();
-      if (frame.contains("\"authenticate\"")) {
+      if (frame.contains("\"auth\"")) {
         auths.add(frame);
       }
     }
     assertThat(auths).hasSize(2);
     String joined = String.join("\n", auths);
-    assertThat(joined).contains("\"key_id\":\"alice-key\"");
-    assertThat(joined).contains("\"key_id\":\"bob-key\"");
+    assertThat(joined).contains("\"key\":\"alice-key\"");
+    assertThat(joined).contains("\"key\":\"bob-key\"");
     assertThat(joined).doesNotContain("test-key");
   }
 
@@ -932,12 +1100,12 @@ class AlpacaTradeUpdatesStreamTest {
     String f1 = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
     String f2 = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
     for (String f : new String[] {f1, f2}) {
-      if (f != null && f.contains("\"authenticate\"")) {
+      if (f != null && f.contains("\"action\":\"auth\"")) {
         auths.add(f);
       }
     }
     assertThat(auths).hasSize(1);
-    assertThat(auths.iterator().next()).contains("\"key_id\":\"alice-key\"");
+    assertThat(auths.iterator().next()).contains("\"key\":\"alice-key\"");
     // "broken" never authenticated — no third client connected.
     assertThat(server.frames.poll(500, TimeUnit.MILLISECONDS)).isNull();
   }
@@ -1033,8 +1201,8 @@ class AlpacaTradeUpdatesStreamTest {
     String f2 = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
     assertThat(f1).isNotNull();
     assertThat(f2).isNotNull();
-    String bobAuth = f1.contains("\"authenticate\"") ? f1 : f2;
-    assertThat(bobAuth).contains("\"key_id\":\"bob-key\"");
+    String bobAuth = f1.contains("\"action\":\"auth\"") ? f1 : f2;
+    assertThat(bobAuth).contains("\"key\":\"bob-key\"");
     // alice did NOT re-authenticate (no restart) → no further frames arrive.
     assertThat(server.frames.poll(500, TimeUnit.MILLISECONDS)).isNull();
   }
@@ -1082,7 +1250,7 @@ class AlpacaTradeUpdatesStreamTest {
     List<String> frames = drainFrames(600);
     long bobAuths =
         frames.stream()
-            .filter(f -> f.contains("\"authenticate\"") && f.contains("\"key_id\":\"bob-key\""))
+            .filter(f -> f.contains("\"action\":\"auth\"") && f.contains("\"key\":\"bob-key\""))
             .count();
     assertThat(bobAuths).isEqualTo(1L);
   }
@@ -1131,7 +1299,7 @@ class AlpacaTradeUpdatesStreamTest {
     List<String> frames = drainFrames(600);
     long bobAuths =
         frames.stream()
-            .filter(f -> f.contains("\"authenticate\"") && f.contains("\"key_id\":\"bob-key\""))
+            .filter(f -> f.contains("\"action\":\"auth\"") && f.contains("\"key\":\"bob-key\""))
             .count();
     assertThat(bobAuths).isEqualTo(1L);
   }
@@ -1161,7 +1329,7 @@ class AlpacaTradeUpdatesStreamTest {
     List<String> frames = drainFrames(600);
     long lateAuths =
         frames.stream()
-            .filter(f -> f.contains("\"authenticate\"") && f.contains("\"key_id\":\"late-key\""))
+            .filter(f -> f.contains("\"action\":\"auth\"") && f.contains("\"key\":\"late-key\""))
             .count();
     assertThat(lateAuths).isEqualTo(1L);
   }
@@ -1173,7 +1341,7 @@ class AlpacaTradeUpdatesStreamTest {
     stream =
         new AlpacaTradeUpdatesStream(
             new FillListenerProperties(
-                true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32),
+                true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32, 0L),
             new AlpacaProperties("http://unused", "test-key", "test-secret"),
             cs,
             dispatcher,
@@ -1201,7 +1369,7 @@ class AlpacaTradeUpdatesStreamTest {
   private AlpacaTradeUpdatesStream perTenantStream(BrokerCredentialSource creds) {
     return new AlpacaTradeUpdatesStream(
         new FillListenerProperties(
-            true, "ws://localhost:" + port + "/stream", true, 100L, 1_000L, 32),
+            true, "ws://localhost:" + port + "/stream", true, 100L, 1_000L, 32, 0L),
         new AlpacaProperties("http://unused", "test-key", "test-secret"),
         creds,
         dispatcher,
@@ -1314,6 +1482,13 @@ class AlpacaTradeUpdatesStreamTest {
 
     /** BINARY counterpart of {@link #sendFragmented}, split at an arbitrary BYTE boundary. */
     /** #715: start a binary message and NEVER set FIN — the frame never completes. */
+    /** #715 review: without this, a leaked socket per recycle was invisible to every test. */
+    int liveClients() {
+      synchronized (clients) {
+        return clients.size();
+      }
+    }
+
     void sendNonFinalBinary(byte[] chunk) {
       List<WebSocket> snapshot;
       synchronized (clients) {

@@ -22,6 +22,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *   <li>{@code reconnectBaseMs} / {@code reconnectCapMs} — exponential-backoff bounds.
  *   <li>{@code dedupCacheSize} — bounded LRU keyed on {@code (broker_order_id, filled_qty)} so WS
  *       reconnect-replays don't double-dispatch.
+ *   <li>{@code recycleAfterMs} — #715: maximum lifetime of ONE socket before it is deliberately
+ *       torn down and re-established. A trade-updates socket can stop being fed while staying OPEN
+ *       (no close frame, no error, {@code reconnects_total} stays 0) and never recovers; a bounded
+ *       lifetime is the only thing that ends that state. {@code 0} disables.
  * </ul>
  *
  * <p>The compact constructor fails loud on non-positive numeric values: a {@code 0} or negative
@@ -35,7 +39,11 @@ public record FillListenerProperties(
     boolean perTenantEnabled,
     long reconnectBaseMs,
     long reconnectCapMs,
-    int dedupCacheSize) {
+    int dedupCacheSize,
+    long recycleAfterMs) {
+
+  /** Floor for a non-zero recycle interval; guards against a reconnect storm. */
+  static final long MIN_RECYCLE_AFTER_MS = 10_000L;
 
   private static final Set<String> LOOPBACK_HOSTS = Set.of("localhost", "127.0.0.1", "::1");
 
@@ -55,6 +63,21 @@ public record FillListenerProperties(
               + ") must be >= reconnect-base-ms ("
               + reconnectBaseMs
               + ")");
+    }
+    // 0 is legal here (disabled), so the guard is two-sided. The floor is NOT cosmetic: a typo'd
+    // small value reconnects every tenant continuously on the live fill path, which is strictly
+    // worse than the starved socket this exists to fix.
+    if (recycleAfterMs < 0L) {
+      throw new IllegalArgumentException(
+          "exec.fill-listener.recycle-after-ms must be >= 0 (0 disables), got " + recycleAfterMs);
+    }
+    if (recycleAfterMs > 0L && recycleAfterMs < MIN_RECYCLE_AFTER_MS) {
+      throw new IllegalArgumentException(
+          "exec.fill-listener.recycle-after-ms must be 0 or >= "
+              + MIN_RECYCLE_AFTER_MS
+              + "ms, got "
+              + recycleAfterMs
+              + " — anything shorter reconnects faster than the fill-poll cycle");
     }
     if (dedupCacheSize <= 0) {
       throw new IllegalArgumentException(

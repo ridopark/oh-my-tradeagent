@@ -35,6 +35,7 @@ public class FillListenerMetrics {
   private final Map<String, AtomicLong> partialBytesByTenant = new ConcurrentHashMap<>();
   private final Counter eventsDroppedDedup;
   private final Counter reconnects;
+  private final Counter recycles;
   private final Counter eventsUnknownOrder;
   private final Counter signalWorkflowNotFound;
   private final Counter signalErrors;
@@ -118,6 +119,17 @@ public class FillListenerMetrics {
                     + " successfully and still never subscribe, and this counter is the only"
                     + " signal that distinguishes the two. Expect one per open socket per"
                     + " (re)connect, so a pod serving N tenants should reach N shortly after boot.")
+            .register(registry);
+    // #715: a deliberate recycle also increments `reconnects`, which would destroy
+    // `reconnects_total == 0` as the starved-socket tell — the exact signal that cracked this
+    // case. Counting recycles separately keeps (reconnects - recycles) as genuine broker-side
+    // disconnects.
+    this.recycles =
+        Counter.builder("fill_listener.recycles")
+            .description(
+                "Sockets deliberately torn down after reaching their configured maximum lifetime"
+                    + " (#715). Subtract from reconnects_total to isolate genuine broker-side"
+                    + " disconnects.")
             .register(registry);
     this.framesWithoutStream =
         Counter.builder("fill_listener.frames_without_stream")
@@ -241,6 +253,10 @@ public class FillListenerMetrics {
 
   public void recordDispatched() {
     eventsDispatched.increment();
+  }
+
+  public void recordRecycle() {
+    recycles.increment();
   }
 
   public void recordSubscriptionConfirmed() {
