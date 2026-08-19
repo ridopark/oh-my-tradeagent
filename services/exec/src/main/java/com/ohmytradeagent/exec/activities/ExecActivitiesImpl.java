@@ -354,6 +354,26 @@ public class ExecActivitiesImpl implements ExecActivities {
     requirePresent(intent.getOptionSymbol(), "optionSymbol", intentKey);
     requirePresent(intent.getSide(), "side", intentKey);
     requirePresent(intent.getQty(), "qty", intentKey);
+    // #735: a non-positive qty must never reach the broker. `remainingQty` can go NEGATIVE today —
+    // the flatten path books a CUMULATIVE broker quantity as if it were a delta, so an 11-lot exit
+    // reporting (5, then 11) books 5 and then 11 and lands at -5. `flattenIntent` does
+    // setQty(remainingQty) with no floor, and flattenRemaining's only early-out is
+    // `remainingQty == 0`, which -5 sails past. The intent is then journaled and POSTed, Alpaca
+    // 422s it non-retryably, and that propagates out of run() — failing the PositionWorkflow and
+    // orphaning a LIVE lot.
+    //
+    // Guarded here rather than in the workflow deliberately: this is the last point every order
+    // passes through, it needs no Temporal version gate, and it holds no matter which of the eight
+    // cumulative-vs-delta sites is fixed first.
+    if (intent.getQty() <= 0L) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "OrderIntent.qty must be > 0 but was "
+              + intent.getQty()
+              + " (intentKey="
+              + intentKey
+              + ")",
+          "InvalidOrderIntentError");
+    }
   }
 
   private static void requirePresent(Object value, String field, String intentKey) {
