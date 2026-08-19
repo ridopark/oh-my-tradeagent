@@ -1258,6 +1258,55 @@ class PositionWorkflowImplTest {
         .isEqualTo(0L);
   }
 
+  /**
+   * Issue #735 Phase 2: a PARTIAL fill must not be treated as a COMPLETED exit.
+   *
+   * <p>{@code processOne} books the first fill, releases the exit latch and returns. That is
+   * correct while every fill is terminal — which it has been, because the WS has delivered nothing
+   * for ~11 weeks and {@code FillPoller} structurally cannot dispatch a partial. The moment real
+   * partials arrive it is wrong: a full-close STC that fills 2 of 5 releases the latch with 3 still
+   * outstanding and the exit is silently abandoned. Nothing retries it, nothing times it out, and
+   * the lot sits unmanaged until EOD.
+   *
+   * <p>The observable: an exit that never reaches its captured {@code targetRemaining} must surface
+   * as a {@code PartialExitFillTimeout} (which then drives the existing cancel/retry machinery),
+   * NOT complete silently.
+   */
+  @Test
+  void issue735p2_partialFillOnFullCloseExit_doesNotCompleteTheExitSilently() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-735p2-partial");
+    PositionWorkflowInput in = input(5);
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    // Full-close STC (fraction 1.0): targetRemaining == 0.
+    stub.partialExit(partialExitRequest("sig-p2", "pos-735p2-partial", 1.0));
+    waitForPlaceOrderCount(1);
+
+    // The broker fills only 2 of the 5 and the rest never comes.
+    stub.onFill(fill("brk-p2", 2L, new BigDecimal("2.50")));
+
+    long deadline = System.currentTimeMillis() + 15_000;
+    while (System.currentTimeMillis() < deadline
+        && captureAll("PartialExitFillTimeout").isEmpty()) {
+      env.sleep(Duration.ofSeconds(1));
+      Thread.sleep(50);
+    }
+
+    assertThat(stub.positionState().remainingQty())
+        .as("only the 2 that actually filled may be booked")
+        .isEqualTo(3L);
+    assertThat(captureAll("PartialExitFillTimeout"))
+        .as("an exit that never reached its target must NOT complete silently")
+        .isNotEmpty();
+  }
+
   // ---------- Phase 1 (PLAN-2026-06-30): flatten broker-authoritative terminal-state reconcile
   // ----------
 
