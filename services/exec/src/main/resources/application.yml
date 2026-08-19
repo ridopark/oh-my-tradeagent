@@ -87,6 +87,14 @@ exec:
     reconnect-base-ms: 1000
     reconnect-cap-ms: 60000
     dedup-cache-size: 1024
+    # #715: maximum lifetime of ONE trade-updates socket before it is deliberately torn
+    # down and re-established. A socket can stop being fed while staying OPEN (no close
+    # frame, no error, reconnects_total stays 0) and never recovers — measured: one
+    # socket delivered 6h25m then went permanently silent, another was dead at 19 min.
+    # 0 DISABLES (shipped default: dark, per-cluster opt-in like per-tenant-enabled).
+    # Do NOT enable on live until the cumulative-vs-delta partial-fill bug is fixed:
+    # a working socket delivers partial_fill events that emitExitFill mishandles.
+    recycle-after-ms: ${EXEC_FILL_LISTENER_RECYCLE_AFTER_MS:0}
     poll:
       enabled: ${EXEC_FILL_LISTENER_POLL_ENABLED:false}
       interval-ms: 30000

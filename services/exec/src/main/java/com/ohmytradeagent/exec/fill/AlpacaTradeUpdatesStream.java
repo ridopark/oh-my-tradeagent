@@ -111,6 +111,30 @@ public class AlpacaTradeUpdatesStream {
   private final AlpacaProperties alpacaProps;
   private final BrokerCredentialSource credentialSource;
   private final FillDispatcher dispatcher;
+
+  /**
+   * #715 stagger buckets. Slot-based rather than hash-based deliberately: {@code String.hashCode()}
+   * can be NEGATIVE, and a negative timeout makes {@code await(t, MS)} return false immediately — a
+   * reconnect hot loop on the live fill path. Slots are also collision-free below {@code
+   * STAGGER_SLOTS} tenants, which a hash is not.
+   */
+  static final int STAGGER_SLOTS = 8;
+
+  /**
+   * How long past its nominal lifetime this runner's socket waits, so live tenants never recycle in
+   * the same instant and leave no listener at all. Applied to the FIRST connection only — reconnect
+   * drift separates them thereafter.
+   */
+  static long staggerMsFor(long recycleAfterMs, int slot) {
+    if (recycleAfterMs <= 0L) {
+      return 0L;
+    }
+    return (recycleAfterMs / STAGGER_SLOTS) * Math.floorMod(slot, STAGGER_SLOTS);
+  }
+
+  private final java.util.concurrent.atomic.AtomicInteger nextStaggerSlot =
+      new java.util.concurrent.atomic.AtomicInteger();
+
   private final FillListenerMetrics metrics;
   private final ObjectMapper mapper;
   private final HttpClient http;
@@ -442,6 +466,9 @@ public class AlpacaTradeUpdatesStream {
    * cross-account broker_order_id collision.
    */
   private final class TenantRunner {
+    /** #715: consumed by the FIRST connection only; see staggerMsFor. */
+    private long staggerMs;
+
     private final String tenant;
     private final String threadName;
     private final EndpointSupplier endpointSupplier;
@@ -460,6 +487,7 @@ public class AlpacaTradeUpdatesStream {
     private Thread runner;
 
     TenantRunner(String tenant, String threadName, EndpointSupplier endpointSupplier) {
+      this.staggerMs = staggerMsFor(props.recycleAfterMs(), nextStaggerSlot.getAndIncrement());
       this.tenant = tenant;
       this.threadName = threadName;
       this.endpointSupplier = endpointSupplier;
@@ -554,7 +582,34 @@ public class AlpacaTradeUpdatesStream {
       unhandledStreamsWarned.clear();
       sendAuth(ws, endpoint);
       sendListen(ws);
-      closed.await();
+      long recycleAfterMs = props.recycleAfterMs();
+      if (recycleAfterMs > 0L) {
+        long wait = recycleAfterMs + staggerMs;
+        staggerMs = 0L; // first connection only
+        if (!closed.await(wait, TimeUnit.MILLISECONDS)) {
+          // #715: the socket outlived its bound without closing. Tear it down HERE, on the runner's
+          // own thread, because `closed` is a local of this frame — nothing outside can count it
+          // down. An external abort would leave this thread parked in await() forever with the
+          // socket dead: the #715 symptom, self-inflicted and permanent.
+          //
+          // Order matters. Null the handle BEFORE aborting so a concurrent stop() either takes the
+          // live socket and closes it normally, or sees null and goes straight to interrupt+join.
+          // Metric LAST: this is NOT inside a Listener callback, so the rule documented on that
+          // class is inverted here — a throw cannot mute the socket, but it would skip the abort.
+          currentSocket.compareAndSet(ws, null);
+          ws.abort();
+          recordRecycle();
+          log.info(
+              "fill-listener[{}] recycling socket after {}ms (planned; #715 starvation guard)",
+              tenant,
+              wait);
+          // Clean return => runForever resets backoff to base. A planned recycle must NOT escalate
+          // backoff, or a healthy socket would widen its own gap toward the cap every interval.
+          return;
+        }
+      } else {
+        closed.await();
+      }
       currentSocket.compareAndSet(ws, null);
     }
 
@@ -562,13 +617,11 @@ public class AlpacaTradeUpdatesStream {
       Map<String, Object> frame =
           Map.of(
               "action",
-              "authenticate",
-              "data",
-              Map.of(
-                  "key_id",
-                  nullToEmpty(endpoint.keyId()),
-                  "secret_key",
-                  nullToEmpty(endpoint.secret())));
+              "auth",
+              "key",
+              nullToEmpty(endpoint.keyId()),
+              "secret",
+              nullToEmpty(endpoint.secret()));
       sendTextWithTimeout(ws, serialize(frame));
     }
 
@@ -595,6 +648,15 @@ public class AlpacaTradeUpdatesStream {
      * #handleFrame} — through the runner that owns the tenant identity.
      */
     private final AtomicBoolean instrumentationWarned = new AtomicBoolean(false);
+
+    /** Guarded like the Listener delegates: instrumentation must never break the socket path. */
+    private void recordRecycle() {
+      try {
+        metrics.recordRecycle();
+      } catch (RuntimeException e) {
+        log.warn("fill-listener[{}] recycle metric failed: {}", tenant, e.toString());
+      }
+    }
 
     private void recordWsCallback(String channel, boolean last) {
       try {
@@ -685,11 +747,12 @@ public class AlpacaTradeUpdatesStream {
         // is not explicitly "authorized" warns, including a reply with no status at all: an
         // unrecognized shape must fail loud rather than be assumed successful.
         if ("authorized".equals(status)) {
+          // Log the WHOLE payload, not two extracted fields. Alpaca carried
+          // "this authentication format is being deprecated..." in `message` on every single
+          // connection for eleven weeks and we threw it away, because this line read only
+          // status+action. The reply contains no secret — Alpaca never echoes the request.
           log.info(
-              "fill-listener[{}] authorization reply status={} action={}",
-              tenant,
-              status,
-              authData.path("action").asText(""));
+              "fill-listener[{}] authorization reply status={} data={}", tenant, status, authData);
         } else {
           log.warn(
               "fill-listener[{}] authorization reply NOT authorized status={} action={} message={}"
