@@ -130,7 +130,7 @@ Deliberately **not** folded into Phases 1-2: it is the entry path, needs its own
 own await-to-completion decision (how long to wait for the balance before confirming), and bundling
 it would make the replay risk of Phase 1 harder to reason about.
 
-**Deliverable of this phase:** the issue, with the worked example and the `getOrderStatus`
+**Deliverable of this phase:** #738 — filed, with the worked example and the `getOrderStatus`
 reconciliation option written up. Implementation is scoped separately.
 
 ---
@@ -202,7 +202,7 @@ A replay fixture nobody has watched fail is decoration.
 5. A captured v=0 history replays byte-identical, **and** the fixture has been watched to fail with
    the gate defeated.
 6. Full `services/orchestrator` suite green; `spotless:check` clean.
-7. Phase 3's issue exists and is linked from #735.
+7. Phase 3's issue (#738) exists and is linked from #735.
 
 ## Halt conditions
 
