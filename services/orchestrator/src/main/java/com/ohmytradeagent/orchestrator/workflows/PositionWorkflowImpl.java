@@ -678,6 +678,38 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       "partial-exit-place-retry-next-session-v1";
 
   /**
+   * Issue #735: Alpaca reports {@code filled_qty} as the CUMULATIVE quantity filled so far on a
+   * broker order, NOT the increment since the last event. Every booking site except {@link
+   * #bookFlattenDelta} subtracted it as a delta, so a single order filling 2-then-5 booked 7
+   * against a 5-lot and drove {@code remainingQty} NEGATIVE (breaking R-AA-1), while the converse —
+   * a first partial treated as a completed exit — OVERSTATES the lot and produces the oversized
+   * flatten of #716.
+   *
+   * <p>Under v&gt;=1 every exit booking is converted to a clamped DELTA in {@link
+   * #emitExitFill(String, FillSignalPayload)} against a per-broker-order ledger. The ledger is
+   * keyed on {@code broker_order_id} rather than {@code intent_key} because the broker order is the
+   * unit Alpaca actually cumulates over (an intent_key is a proxy that a {@code :retry-N} placement
+   * breaks).
+   *
+   * <p>MUST be version-gated: a duplicate report now books a delta of 0 and emits NOTHING, where
+   * v=0 emitted a full {@code PartialExitFilled}. That is a command-COUNT divergence, not a payload
+   * difference — replay-fatal for the in-flight executions without this gate. (Temporal 1.27 replay
+   * ignores activity INPUT payloads, which is why the qty change alone would not have needed one.)
+   */
+  private static final String VERSION_EXIT_CUMULATIVE_LEDGER = "exit-cumulative-ledger-v1";
+
+  /**
+   * Bound on {@link #exitBookedByOrder}. Workflow fields are NOT serialized into Temporal history
+   * (history holds commands and events; state is reconstructed by replay), so an unbounded ledger
+   * is a worker-heap concern rather than a history-bloat one — but {@code PositionWorkflowImpl} has
+   * no continue-as-new and an overnight position accumulates a broker order per exit attempt, so it
+   * is bounded anyway. Oldest-first eviction is safe: a broker order old enough to fall out of a
+   * 64-entry window is long terminal, and the {@code Math.min(delta, remainingQty)} clamp still
+   * prevents an evicted key's re-report from over-booking.
+   */
+  private static final int EXIT_LEDGER_MAX_ORDERS = 64;
+
+  /**
    * Phase 1: maximum number of NEXT-SESSION re-drives of a failed-to-place partial-target exit
    * before the workflow gives up retrying, emits the terminal {@link
    * #KIND_PARTIAL_EXIT_RETRY_EXHAUSTED} page, and lets normal exits govern the lot. A partial
@@ -858,6 +890,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * Both default null/0 and are written only under {@link
    * #VERSION_FLATTEN_CANCEL_TERMINAL_RECONCILE} v&gt;=1, so legacy histories replay unchanged.
    */
+  /**
+   * Issue #735 (v&gt;=1 only): per-broker-order cumulative-booked ledger. Maps {@code
+   * broker_order_id} (falling back to the exit's signal_id when the broker id is absent on a
+   * synthesized fill) to the quantity already booked for that order, so a CUMULATIVE broker report
+   * is converted to the un-booked delta exactly once. Bounded by {@link #EXIT_LEDGER_MAX_ORDERS}.
+   */
+  private final Map<String, Long> exitBookedByOrder = new LinkedHashMap<>();
+
   private String flattenBookedKey;
 
   private long flattenBookedQty;
@@ -3928,6 +3968,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    *     between "real progress this poll" and "fully accounted, residual remains").
    */
   private long bookFlattenDelta(String reason, String intentKey, FillSignalPayload terminalFill) {
+    // Issue #735 v>=1: emitExitFill now owns the cumulative->delta conversion for EVERY booking
+    // site, keyed on the broker order. Running this method's own intent_key ledger on top would
+    // double-convert — it would hand emitExitFill an already-differenced qty, which the order
+    // ledger would then difference AGAIN against the same broker order. Delegate instead; the
+    // guardrail #3 lastFillEvent clear is preserved below.
+    if (Workflow.getVersion(VERSION_EXIT_CUMULATIVE_LEDGER, Workflow.DEFAULT_VERSION, 1) >= 1) {
+      long booked = emitExitFill("flatten-" + reason, terminalFill);
+      lastFillEvent = null;
+      return booked;
+    }
     if (!intentKey.equals(flattenBookedKey)) {
       // Active key rolled (fresh :retry-N) or first sighting: this key's cumulative count starts at
       // 0.
@@ -3970,8 +4020,18 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * eod/expiry/chandelier paths. Single P&L source: {@code EodForceFlattened}/{@code
    * ExpiryForceFlattened} stay P&L-neutral lifecycle markers.
    */
-  private void emitExitFill(String signalId, FillSignalPayload fillEvent) {
+  private long emitExitFill(String signalId, FillSignalPayload fillEvent) {
     long filled = fillEvent.getFilledQty();
+    // Issue #735: convert the broker's CUMULATIVE filled_qty into the un-booked delta for this
+    // broker order, clamped to the outstanding lot. Returning 0 here emits NO audit event — that
+    // command-count change is precisely what VERSION_EXIT_CUMULATIVE_LEDGER fences off from the
+    // in-flight v=0 executions.
+    if (Workflow.getVersion(VERSION_EXIT_CUMULATIVE_LEDGER, Workflow.DEFAULT_VERSION, 1) >= 1) {
+      filled = bookableExitDelta(fillEvent);
+      if (filled <= 0) {
+        return 0L;
+      }
+    }
     remainingQty -= filled;
     // F1 supersede guardrail: any exit fill that reduces the lot marks it as no-longer-untouched.
     // Conservative by direction — it only makes the supersede check MORE restrictive (a leg that
@@ -4007,6 +4067,54 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // decremented, so remainingQty + filled is the qty before this leg. Inert for copytrade
     // (tp_ratio == null) and replay-gated under VERSION_WATCHLIST_EXIT.
     emitWatchlistMeasurement(signalId, filled, remainingQty + filled, fillEvent.getAvgFillPrice());
+    return filled;
+  }
+
+  /**
+   * Issue #735: the un-booked, clamped delta of {@code fillEvent}'s CUMULATIVE {@code filled_qty}
+   * for its broker order, advancing {@link #exitBookedByOrder} by whatever it returns.
+   *
+   * <p>Two guards, both load-bearing:
+   *
+   * <ul>
+   *   <li>a non-positive delta books NOTHING — a duplicate or stale report of a cumulative already
+   *       seen (the same fill arriving via two evidences, e.g. a cancel-on-filled return AND a
+   *       buffered onFill) must not decrement the lot twice;
+   *   <li>{@code Math.min(delta, remainingQty)} — a broker report larger than the outstanding lot
+   *       can never drive {@code remainingQty} negative, which would emit PositionClosed with
+   *       remaining &lt; 0 and break R-AA-1.
+   * </ul>
+   *
+   * <p>The ledger records {@code alreadyBooked + bookable} rather than the raw cumulative, so a
+   * clamped booking leaves the un-bookable remainder permanently unbooked instead of silently
+   * absorbing it.
+   */
+  private long bookableExitDelta(FillSignalPayload fillEvent) {
+    String key = fillEvent.getBrokerOrderId();
+    if (key == null || key.isBlank()) {
+      // No order identity, so no ledger is possible. Book the reported qty, still clamped. This
+      // deliberately errs toward OVER-booking: an under-book leaves remainingQty stuck above zero
+      // and the position never reaches its terminal close — a live lot that hangs unflattened,
+      // which is worse than an early close that reconciliation will surface as an orphan. Real
+      // Alpaca fills always carry an order id; synthesized fills inherit one from the broker
+      // result, so this is a defensive branch rather than an expected path.
+      return Math.max(0L, Math.min(fillEvent.getFilledQty(), remainingQty));
+    }
+    long alreadyBooked = exitBookedByOrder.getOrDefault(key, 0L);
+    long delta = fillEvent.getFilledQty() - alreadyBooked;
+    if (delta <= 0) {
+      return 0L;
+    }
+    long bookable = Math.min(delta, remainingQty);
+    if (bookable <= 0) {
+      return 0L;
+    }
+    exitBookedByOrder.put(key, alreadyBooked + bookable);
+    // Bounded, oldest-first. LinkedHashMap preserves insertion order, so replay is deterministic.
+    while (exitBookedByOrder.size() > EXIT_LEDGER_MAX_ORDERS) {
+      exitBookedByOrder.remove(exitBookedByOrder.keySet().iterator().next());
+    }
+    return bookable;
   }
 
   /**
