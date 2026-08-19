@@ -819,6 +819,25 @@ public class AlpacaTradeUpdatesStream {
     }
   }
 
+  /**
+   * <b>Rule for anything added inside these callbacks: it must sit AFTER {@code
+   * webSocket.request(1)}, or be incapable of throwing.</b>
+   *
+   * <p>Demand is re-armed at the END of {@code onText}/{@code onBinary}. Anything that throws
+   * before that point skips the request, and the socket is never fed another frame — permanently
+   * mute, on a connection that still reports open, authorized and subscribed, with no close frame,
+   * no error frame and no reconnect. That is indistinguishable from the broker sending nothing,
+   * which is the exact bug this class has spent #693, #694, #715, #720 and #722 chasing.
+   *
+   * <p>This has now bitten twice. First as the JDK's default {@code onBinary}, which silently
+   * {@code request(1)}'d and discarded every frame (#694). Then as the #715 instrumentation itself:
+   * {@code recordPartialBytes} registers a Micrometer gauge on first call per tenant, meter
+   * registration can throw, and the diagnostic would have silenced the socket it was added to
+   * diagnose. Both delegates are now guarded.
+   *
+   * <p>Instrumentation that can silence the thing it measures is a nasty class of bug. Assume any
+   * new call here is in it until shown otherwise.
+   */
   private final class Listener implements WebSocket.Listener {
     private final CountDownLatch closed;
     private final TenantRunner owner;
