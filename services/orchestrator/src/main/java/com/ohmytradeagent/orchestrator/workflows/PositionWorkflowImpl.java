@@ -699,6 +699,26 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_EXIT_CUMULATIVE_LEDGER = "exit-cumulative-ledger-v1";
 
   /**
+   * Issue #735 Phase 2: {@code processOne} booked the FIRST fill, released the exit latch and
+   * returned — treating any fill as a completed exit. That was correct while every fill the exit
+   * path could see was terminal (the WS has delivered nothing for ~11 weeks and {@code FillPoller}
+   * structurally cannot dispatch a partial, so today's quantities are shape-preserving). The moment
+   * real partials arrive it silently ABANDONS the remainder: a full-close STC filling 2 of 5
+   * releases the latch with 3 outstanding, nothing retries it, and the lot sits unmanaged until EOD
+   * — while {@code remainingQty} overstates a position the broker may have already sold, which is
+   * the oversized-flatten shape of #716.
+   *
+   * <p>Under v&gt;=1 the exit drains successive partials of the SAME resting order until it reaches
+   * the {@code targetRemaining} captured before placement, a pre-emption wins, or the TTL expires
+   * (which then drives the EXISTING cancel/retry machinery instead of a silent completion).
+   *
+   * <p>Gated because the drain loop changes the command sequence: each additional partial books
+   * another {@code PartialExitFilled}, and an unmet target now reaches the timeout branch that v=0
+   * never entered after a fill.
+   */
+  private static final String VERSION_EXIT_PARTIAL_AWAIT_LOOP = "exit-partial-await-loop-v1";
+
+  /**
    * Bound on {@link #exitBookedByOrder}. Workflow fields are NOT serialized into Temporal history
    * (history holds commands and events; state is reconstructed by replay), so an unbounded ledger
    * is a worker-heap concern rather than a history-bloat one — but {@code PositionWorkflowImpl} has
@@ -2884,6 +2904,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // — the getOrderStatus call + the synthesized PartialExitFilled emit are strictly behind v>=1.
     int cancelTerminalReconcileVersion =
         Workflow.getVersion(VERSION_EXIT_CANCEL_TERMINAL_RECONCILE, Workflow.DEFAULT_VERSION, 1);
+    // Issue #735 Phase 2 gate, read ONCE here alongside the sibling exit gates so the marker
+    // resolves at a stable scope.
+    int partialAwaitLoopVersion =
+        Workflow.getVersion(VERSION_EXIT_PARTIAL_AWAIT_LOOP, Workflow.DEFAULT_VERSION, 1);
     int retryCount = 0;
     long exitFillTtlSecs = 0L;
 
@@ -3117,37 +3141,80 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       currentInFlightBrokerOrderId = placed.getBrokerOrderId();
 
       boolean filledInTime;
-      if (exitTimeoutVersion == Workflow.DEFAULT_VERSION) {
-        Workflow.await(
-            () ->
-                lastFillEvent != null
-                    || eodFired
-                    || expiryFired
-                    || !pendingRiskBreaches.isEmpty()
-                    || !pendingForceCloses.isEmpty());
-        filledInTime = true; // v=0 has no timeout; only an await wakeup gets us here.
-      } else {
-        // Issue #212: per-strategy TTL sourced from input under VERSION_TTL_FROM_INPUT v>=1;
-        // falls back to EXIT_FILL_TTL_SECS_DEFAULT under v=DEFAULT_VERSION or null input field.
-        exitFillTtlSecs = resolveExitFillTtlSecs();
-        filledInTime =
-            Workflow.await(
-                Duration.ofSeconds(exitFillTtlSecs),
-                () ->
-                    lastFillEvent != null
-                        || eodFired
-                        || expiryFired
-                        // Plan-2B R-AB-2: yield the stepped reprice to the R-AB-1 flatten timer so
-                        // the bounded flatten is the unambiguous final owner (deadline pinned at or
-                        // before the lead trigger; no overlapping double-place). Predicate-only
-                        // addition (expiryLeadFired latched only under v>=1) — replay-neutral for
-                        // v=0 histories.
-                        || expiryLeadFired
-                        || !pendingRiskBreaches.isEmpty()
-                        || !pendingForceCloses.isEmpty());
+      // #735 P2: drain successive PARTIAL fills of this ONE resting order. Under
+      // partialAwaitLoopVersion=0 the body runs exactly ONCE and breaks at the bottom, so the
+      // legacy command sequence is unchanged; under v>=1 a partial that has not yet reached
+      // targetRemaining loops back to await the rest of the SAME order rather than returning as
+      // though the exit were complete.
+      while (true) {
+        if (exitTimeoutVersion == Workflow.DEFAULT_VERSION) {
+          Workflow.await(
+              () ->
+                  lastFillEvent != null
+                      || eodFired
+                      || expiryFired
+                      || !pendingRiskBreaches.isEmpty()
+                      || !pendingForceCloses.isEmpty());
+          filledInTime = true; // v=0 has no timeout; only an await wakeup gets us here.
+        } else {
+          // Issue #212: per-strategy TTL sourced from input under VERSION_TTL_FROM_INPUT v>=1;
+          // falls back to EXIT_FILL_TTL_SECS_DEFAULT under v=DEFAULT_VERSION or null input field.
+          exitFillTtlSecs = resolveExitFillTtlSecs();
+          filledInTime =
+              Workflow.await(
+                  Duration.ofSeconds(exitFillTtlSecs),
+                  () ->
+                      lastFillEvent != null
+                          || eodFired
+                          || expiryFired
+                          // Plan-2B R-AB-2: yield the stepped reprice to the R-AB-1 flatten timer
+                          // so
+                          // the bounded flatten is the unambiguous final owner (deadline pinned at
+                          // or
+                          // before the lead trigger; no overlapping double-place). Predicate-only
+                          // addition (expiryLeadFired latched only under v>=1) — replay-neutral for
+                          // v=0 histories.
+                          || expiryLeadFired
+                          || !pendingRiskBreaches.isEmpty()
+                          || !pendingForceCloses.isEmpty());
+        }
+
+        if (partialAwaitLoopVersion < 1 || lastFillEvent == null) {
+          break;
+        }
+        // A fill landed. Book it and CLEAR it — the pre-#735 code left lastFillEvent set here, so
+        // a stale cumulative could be drained a second time downstream.
+        applyExitFill(req, lastFillEvent);
+        lastFillEvent = null;
+        // Termination: each iteration blocks on the SAME bounded await, so this is driven by
+        // inbound broker signals rather than spinning, and a non-fill wakeup breaks above. A
+        // duplicate cumulative books 0 under the #735 ledger — it emits no audit command, so it
+        // cannot grow history either; it only re-arms the TTL, which the timeout branch then
+        // handles normally. An explicit no-progress break was tried and removed: no test could
+        // justify it, and its only reachable path returned SILENTLY holding the exit latch, which
+        // is worse than the TTL timeout it was preventing.
+        if (remainingQty <= targetRemaining
+            || eodFired
+            || expiryFired
+            || expiryLeadFired
+            || !pendingRiskBreaches.isEmpty()
+            || !pendingForceCloses.isEmpty()) {
+          break;
+        }
       }
 
-      if (lastFillEvent != null) {
+      if (partialAwaitLoopVersion >= 1) {
+        if (remainingQty <= targetRemaining) {
+          releaseExitInFlightLatches();
+          if (remainingQty == 0 && closeReason == null) {
+            closeReason = "normal_stc";
+          }
+          return;
+        }
+        // Target unmet. Fall through to the EXISTING timeout / cancel / retry machinery with
+        // remainingQty already reflecting whatever actually filled — instead of returning as if
+        // the exit were done.
+      } else if (lastFillEvent != null) {
         applyExitFill(req, lastFillEvent);
         releaseExitInFlightLatches();
         if (remainingQty == 0 && closeReason == null) {
@@ -3915,8 +3982,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * byte-identical. Does NOT touch the in-flight latches or {@code closeReason} — the caller owns
    * lifecycle transitions.
    */
-  private void applyExitFill(PartialExitRequest req, FillSignalPayload fillEvent) {
-    emitExitFill(req.getSignalId(), fillEvent);
+  private long applyExitFill(PartialExitRequest req, FillSignalPayload fillEvent) {
+    return emitExitFill(req.getSignalId(), fillEvent);
   }
 
   /**
