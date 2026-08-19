@@ -30,6 +30,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -588,6 +589,51 @@ public class AlpacaTradeUpdatesStream {
       }
     }
 
+    /**
+     * #715 instrumentation delegates. The Listener is a nested type holding only an {@code owner}
+     * reference, so it reaches the shared metrics the same way it already reaches {@link
+     * #handleFrame} — through the runner that owns the tenant identity.
+     */
+    private final AtomicBoolean instrumentationWarned = new AtomicBoolean(false);
+
+    private void recordWsCallback(String channel, boolean last) {
+      try {
+        metrics.recordWsCallback(channel, last);
+      } catch (RuntimeException e) {
+        instrumentationFailed(e);
+      }
+    }
+
+    private void recordPartialBytes(long bytes) {
+      try {
+        metrics.recordPartialBytes(tenant, bytes);
+      } catch (RuntimeException e) {
+        instrumentationFailed(e);
+      }
+    }
+
+    /**
+     * Instrumentation MUST NOT THROW, for the same reason {@link #handleFrame} must not: both are
+     * invoked from onText/onBinary BEFORE {@code webSocket.request(1)}, so an escaping exception
+     * skips the request and the socket is never fed another frame — permanently mute.
+     *
+     * <p>That is not hypothetical here. {@link FillListenerMetrics#recordPartialBytes} registers a
+     * Micrometer gauge inside {@code computeIfAbsent} on the first call per tenant, and meter
+     * registration can throw. Diagnostics that silence the very socket they exist to diagnose would
+     * be the worst possible outcome for this change, so the failure is contained and logged rather
+     * than propagated — one WARN per connection, because a broken registry would otherwise log on
+     * every frame.
+     */
+    private void instrumentationFailed(RuntimeException e) {
+      if (instrumentationWarned.compareAndSet(false, true)) {
+        log.warn(
+            "fill-listener[{}] #715 instrumentation failed; metrics for this connection are"
+                + " unreliable but the socket is unaffected: {}",
+            tenant,
+            e.toString());
+      }
+    }
+
     // MUST NOT THROW. Both call sites (Listener#onText / #onBinary) invoke webSocket.request(1)
     // AFTER this returns, so an escaping exception skips the request and the socket stops being fed
     // frames entirely — permanently mute, strictly worse than the bug this logging exists to find.
@@ -773,6 +819,25 @@ public class AlpacaTradeUpdatesStream {
     }
   }
 
+  /**
+   * <b>Rule for anything added inside these callbacks: it must sit AFTER {@code
+   * webSocket.request(1)}, or be incapable of throwing.</b>
+   *
+   * <p>Demand is re-armed at the END of {@code onText}/{@code onBinary}. Anything that throws
+   * before that point skips the request, and the socket is never fed another frame — permanently
+   * mute, on a connection that still reports open, authorized and subscribed, with no close frame,
+   * no error frame and no reconnect. That is indistinguishable from the broker sending nothing,
+   * which is the exact bug this class has spent #693, #694, #715, #720 and #722 chasing.
+   *
+   * <p>This has now bitten twice. First as the JDK's default {@code onBinary}, which silently
+   * {@code request(1)}'d and discarded every frame (#694). Then as the #715 instrumentation itself:
+   * {@code recordPartialBytes} registers a Micrometer gauge on first call per tenant, meter
+   * registration can throw, and the diagnostic would have silenced the socket it was added to
+   * diagnose. Both delegates are now guarded.
+   *
+   * <p>Instrumentation that can silence the thing it measures is a nasty class of bug. Assume any
+   * new call here is in it until shown otherwise.
+   */
   private final class Listener implements WebSocket.Listener {
     private final CountDownLatch closed;
     private final TenantRunner owner;
@@ -816,9 +881,12 @@ public class AlpacaTradeUpdatesStream {
         return null;
       }
       partialFrame.append(data);
+      owner.recordWsCallback("text", last);
+      owner.recordPartialBytes(partialFrame.length());
       if (last) {
         String frame = partialFrame.toString();
         partialFrame.setLength(0);
+        owner.recordPartialBytes(0L);
         owner.handleFrame(frame);
       }
       webSocket.request(1);
@@ -841,9 +909,12 @@ public class AlpacaTradeUpdatesStream {
       byte[] chunk = new byte[data.remaining()];
       data.get(chunk);
       partialBinaryFrame.writeBytes(chunk);
+      owner.recordWsCallback("binary", last);
+      owner.recordPartialBytes(partialBinaryFrame.size());
       if (last) {
         String frame = partialBinaryFrame.toString(StandardCharsets.UTF_8);
         partialBinaryFrame.reset();
+        owner.recordPartialBytes(0L);
         owner.handleFrame(frame);
       }
       webSocket.request(1);

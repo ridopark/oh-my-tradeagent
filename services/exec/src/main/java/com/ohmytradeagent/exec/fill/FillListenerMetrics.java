@@ -7,6 +7,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -28,6 +29,10 @@ public class FillListenerMetrics {
   private final Counter eventsDispatched;
   private final Counter subscriptionConfirmed;
   private final Counter framesWithoutStream;
+  private final Map<String, Counter> wsCallbacksByChannel;
+  private final Map<String, Counter> wsFragmentsByChannel;
+  private final MeterRegistry registry;
+  private final Map<String, AtomicLong> partialBytesByTenant = new ConcurrentHashMap<>();
   private final Counter eventsDroppedDedup;
   private final Counter reconnects;
   private final Counter eventsUnknownOrder;
@@ -45,6 +50,7 @@ public class FillListenerMetrics {
 
   FillListenerMetrics(MeterRegistry registry, Clock clock) {
     this.clock = clock;
+    this.registry = registry;
     Map<String, Counter> received = new LinkedHashMap<>();
     for (String event : new String[] {"fill", "partial_fill"}) {
       received.put(
@@ -55,6 +61,49 @@ public class FillListenerMetrics {
               .register(registry));
     }
     this.receivedByEvent = Map.copyOf(received);
+    // #715: instrument the WebSocket callback boundary itself, BELOW every other counter here.
+    //
+    // Every existing signal in this class sits behind handleFrame, so all of them read zero for
+    // three completely different faults, and they cannot be told apart:
+    //   1. bytes arrive fragmented and `last` never becomes true -> we accumulate forever and
+    //      never call handleFrame (no log, no counter, no reconnect: the abort is at 1MB)
+    //   2. complete frames arrive but our dispatch is broken
+    //   3. nothing ever reaches the client
+    //
+    // Only (3) exonerates this client. Counting the callbacks separates them:
+    //   callbacks > 0, fragments > 0  -> (1), and it is OURS
+    //   callbacks > 0, fragments == 0 -> (2), and it is OURS
+    //   callbacks == 0               -> (3): for bytes to have arrived, the JDK would have to be
+    //                                   discarding DECRYPTED frames below the callback boundary
+    //
+    // That last row is why this is worth six lines: it settles whether the loss is client-side
+    // without a packet capture, a veth, an idle baseline, or operator root.
+    Map<String, Counter> callbacks = new LinkedHashMap<>();
+    Map<String, Counter> fragments = new LinkedHashMap<>();
+    for (String channel : new String[] {"text", "binary"}) {
+      callbacks.put(
+          channel,
+          Counter.builder("fill_listener.ws_callbacks")
+              .tag("channel", channel)
+              .description(
+                  "WebSocket Listener callback invocations. Counted on ENTRY, before"
+                      + " fragment accumulation and before handleFrame, so this is the lowest"
+                      + " observable point in the client. Zero across a session with known order"
+                      + " activity means nothing reached the client above TLS.")
+              .register(registry));
+      fragments.put(
+          channel,
+          Counter.builder("fill_listener.ws_fragments")
+              .tag("channel", channel)
+              .description(
+                  "Callback invocations carrying a NON-final fragment (last == false). Non-zero"
+                      + " while events_received stays zero means frames are arriving but never"
+                      + " completing, so handleFrame is never reached and every other counter here"
+                      + " reads zero for a reason that is ours, not the broker's.")
+              .register(registry));
+    }
+    this.wsCallbacksByChannel = Map.copyOf(callbacks);
+    this.wsFragmentsByChannel = Map.copyOf(fragments);
     this.eventsDispatched =
         Counter.builder("fill_listener.events_dispatched")
             .description(
@@ -137,6 +186,56 @@ public class FillListenerMetrics {
     Counter counter = receivedByEvent.get(event);
     if (counter != null) {
       counter.increment();
+    }
+  }
+
+  /**
+   * Bytes currently sitting in this tenant's un-dispatched fragment accumulator.
+   *
+   * <p>#715: `handleFrame` is only reached when a frame's FINAL fragment arrives. If frames arrive
+   * fragmented and {@code last} never becomes true, both handlers accumulate, re-arm demand, and
+   * never dispatch — and because every other counter in this class sits behind `handleFrame`, ALL
+   * of them read zero. So does the reconnect counter, since the oversize abort is at 1MB and a
+   * session's worth of fragments is kilobytes. That failure is invisible by construction; this
+   * gauge is the only thing that would show it.
+   *
+   * <p>Non-zero and rising while {@code events_received} stays zero means the bytes are arriving
+   * and WE are failing to complete them — the fault is ours, not the broker's.
+   *
+   * <p>Reported per tenant because each socket owns its own accumulator, and summed across the two
+   * channels: RFC 6455 forbids interleaving a text and a binary message on one connection, so at
+   * most one is ever non-empty and the sum is exact rather than an approximation.
+   */
+  public void recordPartialBytes(String tenant, long bytes) {
+    partialBytesByTenant
+        .computeIfAbsent(
+            tenant,
+            t -> {
+              AtomicLong holder = new AtomicLong();
+              Gauge.builder("fill_listener.ws_partial_bytes", holder, AtomicLong::doubleValue)
+                  .tag("tenant", t)
+                  .description(
+                      "Bytes buffered in the un-dispatched WebSocket fragment accumulator. Non-zero"
+                          + " while events_received stays zero means frames are arriving but never"
+                          + " completing, so handleFrame is never reached and every other"
+                          + " fill_listener counter reads zero for a client-side reason.")
+                  .register(registry);
+              return holder;
+            })
+        .set(bytes);
+  }
+
+  /** Called on ENTRY to onText/onBinary — the lowest observable point in the client. */
+  public void recordWsCallback(String channel, boolean last) {
+    Counter c = wsCallbacksByChannel.get(channel);
+    if (c != null) {
+      c.increment();
+    }
+    if (!last) {
+      Counter f = wsFragmentsByChannel.get(channel);
+      if (f != null) {
+        f.increment();
+      }
     }
   }
 
