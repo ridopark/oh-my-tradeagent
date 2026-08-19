@@ -39,8 +39,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Drives {@link AlpacaTradeUpdatesStream} against an in-process Java-WebSocket server. Pins the
- * Alpaca trade-updates handshake shape (authenticate → listen → events) and the listener's filter /
- * dedup / reconnect contracts.
+ * Alpaca trade-updates handshake shape (auth → listen → events) and the listener's filter / dedup /
+ * reconnect contracts.
  */
 class AlpacaTradeUpdatesStreamTest {
 

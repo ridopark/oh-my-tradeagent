@@ -43,9 +43,9 @@ import org.springframework.stereotype.Component;
 
 /**
  * Long-running Alpaca trade-updates WebSocket listener. Connects to the configured stream URL,
- * sends the {@code authenticate} + {@code listen} handshake frames, parses incoming JSON, filters
- * to {@code fill} / {@code partial_fill}, dedupes on {@code (broker_order_id, filled_qty)}, and
- * hands each surviving event to a {@link FillDispatcher}.
+ * sends the {@code auth} + {@code listen} handshake frames, parses incoming JSON, filters to {@code
+ * fill} / {@code partial_fill}, dedupes on {@code (broker_order_id, filled_qty)}, and hands each
+ * surviving event to a {@link FillDispatcher}.
  *
  * <p><b>Frames arrive on BOTH channels.</b> Alpaca sends trade_updates as <b>binary</b> frames
  * carrying JSON, so {@link Listener#onBinary} is load-bearing, not defensive — see #693, where its
@@ -608,15 +608,17 @@ public class AlpacaTradeUpdatesStream {
           // down. An external abort would leave this thread parked in await() forever with the
           // socket dead: the #715 symptom, self-inflicted and permanent.
           //
-          // Order matters. Null the handle BEFORE aborting so a concurrent stop() either takes the
-          // live socket and closes it normally, or sees null and goes straight to interrupt+join.
+          // Order matters. Abort FIRST, then null the handle in a finally. Until the abort has
+          // been attempted the socket is still live, so a concurrent stop() that reads the handle
+          // finds it and closes it normally; nulling first would drop the only reference to a
+          // still-live socket, and an abort() that then threw would leave it unreachable by stop()
+          // forever. The finally clears the handle on both paths, so a throwing abort() cannot
+          // strand a stale handle either.
           // Metric LAST: this is NOT inside a Listener callback, so the rule documented on that
           // class is inverted here — a throw cannot mute the socket, but it would skip the abort.
           try {
             ws.abort();
           } finally {
-            // Null the handle even if abort() failed. CAS-then-abort would leave a live socket
-            // unreachable by stop() on a throw; this ordering keeps stop() able to find it.
             currentSocket.compareAndSet(ws, null);
           }
           recordRecycle();
