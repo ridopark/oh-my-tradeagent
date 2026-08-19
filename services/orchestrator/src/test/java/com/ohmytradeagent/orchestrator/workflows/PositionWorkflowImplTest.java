@@ -1307,6 +1307,69 @@ class PositionWorkflowImplTest {
         .isNotEmpty();
   }
 
+  /**
+   * Issue #735 Phase 2 HAPPY PATH — the case this code will actually meet in production once the WS
+   * delivers again, and the one no test covered: a full-close STC that fills in TWO partials and
+   * COMPLETES.
+   *
+   * <p>The broker reports CUMULATIVE 2 then 5 on the SAME order. The exit must drain both inside a
+   * SINGLE processOne cycle, book 2 then 3 (never 2 then 5 — that is the Phase 1 ledger), reach
+   * targetRemaining == 0, release the latch ONCE, set closeReason=normal_stc, and emit NO
+   * PartialExitFillTimeout — the retry/cancel machinery must never be entered on a clean fill.
+   *
+   * <p>The sibling test asserts the UNHAPPY path (a partial that never completes must not finish
+   * silently). Together they pin both exits from the drain loop.
+   */
+  @Test
+  void issue735p2_twoPartialsCompletingTheExit_drainInOneCycleAndCloseCleanly() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-735p2-happy");
+    PositionWorkflowInput in = input(5);
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
+    in.setExitFillTtlSecs(30L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    stub.partialExit(partialExitRequest("sig-p2-happy", "pos-735p2-happy", 1.0));
+    waitForPlaceOrderCount(1);
+
+    // Partial: 2 of 5 filled so far.
+    stub.onFill(fill("brk-p2-happy", 2L, new BigDecimal("2.50")));
+    long deadline = System.currentTimeMillis() + 10_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() == 5L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty())
+        .as("first partial books 2 and the exit stays in flight")
+        .isEqualTo(3L);
+    assertThat(captureAll("PositionClosed")).as("a partial must not close the position").isEmpty();
+
+    // SAME order completes: cumulative 5 -> delta 3.
+    stub.onFill(fill("brk-p2-happy", 5L, new BigDecimal("2.48")));
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-735p2-happy");
+
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills.stream().mapToLong(e -> asLong(e.getSubject().get("qty_filled"))).sum())
+        .as("2 + 3 == the 5-lot (cumulative 5 booked as a delta, not re-booked in full)")
+        .isEqualTo(5L);
+    assertThat(fills.stream().map(e -> asLong(e.getSubject().get("qty_filled"))).toList())
+        .as("booked as two deltas in order")
+        .containsExactly(2L, 3L);
+
+    // The clean-fill path must never enter the timeout / cancel / retry machinery.
+    assertThat(captureAll("PartialExitFillTimeout"))
+        .as("a completing exit must not time out")
+        .isEmpty();
+    verify(exec, never()).cancelOrder(anyString());
+    verify(exec, times(1)).placeOrder(any());
+
+    AuditEvent closed = captureKind("PositionClosed");
+    assertThat(asLong(closed.getSubject().get("remaining_qty"))).isEqualTo(0L);
+  }
+
   // ---------- Phase 1 (PLAN-2026-06-30): flatten broker-authoritative terminal-state reconcile
   // ----------
 

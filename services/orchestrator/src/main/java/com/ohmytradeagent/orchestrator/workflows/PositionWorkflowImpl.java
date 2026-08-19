@@ -3193,12 +3193,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         // handles normally. An explicit no-progress break was tried and removed: no test could
         // justify it, and its only reachable path returned SILENTLY holding the exit latch, which
         // is worse than the TTL timeout it was preventing.
-        if (remainingQty <= targetRemaining
-            || eodFired
-            || expiryFired
-            || expiryLeadFired
-            || !pendingRiskBreaches.isEmpty()
-            || !pendingForceCloses.isEmpty()) {
+        // The pre-emption set MUST mirror the await predicate exactly, and the predicate differs
+        // by branch: the untimed (exitTimeoutVersion == DEFAULT_VERSION) await has no
+        // expiryLeadFired term, so breaking on it there would abandon the drain for a latch that
+        // await could never have woken on — a pre-emption the legacy path does not recognise.
+        boolean preempted =
+            eodFired
+                || expiryFired
+                || (exitTimeoutVersion != Workflow.DEFAULT_VERSION && expiryLeadFired)
+                || !pendingRiskBreaches.isEmpty()
+                || !pendingForceCloses.isEmpty();
+        if (remainingQty <= targetRemaining || preempted) {
           break;
         }
       }
@@ -3982,8 +3987,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * byte-identical. Does NOT touch the in-flight latches or {@code closeReason} — the caller owns
    * lifecycle transitions.
    */
-  private long applyExitFill(PartialExitRequest req, FillSignalPayload fillEvent) {
-    return emitExitFill(req.getSignalId(), fillEvent);
+  private void applyExitFill(PartialExitRequest req, FillSignalPayload fillEvent) {
+    emitExitFill(req.getSignalId(), fillEvent);
   }
 
   /**
