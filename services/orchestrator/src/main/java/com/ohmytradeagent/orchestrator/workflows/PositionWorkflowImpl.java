@@ -719,6 +719,28 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_EXIT_PARTIAL_AWAIT_LOOP = "exit-partial-await-loop-v1";
 
   /**
+   * Issue #738: refuse to book a fill of our OWN ENTRY order as an exit.
+   *
+   * <p>{@code FillSignalPayload} carries only {@code brokerOrderId / filledQty / avgFillPrice /
+   * filledAt} — no intent key, no side — and {@code onFill} does nothing but latch it. The workflow
+   * retained only {@code currentInFlightBrokerOrderId} (the EXIT placement), so it could not
+   * recognise its own entry fill.
+   *
+   * <p>{@code processOne} clears {@code lastFillEvent} immediately before placing (:3023), which
+   * discards a stale entry fill parked BEFORE the placement — and masks this most of the time. The
+   * race is the window AFTER placement: an entry fill landing while the exit is resting is
+   * indistinguishable from the exit filling. Reproduced — a 50-lot entry that confirms at 10 and
+   * then completes mid-await books {@code min(50, 10)} = 10 and drives {@code remainingQty} to ZERO
+   * while the broker holds 50, so the workflow reports FLAT and stops managing the lot.
+   *
+   * <p>That window is exactly when a partially-filled entry is most likely to complete: the price
+   * came back, which is also what prompted the STC.
+   *
+   * <p>Gated: skipping a booking removes a {@code PartialExitFilled} audit command from the stream.
+   */
+  private static final String VERSION_ENTRY_FILL_NOT_AN_EXIT = "entry-fill-not-an-exit-v1";
+
+  /**
    * Bound on {@link #exitBookedByOrder}. Workflow fields are NOT serialized into Temporal history
    * (history holds commands and events; state is reconstructed by replay), so an unbounded ledger
    * is a worker-heap concern rather than a history-bloat one — but {@code PositionWorkflowImpl} has
@@ -858,6 +880,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private boolean exitInFlight;
   private final ArrayDeque<PartialExitRequest> pendingExits = new ArrayDeque<>();
   private FillSignalPayload lastFillEvent;
+
+  /**
+   * Issue #738: the broker order id of the ENTRY order, captured at confirm. The ONLY thing that
+   * lets this workflow recognise a fill of its own entry — the payload carries no side and no
+   * intent key.
+   */
+  private String entryBrokerOrderId;
+
   private String currentInFlightBrokerOrderId;
   private String currentInFlightSignalId;
   // Issue #216: track the live intent_key of the in-flight exit order. Pre-#216 the key was
@@ -1241,6 +1271,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               ? lastFillEvent.getAvgFillPrice()
               : in.getEntryPremium();
       this.remainingQty = firstFilledQty;
+      // #738: remember WHICH broker order is ours on the entry side, so a later fill of it can
+      // never be mistaken for an exit fill.
+      this.entryBrokerOrderId = lastFillEvent.getBrokerOrderId();
       this.positionConfirmed = true;
       // F1 supersede guardrail: stamp the confirm instant (deterministic Workflow clock).
       this.entryAt = workflowNow();
@@ -4088,6 +4121,23 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * ExpiryForceFlattened} stay P&L-neutral lifecycle markers.
    */
   private long emitExitFill(String signalId, FillSignalPayload fillEvent) {
+    // #738: a fill of our OWN ENTRY order is not an exit. Booking it would decrement the position
+    // we just bought — and #740's clamp turns that into a clean zero, so the workflow reports FLAT
+    // while the broker still holds the lot. Refuse it here, at the single site every booking path
+    // funnels through.
+    if (Workflow.getVersion(VERSION_ENTRY_FILL_NOT_AN_EXIT, Workflow.DEFAULT_VERSION, 1) >= 1
+        && entryBrokerOrderId != null
+        && entryBrokerOrderId.equals(fillEvent.getBrokerOrderId())) {
+      Workflow.getLogger(PositionWorkflowImpl.class)
+          .warn(
+              "#738: refusing to book a fill of the ENTRY order as an exit"
+                  + " broker_order_id={} filled_qty={} remaining_qty={} signal_id={}",
+              fillEvent.getBrokerOrderId(),
+              fillEvent.getFilledQty(),
+              remainingQty,
+              signalId);
+      return 0L;
+    }
     long filled = fillEvent.getFilledQty();
     // Issue #735: convert the broker's CUMULATIVE filled_qty into the un-booked delta for this
     // broker order, clamped to the outstanding lot. Returning 0 here emits NO audit event — that
