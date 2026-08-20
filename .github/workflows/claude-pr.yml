@@ -112,8 +112,14 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: |
           set -uo pipefail
+          # `| tail -1` here was a bug, not a safeguard: jq emits the comment body across many
+          # LINES, so tail took the body's last LINE rather than the last matching COMMENT. Every
+          # grep below then ran against that single line, and any review whose verdict is followed
+          # by a closing sentence failed with "carries no Verdict section" while displaying a
+          # verdict. Observed on #761: 4441 chars / 40 lines collapsed to a 318-char paragraph.
+          # Select the last matching comment IN jq instead, keeping the body whole.
           body=$(gh pr view "$PR" --json comments \
-            --jq ".comments[] | select(.body | contains(\"actions/runs/$RUN_ID\")) | .body" | tail -1)
+            --jq "[.comments[] | select(.body | contains(\"actions/runs/$RUN_ID\")) | .body] | last // \"\"")
 
           # Known GitHub guardrail: a PR that edits `.github/workflows/**` cannot run its own
           # Claude review — the action posts nothing at all. That is not a stalled review, it is
