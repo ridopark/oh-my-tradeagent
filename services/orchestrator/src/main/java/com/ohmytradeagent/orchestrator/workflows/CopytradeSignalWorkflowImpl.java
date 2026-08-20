@@ -1971,9 +1971,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    * broker-<broker_target>} task queue and returns the account's <b>cash</b> balance — the cash
    * component of the notional-cap gate's MTM-stable cost-basis capital base ({@code cash +
    * sum_open_notional}, issue #323). Returns {@code null} when the notional-cap gate is disabled
-   * (BOTH {@code notional_cap_pct_of_capital_base} and {@code notional_cap_pct_of_capital_base}
-   * null, per {@link StrategyConfigs#notionalCapConfigured}) so the cross-service round-trip only
-   * fires when the strategy enabled the gate.
+   * ({@code notional_cap_pct_of_capital_base} null, per {@link
+   * StrategyConfigs#notionalCapConfigured}) so the cross-service round-trip only fires when the
+   * strategy enabled the gate.
    *
    * <p>Fail-closed semantics: any exception (after Temporal's own retries), a null/blank {@code
    * broker_target}, or a null result/cash yields {@code BigDecimal.ZERO}. The downstream {@code
@@ -1989,13 +1989,11 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
    */
   private BigDecimal dispatchAccountSnapshot(
       CopytradeSignalPayload payload, StrategyConfig config) {
-    // Enablement mirrors RiskActivitiesImpl#resolveNotionalCapPct (#336): the cap (and so the cash
-    // dispatch) is on when EITHER the canonical notional_cap_pct_of_capital_base OR the deprecated
-    // notional_cap_pct_of_capital_base is set. Pre-#336 this tested equity-only, so a config that
-    // set
-    // ONLY
-    // the new canonical field (the migration end-state) skipped the dispatch and checkNotionalCap
-    // rejected every BTO with cash_unavailable. Sharing StrategyConfigs.notionalCapConfigured keeps
+    // Enablement mirrors RiskActivitiesImpl#resolveNotionalCapPct: the cap (and so the cash
+    // dispatch) is on when notional_cap_pct_of_capital_base is set. Pre-#336 this tested the
+    // now-removed equity alias only, so a config setting ONLY the canonical field (the migration
+    // end-state, and since #338 the only state) skipped the dispatch and checkNotionalCap rejected
+    // every BTO with cash_unavailable. Sharing StrategyConfigs.notionalCapConfigured keeps
     // guard and resolver in lockstep.
     //
     // Replay-safe by construction (no new Workflow.getVersion marker needed): `config` reaches this
