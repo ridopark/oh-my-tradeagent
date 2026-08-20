@@ -6,8 +6,8 @@ import java.util.List;
  * Issue #323 part (a): resolves the set of strategy ids that belong to a tenant, used by {@link
  * VisibilityPortfolioSnapshot} to widen the {@code openPositions} Visibility query from a single
  * {@code (tenant, strategy)} to <b>all of the tenant's strategies</b> on the same {@code
- * broker_target} — so the {@code notional_cap_pct_of_equity}, {@code same_underlying_count}, and
- * {@code sector_concentration_cap} gates observe the tenant's whole running book.
+ * broker_target} — so the {@code notional_cap_pct_of_capital_base}, {@code same_underlying_count},
+ * and {@code sector_concentration_cap} gates observe the tenant's whole running book.
  *
  * <p>Cross-tenant isolation is preserved structurally: only the <i>current</i> tenant's strategies
  * are ever returned, so another tenant's PositionWorkflows never enter the snapshot. The

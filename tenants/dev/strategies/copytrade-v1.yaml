@@ -44,8 +44,7 @@ max_contracts: 50
 # (sum_open_notional + new_notional) > notional_cap_pct_of_capital_base * (cash +
 # sum_open_notional). Bounds TOTAL premium-at-risk across positions — complements the
 # count caps (max_positions / max_contracts), which don't limit dollars. 0.25 = at most
-# 25% of the cost-basis capital base deployed at once. null disables. (Do NOT also set the
-# deprecated notional_cap_pct_of_equity — differing values fail closed.)
+# 25% of the cost-basis capital base deployed at once. null disables.
 notional_cap_pct_of_capital_base: 0.25
 
 # Phase 2a default per Open Question #10

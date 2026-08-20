@@ -537,12 +537,12 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   }
 
   /**
-   * Issue #317/#323: when {@code notional_cap_pct_of_equity} is enabled, the v=1 branch dispatches
-   * the cross-service {@code AccountSnapshotActivity} over the {@code broker-<broker_target>} queue
-   * and threads the returned <b>cash</b> (the cash component of the #323 cost-basis capital base
-   * {@code cash + sum_open_notional}) down into {@code risk.checkEntryWithLimit(...)}. Pins both
-   * the dispatch (request keyed solely on broker_target) and the carry-over to the risk gate's 5th
-   * arg.
+   * Issue #317/#323: when {@code notional_cap_pct_of_capital_base} is enabled, the v=1 branch
+   * dispatches the cross-service {@code AccountSnapshotActivity} over the {@code
+   * broker-<broker_target>} queue and threads the returned <b>cash</b> (the cash component of the
+   * #323 cost-basis capital base {@code cash + sum_open_notional}) down into {@code
+   * risk.checkEntryWithLimit(...)}. Pins both the dispatch (request keyed solely on broker_target)
+   * and the carry-over to the risk gate's 5th arg.
    */
   @Test
   void handleBto_dispatchesAccountSnapshot_andThreadsEquityIntoCheckEntryWithLimit() {
@@ -670,13 +670,13 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
 
   /**
    * Issue #336 regression guard: a config that sets ONLY the canonical {@code
-   * notional_cap_pct_of_capital_base} (the {@code notional_cap_pct_of_equity} alias null — the
-   * migration end-state) MUST still dispatch the {@code AccountSnapshotActivity} and run the cap
-   * against the real broker cash. Pre-fix the workflow's dispatch guard tested {@code
-   * getNotionalCapPctOfCapitalBase() == null} only, so this config returned null cash, the snapshot
-   * never fired, and {@code checkNotionalCap} rejected EVERY BTO with {@code cash_unavailable} (the
-   * new field was non-functional). This test wires a <b>real</b> {@link RiskActivitiesImpl} so
-   * {@code checkNotionalCap} actually evaluates — asserting the snapshot IS dispatched and the cap
+   * notional_cap_pct_of_capital_base} (#338 removed the deprecated alias — the migration end-state)
+   * MUST still dispatch the {@code AccountSnapshotActivity} and run the cap against the real broker
+   * cash. Pre-fix the workflow's dispatch guard tested {@code getNotionalCapPctOfCapitalBase() ==
+   * null} only, so this config returned null cash, the snapshot never fired, and {@code
+   * checkNotionalCap} rejected EVERY BTO with {@code cash_unavailable} (the new field was
+   * non-functional). This test wires a <b>real</b> {@link RiskActivitiesImpl} so {@code
+   * checkNotionalCap} actually evaluates — asserting the snapshot IS dispatched and the cap
    * APPROVES on the math with the threaded cash (order placed), NOT a blanket {@code
    * cash_unavailable} reject. {@code RiskActivitiesNotionalCapResolverTest} passes cash straight
    * into checkEntryWithLimit and structurally cannot catch this guard gap.

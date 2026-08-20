@@ -92,7 +92,7 @@ class RiskActivitiesPortfolioGatesTest {
             preTradeCheck);
   }
 
-  // ----- notional_cap_pct_of_equity -----
+  // ----- notional_cap_pct_of_capital_base -----
   // #323: the denominator is the cost-basis capital base (cash + sum_open_notional); the seam value
   // (default mock 100000) is now the account CASH component, not net-liq equity. The gate is
   // sum_open_notional + new <= pct * (cash + sum_open_notional).

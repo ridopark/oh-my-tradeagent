@@ -23,7 +23,7 @@ public interface PortfolioSnapshot {
 
   /**
    * Account equity (dollars) for the brokerage account behind {@code brokerTarget}, which the
-   * {@code notional_cap_pct_of_equity} gate compares against.
+   * {@code notional_cap_pct_of_capital_base} gate compares against.
    *
    * <p>Equity is <b>account-level</b>, not per {@code (tenant, strategy)}. exec-svc is deployed
    * once per {@code <provider>-<env>} pair (one credential set / one brokerage account), so every

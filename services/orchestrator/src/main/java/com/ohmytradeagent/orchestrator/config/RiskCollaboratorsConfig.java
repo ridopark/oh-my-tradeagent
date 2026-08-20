@@ -30,7 +30,7 @@ public class RiskCollaboratorsConfig {
   /**
    * Issue #318: Temporal Advanced Visibility–backed PortfolioSnapshot — lists running
    * PositionWorkflows for the {@code (tenant, strategy)} scope so the {@code same_underlying_count}
-   * and {@code notional_cap_pct_of_equity} gates observe the real open book. Overrides {@link
+   * and {@code notional_cap_pct_of_capital_base} gates observe the real open book. Overrides {@link
    * #noOpPortfolioSnapshot()} (its {@code @ConditionalOnMissingBean} yields to this primary bean).
    */
   @Bean
@@ -50,7 +50,8 @@ public class RiskCollaboratorsConfig {
     // the account cap had (PR #604): a DB-onboarded tenant absent from the tenants tree would
     // otherwise resolve to an empty set here — and since the requesting strategy is always added,
     // that silently undercounts sum_open_notional to ONLY the requesting strategy for a MULTI-
-    // strategy tenant, loosening notional_cap_pct_of_equity fail-OPEN. One config source now flips
+    // strategy tenant, loosening notional_cap_pct_of_capital_base fail-OPEN. One config source now
+    // flips
     // every consumer together.
     return new VisibilityPortfolioSnapshot(workflowClient, meterRegistry, tenantStrategies);
   }

@@ -24,18 +24,18 @@ public interface RiskActivities {
 
   /**
    * Slip-adjusted variant of {@link #checkEntry}. {@code limit} is the BTO max-cost threaded into
-   * both the {@code notional_cap_pct_of_equity} gate and the {@code pre_trade_check} buying-power
-   * compare so a snug cap can no longer be passed on the optimistic mirror price.
+   * both the {@code notional_cap_pct_of_capital_base} gate and the {@code pre_trade_check}
+   * buying-power compare so a snug cap can no longer be passed on the optimistic mirror price.
    *
    * <p>{@code limit} should be non-null in production. The implementation falls back to {@code
    * payload.getPrice()} when {@code limit} is null to keep the unit-test surface ergonomic.
    *
    * <p>{@code accountCash} is the workflow-supplied account cash balance dispatched from the {@code
    * broker-<broker_target>} {@code AccountSnapshotActivity} (mirroring how {@code preTradeResult}
-   * is threaded down). When non-null it feeds the {@code notional_cap_pct_of_equity} gate directly;
-   * when null the gate falls back to {@link PortfolioSnapshot#accountEquity} keyed on {@code
-   * broker_target} (the seam for tests / non-dispatch providers). The gate already fails closed on
-   * a zero/missing figure.
+   * is threaded down). When non-null it feeds the {@code notional_cap_pct_of_capital_base} gate
+   * directly; when null the gate falls back to {@link PortfolioSnapshot#accountEquity} keyed on
+   * {@code broker_target} (the seam for tests / non-dispatch providers). The gate already fails
+   * closed on a zero/missing figure.
    */
   RiskDecision checkEntryWithLimit(
       CopytradeSignalPayload payload,
@@ -51,7 +51,7 @@ public interface RiskActivities {
    * applied — a {@link WatchlistTriggerPayload} carries no author and no posted-at timestamp.
    *
    * <p>{@code limit} is the BTO max-cost (option premium) threaded into the {@code
-   * notional_cap_pct_of_equity} gate and the {@code pre_trade_check} buying-power compare,
+   * notional_cap_pct_of_capital_base} gate and the {@code pre_trade_check} buying-power compare,
    * mirroring {@link #checkEntryWithLimit}. {@code accountCash} feeds the notional-cap gate's
    * capital base and fails closed on null/zero.
    */

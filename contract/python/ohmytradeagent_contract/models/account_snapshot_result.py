@@ -23,7 +23,7 @@ class AccountSnapshotResult(BaseModel):
     """
     cash: Annotated[float | None, Field(ge=0.0)] = None
     """
-    Issue #323: account cash balance in dollars (Alpaca /v2/account 'cash'). The notional_cap_pct_of_equity gate uses the MTM-stable cost-basis capital base (cash + sum_open_notional) as its denominator instead of net-liq equity, so numerator and denominator share the same cost-basis open-notional term. Optional for back-compat with pre-#323 producers/records; a null/absent or zero cash makes the cap gate fail closed (rejects) rather than passing an unbounded cap.
+    Issue #323: account cash balance in dollars (Alpaca /v2/account 'cash'). The notional_cap_pct_of_capital_base gate uses the MTM-stable cost-basis capital base (cash + sum_open_notional) as its denominator instead of net-liq equity, so numerator and denominator share the same cost-basis open-notional term. Optional for back-compat with pre-#323 producers/records; a null/absent or zero cash makes the cap gate fail closed (rejects) rather than passing an unbounded cap.
     """
     account_number: str | None = None
     """
