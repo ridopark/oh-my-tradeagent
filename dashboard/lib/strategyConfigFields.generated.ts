@@ -17,7 +17,7 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
   },
   {
     field: "author_whitelist",
-    description: "Discord author IDs whose signals are admitted. Risk gate AUTHOR_NOT_WHITELISTED on miss. Required — always present (identity/routing/whitelist).",
+    description: "Discord author IDs whose signals are admitted. Risk gate AUTHOR_NOT_WHITELISTED on miss. Copytrade-only: RiskActivitiesImpl.checkEntryInternal treats a null OR empty whitelist as \"admit nobody\" and rejects every non-manual signal (fail-closed), so this is safe to omit. The watchlist-trigger path never consults it (see checkWatchlistEntry / runStrategyAgnosticGates) — OPTIONAL and absent for non-copytrade strategies; no sentinel value needed (issue #459).",
   },
   {
     field: "broker_account_id",
