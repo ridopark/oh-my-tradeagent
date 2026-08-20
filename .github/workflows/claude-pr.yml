@@ -43,13 +43,18 @@ jobs:
           fetch-depth: 0
 
       - name: Code review
+        id: review
         uses: anthropics/claude-code-action@v1
         with:
           prompt: |
             You are reviewing PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
 
             Steps:
-            1. Read `.claude/agents/code-reviewer.md` for the project review rubric.
+            1. Read `CLAUDE.md` at the repo root for the project's coding rubric (SOLID/DRY/KISS,
+               surgical changes, goal-driven execution) and apply it to the review. It is checked
+               in, so it IS present in your checkout. If `.claude/agents/code-reviewer.md` also
+               exists, read that too — but it is developer-local and usually absent in CI, so do
+               not treat its absence as a problem.
             2. `gh pr view ${{ github.event.pull_request.number }} --json title,body,headRefName,baseRefName`
             3. `gh pr diff ${{ github.event.pull_request.number }}`
             4. Produce a structured review:
@@ -81,3 +86,57 @@ jobs:
           use_sticky_comment: "true"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # A green "Claude code review" check used to mean only "the action did not crash". On PR #755
+      # the run ended after 6 of its 7 steps — the last one being "post final review" — so no
+      # verdict was ever written, and the check still reported SUCCESS. That is worse than having no
+      # review job at all: it is a review-shaped signal that a reviewer can merge on. (It is the
+      # THIRD time this job has silently produced no verdict; see the two prompt-level fixes
+      # documented above.) This step makes "no verdict" a red check.
+      #
+      # It matches on THIS run's id, which the action embeds in its comment as
+      # ".../actions/runs/<id>" — so a sticky comment still holding a PREVIOUS push's verdict can
+      # never satisfy it. Verdict detection is deliberately format-loose (the word "Verdict" plus
+      # one of the three tokens, anywhere in the body) because past attempts to pin the bot's exact
+      # markdown have broken on reformatting.
+      #
+      # NOTE for anyone editing this file: for same-repo `pull_request` runs GitHub uses the
+      # workflow from the PR HEAD, not the base branch — so a change here DOES take effect on its
+      # own PR and you get one free live test of it. (`pull_request_target` is the one that runs
+      # the base copy.) That is how the workflow-file exemption below was found.
+      - name: Verify a verdict was actually posted
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          body=$(gh pr view "$PR" --json comments \
+            --jq ".comments[] | select(.body | contains(\"actions/runs/$RUN_ID\")) | .body" | tail -1)
+
+          # Known GitHub guardrail: a PR that edits `.github/workflows/**` cannot run its own
+          # Claude review — the action posts nothing at all. That is not a stalled review, it is
+          # structurally impossible, so failing here would leave every future CI-fix PR permanently
+          # red with no way to clear it. Warn loudly and pass; plain CI is the gate for those PRs.
+          # (Discovered by this very step on its own PR, #760.)
+          if [ -z "$body" ] && gh pr view "$PR" --json files --jq '.files[].path' \
+               | grep -q '^\.github/workflows/'; then
+            echo "::warning::No Claude review for run $RUN_ID: this PR edits .github/workflows/**, which GitHub blocks from running its own review. NOT reviewed by the bot — plain CI is the gate. Review this one by hand."
+            exit 0
+          fi
+          if [ -z "$body" ]; then
+            echo "::error::Claude review posted NO comment for run $RUN_ID. The review did not happen — do not treat this PR as reviewed."
+            exit 1
+          fi
+          if ! printf '%s' "$body" | grep -qi 'verdict'; then
+            echo "::error::Claude review comment for run $RUN_ID carries no Verdict section — the run ended before posting one (unchecked final step). The PR is NOT reviewed."
+            echo "--- comment tail ---"; printf '%s\n' "$body" | tail -25
+            exit 1
+          fi
+          if ! printf '%s' "$body" | grep -qE 'READY|NEEDS FIXES|BLOCKED'; then
+            echo "::error::Claude review comment for run $RUN_ID names no verdict token (READY | NEEDS FIXES | BLOCKED). The PR is NOT reviewed."
+            echo "--- comment tail ---"; printf '%s\n' "$body" | tail -25
+            exit 1
+          fi
+          echo "Verdict present for run $RUN_ID."
