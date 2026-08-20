@@ -57,35 +57,36 @@ name: Deploy to homelab
 #   deploy workflow's responsibility narrow (image → rolled out, Ready).
 #
 # If a red CI leg (or the build itself) made `build-images.yml` conclude
-# anything other than 'success', this workflow's real jobs never run — see
-# `notify-deploy-outcome` below, which exists specifically to fail loudly
-# and notify Discord in that case instead of leaving an ambiguous skipped
-# run (#723).
+# anything other than 'success', this workflow's real jobs never run: the
+# `workflow_run` event still fires (any conclusion), but `preflight` gates on
+# `conclusion == 'success'`, so it and `deploy` are both skipped — the whole
+# run used to show up as an opaque skipped/cancelled entry that nobody
+# noticed (#723; on 2026-08-19 this dropped #722's deploy while the cluster
+# read green). `notify-deploy-outcome` in `deploy-notify.yml`, a standalone
+# sibling workflow, is what makes that loud now — see its own header for why
+# it deliberately lives OUTSIDE this file (independent of the `deploy-homelab`
+# concurrency group below, so a wait for approval on one run can never delay
+# the failure alert for another).
 #
 # A THIRD silent case (also #723, confirmed live: PR #758 added
 # infra/k8s/64-copytrade-servicemonitor.yaml and it never reached the
 # cluster): `build-images.yml` only watches services/**, contract/**,
 # pom.xml, infra/docker/**, dashboard/**, .dockerignore — NOT infra/k8s/**.
 # A commit that touches ONLY infra/k8s/ manifests never makes build-images.yml
-# run at all, so this workflow's `workflow_run` trigger never fires either —
-# no run, no skip, nothing. The diff-based matrix below also only knows how
-# to apply the handful of per-Deployment manifests (51/52/53/54/55/58/59/60/
-# 62/63-*.yaml); free-standing resources like ServiceMonitors have no
-# `matrix.service` to roll under at all. Rather than widen the auto-apply
-# surface (real risk: racing an untested manifest against the live cluster,
-# or double-rolling a service if the same commit also changed its code), the
-# `notify-k8s-manifest-changed` job below just makes the gap loud so it gets
-# applied by hand instead of assumed.
+# run at all, so the `workflow_run` trigger never fires either — no run, no
+# skip, nothing. The diff-based matrix below also only knows how to apply the
+# handful of per-Deployment manifests (51/52/53/54/55/58/59/60/62/63-*.yaml);
+# free-standing resources like ServiceMonitors have no `matrix.service` to
+# roll under at all. `deploy-notify.yml`'s `notify-k8s-manifest-changed` job
+# flags this instead of widening the auto-apply surface (real risk: racing an
+# untested manifest against the live cluster, or double-rolling a service if
+# the same commit also changed its code).
 
 on:
   workflow_run:
     workflows: ["Build and push images"]
     types: [completed]
     branches: [main]
-  push:
-    branches: [main]
-    paths:
-      - "infra/k8s/**"
   workflow_dispatch:
     inputs:
       service:
@@ -271,117 +272,38 @@ jobs:
             echo "::notice::No deployable service changed in ${HEAD_SHA}; skipping rollout."
           fi
 
-  # Closes the silent-skip gap (#723): when `build-images.yml` concludes
-  # anything other than 'success' (a red CI leg makes its `ci-gate` job
-  # fail, or that job hits its own timeout and reports 'cancelled'), THIS
-  # workflow's `preflight`/`deploy` jobs never execute — their `if:`
-  # conditions are false — so the whole run used to show up as an opaque
-  # skipped/cancelled entry that nobody noticed. This job runs (via
-  # `always()`) precisely when that happens, FAILS on purpose so the
-  # commit shows a red check instead of an ambiguous skip, and posts to
-  # Discord. It also covers the other silent case: build succeeded but the
-  # diff-based matrix came back empty (a manifest-only or docs-only PR) —
-  # that is a legitimate no-op, so it gets a distinct yellow notice instead
-  # of a failure.
-  notify-deploy-outcome:
-    name: Report deploy outcome
+  # Covers the "build succeeded but the diff-based matrix came back empty"
+  # case (a docs/config-only merge) — a legitimate no-op that must not look
+  # identical to "deployed". This is deliberately LOW urgency (nothing is
+  # broken; CI+build both passed), so unlike `deploy-notify.yml`'s jobs it
+  # stays in this file and simply inherits the workflow-level
+  # `deploy-homelab` concurrency group — it's fine if it queues briefly
+  # behind an in-progress run. The CI-failure case, where speed matters, is
+  # handled in `deploy-notify.yml` instead — see this file's top comment.
+  notify-nothing-to-roll:
+    name: Notify (nothing to roll)
     needs: preflight
-    if: always() && github.event_name == 'workflow_run'
+    if: |
+      always() && github.event_name == 'workflow_run' &&
+      needs.preflight.result == 'success' &&
+      needs.preflight.outputs.enabled == 'true' &&
+      needs.preflight.outputs.matrix == '{"service":[]}'
     runs-on: ubuntu-latest
-    # Own concurrency group, distinct from the workflow-level `deploy-homelab`
-    # group: `deploy` blocks on a required-reviewer approval that can sit
-    # pending for a long time, and this job's whole purpose is to notify
-    # RIGHT AWAY when nothing deployed — it must never queue behind that wait.
-    concurrency:
-      group: deploy-homelab-notify-${{ github.run_id }}
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Notify if no deploy happened (or none was expected)
+      - name: Notify
         env:
-          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
-          ENABLED: ${{ needs.preflight.outputs.enabled }}
-          MATRIX: ${{ needs.preflight.outputs.matrix }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK_URL }}
         run: |
           set -uo pipefail
-
-          notify() { # title msg color
-            { echo "## $1"; echo ""; echo "$2"; } >> "$GITHUB_STEP_SUMMARY"
-            if [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
-              ./scripts/discord-notify.sh "$1" "$2" "$3" \
-                || echo "::warning::discord notify failed (non-fatal)"
-            else
-              echo "::warning::DISCORD_DEPLOY_WEBHOOK_URL not set — notification is log/summary only."
-            fi
-          }
-
-          if [ "${CONCLUSION}" != "success" ]; then
-            echo "::error::Build and push images concluded '${CONCLUSION}' for ${SHA:0:8} — the deploy chain never fired."
-            notify "🔴 Deploy to homelab did NOT run" \
-              "Build and push images concluded '${CONCLUSION}' for \`${SHA:0:8}\` — CI was red, or the build itself failed/timed out, so no image was built and the deploy chain never fired. The cluster is UNCHANGED, still on the previous image. Build run: ${RUN_URL}" \
-              red
-            exit 1
-          fi
-
-          if [ "${ENABLED}" != "true" ]; then
-            # DEPLOY_ENABLED unset or KUBECONFIG_DEPLOY missing — preflight
-            # already logged this via ::notice::; it's a known operator-setup
-            # state, not the silent-failure case this job exists for.
-            exit 0
-          fi
-
-          if [ "${MATRIX}" = '{"service":[]}' ]; then
-            notify "🟡 Deploy ran, nothing to roll" \
-              "CI passed and images built for \`${SHA:0:8}\`, but no service's code or manifest changed in that commit — nothing was rolled to homelab. This is expected for docs/config-only merges. If a rollout WAS expected, dispatch 'Deploy to homelab' manually. Build run: ${RUN_URL}" \
-              yellow
-          fi
-
-  # Covers the third silent case documented at the top of this file: a push
-  # to main touching ONLY infra/k8s/** never makes build-images.yml run, so
-  # the `workflow_run` trigger above never fires and nothing else in this
-  # workflow executes. This job is the only signal an operator gets that a
-  # manifest merged and may not be live. It does not attempt to apply
-  # anything — see the top-of-file comment for why that's deliberately out
-  # of scope here.
-  notify-k8s-manifest-changed:
-    name: Notify (k8s manifest changed — not auto-applied)
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    # Same reasoning as notify-deploy-outcome's concurrency override: must
-    # not queue behind an in-progress or approval-pending `deploy` run.
-    concurrency:
-      group: deploy-homelab-notify-${{ github.run_id }}
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: List changed manifests and notify
-        env:
-          SHA: ${{ github.sha }}
-          GH_TOKEN: ${{ github.token }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK_URL }}
-        run: |
-          set -uo pipefail
-          files=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}" --jq '.files[].filename' \
-            | grep '^infra/k8s/' || true)
-          if [ -z "$files" ]; then
-            echo "No infra/k8s/ files in this commit's diff — nothing to notify."
-            exit 0
-          fi
-
-          file_list=$(printf '  - %s\n' $files)
-          msg="infra/k8s manifest(s) changed in \`${SHA:0:8}\` on main:"$'\n'"${file_list}"$'\n'"These are only auto-applied automatically when the SAME commit ALSO changes that service's code (deploy.yml's rollout is keyed off services/**, not infra/k8s/**). Files with no matching Deployment (ServiceMonitors, RBAC, etc.) are never auto-applied at all. Verify this reached the cluster, or apply by hand: kubectl -n copytrade apply -f <file>."
-
+          msg="CI passed and images built for \`${SHA:0:8}\`, but no service's code or manifest changed in that commit — nothing was rolled to homelab. This is expected for docs/config-only merges. If a rollout WAS expected, dispatch 'Deploy to homelab' manually. Build run: ${RUN_URL}"
           echo "$msg"
-          { echo "## 🟡 k8s manifest changed — verify it reached the cluster"; echo ""; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "## 🟡 Deploy ran, nothing to roll"; echo ""; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
           if [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
-            ./scripts/discord-notify.sh "🟡 k8s manifest changed — verify it reached the cluster" "$msg" yellow \
+            ./scripts/discord-notify.sh "🟡 Deploy ran, nothing to roll" "$msg" yellow \
               || echo "::warning::discord notify failed (non-fatal)"
           else
             echo "::warning::DISCORD_DEPLOY_WEBHOOK_URL not set — notification is log/summary only."

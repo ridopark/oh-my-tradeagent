@@ -1,0 +1,132 @@
+name: Deploy notifications
+
+# Companion to `deploy.yml`, split into its own file rather than added as
+# jobs there — on purpose, for two reasons (#723):
+#
+# 1. Concurrency isolation. `deploy.yml` carries a workflow-level
+#    `concurrency: group: deploy-homelab`, and its `deploy` job blocks on a
+#    required-reviewer approval that can sit pending for a long time. Both
+#    jobs below exist specifically to notify RIGHT AWAY when something is
+#    silently wrong — they must never be able to queue behind that approval
+#    wait. Putting them in their own workflow file makes that a structural
+#    guarantee (separate files never share a concurrency group), rather than
+#    relying on a job-level `concurrency:` override to escape a
+#    workflow-level one, which is a real GitHub Actions gotcha worth not
+#    getting wrong here.
+# 2. Checkout safety. `notify-ci-failure` reacts to `workflow_run` events
+#    from "Build and push images", which ALSO triggers on `pull_request`
+#    (untrusted, PR-author-controlled code). This job only needs
+#    `scripts/discord-notify.sh`, nothing from the triggering commit, so its
+#    checkout intentionally takes NO `ref:` — it defaults to this
+#    workflow's own ref (`main`), never an attacker-controlled SHA, even
+#    though `branches: [main]` on the trigger below already excludes
+#    PR-triggered runs in practice (verified empirically: no `Deploy
+#    to homelab`-family run has ever fired off a `pull_request`-triggered
+#    build). Belt and suspenders, at zero functional cost.
+#
+# Two silent cases, two jobs:
+#   - notify-ci-failure: `build-images.yml` concluded anything other than
+#     'success' (red CI, or its `ci-gate` job's own 30-minute timeout,
+#     which GitHub reports as 'cancelled') — so `deploy.yml`'s `preflight`
+#     gate never fires and the whole deploy chain silently never ran.
+#     FAILS ON PURPOSE (red check, not an ambiguous skip) plus a Discord
+#     alert. On 2026-08-19 this exact case dropped #722's deploy while the
+#     cluster read green — see the run at
+#     .../actions/runs/32250061244 (reported conclusion: cancelled).
+#   - notify-k8s-manifest-changed: `build-images.yml` only watches
+#     services/**, contract/**, pom.xml, infra/docker/**, dashboard/**,
+#     .dockerignore — NOT infra/k8s/**. A commit touching ONLY k8s
+#     manifests never makes build-images.yml run at all, so the
+#     workflow_run trigger below never fires either: no run, no skip,
+#     nothing. Confirmed live: PR #758 added
+#     infra/k8s/64-copytrade-servicemonitor.yaml and it never reached the
+#     cluster (no build-images.yml run exists for that merge commit).
+#     Rather than widen deploy.yml's auto-apply surface — real risk: racing
+#     an untested manifest against the live cluster, or double-rolling a
+#     service if the same commit also touched its code — this job just
+#     flags the change so it gets applied by hand.
+#
+# Neither job touches the cluster. Both are best-effort on Discord: they
+# post via `secrets.DISCORD_DEPLOY_WEBHOOK_URL` (not set as a repo secret as
+# of this writing — `gh secret list` confirms), falling back to a
+# `GITHUB_STEP_SUMMARY` + workflow annotation. Add the secret to get Discord
+# delivery; the failing check / summary works regardless.
+
+on:
+  workflow_run:
+    workflows: ["Build and push images"]
+    types: [completed]
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - "infra/k8s/**"
+
+permissions:
+  contents: read
+
+jobs:
+  notify-ci-failure:
+    name: Notify (deploy chain did not fire)
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    steps:
+      # Deliberately NO `ref:` override — see the file header. Checks out
+      # this workflow's own ref (main), never the triggering commit.
+      - uses: actions/checkout@v4
+
+      - name: Fail loudly and notify
+        env:
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK_URL }}
+        run: |
+          set -uo pipefail
+          msg="Build and push images concluded '${CONCLUSION}' for \`${SHA:0:8}\` — CI was red, or the build itself failed/timed out, so no image was built and the deploy chain never fired. The cluster is UNCHANGED, still on the previous image. Build run: ${RUN_URL}"
+          echo "::error::${msg}"
+          { echo "## 🔴 Deploy to homelab did NOT run"; echo ""; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
+            ./scripts/discord-notify.sh "🔴 Deploy to homelab did NOT run" "$msg" red \
+              || echo "::warning::discord notify failed (non-fatal)"
+          else
+            echo "::warning::DISCORD_DEPLOY_WEBHOOK_URL not set — notification is log/summary only."
+          fi
+          exit 1
+
+  notify-k8s-manifest-changed:
+    name: Notify (k8s manifest changed — not auto-applied)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: List changed manifests and notify
+        env:
+          SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK_URL }}
+        run: |
+          set -uo pipefail
+          file_list=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in infra/k8s/*) file_list="${file_list}  - ${f}"$'\n' ;; esac
+          done < <(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}" --jq '.files[].filename')
+
+          if [ -z "$file_list" ]; then
+            echo "No infra/k8s/ files in this commit's diff — nothing to notify."
+            exit 0
+          fi
+
+          note="These manifests are only auto-applied when the SAME commit ALSO changes that service's code (deploy.yml's rollout is keyed off services/**, not infra/k8s/**). Files with no matching Deployment (ServiceMonitors, RBAC, etc.) are never auto-applied at all. Verify this reached the cluster, or apply by hand: kubectl -n copytrade apply -f <file>."
+          msg="infra/k8s manifest(s) changed in \`${SHA:0:8}\` on main:"$'\n'"${file_list}${note}"
+
+          echo "$msg"
+          { echo "## 🟡 k8s manifest changed — verify it reached the cluster"; echo ""; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
+            ./scripts/discord-notify.sh "🟡 k8s manifest changed — verify it reached the cluster" "$msg" yellow \
+              || echo "::warning::discord notify failed (non-fatal)"
+          else
+            echo "::warning::DISCORD_DEPLOY_WEBHOOK_URL not set — notification is log/summary only."
+          fi
