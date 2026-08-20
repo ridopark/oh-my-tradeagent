@@ -547,7 +547,8 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   @Test
   void handleBto_dispatchesAccountSnapshot_andThreadsEquityIntoCheckEntryWithLimit() {
     StrategyConfig cfg = configWithPreTradeEnabled();
-    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    cfg.setNotionalCapPctOfCapitalBase(
+        new BigDecimal("0.50")); // enables the account-snapshot dispatch
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(contract.resolve(any())).thenReturn(resolved());
@@ -612,7 +613,8 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   @Test
   void handleBto_failsClosed_whenAccountSnapshotActivityThrows() {
     StrategyConfig cfg = configWithPreTradeEnabled();
-    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    cfg.setNotionalCapPctOfCapitalBase(
+        new BigDecimal("0.50")); // enables the account-snapshot dispatch
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(contract.resolve(any())).thenReturn(resolved());
@@ -671,7 +673,7 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
    * notional_cap_pct_of_capital_base} (the {@code notional_cap_pct_of_equity} alias null — the
    * migration end-state) MUST still dispatch the {@code AccountSnapshotActivity} and run the cap
    * against the real broker cash. Pre-fix the workflow's dispatch guard tested {@code
-   * getNotionalCapPctOfEquity() == null} only, so this config returned null cash, the snapshot
+   * getNotionalCapPctOfCapitalBase() == null} only, so this config returned null cash, the snapshot
    * never fired, and {@code checkNotionalCap} rejected EVERY BTO with {@code cash_unavailable} (the
    * new field was non-functional). This test wires a <b>real</b> {@link RiskActivitiesImpl} so
    * {@code checkNotionalCap} actually evaluates — asserting the snapshot IS dispatched and the cap
@@ -707,12 +709,11 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
       ok.setStatus(SubscribePremiumResult.Status.SUBSCRIBED);
       when(localMarketData.subscribePremium(any())).thenReturn(ok);
 
-      // NEW-ONLY config: canonical capital_base set, deprecated equity alias null. preTradeCheck
+      // Canonical capital_base set (#338 removed the deprecated equity alias). preTradeCheck
       // disabled so the gate runs purely on the notional-cap math against the dispatched cash.
       StrategyConfig cfg = configWithPreTradeEnabled();
       cfg.setPreTradeCheckEnabled(false);
       cfg.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
-      cfg.setNotionalCapPctOfEquity(null);
       when(localStrategy.get("dev", "copytrade-v1")).thenReturn(cfg);
       when(localStrategy.capitalForStrategy("dev", "copytrade-v1"))
           .thenReturn(new BigDecimal("100000"));
@@ -818,7 +819,6 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
       StrategyConfig cfg = configWithPreTradeEnabled();
       cfg.setPreTradeCheckEnabled(false);
       cfg.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
-      cfg.setNotionalCapPctOfEquity(null);
       when(localStrategy.get("dev", "copytrade-v1")).thenReturn(cfg);
       when(localStrategy.capitalForStrategy("dev", "copytrade-v1"))
           .thenReturn(new BigDecimal("100000"));
@@ -895,7 +895,8 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   void dispatchAccountSnapshot_canceledFailurePropagates_andDoesNotIncrementCounter()
       throws Exception {
     StrategyConfig cfg = configWithPreTradeEnabled();
-    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    cfg.setNotionalCapPctOfCapitalBase(
+        new BigDecimal("0.50")); // enables the account-snapshot dispatch
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(contract.resolve(any())).thenReturn(resolved());
@@ -962,7 +963,8 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   @Test
   void dispatchAccountSnapshot_metricsEmitCanceledFailurePropagates() {
     StrategyConfig cfg = configWithPreTradeEnabled();
-    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    cfg.setNotionalCapPctOfCapitalBase(
+        new BigDecimal("0.50")); // enables the account-snapshot dispatch
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(contract.resolve(any())).thenReturn(resolved());
@@ -1171,7 +1173,8 @@ class CopytradeSignalWorkflowImplPreTradeDispatchTest {
   @Test
   void process_canceledFailure_propagatesUnaudited_phase2() {
     StrategyConfig cfg = configWithPreTradeEnabled();
-    cfg.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // enables the account-snapshot dispatch
+    cfg.setNotionalCapPctOfCapitalBase(
+        new BigDecimal("0.50")); // enables the account-snapshot dispatch
     when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
     when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
     when(contract.resolve(any())).thenReturn(resolved());

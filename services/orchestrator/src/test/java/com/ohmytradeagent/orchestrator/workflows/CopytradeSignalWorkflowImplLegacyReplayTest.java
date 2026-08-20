@@ -932,7 +932,6 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
   private static StrategyConfig notionalCapStrategyConfig() {
     StrategyConfig c = legacyStrategyConfig();
     c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
-    c.setNotionalCapPctOfEquity(null);
     return c;
   }
 

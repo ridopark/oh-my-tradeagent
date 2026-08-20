@@ -256,11 +256,6 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     description: "Issue #336 portfolio-level gate (canonical field): max combined open-position notional + this signal's notional, expressed as a fraction of the MTM-stable cost-basis capital base. Reject with NOTIONAL_CAP_EXCEEDED when (sum_open_notional + new_notional) > notional_cap_pct_of_capital_base * (cash + sum_open_notional). Per #323 the denominator is the cost-basis capital base (cash + sum_open_notional), NOT net-liq equity: numerator and denominator share the same cost-basis open-notional term so the cap is MTM-stable (it neither loosens on an appreciating long-options book nor tightens on a bleeding one, and adds no new market-data dependency). Opt-in: null disables the gate. Complements max_positions, which only bounds the count of concurrent positions, not their total dollar exposure.",
   },
   {
-    field: "notional_cap_pct_of_equity",
-    kind: "number",
-    description: "DEPRECATED (Issue #336): alias for notional_cap_pct_of_capital_base; retained only so additionalProperties:false still accepts configs that set the old name. Will be removed after the deprecation window (tracked in #338). The denominator was already the cost-basis capital base (cash + sum_open_notional) post-#323 despite the misleading '_of_equity' name; the canonical field name fixes that. If BOTH this and notional_cap_pct_of_capital_base are set to DIFFERENT values the entry is rejected (fail-closed, NOTIONAL_CAP_EXCEEDED detail ambiguous_cap_config). Migrate to notional_cap_pct_of_capital_base. Deprecated alias of notional_cap_pct_of_capital_base, consulted only when that canonical field is null; setting both to different values fails the entry closed (ambiguous_cap_config), and both null disables the notional-cap gate.",
-  },
-  {
     field: "partial_fractions",
     description: "Phase 3: keyword -> fraction mapping for KeywordPartialMatcher (e.g. {\"half\": 0.5, \"third\": 0.33, \"out\": 1.0}). Unset (null/empty map): the STC keyword matcher has no keywords, so every STC falls back to default_stc_fraction (which itself defaults to 0.5).",
   },

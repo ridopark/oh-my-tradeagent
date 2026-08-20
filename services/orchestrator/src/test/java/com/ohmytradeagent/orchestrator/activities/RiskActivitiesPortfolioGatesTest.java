@@ -100,7 +100,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void notionalCap_approves_whenCombinedNotionalUnderCap() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("20000"))));
     // cash=100000 (workflow-supplied), sum_open_notional=20000 → base=120000, cap=0.5*120000=60000.
@@ -118,7 +118,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void notionalCap_rejects_whenCombinedNotionalOverCap() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
     // cash=100 (low, workflow-supplied), sum_open_notional=49900 → base=50000, cap=0.5*50000=25000.
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("49900"))));
@@ -142,7 +142,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void checkEntryWithLimit_notionalCap_usesSlipAdjustedLimit_notMirrorPrice() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
     // #323: cash=50230 (workflow-supplied), sum_open_notional=49770 → base=100000,
     // cap=0.5*100000=50000.
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
@@ -206,7 +206,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void notionalCap_disabled_whenConfigNull() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(null);
+    c.setNotionalCapPctOfCapitalBase(null);
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("9999999"))));
     RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
@@ -220,7 +220,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void notionalCap_failsClosed_whenCashZeroOrUnavailable() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
 
     // Case 1: cash unavailable (legacy null-cash path) → fail closed, net-liq seam never read.
     RiskDecision dNull = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
@@ -247,7 +247,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void notionalCap_failsClosed_whenBrokerTargetNull() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
     c.setBrokerTarget(null);
 
     RiskDecision d = risk.checkEntry(btoPayload("acme_trader", FIXED_NOW), c, null);
@@ -267,7 +267,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void checkEntryWithLimit_usesWorkflowSuppliedEquity_overSnapshotSeam() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // 50% cap
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50")); // 50% cap
     // Dispatched cash 1000, no open positions → base=1000, cap=500. new notional 230 < 500 →
     // approve.
     RiskDecision approve =
@@ -301,7 +301,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void checkEntryWithLimit_nullCash_failsClosed_doesNotSubstituteNetLiqSeam() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50")); // gate enabled
     RiskDecision d =
         risk.checkEntryWithLimit(
             btoPayload("acme_trader", FIXED_NOW), c, null, new BigDecimal("2.30"), null);
@@ -321,7 +321,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void checkEntryWithLimit_propagatesWhenOpenPositionsThrows_failClosed() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // gate enabled
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50")); // gate enabled
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenThrow(new IllegalStateException("visibility unavailable"));
 
@@ -345,7 +345,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void checkNotionalCap_capDetailReflectsCashPlusOpenDenominator() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("30000"))));
     // cash=10000 (workflow-supplied), base = 10000 + 30000 = 40000, cap = 0.5 * 40000 = 20000.
@@ -410,7 +410,6 @@ class RiskActivitiesPortfolioGatesTest {
   void notionalCapHeadroomContracts_capDisabled_returnsUnbounded() {
     StrategyConfig c = config();
     c.setNotionalCapPctOfCapitalBase(null);
-    c.setNotionalCapPctOfEquity(null);
     long headroom =
         risk.notionalCapHeadroomContracts(
             c, new BigDecimal("2.30"), new BigDecimal("100000"), "dev", "copytrade-v1");
@@ -424,20 +423,6 @@ class RiskActivitiesPortfolioGatesTest {
     c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
     long headroom =
         risk.notionalCapHeadroomContracts(c, new BigDecimal("2.27"), null, "dev", "copytrade-v1");
-    assertThat(headroom).isEqualTo(0L);
-  }
-
-  // Ambiguous cap (#336): both canonical and deprecated fields set to DIFFERENT values →
-  // AmbiguousCapConfigException caught → zero headroom (fail-closed), mirroring the gate's
-  // ambiguous_cap_config reject.
-  @Test
-  void notionalCapHeadroomContracts_ambiguousCap_returnsZero() {
-    StrategyConfig c = config();
-    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.80"));
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50")); // different value → ambiguous
-    long headroom =
-        risk.notionalCapHeadroomContracts(
-            c, new BigDecimal("2.27"), new BigDecimal("100000"), "dev", "copytrade-v1");
     assertThat(headroom).isEqualTo(0L);
   }
 
@@ -504,7 +489,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void checkEntry_sameUnderlying_propagatesWhenOpenPositionsThrows_failClosed() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(null); // ONLY same_underlying_count enabled
+    c.setNotionalCapPctOfCapitalBase(null); // ONLY same_underlying_count enabled
     c.setSectorConcentrationCap(null);
     c.setSameUnderlyingCount(2L);
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
@@ -602,7 +587,7 @@ class RiskActivitiesPortfolioGatesTest {
   @Test
   void checkEntry_sectorConcentration_propagatesWhenOpenPositionsThrows_failClosed() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(null); // ONLY sector_concentration_cap enabled
+    c.setNotionalCapPctOfCapitalBase(null); // ONLY sector_concentration_cap enabled
     c.setSameUnderlyingCount(null);
     c.setSectorConcentrationCap(2L);
     Map<String, String> sectors = new HashMap<>();

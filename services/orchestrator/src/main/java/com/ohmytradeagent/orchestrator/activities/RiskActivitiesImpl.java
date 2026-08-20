@@ -48,11 +48,10 @@ import org.springframework.stereotype.Component;
  * {@code pre_trade_check}. Each is strictly opt-in via the corresponding {@code StrategyConfig}
  * field; null/absent config short-circuits the gate so existing strategies remain unchanged.
  *
- * <p>Issue #336: the notional-cap field {@code notional_cap_pct_of_capital_base} is canonical;
- * {@code notional_cap_pct_of_equity} is a DEPRECATED alias resolved by {@link
- * #resolveNotionalCapPct} — old-only and both-equal paths emit the {@link
- * #DEPRECATED_EQUITY_FIELD_COUNTER_NAME} counter + a {@code log.warn}; both-set-unequal fails
- * CLOSED with {@link RejectionReason#NOTIONAL_CAP_EXCEEDED} detail {@code ambiguous_cap_config}.
+ * <p>Issue #336/#338: the notional-cap field {@code notional_cap_pct_of_capital_base} is the only
+ * one. Its deprecated alias {@code notional_cap_pct_of_equity} was removed from the schema in #338
+ * once every live tenant had migrated, taking the migration counter and the ambiguous-config
+ * fail-closed branch with it.
  */
 @Component
 public class RiskActivitiesImpl implements RiskActivities {
@@ -64,15 +63,6 @@ public class RiskActivitiesImpl implements RiskActivities {
    * #notionalCapHeadroomContracts}.
    */
   private static final BigDecimal LONG_MAX_AS_DECIMAL = BigDecimal.valueOf(Long.MAX_VALUE);
-
-  /**
-   * Issue #336 deprecation signal. Incremented (and a {@code log.warn} emitted) whenever a strategy
-   * config still sets the deprecated {@code notional_cap_pct_of_equity} alias. Follows the
-   * #329/#331 risk-counter idiom: {@code Counter.builder(...).register(meterRegistry)}, a {@code
-   * _total}-suffixed name, and per-tag caching keyed on the {@code tenant}/{@code strategy} tags.
-   */
-  static final String DEPRECATED_EQUITY_FIELD_COUNTER_NAME =
-      "notional_cap_deprecated_equity_field_total";
 
   /**
    * C2 (single-account-loss-rule): incremented on every {@link
@@ -94,8 +84,6 @@ public class RiskActivitiesImpl implements RiskActivities {
   private final DrawdownVelocitySampler drawdownVelocitySampler;
   private final PreTradeCheckActivity preTradeCheckActivity;
   private final MeterRegistry meterRegistry;
-  private final ConcurrentMap<String, Counter> deprecatedEquityFieldCounters =
-      new ConcurrentHashMap<>();
   private final ConcurrentMap<String, Counter> killSwitchUnavailableCounters =
       new ConcurrentHashMap<>();
 
@@ -371,7 +359,8 @@ public class RiskActivitiesImpl implements RiskActivities {
     // portfolioSnapshot.openPositions(...) (a Visibility error in VisibilityPortfolioSnapshot) MUST
     // propagate out of here and fail checkEntry/checkEntryWithLimit so the workflow never reaches
     // placeOrder. Do NOT wrap this call in try/catch returning List.of(): an empty list means
-    // sum_open_notional=0, which loosens the notional_cap_pct_of_equity cap and flips the gate
+    // sum_open_notional=0, which loosens the notional_cap_pct_of_capital_base cap and flips the
+    // gate
     // fail-OPEN (permitting trades it should reject). Unlike checkKillSwitch
     // (RiskActivitiesImpl.java ~448-461), which fails closed *explicitly* with
     // KILL_SWITCH_UNAVAILABLE, this gate fails closed *only by the absence of a catch* here and in
@@ -388,9 +377,9 @@ public class RiskActivitiesImpl implements RiskActivities {
   }
 
   /**
-   * notional_cap_pct_of_capital_base (canonical; {@code notional_cap_pct_of_equity} is a deprecated
-   * alias resolved by {@link #resolveNotionalCapPct}, #336): reject when {@code (sum_open_notional
-   * + new_notional) > cap_pct * (cash + sum_open_notional)}.
+   * notional_cap_pct_of_capital_base (#336; its deprecated {@code notional_cap_pct_of_equity} alias
+   * was removed in #338): reject when {@code (sum_open_notional + new_notional) > cap_pct * (cash +
+   * sum_open_notional)}.
    *
    * <p><b>MTM-stable cost-basis denominator (#323).</b> The denominator is the cost-basis capital
    * base {@code cash + sum_open_notional}, NOT the net-liq (MTM) {@code equity} it replaced. Both
@@ -411,14 +400,7 @@ public class RiskActivitiesImpl implements RiskActivities {
    * are no open positions, which is itself a reject (cannot size against a zero base).
    */
   private RiskDecision checkNotionalCap(PortfolioContext ctx) {
-    BigDecimal capPct;
-    try {
-      capPct = resolveNotionalCapPct(ctx.config);
-    } catch (AmbiguousCapConfigException e) {
-      // Issue #336 fail-closed: both notional_cap fields set to different values. Reject rather
-      // than silently picking one — an ambiguous risk-gate config must never admit a trade.
-      return RiskDecision.rejected(RejectionReason.NOTIONAL_CAP_EXCEEDED, "ambiguous_cap_config");
-    }
+    BigDecimal capPct = resolveNotionalCapPct(ctx.config);
     if (capPct == null) {
       return null;
     }
@@ -446,78 +428,21 @@ public class RiskActivitiesImpl implements RiskActivities {
   }
 
   /**
-   * Issue #336: resolve the notional-cap fraction from the canonical {@code
-   * notional_cap_pct_of_capital_base} and the DEPRECATED alias {@code notional_cap_pct_of_equity}.
-   * The returned value flows into {@link #checkNotionalCap}'s gate math unchanged — only the field
-   * <i>source</i> changes here, never the math.
+   * Issue #336: the notional-cap fraction, from the canonical {@code
+   * notional_cap_pct_of_capital_base}. The returned value flows into {@link #checkNotionalCap}'s
+   * gate math unchanged. Null (field unset) disables the gate — the existing opt-in behaviour,
+   * shared with the workflow's AccountSnapshot-dispatch guard via {@link
+   * StrategyConfigs#notionalCapConfigured} so enablement never diverges (#336 regression guard).
    *
-   * <ul>
-   *   <li>canonical set, alias null → return canonical (normal path).
-   *   <li>canonical null, alias set → emit the deprecation signal (counter + warn), return alias.
-   *   <li>both set, equal → emit the deprecation signal, return the (equal) value.
-   *   <li>both set, unequal → throw {@link AmbiguousCapConfigException} so the gate fails CLOSED.
-   *   <li>both null → return null (gate disabled — existing opt-in behavior).
-   * </ul>
+   * <p>#338: the deprecated {@code notional_cap_pct_of_equity} alias, its migration counter, and
+   * the both-set-and-unequal fail-closed branch were removed here once every live tenant had
+   * migrated to the canonical field and the alias left the schema.
    */
   private BigDecimal resolveNotionalCapPct(StrategyConfig config) {
-    BigDecimal capBase = config.getNotionalCapPctOfCapitalBase();
-    BigDecimal equity = config.getNotionalCapPctOfEquity();
-    // Both null → gate disabled. Shared with the workflow's AccountSnapshot-dispatch guard via
-    // StrategyConfigs.notionalCapConfigured so enablement never diverges (#336 regression guard).
     if (!StrategyConfigs.notionalCapConfigured(config)) {
       return null;
     }
-    if (equity == null) {
-      // capBase != null → canonical path.
-      return capBase;
-    }
-    if (capBase == null) {
-      emitDeprecatedEquityFieldSignal(config);
-      return equity;
-    }
-    if (capBase.compareTo(equity) != 0) {
-      throw new AmbiguousCapConfigException();
-    }
-    emitDeprecatedEquityFieldSignal(config);
-    return capBase;
-  }
-
-  /**
-   * Issue #336 deprecation signal: increment the {@link #DEPRECATED_EQUITY_FIELD_COUNTER_NAME}
-   * Micrometer counter (tagged by tenant/strategy) and {@code log.warn} naming the strategy so
-   * operators see they must migrate to {@code notional_cap_pct_of_capital_base}. {@code
-   * checkNotionalCap} is an {@code @Activity} (not workflow code), so this side effect carries no
-   * Temporal-replay concern.
-   */
-  private void emitDeprecatedEquityFieldSignal(StrategyConfig config) {
-    String tenant = config.getTenantId();
-    String strategy = config.getStrategyId();
-    Counter counter =
-        deprecatedEquityFieldCounters.computeIfAbsent(
-            tenant + "/" + strategy,
-            key ->
-                Counter.builder(DEPRECATED_EQUITY_FIELD_COUNTER_NAME)
-                    .description(
-                        "Strategy configs still setting the deprecated notional_cap_pct_of_equity alias (#336); migrate to notional_cap_pct_of_capital_base.")
-                    .tag("tenant", tenant)
-                    .tag("strategy", strategy)
-                    .register(meterRegistry));
-    counter.increment();
-    log.warn(
-        "DEPRECATED notional_cap_pct_of_equity set for tenant={} strategy={}; migrate to notional_cap_pct_of_capital_base (#336, removal tracked in #338)",
-        tenant,
-        strategy);
-  }
-
-  /**
-   * Issue #336 fail-closed sentinel: thrown by {@link #resolveNotionalCapPct} when BOTH
-   * notional-cap fields are set to different values. Caught in {@link #checkNotionalCap}, which
-   * rejects the entry rather than silently picking one field's value.
-   */
-  private static final class AmbiguousCapConfigException extends RuntimeException {
-    AmbiguousCapConfigException() {
-      super(null, null, false, false);
-    }
+    return config.getNotionalCapPctOfCapitalBase();
   }
 
   private RiskDecision checkSameUnderlyingCount(PortfolioContext ctx) {
@@ -735,14 +660,7 @@ public class RiskActivitiesImpl implements RiskActivities {
       BigDecimal accountCash,
       String tenantId,
       String strategyId) {
-    BigDecimal capPct;
-    try {
-      capPct = resolveNotionalCapPct(config);
-    } catch (AmbiguousCapConfigException e) {
-      // Ambiguous cap → no headroom (fail-closed); the gate independently rejects ambiguous
-      // configs.
-      return 0L;
-    }
+    BigDecimal capPct = resolveNotionalCapPct(config);
     if (capPct == null) {
       // Gate disabled → no notional-cap constraint; the workflow's MIN-composition no-ops.
       return Long.MAX_VALUE;
