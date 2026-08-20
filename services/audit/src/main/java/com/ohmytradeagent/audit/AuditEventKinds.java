@@ -321,6 +321,11 @@ public final class AuditEventKinds {
           "ChandelierUnarmedByExit",
           "RiskBreachReceived",
           "RiskBreachActed",
+          // #762: an AUTOMATED daily-loss breach that declined to flatten a LONG-DATED position.
+          // A daily breaker governs one session; a position whose expiry outlives that window by
+          // months is left to its own controls (trail / EOD / expiry). Operator-initiated breaches
+          // and force-closes are never exempt.
+          "RiskBreachFlattenSkippedLongDated",
           "ForceCloseRequested",
           "ForceCloseNoop",
           // Operator "Trim" (PositionWorkflow.partial_close Update, driven by the /live Trim

@@ -2803,12 +2803,74 @@ class PositionWorkflowImplTest {
     WorkflowStub.fromTyped(stub).getResult(String.class);
   }
 
+  /**
+   * Issue #762: an AUTOMATED daily-loss breach must NOT liquidate a long-dated position.
+   *
+   * <p>Live 2026-08-19: prod-kipark's switch tripped on a −$4,050 loss produced entirely by a 6-DTE
+   * SPY put, and the cascade market-flattened everything — including DRAM at 212 DTE. A daily
+   * breaker's window is one session; a 212-DTE position's P&amp;L that day is noise against its
+   * holding period, and it has its own controls (trail / EOD / expiry). On prod_real that same
+   * contract carries a trail ~25% away which the cascade would have pre-empted.
+   */
+  @Test
+  void issue762_automatedBreach_doesNotFlattenLongDatedPosition() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+
+    PositionWorkflow stub = newStub("pos-762-long-dated");
+    WorkflowStub.fromTyped(stub).start(futureInput(4)); // 2 years out
+    confirmEntry(stub, 4L);
+
+    stub.riskBreach(riskBreachPayload("auto:daily_loss", "auto:daily_loss"));
+    Thread.sleep(1500);
+
+    assertThat(stub.positionState().remainingQty())
+        .as("a daily breaker must not liquidate a position whose horizon outlives it")
+        .isEqualTo(4L);
+    verify(exec, never()).placeOrder(any());
+
+    AuditEvent skipped = captureKind("RiskBreachFlattenSkippedLongDated");
+    assertThat(skipped.getSubject()).containsEntry("reason", "auto:daily_loss");
+    assertThat(asLong(skipped.getSubject().get("exempt_above_dte"))).isEqualTo(90L);
+    assertThat(asLong(skipped.getSubject().get("days_to_expiry"))).isGreaterThan(90L);
+    // The breach is still RECORDED — the trip and its entry-halt are unaffected.
+    captureKind("RiskBreachActed");
+  }
+
+  /**
+   * Issue #762: operator intent always wins. A MANUAL breach flattens a long-dated position exactly
+   * as before — the exemption is scoped to {@code auto:*} actors only, and anything unrecognised
+   * fails CLOSED (flattens).
+   */
+  @Test
+  void issue762_operatorBreach_stillFlattensLongDatedPosition() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-762-long-dated-manual");
+    WorkflowStub.fromTyped(stub).start(futureInput(4)); // same 2-year contract
+    confirmEntry(stub, 4L);
+
+    stub.riskBreach(riskBreachPayload("manual:operator", "ops-7"));
+
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten-762", 4L, new BigDecimal("2.50")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    assertThat(captureAll("RiskBreachFlattenSkippedLongDated"))
+        .as("an operator breach is never exempt")
+        .isEmpty();
+    captureKind("PositionClosed");
+  }
+
   @Test
   void riskBreach_healthyPosition_flattens() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     PositionWorkflow stub = newStub("pos-risk-breach");
-    WorkflowStub.fromTyped(stub).start(futureInput(4));
+    // #762: SHORT-dated on purpose. This test's subject is "an ordinary position flattens on an
+    // automated breach"; FUTURE_OCC_SYMBOL is 2 years out and is now exempt, which would make this
+    // assert the opposite of what it means. The 2-year case is covered by the #762 tests below.
+    WorkflowStub.fromTyped(stub).start(shortDatedInput(4));
     confirmEntry(stub, 4L);
 
     stub.riskBreach(riskBreachPayload("auto:daily_loss", "auto:daily_loss"));
@@ -4385,6 +4447,25 @@ class PositionWorkflowImplTest {
   private PositionWorkflowInput futureInput(long qty) {
     PositionWorkflowInput in = input(qty);
     in.setContractSymbol(FUTURE_OCC_SYMBOL);
+    return in;
+  }
+
+  /**
+   * Issue #762: an unexpired but SHORT-dated contract (30 DTE), below the automated-breach
+   * exemption threshold. {@link #FUTURE_OCC_SYMBOL} is deliberately 2 YEARS out, which is now a
+   * behavioural difference rather than an incidental one — an automated daily-loss breach does not
+   * flatten it. Tests that mean "an ordinary position" need this, not that.
+   */
+  private static final String SHORT_DATED_OCC_SYMBOL =
+      "NVDA  "
+          + LocalDate.now(ZoneId.of("America/New_York"))
+              .plusDays(30)
+              .format(DateTimeFormatter.ofPattern("yyMMdd"))
+          + "C00140000";
+
+  private PositionWorkflowInput shortDatedInput(long qty) {
+    PositionWorkflowInput in = input(qty);
+    in.setContractSymbol(SHORT_DATED_OCC_SYMBOL);
     return in;
   }
 
