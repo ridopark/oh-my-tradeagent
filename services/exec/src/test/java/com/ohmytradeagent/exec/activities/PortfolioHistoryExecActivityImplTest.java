@@ -96,10 +96,15 @@ class PortfolioHistoryExecActivityImplTest {
     verify(broker).getAccountActivities(from.capture(), to.capture());
     assertThat(from.getValue()).isEqualTo(1719446400L);
     long now = Instant.now().getEpochSecond();
-    assertThat(to.getValue()).isEqualTo(Math.max(1719532800L, now));
+    // #723: `to` is computed from Instant.now() INSIDE the impl. Reading the clock again here and
+    // demanding exact equality flakes whenever a second boundary falls between the two reads —
+    // observed in CI 2026-08-20: "expected: 1787198746L but was: 1787198745L", off by exactly one
+    // second. Assert the PROPERTY instead (the upper bound is extended to ~now), with a tolerance
+    // that spans the gap. The tolerant assertion below was already here, which made the strict one
+    // redundant as well as wrong.
+    assertThat(to.getValue()).isBetween(now - 5, now + 1);
     // NOW (>= 2026) dominates the historical series-last (2024-06), proving the extension.
     assertThat(to.getValue()).isGreaterThan(1719532800L);
-    assertThat(to.getValue()).isGreaterThanOrEqualTo(now - 5);
   }
 
   @Test
