@@ -719,6 +719,43 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_EXIT_PARTIAL_AWAIT_LOOP = "exit-partial-await-loop-v1";
 
   /**
+   * Issue #762: an AUTOMATED daily-loss breach must not liquidate a position whose horizon outlives
+   * the breaker's.
+   *
+   * <p>Observed live 2026-08-19: prod-kipark's per-strategy daily-loss switch tripped on a −$4,050
+   * loss produced entirely by a **6-DTE** SPY put, and the cascade market-flattened every open
+   * position — including {@code DRAM 270319C00100000} at **212 DTE**. A six-day contract's loss
+   * liquidated a seven-month contract.
+   *
+   * <p>A DAILY breaker's window is one session. A 212-DTE position's P&amp;L on any given day is
+   * noise against its holding period, and it has its OWN controls — an armed chandelier trail, the
+   * EOD sweep, the expiry flatten. On prod_real the same contract carries a trail ~25% away; the
+   * cascade would market-sell it before that trail ever acted.
+   *
+   * <p>Scope, deliberately narrow: this exempts ONLY automated breaches. An operator-initiated risk
+   * breach and {@code force_close} always flatten everything — operator intent wins, always. The
+   * trip itself is unaffected: the switch still halts new entries for the session, so the
+   * protective purpose is preserved without the liquidation.
+   */
+  private static final String VERSION_RISK_BREACH_EXEMPT_LONG_DATED =
+      "risk-breach-exempt-long-dated-v1";
+
+  /**
+   * Days-to-expiry above which an AUTOMATED risk breach declines to flatten (issue #762).
+   *
+   * <p>90 sits deliberately between the real positions this fired on: SPY at 6 DTE and TSLA at 30
+   * DTE are ordinary short-dated copytrade legs and still flatten; DRAM at 212 DTE is categorically
+   * different and does not. A hard constant rather than config on purpose — adding a
+   * strategy-config field would regenerate three artifacts (contract/java, contract/python, the
+   * dashboard field manifest) for a value nobody has asked to tune yet.
+   */
+  private static final long RISK_BREACH_EXEMPT_DTE_DAYS = 90L;
+
+  /** #762 audit: an automated breach declined to flatten a long-dated position. */
+  private static final String KIND_RISK_BREACH_FLATTEN_SKIPPED_LONG_DATED =
+      "RiskBreachFlattenSkippedLongDated";
+
+  /**
    * Bound on {@link #exitBookedByOrder}. Workflow fields are NOT serialized into Temporal history
    * (history holds commands and events; state is reconstructed by replay), so an unbounded ledger
    * is a worker-heap concern rather than a history-bloat one — but {@code PositionWorkflowImpl} has
@@ -2051,8 +2088,55 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             "reason", payload.getReason(),
             "actor", payload.getActor(),
             "remaining_qty", remainingQty));
+    // #762: decline to liquidate a LONG-DATED position on an AUTOMATED daily-loss breach. The
+    // breaker governs one session; this position's horizon outlives it by months and it has its
+    // own controls. Operator-initiated breaches are never exempt — see the change-id javadoc.
+    if (Workflow.getVersion(VERSION_RISK_BREACH_EXEMPT_LONG_DATED, Workflow.DEFAULT_VERSION, 1) >= 1
+        && isAutomatedBreach(payload.getActor())) {
+      Long dte = daysToExpiry();
+      if (dte != null && dte > RISK_BREACH_EXEMPT_DTE_DAYS) {
+        auditLog(
+            KIND_RISK_BREACH_FLATTEN_SKIPPED_LONG_DATED,
+            subject(
+                "reason",
+                payload.getReason(),
+                "actor",
+                payload.getActor(),
+                "remaining_qty",
+                remainingQty,
+                "contract_symbol",
+                input.getContractSymbol(),
+                "days_to_expiry",
+                dte,
+                "exempt_above_dte",
+                RISK_BREACH_EXEMPT_DTE_DAYS));
+        return; // stays ALIVE — trail / EOD / expiry still govern it.
+      }
+    }
     closeReason = "risk_breach";
     flattenRemaining("risk_breach");
+  }
+
+  /**
+   * #762: is this breach machine-generated? Automated actors are namespaced {@code auto:*} (e.g.
+   * {@code auto:daily_loss}, {@code auto:account_mtm_unavailable}); an operator carries {@code
+   * manual:*} or an operator id. Fail CLOSED on anything unrecognised — an unknown actor flattens,
+   * because the exemption must never be the default for an actor nobody classified.
+   */
+  private static boolean isAutomatedBreach(String actor) {
+    return actor != null && actor.startsWith("auto:");
+  }
+
+  /**
+   * #762: days from the workflow's deterministic ET "today" to the managed contract's OCC expiry.
+   * {@code null} when the OCC has no parseable expiry — the caller then flattens, fail-closed.
+   */
+  private Long daysToExpiry() {
+    LocalDate expiry = expiryDateFromOcc(input.getContractSymbol());
+    if (expiry == null) {
+      return null;
+    }
+    return java.time.temporal.ChronoUnit.DAYS.between(currentEtDate(), expiry);
   }
 
   /** Main-loop force-close processor. Cancel-then-flatten via the shared flatten helper. */
