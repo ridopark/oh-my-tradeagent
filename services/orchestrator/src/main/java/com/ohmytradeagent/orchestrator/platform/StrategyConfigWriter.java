@@ -539,9 +539,12 @@ public class StrategyConfigWriter {
     requireNonNull(cfg.getTenantId(), "tenant_id", label);
     requireNonNull(cfg.getStrategyId(), "strategy_id", label);
     requireNonNull(cfg.getBrokerTarget(), "broker_target", label);
-    if (cfg.getAuthorWhitelist() == null || cfg.getAuthorWhitelist().isEmpty()) {
-      throw new InvalidConfigException("author_whitelist must be non-empty (" + label + ")");
-    }
+    // #459: author_whitelist is optional as of the schema relaxation — the watchlist-trigger path
+    // never consults it, so a write-time non-empty requirement here would force every non-copytrade
+    // strategy back onto the sentinel this issue removes. The copytrade safety invariant lives at
+    // the consumer instead: RiskActivitiesImpl.checkEntryInternal treats a null OR empty whitelist
+    // as "admit nobody" and rejects every non-manual signal, so a copytrade config accidentally
+    // written without one fails closed at signal time rather than being blocked at write time.
     requireNonNull(cfg.getMaxSignalAgeBtoSecs(), "max_signal_age_bto_secs", label);
     requireNonNull(cfg.getMaxSignalAgeStcSecs(), "max_signal_age_stc_secs", label);
     requireNonNull(cfg.getMaxPositions(), "max_positions", label);

@@ -360,6 +360,19 @@ _STRATEGY_CONFIG_BASE = {
 }
 
 
+def test_strategy_config_author_whitelist_optional_round_trip() -> None:
+    """#459: author_whitelist is optional — a non-copytrade (e.g. watchlist-trigger) strategy
+    config must validate without it, no sentinel value required."""
+    data = {k: v for k, v in _STRATEGY_CONFIG_BASE.items() if k != "author_whitelist"}
+    data["strategy_id"] = "watchlist-trigger-v1"
+
+    model = StrategyConfig.model_validate(data)
+
+    assert model.author_whitelist is None
+    reloaded = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert "author_whitelist" not in reloaded
+
+
 def test_strategy_config_trail_fields_positive() -> None:
     data = {**_STRATEGY_CONFIG_BASE, "trail_debounce_ticks": 1, "trail_disarm_minutes_before_close": 0}
     model = StrategyConfig.model_validate(data)

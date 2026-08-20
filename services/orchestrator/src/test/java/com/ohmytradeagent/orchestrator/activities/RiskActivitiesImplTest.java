@@ -73,6 +73,34 @@ class RiskActivitiesImplTest {
   }
 
   @Test
+  void rejects_nullAuthorWhitelist() {
+    // #459: author_whitelist is now schema-optional (the watchlist-trigger path never sets it).
+    // The copytrade path must still fail closed — a null whitelist admits nobody, not everybody.
+    StrategyConfig cfg = config();
+    cfg.setAuthorWhitelist(null);
+
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), cfg, null);
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.AUTHOR_NOT_WHITELISTED);
+    assertThat(d.detail()).isEqualTo("author=acme_trader");
+  }
+
+  @Test
+  void rejects_emptyAuthorWhitelist() {
+    // #459: an explicit empty list must reject exactly like null — "admit nobody", never "admit
+    // anybody" — regardless of which author posted the signal.
+    StrategyConfig cfg = config();
+    cfg.setAuthorWhitelist(Set.of());
+
+    RiskDecision d = risk.checkEntry(payload("acme_trader", FIXED_NOW), cfg, null);
+
+    assertThat(d.allowed()).isFalse();
+    assertThat(d.reason()).isEqualTo(RejectionReason.AUTHOR_NOT_WHITELISTED);
+    assertThat(d.detail()).isEqualTo("author=acme_trader");
+  }
+
+  @Test
   void rejects_signalOlderThanMaxAge() {
     // Issue #3: with the new BTO default of 30s, any signal older than 30s should be rejected.
     Instant tooOld = FIXED_NOW.minusSeconds(45);
