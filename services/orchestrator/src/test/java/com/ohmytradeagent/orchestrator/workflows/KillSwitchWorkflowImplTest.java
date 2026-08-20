@@ -276,6 +276,57 @@ class KillSwitchWorkflowImplTest {
     verify(pnl, never()).computeRealizedPnl(anyString(), anyString(), any());
   }
 
+  /**
+   * Issue #746: {@code doReset} arms {@code coolingDownUntil}, and the heartbeat NEVER READ IT.
+   * Every reference in the impl was write-or-project — carried in on the input, written to the
+   * carry, set by the reset, projected into {@code killswitch_state} — with no guard anywhere in
+   * the trip path. The sibling {@code AccountKillSwitchWorkflowImpl} honours its own at :830.
+   *
+   * <p>Consequence, observed live 2026-08-19 on prod-kipark: a reset over a still-breaching book
+   * re-tripped SEVEN SECONDS BEFORE its own advertised {@code cooling_down_until}. The cooldown was
+   * not merely short — it was inert by construction, and the value reported in the query and the
+   * reset audit advertised protection that did not exist.
+   *
+   * <p>Here the realized loss STAYS breaching across the reset (that is the whole point: the
+   * operator resets knowing the book is down, to get a window to act). Within the cooldown the
+   * switch must stay untripped.
+   */
+  @Test
+  void heartbeat_withinPostResetCooldown_doesNotReTrip() {
+    when(calendar.isMarketOpen()).thenReturn(true);
+    // Still breaching AFTER the reset — realized P&L does not improve just because we untripped.
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-3000"));
+    // Cooldown longer than the heartbeat interval, so a tick lands INSIDE the window.
+    StrategyConfig cfg = strategyConfig();
+    cfg.setResetCooldownSecs(600L);
+    when(strategy.get(anyString(), anyString())).thenReturn(cfg);
+
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-cooldown");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // First tick auto-trips on the breach.
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    // Operator resets over the still-underwater book; this arms the 600s cooldown.
+    stub.reset(resetRequest("alice", "#746 cooldown"));
+    KillSwitchState afterReset = stub.killswitchState();
+    assertThat(afterReset.getTripped()).isFalse();
+    assertThat(afterReset.getCoolingDownUntil()).isNotNull();
+
+    // Several heartbeats elapse, all INSIDE the cooldown window.
+    env.sleep(Duration.ofSeconds(180));
+
+    assertThat(stub.killswitchState().getTripped())
+        .as("a reset must survive its own cooldown — the book is still breaching, that is expected")
+        .isFalse();
+    // Exactly one trip audit: the original. The cooldown suppressed the re-trip entirely.
+    assertThat(countKind("KillSwitchTripped"))
+        .as("no second trip may be emitted inside the cooldown")
+        .isEqualTo(1L);
+  }
+
   @Test
   void heartbeat_crossDayLoss_nowTrips_auto_daily_loss() {
     // PLAN-2026-07-22 safety-lock: a prior-day position closed today at a LOSS pre-fix read as a
