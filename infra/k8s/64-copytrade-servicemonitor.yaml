@@ -1,0 +1,49 @@
+# Prometheus scrape config for the Spring Boot services in `copytrade`. Before this,
+# Prometheus scraped NOTHING in the namespace — every Micrometer meter (fill_listener_*,
+# feed health, etc.) was only reachable via `kubectl exec ... wget localhost:8080/actuator/prometheus`,
+# so none of it was graphable or alertable. See #721.
+#
+# kube-prometheus-stack's Prometheus CR (verified live on the homelab, read-only
+# `kubectl get prometheus -A -o yaml`) has:
+#   serviceMonitorNamespaceSelector: {}                          # watches ALL namespaces
+#   serviceMonitorSelector: {matchLabels: {release: kube-prometheus-stack}}
+# so this only needs the `release: kube-prometheus-stack` label below — no Prometheus
+# CR change required. Modeled on the existing `kube-prometheus-stack-grafana`
+# ServiceMonitor in the `monitoring` namespace (same port/selector shape).
+#
+# Scope: only services whose application.yml exposes `management.endpoints.web.exposure`
+# with `prometheus` — orchestrator, exec (paper + live), market-data, api-gateway,
+# tenant-dashboard-bff. stc-intent-service is a Python/FastAPI service with no actuator
+# endpoint and is deliberately not included. The `app: <name>` label each of those six
+# Services now carries (added alongside this file) is what `selector` below matches on.
+#
+# NOT self-deploying: `deploy.yml` only applies a per-service manifest when that
+# service's code changed in the PR. This is a new shared manifest, so it needs a
+# one-time manual `kubectl apply -f infra/k8s/64-copytrade-servicemonitor.yaml`
+# (and the six `labels:` additions on the existing Service manifests) on the homelab
+# before Prometheus will pick it up.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: copytrade-actuator
+  namespace: copytrade
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - copytrade
+  selector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - orchestrator
+          - exec-alpaca-paper
+          - exec-alpaca-live
+          - market-data
+          - api-gateway
+          - tenant-dashboard-bff
+  endpoints:
+    - port: http
+      path: /actuator/prometheus

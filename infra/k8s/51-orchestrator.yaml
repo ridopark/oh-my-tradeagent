@@ -3,6 +3,10 @@ kind: Service
 metadata:
   name: orchestrator
   namespace: copytrade
+  # app label lets the ServiceMonitor (infra/k8s/64-copytrade-servicemonitor.yaml)
+  # select this Service for actuator/prometheus scraping. See #721.
+  labels:
+    app: orchestrator
 spec:
   selector:
     app: orchestrator
