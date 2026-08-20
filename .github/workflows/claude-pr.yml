@@ -57,6 +57,15 @@ jobs:
                not treat its absence as a problem.
             2. `gh pr view ${{ github.event.pull_request.number }} --json title,body,headRefName,baseRefName`
             3. `gh pr diff ${{ github.event.pull_request.number }}`
+            DO NOT RUN BUILDS OR TEST SUITES. No `mvn`, no `pytest`, no `npm test`. A single
+               orchestrator suite takes ~4 minutes and will consume your entire budget before you
+               post a verdict — this has stalled the review TWICE on PR #765 (3m16s and 4m10s),
+               both times parked on "run the tests to confirm green", leaving the final step
+               unchecked and no verdict written. CI already runs every suite as a REQUIRED check;
+               a green `Java (services/...)` leg is the evidence you would be duplicating. Your job
+               is to review the DIFF. Use Bash only for the `gh` commands above and cheap reads
+               (grep/sed/head). If a test's correctness cannot be judged by reading it, say so in
+               the review — that is a finding, not a reason to go build the repo.
             4. Produce a structured review:
                - Overview (1-2 sentences)
                - Findings (severity-tagged: blocker | major | minor | nit). Section by:
