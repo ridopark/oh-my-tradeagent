@@ -133,6 +133,27 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
    * history does not contain. Pinned by {@code
    * KillSwitchWorkflowImplLegacyReplayTest#legacyTrippedDailyLossRolloverHistoryDoesNotClear}.
    */
+  /**
+   * Issue #746: honour the post-reset cooldown that {@link #doReset} arms.
+   *
+   * <p>{@code coolingDownUntil} was written, carried across continue-as-new, set by both reset
+   * paths, and projected into {@code killswitch_state} — and NEVER READ in the trip path. So a
+   * reset over a still-breaching book re-tripped on the very next heartbeat. Observed live on
+   * prod-kipark 2026-08-19: reset at 14:01:48 advertising {@code cooling_down_until=14:02:48.681},
+   * re-tripped at {@code 14:02:41.563} — SEVEN SECONDS INSIDE its own window. The cooldown was not
+   * short, it was inert, and the value in the query and the reset audit advertised protection that
+   * did not exist.
+   *
+   * <p>The sibling {@code AccountKillSwitchWorkflowImpl} has always honoured its own (":830"). This
+   * brings the per-strategy switch into line.
+   *
+   * <p>MUST be gated: suppressing a trip removes a {@code doTrip} — its {@code KillSwitchTripped}
+   * audit Log activity AND its cascade — from the command stream. That is a command-COUNT
+   * divergence for in-flight executions, not a payload difference.
+   */
+  static final String VERSION_KILLSWITCH_HONOUR_RESET_COOLDOWN =
+      "killswitch-honour-reset-cooldown-v1";
+
   static final String VERSION_KILLSWITCH_CLEAR_DAILY_LOSS_ON_ROLLOVER =
       "killswitch-clear-daily-loss-trip-on-rollover-v1";
 
@@ -334,6 +355,18 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     }
 
     if (tripped) {
+      return;
+    }
+    // #746: honour the cooldown doReset armed. Read AFTER the tripped early-return deliberately —
+    // the window only means anything on an UNTRIPPED switch, and a tripped tick has already
+    // short-circuited. Placed BEFORE the market-open check to mirror AccountKillSwitchWorkflowImpl,
+    // so the two switches agree on evaluation order.
+    if (Workflow.getVersion(VERSION_KILLSWITCH_HONOUR_RESET_COOLDOWN, Workflow.DEFAULT_VERSION, 1)
+            >= 1
+        && coolingDownUntil != null
+        && workflowNow().isBefore(coolingDownUntil)) {
+      // Intentional inert window: the operator reset knowing the book was still down, and this is
+      // the breathing room that reset was supposed to buy. Not a defer, not an error — say nothing.
       return;
     }
     if (!calendar.isMarketOpen()) {
