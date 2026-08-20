@@ -2,6 +2,11 @@ package com.ohmytradeagent.contract.identity;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
+import com.ohmytradeagent.contract.StrategyConfig;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -34,6 +39,35 @@ class RiskRelevantConfigKeysTest {
     // two ITs asserted opposite answers for months without either failing, because both are
     // RUN_DB_ITS-gated in separate modules.
     assertThat(RiskRelevantConfigKeys.ALL).doesNotContain("daily_loss_threshold");
+  }
+
+  @Test
+  void everyKeyIsARealStrategyConfigProperty() {
+    // The drift this class prevents is between its two CONSUMERS. This guards the third direction
+    // nothing was watching: drift between the set and the SCHEMA.
+    //
+    // A key removed from strategy-config.json but left here becomes a ghost — it can never appear
+    // in a TenantConfigChanged subject, so it silently guards nothing while still reading as a
+    // real-money control. That is how #338 shipped its first round: notional_cap_pct_of_equity was
+    // deleted from the schema and this set kept listing it, and every existing test here passed,
+    // because they all assert specific keys rather than the set as a whole.
+    //
+    // Introspects the GENERATED POJO rather than parsing the schema file, so it needs no path
+    // assumptions and fails the moment jsonschema2pojo stops emitting the property.
+    ObjectMapper mapper = new ObjectMapper();
+    Set<String> schemaProps =
+        mapper
+            .getSerializationConfig()
+            .introspect(mapper.getTypeFactory().constructType(StrategyConfig.class))
+            .findProperties()
+            .stream()
+            .map(BeanPropertyDefinition::getName)
+            .collect(Collectors.toSet());
+
+    assertThat(schemaProps).isNotEmpty(); // introspection actually found something
+    assertThat(RiskRelevantConfigKeys.ALL)
+        .as("promotion-voiding keys that no longer exist in StrategyConfig")
+        .allSatisfy(key -> assertThat(schemaProps).contains(key));
   }
 
   @Test

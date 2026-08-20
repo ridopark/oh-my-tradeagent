@@ -23,7 +23,7 @@ import org.slf4j.LoggerFactory;
 /**
  * Issue #318: Temporal Advanced Visibility–backed {@link PortfolioSnapshot}. Lists running {@code
  * PositionWorkflow} instances for the requesting tenant and values each open position so the {@code
- * same_underlying_count} and {@code notional_cap_pct_of_equity} portfolio gates in {@link
+ * same_underlying_count} and {@code notional_cap_pct_of_capital_base} portfolio gates in {@link
  * RiskActivitiesImpl} observe the real open book (the prior no-op default always reported an empty
  * list, so both gates saw zero positions).
  *
@@ -55,13 +55,14 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>Cost-basis capital base (#323).</b> {@code sum_open_notional} (this numerator) is <b>cost
  * basis</b> (entry premium × remaining qty × multiplier). As of #323 the {@code
- * notional_cap_pct_of_equity} cap denominator is the <b>cost-basis capital base</b> {@code cash +
- * sum_open_notional}, not the net-liq (MTM) equity — so numerator and denominator share the same
- * cost-basis open-notional term and the cap is MTM-stable (it neither loosens on an appreciating
- * long-options book nor tightens on a bleeding one, and adds no new market-data dependency). This
- * snapshot's {@link #accountEquity(String)} fallback still returns the documented ZERO sentinel
- * (fail-closed); the live capital base is threaded over the broker dispatch seam ({@code cash}
- * added to the Alpaca {@code /v2/account} read, see {@code RiskActivitiesImpl.checkNotionalCap}).
+ * notional_cap_pct_of_capital_base} cap denominator is the <b>cost-basis capital base</b> {@code
+ * cash + sum_open_notional}, not the net-liq (MTM) equity — so numerator and denominator share the
+ * same cost-basis open-notional term and the cap is MTM-stable (it neither loosens on an
+ * appreciating long-options book nor tightens on a bleeding one, and adds no new market-data
+ * dependency). This snapshot's {@link #accountEquity(String)} fallback still returns the documented
+ * ZERO sentinel (fail-closed); the live capital base is threaded over the broker dispatch seam
+ * ({@code cash} added to the Alpaca {@code /v2/account} read, see {@code
+ * RiskActivitiesImpl.checkNotionalCap}).
  *
  * <p>Registered as the {@code @Bean PortfolioSnapshot} in {@link
  * com.ohmytradeagent.orchestrator.config.RiskCollaboratorsConfig}, overriding the
@@ -75,12 +76,12 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
    * Task (c) fail-closed bound (#325). A correlated Temporal degradation can leave {@code
    * listExecutions} succeeding while the per-workflow {@code positionState} query fails for many
    * listed positions, which would drop those positions from {@code sum_open_notional} and silently
-   * <i>loosen</i> the {@code notional_cap_pct_of_equity} cap (undercounting open exposure → permits
-   * trades it should reject). To keep that failure mode fail-closed we throw instead of returning
-   * an undercounted list once the listed positions fail to <i>value</i> badly enough. Only genuine
-   * value-failures ({@link ValueResult#failure()} — a Running workflow that cannot answer its state
-   * query, a degradation signal) count; legitimate just-closed/blank/null-premium <i>skips</i>
-   * ({@link ValueResult#skip()}) do NOT.
+   * <i>loosen</i> the {@code notional_cap_pct_of_capital_base} cap (undercounting open exposure →
+   * permits trades it should reject). To keep that failure mode fail-closed we throw instead of
+   * returning an undercounted list once the listed positions fail to <i>value</i> badly enough.
+   * Only genuine value-failures ({@link ValueResult#failure()} — a Running workflow that cannot
+   * answer its state query, a degradation signal) count; legitimate just-closed/blank/null-premium
+   * <i>skips</i> ({@link ValueResult#skip()}) do NOT.
    *
    * <p>The bound combines two rules (see {@link #failsClosed}):
    *
@@ -158,8 +159,8 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
    * WARNING — fail-closed seam (#325, hardening #318). This method must let a Visibility error (the
    * {@code listExecutions} query or the stream iteration) <b>propagate</b>. Do NOT wrap the body in
    * {@code try { ... } catch (Exception e) { return List.of(); }}: an empty list means {@code
-   * sum_open_notional=0}, which <b>loosens</b> the {@code notional_cap_pct_of_equity} cap and flips
-   * the gate <b>fail-OPEN</b> (it would then permit trades it should reject). The fail-closed
+   * sum_open_notional=0}, which <b>loosens</b> the {@code notional_cap_pct_of_capital_base} cap and
+   * flips the gate <b>fail-OPEN</b> (it would then permit trades it should reject). The fail-closed
    * guarantee relies on the throwable reaching {@code RiskActivitiesImpl.PortfolioContext
    * .openPositions()} and failing the {@code checkEntry}/{@code checkEntryWithLimit} activity so
    * the workflow never reaches {@code placeOrder}. The per-position {@link #valuePosition} swallow
@@ -369,8 +370,8 @@ public class VisibilityPortfolioSnapshot implements PortfolioSnapshot {
    * Account equity is sourced over the {@code broker-<broker_target>} {@code
    * AccountSnapshotActivity} seam and threaded into the gate by the workflow (Issue #317); this
    * snapshot is only the fallback when the workflow supplies none. Returns the documented {@code
-   * ZERO} sentinel so the {@code notional_cap_pct_of_equity} gate fails closed (cannot compute the
-   * cap → reject), preserving the #317 fail-closed-on-zero-equity contract.
+   * ZERO} sentinel so the {@code notional_cap_pct_of_capital_base} gate fails closed (cannot
+   * compute the cap → reject), preserving the #317 fail-closed-on-zero-equity contract.
    */
   @Override
   public BigDecimal accountEquity(String brokerTarget) {

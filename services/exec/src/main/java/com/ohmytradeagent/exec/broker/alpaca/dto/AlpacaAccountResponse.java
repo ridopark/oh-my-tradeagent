@@ -13,9 +13,9 @@ import java.math.BigDecimal;
  * wrong one would let the cap pass far larger exposure than intended.
  *
  * <p>{@code cash} is the account's cash balance (issue #323). The {@code
- * notional_cap_pct_of_equity} gate's MTM-stable denominator is the cost-basis capital base {@code
- * cash + sum_open_notional}, so the gate reads {@code cash} (not net-liq {@code equity}) for its
- * denominator — keeping numerator and denominator on the same cost basis. Like {@code equity},
+ * notional_cap_pct_of_capital_base} gate's MTM-stable denominator is the cost-basis capital base
+ * {@code cash + sum_open_notional}, so the gate reads {@code cash} (not net-liq {@code equity}) for
+ * its denominator — keeping numerator and denominator on the same cost basis. Like {@code equity},
  * {@code cash} is distinct from {@code buyingPower}. {@code cash} is ALSO the affordability basis
  * for the {@code pre_trade_check} gate (see below), so a margin account cannot lever past its cash.
  *

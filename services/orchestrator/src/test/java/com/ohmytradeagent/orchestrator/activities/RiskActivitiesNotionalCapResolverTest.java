@@ -10,11 +10,9 @@ import com.ohmytradeagent.contract.CopytradeSignalPayload;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
-import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.workflows.AccountKillSwitchWorkflow;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflow;
-import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.temporal.client.WorkflowClient;
 import java.math.BigDecimal;
@@ -29,12 +27,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Issue #336: covers the five branches of {@code RiskActivitiesImpl.resolveNotionalCapPct} (the
- * deprecated {@code notional_cap_pct_of_equity} alias vs the canonical {@code
- * notional_cap_pct_of_capital_base}). All branches preserve the existing gate math; only the field
- * <i>source</i> changes. The deprecation paths assert the {@code
- * notional_cap_deprecated_equity_field_total} counter increments; the both-unequal branch asserts
- * the fail-closed {@code ambiguous_cap_config} reject.
+ * Issue #336/#338: covers {@code RiskActivitiesImpl.resolveNotionalCapPct}, now a single-field
+ * resolver over the canonical {@code notional_cap_pct_of_capital_base}.
+ *
+ * <p>#338 removed the deprecated {@code notional_cap_pct_of_equity} alias from the schema once
+ * every live tenant had migrated, which collapsed five branches to two: the field is set (gate on)
+ * or it is not (gate off, opt-in). The alias-only, both-equal, both-unequal ({@code
+ * ambiguous_cap_config}) and counter-accumulation cases went with it — there is no second field
+ * left to disagree with.
+ *
+ * <p>What remains is still worth asserting: it is the enablement contract {@code
+ * StrategyConfigs#notionalCapConfigured} must stay in lockstep with, and a divergence there makes
+ * the gate reject every entry with {@code cash_unavailable} (the #336 regression).
  */
 class RiskActivitiesNotionalCapResolverTest {
 
@@ -84,82 +88,28 @@ class RiskActivitiesNotionalCapResolverTest {
             registry);
   }
 
-  // ----- Branch 1: canonical only → works, no deprecation signal -----
+  // ----- Set → gate enabled, resolves to the configured fraction -----
   @Test
-  void newFieldOnly_usesCapitalBase_noDeprecationSignal() {
+  void capitalBaseSet_enablesTheGate() {
     StrategyConfig c = config();
     c.setNotionalCapPctOfCapitalBase(HALF);
     RiskDecision d = invoke(c);
     assertThat(d.allowed()).isTrue();
-    assertThat(deprecationCount()).isZero();
   }
 
-  // ----- Branch 2: deprecated alias only → works + counter + warn -----
+  // ----- Unset → gate disabled (opt-in), approve -----
   @Test
-  void oldFieldOnly_usesEquity_emitsDeprecationSignal() {
-    StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(HALF);
-    RiskDecision d = invoke(c);
-    assertThat(d.allowed()).isTrue();
-    assertThat(deprecationCount()).isEqualTo(1.0);
-  }
-
-  // ----- Branch 3: both set, equal → works + deprecation signal -----
-  @Test
-  void bothEqual_usesValue_emitsDeprecationSignal() {
-    StrategyConfig c = config();
-    c.setNotionalCapPctOfCapitalBase(HALF);
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
-    RiskDecision d = invoke(c);
-    assertThat(d.allowed()).isTrue();
-    assertThat(deprecationCount()).isEqualTo(1.0);
-  }
-
-  // ----- Branch 4: both set, unequal → FAIL CLOSED, no deprecation signal -----
-  @Test
-  void bothUnequal_failsClosed_ambiguousCapConfig() {
-    StrategyConfig c = config();
-    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.40"));
-    RiskDecision d = invoke(c);
-    assertThat(d.allowed()).isFalse();
-    assertThat(d.reason()).isEqualTo(RejectionReason.NOTIONAL_CAP_EXCEEDED);
-    assertThat(d.detail()).isEqualTo("ambiguous_cap_config");
-    // An ambiguous config is a hard reject, not a deprecation-warn path.
-    assertThat(deprecationCount()).isZero();
-  }
-
-  // ----- Branch 5: neither set → gate disabled (opt-in), approve -----
-  @Test
-  void neitherSet_gateDisabled_approves() {
+  void unset_gateDisabled_approves() {
     StrategyConfig c = config();
     // A massive open book would blow any cap, but with neither field set the gate is off.
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("AAPL", new BigDecimal("9999999"))));
     RiskDecision d = invoke(c);
     assertThat(d.allowed()).isTrue();
-    assertThat(deprecationCount()).isZero();
-  }
-
-  // The old-only and both-equal deprecation paths share one tenant/strategy tag, so the counter
-  // accumulates across calls — proving per-tag caching rather than a fresh counter per call.
-  @Test
-  void deprecationCounter_accumulatesAcrossCalls() {
-    StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(HALF);
-    invoke(c);
-    invoke(c);
-    assertThat(deprecationCount()).isEqualTo(2.0);
   }
 
   private RiskDecision invoke(StrategyConfig c) {
     return risk.checkEntryWithLimit(btoPayload(), c, null, LIMIT, CASH);
-  }
-
-  private double deprecationCount() {
-    Counter counter =
-        registry.find(RiskActivitiesImpl.DEPRECATED_EQUITY_FIELD_COUNTER_NAME).counter();
-    return counter == null ? 0.0 : counter.count();
   }
 
   private static KillSwitchState notTrippedState() {

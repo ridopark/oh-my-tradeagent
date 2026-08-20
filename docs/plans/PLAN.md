@@ -63,7 +63,7 @@ A Temporal-orchestrated microservice system that mirrors options trades from a v
 │   in-process activities (folded from risk-svc + contract-resolver):│
 │     - risk.check_entry / check_exit                                 │
 │       sub-gates: author_whitelist, signal_age, kill_switch,         │
-│         max_positions, notional_cap_pct_of_equity,                  │
+│         max_positions, notional_cap_pct_of_capital_base,                  │
 │         same_underlying_count, sector_concentration_cap,            │
 │         daily_trade_count, drawdown_velocity_threshold,             │
 │         pre_trade_check (cross-svc to exec-svc, Issue #6)           │
@@ -195,7 +195,7 @@ The `force_close` dual-control requirement applies to **live** broker targets on
            TenantStrategy='t-<t>/s-<s>' AND
            ExecutionStatus='Running') < cfg.max_positions
        - (Issue #6 portfolio gates, each opt-in via cfg)
-           sum_open_notional + new_notional ≤ cfg.notional_cap_pct_of_equity * equity
+           sum_open_notional + new_notional ≤ cfg.notional_cap_pct_of_capital_base * equity
                                                             → NOTIONAL_CAP_EXCEEDED
            count(open positions whose underlying == payload.ticker) < cfg.same_underlying_count
                                                             → SAME_UNDERLYING_LIMIT
@@ -768,7 +768,7 @@ all four touch trading-critical code paths.
   - OpenTelemetry traces span sidecar → Temporal → workflow → activities. Trace context propagated via Temporal's interceptor and OTel context propagation in Python.
   - Per-service health endpoints (Spring Actuator `/actuator/health`).
   - Temporal UI as the workflow-history viewer; api-gateway exposes a `/positions` view for operator-facing status.
-- **Portfolio-level risk gates (Issue #6)**: `risk.check_entry` runs six opt-in portfolio-level sub-gates after the per-order ones. `notional_cap_pct_of_equity` bounds (sum of open-position notional + new notional) against equity. `same_underlying_count` caps concurrent positions on a single underlying. `sector_concentration_cap` caps concurrent positions in a sector (tickers resolve via per-strategy `sector_overrides`; unmapped tickers map to `unknown` and are exempt). `daily_trade_count` caps accepted BTOs per UTC trading day (counted from `audit_log` SignalAccepted events). `drawdown_velocity_threshold` (per-minute MTM loss rate) is an intraday rate-of-loss circuit breaker complementing the cumulative `daily_loss_threshold`. `pre_trade_check` is a cross-service Activity routed to `broker-<broker_target>`; the broker reports buying_power / PDT status / margin sufficiency, and risk-svc rejects when `allowed=false`, `buying_power < estimated_notional`, `pdt_status='BLOCKED'`, or `margin_sufficient=false`. Each gate is strictly opt-in (null config disables); a missing collaborator (zero equity, throwing pre-trade check) fails closed rather than silently passing. New `RejectionReason` codes: `NOTIONAL_CAP_EXCEEDED`, `SAME_UNDERLYING_LIMIT`, `SECTOR_CONCENTRATION_EXCEEDED`, `DAILY_TRADE_COUNT_EXCEEDED`, `DRAWDOWN_VELOCITY_EXCEEDED`, `PRE_TRADE_CHECK_FAILED`.
+- **Portfolio-level risk gates (Issue #6)**: `risk.check_entry` runs six opt-in portfolio-level sub-gates after the per-order ones. `notional_cap_pct_of_capital_base` bounds (sum of open-position notional + new notional) against equity. `same_underlying_count` caps concurrent positions on a single underlying. `sector_concentration_cap` caps concurrent positions in a sector (tickers resolve via per-strategy `sector_overrides`; unmapped tickers map to `unknown` and are exempt). `daily_trade_count` caps accepted BTOs per UTC trading day (counted from `audit_log` SignalAccepted events). `drawdown_velocity_threshold` (per-minute MTM loss rate) is an intraday rate-of-loss circuit breaker complementing the cumulative `daily_loss_threshold`. `pre_trade_check` is a cross-service Activity routed to `broker-<broker_target>`; the broker reports buying_power / PDT status / margin sufficiency, and risk-svc rejects when `allowed=false`, `buying_power < estimated_notional`, `pdt_status='BLOCKED'`, or `margin_sufficient=false`. Each gate is strictly opt-in (null config disables); a missing collaborator (zero equity, throwing pre-trade check) fails closed rather than silently passing. New `RejectionReason` codes: `NOTIONAL_CAP_EXCEEDED`, `SAME_UNDERLYING_LIMIT`, `SECTOR_CONCENTRATION_EXCEEDED`, `DAILY_TRADE_COUNT_EXCEEDED`, `DRAWDOWN_VELOCITY_EXCEEDED`, `PRE_TRADE_CHECK_FAILED`.
 - **Retries**: per-Activity retry policies; non-retryable types (`InsufficientFundsError`, `InvalidContractError`, `AuthError`, `QuotaExceededError`, `KillSwitchActiveError`) short-circuit.
 - **Rate limits**: per-broker worker concurrency caps (Alpaca 200/min, Tradier 120/min, IBKR ~50/sec but with separate order rate-limiting).
 - **Live / paper separation**: separate Temporal task queues; CI guardrail blocks code paths that route paper to live.

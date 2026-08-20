@@ -146,7 +146,7 @@ class RiskActivitiesWatchlistEntryTest {
   @Test
   void rejects_whenNotionalCapExceeded() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("NVDA", new BigDecimal("49900"))));
     // cash=100, sum_open=49900 → base=50000, cap=25000. projected=49900+230=50130 > 25000 → reject.
@@ -161,7 +161,7 @@ class RiskActivitiesWatchlistEntryTest {
   @Test
   void rejects_whenAccountCashNullOrZero_failsClosed() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
 
     RiskDecision dNull =
         risk.checkWatchlistEntry(watchlistPayload(), c, null, new BigDecimal("2.30"), null);
@@ -224,7 +224,7 @@ class RiskActivitiesWatchlistEntryTest {
   @Test
   void parity_sameAgnosticVerdict_whenAuthorAndAgeSatisfied() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("NVDA", new BigDecimal("49900"))));
 

@@ -63,7 +63,6 @@ public final class RiskRelevantConfigKeys {
           "max_notional_per_signal",
           "max_daily_notional_deployed",
           // risk-manager additions
-          "notional_cap_pct_of_equity",
           "same_underlying_count",
           "sector_concentration_cap",
           "daily_trade_count",

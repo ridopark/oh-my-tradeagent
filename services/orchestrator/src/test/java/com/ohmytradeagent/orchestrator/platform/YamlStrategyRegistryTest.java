@@ -166,9 +166,16 @@ class YamlStrategyRegistryTest {
   }
 
   @Test
-  void issue336_loadsDeprecatedNotionalCapEquityAlias(@TempDir Path tenantsDir) throws Exception {
-    // Issue #336: a config using the DEPRECATED notional_cap_pct_of_equity alias must still load
-    // (the field is retained in the additionalProperties:false schema so old configs deserialize).
+  void issue338_rejectsRemovedNotionalCapEquityAlias(@TempDir Path tenantsDir) throws Exception {
+    // #338: the deprecated notional_cap_pct_of_equity alias is gone from the schema, and the
+    // generated POJO carries no catch-all (jsonschema2pojo includeAdditionalProperties=false), so
+    // a config still setting it now FAILS TO LOAD. That loudness is the point: every live tenant
+    // was verified migrated before the removal, so a config still carrying the field is a stale
+    // config someone needs to see — NOT a value to quietly drop, which would silently leave the
+    // notional-cap gate unconfigured (a fail-OPEN on a risk gate).
+    //
+    // The registry wraps the Jackson failure in IllegalStateException("Failed to parse <path>"),
+    // so the field name lives on the CAUSE, not the top-level message.
     Path file = tenantsDir.resolve("dev/strategies/copytrade-v1.yaml");
     Files.createDirectories(file.getParent());
     Files.writeString(
@@ -190,11 +197,10 @@ class YamlStrategyRegistryTest {
         """);
 
     YamlStrategyRegistry registry = new YamlStrategyRegistry(tenantsDir.toString());
-    StrategyConfig cfg = registry.get("dev", "copytrade-v1");
 
-    assertThat(cfg.getNotionalCapPctOfEquity())
-        .isEqualByComparingTo(new java.math.BigDecimal("0.40"));
-    assertThat(cfg.getNotionalCapPctOfCapitalBase()).isNull();
+    assertThatThrownBy(() -> registry.get("dev", "copytrade-v1"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasStackTraceContaining("notional_cap_pct_of_equity");
   }
 
   @Test
@@ -226,6 +232,5 @@ class YamlStrategyRegistryTest {
 
     assertThat(cfg.getNotionalCapPctOfCapitalBase())
         .isEqualByComparingTo(new java.math.BigDecimal("0.40"));
-    assertThat(cfg.getNotionalCapPctOfEquity()).isNull();
   }
 }

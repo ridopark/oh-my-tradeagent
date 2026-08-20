@@ -234,7 +234,7 @@ class RiskActivitiesManualEntryTest {
   @Test
   void manualEntry_rejectedWhenNotionalCapExceeded() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
     when(portfolioSnapshot.openPositions(anyString(), anyString()))
         .thenReturn(List.of(new PortfolioSnapshot.OpenPosition("NVDA", new BigDecimal("49900"))));
 
@@ -249,7 +249,7 @@ class RiskActivitiesManualEntryTest {
   @Test
   void manualEntry_failsClosedWhenAccountCashUnavailable() {
     StrategyConfig c = config();
-    c.setNotionalCapPctOfEquity(new BigDecimal("0.50"));
+    c.setNotionalCapPctOfCapitalBase(new BigDecimal("0.50"));
 
     RiskDecision d =
         risk.checkEntryWithLimit(manualPayload(FIXED_NOW), c, null, new BigDecimal("2.35"), null);
