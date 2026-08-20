@@ -55,6 +55,32 @@ name: Deploy to homelab
 #   `/actuator/prometheus`), run the per-PR test-plan checks manually
 #   against the cluster — those are not gated here on purpose, to keep the
 #   deploy workflow's responsibility narrow (image → rolled out, Ready).
+#
+# If a red CI leg (or the build itself) made `build-images.yml` conclude
+# anything other than 'success', this workflow's real jobs never run: the
+# `workflow_run` event still fires (any conclusion), but `preflight` gates on
+# `conclusion == 'success'`, so it and `deploy` are both skipped — the whole
+# run used to show up as an opaque skipped/cancelled entry that nobody
+# noticed (#723; on 2026-08-19 this dropped #722's deploy while the cluster
+# read green). `notify-deploy-outcome` in `deploy-notify.yml`, a standalone
+# sibling workflow, is what makes that loud now — see its own header for why
+# it deliberately lives OUTSIDE this file (independent of the `deploy-homelab`
+# concurrency group below, so a wait for approval on one run can never delay
+# the failure alert for another).
+#
+# A THIRD silent case (also #723, confirmed live: PR #758 added
+# infra/k8s/64-copytrade-servicemonitor.yaml and it never reached the
+# cluster): `build-images.yml` only watches services/**, contract/**,
+# pom.xml, infra/docker/**, dashboard/**, .dockerignore — NOT infra/k8s/**.
+# A commit that touches ONLY infra/k8s/ manifests never makes build-images.yml
+# run at all, so the `workflow_run` trigger never fires either — no run, no
+# skip, nothing. The diff-based matrix below also only knows how to apply the
+# handful of per-Deployment manifests (51/52/53/54/55/58/59/60/62/63-*.yaml);
+# free-standing resources like ServiceMonitors have no `matrix.service` to
+# roll under at all. `deploy-notify.yml`'s `notify-k8s-manifest-changed` job
+# flags this instead of widening the auto-apply surface (real risk: racing an
+# untested manifest against the live cluster, or double-rolling a service if
+# the same commit also changed its code).
 
 on:
   workflow_run:
@@ -244,6 +270,43 @@ jobs:
           echo "Diff-based deploy matrix: $matrix"
           if [ "$matrix" = '{"service":[]}' ]; then
             echo "::notice::No deployable service changed in ${HEAD_SHA}; skipping rollout."
+          fi
+
+  # Covers the "build succeeded but the diff-based matrix came back empty"
+  # case (a docs/config-only merge) — a legitimate no-op that must not look
+  # identical to "deployed". This is deliberately LOW urgency (nothing is
+  # broken; CI+build both passed), so unlike `deploy-notify.yml`'s jobs it
+  # stays in this file and simply inherits the workflow-level
+  # `deploy-homelab` concurrency group — it's fine if it queues briefly
+  # behind an in-progress run. The CI-failure case, where speed matters, is
+  # handled in `deploy-notify.yml` instead — see this file's top comment.
+  notify-nothing-to-roll:
+    name: Notify (nothing to roll)
+    needs: preflight
+    if: |
+      always() && github.event_name == 'workflow_run' &&
+      needs.preflight.result == 'success' &&
+      needs.preflight.outputs.enabled == 'true' &&
+      needs.preflight.outputs.matrix == '{"service":[]}'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Notify
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK_URL }}
+        run: |
+          set -uo pipefail
+          msg="CI passed and images built for \`${SHA:0:8}\`, but no service's code or manifest changed in that commit — nothing was rolled to homelab. This is expected for docs/config-only merges. If a rollout WAS expected, dispatch 'Deploy to homelab' manually. Build run: ${RUN_URL}"
+          echo "$msg"
+          { echo "## 🟡 Deploy ran, nothing to roll"; echo ""; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
+            ./scripts/discord-notify.sh "🟡 Deploy ran, nothing to roll" "$msg" yellow \
+              || echo "::warning::discord notify failed (non-fatal)"
+          else
+            echo "::warning::DISCORD_DEPLOY_WEBHOOK_URL not set — notification is log/summary only."
           fi
 
   deploy:
