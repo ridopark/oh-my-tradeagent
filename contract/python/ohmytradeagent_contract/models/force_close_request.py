@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ForceCloseRequest(BaseModel):
@@ -14,9 +16,9 @@ class ForceCloseRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    operator_id: constr(min_length=1)
-    reason: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    operator_id: Annotated[str, Field(min_length=1)]
+    reason: Annotated[str, Field(min_length=1)]
     """
     Free-form operator-supplied reason recorded on ForceCloseRequested audit event.
     """

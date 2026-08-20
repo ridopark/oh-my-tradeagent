@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -18,7 +19,7 @@ class AccountSnapshotRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
@@ -26,7 +27,7 @@ class AccountSnapshotRequest(BaseModel):
     """
     Routes the account-snapshot Activity to the broker-<value> task queue, mirroring PreTradeCheckRequest.broker_target and OrderIntent.broker_target.
     """
-    tenant_id: constr(min_length=1) | None = None
+    tenant_id: Annotated[str | None, Field(min_length=1)] = None
     """
     P4-c-b: OPTIONAL. When present, exec resolves the broker for this tenant so the cap-basis cash reads the tenant's OWN brokerage account (per-tenant-credential end-state). When absent (the dashboard account-level equity caller, or a legacy request), exec falls back to the account-level credential set. Behavior-preserving under the env-fallback source (which ignores tenant → the same single account).
     """

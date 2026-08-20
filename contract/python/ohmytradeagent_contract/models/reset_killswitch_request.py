@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ResetKillSwitchRequest(BaseModel):
@@ -14,8 +16,8 @@ class ResetKillSwitchRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    approver_id_1: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    approver_id_1: Annotated[str, Field(min_length=1)]
     note: str | None = None
     """
     Operator-supplied free-form note recorded in the KillSwitchResetApproved audit event.

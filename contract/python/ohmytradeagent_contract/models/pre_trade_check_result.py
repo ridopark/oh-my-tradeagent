@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, confloat, conint
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PdtStatus(StrEnum):
@@ -26,12 +27,12 @@ class PreTradeCheckResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     allowed: bool
     """
     Top-level decision from the broker. If false, the risk gate rejects regardless of the field-level signals. Brokers that cannot decide return true and rely on the field-level checks.
     """
-    buying_power: confloat(ge=0.0)
+    buying_power: Annotated[float, Field(ge=0.0)]
     """
     The broker's cash-affordability basis in dollars at the moment of the check: the funds actually available to fund the order, NOT margin/options buying power. For Alpaca this is the account's available cash, so a margin account (whose options_buying_power is 2-4x cash) cannot lever past its cash. risk-svc rejects when buying_power < estimated_notional.
     """

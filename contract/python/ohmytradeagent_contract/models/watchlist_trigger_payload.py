@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
 
 from datetime import date
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import Field, BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Direction(StrEnum):
@@ -47,19 +47,19 @@ class WatchlistTriggerPayload(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version. Start at 1; bump on non-backward-compatible field changes.
     """
-    tenant_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
     """
     Tenant scope key. Required on every Activity payload and workflow input.
     """
-    strategy_id: constr(min_length=1)
+    strategy_id: Annotated[str, Field(min_length=1)]
     """
     Strategy scope key within the tenant.
     """
-    ticker: constr(pattern=r"^[A-Z]{1,6}$")
+    ticker: Annotated[str, Field(pattern="^[A-Z]{1,6}$")]
     """
     Underlying equity ticker (e.g. 'AAPL'); uppercase, no exchange suffix. The RAW underlying — not an OCC option symbol. The full OCC symbol is composed downstream from (ticker, et_date-derived expiry, strike, right).
     """
@@ -67,11 +67,11 @@ class WatchlistTriggerPayload(BaseModel):
     """
     Price-trigger direction relative to `trigger`. ABOVE fires when the underlying trades above the level (breakout); BELOW fires when it trades below (breakdown).
     """
-    trigger: Annotated[Decimal, Field(gt=0)]
+    trigger: Annotated[Decimal, Field(gt=0.0)]
     """
     Underlying price level (dollars) that arms/fires the entry per `direction`.
     """
-    strike: Annotated[Decimal, Field(gt=0)]
+    strike: Annotated[Decimal, Field(gt=0.0)]
     """
     Option strike price (dollars).
     """

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AdoptionWorkflowInput(BaseModel):
@@ -14,14 +16,14 @@ class AdoptionWorkflowInput(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
-    occ: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
+    occ: Annotated[str, Field(min_length=1)]
     """
     The orphaned OCC option symbol to adopt. Operator may supply the broker/audit compact form or the padded OccSymbol.of form; the workflow resolves the canonical padded form from the journal anchor.
     """
-    operator_id: constr(min_length=1)
+    operator_id: Annotated[str, Field(min_length=1)]
     """
     Operator who triggered the adoption (from X-Operator-Id). Recorded in the PositionAdopted audit provenance.
     """

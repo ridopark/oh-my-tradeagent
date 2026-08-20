@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import Field, AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class State(StrEnum):
@@ -33,8 +33,8 @@ class OrderIntentResult(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
-    intent_key: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    intent_key: Annotated[str, Field(min_length=1)]
     broker_order_id: str | None = None
     """
     Broker's order ID. Null when state is RECORDED (intent persisted but broker not yet called).
@@ -48,11 +48,11 @@ class OrderIntentResult(BaseModel):
     """
     Most recent broker / journal error message, if state==ERRORED or a transient failure was recorded.
     """
-    filled_qty: conint(ge=0) | None = None
+    filled_qty: Annotated[int | None, Field(ge=0)] = None
     """
     Broker-confirmed filled quantity. Populated when state=FILLED (typically via cancel-on-filled race recovery — see issue #165).
     """
-    avg_fill_price: Annotated[Decimal, Field(gt=0)] | None = None
+    avg_fill_price: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Broker-confirmed average fill price. Populated when state=FILLED.
     """

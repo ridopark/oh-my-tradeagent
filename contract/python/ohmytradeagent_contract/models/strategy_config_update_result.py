@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Outcome(StrEnum):
@@ -29,7 +30,7 @@ class StrategyConfigUpdateResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
@@ -37,7 +38,7 @@ class StrategyConfigUpdateResult(BaseModel):
     """
     Controlled disposition of the write. UPDATED: the CAS committed (new_version set). REJECTED_STALE_VERSION: expected_version was stale (OptimisticLockException). REJECTED_DANGEROUS: the write would increase/remove risk or drift an identity/live-routing field (DangerousFieldChangeRejected) — NEVER coarsened into UPDATED. REJECTED_INVALID: the proposed config is malformed / fails live gates (InvalidConfigException). NOT_FOUND: no stored row for (tenant, strategy). REJECTED_PERSIST_ERROR: reserved coarse persist-error bucket for the caller; the activity itself does NOT emit it (a corrupt-row IllegalStateException propagates as a retryable failure instead).
     """
-    new_version: conint(ge=1) | None = None
+    new_version: Annotated[int | None, Field(ge=1)] = None
     """
     Set ONLY on UPDATED: the persisted version after the compare-and-set bump. Null/omitted on every rejected outcome.
     """

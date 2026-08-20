@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -18,15 +19,15 @@ class LiveActivationRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
-    tenant_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
     """
     The tenant whose (tenant, strategy) live promotion is being activated.
     """
-    strategy_id: constr(min_length=1)
+    strategy_id: Annotated[str, Field(min_length=1)]
     """
     The strategy being activated for live trading.
     """
@@ -34,7 +35,7 @@ class LiveActivationRequest(BaseModel):
     """
     The live broker_target being approved. Recorded in the LivePromotionApproved subject (the gate matches subject->>'broker_target') and used to route the fresh account probe to broker-<value>.
     """
-    operator_id: constr(min_length=1)
+    operator_id: Annotated[str, Field(min_length=1)]
     """
     The authenticated operator (X-Operator-Id) performing the one-click activation. Recorded as the machine-attributed approver in the emitted LivePromotionApproved subject (operator_id) — the single-operator substitute for the legacy dual-control approve().
     """

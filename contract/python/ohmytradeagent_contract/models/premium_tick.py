@@ -4,17 +4,10 @@
 from __future__ import annotations
 
 from decimal import Decimal
+
 from typing import Annotated
 
-from pydantic import (
-    AwareDatetime,
-    BaseModel,
-    ConfigDict,
-    Field,
-    confloat,
-    conint,
-    constr,
-)
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class PremiumTick(BaseModel):
@@ -26,23 +19,23 @@ class PremiumTick(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
-    contract_symbol: constr(min_length=1)
+    contract_symbol: Annotated[str, Field(min_length=1)]
     """
     OCC option symbol the tick is for.
     """
-    premium: Annotated[Decimal, Field(gt=0)]
+    premium: Annotated[Decimal, Field(gt=0.0)]
     """
     Premium per contract, dollars. Source-of-truth field for the chandelier trail comparison. Quote-derived, NOT a last-trade price: market-data-svc fills it with a plain (bid+ask)/2 computed from ONE Alpaca REST snapshot (AlpacaMarketData.midPrice). CORRECTED 2026-08-16 — this previously claimed the mid was 'smoothed over a 5-10s window'. It is not, and no smoothing has ever existed anywhere in market-data; the ~2s poll cadence DECIMATES (samples one instant) rather than averaging, so it does nothing to suppress an outlier. That false claim mattered: consumers reasoned about the chandelier trail's safety on the assumption that a single blown quote had been smoothed away, when a one-sided NBBO collapse halves this value in a single tick.
     """
-    bid: confloat(ge=0.0) | None = None
+    bid: Annotated[float | None, Field(ge=0.0)] = None
     """
     Live NBBO bid per contract, dollars. Source-of-truth for the watchlist-trigger premium stop/target TRIGGER: a long option is exited at the bid (the price it can actually sell into), so the -1R stop and +2R target are evaluated against this, not the mid. A bid of 0 means no live bid (unexitable except by exercise). Optional/absent for back-compat with pre-bid tick producers and histories; consumers that require it fall back to `premium` (mid) when absent and audit the degradation.
     """
-    ask: confloat(ge=0.0) | None = None
+    ask: Annotated[float | None, Field(ge=0.0)] = None
     """
     Live NBBO ask per contract, dollars. Carried alongside `bid` so a consumer can compute the spread and reject a blown/illiquid book — NOTE (2026-08-16): no consumer does this today. Its only use in the orchestrator is a field copy (PositionWorkflowImpl bidAsPremiumTick); no spread or blown-book check exists anywhere. Stated so the field is not mistaken for an active guard. Optional/absent for back-compat.
     """

@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class ChangeType(StrEnum):
@@ -37,15 +38,15 @@ class BrokerCredentialAuditRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
-    tenant_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
     """
     Tenant whose broker credential was written/rotated. Subject key and the audit event's tenant_id; the per-tenant credential chain is keyed on tenant_id + the '_broker' strategy sentinel.
     """
-    provider: constr(min_length=1)
+    provider: Annotated[str, Field(min_length=1)]
     """
     Broker provider the credential targets (e.g. 'alpaca'). A plain non-secret string, NOT the broker_target enum, to avoid the regen.sh BrokerTarget dedup collision.
     """
@@ -57,7 +58,7 @@ class BrokerCredentialAuditRequest(BaseModel):
     """
     Controlled disposition of the write. A closed enum (no free-text reason) so the audit subject can never carry leaked key material. On any REJECTED_* outcome the optional broker_account_id/credential_version/kek_version are typically omitted.
     """
-    actor: constr(min_length=1)
+    actor: Annotated[str, Field(min_length=1)]
     """
     Who/what caused the credential write (e.g. an api-gateway route or operator id). Subject key and the audit event's actor.
     """
@@ -65,15 +66,15 @@ class BrokerCredentialAuditRequest(BaseModel):
     """
     When the credential write/rotation occurred (RFC 3339 / ISO-8601). Becomes the audit event's occurred_at.
     """
-    broker_account_id: constr(min_length=1) | None = None
+    broker_account_id: Annotated[str | None, Field(min_length=1)] = None
     """
     OPTIONAL. The NON-SECRET brokerage account number returned by the /v2/account identity probe (e.g. 'PA3FKGPFYPLH'). Omitted on rejected outcomes. NOT a key/secret.
     """
-    credential_version: conint(ge=1) | None = None
+    credential_version: Annotated[int | None, Field(ge=1)] = None
     """
     OPTIONAL. The persisted credential row version after the write (the CAS-bumped version). Omitted on rejected outcomes.
     """
-    kek_version: conint(ge=1) | None = None
+    kek_version: Annotated[int | None, Field(ge=1)] = None
     """
     OPTIONAL. The KEK version used to wrap the row DEK at write time. A non-secret version identifier, never the KEK bytes. Omitted on rejected outcomes.
     """

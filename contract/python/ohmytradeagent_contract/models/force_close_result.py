@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Status(StrEnum):
@@ -25,12 +26,12 @@ class ForceCloseResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     status: Status
     """
     ACCEPTED: cancel-then-marketable-sell sequence queued. NOOP_ALREADY_CLOSED: position already at remainingQty=0 (e.g. another exit just filled).
     """
-    exit_signal_id: constr(min_length=1)
+    exit_signal_id: Annotated[str, Field(min_length=1)]
     """
     Deterministic exit dedupe key. Shape: 'force:<operator_id>:<offset>'.
     """

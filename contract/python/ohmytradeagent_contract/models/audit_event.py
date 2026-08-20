@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class AuditEvent(BaseModel):
@@ -16,13 +16,13 @@ class AuditEvent(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
-    event_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
+    event_id: Annotated[str, Field(min_length=1)]
     """
     UUID v4 for this event row.
     """
@@ -30,28 +30,31 @@ class AuditEvent(BaseModel):
     """
     RFC3339 UTC timestamp set by the originator of the event (broker for fills, sidecar for posted, workflow for decided).
     """
-    kind: constr(min_length=1) = Field(
-        ...,
-        examples=[
-            "SignalReceived",
-            "SignalAccepted",
-            "SignalRejected",
-            "EntryFilled",
-            "EntryExpired",
-            "ExitRequested",
-            "KillSwitchTripped",
-            "KillSwitchResetApproved",
-            "KillSwitchResetExpired",
-            "KillSwitchDegraded",
-            "LivePromotionApproved",
-            "ReconciliationCompleted",
-            "JournalOrphan",
-            "BrokerOrphan",
-            "OrphanSTC",
-            "SymbolDriftDetected",
-            "TenantConfigChanged",
-        ],
-    )
+    kind: Annotated[
+        str,
+        Field(
+            examples=[
+                "SignalReceived",
+                "SignalAccepted",
+                "SignalRejected",
+                "EntryFilled",
+                "EntryExpired",
+                "ExitRequested",
+                "KillSwitchTripped",
+                "KillSwitchResetApproved",
+                "KillSwitchResetExpired",
+                "KillSwitchDegraded",
+                "LivePromotionApproved",
+                "ReconciliationCompleted",
+                "JournalOrphan",
+                "BrokerOrphan",
+                "OrphanSTC",
+                "SymbolDriftDetected",
+                "TenantConfigChanged",
+            ],
+            min_length=1,
+        ),
+    ]
     """
     Event kind tag. Known kinds: SignalReceived, SignalAccepted, SignalRejected, EntryFilled, EntryExpired, ExitRequested, KillSwitchTripped, KillSwitchResetApproved, KillSwitchResetExpired, KillSwitchDegraded, LivePromotionApproved, ReconciliationCompleted, JournalOrphan, BrokerOrphan, OrphanSTC, SymbolDriftDetected, TenantConfigChanged. KillSwitchResetApproved (issue #7) is emitted by a single-operator kill-switch reset — the manual reset_killswitch / reset_account_killswitch (via=manual_reset) or the one-click reset_on_activation (via=live_activation); its subject carries via, cooling_down_until, cooldown_secs, an optional note, and the operator identity keyed per path (approver_id_1 for a manual reset; operator for a live_activation reset). LivePromotionApproved (issue #87) is emitted by the single-operator LivePromotionActivities.activate Activity (the one-click Activate path); its subject includes operator_id, tenant_id, strategy_id, broker_target, activation_mode, approved_at (and expected_account_id when probed). See docs/ops/live-promotion-rollback.md §Sign-off recording for the full SOP. TenantConfigChanged (issue #88) is emitted by TenantConfigChangedEmitter at orchestrator boot when the per-strategy YAML differs from the previously persisted snapshot; its subject MUST include tenant_id, strategy_id, changed_keys (non-empty array of YAML property names that differ), old_values (map of present-key entries from the prior snapshot; redacted-key entries omit the value), new_values (same shape from the new snapshot, same redaction rule), source (string identifying the trigger; "configmap-reload" for the boot-path emitter; future emitters may use other values like "vault-rotation"), and loaded_at (RFC3339 timestamp of the load that produced the diff). The redact-by-key behavior is pinned in this convention: for any key whose value carries a credential or Vault path (as determined by the emitter's redacted-key set), the key still appears in changed_keys but the value is omitted from both old_values and new_values. The redacted-key set is implementation detail of the emitter and intentionally not enumerated here.
     """

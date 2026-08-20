@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -18,7 +19,7 @@ class PortfolioHistoryRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See AccountSnapshotRequest.schema_version.
     """
@@ -34,7 +35,7 @@ class PortfolioHistoryRequest(BaseModel):
     """
     ALREADY-RESOLVED Alpaca timeframe, e.g. 5Min, 15Min, 1D. Resolved alongside period by the BFF client.
     """
-    tenant_id: constr(min_length=1) | None = None
+    tenant_id: Annotated[str | None, Field(min_length=1)] = None
     """
     OPTIONAL. When present, exec resolves the broker for this tenant so the chart reads the tenant's OWN brokerage account (per-tenant-credential end-state). When absent (the account-level dashboard caller, or a legacy request), exec falls back to the account-level credential set. Behavior-preserving under the env-fallback source (which ignores tenant → the same single account). Mirrors AccountSnapshotRequest.tenant_id.
     """

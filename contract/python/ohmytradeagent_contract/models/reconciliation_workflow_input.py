@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -18,14 +19,14 @@ class ReconciliationWorkflowInput(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
     broker_target: BrokerTarget
     """
     Routes journal_dump_open + broker_list_open_orders Activities to the broker-<value> task queue. Phase 2c.2: <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 records; using them for active reconciliation produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.
     """
-    broker_account_id: constr(min_length=1) | None = None
+    broker_account_id: Annotated[str | None, Field(min_length=1)] = None
     """
     Phase F2b: the strategy's resolved brokerage account id (StrategyConfig.broker_account_id). OPTIONAL — omitted on pre-F2b serialized inputs and for tenants that declare no account, so it is NOT in required. When present it scopes the account-wide cross-tenant sibling-owner orphan-suppression probe: a broker-held OCC managed by a running PositionWorkflow under a DIFFERENT tenant sharing the SAME broker account is suppressed instead of false-paged. When null/absent the account-scoped probe is skipped and recon degrades to the pre-F2b tenant-scoped behavior.
     """

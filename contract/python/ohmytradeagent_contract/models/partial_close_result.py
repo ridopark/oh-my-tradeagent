@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Status(StrEnum):
@@ -25,12 +26,12 @@ class PartialCloseResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     status: Status
     """
     ACCEPTED: the trim was enqueued (the SELL is placed by the main loop). NOOP_ALREADY_CLOSED: the position was already drained (remainingQty == 0 on a confirmed position) — nothing was enqueued.
     """
-    exit_signal_id: constr(min_length=1)
+    exit_signal_id: Annotated[str, Field(min_length=1)]
     """
     Dedupe key of the synthesized partial exit inside the position ('trim:<operator_id>:<workflow_millis>').
     """

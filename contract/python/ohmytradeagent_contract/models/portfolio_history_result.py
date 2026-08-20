@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, conint
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PortfolioHistoryResult(BaseModel):
@@ -14,7 +16,7 @@ class PortfolioHistoryResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     timestamps: list[int]
     """
     Epoch-seconds index shared by equity[], profit_loss[], and profit_loss_pct[].

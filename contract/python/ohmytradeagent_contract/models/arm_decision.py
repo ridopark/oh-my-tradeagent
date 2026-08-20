@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, confloat
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ArmDecision(BaseModel):
@@ -18,7 +20,7 @@ class ArmDecision(BaseModel):
     """
     True to arm the trigger for subsequent fire evaluation; false to drop it.
     """
-    size_multiplier: confloat(ge=0.0)
+    size_multiplier: Annotated[float, Field(ge=0.0)]
     """
     Position-size multiplier applied to the base allocation when the trigger eventually fires. 0 disables sizing without disarming.
     """

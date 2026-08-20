@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 from decimal import Decimal
+
 from typing import Annotated
 
-from pydantic import Field, AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class EquityTick(BaseModel):
@@ -18,15 +19,15 @@ class EquityTick(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version.
     """
-    ticker: constr(min_length=1)
+    ticker: Annotated[str, Field(min_length=1)]
     """
     Underlying equity symbol the tick is for.
     """
-    last: Annotated[Decimal, Field(gt=0)]
+    last: Annotated[Decimal, Field(gt=0.0)]
     """
     Last trade price of the underlying, dollars. Source-of-truth field for the level-trigger comparison.
     """

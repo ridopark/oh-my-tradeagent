@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class Status(StrEnum):
@@ -26,11 +27,11 @@ class OptionQuoteResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version.
     """
-    contract_symbol: constr(min_length=1)
+    contract_symbol: Annotated[str, Field(min_length=1)]
     """
     OCC option symbol the snapshot is for (echoed from the request).
     """

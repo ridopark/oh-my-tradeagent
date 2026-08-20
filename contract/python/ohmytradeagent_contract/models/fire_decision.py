@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, confloat
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FireDecision(BaseModel):
@@ -18,7 +20,7 @@ class FireDecision(BaseModel):
     """
     True to proceed with the entry; false to hold (the trigger stays armed for later evaluation).
     """
-    size_multiplier: confloat(ge=0.0)
+    size_multiplier: Annotated[float, Field(ge=0.0)]
     """
     Position-size multiplier applied to the base allocation for this fire. 0 suppresses the entry without disarming.
     """

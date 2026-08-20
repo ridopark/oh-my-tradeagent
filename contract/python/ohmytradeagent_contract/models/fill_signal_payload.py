@@ -4,16 +4,10 @@
 from __future__ import annotations
 
 from decimal import Decimal
+
 from typing import Annotated
 
-from pydantic import (
-    AwareDatetime,
-    BaseModel,
-    ConfigDict,
-    Field,
-    conint,
-    constr,
-)
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class FillSignalPayload(BaseModel):
@@ -25,19 +19,19 @@ class FillSignalPayload(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    broker_order_id: constr(min_length=1) = Field(..., alias="brokerOrderId")
+    broker_order_id: Annotated[str, Field(alias="brokerOrderId", min_length=1)]
     """
     Broker-assigned order identifier the fill is reported against. Matches OrderIntentJournal.broker_order_id for the originating intent.
     """
-    filled_qty: conint(ge=0) = Field(..., alias="filledQty")
+    filled_qty: Annotated[int, Field(alias="filledQty", ge=0)]
     """
     Cumulative filled quantity reported by the broker for this order.
     """
-    avg_fill_price: Annotated[Decimal, Field(gt=0)] = Field(..., alias="avgFillPrice")
+    avg_fill_price: Annotated[Decimal, Field(alias="avgFillPrice", gt=0.0)]
     """
     Average fill price across all partials reported for this order.
     """
-    filled_at: AwareDatetime = Field(..., alias="filledAt")
+    filled_at: Annotated[AwareDatetime, Field(alias="filledAt")]
     """
     Broker timestamp of the fill report (ISO-8601 with offset).
     """

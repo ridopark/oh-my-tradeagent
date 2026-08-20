@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import Field, BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -32,17 +32,17 @@ class PreTradeCheckRequest(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
     broker_target: BrokerTarget
     """
     Routes the pre-trade-check Activity to the broker-<value> task queue, mirroring OrderIntent.broker_target.
     """
-    option_symbol: constr(min_length=1)
+    option_symbol: Annotated[str, Field(min_length=1)]
     """
     Full OCC option symbol (e.g. 'AAPL250117C00150000') the gate is evaluating, resolved upstream by ContractActivities.resolve from CopytradeSignalPayload.(ticker, expiry, strike, right). Distinct from the raw underlying ticker on the signal payload. Included so broker adapters can ask their venue for symbol-specific buying-power or margin requirements when supported.
     """
@@ -50,11 +50,11 @@ class PreTradeCheckRequest(BaseModel):
     """
     BUY for BTO entries; SELL is reserved for future hardening of STC paths (currently STC bypasses the entry gate). Broker adapters only need BUY semantics in this PR.
     """
-    qty: conint(ge=1)
+    qty: Annotated[int, Field(ge=1)]
     """
     Contracts requested.
     """
-    estimated_notional: Annotated[Decimal, Field(gt=0)]
+    estimated_notional: Annotated[Decimal, Field(gt=0.0)]
     """
     Dollar notional the risk gate computed (qty * payload.price * 100 for options). Broker adapters compare this to buying_power.
     """

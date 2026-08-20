@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Outcome(StrEnum):
@@ -27,7 +28,7 @@ class AdoptionResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     outcome: Outcome
     """
     ADOPTED: a PositionWorkflow owner was reconstructed + started for the orphan. ALREADY_OWNED: a live PositionWorkflow already owns the OCC (idempotency no-op). REFUSED_NOT_HELD: the broker does not actually hold the lot (phantom guard). REFUSED_NO_ANCHOR: no entry_signal_id could be anchored from the journal, so the canonical workflow id cannot be built (documented known limitation).

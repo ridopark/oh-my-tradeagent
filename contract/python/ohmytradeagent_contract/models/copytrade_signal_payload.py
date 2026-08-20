@@ -4,20 +4,12 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
 
 from datetime import date
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import (
-    AwareDatetime,
-    BaseModel,
-    ConfigDict,
-    Field,
-    confloat,
-    conint,
-    constr,
-)
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class Action(StrEnum):
@@ -66,27 +58,27 @@ class CopytradeSignalPayload(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. Workers reject newer-than-build inputs to force orchestrator rollback. Start at 1; bump when fields change in non-backward-compatible ways.
     """
-    tenant_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
     """
     Tenant scope key. Required on every Activity payload and workflow input.
     """
-    strategy_id: constr(min_length=1)
+    strategy_id: Annotated[str, Field(min_length=1)]
     """
     Strategy scope key within the tenant.
     """
-    signal_id: constr(min_length=1)
+    signal_id: Annotated[str, Field(min_length=1)]
     """
     Deterministic dedupe key. Shape: '<message_id>:<line_index>'.
     """
-    message_id: constr(min_length=1)
+    message_id: Annotated[str, Field(min_length=1)]
     """
     Discord message id the line was parsed from.
     """
-    author: constr(min_length=1)
+    author: Annotated[str, Field(min_length=1)]
     """
     Discord username that posted the line.
     """
@@ -98,7 +90,7 @@ class CopytradeSignalPayload(BaseModel):
     """
     Author intent: buy-to-open, sell-to-close, or retrospective average-note.
     """
-    ticker: constr(pattern=r"^[A-Z]{1,6}$")
+    ticker: Annotated[str, Field(pattern="^[A-Z]{1,6}$")]
     """
     Underlying equity ticker (e.g. 'AAPL'); uppercase, no exchange suffix. This is the RAW underlying — not an OCC option symbol. The full OCC symbol (e.g. 'AAPL250117C00150000') is composed downstream by ContractActivities.resolve from (ticker, expiry, strike, right) and lands on OrderIntent.option_symbol before exec.
     """
@@ -106,7 +98,7 @@ class CopytradeSignalPayload(BaseModel):
     """
     Option expiry date (YYYY-MM-DD) at 00:00 UTC of that calendar date.
     """
-    strike: Annotated[Decimal, Field(gt=0)]
+    strike: Annotated[Decimal, Field(gt=0.0)]
     """
     Strike price, dollars.
     """
@@ -114,7 +106,7 @@ class CopytradeSignalPayload(BaseModel):
     """
     Option right: Call or Put.
     """
-    price: Annotated[Decimal, Field(gt=0)]
+    price: Annotated[Decimal, Field(gt=0.0)]
     """
     Author's stated fill premium (per contract, dollars). 5-30s stale by the time we read it; size off fresh ask not this.
     """
@@ -126,7 +118,7 @@ class CopytradeSignalPayload(BaseModel):
     """
     Optional classifier hint for STC lines: whether the author intends a full exit or a partial. Null/absent = unclassified. Spec-only in Phase 1 (PLAN-2026-07-25-stc-intent-classifier); no consumer yet — the orchestrator STC-intent enforcement lands in a later phase, gated per-tenant.
     """
-    close_confidence: confloat(ge=0.0, le=1.0) | None = None
+    close_confidence: Annotated[float | None, Field(ge=0.0, le=1.0)] = None
     """
     Optional confidence score in [0,1] for close_intent. Null/absent = no score. Spec-only in Phase 1; no consumer yet.
     """
@@ -134,11 +126,11 @@ class CopytradeSignalPayload(BaseModel):
     """
     PLAN-2026-08-10-live-manual-bto: who produced this signal. Null/absent == 'discord' (every signal the sidecar emits; the field is deliberately NOT defaulted in-schema so an absent value stays null on the Java DTO and legacy replay histories are unaffected). 'manual' marks an operator-initiated entry submitted from the /live dashboard: it suppresses the edited-signal supersede in CopytradeSignalWorkflowImpl.maybeSupersedePriorLeg (a hand-typed BTO must never auto-flatten a Discord leg that happens to share underlying+strike+right within the 120s correction window) and tags the audit trail for forensics.
     """
-    qty_override: conint(ge=1) | None = None
+    qty_override: Annotated[int | None, Field(ge=1)] = None
     """
     PLAN-2026-08-10-live-manual-bto: operator-chosen contract count that REPLACES capital-weight sizing for this entry. Null/absent (every sidecar-emitted signal) == today's Sizing.computeEntry path, unchanged. When set, the entry is still gated: it is rejected when outside [min_contracts, max_contracts], and rejected (NOT silently clamped down, unlike the auto-sized path) when the notional-cap headroom is smaller than the requested qty — a manual entry that cannot be filled at the requested size is the operator's decision to re-make, not ours to shrink.
     """
-    raw_line: constr(min_length=1)
+    raw_line: Annotated[str, Field(min_length=1)]
     """
     The line as parsed, for audit.
     """

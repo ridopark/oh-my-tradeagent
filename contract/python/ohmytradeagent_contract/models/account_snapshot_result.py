@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, confloat, conint
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AccountSnapshotResult(BaseModel):
@@ -14,12 +16,12 @@ class AccountSnapshotResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    equity: confloat(ge=0.0)
+    schema_version: Annotated[int, Field(ge=1)]
+    equity: Annotated[float, Field(ge=0.0)]
     """
     Account net-liquidation equity in dollars at the moment of the check (Alpaca /v2/account 'equity', not buying_power). Retained for the #317 fail-closed contract and any equity-based consumers. A zero value means the figure was unavailable; consumers fail closed rather than passing an unbounded cap.
     """
-    cash: confloat(ge=0.0) | None = None
+    cash: Annotated[float | None, Field(ge=0.0)] = None
     """
     Issue #323: account cash balance in dollars (Alpaca /v2/account 'cash'). The notional_cap_pct_of_equity gate uses the MTM-stable cost-basis capital base (cash + sum_open_notional) as its denominator instead of net-liq equity, so numerator and denominator share the same cost-basis open-notional term. Optional for back-compat with pre-#323 producers/records; a null/absent or zero cash makes the cap gate fail closed (rejects) rather than passing an unbounded cap.
     """

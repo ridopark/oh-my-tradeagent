@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StrategyConfigUpdateRequest(BaseModel):
@@ -16,15 +16,15 @@ class StrategyConfigUpdateRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version. Workers reject newer-than-build inputs.
     """
-    tenant_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
     """
     Tenant whose strategy config is being written. The api-gateway asserts this equals the validated X-Tenant-Id before starting the workflow; StrategyConfigWriter's IDENTITY field-class check additionally hard-blocks any drift between this and config.tenant_id / the stored row.
     """
-    strategy_id: constr(min_length=1)
+    strategy_id: Annotated[str, Field(min_length=1)]
     """
     Strategy whose config row is the compare-and-set target for (tenant_id, strategy_id). The writer's NOT_FOUND / IDENTITY gates are authoritative — a wrong/absent strategy yields NOT_FOUND, never a write.
     """
@@ -32,11 +32,11 @@ class StrategyConfigUpdateRequest(BaseModel):
     """
     The proposed full StrategyConfig blob. Reuses the generated StrategyConfig DTO (like strategy-config.json's nested objects). StrategyConfigWriter validates it standalone, then enforces the reduce-or-hold-risk field-class rules against the currently-stored row before the CAS UPDATE.
     """
-    expected_version: conint(ge=0)
+    expected_version: Annotated[int, Field(ge=0)]
     """
     Optimistic-concurrency guard: the version the caller read. The CAS UPDATE matches WHERE version = expected_version; a stale value (a concurrent writer won) yields REJECTED_STALE_VERSION.
     """
-    actor: constr(min_length=1)
+    actor: Annotated[str, Field(min_length=1)]
     """
     Who/what caused the write (e.g. the api-gateway route id). Recorded on the audit event and the strategy_config row's updated_by.
     """

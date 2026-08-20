@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import Field, BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Side(StrEnum):
@@ -28,12 +28,12 @@ class BrokerPosition(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
-    option_symbol: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    option_symbol: Annotated[str, Field(min_length=1)]
     """
     OCC-formatted symbol, broker-native form (Alpaca: no padding).
     """
-    qty: conint(ge=1)
+    qty: Annotated[int, Field(ge=1)]
     """
     Long contract count. Negative qty is out of scope for v0 — copytrade only opens long positions.
     """
@@ -41,7 +41,7 @@ class BrokerPosition(BaseModel):
     """
     Phase 3 v0 supports LONG only; SHORT/inverse positions are not produced by copytrade.
     """
-    avg_entry_price: Annotated[Decimal, Field(gt=0)] | None = None
+    avg_entry_price: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Optional avg entry price from broker. May be omitted if broker doesn't carry it.
     """
