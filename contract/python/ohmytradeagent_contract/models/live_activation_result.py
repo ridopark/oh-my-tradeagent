@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Outcome(StrEnum):
@@ -30,7 +31,7 @@ class LiveActivationResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """

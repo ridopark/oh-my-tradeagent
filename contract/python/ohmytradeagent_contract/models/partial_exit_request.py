@@ -4,17 +4,10 @@
 from __future__ import annotations
 
 from decimal import Decimal
+
 from typing import Annotated
 
-from pydantic import (
-    AwareDatetime,
-    BaseModel,
-    ConfigDict,
-    Field,
-    confloat,
-    conint,
-    constr,
-)
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class PartialExitRequest(BaseModel):
@@ -26,25 +19,25 @@ class PartialExitRequest(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
-    signal_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
+    signal_id: Annotated[str, Field(min_length=1)]
     """
     Dedupe key inside the receiving PositionWorkflow. Shape: '<message_id>:<line_index>'.
     """
-    position_workflow_id: constr(min_length=1)
+    position_workflow_id: Annotated[str, Field(min_length=1)]
     """
     Target PositionWorkflow workflow_id (resolved via Redis cache + Visibility fallback).
     """
-    fraction: confloat(le=1.0, gt=0.0)
+    fraction: Annotated[float, Field(gt=0.0, le=1.0)]
     """
     Fraction of remaining qty to close. Resolved from KeywordPartialMatcher.match(tail, cfg.partial_fractions, cfg.default_stc_fraction).
     """
-    ref_premium: Annotated[Decimal, Field(gt=0)] | None = None
+    ref_premium: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Author-posted exit premium (for audit; not source-of-truth for fill price). Also SEEDS the exit LIMIT price in PositionWorkflowImpl.exitIntent. OPTIONAL: null/absent places the exit marketable (the de-risk-cue dispatcher already passes a null target_entry_premium), and it is unused entirely when market=true.
     """
@@ -52,15 +45,15 @@ class PartialExitRequest(BaseModel):
     """
     Place the partial SELL as a MARKET order (limit_price=null) instead of the ref_premium-seeded bounded limit + reprice ladder. Set by the operator-initiated PositionWorkflow.partial_close Update (the /live 'Trim' button), whose contract is exit-NOW like force_close. Null/absent/false keeps the bounded-limit STC behavior — every pre-existing dispatcher (STC, de-risk cue) omits it, so their placement is unchanged.
     """
-    reason: constr(min_length=1)
+    reason: Annotated[str, Field(min_length=1)]
     """
     Why the exit fired (e.g., 'stc_signal').
     """
-    author: constr(min_length=1)
+    author: Annotated[str, Field(min_length=1)]
     """
     Discord author who posted the STC line.
     """
-    raw_line: constr(min_length=1)
+    raw_line: Annotated[str, Field(min_length=1)]
     """
     The STC line as parsed, for audit.
     """

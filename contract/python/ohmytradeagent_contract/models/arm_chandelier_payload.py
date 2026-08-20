@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 from decimal import Decimal
+
 from typing import Annotated
 
-from pydantic import Field, BaseModel, ConfigDict, confloat, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ArmChandelierPayload(BaseModel):
@@ -18,25 +19,25 @@ class ArmChandelierPayload(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
-    position_workflow_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
+    position_workflow_id: Annotated[str, Field(min_length=1)]
     """
     Target PositionWorkflow workflow_id.
     """
-    source_signal_id: constr(min_length=1)
+    source_signal_id: Annotated[str, Field(min_length=1)]
     """
     signal_id of the STC line that triggered the arm. Recorded for audit forensics.
     """
-    peak_premium: Annotated[Decimal, Field(gt=0)]
+    peak_premium: Annotated[Decimal, Field(gt=0.0)]
     """
     Initial peak premium to anchor the trail at. Typically the STC ref_premium at arm time.
     """
-    giveback_pct: confloat(le=0.5, gt=0.0)
+    giveback_pct: Annotated[float, Field(gt=0.0, le=0.5)]
     """
     Trailing-stop giveback fraction. fire_threshold = peak * (1 - giveback_pct).
     """

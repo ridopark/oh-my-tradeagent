@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Annotated
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, confloat, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class AccountKillSwitchWorkflowInput(BaseModel):
@@ -16,11 +17,11 @@ class AccountKillSwitchWorkflowInput(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1, le=5)
+    schema_version: Annotated[int, Field(ge=1, le=5)]
     """
     DTO contract version. v1 = bootstrap-only input; v2 adds optional carry-forward fields produced by continueAsNew; v3 adds the sod_equity carry-forward; v4 adds the consecutive_mtm_unavailable_ticks carry-forward; v5 adds the last_open_positions/last_open_mtm exposure-cache carry-forward. Workers reject newer-than-build inputs.
     """
-    tenant_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
     tripped: bool | None = None
     """
     Carry-forward state from a prior run. Absent on fresh bootstrap. Default false.
@@ -45,15 +46,15 @@ class AccountKillSwitchWorkflowInput(BaseModel):
     """
     Carry-forward trading day from a prior run. Absent on fresh bootstrap; next heartbeat refreshes via calendar.todayEt().
     """
-    sod_equity: confloat(ge=0.0) | None = None
+    sod_equity: Annotated[float | None, Field(ge=0.0)] = None
     """
     Carry-forward start-of-day account equity for trading_day, captured once per day for the account_daily_loss_pct cap. Absent on fresh bootstrap and re-captured on each day rollover; carried across continueAsNew so a same-day CAN does not re-read it. v3+.
     """
-    consecutive_mtm_unavailable_ticks: conint(ge=0) | None = None
+    consecutive_mtm_unavailable_ticks: Annotated[int | None, Field(ge=0)] = None
     """
     Carry-forward count of CONSECUTIVE unpriceable-book heartbeats accumulated toward the small-book mtm-unavailable fail-close debounce (MTM_UNAVAILABLE_TRIP_TICKS). Carried across continueAsNew so a same-day CAN mid-debounce does not reset the count. Absent on fresh bootstrap and when the count is 0. v4+.
     """
-    last_open_positions: conint(ge=0) | None = None
+    last_open_positions: Annotated[int | None, Field(ge=0)] = None
     """
     Carry-forward listed open-position count cached from the last heartbeat that valued the book (the reset-banner exposure). Carried across continueAsNew so the exposure is not blank for up to one heartbeat after a same-day CAN. Absent on fresh bootstrap and until the first valued heartbeat. v5+.
     """

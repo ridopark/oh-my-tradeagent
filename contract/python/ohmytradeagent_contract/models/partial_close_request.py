@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, confloat, conint, constr
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PartialCloseRequest(BaseModel):
@@ -14,13 +16,13 @@ class PartialCloseRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    operator_id: constr(min_length=1)
-    reason: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    operator_id: Annotated[str, Field(min_length=1)]
+    reason: Annotated[str, Field(min_length=1)]
     """
     Free-form operator-supplied reason recorded on the OperatorTrimRequested audit event.
     """
-    fraction: confloat(lt=1.0, gt=0.0)
+    fraction: Annotated[float, Field(gt=0.0, lt=1.0)]
     """
     Fraction of the remaining qty to sell. The workflow closes min(remainingQty, ceil(remainingQty * fraction)) contracts, matching the STC partial math exactly. Bounded strictly below 1, but note that the < 1 bound ALONE does not make a trim reduce-only: ceil() means 0.75 of a 3-lot is 3. The reduce-only guarantee comes from the workflow clamping an operator trim to remainingQty - 1 (auditing OperatorTrimClamped, and placing no order at all on a 1-lot), so a trim can never flatten a position however stale the caller's view of the remaining qty is.
     """

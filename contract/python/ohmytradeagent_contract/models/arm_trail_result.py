@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Status(StrEnum):
@@ -26,7 +27,7 @@ class ArmTrailResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     status: Status
     """
     ARMED: the trail is now live on this position. ALREADY_ARMED: a trail was already running and this request did not LOOSEN it (the workflow never widens an existing stop). REJECTED: nothing was armed — the position remains unprotected and `reason` says why.

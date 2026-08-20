@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 from decimal import Decimal
+
 from typing import Annotated
 
-from pydantic import Field, BaseModel, ConfigDict, confloat, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SubscribeEquityRequest(BaseModel):
@@ -18,29 +19,29 @@ class SubscribeEquityRequest(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version.
     """
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
-    ticker: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
+    ticker: Annotated[str, Field(min_length=1)]
     """
     Underlying equity symbol to subscribe (e.g. NVDA).
     """
-    target_workflow_id: constr(min_length=1)
+    target_workflow_id: Annotated[str, Field(min_length=1)]
     """
     Target workflow_id to receive equity-tick signals (the WatchlistTriggerWorkflow child).
     """
-    signal_name: constr(min_length=1)
+    signal_name: Annotated[str, Field(min_length=1)]
     """
     Signal method name to invoke on the target workflow for each emitted tick (e.g. equityTick).
     """
-    trigger_level: Annotated[Decimal, Field(gt=0)]
+    trigger_level: Annotated[Decimal, Field(gt=0.0)]
     """
     Reference price level T (the leg's trigger). Used as the min-move throttle base: a new tick is emitted only when |last - lastEmitted| >= equity_emit_delta_pct * T.
     """
-    equity_emit_delta_pct: confloat(ge=0.0)
+    equity_emit_delta_pct: Annotated[float, Field(ge=0.0)]
     """
     Minimum fractional move (of trigger_level) before a new tick is emitted. Throttles tick volume to keep workflow history bounded.
     """

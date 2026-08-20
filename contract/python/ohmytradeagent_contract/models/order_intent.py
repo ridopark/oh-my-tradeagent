@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import Field, AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -32,17 +32,17 @@ class OrderIntent(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. Workers reject newer-than-build inputs to force redeploy.
     """
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
-    intent_key: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
+    intent_key: Annotated[str, Field(min_length=1)]
     """
     Internal deterministic idempotency key (journal PK). Shape: '<workflow_id>:entry' or '<workflow_id>:exit:<exit_signal_id>'. The broker-facing client_order_id is NOT this value verbatim: per #295 it is a bounded (<=128-char) SHA-256-derived id deterministically computed from — and distinct from — this intent_key, since a real exit intent_key can exceed Alpaca's 128-char client_order_id cap.
     """
-    signal_id: constr(min_length=1)
+    signal_id: Annotated[str, Field(min_length=1)]
     """
     Source Discord signal_id (correlates to CopytradeSignalPayload.signal_id and the audit-log correlation_id).
     """
@@ -50,11 +50,11 @@ class OrderIntent(BaseModel):
     """
     Routes the activity to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; using them for active routing produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live.
     """
-    broker_account_id: constr(min_length=1) | None = None
+    broker_account_id: Annotated[str | None, Field(min_length=1)] = None
     """
     P4-c-b-2: OPTIONAL. The brokerage account the dispatching strategy config declares (StrategyConfig.broker_account_id). exec cross-checks it against the account the resolved per-tenant credentials AUTHENTICATE — a mismatch (both non-blank) fails closed (AccountMismatchError) so a typo'd/inconsistent operator setup can't route an order to the wrong account. A blank value (today's tenants) disables the cross-check. NOT persisted to order_intent_journal — it is a pre-broker in-memory routing guard, not part of the order record.
     """
-    option_symbol: constr(min_length=1)
+    option_symbol: Annotated[str, Field(min_length=1)]
     """
     Full OCC option symbol (e.g. 'AAPL250117C00150000'), resolved by ContractActivities.resolve from CopytradeSignalPayload.(ticker, expiry, strike, right). Distinct from the raw underlying ticker carried on the upstream signal payload.
     """
@@ -62,11 +62,11 @@ class OrderIntent(BaseModel):
     """
     BUY=BTO; SELL=STC. Phase 2b only exercises BUY.
     """
-    qty: conint(ge=1)
+    qty: Annotated[int, Field(ge=1)]
     """
     Number of contracts (after capital-weight clamp).
     """
-    limit_price: Annotated[Decimal, Field(gt=0)] | None = None
+    limit_price: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Optional limit. Omitted (null) means marketable-mid. Phase 2b passes payload.price.
     """

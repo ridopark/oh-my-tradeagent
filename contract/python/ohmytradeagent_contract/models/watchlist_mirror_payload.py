@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class WatchlistMirrorPayload(BaseModel):
@@ -16,15 +17,15 @@ class WatchlistMirrorPayload(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version. Start at 1; bump on non-backward-compatible field changes.
     """
-    tenant_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
     """
     Tenant scope key. Required on every Activity payload and workflow input.
     """
-    strategy_id: constr(min_length=1)
+    strategy_id: Annotated[str, Field(min_length=1)]
     """
     Strategy scope key within the tenant.
     """
@@ -32,15 +33,15 @@ class WatchlistMirrorPayload(BaseModel):
     """
     ET calendar date of the watchlist (YYYY-MM-DD, e.g. '2026-06-03'). The America/New_York wall-clock date the message belongs to — NOT a timestamp. Kept as a plain date to avoid timezone/offset ambiguity at the wire boundary. Named et_date (not date) to avoid shadowing the date type in generated models.
     """
-    author: constr(min_length=1)
+    author: Annotated[str, Field(min_length=1)]
     """
     Discord username that posted the watchlist message.
     """
-    raw_text: constr(min_length=1)
+    raw_text: Annotated[str, Field(min_length=1)]
     """
     The verbatim watchlist message body as read from Discord, unmodified. Length intentionally unconstrained (multi-line watchlists vary widely).
     """
-    source_message_id: constr(min_length=1)
+    source_message_id: Annotated[str, Field(min_length=1)]
     """
     Discord message id the watchlist was read from; the dedupe key alongside WorkflowIDReusePolicy.REJECT_DUPLICATE.
     """

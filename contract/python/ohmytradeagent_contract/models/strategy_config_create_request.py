@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, confloat, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StrategyConfigCreateRequest(BaseModel):
@@ -16,15 +16,15 @@ class StrategyConfigCreateRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version. Workers reject newer-than-build inputs.
     """
-    tenant_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
     """
     Tenant being created. Taken from the api-gateway path (operator-scoped, NOT X-Tenant-Id — the operator does not belong to the new tenant). StrategyConfigWriter.create rejects a config whose tenant_id does not match this (REJECTED_INVALID).
     """
-    strategy_id: constr(min_length=1)
+    strategy_id: Annotated[str, Field(min_length=1)]
     """
     Strategy whose first config row is the INSERT target for (tenant_id, strategy_id). A second create for the same key yields ALREADY_EXISTS, never a second row.
     """
@@ -32,7 +32,7 @@ class StrategyConfigCreateRequest(BaseModel):
     """
     The full StrategyConfig blob to persist at version 1. Reuses the generated StrategyConfig DTO. StrategyConfigWriter validates it standalone (live-required gates apply ONLY when broker_target is live, so a paper create passes); a live create missing a loss gate is REJECTED_INVALID.
     """
-    operator_id: constr(min_length=1)
+    operator_id: Annotated[str, Field(min_length=1)]
     """
     The authenticated operator (X-Operator-Id). Recorded on the audit event and the strategy_config row's updated_by — operator attribution comes from the audit_log chain, not a created_by column.
     """
@@ -40,7 +40,7 @@ class StrategyConfigCreateRequest(BaseModel):
     """
     OPTIONAL cross-event correlation key. Embedded in the workflow id so a retried api-gateway call dedups on REJECT_DUPLICATE rather than re-running the INSERT.
     """
-    account_daily_loss_pct: confloat(le=1.0, gt=0.0) | None = None
+    account_daily_loss_pct: Annotated[float | None, Field(gt=0.0, le=1.0)] = None
     """
     PLAN-2026-08-05-direct-live-tenant-onboarding: OPTIONAL operator-supplied account-level daily-loss cap (fraction of start-of-day equity). When a LIVE strategy is created and the tenant has no armed cap yet, StrategyConfigWriter.create arms it — an unconditional INSERT into tenant_config (ON CONFLICT DO NOTHING) BEFORE the strategy INSERT — so the live-required-gate (StrategyConfigInvariants.validateLiveRequiredGates: accountCapArmed = account_daily_loss_pct>0 OR account_daily_loss_threshold>0) passes in one operator action. Floored at TenantConfigWriter.MIN_ACCOUNT_DAILY_LOSS_PCT (0.05). Null/absent = no cap supplied → a live create with no pre-existing cap is still REJECTED_INVALID (unchanged); a paper create ignores it. The per-strategy StrategyConfig.daily_loss_threshold is a DEAD field and does NOT satisfy this gate.
     """

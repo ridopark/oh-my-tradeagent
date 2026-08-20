@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -33,16 +34,16 @@ class JournalEntry(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    intent_key: constr(min_length=1)
-    signal_id: constr(min_length=1)
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    intent_key: Annotated[str, Field(min_length=1)]
+    signal_id: Annotated[str, Field(min_length=1)]
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
     broker_target: BrokerTarget
-    client_order_id: constr(min_length=1)
-    option_symbol: constr(min_length=1)
+    client_order_id: Annotated[str, Field(min_length=1)]
+    option_symbol: Annotated[str, Field(min_length=1)]
     side: Side
-    qty: conint(ge=1)
+    qty: Annotated[int, Field(ge=1)]
     state: State
     broker_order_id: str | None = None
     recorded_at: AwareDatetime

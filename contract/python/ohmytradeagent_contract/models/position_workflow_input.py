@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import Field, BaseModel, ConfigDict, confloat, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -32,22 +32,22 @@ class PositionWorkflowInput(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
-    entry_signal_id: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
+    entry_signal_id: Annotated[str, Field(min_length=1)]
     """
     signal_id of the BTO that opened the position. Disambiguates re-BTO on the same OCC under WorkflowIDReusePolicy.REJECT_DUPLICATE.
     """
-    contract_symbol: constr(min_length=1)
+    contract_symbol: Annotated[str, Field(min_length=1)]
     """
     OCC option symbol (e.g., NVDA250516C00140000). Set as a Search Attribute 'ContractSymbol' on workflow start for STC dispatch.
     """
-    qty: conint(ge=1)
+    qty: Annotated[int, Field(ge=1)]
     """
     Original position size, contracts.
     """
-    entry_premium: Annotated[Decimal, Field(gt=0)]
+    entry_premium: Annotated[Decimal, Field(gt=0.0)]
     """
     Fill premium per contract, dollars (source-of-truth: broker fill, not author-posted price).
     """
@@ -67,65 +67,67 @@ class PositionWorkflowInput(BaseModel):
     """
     Issue #205: carried over from the spawning CopytradeSignalWorkflow's StrategyConfig.min_partial_qty_behavior. Drives PositionWorkflow.processOne's pre-qtyToClose gate when remainingQty <= 1 AND floor(remainingQty * fraction) == 0. 'skip' emits PartialExitSkippedMinQty and places no order; 'full_close' closes the last contract. Optional/null treated as 'skip' to match the YAML comment's documented default. Gated behind Workflow.getVersion('min-partial-qty-skip', DEFAULT, 1) so in-flight pre-#205 workflows preserve legacy ceil(remainingQty * fraction) behavior on replay.
     """
-    first_fill_ttl_secs: conint(ge=1) | None = None
+    first_fill_ttl_secs: Annotated[int | None, Field(ge=1)] = None
     """
     Issue #212: bounded wait (seconds) inside PositionWorkflow.run() for the first onFill that confirms PositionEntered (issue #203 entry-fill gate). Carried over from the spawning CopytradeSignalWorkflow's StrategyConfig — paper broker_targets receive pending_ttl_paper_secs, live broker_targets receive pending_ttl_live_secs. Optional/null treated as the legacy 90L default to preserve pre-#212 behavior for replays of positions spawned before this field existed. PositionWorkflowImpl gates consumption behind Workflow.getVersion('ttl-from-input', DEFAULT, 1) so in-flight pre-#212 workflows continue with the hardcoded 90s constant on replay.
     """
-    exit_fill_ttl_secs: conint(ge=1) | None = None
+    exit_fill_ttl_secs: Annotated[int | None, Field(ge=1)] = None
     """
     Issue #212: bounded wait (seconds) inside PositionWorkflow.processOne() for the broker fill confirmation on a placed exit order (issue #204 exit-fill timeout). Carried over from the spawning CopytradeSignalWorkflow's StrategyConfig — paper broker_targets receive pending_ttl_paper_secs, live broker_targets receive pending_ttl_live_secs. Optional/null treated as the legacy 90L default to preserve pre-#212 behavior for replays of positions spawned before this field existed. PositionWorkflowImpl gates consumption behind Workflow.getVersion('ttl-from-input', DEFAULT, 1) so in-flight pre-#212 workflows continue with the hardcoded 90s constant on replay.
     """
-    force_close_0dte_et: constr(pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$") | None = (
-        None
-    )
+    force_close_0dte_et: Annotated[
+        str | None, Field(pattern="^([01][0-9]|2[0-3]):[0-5][0-9]$")
+    ] = None
     """
     Issue #15: wall-clock time (HH:MM in US/Eastern) carried over from the spawning CopytradeSignalWorkflow's StrategyConfig.force_close_0dte_et. Governs the time at which PositionWorkflow's 0DTE expiry-close flatten timer fires (the flatten stays a MARKET order). Optional/null/absent treated as the legacy 15:30 ET default to preserve pre-change behavior for replays of positions spawned before this field existed; no Workflow.getVersion gate is required because the value flows only through MarketCalendarActivities.durationUntilExpiryCloseEt's (replay-ignored) activity input and the unchanged timer-arming command sequence.
     """
-    exit_floor_abs: Annotated[Decimal, Field(gt=0)] | None = None
+    exit_floor_abs: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Plan-2A R-AA-5: carried over from the spawning workflow's StrategyConfig.exit_floor_abs so PositionWorkflow's bounded scheduled flatten (R-AA-3) has an absolute price floor. fail-SAFE: null/absent/unresolvable falls back to a marketable exit. Optional/null preserves pre-change behavior for replays of positions spawned before this field existed. Spec-only carry in this chunk; flatten consumption lands in R-AA-3.
     """
-    exit_floor_pct: confloat(le=1.0, gt=0.0) | None = None
+    exit_floor_pct: Annotated[float | None, Field(gt=0.0, le=1.0)] = None
     """
     Plan-2A R-AA-5: carried over from StrategyConfig.exit_floor_pct. Fractional price floor (fraction of the anchor premium) for the bounded scheduled flatten; combined with exit_floor_abs via max(). fail-SAFE identically. Optional/null preserves pre-change behavior. Spec-only carry in this chunk; flatten consumption lands in R-AA-3.
     """
-    expiry_day_floor: confloat(le=1.0, gt=0.0) | None = None
+    expiry_day_floor: Annotated[float | None, Field(gt=0.0, le=1.0)] = None
     """
     Plan-2A R-AA-5: carried over from StrategyConfig.expiry_day_floor. On the expiry session the bounded flatten's floor collapses to this near-zero value (applied only when a live bid exists; bid <= 0 → fully marketable). Optional/null preserves pre-change behavior. Spec-only carry in this chunk; flatten consumption lands in R-AA-3.
     """
-    flatten_lead_minutes: conint(ge=0, le=390) | None = None
+    flatten_lead_minutes: Annotated[int | None, Field(ge=0, le=390)] = None
     """
     Plan-2B R-AB-1: carried over from StrategyConfig.flatten_lead_minutes. PositionWorkflow arms a guaranteed bounded flatten timer for EVERY lot (multi-day included) at (expiry_close - flatten_lead_minutes) ET so a position with no STC is sold before expiry. Optional/null treated as the in-code 30-minute default. Consumption is gated behind Workflow.getVersion so in-flight pre-2B workflows replay deterministically (legacy histories never recorded the lead timer).
     """
-    exit_reprice_steps: conint(ge=1, le=10) | None = None
+    exit_reprice_steps: Annotated[int | None, Field(ge=1, le=10)] = None
     """
     Plan-2B R-AB-2: carried over from StrategyConfig.exit_reprice_steps. Bounds the stepped exit reprice in PositionWorkflow.processOne. Optional/null treated as the in-code default (~3). Consumption gated behind Workflow.getVersion so in-flight pre-2B workflows keep the legacy single-shot exit retry on replay.
     """
-    exit_reprice_tick: confloat(le=5.0, gt=0.0) | None = None
+    exit_reprice_tick: Annotated[float | None, Field(gt=0.0, le=5.0)] = None
     """
     Plan-2B R-AB-2: carried over from StrategyConfig.exit_reprice_tick. Per-step price concession the bounded stepped exit reprice walks toward the market. Optional/null treated as the in-code default (~0.05). Consumption gated behind Workflow.getVersion.
     """
-    tp_ratio: Annotated[Decimal, Field(gt=0)] | None = None
+    tp_ratio: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Carried from StrategyConfig.tp_ratio. Reward:risk ratio for the watchlist-trigger premium take-profit. The first take-profit triggers when the live bid reaches entry_premium * (1 + tp_ratio * sl_pct) (= +tp_ratio*R, where R = sl_pct * entry_premium). Opt-in: null/absent disables the premium TP/SL/trail exit entirely, preserving the copytrade-only (STC/chandelier-on-partial) exit behavior for every position that does not set it. Consumption getVersion-gated so in-flight positions spawned before this field existed replay deterministically.
     """
-    sl_pct: confloat(le=1.0, gt=0.0) | None = None
+    sl_pct: Annotated[float | None, Field(gt=0.0, le=1.0)] = None
     """
     Carried from StrategyConfig.sl_pct. Hard stop as a fraction of entry premium. R = sl_pct * entry_premium; the -1R stop triggers when the live bid falls to entry_premium * (1 - sl_pct) and routes a MARKETABLE flatten (reason=stop_loss). Opt-in: null/absent disables the premium TP/SL/trail exit (see tp_ratio). getVersion-gated.
     """
-    tp_partial_fraction: confloat(le=1.0, gt=0.0) | None = None
+    tp_partial_fraction: Annotated[float | None, Field(gt=0.0, le=1.0)] = None
     """
     Carried from StrategyConfig.tp_partial_fraction. Fraction of the remaining position closed when the +tp_ratio*R take-profit first triggers; the unclosed remainder moves its stop to breakeven (entry_premium) and arms the chandelier trail (trail_giveback_pct) on the runner. Optional/null treated as 0.5 in PositionWorkflowImpl when tp_ratio is set.
     """
-    trail_giveback_pct: confloat(le=0.5, gt=0.0) | None = None
+    trail_giveback_pct: Annotated[float | None, Field(gt=0.0, le=0.5)] = None
     """
     Carried from StrategyConfig.trail_giveback_pct. Chandelier-trail giveback fraction armed on the take-profit remainder (see tp_partial_fraction). Optional/null falls back to the in-code default. getVersion-gated.
     """
-    no_progress_time_stop_secs: conint(ge=1) | None = None
+    no_progress_time_stop_secs: Annotated[int | None, Field(ge=1)] = None
     """
     Carried from StrategyConfig.no_progress_time_stop_secs. If neither the take-profit nor the hard stop has triggered within this many seconds of the first fill, PositionWorkflow flattens the position (reason=time_stop) so a stalled breakout does not bleed theta into the -1R stop. Opt-in: null/absent disables the time stop. getVersion-gated.
     """
-    force_close_eod_et: constr(pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$") | None = None
+    force_close_eod_et: Annotated[
+        str | None, Field(pattern="^([01][0-9]|2[0-3]):[0-5][0-9]$")
+    ] = None
     """
     Carried from StrategyConfig.force_close_eod_et. Wall-clock time (HH:MM US/Eastern) for the blanket EOD force-flatten timer, replacing the hardcoded 15:55 ET. Optional/null/absent falls back to the legacy 15:55 ET to preserve pre-change behavior for replays of positions spawned before this field existed. The value flows through MarketCalendarActivities.durationUntilEodEt(LocalTime)'s replay-ignored activity input; consumption is getVersion-gated where the timer-arming command sequence changes.
     """

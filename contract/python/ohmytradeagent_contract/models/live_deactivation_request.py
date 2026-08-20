@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 from ohmytradeagent_contract.types.broker_target import BrokerTarget
@@ -18,15 +19,15 @@ class LiveDeactivationRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
-    tenant_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
     """
     The tenant whose (tenant, strategy) live promotion is being deactivated.
     """
-    strategy_id: constr(min_length=1)
+    strategy_id: Annotated[str, Field(min_length=1)]
     """
     The strategy being deactivated.
     """
@@ -34,7 +35,7 @@ class LiveDeactivationRequest(BaseModel):
     """
     The live broker_target being deactivated. Recorded in the LivePromotionDeactivated subject (the gate matches subject->>'broker_target' newest-after-approval).
     """
-    operator_id: constr(min_length=1)
+    operator_id: Annotated[str, Field(min_length=1)]
     """
     The authenticated operator (X-Operator-Id) performing the deactivation. Recorded in the emitted LivePromotionDeactivated subject (operator_id).
     """

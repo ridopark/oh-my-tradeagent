@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Annotated
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, conint
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class KillSwitchState(BaseModel):
@@ -16,7 +17,7 @@ class KillSwitchState(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     tripped: bool
     """
     True iff the switch is currently active (trips block new entries; cool-down after reset is reported via cooling_down_until).
@@ -41,7 +42,7 @@ class KillSwitchState(BaseModel):
     """
     Current trading day the auto-trip heartbeat is evaluating (America/New_York).
     """
-    open_positions: conint(ge=0) | None = None
+    open_positions: Annotated[int | None, Field(ge=0)] = None
     """
     Account-cap open-position count (listed) from the last heartbeat's open-book read. Null for the per-strategy kill switch (only the AccountKillSwitchWorkflow populates it). Advisory/observability only.
     """

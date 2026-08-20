@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import Field, BaseModel, ConfigDict, conint
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class State(StrEnum):
@@ -34,7 +34,7 @@ class CopytradeEntryStatus(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version.
     """
@@ -54,7 +54,7 @@ class CopytradeEntryStatus(BaseModel):
     """
     Resolved OCC option symbol. Absent when the entry was refused BEFORE contract resolution (the early gates: strategy-disabled, risk decision, capital-unavailable).
     """
-    contracts: conint(ge=0) | None = None
+    contracts: Annotated[int | None, Field(ge=0)] = None
     """
     Contract count the entry was placed for, after sizing (or after the operator's qty_override). Absent until the order is submitted.
     """
@@ -62,11 +62,11 @@ class CopytradeEntryStatus(BaseModel):
     """
     Broker-assigned order id, present from SUBMITTED onward.
     """
-    filled_qty: conint(ge=0) | None = None
+    filled_qty: Annotated[int | None, Field(ge=0)] = None
     """
     Cumulative filled quantity reported by the broker. Present when state=FILLED.
     """
-    avg_fill_price: Annotated[Decimal, Field(gt=0)] | None = None
+    avg_fill_price: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Average fill premium per contract, dollars. Present when state=FILLED.
     """

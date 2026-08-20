@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
 
 from datetime import date
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import Field, AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class Right(StrEnum):
@@ -30,27 +30,27 @@ class CopytradeDeriskPayload(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
-    tenant_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
     """
     Tenant scope key. Required on every Activity payload and workflow input.
     """
-    strategy_id: constr(min_length=1)
+    strategy_id: Annotated[str, Field(min_length=1)]
     """
     Strategy scope key within the tenant.
     """
-    signal_id: constr(min_length=1)
+    signal_id: Annotated[str, Field(min_length=1)]
     """
     Deterministic dedupe key for this de-risk event. Shape: '<cue_message_id>:derisk'. Distinct from any BTO/STC signal_id so the position workflow's exit-dedup never collides.
     """
-    message_id: constr(min_length=1)
+    message_id: Annotated[str, Field(min_length=1)]
     """
     Discord message id of the de-risk cue message.
     """
-    author: constr(min_length=1)
+    author: Annotated[str, Field(min_length=1)]
     """
     Discord username that posted the de-risk cue (must match the author of the attributed BTO).
     """
@@ -58,7 +58,7 @@ class CopytradeDeriskPayload(BaseModel):
     """
     RFC3339 UTC timestamp when the cue message was posted on Discord.
     """
-    ticker: constr(pattern=r"^[A-Z]{1,6}$")
+    ticker: Annotated[str, Field(pattern="^[A-Z]{1,6}$")]
     """
     Underlying equity ticker of the attributed target BTO (uppercase, no exchange suffix). RAW underlying — the OCC symbol is composed downstream by ContractActivities.resolve from (ticker, expiry, strike, right).
     """
@@ -66,7 +66,7 @@ class CopytradeDeriskPayload(BaseModel):
     """
     Option expiry date (YYYY-MM-DD) of the attributed target BTO.
     """
-    strike: Annotated[Decimal, Field(gt=0)]
+    strike: Annotated[Decimal, Field(gt=0.0)]
     """
     Strike price (dollars) of the attributed target BTO.
     """
@@ -74,11 +74,11 @@ class CopytradeDeriskPayload(BaseModel):
     """
     Option right of the attributed target BTO: Call or Put.
     """
-    target_bto_signal_id: constr(min_length=1)
+    target_bto_signal_id: Annotated[str, Field(min_length=1)]
     """
     signal_id of the attributed preceding BTO line, for audit correlation between the de-risk action and the original entry.
     """
-    target_entry_premium: Annotated[Decimal, Field(gt=0)] | None = None
+    target_entry_premium: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Optional. The attributed BTO's stated fill premium, used only to seed the chandelier trail's initial peak at arm time (it ratchets up on live ticks regardless). Null/absent: the trail seeds its peak from the first live tick.
     """
@@ -86,7 +86,7 @@ class CopytradeDeriskPayload(BaseModel):
     """
     Optional. The normalized cue phrase that fired (e.g. '0 or hero'), recorded for audit. Null/absent: not surfaced.
     """
-    raw_line: constr(min_length=1)
+    raw_line: Annotated[str, Field(min_length=1)]
     """
     The de-risk cue message text as observed, for audit.
     """

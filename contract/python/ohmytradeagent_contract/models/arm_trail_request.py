@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 from decimal import Decimal
+
 from typing import Annotated
 
-from pydantic import Field, BaseModel, ConfigDict, confloat, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ArmTrailRequest(BaseModel):
@@ -18,16 +19,16 @@ class ArmTrailRequest(BaseModel):
         extra="forbid",
         json_encoders={Decimal: float},
     )
-    schema_version: conint(ge=1)
-    operator_id: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    operator_id: Annotated[str, Field(min_length=1)]
     """
     Verified operator identity, threaded by api-gateway from the session — never client-supplied. Recorded on the ChandelierArmed audit event for attribution.
     """
-    giveback_pct: confloat(le=0.5, gt=0.0)
+    giveback_pct: Annotated[float, Field(gt=0.0, le=0.5)]
     """
     Trailing giveback fraction. fire_threshold = peak * (1 - giveback_pct), recomputed as the peak rises, so the stop moves UP and never down. Capped at 0.5 to match PositionWorkflowImpl.MAX_GIVEBACK and the strategy-config trail_giveback_pct bound — a looser value is rejected by the workflow, so it is rejected here first.
     """
-    peak_premium: Annotated[Decimal, Field(gt=0)] | None = None
+    peak_premium: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     OPTIONAL anchor override. Omit it in normal operation: the workflow then resolves the anchor itself as max(its own tracked peak, a fresh quote), which is strictly better than anything a browser can supply — a page-rendered premium is seconds stale, and an anchor that is too low sets the stop too low on a real-money position. Present only for the rare case where an operator must pin the anchor deliberately.
     """

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class GetOptionQuoteRequest(BaseModel):
@@ -14,13 +16,13 @@ class GetOptionQuoteRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version.
     """
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
-    contract_symbol: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
+    contract_symbol: Annotated[str, Field(min_length=1)]
     """
     OCC option symbol to snapshot.
     """

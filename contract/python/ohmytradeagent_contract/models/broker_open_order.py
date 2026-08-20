@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Side(StrEnum):
@@ -21,15 +22,15 @@ class BrokerOpenOrder(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    broker_order_id: constr(min_length=1)
-    client_order_id: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    broker_order_id: Annotated[str, Field(min_length=1)]
+    client_order_id: Annotated[str, Field(min_length=1)]
     """
     Required even from broker. Per #295 our place_order sets this to a bounded (<=128-char) SHA-256-derived id deterministically computed from — and distinct from — the internal intent_key (a raw exit intent_key can exceed Alpaca's 128-char cap), so reconciliation matches on this derived id, not on intent_key verbatim. An id we cannot reproduce from a known intent_key means the broker book contains an order we did not place.
     """
-    option_symbol: constr(min_length=1)
+    option_symbol: Annotated[str, Field(min_length=1)]
     side: Side
-    qty: conint(ge=1)
+    qty: Annotated[int, Field(ge=1)]
     state: str
     """
     Broker-native state string (e.g., 'open', 'partially_filled'). Reconciliation does not parse this; it is audit-only.

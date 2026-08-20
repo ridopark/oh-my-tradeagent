@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, conint
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Outcome(StrEnum):
@@ -26,7 +27,7 @@ class StrategyConfigCreateResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
+    schema_version: Annotated[int, Field(ge=1)]
     """
     DTO contract version. See CopytradeSignalPayload.schema_version.
     """
@@ -34,7 +35,7 @@ class StrategyConfigCreateResult(BaseModel):
     """
     Controlled disposition of the create. CREATED: the row was inserted at version 1 (created_version set). ALREADY_EXISTS: a row already existed for (tenant, strategy) — the INSERT ... ON CONFLICT DO NOTHING affected zero rows (RowAlreadyExistsException). REJECTED_INVALID: the proposed config is malformed / fails live-required gates / its tenant_id|strategy_id does not match the create target (InvalidConfigException).
     """
-    created_version: conint(ge=1) | None = None
+    created_version: Annotated[int | None, Field(ge=1)] = None
     """
     Set ONLY on CREATED: the persisted version (always 1 for a fresh row). Null/omitted on every other outcome.
     """

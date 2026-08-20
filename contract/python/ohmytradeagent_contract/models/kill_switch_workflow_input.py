@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Annotated
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class KillSwitchWorkflowInput(BaseModel):
@@ -16,12 +17,12 @@ class KillSwitchWorkflowInput(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1, le=2)
+    schema_version: Annotated[int, Field(ge=1, le=2)]
     """
     DTO contract version. v1 = bootstrap-only input; v2 adds optional carry-forward fields produced by continueAsNew. Workers reject newer-than-build inputs.
     """
-    tenant_id: constr(min_length=1)
-    strategy_id: constr(min_length=1)
+    tenant_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
     tripped: bool | None = None
     """
     Carry-forward state from a prior run. Absent on fresh bootstrap. Default false.

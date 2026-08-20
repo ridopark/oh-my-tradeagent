@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, conint, constr
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TripKillSwitchRequest(BaseModel):
@@ -14,12 +16,12 @@ class TripKillSwitchRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    reason: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    reason: Annotated[str, Field(min_length=1)]
     """
     Free-form trip reason for audit (e.g., 'manual:operator_initiated', 'auto:daily_loss', 'auto:circuit_breaker').
     """
-    actor: constr(min_length=1)
+    actor: Annotated[str, Field(min_length=1)]
     """
     Who tripped (e.g., 'operator:ridopark', 'auto:daily_loss').
     """

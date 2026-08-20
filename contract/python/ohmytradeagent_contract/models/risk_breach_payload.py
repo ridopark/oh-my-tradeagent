@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
+from typing import Annotated
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class RiskBreachPayload(BaseModel):
@@ -14,7 +16,7 @@ class RiskBreachPayload(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    reason: constr(min_length=1)
-    actor: constr(min_length=1)
+    schema_version: Annotated[int, Field(ge=1)]
+    reason: Annotated[str, Field(min_length=1)]
+    actor: Annotated[str, Field(min_length=1)]
     occurred_at: AwareDatetime

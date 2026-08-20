@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, conint
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ReconciliationSummary(BaseModel):
@@ -14,18 +16,18 @@ class ReconciliationSummary(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    schema_version: conint(ge=1)
-    journal_entries_checked: conint(ge=0)
-    broker_orders_checked: conint(ge=0)
-    journal_orphans: conint(ge=0)
+    schema_version: Annotated[int, Field(ge=1)]
+    journal_entries_checked: Annotated[int, Field(ge=0)]
+    broker_orders_checked: Annotated[int, Field(ge=0)]
+    journal_orphans: Annotated[int, Field(ge=0)]
     """
     Journal rows in non-terminal state with no matching broker order (and recorded_at older than 5 min).
     """
-    broker_orphans: conint(ge=0)
+    broker_orphans: Annotated[int, Field(ge=0)]
     """
     Broker open orders with client_order_id not in journal.
     """
-    position_orphans: conint(ge=0) | None = None
+    position_orphans: Annotated[int | None, Field(ge=0)] = None
     """
     Issue #165: broker-held positions with no running PositionWorkflow. Optional + back-compat: older consumers (and older workflow versions) that don't set this field still parse cleanly.
     """
