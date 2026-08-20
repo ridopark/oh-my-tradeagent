@@ -3,6 +3,10 @@ kind: Service
 metadata:
   name: api-gateway
   namespace: copytrade
+  # app label lets the ServiceMonitor (infra/k8s/64-copytrade-servicemonitor.yaml)
+  # select this Service for actuator/prometheus scraping. See #721.
+  labels:
+    app: api-gateway
 spec:
   selector:
     app: api-gateway

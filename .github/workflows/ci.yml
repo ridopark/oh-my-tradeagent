@@ -90,8 +90,14 @@ jobs:
           # cache (which the Save step then persists so future runs never hit the
           # network). A REAL validation error (no "failed downloading" line) fails fast
           # — we never retry a genuine manifest break.
+          # -schema-location default + the datreeio CRDs-catalog fallback lets
+          # kubeconform validate CRD-defined kinds (e.g. the Prometheus Operator's
+          # ServiceMonitor, #721) instead of erroring "could not find schema" — the
+          # catalog is schema-only (no live cluster/CRD install needed).
           for attempt in 1 2 3 4 5; do
             out=$(kubeconform -strict -kubernetes-version 1.35.0 \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
               -cache .kubeconform-cache -summary infra/k8s/ 2>&1) && { echo "$out"; exit 0; }
             echo "$out"
             if ! echo "$out" | grep -q 'failed downloading schema'; then

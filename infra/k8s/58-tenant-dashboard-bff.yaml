@@ -8,6 +8,10 @@ kind: Service
 metadata:
   name: tenant-dashboard-bff
   namespace: copytrade
+  # app label lets the ServiceMonitor (infra/k8s/64-copytrade-servicemonitor.yaml)
+  # select this Service for actuator/prometheus scraping. See #721.
+  labels:
+    app: tenant-dashboard-bff
 spec:
   selector:
     app: tenant-dashboard-bff
