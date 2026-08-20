@@ -21,9 +21,26 @@ import java.math.RoundingMode;
  * <p>{@link RoundingMode#HALF_UP} is the standard, least-surprising direction. A {@code null} limit
  * (MARKET-order flatten) is passed through unchanged — there is no price to round.
  *
- * <p>Scope note (Issue #266): this is PENNY rounding only. OPRA nickel-tick rules for ≥$3 options
- * are per-symbol (penny-pilot names tick $0.01 even ≥$3) and the codebase has no per-symbol tick
- * table; nickel-grid snapping is deferred to issue #270 (needs operator tick-policy input).
+ * <p>Scope note: this is PENNY rounding only, and that is the FINAL policy — not a gap awaiting
+ * work. Issue #270 tracked snapping ≥$3 limits to the OPRA $0.05 nickel grid; it was closed
+ * 2026-08-20 as not-reproducible against this broker, on 90 days of live order flow:
+ *
+ * <ul>
+ *   <li>42 live orders carried a ≥$3 limit deliberately OFF the nickel grid. 28 filled, 14 were
+ *       ordinary TTL/re-peg cancels, and ZERO were rejected. Alpaca does not enforce OPRA nickel
+ *       increments on our flow.
+ *   <li>The only price-shaped 422s on record complain about DECIMAL PLACES, not a grid ("limit
+ *       price must be limited to 2 decimal places" — ARM at 11.6750, SPY at 2.6750, both paper,
+ *       both June 2026). That is precisely what this class fixes.
+ * </ul>
+ *
+ * <p><b>Do not add nickel snapping.</b> It would over-coarsen penny-pilot names that legitimately
+ * tick $0.01 above $3, and on a SELL limit it rounds the wrong way — systematically widening every
+ * ≥$3 exit limit to avoid a rejection that does not occur. Exits are where slippage compounds.
+ *
+ * <p>This finding is about ALPACA, not about OPRA. {@code broker_target} also admits
+ * tradier/ibkr/schwab; a future broker may enforce the nickel grid, at which point the policy is
+ * per-broker and this note is the starting evidence, not a reason to skip re-measuring.
  */
 public final class OptionTick {
 
