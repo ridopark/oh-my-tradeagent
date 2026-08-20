@@ -1,14 +1,35 @@
-name: k8s drift check (advisory)
+name: k8s drift check
 
 # Runs `kubectl diff -f infra/k8s/` against the live homelab k3s cluster
 # whenever a PR touches `infra/k8s/**`, and posts the diff as a sticky
-# PR comment. Advisory only — never blocks merge.
+# PR comment.
+#
+# ADVISORY for most manifests — never blocks merge. #133 chose this
+# for v0 because most drift here is intentional/transient and a blanket
+# gate becomes something people route around, which is worse than
+# advisory.
+#
+# BLOCKING for the real-money manifest set (see BLOCKING_RE below):
+# #750 — on #744 this check correctly detected and reported real drift
+# on `52b-exec-alpaca-live.yaml` (the #715 starvation guard silently
+# disarmed) and the PR merged anyway; nobody read the comment. A
+# manifest that deploys real-money order flow, and is excluded from CI
+# deploy so nothing else ever reconciles it, cannot rely on a human
+# reading a sticky comment as its only enforcement. Confirmed drift on
+# those manifests now fails the job. A COVERAGE GAP (RBAC Forbidden,
+# cluster unreachable, etc.) on those same manifests does NOT fail the
+# job — seeing #133's own rejected Option 2 (a single-node homelab
+# reboot mid-PR would stall every infra/k8s PR, not just ones touching
+# the real-money files, since every run diffs every manifest
+# regardless of what the PR changed) — but it IS surfaced loudly (job
+# `::warning::` + a `🔒 BLOCKING` marker in the PR comment) so it can
+# never be mistaken for "checked and clean".
 #
 # Why this exists: kubeconform (in ci.yml) catches schema regressions but
 # does NOT compare to live cluster state. This workflow closes that loop
 # so reviewers see drift before merging. Implements Option 1 (advisory
-# comment) from issue #133; Options 2 (blocking check) and 3 (GitOps)
-# are deferred.
+# comment) from issue #133 for the general case, with the #750 blocking
+# carve-out above; Option 3 (GitOps) remains deferred.
 #
 # Cluster reachability: requires a self-hosted runner with LAN access to
 # the homelab (label `homelab`) plus a read-only kubeconfig in the
@@ -142,6 +163,14 @@ jobs:
           # coverage is the failure this workflow exists to catch.
           EXCLUDE_RE='^(00-namespace|56-ci-readonly-sa)\.yaml$'
 
+          # Real-money manifests (#750). Confirmed drift here fails the job — see the file
+          # header for why. A COVERAGE GAP (RBAC Forbidden, cluster unreachable, ...) on these
+          # files does NOT fail the job, only confirmed drift does — deliberately, to avoid
+          # reintroducing #133's rejected Option 2 failure mode (a single-node homelab reboot
+          # mid-PR blocking every infra/k8s PR). Both are called out prominently in the PR
+          # comment either way, so a gap can never read as "checked and clean".
+          BLOCKING_RE='^(52b-exec-alpaca-live|52-exec-alpaca-paper)\.yaml$'
+
           # `kubectl diff` reports two things that are not drift, and on the first real run they
           # were 2 of the 9 "drifted" files — enough noise to bury the findings that mattered:
           #
@@ -271,6 +300,10 @@ jobs:
 
           : > "$RUNNER_TEMP/drift.txt"
           : > "$RUNNER_TEMP/coverage.txt"
+          # Names of BLOCKING_RE manifests with confirmed drift. Non-empty at the end of the
+          # loop means the "Fail on blocking drift" step below fails the job. A coverage gap on
+          # a blocking manifest is intentionally NOT written here — see the BLOCKING_RE comment.
+          : > "$RUNNER_TEMP/blocking_fail.txt"
 
           # Truncation happens ABOVE this line, so the degradation notice below survives into the
           # posted comment.
@@ -290,10 +323,18 @@ jobs:
               echo "- \`$b\` — excluded by design (cluster-scoped / RBAC kinds)" >> "$RUNNER_TEMP/coverage.txt"
               continue
             fi
+            if echo "$b" | grep -qE "$BLOCKING_RE"; then
+              blocking_tag="🔒 BLOCKING — "
+            else
+              blocking_tag=""
+            fi
             out=$(kubectl diff -f "$f" 2>&1)
             rc=$?
             if [ $rc -eq 0 ]; then
               clean=$((clean + 1))
+              if [ -n "$blocking_tag" ]; then
+                echo "- \`$b\` — ${blocking_tag}clean" >> "$RUNNER_TEMP/coverage.txt"
+              fi
             elif [ $rc -eq 1 ]; then
               # Re-classify: strip server-assigned metadata and pure reordering, then see whether
               # anything authored actually differs. Filter exit 0 = it was all noise, 10 = real
@@ -315,10 +356,15 @@ jobs:
               if [ $frc -eq 0 ]; then
                 clean=$((clean + 1))
                 suppressed=$((suppressed + 1))
-                echo "- \`$b\` — clean (differed only by server-assigned metadata / list order)" >> "$RUNNER_TEMP/coverage.txt"
+                echo "- \`$b\` — ${blocking_tag}clean (differed only by server-assigned metadata / list order)" >> "$RUNNER_TEMP/coverage.txt"
               elif [ $frc -eq 10 ]; then
                 drifted=$((drifted + 1))
-                { echo "### DRIFT — $b"; echo "$filtered"; echo; } >> "$RUNNER_TEMP/drift.txt"
+                if [ -n "$blocking_tag" ]; then
+                  echo "$b" >> "$RUNNER_TEMP/blocking_fail.txt"
+                  echo "::error::Blocking drift on real-money manifest $b — see the PR comment for the diff."
+                  echo "- \`$b\` — ${blocking_tag}drifted (see diff below — this FAILS the job)" >> "$RUNNER_TEMP/coverage.txt"
+                fi
+                { echo "### DRIFT — ${blocking_tag}$b"; echo "$filtered"; echo; } >> "$RUNNER_TEMP/drift.txt"
               else
                 # The filter failed (crash, missing interpreter, or an empty drift claim). Report
                 # the RAW kubectl diff — never the filter's stdout, which is empty in exactly
@@ -326,8 +372,12 @@ jobs:
                 # found nothing to show". Counted as drift so the finding cannot be lost, and the
                 # filter's stderr is carried through so the cause is diagnosable from the comment.
                 drifted=$((drifted + 1))
+                if [ -n "$blocking_tag" ]; then
+                  echo "$b" >> "$RUNNER_TEMP/blocking_fail.txt"
+                  echo "::error::Blocking drift on real-money manifest $b (noise filter failed, unfiltered diff) — see the PR comment for the diff."
+                fi
                 {
-                  echo "### DRIFT — $b (noise filter FAILED, exit $frc — diff below is UNFILTERED)"
+                  echo "### DRIFT — ${blocking_tag}$b (noise filter FAILED, exit $frc — diff below is UNFILTERED)"
                   if [ -s "$RUNNER_TEMP/filter.err" ]; then
                     echo "noise filter stderr:"
                     head -c 2000 "$RUNNER_TEMP/filter.err"
@@ -336,14 +386,23 @@ jobs:
                   echo "$out"
                   echo
                 } >> "$RUNNER_TEMP/drift.txt"
-                echo "- \`$b\` — drift reported UNFILTERED (noise filter exited $frc)" >> "$RUNNER_TEMP/coverage.txt"
+                echo "- \`$b\` — ${blocking_tag}drift reported UNFILTERED (noise filter exited $frc)$( [ -n "$blocking_tag" ] && echo ' — this FAILS the job')" >> "$RUNNER_TEMP/coverage.txt"
               fi
             else
               # NOT silently tolerated: an unreadable manifest is a COVERAGE GAP, and the
               # comment must say so rather than imply the object was checked and matched.
+              #
+              # A gap on a BLOCKING_RE manifest deliberately does NOT fail the job (unlike
+              # confirmed drift above) — see the BLOCKING_RE comment for why (avoids
+              # reintroducing #133's rejected "single-node reboot blocks every infra/k8s PR"
+              # failure mode). It still gets a loud ::warning:: and a 🔒 marker so it can never
+              # read as "checked and clean".
               errored=$((errored + 1))
-              { echo "### COVERAGE GAP — $b (kubectl diff exit $rc; this manifest was NOT checked)"; echo "$out"; echo; } >> "$RUNNER_TEMP/drift.txt"
-              echo "- \`$b\` — **NOT CHECKED** (exit $rc, see report)" >> "$RUNNER_TEMP/coverage.txt"
+              if [ -n "$blocking_tag" ]; then
+                echo "::warning::Real-money manifest $b could NOT be checked (kubectl diff exit $rc) — not blocking, but see the PR comment."
+              fi
+              { echo "### COVERAGE GAP — ${blocking_tag}$b (kubectl diff exit $rc; this manifest was NOT checked)"; echo "$out"; echo; } >> "$RUNNER_TEMP/drift.txt"
+              echo "- \`$b\` — ${blocking_tag}**NOT CHECKED** (exit $rc, see report)" >> "$RUNNER_TEMP/coverage.txt"
             fi
           done
           set -e
@@ -375,10 +434,14 @@ jobs:
             // no statement of what was inspected is exactly how a check that silently stopped
             // checking passes for a working one.
             const coverage = fs.readFileSync(process.env.COVERAGE_FILE, 'utf8').trim();
-            const head = `${marker}\n### k8s drift check (advisory)\n\n${coverage}\n`;
+            const head = `${marker}\n### k8s drift check\n\n${coverage}\n`;
+            const footer = '_Advisory for most manifests. 🔒 **BLOCKING** for the real-money set ' +
+              '(`52b-exec-alpaca-live.yaml`, `52-exec-alpaca-paper.yaml`) — confirmed drift on ' +
+              'those fails the job; a coverage gap on them does not, but is called out above. ' +
+              'See `docs/ops/k8s-drift-check.md`._';
             const body = driftRaw.length === 0
-              ? `${head}\nNo drift detected in the manifests checked above.`
-              : `${head}\n<details><summary>kubectl diff (per manifest)</summary>\n\n\`\`\`diff\n${driftRaw}\n\`\`\`\n\n</details>\n\n_Advisory only — does not block merge. See \`docs/ops/k8s-drift-check.md\`._`;
+              ? `${head}\nNo drift detected in the manifests checked above.\n\n${footer}`
+              : `${head}\n<details><summary>kubectl diff (per manifest)</summary>\n\n\`\`\`diff\n${driftRaw}\n\`\`\`\n\n</details>\n\n${footer}`;
 
             const { owner, repo } = context.repo;
             const issue_number = context.payload.pull_request.number;
@@ -398,3 +461,16 @@ jobs:
                 owner, repo, issue_number, body,
               });
             }
+
+      # Runs AFTER the comment is posted, so the blocking finding is always visible on the PR
+      # even when this step fails the job. See BLOCKING_RE / the file header for scope and
+      # rationale (confirmed drift only — a coverage gap does not fail the job).
+      - name: Fail on real-money manifest drift
+        run: |
+          if [ -s "$RUNNER_TEMP/blocking_fail.txt" ]; then
+            echo "::error::Confirmed drift on blocking (real-money) manifest(s):"
+            cat "$RUNNER_TEMP/blocking_fail.txt"
+            echo "See the PR comment above for the diff, and docs/ops/k8s-drift-check.md for scope/rationale."
+            exit 1
+          fi
+          echo "No blocking drift on the real-money manifest set."

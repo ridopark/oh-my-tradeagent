@@ -8,7 +8,16 @@ exits early with a "skipped" notice — it does not fail.
 Scope: implements **Option 1 (advisory PR comment)** from issue #133.
 The workflow runs `kubectl diff -f infra/k8s/` against the live homelab
 cluster from a self-hosted runner and posts the diff as a sticky PR
-comment. Advisory only — never blocks merge.
+comment.
+
+Advisory for most manifests — never blocks merge. **Blocking** for the
+real-money set (`52b-exec-alpaca-live.yaml`, `52-exec-alpaca-paper.yaml`,
+see [#750](https://github.com/ridopark/oh-my-tradeagent/issues/750)):
+confirmed drift on those fails the job; a coverage gap (RBAC Forbidden,
+cluster unreachable) on them does not fail the job but is called out
+loudly in the comment and the job log. See
+[Why advisory-only, with a #750 blocking carve-out](#why-advisory-only-with-a-750-blocking-carve-out)
+below.
 
 ## Prerequisites
 
@@ -165,7 +174,7 @@ gh variable set K8S_DRIFT_CHECK_ENABLED --body "true"
 
 The next PR that touches `infra/k8s/**` should:
 
-- Trigger the **k8s drift check (advisory)** workflow.
+- Trigger the **k8s drift check** workflow.
 - Run the preflight on GitHub-hosted infra.
 - Pause the `kubectl diff` job with a yellow **"Review pending
   deployments"** banner on the PR (this is the `production-drift-check`
@@ -174,8 +183,11 @@ The next PR that touches `infra/k8s/**` should:
   a one-click confirmation; for any fork PR you should review the
   diff first.
 - After approval: dispatch the diff job to the self-hosted runner.
-- Post a comment starting with `### k8s drift check (advisory)` (or
-  update it if the PR is pushed again).
+- Post a comment starting with `### k8s drift check` (or update it if
+  the PR is pushed again).
+- If the PR's diff shows confirmed drift on `52b-exec-alpaca-live.yaml`
+  or `52-exec-alpaca-paper.yaml`, fail the job (red X on the PR) — see
+  [Why advisory-only, with a #750 blocking carve-out](#why-advisory-only-with-a-750-blocking-carve-out).
 
 If no comment appears, check the workflow run log under the **Actions**
 tab — the preflight job's "Check K8S_DRIFT_CHECK_ENABLED" step prints a
@@ -281,7 +293,7 @@ suite, build an image), this design must be revisited — at that point
 the right answer is probably a Tailscale tunnel from a GitHub-hosted
 runner rather than a self-hosted runner on the LAN.
 
-## Why advisory-only
+## Why advisory-only, with a #750 blocking carve-out
 
 Issue #133 explicitly chose Option 1 (advisory comment) over Option 2
 (blocking check) and Option 3 (GitOps) for v0:
@@ -292,3 +304,35 @@ Issue #133 explicitly chose Option 1 (advisory comment) over Option 2
 - Option 3 (GitOps via Flux/ArgoCD) inverts the deploy flow and is a
   much bigger change. Track as a separate issue when the operator is
   ready to give up the `kubectl apply` workflow.
+
+That reasoning holds for the general case, but on #744 the check
+correctly reported real drift on `52b-exec-alpaca-live.yaml` — the
+#715 starvation guard silently disarmed — and the PR merged anyway
+because nothing enforced the comment. `52b-exec-alpaca-live.yaml` is
+also excluded from the *deploy* workflow entirely (a separate CI
+concern from this drift-check), so nothing else ever reconciles it
+automatically — the PR comment was the only signal, and nobody read
+it.
+
+**#750 makes confirmed drift on the real-money manifest set
+(`52b-exec-alpaca-live.yaml`, `52-exec-alpaca-paper.yaml`) fail the
+`drift` job.** This is a narrower change than reopening Option 2:
+
+- It fails on **confirmed drift only** (`kubectl diff` succeeded and
+  found a real, non-noise difference) — never on a coverage gap
+  (RBAC Forbidden, cluster unreachable, missing python3, etc). A
+  single-node reboot mid-PR still does not block merges — every
+  manifest, including the blocking set, degrades to a loud, non-fatal
+  "NOT CHECKED" in that case, exactly Option 2's original objection.
+- It is scoped to two manifests, not "all drift". Most drift under
+  `infra/k8s/` is still intentional/transient and stays advisory —
+  blocking on all of it would just get routed around (`[skip-review]`-
+  style), which is worse than today's advisory comment.
+- Every blocking-set file gets a 🔒 `BLOCKING` marker in the PR
+  comment regardless of status (clean, drifted, or gap), so its
+  special status is visible without reading this doc or the workflow
+  source.
+
+If the real-money set grows, or a future change wants gaps to also
+block, treat that as a new decision with the same tradeoff analysis —
+don't silently widen `BLOCKING_RE` without re-reading this section.
