@@ -124,11 +124,6 @@ const watchlistConfig = (brokerTarget: string) =>
     {
       schema_version: 1,
       broker_target: brokerTarget,
-      // Schema-required (strategy-config.json `required` lists author_whitelist), but UNUSED by the
-      // watchlist-trigger path — it gates the Discord-author copytrade flow. A non-author placeholder
-      // satisfies the shared schema without whitelisting anyone, matching
-      // tenants/dev/strategies/watchlist-trigger-v1.yaml. Without it the create 400s on validation.
-      author_whitelist: ["watchlist-trigger-unused"],
       capital_source: "account_cash",
       capital_weight: 0.05,
       min_contracts: 1,

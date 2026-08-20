@@ -117,6 +117,34 @@ class WatchlistTriggerContractsTest {
   }
 
   @Test
+  void strategyConfig_absentAuthorWhitelist_roundTrips_asNonCopytradeStrategy() throws Exception {
+    // #459: author_whitelist is optional as of the schema relaxation — a watchlist-trigger config
+    // (which never consults it) must validate/round-trip cleanly with the field entirely absent, no
+    // sentinel value required. jsonschema2pojo initializes collection-typed fields to an empty
+    // collection (not null) regardless of `required`/`minItems`, so the generated getter returns
+    // empty rather than null here — either way RiskActivitiesImpl.checkEntryInternal's
+    // `authorWhitelist == null || !authorWhitelist.contains(...)` check fails closed on it.
+    String json =
+        "{\"schema_version\":1,\"tenant_id\":\"dev\",\"strategy_id\":\"watchlist-trigger-v1\","
+            + "\"broker_target\":\"alpaca-paper\","
+            + "\"max_signal_age_bto_secs\":30,\"max_signal_age_stc_secs\":60,\"max_positions\":5,"
+            + "\"capital_weight\":0.2,\"min_contracts\":1,\"max_contracts\":5}";
+
+    StrategyConfig deserialized = mapper.readValue(json, StrategyConfig.class);
+
+    assertThat(deserialized.getAuthorWhitelist()).isEmpty();
+
+    // Pre-existing jsonschema2pojo behavior (unrelated to this issue): a collection-typed field's
+    // generated default is `new LinkedHashSet<>()`, not null, and @JsonInclude(NON_NULL) at the
+    // class level does not suppress an empty (non-null) collection — so absent-on-read
+    // re-serializes as an explicit `[]`, not as absent. That is harmless here: an empty set is
+    // exactly what the "no author gate" contract calls for, and RiskActivitiesImpl's
+    // null-or-empty check treats it identically to a truly-absent field.
+    JsonNode roundTripped = mapper.readTree(mapper.writeValueAsString(deserialized));
+    assertThat(roundTripped.get("author_whitelist")).isEqualTo(mapper.readTree("[]"));
+  }
+
+  @Test
   void strategyConfig_copytradeV1Fixture_deserializesUnchanged_withDefaults() throws Exception {
     // The committed copytrade-v1 fixture now carries the five new fields explicitly; it must
     // deserialize and surface those values without perturbing any existing value. (The
