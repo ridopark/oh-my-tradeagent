@@ -5,9 +5,8 @@ import static org.mockito.Mockito.when;
 
 import io.temporal.api.workflowservice.v1.WorkflowServiceGrpc;
 import io.temporal.client.WorkflowClient;
-import io.temporal.client.WorkflowClientOptions;
 import io.temporal.serviceclient.WorkflowServiceStubs;
-import io.temporal.worker.Worker;
+import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.WorkerFactory;
 import org.jooq.DSLContext;
 import org.junit.jupiter.api.Test;
@@ -46,13 +45,27 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  *       supplied by {@link TemporalMockConfig} so the downstream {@code @Component} beans that
  *       inject them ({@code AuditActivitiesImpl}, {@code ContractActivitiesImpl}, {@code
  *       PositionLookupActivitiesImpl}) still wire cleanly.
- *   <li><b>Mock overrides for {@link WorkflowServiceStubs}, {@link WorkflowClient}, {@link
- *       WorkerFactory}, {@link Worker}</b>: these beans are declared in {@code
- *       TemporalWorkerConfig} and the real implementations dial {@code temporal.target} ({@code
- *       localhost:7233} by default) during construction. The mock overrides in {@link
- *       TemporalMockConfig} share the same bean names so {@code
- *       spring.main.allow-bean-definition-overriding=true} replaces the production definitions
- *       wholesale (avoiding the production factory method ever being invoked).
+ *   <li><b>Test-double overrides for {@link WorkflowServiceStubs}, {@link WorkflowClient}, {@link
+ *       WorkerFactory}</b>: these beans are declared in {@code TemporalWorkerConfig} and the real
+ *       implementations dial {@code temporal.target} ({@code localhost:7233} by default) during
+ *       construction. The overrides in {@link TemporalMockConfig} share the same bean names so
+ *       {@code spring.main.allow-bean-definition-overriding=true} replaces the production
+ *       definitions. {@code workflowServiceStubs} stays a Mockito mock (nothing here needs it to be
+ *       real), but {@code workflowClient} and {@code workerFactory} are backed by an in-memory
+ *       {@link TestWorkflowEnvironment} — <b>not</b> mocked out — specifically so the production
+ *       {@code worker(...)} {@code @Bean} (also not overridden — see Issue #578 below) runs for
+ *       real against them.
+ *   <li><b>Issue #578 — the production {@code worker(...)} {@code @Bean} is NOT mocked</b>: earlier
+ *       revisions of this test replaced {@code Worker worker()} with a Mockito mock, which meant
+ *       the real {@code registerWorkflowImplementationTypes(...)}/{@code
+ *       registerActivitiesImplementations(...)} calls in {@code TemporalWorkerConfig.worker(...)}
+ *       never executed in CI — so a duplicate activity/workflow type name (e.g. #577's {@code
+ *       TenantConfigUpdateActivities.update()} vs. {@code StrategyConfigUpdateActivities.update()},
+ *       both defaulting to Temporal type {@code "Update"}) was structurally undetectable here and
+ *       only surfaced as a {@code TypeAlreadyRegisteredException} crash-loop at homelab boot. Now
+ *       {@code worker(...)} runs unmocked, backed by the in-memory {@link
+ *       TestWorkflowEnvironment}'s real {@link WorkerFactory}, so the real Temporal SDK
+ *       registration — and its duplicate-type check — executes during this test's context refresh.
  *   <li><b>{@code orchestrator.tenants-dir}</b>: pointed at a non-existent path so {@code
  *       KillSwitchBootstrapper}, {@code ReconciliationScheduleBootstrapper}, and {@code
  *       TenantConfigChangedEmitter} all early-return on their {@code Files.exists(tenantsDir)}
@@ -60,8 +73,8 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  *       enforces — they just skip their Temporal-touching {@code run()} bodies.
  * </ul>
  *
- * <p><b>Halt condition</b>: if a production bean fails to instantiate even with these mocks (e.g. a
- * circular dep or a new auto-config that pulls in an external service), <b>do not</b> add
+ * <p><b>Halt condition</b>: if a production bean fails to instantiate even with these test doubles
+ * (e.g. a circular dep or a new auto-config that pulls in an external service), <b>do not</b> add
  * {@code @ActiveProfiles("test")} — that would re-enable the {@code @Profile("!test")} exclusions
  * and defeat this test's entire purpose. Surface the failing bean as a separate bug.
  */
@@ -89,26 +102,42 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 class ProductionContextSmokeTest {
 
   /**
-   * Replaces the real Temporal beans from {@code TemporalWorkerConfig} with mocks so the test
-   * doesn't dial {@code localhost:7233}. The {@code @Bean} method names ({@code
-   * workflowServiceStubs}, {@code workflowClient}, {@code workerFactory}, {@code worker}) match the
-   * production names exactly, and {@code spring.main.allow-bean-definition-overriding=true} is set
-   * in {@code @SpringBootTest.properties} so these definitions replace the originals from {@link
+   * Replaces the real Temporal beans from {@code TemporalWorkerConfig} with test doubles so the
+   * test doesn't dial {@code localhost:7233}. The {@code @Bean} method names ({@code
+   * workflowServiceStubs}, {@code workflowClient}, {@code workerFactory}) match the production
+   * names exactly, and {@code spring.main.allow-bean-definition-overriding=true} is set in
+   * {@code @SpringBootTest.properties} so these definitions replace the originals from {@link
    * com.ohmytradeagent.orchestrator.config.TemporalWorkerConfig}. Name-matching is preferred over
    * {@code @Primary} because Spring's {@code @Configuration} CGLIB proxy invokes both {@code @Bean}
    * methods otherwise — and the production factory method itself dials Temporal during invocation,
    * defeating the mock.
    *
-   * <p>The {@link WorkflowClient} stub returns a real {@link WorkflowClientOptions} from {@code
-   * getOptions()} because {@link
+   * <p><b>Issue #578</b>: unlike {@code workflowServiceStubs}/{@code workflowClient}/{@code
+   * workerFactory}, the production {@code worker(...)} {@code @Bean} from {@code
+   * TemporalWorkerConfig} is deliberately <strong>not</strong> overridden here. It is left to run
+   * for real, backed by the in-memory {@link TestWorkflowEnvironment}'s {@link WorkerFactory}
+   * instead of a real Temporal connection, so its {@code registerWorkflowImplementationTypes(...)}
+   * and {@code registerActivitiesImplementations(...)} calls execute against the real Temporal SDK
+   * during context refresh. Two activity (or workflow) impls that collide on the same effective
+   * type name on the {@code orchestrator-core} queue — e.g. #577's {@code
+   * TenantConfigUpdateActivities.update()} vs {@code StrategyConfigUpdateActivities.update()}, both
+   * defaulting to {@code "Update"} — now throw {@code TypeAlreadyRegisteredException} right here,
+   * exactly like production boot, instead of escaping to a mocked no-op {@code Worker}.
+   *
+   * <p>The {@link WorkflowClient} comes from the same {@link TestWorkflowEnvironment} so {@link
    * com.ohmytradeagent.orchestrator.metrics.KillSwitchHistoryLengthGauge}'s scheduled {@code
-   * poll()} method reads {@code workflowClient.getOptions().getNamespace()} on every tick. The
-   * scheduler is enabled (via {@code @EnableScheduling} on {@code OrchestratorApplication}) and may
-   * fire during the brief context lifetime, so the {@code getOptions()} call needs a non-null
-   * answer to avoid an NPE racing with context shutdown.
+   * poll()} method (which reads {@code workflowClient.getOptions().getNamespace()} on every tick)
+   * gets a real, non-null answer instead of racing an NPE against context shutdown. The scheduler
+   * is enabled (via {@code @EnableScheduling} on {@code OrchestratorApplication}) and may fire
+   * during the brief context lifetime.
    */
   @TestConfiguration
   static class TemporalMockConfig {
+
+    @Bean(destroyMethod = "close")
+    TestWorkflowEnvironment temporalTestWorkflowEnvironment() {
+      return TestWorkflowEnvironment.newInstance();
+    }
 
     @Bean
     WorkflowServiceStubs workflowServiceStubs() {
@@ -119,21 +148,13 @@ class ProductionContextSmokeTest {
     }
 
     @Bean
-    WorkflowClient workflowClient(WorkflowServiceStubs service) {
-      WorkflowClient client = mock(WorkflowClient.class);
-      when(client.getWorkflowServiceStubs()).thenReturn(service);
-      when(client.getOptions()).thenReturn(WorkflowClientOptions.newBuilder().build());
-      return client;
+    WorkflowClient workflowClient(TestWorkflowEnvironment testEnv) {
+      return testEnv.getWorkflowClient();
     }
 
     @Bean
-    WorkerFactory workerFactory(WorkflowClient client) {
-      return mock(WorkerFactory.class);
-    }
-
-    @Bean
-    Worker worker() {
-      return mock(Worker.class);
+    WorkerFactory workerFactory(TestWorkflowEnvironment testEnv) {
+      return testEnv.getWorkerFactory();
     }
 
     /**
@@ -168,5 +189,11 @@ class ProductionContextSmokeTest {
     // Intentionally empty: the @SpringBootTest annotation does the work. If any
     // @Profile("!test")-gated bean fails to instantiate, context refresh throws and JUnit
     // reports the failure. That is exactly the regression surface this test pins.
+    //
+    // Issue #578: also covers the production TemporalWorkerConfig.worker(...) @Bean, which is NOT
+    // mocked (see TemporalMockConfig javadoc above) — its real
+    // registerWorkflowImplementationTypes(...)/registerActivitiesImplementations(...) calls run
+    // during context refresh, so a duplicate activity/workflow type name on the orchestrator-core
+    // queue throws TypeAlreadyRegisteredException right here.
   }
 }
