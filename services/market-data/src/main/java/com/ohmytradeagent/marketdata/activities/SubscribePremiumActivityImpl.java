@@ -80,6 +80,29 @@ public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
    */
   private final ConcurrentHashMap<String, Subscription> active = new ConcurrentHashMap<>();
 
+  /**
+   * Dedup index: (contractSymbol, positionWorkflowId) -> subscription_id (#776).
+   *
+   * <p>A SECOND live subscription for the same pair is never wanted — both feed the same workflow,
+   * so a duplicate double-delivers every NBBO print, doubles the signal rate on a workflow with no
+   * continue-as-new, and lets ONE market print satisfy a debounce that is supposed to require
+   * consecutive independent ticks. {@code PositionWorkflowImpl} documents the hazard and dodges it
+   * by setting trail state directly instead of re-subscribing; the #776 boot recovery cannot use
+   * that dodge, so the guarantee has to live here.
+   *
+   * <p>Keyed on the PAIR, never on the contract alone: two tenants' PositionWorkflows on the same
+   * OCC are independent subscribers and must both be fed (prod_real and prod-jinchul hold the same
+   * TSLA contract today).
+   */
+  private final ConcurrentHashMap<String, String> subscriptionIdByKey = new ConcurrentHashMap<>();
+
+  /**
+   * NUL-separated so it cannot collide: an OCC carries spaces, a workflow id carries '/' and ':'.
+   */
+  private static String dedupKey(String occSymbol, String positionWorkflowId) {
+    return occSymbol + '\u0000' + positionWorkflowId;
+  }
+
   public SubscribePremiumActivityImpl(
       MarketDataProvider provider,
       WorkflowClient workflowClient,
@@ -164,23 +187,58 @@ public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
     result.setSubscribedAt(OffsetDateTime.ofInstant(Instant.now(), ZoneOffset.UTC));
     try {
       String posWfId = req.getPositionWorkflowId();
-      final String[] subIdHolder = new String[1];
-      Subscription sub =
-          provider.subscribePremium(
-              req.getContractSymbol(),
-              tick -> {
-                // Throttle on the FEED thread, before the dispatcher hop: a suppressed tick must
-                // cost nothing downstream, and the CAS is what makes that safe under concurrency.
-                ThrottleState throttle =
-                    throttles.computeIfAbsent(posWfId, k -> new ThrottleState());
-                if (!shouldEmit(throttle, tick.premium(), tick.bid())) {
-                  return;
+      String occSymbol = req.getContractSymbol();
+      String key = dedupKey(occSymbol, posWfId);
+      // compute() holds the per-key bin lock, so the "is one already live?" check and the
+      // provider subscribe are atomic against a concurrent subscribe for the same pair — two
+      // callers cannot both see "absent" and both open one. Same discipline as
+      // AlpacaMarketData.startPremiumPoll. The provider subscribe is in-process (registers a
+      // listener, starts a poll); no network call happens under this lock.
+      String subscriptionId =
+          subscriptionIdByKey.compute(
+              key,
+              (k, existingId) -> {
+                // Reuse only a subscription that is still LIVE. A torn-down id lingering in the
+                // index must not be handed back as if it were feeding anything.
+                if (existingId != null && active.containsKey(existingId)) {
+                  // LOUD on purpose. Re-arming from /live is the operator's repair for an orphaned
+                  // trail, and before this dedup existed a re-arm always opened a fresh
+                  // subscription. Now it can legitimately do nothing, so an operator whose re-arm
+                  // appeared to succeed must be able to see WHY nothing changed.
+                  log.info(
+                      "subscribePremium reuse: occ={} wf={} existing_subscription_id={} "
+                          + "(no new subscription opened)",
+                      occSymbol,
+                      posWfId,
+                      existingId);
+                  return existingId;
                 }
-                dispatcher.submit(() -> dispatchTick(posWfId, subIdHolder[0], toPremiumTick(tick)));
+                final String[] subIdHolder = new String[1];
+                Subscription sub =
+                    provider.subscribePremium(
+                        occSymbol,
+                        tick -> {
+                          // Throttle on the FEED thread, before the dispatcher hop: a suppressed
+                          // tick must cost nothing downstream, and the CAS is what makes that safe
+                          // under concurrency.
+                          ThrottleState throttle =
+                              throttles.computeIfAbsent(posWfId, t -> new ThrottleState());
+                          if (!shouldEmit(throttle, tick.premium(), tick.bid())) {
+                            return;
+                          }
+                          dispatcher.submit(
+                              () ->
+                                  dispatchTick(
+                                      occSymbol, posWfId, subIdHolder[0], toPremiumTick(tick)));
+                        });
+                subIdHolder[0] = sub.subscriptionId();
+                active.put(sub.subscriptionId(), sub);
+                return sub.subscriptionId();
               });
-      subIdHolder[0] = sub.subscriptionId();
-      active.put(sub.subscriptionId(), sub);
-      result.setSubscriptionId(sub.subscriptionId());
+      // NOTE: reuse deliberately does NOT touch `throttles`. Resetting the emit baseline on a
+      // re-subscribe would let the next in-band tick through, and #776 recovery re-subscribes the
+      // whole armed book at once — that is a burst into workflows with no continue-as-new.
+      result.setSubscriptionId(subscriptionId);
       result.setStatus(SubscribePremiumResult.Status.SUBSCRIBED);
       return result;
     } catch (RuntimeException e) {
@@ -197,24 +255,59 @@ public class SubscribePremiumActivityImpl implements SubscribePremiumActivity {
     }
   }
 
-  private void dispatchTick(String posWfId, String subscriptionId, PremiumTick tick) {
+  private void dispatchTick(
+      String occSymbol, String posWfId, String subscriptionId, PremiumTick tick) {
     try {
       WorkflowStub stub = workflowClient.newUntypedWorkflowStub(posWfId);
       stub.signal("chandelierTick", tick);
     } catch (WorkflowNotFoundException notFound) {
       // Target workflow has closed; tear down the subscription so we stop fanning out.
-      if (subscriptionId != null) {
-        Subscription sub = active.remove(subscriptionId);
-        if (sub != null) {
-          sub.close();
-        }
-        // Drop the baseline too, or every closed position leaks one entry for the worker's life.
-        // Note this is the ONLY teardown path (Phase 4 has no explicit unsubscribe), so a baseline
-        // is reclaimed when a later dispatch discovers the workflow is gone — not at close itself.
-        throttles.remove(posWfId);
-      }
+      tearDown(occSymbol, posWfId, subscriptionId);
     } catch (Exception ignored) {
       // Best-effort tick dispatch — Phase 4 deliberately does not surface transient errors.
+    }
+  }
+
+  /**
+   * Detach one subscription and drop every index entry that referenced it. Package-private so the
+   * dedup tests exercise the REAL tear-down rather than a test-only twin.
+   *
+   * <p>The dedup entry is removed with the two-arg {@code remove(key, expected)} so a re-subscribe
+   * that already replaced it (recovery racing a manual re-arm) is not clobbered by a late tear-down
+   * of the OLD subscription.
+   */
+  void tearDown(String occSymbol, String posWfId, String subscriptionId) {
+    if (subscriptionId == null) {
+      return;
+    }
+    Subscription sub = active.remove(subscriptionId);
+    if (sub == null) {
+      // Already torn down, or this id was SUPERSEDED by a newer subscription for the same pair.
+      // Returning here is load-bearing: `throttles` is keyed on the workflow id alone, so an
+      // unconditional clear would wipe the LIVE subscription's emit baseline and let the next
+      // in-band tick through — the exact invariant secondSubscribe_doesNotResetTheThrottleBaseline
+      // exists to protect, defeated from the teardown side.
+      subscriptionIdByKey.remove(dedupKey(occSymbol, posWfId), subscriptionId);
+      return;
+    }
+    sub.close();
+    subscriptionIdByKey.remove(dedupKey(occSymbol, posWfId), subscriptionId);
+    // Drop the baseline too, or every closed position leaks one entry for the worker's life.
+    // Note this is the ONLY teardown path (Phase 4 has no explicit unsubscribe), so a baseline
+    // is reclaimed when a later dispatch discovers the workflow is gone — not at close itself.
+    throttles.remove(posWfId);
+  }
+
+  /**
+   * Reproduces the window inside {@link #tearDown} where {@code active.remove} and {@code
+   * sub.close()} have happened but the dedup-index removal has NOT — the interleaving a concurrent
+   * subscribe actually observes. Package-private and test-only: the window is otherwise unreachable
+   * from outside, and both guards covering it survived a mutation sweep without it.
+   */
+  void simulateTearDownRaceForTest(String subscriptionId) {
+    Subscription sub = active.remove(subscriptionId);
+    if (sub != null) {
+      sub.close();
     }
   }
 
