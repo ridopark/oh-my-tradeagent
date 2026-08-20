@@ -689,6 +689,52 @@ class AlpacaTradeUpdatesStreamTest {
   // what the code did. The recovery that IS observable is covered by the abort test above.
 
   @Test
+  void recycleDisabledIsLoggedOnceAtStartup() throws Exception {
+    // #749: silence must not be the only signal that the #715 starvation guard is off. Before
+    // this, a disarmed pod and an armed-but-not-yet-fired one were indistinguishable for up to
+    // recycleAfterMs. setUp() builds `stream` with recycle-after-ms=0L (disabled).
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+
+      ILoggingEvent event = awaitLog(logs, "fill-listener recycle");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel()).isEqualTo(Level.INFO);
+      assertThat(event.getFormattedMessage()).contains("DISABLED").contains("recycle-after-ms=0");
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
+  @Test
+  void recycleArmedIntervalIsLoggedOnceAtStartup() throws Exception {
+    // Armed side of the same guarantee: the resolved interval must be visible from the pod's own
+    // log without reading the deployment env or waiting up to recycleAfterMs for the first
+    // "recycling socket" line to appear.
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    AlpacaTradeUpdatesStream armed =
+        new AlpacaTradeUpdatesStream(
+            new FillListenerProperties(
+                true, "ws://localhost:" + port + "/stream", false, 100L, 1_000L, 32, 900_000L),
+            new AlpacaProperties("http://unused", "test-key", "test-secret"),
+            new ThrowingCredentialSource(),
+            dispatcher,
+            metrics,
+            new ObjectMapper().registerModule(new JavaTimeModule()));
+    try {
+      armed.start();
+
+      ILoggingEvent event = awaitLog(logs, "fill-listener recycle");
+      assertThat(event).isNotNull();
+      assertThat(event.getLevel()).isEqualTo(Level.INFO);
+      assertThat(event.getFormattedMessage()).contains("interval=900000ms");
+    } finally {
+      armed.stop();
+      detachLogCapture(logs);
+    }
+  }
+
+  @Test
   void authorizedHandshakeIsLoggedAtInfo() throws Exception {
     ListAppender<ILoggingEvent> logs = attachLogCapture();
     try {

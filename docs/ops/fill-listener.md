@@ -44,6 +44,82 @@ env:
 
 Test profiles leave both unset → both beans are absent from the context.
 
+## Socket recycle (#715 starvation guard)
+
+A trade-updates socket can stop being fed while staying **open** — no close
+frame, no error, `reconnects_total` stays flat — and never recovers on its
+own. `EXEC_FILL_LISTENER_RECYCLE_AFTER_MS` (`exec.fill-listener.recycle-after-ms`)
+bounds how long any one socket is allowed to live: once a connection reaches
+that age it is deliberately torn down and reconnected, even if it looks
+perfectly healthy. `0` disables it; any non-zero value must be `>= 10_000`ms
+(`FillListenerProperties.MIN_RECYCLE_AFTER_MS`). Every tenant's socket also
+gets a slot-based stagger offset (`AlpacaTradeUpdatesStream.staggerMsFor`) so
+a shared disconnect (an Alpaca restart, an LB drain — all live tenants dial
+the same endpoint) can never phase-lock every socket onto the same recycle
+instant.
+
+### Confirming it is armed
+
+`AlpacaTradeUpdatesStream#start()` logs the resolved value exactly once per
+pod, at startup, in **both** states — this is the load-bearing check, because
+before #749 silence meant both "off" and "nobody looked":
+
+```sh
+kubectl logs deploy/exec-alpaca-live -n copytrade | grep "fill-listener recycle"
+```
+
+- `fill-listener recycle interval=900000ms (stagger slots=8)` — armed.
+- `fill-listener recycle DISABLED (recycle-after-ms=0)` — disabled.
+
+This is the ONLY way to know the state right after a roll without either
+reading the deployment env directly (`kubectl get deploy ... -o jsonpath=...`)
+or waiting up to `recycle-after-ms` (plus stagger) for the first
+`recycling socket after Nms` line to appear. Twice within 24h of #715
+shipping, the armed/disarmed state silently diverged from what `main`
+declared (#744, #745) and both were caught only by hand — this log line is
+what would have made either obvious immediately.
+
+### What healthy looks like
+
+`fill_listener_recycles_total` and `fill_listener_reconnects_total` should
+track **1:1** while the guard is doing its job: every recycle tears the
+socket down and the very next connection attempt records a reconnect, so in
+a quiet system `reconnects_total` grows in lockstep with `recycles_total`
+(any excess above that is genuine broker-side disconnects — see the
+`recycles` counter's own description for why the two are tracked
+separately). A gap opening up between them — recycles firing but reconnects
+not following — means the runner thread died or wedged after tearing down
+the old socket instead of re-establishing a new one.
+
+### The failure mode a recycle can reintroduce: a MUTE socket
+
+A recycle only proves the OLD socket was torn down; it says nothing about
+whether the NEW one is actually receiving frames. If the fresh connection
+lands in the same authenticated-but-silent state #715 originally found
+(see "Stream is up but no fills are arriving" above), the symptom looks
+like:
+
+- `fill_listener_recycles_total` climbing on schedule (recycle logic is
+  firing correctly), **while**
+- `fill_listener_ws_callbacks_total` (`channel=text`/`channel=binary`) stays
+  flat post-recycle — no callback means nothing reached the client above
+  TLS on the new socket.
+
+That combination is a mute new socket, not a healthy one — don't read a
+climbing `recycles_total` alone as "the guard is working"; corroborate it
+against `ws_callbacks_total` (or `subscription_confirmed_total` /
+`events_received_total`) actually moving afterward. Follow the
+"Confirm the socket actually SUBSCRIBED" triage steps above against the
+post-recycle connection specifically.
+
+### Follow-up, not done here
+
+A `fill_listener_recycle_interval_ms` gauge would make the armed value
+scrapeable/alertable instead of log-only, so a pod that comes back disarmed
+after a bad deploy is visible in monitoring rather than requiring someone to
+notice the log line's absence. Blocked in practice on #721 — nothing scrapes
+the `copytrade` namespace yet (see "Health metrics" below).
+
 ## Health metrics
 
 All exposed on the pod's `/actuator/prometheus` endpoint — but **nothing collects

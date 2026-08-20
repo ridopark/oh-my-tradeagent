@@ -179,10 +179,31 @@ public class AlpacaTradeUpdatesStream {
 
   @EventListener(ApplicationReadyEvent.class)
   public void start() {
+    logRecycleConfig();
     if (props.perTenantEnabled()) {
       startPerTenant();
     } else {
       startSingleSocket();
+    }
+  }
+
+  /**
+   * #749: state the resolved recycle interval once at startup, per pod, in BOTH states — armed AND
+   * disabled. The disabled case is the important one: before this, silence meant both "off" and
+   * "nobody looked", and within 24h of #715 shipping that ambiguity let one pod run genuinely
+   * disarmed while {@code main} asserted it was armed (#745) and another run armed via an
+   * imperative {@code kubectl set env} that the next deploy would have silently wiped (#744) — both
+   * caught by hand, neither visible in a log. Logged unconditionally so grepping any pod's startup
+   * log answers "is the starvation guard on?" without reading the deployment env or waiting up to
+   * {@code recycleAfterMs} for the first recycle to fire.
+   */
+  private void logRecycleConfig() {
+    long recycleAfterMs = props.recycleAfterMs();
+    if (recycleAfterMs > 0L) {
+      log.info(
+          "fill-listener recycle interval={}ms (stagger slots={})", recycleAfterMs, STAGGER_SLOTS);
+    } else {
+      log.info("fill-listener recycle DISABLED (recycle-after-ms=0)");
     }
   }
 
