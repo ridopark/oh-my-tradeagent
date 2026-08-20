@@ -1,7 +1,12 @@
 package com.ohmytradeagent.marketdata.quote;
 
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
+import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -33,6 +38,43 @@ public class MarketDataQuoteController {
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("ticker", ticker);
     out.put("price", provider.snapshotEquityPrice(ticker).orElse(null));
+    return out;
+  }
+
+  /**
+   * {@code {now, subscriptions:[{occ, subscribers, poll_ok_count, last_poll_ok_at, last_emit_at,
+   * consecutive_failures}]}} — per-contract premium-poll liveness (#717).
+   *
+   * <p>{@code now} is this service's wall clock, returned so the caller can age the stamps against
+   * the SAME clock that wrote them instead of against its own. market-data and the BFF are separate
+   * pods; a couple of seconds of drift between them is the difference between "alive" and "dead" at
+   * a 500ms poll, so the subtraction has to happen in one frame of reference.
+   *
+   * <p>A contract absent from the list has NO live subscription — that is the #717 signal, and it
+   * is a positive statement, not a missing-data case. Timestamps are ISO-8601 UTC strings rather
+   * than epoch millis so a human reading the raw endpoint can diagnose it unaided.
+   */
+  @GetMapping("/md/premium-subscriptions")
+  public Map<String, Object> premiumSubscriptions() {
+    List<Map<String, Object>> rows = new ArrayList<>();
+    provider.premiumFeedStatus().values().stream()
+        .sorted(Comparator.comparing(PremiumFeedStatus::occSymbol))
+        .forEach(
+            st -> {
+              Map<String, Object> row = new LinkedHashMap<>();
+              row.put("occ", st.occSymbol());
+              row.put("subscribers", st.subscribers());
+              row.put("poll_ok_count", st.pollOkCount());
+              row.put(
+                  "last_poll_ok_at",
+                  st.lastPollOkAt() == null ? null : st.lastPollOkAt().toString());
+              row.put("last_emit_at", st.lastEmitAt() == null ? null : st.lastEmitAt().toString());
+              row.put("consecutive_failures", st.consecutiveFailures());
+              rows.add(row);
+            });
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("now", Instant.now().toString());
+    out.put("subscriptions", rows);
     return out;
   }
 

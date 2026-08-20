@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { TrailFeedDot, useTrailLiveness } from "./TrailLiveness";
 
 // Client island for the per-position "Stop-loss" button on /live — arms the EXISTING chandelier
 // trail (PositionWorkflowImpl's armChandelier path), it does not introduce a second stop mechanism.
@@ -101,8 +102,10 @@ export function StopLossButton({
   // WHAT THIS DOES AND DOES NOT MEAN. It reports that the WORKFLOW has a CHANDELIER trail armed.
   // Two things it does not say:
   //   - It does not prove ticks are still flowing to it. A market-data restart can orphan the
-  //     premium subscription while the workflow still believes it is trailing. Surfacing that needs
-  //     tick-staleness, which this control does not have.
+  //     premium subscription while the workflow still believes it is trailing. That is now
+  //     surfaced SEPARATELY by <TrailFeedDot>, which reads market-data's own per-contract poll
+  //     clock rather than this flag -- see components/TrailLiveness.tsx. This prop remains
+  //     workflow-state-only and must not be read as feed liveness.
   //   - It is not necessarily the TIGHTEST stop on the position. A watchlist-exit leg that has
   //     already hit its target also carries a breakeven `exitStopLevel` above this trail, so there
   //     the badge is pessimistic — it names a stop below the level that would really exit. Every
@@ -122,6 +125,9 @@ export function StopLossButton({
   // Explicit in-flight lock rather than useTransition's `pending`: React 18.3.1 closes a transition
   // scope at the first `await`, which would re-expose a clickable button mid-flight. See
   // TrimButton/ForceExitButton for the same reasoning.
+  // Hook order is fixed: called before the armed-branch early return below, which would
+  // otherwise make this conditional.
+  const liveness = useTrailLiveness(workflowId);
   const [submitting, setSubmitting] = useState(false);
   const [picking, setPicking] = useState(false);
   const [confirming, setConfirming] = useState<number | null>(null);
@@ -194,10 +200,16 @@ export function StopLossButton({
   // outcome it cannot predict.
   if (armedGivebackPct != null) {
     const stop = armedStopPrice ?? stopPriceFor(currentPrice, armedGivebackPct);
+    // The dot is the half the text cannot say. "Trailing 45%" is WORKFLOW state and stays true
+    // whether or not anything is feeding the stop; the dot reads market-data's own poll clock, so
+    // an orphaned subscription (#717) shows red beside a badge that still reads armed.
     return (
-      <span className="text-xs font-medium text-emerald-300" role="status">
-        Trailing {Math.round(armedGivebackPct * 100)}%
-        {stop != null && ` · stop now ≈ $${stop.toFixed(2)}`}
+      <span className="inline-flex items-center gap-1.5" role="status">
+        <TrailFeedDot entry={liveness} />
+        <span className="text-xs font-medium text-emerald-300">
+          Trailing {Math.round(armedGivebackPct * 100)}%
+          {stop != null && ` · stop now ≈ $${stop.toFixed(2)}`}
+        </span>
       </span>
     );
   }

@@ -17,6 +17,7 @@ import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -133,7 +134,13 @@ class PositionsReaderTest {
     wireListExecutions("wf-armed");
     wireState("wf-armed", new PositionStateView(occ, 2, new BigDecimal("3.28")));
     wireTrailing(
-        "wf-armed", new TrailingStateView(true, new BigDecimal("0.35"), new BigDecimal("2.63")));
+        "wf-armed",
+        new TrailingStateView(
+            true,
+            new BigDecimal("0.35"),
+            new BigDecimal("2.63"),
+            OffsetDateTime.parse("2026-08-20T14:00:00Z"),
+            42L));
 
     List<OpenPosition> out = reader.openPositions("acme");
 
@@ -143,6 +150,39 @@ class PositionsReaderTest {
     // Passed through verbatim. 2.63 is PEAK-anchored and is NOT derivable from any price this
     // reader holds: entry 3.28 x 0.65 = 2.13. A reader that recomputed the stop would fail here.
     assertThat(out.get(0).trailStopPrice()).isEqualByComparingTo("2.63");
+    // #717 tick liveness rides through untouched — the /live badge's pulse reads ticksReceived and
+    // its feed dot needs the observed-at stamp; a reader that dropped them would fail here.
+    assertThat(out.get(0).trailTicksReceived()).isEqualTo(42L);
+    assertThat(out.get(0).trailLastTickObservedAt())
+        .isEqualTo(OffsetDateTime.parse("2026-08-20T14:00:00Z"));
+  }
+
+  /**
+   * An UNARMED position still reports tick liveness. lastTickObservedAt is stamped before the route
+   * fork, so it is populated regardless of arming — PositionsReader gates the trail FIELDS on
+   * `armed` and must not gate the liveness fields with them. Guards the claim made in the comment
+   * at that build site; without this, gating all five together would pass every other test here.
+   */
+  @Test
+  void reportsTickLivenessEvenWhenUnarmed() {
+    LocalDate today = LocalDate.now(MARKET_TZ);
+    String occ = occFor("AMD", today.plusDays(21), "C", "00530000");
+
+    wireStrategies("acme", "s1");
+    wireListExecutions("wf-unarmed-ticking");
+    wireState("wf-unarmed-ticking", new PositionStateView(occ, 5, new BigDecimal("1.10")));
+    wireTrailing(
+        "wf-unarmed-ticking",
+        new TrailingStateView(false, null, null, OffsetDateTime.parse("2026-08-20T14:03:00Z"), 7L));
+
+    List<OpenPosition> out = reader.openPositions("acme");
+
+    assertThat(out).hasSize(1);
+    assertThat(out.get(0).trailingArmed()).isFalse();
+    assertThat(out.get(0).trailGivebackPct()).isNull();
+    assertThat(out.get(0).trailTicksReceived()).isEqualTo(7L);
+    assertThat(out.get(0).trailLastTickObservedAt())
+        .isEqualTo(OffsetDateTime.parse("2026-08-20T14:03:00Z"));
   }
 
   @Test
@@ -153,7 +193,7 @@ class PositionsReaderTest {
     wireStrategies("acme", "s1");
     wireListExecutions("wf-unarmed");
     wireState("wf-unarmed", new PositionStateView(occ, 3, new BigDecimal("2.00")));
-    wireTrailing("wf-unarmed", new TrailingStateView(false, null, null));
+    wireTrailing("wf-unarmed", new TrailingStateView(false, null, null, null, 0L));
 
     List<OpenPosition> out = reader.openPositions("acme");
 

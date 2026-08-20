@@ -12,6 +12,7 @@ import {
   type ForceExitActionResult,
 } from "@/components/ForceExitButton";
 import { TrimButton, type TrimActionResult } from "@/components/TrimButton";
+import { TrailLivenessProvider } from "@/components/TrailLiveness";
 import {
   StopLossButton,
   type StopLossActionResult,
@@ -438,7 +439,7 @@ export default async function LivePage() {
   }
 
   return (
-    <>
+    <TrailLivenessProvider>
       <Nav tenantId={session?.tenantId} />
       {/* Full-bleed: mounted OUTSIDE <main> so the tripped bar spans the viewport edge-to-edge
           (inside main's centered max-w-6xl it would be inset and capped — not the prominent bar). */}
@@ -532,7 +533,7 @@ export default async function LivePage() {
           />
         </section>
       </main>
-    </>
+    </TrailLivenessProvider>
   );
 }
 

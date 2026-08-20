@@ -631,6 +631,36 @@ export interface ProximityResponse {
 }
 export const getProximity = () => bffGet<ProximityResponse>("/api/proximity");
 
+// Per-position trailing-stop liveness (#717) for the /live badge's pulse + feed dot.
+//
+// `feed_status` has THREE states and the third is load-bearing:
+//   live     — market-data holds a subscription and polled it within the last 10s
+//   orphaned — market-data answered and has no live/fresh subscription for this contract
+//   unknown  — market-data could not be reached, so we cannot say either way
+// Never collapse `unknown` into `orphaned`. An operator's response to a red badge is to re-arm a
+// stop on a real-money position; a monitoring hop failing must not trigger that.
+//
+// `ticks_received` is the PULSE driver — the client blinks when it INCREMENTS between polls. Its
+// absolute value carries little meaning: the 1% emit band means an armed trail sees ~50 ticks a
+// DAY, which is exactly why the steady dot reads `feed_status` (a 2/sec POLL clock) instead.
+export interface TrailLivenessPosition {
+  workflow_id: string;
+  contract_symbol: string;
+  trailing_armed: boolean;
+  trail_giveback_pct: number | null;
+  trail_stop_price: number | null;
+  ticks_received: number;
+  last_tick_observed_at: string | null;
+  feed_status: "live" | "orphaned" | "unknown";
+}
+export interface TrailLivenessResponse {
+  tenant_id: string;
+  market_data_reachable: boolean;
+  positions: TrailLivenessPosition[];
+}
+export const getTrailLiveness = () =>
+  bffGet<TrailLivenessResponse>("/api/trail-liveness");
+
 // Account portfolio history (/live equity chart). Parallel arrays indexed by `timestamps` (epoch
 // seconds): `equity` is the chart line, `profit_loss`/`profit_loss_pct` the range-aware headline,
 // `base_value` the dashed baseline / range start. Account-level / shared scope (same caveat as
