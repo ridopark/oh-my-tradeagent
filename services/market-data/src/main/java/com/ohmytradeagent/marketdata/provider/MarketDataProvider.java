@@ -55,4 +55,18 @@ public interface MarketDataProvider {
    * closed (loud audit, no connect) rather than drive triggers off a wrong/delayed feed.
    */
   Subscription subscribeEquity(String ticker, Consumer<Tick> onTick);
+
+  /**
+   * Per-contract liveness of the option-premium poll, keyed by the SPACE-PADDED OCC. Display-only:
+   * the tenant-dashboard BFF reads it so /live can distinguish an armed trail that is being fed
+   * from one armed over a subscription nobody services (#717).
+   *
+   * <p>Defaulted to empty rather than abstract on purpose. A provider that does not poll (the
+   * in-memory test/dev fan-out) has nothing truthful to report, and an empty map is read downstream
+   * as "liveness unknown" — which renders the badge in its existing, pre-#717 form. Forcing a
+   * fabricated implementation would make the dev provider assert a liveness it cannot observe.
+   */
+  default java.util.Map<String, PremiumFeedStatus> premiumFeedStatus() {
+    return java.util.Map.of();
+  }
 }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.marketdata.health.FeedHealth;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
+import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
 import com.ohmytradeagent.marketdata.provider.Quote;
 import com.ohmytradeagent.marketdata.provider.Subscription;
 import com.ohmytradeagent.marketdata.provider.Tick;
@@ -17,6 +18,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -86,6 +88,13 @@ public class AlpacaMarketData implements MarketDataProvider {
   // feed dead) — a single contract's transient miss must not flip the aggregate gauge, and one
   // healthy contract ticking proves the feed is alive.
   private final ConcurrentHashMap<String, Integer> optionPollFailures = new ConcurrentHashMap<>();
+
+  /**
+   * Per-OCC premium-poll liveness (#717). Keyed like {@link #bySymbol} (space-padded OCC). Entries
+   * are created on the first successful poll and dropped when the last subscriber leaves.
+   */
+  private final ConcurrentHashMap<String, Liveness> premiumLiveness = new ConcurrentHashMap<>();
+
   private static final int OPTION_POLL_FAIL_THRESHOLD = 3;
 
   /** Equity subscriber registry: ticker -> {listener, ...}. Separate WS endpoint from options. */
@@ -831,6 +840,10 @@ public class AlpacaMarketData implements MarketDataProvider {
       // successful snapshot — a rejected outlier still proves the feed is alive.
       feedHealth.recordTick(FeedHealth.Feed.OPTION);
       optionPollFailures.remove(occSymbol);
+      // Stamped for ANY successful snapshot, on the same reasoning as feedHealth above: a quote the
+      // guard goes on to reject still proves the feed is alive. This is the stamp /live reads, not
+      // the emit stamp — see PremiumFeedStatus for why a tick clock cannot answer the question.
+      premiumLiveness.computeIfAbsent(occSymbol, k -> new Liveness()).recordPollOk();
       if (!acceptPremiumQuote(occSymbol, q)) {
         return;
       }
@@ -846,6 +859,7 @@ public class AlpacaMarketData implements MarketDataProvider {
           // One bad listener must not poison the poll.
         }
       }
+      premiumLiveness.computeIfAbsent(occSymbol, k -> new Liveness()).recordEmit();
     } catch (RuntimeException e) {
       log.warn("Alpaca premium poll failed for {}: {}", occSymbol, e.getMessage());
       onPollFailure(occSymbol);
@@ -963,6 +977,49 @@ public class AlpacaMarketData implements MarketDataProvider {
     }
   }
 
+  @Override
+  public Map<String, PremiumFeedStatus> premiumFeedStatus() {
+    // Built from bySymbol, not from premiumLiveness: only SUBSCRIBED contracts are reportable. A
+    // poll for an unsubscribed OCC (pollOnce is package-private and tests drive it directly) must
+    // not conjure a phantom row, and a contract whose subscribers have all left must vanish even if
+    // a stamp lingers.
+    Map<String, PremiumFeedStatus> out = new LinkedHashMap<>();
+    for (Map.Entry<String, List<Consumer<Tick>>> e : bySymbol.entrySet()) {
+      String occ = e.getKey();
+      Liveness lv = premiumLiveness.get(occ);
+      out.put(
+          occ,
+          new PremiumFeedStatus(
+              occ,
+              e.getValue().size(),
+              lv == null ? 0L : lv.pollOkCount,
+              lv == null ? null : lv.lastPollOkAt,
+              lv == null ? null : lv.lastEmitAt,
+              optionPollFailures.getOrDefault(occ, 0)));
+    }
+    return out;
+  }
+
+  /**
+   * Mutable per-OCC liveness counters. Fields are volatile rather than atomic: the poll for one OCC
+   * is single-threaded (one scheduled task per contract), so there is no increment race to lose —
+   * only a visibility requirement for the HTTP thread that reads them.
+   */
+  private static final class Liveness {
+    private volatile long pollOkCount;
+    private volatile Instant lastPollOkAt;
+    private volatile Instant lastEmitAt;
+
+    void recordPollOk() {
+      pollOkCount++;
+      lastPollOkAt = Instant.now();
+    }
+
+    void recordEmit() {
+      lastEmitAt = Instant.now();
+    }
+  }
+
   private final class AlpacaSubscription implements Subscription {
     private final String id = UUID.randomUUID().toString();
     private final String symbol;
@@ -997,6 +1054,7 @@ public class AlpacaMarketData implements MarketDataProvider {
         if (listeners.isEmpty()) {
           bySymbol.remove(symbol, listeners);
           stopPremiumPoll(symbol);
+          premiumLiveness.remove(symbol);
         }
       }
     }

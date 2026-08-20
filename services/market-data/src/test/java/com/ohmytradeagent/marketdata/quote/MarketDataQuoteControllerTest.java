@@ -6,9 +6,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
+import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
 import com.ohmytradeagent.marketdata.provider.Quote;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -65,5 +69,70 @@ class MarketDataQuoteControllerTest {
         .andExpect(jsonPath("$.bid").value(2.90))
         .andExpect(jsonPath("$.mid").value(2.95))
         .andExpect(jsonPath("$.ask").value(3.00));
+  }
+
+  // --- /md/premium-subscriptions: the #717 trail-liveness wire contract ---
+
+  private static final String OCC = "DRAM  270319C00100000";
+
+  /**
+   * Pins the WIRE CONTRACT from the PRODUCING side. Its consumer, the BFF's
+   * MarketDataLivenessClient, pins the same literals from the other side — the two are a pair and
+   * must be edited together. Without both halves a renamed key breaks nothing visible: the BFF's
+   * parse simply finds no match and every trail badge reads "unknown" indefinitely.
+   *
+   * <p>Driven through MockMvc rather than by calling the method, for the same reason as the tests
+   * above: this asserts the real routing and serialisation, so it also covers the PATH the BFF
+   * hardcodes. A reflection check on the @GetMapping value would not.
+   */
+  @Test
+  void premiumSubscriptions_emitsExactlyTheKeysTheBffParses() throws Exception {
+    Map<String, PremiumFeedStatus> reg = new LinkedHashMap<>();
+    reg.put(
+        OCC,
+        new PremiumFeedStatus(
+            OCC,
+            1,
+            4210L,
+            Instant.parse("2026-08-20T14:00:09.500Z"),
+            Instant.parse("2026-08-20T13:52:01.100Z"),
+            0));
+    when(provider.premiumFeedStatus()).thenReturn(reg);
+
+    mvc.perform(get("/md/premium-subscriptions"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.now").isString())
+        .andExpect(jsonPath("$.subscriptions.length()").value(1))
+        .andExpect(jsonPath("$.subscriptions[0].occ").value(OCC))
+        .andExpect(jsonPath("$.subscriptions[0].subscribers").value(1))
+        .andExpect(jsonPath("$.subscriptions[0].poll_ok_count").value(4210))
+        // ISO-8601 strings, not epoch millis: the BFF parses these with Instant.parse.
+        .andExpect(jsonPath("$.subscriptions[0].last_poll_ok_at").value("2026-08-20T14:00:09.500Z"))
+        .andExpect(jsonPath("$.subscriptions[0].last_emit_at").value("2026-08-20T13:52:01.100Z"))
+        .andExpect(jsonPath("$.subscriptions[0].consecutive_failures").value(0));
+  }
+
+  /**
+   * An empty registry is a POSITIVE statement (nothing subscribed) — the #717 signal, not an error.
+   */
+  @Test
+  void premiumSubscriptions_emptyRegistryIsAnEmptyList_not404() throws Exception {
+    when(provider.premiumFeedStatus()).thenReturn(Map.of());
+
+    mvc.perform(get("/md/premium-subscriptions"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.subscriptions.length()").value(0));
+  }
+
+  /** Subscribed but never polled: present with null stamps. Absence must mean "no subscription". */
+  @Test
+  void premiumSubscriptions_neverPolledContractAppearsWithNullStamps() throws Exception {
+    when(provider.premiumFeedStatus())
+        .thenReturn(Map.of(OCC, new PremiumFeedStatus(OCC, 1, 0L, null, null, 0)));
+
+    mvc.perform(get("/md/premium-subscriptions"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.subscriptions[0].occ").value(OCC))
+        .andExpect(jsonPath("$.subscriptions[0].last_poll_ok_at").doesNotExist());
   }
 }

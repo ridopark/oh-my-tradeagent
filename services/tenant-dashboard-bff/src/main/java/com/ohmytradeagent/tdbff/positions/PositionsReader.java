@@ -13,6 +13,7 @@ import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -129,7 +130,12 @@ public class PositionsReader {
           openNotional,
           armed,
           armed ? trail.givebackPct() : null,
-          armed ? trail.thresholdPremium() : null);
+          armed ? trail.thresholdPremium() : null,
+          // Tick liveness is reported whether or not the trail is armed: lastTickObservedAt is
+          // stamped before the route fork, so an UNARMED position can still show a live feed, and
+          // an ARMED one showing none is exactly the #717 orphan the badge exists to surface.
+          trail == null ? 0L : trail.ticksReceived(),
+          trail == null ? null : trail.lastTickObservedAt());
     } catch (RuntimeException e) {
       log.warn(
           "positionState query failed wf={} strategy={} err={}", wfId, strategyId, e.getMessage());
@@ -207,7 +213,37 @@ public class PositionsReader {
       BigDecimal openNotional,
       boolean trailingArmed,
       BigDecimal trailGivebackPct,
-      BigDecimal trailStopPrice) {
+      BigDecimal trailStopPrice,
+      long trailTicksReceived,
+      OffsetDateTime trailLastTickObservedAt) {
+
+    /**
+     * Back-compat 9-arg form for call sites that predate the tick-liveness fields (#717). Defaults
+     * to "no ticks observed", which downstream reads as liveness-unknown rather than as dead.
+     */
+    public OpenPosition(
+        String workflowId,
+        String strategyId,
+        String contractSymbol,
+        long remainingQty,
+        BigDecimal entryPremium,
+        BigDecimal openNotional,
+        boolean trailingArmed,
+        BigDecimal trailGivebackPct,
+        BigDecimal trailStopPrice) {
+      this(
+          workflowId,
+          strategyId,
+          contractSymbol,
+          remainingQty,
+          entryPremium,
+          openNotional,
+          trailingArmed,
+          trailGivebackPct,
+          trailStopPrice,
+          0L,
+          null);
+    }
 
     /**
      * Back-compat 6-arg form for call sites that predate the trailing fields. Defaults to UN-armed
@@ -273,5 +309,9 @@ public class PositionsReader {
    */
   @JsonIgnoreProperties(ignoreUnknown = true)
   public record TrailingStateView(
-      boolean armed, BigDecimal givebackPct, BigDecimal thresholdPremium) {}
+      boolean armed,
+      BigDecimal givebackPct,
+      BigDecimal thresholdPremium,
+      OffsetDateTime lastTickObservedAt,
+      long ticksReceived) {}
 }

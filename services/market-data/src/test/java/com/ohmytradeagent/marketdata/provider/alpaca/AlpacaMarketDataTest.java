@@ -6,11 +6,13 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
 import com.ohmytradeagent.marketdata.provider.Quote;
 import com.ohmytradeagent.marketdata.provider.Subscription;
 import com.ohmytradeagent.marketdata.provider.Tick;
 import java.io.IOException;
 import java.net.http.HttpClient;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -922,5 +924,84 @@ class AlpacaMarketDataTest {
     assertThat(frame2)
         .isEqualTo("[{\"T\":\"t\",\"S\":\"AAPL\",\"p\":3.21,\"t\":\"2026-06-20T13:31:01Z\"}]");
     assertThat(buf.length()).isZero();
+  }
+
+  // --- #717 premium-feed liveness: a poll that emits nothing still proves the feed is alive ---
+
+  @Test
+  void premiumFeedStatus_onEmit_countsThePollAndStampsBothClocks() {
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+
+    assertThat(rx).hasSize(1);
+    PremiumFeedStatus st = p.premiumFeedStatus().get(OCC);
+    assertThat(st).isNotNull();
+    assertThat(st.occSymbol()).isEqualTo(OCC);
+    assertThat(st.subscribers()).isEqualTo(1);
+    assertThat(st.pollOkCount()).isEqualTo(1L);
+    assertThat(st.lastPollOkAt()).isNotNull();
+    assertThat(st.lastEmitAt()).isNotNull();
+    assertThat(st.consecutiveFailures()).isZero();
+  }
+
+  /**
+   * The discriminating case, and the whole reason the badge reads the POLL stamp: a resampled quote
+   * is rejected by the guard so NO tick is emitted, but the snapshot succeeded — the feed is alive.
+   * Asserted on counters, not clock deltas, so it cannot reproduce the #771 clock-boundary flake.
+   */
+  @Test
+  void premiumFeedStatus_guardRejectedQuote_advancesPollButNotEmit() {
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+    Instant emitStamp = p.premiumFeedStatus().get(OCC).lastEmitAt();
+
+    // SAME quote timestamp -> one observation resampled, not two. Rejected, no fan-out.
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+
+    assertThat(rx).hasSize(1);
+    PremiumFeedStatus st = p.premiumFeedStatus().get(OCC);
+    assertThat(st.pollOkCount()).isEqualTo(2L);
+    assertThat(st.lastEmitAt()).isEqualTo(emitStamp);
+    assertThat(st.consecutiveFailures()).isZero();
+  }
+
+  @Test
+  void premiumFeedStatus_failedSnapshot_doesNotCountAsAGoodPoll() {
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+    server.enqueue(new MockResponse().setResponseCode(200).setBody("{\"snapshots\":{}}"));
+    p.pollOnce(OCC);
+
+    PremiumFeedStatus st = p.premiumFeedStatus().get(OCC);
+    assertThat(st.pollOkCount()).isEqualTo(1L);
+    assertThat(st.consecutiveFailures()).isEqualTo(1);
+  }
+
+  @Test
+  void premiumFeedStatus_afterLastUnsubscribe_dropsTheContract() {
+    AlpacaMarketData p = premiumProvider(newFeedHealth());
+    CopyOnWriteArrayList<Tick> rx = new CopyOnWriteArrayList<>();
+    Subscription sub = p.subscribePremium(OCC, rx::add);
+
+    server.enqueue(optionSnapshotAt("1.20", "1.30", T1));
+    p.pollOnce(OCC);
+    assertThat(p.premiumFeedStatus()).containsKey(OCC);
+
+    sub.close();
+
+    assertThat(p.premiumFeedStatus()).doesNotContainKey(OCC);
   }
 }
