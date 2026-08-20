@@ -2862,6 +2862,60 @@ class PositionWorkflowImplTest {
     captureKind("PositionClosed");
   }
 
+  /**
+   * Issue #762 fail-closed #1: an actor the exemption does not recognise must FLATTEN. The
+   * exemption is keyed on the {@code auto:*} namespace; anything else — an operator id, a future
+   * actor nobody has classified, a typo — takes the liquidating path. The exemption must never be
+   * the default for an actor that was never reasoned about.
+   */
+  @Test
+  void issue762_unrecognisedActor_failsClosedAndFlattens() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-762-unknown-actor");
+    WorkflowStub.fromTyped(stub).start(futureInput(4)); // 2 years out — would be exempt if auto:*
+    confirmEntry(stub, 4L);
+
+    // Not "auto:" anything, and not a recognised operator form either.
+    stub.riskBreach(riskBreachPayload("something_nobody_classified", "unknown-subsystem"));
+
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten-unknown", 4L, new BigDecimal("2.50")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    assertThat(captureAll("RiskBreachFlattenSkippedLongDated"))
+        .as("an unclassified actor must never inherit the exemption")
+        .isEmpty();
+    captureKind("PositionClosed");
+  }
+
+  /**
+   * Issue #762 fail-closed #2: an OCC whose expiry cannot be parsed must FLATTEN. {@code
+   * daysToExpiry()} returns null there, and a position whose tenor is UNKNOWN is not a position we
+   * may assume is long-dated — the safe reading of "I cannot tell" is the liquidating one.
+   */
+  @Test
+  void issue762_unparseableExpiry_failsClosedAndFlattens() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-762-bad-occ");
+    PositionWorkflowInput in = input(4);
+    in.setContractSymbol("BADOCC"); // < 15 chars -> expiryDateFromOcc returns null
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 4L);
+
+    stub.riskBreach(riskBreachPayload("auto:daily_loss", "auto:daily_loss"));
+
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten-badocc", 4L, new BigDecimal("2.50")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    assertThat(captureAll("RiskBreachFlattenSkippedLongDated"))
+        .as("unknown tenor must not be treated as long-dated")
+        .isEmpty();
+    captureKind("PositionClosed");
+  }
+
   @Test
   void riskBreach_healthyPosition_flattens() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
