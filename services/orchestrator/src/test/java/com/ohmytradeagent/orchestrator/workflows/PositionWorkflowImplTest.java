@@ -1307,6 +1307,67 @@ class PositionWorkflowImplTest {
         .isNotEmpty();
   }
 
+  /**
+   * Issue #738: a LATE fill of our own ENTRY order must never be booked as an exit.
+   *
+   * <p>{@code FillSignalPayload} carries only {@code brokerOrderId / filledQty / avgFillPrice /
+   * filledAt} — no intent key, no side — and {@code onFill} does nothing but latch it. The workflow
+   * retained only {@code currentInFlightBrokerOrderId} (the EXIT placement), never the entry
+   * order's id, so it could not recognise its own entry fill.
+   *
+   * <p>A 50-lot entry that fills 10 then completes at 50 therefore: confirms at remainingQty=10
+   * (the understatement this issue was filed for), then hands the second fill to the exit path,
+   * where #740's ledger books {@code min(50, remainingQty=10)} = 10 and drives remainingQty to
+   * ZERO. The workflow reports FLAT while the broker holds 50 real contracts — it stops managing
+   * the position entirely.
+   *
+   * <p>This test pins the guard: the entry order's fill is ignored by the exit path, so the lot
+   * stays at 10 and the exit times out honestly instead of silently consuming the entry.
+   */
+  @Test
+  void issue738_lateFillOfTheEntryOrder_isNotBookedAsAnExit() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult());
+
+    PositionWorkflow stub = newStub("pos-738-late-entry");
+    PositionWorkflowInput in = input(50);
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
+    in.setExitFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+
+    // Entry PARTIALLY fills: 10 of 50, on broker order brk-entry.
+    confirmEntry(stub, 10L);
+    long deadline = System.currentTimeMillis() + 8_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() == 0L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty())
+        .as("confirms on the first entry fill")
+        .isEqualTo(10L);
+
+    // Drive an exit cycle FIRST so processOne is parked on its fill-await. processOne clears
+    // lastFillEvent immediately before placing (:3023), so a stale entry fill parked BEFORE the
+    // placement is merely discarded — the narrow, real race is an entry fill landing DURING the
+    // await, which is indistinguishable from the exit filling.
+    stub.partialExit(partialExitRequest("sig-738", "pos-738-late-entry", 1.0));
+    waitForPlaceOrderCount(1);
+
+    // The SAME entry order completes — cumulative 50. This is an ENTRY fill, not an exit.
+    stub.onFill(fill("brk-entry", 50L, new BigDecimal("2.30")));
+    env.sleep(Duration.ofSeconds(6));
+
+    assertThat(stub.positionState().remainingQty())
+        .as("a fill of the ENTRY order must never decrement the position")
+        .isEqualTo(10L);
+    assertThat(
+            captureAll("PartialExitFilled").stream()
+                .mapToLong(e -> asLong(e.getSubject().get("qty_filled")))
+                .sum())
+        .as("no exit was booked — nothing actually sold")
+        .isEqualTo(0L);
+  }
+
   // ---------- Phase 1 (PLAN-2026-06-30): flatten broker-authoritative terminal-state reconcile
   // ----------
 
