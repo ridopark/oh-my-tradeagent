@@ -227,3 +227,11 @@ class PositionWorkflowInput(BaseModel):
     """
     Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Per-intent-key retry attempt counts; feed the :retry-N intent-key suffix, so a reset would mint a DUPLICATE client_order_id.
     """
+    carried_entry_booked_qty: Annotated[int | None, Field(ge=1)] = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. #738: cumulative entry qty already booked into the lot for the entry order. Carried as a PAIR with carried_expected_qty; either absent disables entry growth on the new run (pre-#738 behavior) — growth arithmetic against an unknown base could double-book.
+    """
+    carried_expected_qty: Annotated[int | None, Field(ge=1)] = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. #738: the ORIGINAL ordered qty (the roll resets qty to the remaining lot, which would wrongly cap entry growth). Pair of carried_entry_booked_qty.
+    """

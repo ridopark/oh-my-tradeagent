@@ -62,6 +62,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   // Audit kinds
   private static final String KIND_POSITION_ENTERED = "PositionEntered";
+
+  /**
+   * Issue #738: a post-confirm fill report on the entry order grew the managed lot. Subject carries
+   * {@code qty_added}, {@code entry_qty_total}, {@code remaining_qty_after}, {@code
+   * broker_order_id} and the report's cumulative {@code avg_fill_price}. Forensics/visibility only
+   * — realized P&L's entry basis stays the parent's {@code EntryFilled} rows.
+   */
+  private static final String KIND_POSITION_ENTRY_INCREASED = "PositionEntryIncreased";
+
   private static final String KIND_PARTIAL_EXIT_REQUESTED = "PartialExitRequested";
   private static final String KIND_PARTIAL_EXIT_FILLED = "PartialExitFilled";
   private static final String KIND_EXIT_DUPLICATE_SUPPRESSED = "ExitDuplicateSuppressed";
@@ -748,6 +757,19 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_ENTRY_FILL_NOT_AN_EXIT = "entry-fill-not-an-exit-v1";
 
   /**
+   * Issue #738 (the fix on top of {@link #VERSION_ENTRY_FILL_NOT_AN_EXIT}'s refusal): a
+   * post-confirm broker report on the ENTRY order GROWS the lot instead of being discarded. The
+   * first fill confirms at its own qty (10 of a 50-lot BTO), and pre-#738 the remaining 40 were
+   * UNMANAGED forever — no trail, no EOD/expiry flatten, sized-out of every exit, invisible to the
+   * account cap, surfaced only as a recon orphan nag. At {@code v>=1} the entry-side cumulative
+   * report books {@code delta = cumulativeFilled - entryBookedQty}, clamped to the ordered {@code
+   * expectedQty}, into {@code remainingQty}, and emits {@link #KIND_POSITION_ENTRY_INCREASED} (a
+   * NEW audit command — which is what gates this). Read ONCE at the top of {@link #run} into {@code
+   * entryGrowthVersion}; marker order is part of the replay contract.
+   */
+  private static final String VERSION_ENTRY_FILL_GROWS_LOT = "entry-fill-grows-lot-v1";
+
+  /**
    * Issue #762: an AUTOMATED daily-loss breach must not liquidate a position whose horizon outlives
    * the breaker's.
    *
@@ -955,6 +977,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * intent key.
    */
   private String entryBrokerOrderId;
+
+  /**
+   * Issue #738: cumulative entry qty already booked into {@code remainingQty} for the entry order
+   * (the confirm's first fill, plus every later {@link #bookEntryGrowth} delta). {@code
+   * Long.MAX_VALUE} disables growth — the fail-safe for a pre-#738 carried run whose input lacks
+   * the carried counters (growth arithmetic against an unknown base could double-book).
+   */
+  private long entryBookedQty;
+
+  /** Issue #738: {@link #VERSION_ENTRY_FILL_GROWS_LOT}, read once at the top of {@link #run}. */
+  private int entryGrowthVersion = Workflow.DEFAULT_VERSION;
 
   private String currentInFlightBrokerOrderId;
   private String currentInFlightSignalId;
@@ -1212,6 +1245,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       this.lastTickAt = OffsetDateTime.parse(in.getCarriedLastTickAt());
     }
     this.entryBrokerOrderId = in.getCarriedEntryBrokerOrderId();
+    // #738: entry-growth counters. BOTH must be present to keep growing across the roll; a
+    // pre-#738 carried input lacks them, and growth arithmetic against an unknown base could
+    // double-book — so absent means DISABLED (Long.MAX_VALUE blocks every delta), which is
+    // exactly the pre-#738 behavior for that run.
+    if (in.getCarriedEntryBookedQty() != null && in.getCarriedExpectedQty() != null) {
+      this.entryBookedQty = in.getCarriedEntryBookedQty();
+    } else {
+      this.entryBookedQty = Long.MAX_VALUE;
+    }
     if (in.getCarriedProcessedSignalIds() != null) {
       this.processedSignalIds.addAll(in.getCarriedProcessedSignalIds());
     }
@@ -1331,6 +1373,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       next.setCarriedLastTickAt(lastTickAt.toString());
     }
     next.setCarriedEntryBrokerOrderId(entryBrokerOrderId);
+    // #738: entry-growth counters, carried as a PAIR (the hydrator requires both). Skipped when
+    // growth is disabled on this run (MAX_VALUE) so the next run stays disabled too.
+    if (entryBookedQty != Long.MAX_VALUE) {
+      next.setCarriedEntryBookedQty(entryBookedQty);
+      next.setCarriedExpectedQty(expectedQty);
+    }
     next.setCarriedProcessedSignalIds(new ArrayList<>(processedSignalIds));
     if (!exitBookedByOrder.isEmpty()) {
       List<CarriedExitBookedEntry> booked = new ArrayList<>();
@@ -1369,7 +1417,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // Issue #203: input.qty is the *expected* quantity (sourced from the parent
     // CopytradeSignalWorkflow's BTO fill in normal flow). Under v=1 we no longer treat it as
     // proof-of-fill — remainingQty stays 0 until the first onFill arrives.
-    this.expectedQty = in.getQty();
+    // #738: a carried run's input.qty was reset to the remaining lot at the roll; the ORIGINAL
+    // ordered qty rides in carried_expected_qty so the entry-growth cap still knows the ceiling.
+    this.expectedQty =
+        carriedRun && in.getCarriedExpectedQty() != null ? in.getCarriedExpectedQty() : in.getQty();
 
     // Phase 2c.2: route exec Activities to broker-<broker_target>. Falls back to the
     // 2c.2 default broker when the input was minted by a pre-2c.2 CopytradeSignalWorkflow that
@@ -1380,11 +1431,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
     int deferVersion =
         Workflow.getVersion(VERSION_DEFER_POSITION_ENTERED, Workflow.DEFAULT_VERSION, 1);
+    // #738 entry-growth marker — read unconditionally here (appended AFTER the defer marker;
+    // order is part of the replay contract) into the field the funnel + main-loop drain consult.
+    this.entryGrowthVersion =
+        Workflow.getVersion(VERSION_ENTRY_FILL_GROWS_LOT, Workflow.DEFAULT_VERSION, 1);
     if (deferVersion == Workflow.DEFAULT_VERSION) {
       // Legacy in-flight workflows: preserve the original ordering — assign remainingQty from
       // input.qty and emit PositionEntered at workflow start so their recorded histories replay
       // without a non-determinism error.
       this.remainingQty = in.getQty();
+      // #738: the legacy branch treats input.qty as fully booked (it always has).
+      this.entryBookedQty = in.getQty();
       this.positionConfirmed = true;
       // F1 supersede guardrail: stamp the confirm instant (deterministic Workflow clock).
       this.entryAt = workflowNow();
@@ -1547,6 +1604,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               ? lastFillEvent.getAvgFillPrice()
               : in.getEntryPremium();
       this.remainingQty = firstFilledQty;
+      // #738: the confirm books the FIRST fill; later cumulative reports on the entry order grow
+      // the lot through bookEntryGrowth (delta vs this counter, capped at expectedQty).
+      this.entryBookedQty = firstFilledQty;
       // #738: remember WHICH broker order is ours on the entry side, so a later fill of it can
       // never be mistaken for an exit fill.
       this.entryBrokerOrderId = lastFillEvent.getBrokerOrderId();
@@ -1656,6 +1716,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   // a
                   // recorded command, so this addition is replay-neutral for v=0 histories.
                   || (flattenAwaitingLateFill && lastFillEvent != null)
+                  // #738: wake on a post-confirm ENTRY-order report so the growth books promptly
+                  // even with nothing else in flight. Predicate-only and version-guarded —
+                  // constant-false for every v=0 history (entryGrowthVersion stays DEFAULT), so
+                  // this addition is replay-neutral.
+                  || (entryGrowthVersion >= 1 && isEntryOrderFill(lastFillEvent))
                   // Phase 1 (PLAN-2026-06-25-trading-remediation): wake on the next-session
                   // re-drive timer for a failed-to-place partial so the main loop re-enqueues it
                   // into pendingExits. Predicate-only — partialPlaceRetryArmed latches only under
@@ -1664,6 +1729,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   || partialPlaceRetryArmed);
       if (eodFired || expiryFired || expiryLeadFired || remainingQty == 0) {
         break;
+      }
+      // #738: drain a post-confirm ENTRY-order report BEFORE any exit interpretation — it is lot
+      // growth, not exit evidence, and letting the flatten/exit branches see it first would only
+      // bounce it off the funnel's refusal. Version-guarded: at v=0 this whole branch is
+      // unreachable (entryGrowthVersion stays DEFAULT), so legacy replays are untouched.
+      if (entryGrowthVersion >= 1 && isEntryOrderFill(lastFillEvent)) {
+        bookEntryGrowth(lastFillEvent);
+        lastFillEvent = null;
+        continue;
       }
       // Plan-2A R-AA-1: apply a LATE fill of a resting in-loop-flatten bounded limit, so a
       // close-in-progress position drains on the broker fill instead of hanging. Guarded by the
@@ -4374,6 +4448,54 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     return emitExitFill(req.getSignalId(), fillEvent);
   }
 
+  /** True iff this fill reports on OUR entry order (post-confirm — the id is captured there). */
+  private boolean isEntryOrderFill(FillSignalPayload fillEvent) {
+    return entryBrokerOrderId != null
+        && fillEvent != null
+        && entryBrokerOrderId.equals(fillEvent.getBrokerOrderId());
+  }
+
+  /**
+   * Issue #738: book a post-confirm cumulative report on the ENTRY order into the managed lot.
+   * Pre-#738, a 50-lot BTO that filled 10-then-40 confirmed at 10 and the other 40 were unmanaged
+   * forever — no trail, no EOD/expiry flatten, sized out of every exit, invisible to the account
+   * cap, surfaced only as a recon orphan. {@code filled_qty} is CUMULATIVE (same broker semantics
+   * as exits, #735): the delta vs {@code entryBookedQty} is booked, clamped so the total can never
+   * exceed the ordered {@code expectedQty} (a stale or duplicate report books 0). Gated on {@link
+   * #VERSION_ENTRY_FILL_GROWS_LOT} (the {@link #KIND_POSITION_ENTRY_INCREASED} audit is a new
+   * command). Realized P&L's entry basis is untouched — that is the parent's {@code EntryFilled}.
+   */
+  private void bookEntryGrowth(FillSignalPayload fillEvent) {
+    if (entryGrowthVersion < 1 || !positionConfirmed) {
+      return;
+    }
+    long delta = fillEvent.getFilledQty() - entryBookedQty;
+    long cap = expectedQty - entryBookedQty;
+    long growth = Math.min(delta, cap);
+    if (growth <= 0) {
+      return;
+    }
+    entryBookedQty += growth;
+    remainingQty += growth;
+    auditLog(
+        KIND_POSITION_ENTRY_INCREASED,
+        subject(
+            "entry_signal_id",
+            input.getEntrySignalId(),
+            "contract_symbol",
+            input.getContractSymbol(),
+            "qty_added",
+            growth,
+            "entry_qty_total",
+            entryBookedQty,
+            "remaining_qty_after",
+            remainingQty,
+            "broker_order_id",
+            fillEvent.getBrokerOrderId(),
+            "avg_fill_price",
+            fillEvent.getAvgFillPrice()));
+  }
+
   /**
    * F1 (VERSION_EXIT_CANCEL_TERMINAL_RECONCILE): translate an authoritative exec {@link
    * OrderIntentResult} terminal state into a {@link FillSignalPayload} the existing {@link
@@ -4491,6 +4613,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               fillEvent.getFilledQty(),
               remainingQty,
               signalId);
+      // #738 fix half two: the refused report is not garbage — it is the rest of OUR entry.
+      // Book the growth here at the same single funnel every fill path drains through, so an
+      // entry report that arrives mid-exit grows the lot instead of vanishing.
+      bookEntryGrowth(fillEvent);
       return 0L;
     }
     long filled = fillEvent.getFilledQty();

@@ -1181,6 +1181,120 @@ class PositionWorkflowImplTest {
   }
 
   /**
+   * Issue #738: a 50-lot BTO that fills 10-then-50(cumulative) must manage the WHOLE lot. The
+   * confirm books the first fill; the later entry-order report grows remainingQty by the delta and
+   * emits PositionEntryIncreased — and a subsequent full exit sells all 50, proving the growth is
+   * managed, not just displayed.
+   */
+  @Test
+  void issue738_secondEntryFill_growsTheManagedLot_andFullExitSellsAllOfIt() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-738-growth");
+    WorkflowStub.fromTyped(stub).start(futureInput(50));
+    confirmEntry(stub, 10L); // partial entry: 10 of 50
+
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() != 10L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty()).isEqualTo(10L);
+
+    // The entry order completes: CUMULATIVE 50 on the SAME broker order id.
+    stub.onFill(fill("brk-entry", 50L, new BigDecimal("2.35")));
+    deadline = System.currentTimeMillis() + 10_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() != 50L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty())
+        .as("the entry residual must be booked into the managed lot")
+        .isEqualTo(50L);
+    AuditEvent grown = captureKind("PositionEntryIncreased");
+    assertThat(asLong(grown.getSubject().get("qty_added"))).isEqualTo(40L);
+    assertThat(asLong(grown.getSubject().get("entry_qty_total"))).isEqualTo(50L);
+
+    // Duplicate cumulative entry report: books nothing.
+    stub.onFill(fill("brk-entry", 50L, new BigDecimal("2.35")));
+    Thread.sleep(500);
+    assertThat(stub.positionState().remainingQty()).isEqualTo(50L);
+
+    // Full exit sells the WHOLE grown lot.
+    stub.partialExit(partialExitRequest("sig-738-close", "pos-738-growth", 1.0));
+    waitForPlaceOrderCount(1);
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    assertThat(intent.getValue().getQty()).as("exit sized against the grown lot").isEqualTo(50L);
+    stub.onFill(fill("brk-exit", 50L, new BigDecimal("2.60")));
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-738-growth");
+  }
+
+  /**
+   * Issue #738 clamp: the broker cannot legitimately fill more than the ordered qty — a stale or
+   * corrupt cumulative above expectedQty books only up to the order size, never past it.
+   */
+  @Test
+  void issue738_entryGrowth_clampsAtTheOrderedQty() throws Exception {
+    PositionWorkflow stub = newStub("pos-738-clamp");
+    WorkflowStub.fromTyped(stub).start(futureInput(50));
+    confirmEntry(stub, 10L);
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() != 10L) {
+      Thread.sleep(50);
+    }
+
+    stub.onFill(fill("brk-entry", 60L, new BigDecimal("2.35"))); // impossible: > ordered 50
+    deadline = System.currentTimeMillis() + 10_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() != 50L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty())
+        .as("growth must clamp at the ordered qty, never book past it")
+        .isEqualTo(50L);
+  }
+
+  /**
+   * Issue #738: an entry-order report landing while an EXIT is resting must still grow the lot (via
+   * the funnel's refusal branch) and must NOT be consumed as the exit's fill.
+   */
+  @Test
+  void issue738_entryFillDuringRestingExit_growsLot_andExitStillNeedsItsOwnFill() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-738-midexit");
+    PositionWorkflowInput in = futureInput(50);
+    in.setExitFillTtlSecs(600L);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 10L);
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() != 10L) {
+      Thread.sleep(50);
+    }
+
+    // Rest a half exit (5 of 10), unfilled.
+    stub.partialExit(partialExitRequest("sig-738-half", "pos-738-midexit", 0.5));
+    waitForPlaceOrderCount(1);
+
+    // Entry completes mid-exit: cumulative 50 on the entry order.
+    stub.onFill(fill("brk-entry", 50L, new BigDecimal("2.35")));
+    deadline = System.currentTimeMillis() + 10_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() != 50L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty())
+        .as("entry growth books even while an exit is in flight")
+        .isEqualTo(50L);
+
+    // The resting exit then fills its own 5: remaining 45.
+    stub.onFill(fill("brk-exit", 5L, new BigDecimal("2.60")));
+    deadline = System.currentTimeMillis() + 10_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() != 45L) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty()).isEqualTo(45L);
+  }
+
+  /**
    * Issue #753: when one broker order books TWICE at different prices, the second booking must be
    * credited at the price its own contracts traded, not the order's running cumulative average.
    * Order fills 2 @ 2.50 (cum avg 2.50), then completes at cumulative 5 @ cum avg 2.32 — the
@@ -1401,9 +1515,12 @@ class PositionWorkflowImplTest {
     stub.onFill(fill("brk-entry", 50L, new BigDecimal("2.30")));
     env.sleep(Duration.ofSeconds(6));
 
+    // #738 full fix: the entry report GROWS the lot (10 -> 50) — it must never DECREMENT it, and
+    // it must never book as an exit. Pre-growth this pinned remainingQty == 10; the residual 40
+    // were unmanaged, which is the other half of the same bug.
     assertThat(stub.positionState().remainingQty())
-        .as("a fill of the ENTRY order must never decrement the position")
-        .isEqualTo(10L);
+        .as("a fill of the ENTRY order grows the lot and never decrements it")
+        .isEqualTo(50L);
     assertThat(
             captureAll("PartialExitFilled").stream()
                 .mapToLong(e -> asLong(e.getSubject().get("qty_filled")))
