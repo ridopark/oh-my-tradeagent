@@ -70,6 +70,19 @@ market-data:
     # AS market-data stays a single replica; a 2nd replica's duplicate connections would be 406'd.
     stock-data-ws-url: ${ALPACA_STOCK_DATA_WS_URL:}
     stock-feed: ${ALPACA_STOCK_FEED:}
+  # #776 P2: RTH-gated boot recovery of armed premium subscriptions (PremiumSubscriptionRecovery).
+  # Defaults live in the component's @Value declarations; listed here for discoverability only.
+  #   trail-recovery.max-attempts: 5            sweep attempts before giving up (alert fires)
+  #   trail-recovery.retry-backoff-seconds: 30  pause between failed/partial attempts
+  #   trail-recovery.max-subscriptions: 20      cap on subscriptions CREATED per sweep (poll-pool ceiling)
+  #   trail-recovery.sweep-deadline-seconds: 120 wall-clock bound on one sweep
+
+# #776 P2: best-effort Discord alert route for the boot recovery (gave-up / truncation / crash).
+# Blank/unset (dev/CI default) -> alerts are log-only. In k8s the env var comes from the
+# discord-alert-credentials Secret (infra/k8s/53-market-data.yaml), same as exec/orchestrator.
+alert:
+  discord:
+    webhook-url: ${ALERT_DISCORD_WEBHOOK_URL:}
 
 management:
   endpoints:
