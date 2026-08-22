@@ -66,3 +66,7 @@ class AccountKillSwitchWorkflowInput(BaseModel):
     """
     #669 carry: the trading day the once-per-day still-tripped page last fired (or was quiet-stamped on the trip day). Carried across continue-as-new so the roll day neither loses its page nor duplicates it; absent on a pre-#669 carry, where the first tripped tick quiet-stamps (one page skipped, once, ever).
     """
+    tripped_trading_day: date | None = None
+    """
+    #670 carry: the tradingDay at the moment of the trip — the calendar-space day the trip belongs to, compared against todayEt by the armability-gated deferred clear. Absent (pre-#670 carry) never auto-clears; the #669 daily still-tripped page keeps it visible.
+    """

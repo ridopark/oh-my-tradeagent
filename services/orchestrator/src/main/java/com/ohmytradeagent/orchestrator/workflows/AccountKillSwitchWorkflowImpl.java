@@ -265,6 +265,20 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       "account-killswitch-still-tripped-page-v1";
 
   /**
+   * Issue #670 hardening: a cap that cannot ARM must not be able to UN-HALT itself. At {@code v>=1}
+   * the rollover branch no longer clears the day-scoped {@code auto:account_daily_loss} trip;
+   * instead a STALE trip (the trip's ET date before today — derived from {@code trippedAt}, no new
+   * carry field) clears on the first MARKET-OPEN tick where the effective threshold actually
+   * resolves. An un-armable tick keeps the trip (protection holds) and returns {@code false} so it
+   * counts toward the cap-inactive page — both alarms, no unprotected open-of-day window (pre-#670:
+   * SOD-equity capture failing at the open left the tenant trading with a cleared, inert cap —
+   * prod-kipark ran that state all day 2026-07-21). Read appended LAST after the still-tripped gate
+   * (marker order preserved).
+   */
+  static final String VERSION_ACCOUNT_CLEAR_ONLY_WHEN_ARMABLE =
+      "account-killswitch-clear-only-when-armable-v1";
+
+  /**
    * Issue #669: the daily still-tripped page, actor-agnostic. Same kind name as the per-strategy
    * switch's — the alerter renders workflow identity from the row.
    */
@@ -397,6 +411,17 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private LocalDate lastStillTrippedPageDay;
 
   /**
+   * Issue #670: the {@code tradingDay} at the moment of the trip — the calendar-space "which day
+   * does this trip belong to" that the deferred armability-gated clear compares against {@code
+   * today}. Deliberately NOT derived from {@code trippedAt}'s wall instant: the calendar activity
+   * is the single source of trading-day truth (and tests mock it independently of the workflow
+   * clock). CARRIED across continue-as-new; null (a pre-#670 carried trip, or a trip landing before
+   * the first heartbeat set tradingDay) never auto-clears — fail-safe, the #669 daily page keeps it
+   * visible.
+   */
+  private LocalDate trippedTradingDay;
+
+  /**
    * PLAN-2026-07-22 (issue #591, risk C6): last-heartbeat open-book exposure cached into queryable
    * state so the reset banner (which reads {@code killswitchState()} BEFORE the operator resets the
    * switch — a Temporal {@code @QueryMethod} cannot dispatch activities to compute it live) can
@@ -506,7 +531,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
-    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 6L) {
+    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 7L) {
       throw new IllegalArgumentException(
           "AccountKillSwitchWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
@@ -531,6 +556,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     if (in.getLastStillTrippedPageDay() != null) {
       this.lastStillTrippedPageDay = in.getLastStillTrippedPageDay();
+    }
+    if (in.getTrippedTradingDay() != null) {
+      this.trippedTradingDay = in.getTrippedTradingDay();
     }
     if (in.getSodEquity() != null) {
       this.sodEquity = in.getSodEquity();
@@ -693,7 +721,8 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         consecutiveMtmUnavailableTicks,
         lastOpenPositions,
         lastOpenMtm,
-        lastStillTrippedPageDay);
+        lastStillTrippedPageDay,
+        trippedTradingDay);
   }
 
   /**
@@ -728,14 +757,17 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       int consecutiveMtmUnavailableTicks,
       Integer lastOpenPositions,
       BigDecimal lastOpenMtm,
-      LocalDate lastStillTrippedPageDay) {
+      LocalDate lastStillTrippedPageDay,
+      LocalDate trippedTradingDay) {
     AccountKillSwitchWorkflowInput carry = new AccountKillSwitchWorkflowInput();
     carry.setSchemaVersion(
-        lastStillTrippedPageDay != null
-            ? 6L
-            : ((lastOpenPositions != null || lastOpenMtm != null)
-                ? 5L
-                : (consecutiveMtmUnavailableTicks > 0 ? 4L : (sodEquity != null ? 3L : 2L))));
+        trippedTradingDay != null
+            ? 7L
+            : (lastStillTrippedPageDay != null
+                ? 6L
+                : ((lastOpenPositions != null || lastOpenMtm != null)
+                    ? 5L
+                    : (consecutiveMtmUnavailableTicks > 0 ? 4L : (sodEquity != null ? 3L : 2L)))));
     carry.setTenantId(tenantId);
     carry.setTripped(tripped);
     if (reason != null && !reason.isEmpty()) {
@@ -773,6 +805,11 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // non-null so a never-tripped carry stays the older byte-identical shape.
     if (lastStillTrippedPageDay != null) {
       carry.setLastStillTrippedPageDay(lastStillTrippedPageDay);
+    }
+    // #670: the trip's trading-day tag rides with the (carried) trip tuple. Non-null-only, same
+    // discipline as its siblings.
+    if (trippedTradingDay != null) {
+      carry.setTrippedTradingDay(trippedTradingDay);
     }
     return carry;
   }
@@ -826,6 +863,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // #669: appended after the rollover-clear read (recorded marker order preserved).
     int stillTrippedPageVersion =
         Workflow.getVersion(VERSION_ACCOUNT_STILL_TRIPPED_PAGE, Workflow.DEFAULT_VERSION, 1);
+    // #670: appended last (see the change-id javadoc).
+    int clearOnlyWhenArmable =
+        Workflow.getVersion(VERSION_ACCOUNT_CLEAR_ONLY_WHEN_ARMABLE, Workflow.DEFAULT_VERSION, 1);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -841,7 +881,10 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       // maybeRepageWhileHolding() and instead falls through to NORMAL evaluation on this same tick
       // — against the new day's SOD equity, which the sodEquity=null above forces it to re-capture.
       // At DEFAULT_VERSION none of it runs; see the change-id javadoc.
-      if (clearDailyLossOnRollover >= 1 && tripped && TRIP_ACTOR_ACCOUNT_DAILY_LOSS.equals(actor)) {
+      if (clearDailyLossOnRollover >= 1
+          && clearOnlyWhenArmable < 1
+          && tripped
+          && TRIP_ACTOR_ACCOUNT_DAILY_LOSS.equals(actor)) {
         // Snapshot the subject BEFORE the wipe (the fields it records are the ones being cleared).
         Map<String, Object> subj =
             subject(
@@ -855,6 +898,47 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         auditLog(KIND_KILL_SWITCH_CLEARED_ON_ROLLOVER, subj);
       }
       this.tradingDay = today;
+    }
+    // #670 (v>=1): the deferred, armability-gated clear. A stale day-scoped trip un-halts ONLY on
+    // a market-open tick whose effective threshold resolves; otherwise the trip HOLDS and the tick
+    // counts as cap-inactive (return false) so the RED page fires instead of a silent unprotected
+    // session. trippedTradingDay==null (legacy carry) never clears here — the daily
+    // still-tripped page (#669) keeps it visible for the operator. All new commands (isMarketOpen +
+    // config reads +
+    // the possible SOD-equity capture inside resolveEffectiveThreshold + the audit) are strictly
+    // behind the v>=1 gate.
+    if (clearOnlyWhenArmable >= 1
+        && tripped
+        && TRIP_ACTOR_ACCOUNT_DAILY_LOSS.equals(actor)
+        && trippedTradingDay != null
+        && trippedTradingDay.isBefore(today)
+        && calendar.isMarketOpen()) {
+      BigDecimal staleAbsolute = tenantConfig.accountDailyLossThreshold(input.getTenantId());
+      BigDecimal staleThreshold = staleAbsolute;
+      if (pctVersion >= 1) {
+        BigDecimal stalePct = tenantConfig.accountDailyLossPct(input.getTenantId());
+        // Mirror the normal evaluation path's bookkeeping: an un-armable tick on a CONFIGURED pct
+        // cap must count toward the cap-inactive page (recordInactivityOutcome gates on this).
+        this.pctConfiguredLastSeen = stalePct != null && stalePct.signum() > 0;
+        staleThreshold = resolveEffectiveThreshold(staleAbsolute, stalePct);
+      }
+      if (staleThreshold != null && staleThreshold.signum() > 0) {
+        Map<String, Object> subj =
+            subject(
+                "reason", reason,
+                "actor", actor,
+                "tripped_at", trippedAt,
+                "prior_trading_day", trippedTradingDay,
+                "trading_day", today,
+                "scope", "account",
+                "deferred_until_armable", true);
+        clearTrippedState();
+        auditLog(KIND_KILL_SWITCH_CLEARED_ON_ROLLOVER, subj);
+        // Fall through: tripped is now false — NORMAL evaluation runs on this same tick against
+        // the just-resolved threshold, exactly as the pre-#670 same-tick clear did.
+      } else {
+        return false; // cannot arm: keep the trip AND count cap-inactive. No unprotected window.
+      }
     }
     if (tripped) {
       // #669: once per trading day, first market-open tick, page that the cap is STILL tripped —
@@ -1571,6 +1655,8 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     this.reason = "";
     this.actor = "";
     this.trippedAt = null;
+    // #670: the trip's trading-day tag dies with the trip.
+    this.trippedTradingDay = null;
     // Phase 2b: clear the still-holding re-page window so a later re-trip starts a fresh cadence.
     this.stillHoldingRepageTicks = 0;
   }
@@ -1620,6 +1706,8 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     this.trippedAt = workflowNow();
     // #669: the trip itself pages loudly today — the daily still-tripped reminder starts TOMORROW.
     this.lastStillTrippedPageDay = tradingDay;
+    // #670: which trading day this trip belongs to (see the field javadoc).
+    this.trippedTradingDay = tradingDay;
 
     // Read the gate ONCE at a stable point before any command. The skip-flatten branch (and its
     // flatten=manual subject key) is strictly behind v>=1 AND an auto: reason; at DEFAULT_VERSION
