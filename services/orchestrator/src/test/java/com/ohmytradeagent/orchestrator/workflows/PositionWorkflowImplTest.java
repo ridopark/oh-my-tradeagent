@@ -1317,11 +1317,14 @@ class PositionWorkflowImplTest {
     env.sleep(Duration.ofMinutes(1));
     waitForPlaceOrderCount(1);
 
+    // The wait between fills polls the audit MOCK (pure client-side — no Temporal query, so no
+    // time-skip unlock): the positionState() polling this test originally used opened the
+    // #723-residual window where the server jumped the run to its execution timeout (hit twice
+    // 2026-08-22). Fully back-to-back sends are NOT safe either — a second fill landing inside
+    // the first's drain is wiped unprocessed by bookFlattenDelta's guardrail-#3 lastFillEvent
+    // clear (pre-existing narrow race, filed separately).
     stub.onFill(fill("brk-753", 2L, new BigDecimal("2.50")));
-    long deadline = System.currentTimeMillis() + 5_000;
-    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() == 5L) {
-      Thread.sleep(50);
-    }
+    waitForAuditKind("PartialExitFilled");
     stub.onFill(fill("brk-753", 5L, new BigDecimal("2.32")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
