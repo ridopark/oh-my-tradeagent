@@ -4,6 +4,8 @@ import static com.ohmytradeagent.orchestrator.alert.AlertSubjects.rawSubject;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.identity.YahooOptionLink;
+import java.time.Duration;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -13,6 +15,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
@@ -124,10 +127,16 @@ public class OrderFailureAlerter {
   // received" message. Shipped in the IMAGE default (NOT via ALERT_DISCORD_FAILURE_KINDS env, unset
   // on homelab and not applied by deploy.yml) — relying on config would silently reopen the exact
   // no-alert gap this closes. application.yml's alert.discord.failure-kinds default mirrors this.
-  private static final String DEFAULT_FAILURE_KINDS =
+  // Issue #779: FloorBreachAlerted (the -50%-of-entry floor-breach page from
+  // alert/floorbreach/FloorBreachAlertLoop) MUST page. Shipped in the IMAGE default (NOT via
+  // ALERT_DISCORD_FAILURE_KINDS env, unset on homelab and not applied by deploy.yml) — relying on
+  // config would silently disable the page. application.yml's failure-kinds default mirrors this.
+  // Visible for testing (issue #779): the allowlist tests assert on the REAL image default rather
+  // than a hand-copied literal, so a missing kind here goes red in the suite.
+  static final String DEFAULT_FAILURE_KINDS =
       "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
           + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,"
-          + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed";
+          + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -155,17 +164,29 @@ public class OrderFailureAlerter {
   private static final Set<String> FLATTEN_KINDS =
       Set.of("EodForceFlattenFailed", "FlattenRetryExhausted");
 
+  // Issue #779: the floor-breach ALERT kind (emitted by alert/floorbreach/FloorBreachAlertLoop).
+  // Its subject shape (contract_symbol / qty / entry_premium / current_bid / loss_pct / step /
+  // threshold / entry_at / dte) differs from both the BTO/STC order-failure shape and the flatten
+  // shape, so it renders via its own buildFloorBreachEmbed (the subject-shape-split precedent).
+  private static final String FLOOR_BREACH_KIND = "FloorBreachAlerted";
+
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
   private final Set<String> failureKinds;
 
+  /** Issue #779: the /live dashboard URL rendered into the floor-breach embed. Blank = omitted. */
+  private final String floorBreachLiveUrl;
+
+  @Autowired
   public OrderFailureAlerter(
       WebhookClient webhookClient,
       TenantWebhookResolver webhookResolver,
       @Value("${alert.discord.failure-kinds:" + DEFAULT_FAILURE_KINDS + "}") String failureKinds,
-      @Value("${alert.discord.signal-feed.enabled:false}") boolean signalFeedEnabled) {
+      @Value("${alert.discord.signal-feed.enabled:false}") boolean signalFeedEnabled,
+      @Value("${alert.floor-breach.live-url:}") String floorBreachLiveUrl) {
     this.webhookClient = webhookClient;
     this.webhookResolver = webhookResolver;
+    this.floorBreachLiveUrl = floorBreachLiveUrl == null ? "" : floorBreachLiveUrl;
     Set<String> parsed =
         Arrays.stream(failureKinds.split(","))
             .map(String::trim)
@@ -178,6 +199,15 @@ public class OrderFailureAlerter {
       parsed.add(SIGNAL_REJECTED_KIND);
     }
     this.failureKinds = Set.copyOf(parsed);
+  }
+
+  /** Back-compat 4-arg form (pre-#779 call sites and tests): no /live link in embeds. */
+  public OrderFailureAlerter(
+      WebhookClient webhookClient,
+      TenantWebhookResolver webhookResolver,
+      String failureKinds,
+      boolean signalFeedEnabled) {
+    this(webhookClient, webhookResolver, failureKinds, signalFeedEnabled, "");
   }
 
   /**
@@ -207,6 +237,8 @@ public class OrderFailureAlerter {
         embed = buildOrphanEmbed(event);
       } else if (FLATTEN_KINDS.contains(event.getKind())) {
         embed = buildFlattenEmbed(event);
+      } else if (FLOOR_BREACH_KIND.equals(event.getKind())) {
+        embed = buildFloorBreachEmbed(event);
       } else {
         embed = buildEmbed(event);
       }
@@ -327,6 +359,97 @@ public class OrderFailureAlerter {
     fields.add(new WebhookEmbed.Field("signal_id", subjectStr(subject, "entry_signal_id"), false));
 
     return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
+
+  /**
+   * Issue #779: render a floor-breach ALERT ({@code FloorBreachAlerted}, emitted by {@code
+   * alert/floorbreach/FloorBreachAlertLoop}). The subject shape is {@code contract_symbol} / {@code
+   * qty} / {@code entry_premium} / {@code current_bid} / {@code loss_pct} / {@code step} / {@code
+   * threshold} / {@code entry_at} / {@code dte}. The title is the operator-actionable summary
+   * ("FLOOR BREACH -NN% — qty occ (tenant)"); the body carries entry vs bid, position age
+   * (humanized from {@code entry_at}), DTE, and a bare /live link — NO action buttons, no
+   * pre-filled anything (issue req 7: this alert must never come with a one-click order). Every key
+   * is read NULL-SAFE: a throwing render is swallowed by {@link #onAuditEvent}'s catch and would
+   * silently LOSE the page.
+   */
+  private WebhookEmbed buildFloorBreachEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    String symbolRaw = rawSubject(subject, "contract_symbol");
+    String qty = subjectStr(subject, "qty");
+    String lossPct = formatLossPct(subject == null ? null : subject.get("loss_pct"));
+
+    String title =
+        ":rotating_light: FLOOR BREACH -"
+            + lossPct
+            + " — "
+            + qty
+            + " "
+            + orNa(symbolRaw)
+            + " ("
+            + orNa(event.getTenantId())
+            + ")";
+
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("symbol", YahooOptionLink.markdown(symbolRaw), false));
+    fields.add(new WebhookEmbed.Field("qty", qty, false));
+    fields.add(
+        new WebhookEmbed.Field("entry_premium", subjectStr(subject, "entry_premium"), false));
+    fields.add(new WebhookEmbed.Field("current_bid", subjectStr(subject, "current_bid"), false));
+    fields.add(new WebhookEmbed.Field("loss", "-" + lossPct, false));
+    fields.add(
+        new WebhookEmbed.Field(
+            "position_age",
+            humanizeAge(subject == null ? null : subject.get("entry_at"), event.getOccurredAt()),
+            false));
+    fields.add(new WebhookEmbed.Field("dte", subjectStr(subject, "dte"), false));
+    if (!floorBreachLiveUrl.isBlank()) {
+      // A bare link is the maximum — never a button, never a pre-filled order form.
+      fields.add(new WebhookEmbed.Field("live", floorBreachLiveUrl, false));
+    }
+
+    return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
+
+  /** {@code 0.60} → {@code "60%"}; unparseable/absent → {@code "?%"}. Never throws. */
+  private static String formatLossPct(Object lossPctRaw) {
+    if (lossPctRaw != null) {
+      try {
+        return new java.math.BigDecimal(String.valueOf(lossPctRaw))
+                .movePointRight(2)
+                .setScale(0, java.math.RoundingMode.HALF_UP)
+                .toPlainString()
+            + "%";
+      } catch (RuntimeException e) {
+        // fall through to the unknown marker
+      }
+    }
+    return "?%";
+  }
+
+  /** Humanized age from {@code entry_at} to the event time (e.g. {@code 5h 12m}). Never throws. */
+  private static String humanizeAge(Object entryAtRaw, OffsetDateTime occurredAt) {
+    if (entryAtRaw == null || occurredAt == null) {
+      return "n/a";
+    }
+    try {
+      OffsetDateTime entryAt = OffsetDateTime.parse(String.valueOf(entryAtRaw));
+      Duration age = Duration.between(entryAt, occurredAt);
+      if (age.isNegative()) {
+        return "n/a";
+      }
+      long days = age.toDays();
+      long hours = age.toHoursPart();
+      long minutes = age.toMinutesPart();
+      if (days > 0) {
+        return days + "d " + hours + "h";
+      }
+      if (hours > 0) {
+        return hours + "h " + minutes + "m";
+      }
+      return minutes + "m";
+    } catch (RuntimeException e) {
+      return "n/a";
+    }
   }
 
   /** Shared embed footer: low-signal trace (workflow_id, tenant/strategy) for both embed shapes. */

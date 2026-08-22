@@ -155,6 +155,11 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     description: "Plan-2B R-AB-1: minutes before the per-strategy expiry close (force_close_0dte_et / 15:30 ET default) at which PositionWorkflow arms a GUARANTEED bounded flatten timer for EVERY lot — multi-day included — so a position with no STC is sold via a bounded marketable LIMIT before expiry rather than ridden to $0 (the QQQ-725 ride-to-expiry class). Independent of eod_force_flatten (which only governs the blanket 15:55 ET sweep). Distinct from durationUntilExpiryCloseEt's 0DTE-only timer. Default ~30 in PositionWorkflowImpl when null. The flatten fires with reason=expiry_lead, routed through 2A's bounded reason-scoped flatten path.",
   },
   {
+    field: "floor_breach_alert_pct",
+    kind: "number",
+    description: "Issue #779: fraction of entry premium lost at which the operator floor-breach ALERT fires (breach when the live bid <= entry_premium x (1 - value)). Null/absent => default 0.50. This field triggers an ALERT ONLY (per-tenant Discord page via FloorBreachAlerted + the /live FLOOR BREACH badge) — it never places, modifies, or cancels an order. SAFE field class (operator-editable on /config). Read by the orchestrator FloorBreachThresholdResolver and the dashboard BFF via config->>'floor_breach_alert_pct'.",
+  },
+  {
     field: "force_close_0dte_et",
     kind: "string",
     control: "time",

@@ -708,6 +708,97 @@ class OrderFailureAlerterTest {
         .contains("EntryWorkflowFailed");
   }
 
+  // ---- Issue #779: floor-breach alert paging ----
+
+  @Test
+  void floorBreachAlertedShipsInImageDefaultAndApplicationYml_779() throws Exception {
+    // The page must ship via the IMAGE default (DEFAULT_FAILURE_KINDS + application.yml), NOT via
+    // ALERT_DISCORD_FAILURE_KINDS env (unset on homelab, not applied by deploy.yml) — the same
+    // no-alert-gap lesson as every kind before it. Reads the REAL constant + the packaged yml.
+    assertThat(OrderFailureAlerter.DEFAULT_FAILURE_KINDS).contains("FloorBreachAlerted");
+
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
+    assertThat(alerter.failureKinds()).contains("FloorBreachAlerted");
+
+    String appYml =
+        new String(
+            OrderFailureAlerterTest.class.getResourceAsStream("/application.yml").readAllBytes(),
+            java.nio.charset.StandardCharsets.UTF_8);
+    assertThat(appYml)
+        .as("application.yml alert.discord.failure-kinds default must mirror FloorBreachAlerted")
+        .contains("FloorBreachAlerted");
+  }
+
+  private static AuditEvent floorBreachEvent(Map<String, Object> subject) {
+    AuditEvent ev = event("FloorBreachAlerted", "wf-floor-1", subject);
+    ev.setActor("floor-breach-alerter");
+    return ev;
+  }
+
+  @Test
+  void floorBreachEmbed_isRed_withTenantSymbolQtyEntryBidLossAgeDteAndLiveLink() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(
+            webhook,
+            RESOLVER,
+            OrderFailureAlerter.DEFAULT_FAILURE_KINDS,
+            true,
+            "https://dash.example/live");
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("contract_symbol", "GOOGL 260918C00200000");
+    subject.put("qty", 3L);
+    subject.put("entry_premium", new java.math.BigDecimal("2.00"));
+    subject.put("current_bid", new java.math.BigDecimal("0.80"));
+    subject.put("loss_pct", new java.math.BigDecimal("0.60"));
+    subject.put("step", 60);
+    subject.put("threshold", new java.math.BigDecimal("0.50"));
+    // event() stamps occurred_at 2026-05-29T07:00:00Z → age from 02:00Z is 5h 0m.
+    subject.put("entry_at", "2026-05-29T02:00:00Z");
+    subject.put("dte", 120L);
+    AuditEvent event = floorBreachEvent(subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(15548997); // red
+    assertThat(embed.title())
+        .contains("FLOOR BREACH -60%")
+        .contains("3 GOOGL 260918C00200000")
+        .contains("(dev)"); // tenant from event()
+    assertThat(field(embed, "symbol")).contains("GOOGL").contains("finance.yahoo.com");
+    assertThat(field(embed, "qty")).isEqualTo("3");
+    assertThat(field(embed, "entry_premium")).isEqualTo("2.00");
+    assertThat(field(embed, "current_bid")).isEqualTo("0.80");
+    assertThat(field(embed, "loss")).isEqualTo("-60%");
+    assertThat(field(embed, "position_age")).isEqualTo("5h 0m");
+    assertThat(field(embed, "dte")).isEqualTo("120");
+    assertThat(field(embed, "live")).isEqualTo("https://dash.example/live");
+    assertThat(embed.footer()).contains("wf-floor-1");
+  }
+
+  @Test
+  void floorBreachEmbed_nullSubject_doesNotThrow_andStillPages() {
+    // A throwing render is swallowed by onAuditEvent's catch — which would LOSE the page. Every
+    // subject read must be null-safe.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(
+            webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true, "");
+
+    AuditEvent event = floorBreachEvent(null);
+    assertThatCode(() -> alerter.onAuditEvent(event)).doesNotThrowAnyException();
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.title()).contains("FLOOR BREACH");
+    assertThat(field(embed, "position_age")).isEqualTo("n/a");
+    // Blank live-url → no live field at all (never a broken link).
+    assertThat(embed.fields()).noneMatch(f -> "live".equals(f.name()));
+  }
+
   private static WebhookEmbed capture(WebhookClient webhook) {
     // Alerters now dispatch through postEmbedToUrl(resolvedUrl, embed).
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);

@@ -332,6 +332,10 @@ class StrategyConfig(BaseModel):
     """
     Per-strategy Discord alert webhook URL (order-execution/fill/broker-rejection alerts + daily digest). SAFE field class (plaintext, non-secret, operator-editable). Read by orchestrator TenantWebhookResolver via config->>'alert_webhook_url'; null/absent => falls back to the ALERT_DISCORD_WEBHOOK_URLS env map then the global default.
     """
+    floor_breach_alert_pct: Annotated[float | None, Field(gt=0.0, le=0.95)] = None
+    """
+    Issue #779: fraction of entry premium lost at which the operator floor-breach ALERT fires (breach when the live bid <= entry_premium x (1 - value)). Null/absent => default 0.50. This field triggers an ALERT ONLY (per-tenant Discord page via FloorBreachAlerted + the /live FLOOR BREACH badge) — it never places, modifies, or cancels an order. SAFE field class (operator-editable on /config). Read by the orchestrator FloorBreachThresholdResolver and the dashboard BFF via config->>'floor_breach_alert_pct'.
+    """
     stc_intent_enforce: bool | None = None
     """
     Opt-in gate for STC close-intent enforcement (PLAN-2026-07-25-stc-intent-classifier). When true, a later phase consults copytrade-signal-payload.close_intent to arbitrate full-vs-partial STC sizing, with the keyword matcher as fallback. Null/absent = disabled (behavior-neutral). Spec-only field in this PR; runtime wiring lands separately, gated per-tenant.
