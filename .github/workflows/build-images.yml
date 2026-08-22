@@ -4,8 +4,18 @@ name: Build and push images
 # under `ghcr.io/<owner>/oh-my-tradeagent-<service>` with `latest` and
 # the commit SHA. On pull_request, only builds (no push) so PRs validate
 # the Dockerfiles + .dockerignore without leaking unfinished tags.
+#
+# workflow_dispatch (#723): the manual re-fire for the flake trap. When the CI
+# leg flakes red on a main commit, this workflow fails at its ci-gate and
+# deploy.yml's workflow_run preflight skips — correct, but previously
+# UNRECOVERABLE without an empty commit: re-running CI alone re-fires nothing
+# downstream. Recovery is now: re-run the failed CI jobs until green, then
+# dispatch this workflow on main — the ci-gate re-reads the (now green) CI
+# conclusion for the tip SHA, the images build, and deploy.yml chains off the
+# completed run exactly as it does for a push.
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -47,7 +57,10 @@ jobs:
   # checks already gate the merge.
   ci-gate:
     name: Wait for CI
-    if: github.event_name == 'push'
+    # Also gates a manual dispatch (#723): the dispatch exists to re-fire the
+    # chain AFTER a CI re-run went green, and the gate is what verifies that —
+    # a dispatch on a still-red SHA fails here exactly like a push would.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -59,6 +72,13 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # A dispatch from any ref but main would push branch code as :latest —
+          # which imagePullPolicy: Always turns into an uncontrolled estate-wide
+          # deploy on the next pod/node restart. Refuse.
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "❌ workflow_dispatch is only valid on main (got ${GITHUB_REF})."
+            exit 1
+          fi
           echo "Gating image build on a green CI run for ${SHA}"
           # CI fires on every push to main (no path filter), so a run is
           # guaranteed to appear — poll until it concludes. 100 * 15s = 25 min.
@@ -144,7 +164,8 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: github.event_name == 'push'
+        # push OR the #723 manual re-fire — both push to GHCR; only PR builds don't.
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -169,7 +190,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           build-args: |
             SERVICE_MODULE=${{ matrix.module }}
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
           tags: |
             ${{ steps.refs.outputs.tag_latest }}
             ${{ steps.refs.outputs.tag_sha }}
