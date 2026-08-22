@@ -43,9 +43,9 @@ import org.springframework.stereotype.Component;
 
 /**
  * Long-running Alpaca trade-updates WebSocket listener. Connects to the configured stream URL,
- * sends the {@code auth} + {@code listen} handshake frames, parses incoming JSON, filters to {@code
- * fill} / {@code partial_fill}, dedupes on {@code (broker_order_id, filled_qty)}, and hands each
- * surviving event to a {@link FillDispatcher}.
+ * sends the {@code auth} frame, waits for the {@code authorized} reply, then sends {@code listen};
+ * parses incoming JSON, filters to {@code fill} / {@code partial_fill}, dedupes on {@code
+ * (broker_order_id, filled_qty)}, and hands each surviving event to a {@link FillDispatcher}.
  *
  * <p><b>Frames arrive on BOTH channels.</b> Alpaca sends trade_updates as <b>binary</b> frames
  * carrying JSON, so {@link Listener#onBinary} is load-bearing, not defensive — see #693, where its
@@ -79,6 +79,17 @@ public class AlpacaTradeUpdatesStream {
 
   private static final Logger log = LoggerFactory.getLogger(AlpacaTradeUpdatesStream.class);
   private static final Duration HANDSHAKE_TIMEOUT = Duration.ofSeconds(5);
+
+  /**
+   * #751: upper bound on the wait for the {@code authorization} reply before the socket is aborted
+   * and the reconnect loop retries. 10s is ~7x the measured worst case (2026-08-19, live: all three
+   * tenants authorized within ~1.3s of socket open) so a healthy-but-slow handshake is not spun
+   * into a reconnect loop, while staying far below the recycle cadence (minutes) and the 30s
+   * FillPoller fallback — a broker that never answers costs one bounded reconnect cycle, not a
+   * mute-but-open socket for the life of the pod.
+   */
+  private static final Duration AUTH_REPLY_TIMEOUT = Duration.ofSeconds(10);
+
   private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(5);
   private static final Duration SHUTDOWN_TIMEOUT = Duration.ofSeconds(2);
   private static final String PROVIDER = "alpaca";
@@ -603,7 +614,10 @@ public class AlpacaTradeUpdatesStream {
     void connectAndRun() throws InterruptedException {
       Endpoint endpoint = endpointSupplier.get();
       CountDownLatch closed = new CountDownLatch(1);
-      Listener listener = new Listener(closed, this);
+      // #751: per-connection like `closed`, deliberately — a late authorization frame surfacing
+      // from an aborted previous socket must never satisfy THIS connection's gate.
+      CompletableFuture<String> authReply = new CompletableFuture<>();
+      Listener listener = new Listener(closed, this, authReply);
       WebSocket ws;
       try {
         ws =
@@ -619,6 +633,33 @@ public class AlpacaTradeUpdatesStream {
       // up after a reconnect is not silenced by a warning emitted on the previous socket.
       unhandledStreamsWarned.clear();
       sendAuth(ws, endpoint);
+      // #751: the subscribe is GATED on an OBSERVED authorized reply. An unauthorized socket stays
+      // OPEN and honors no subscriptions (how the June header-auth bug #471 hid), and a `listen`
+      // processed before the auth is applied is dropped the same silent way — so `listen` is never
+      // sent until the broker has SAID authorized, and every failure branch aborts the socket so
+      // runForever reconnects rather than leaving a mute-but-open socket parked for the pod's life.
+      String authStatus;
+      try {
+        authStatus = authReply.get(AUTH_REPLY_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+      } catch (TimeoutException e) {
+        throw abortHandshake(
+            ws, "no authorization reply within " + AUTH_REPLY_TIMEOUT.toMillis() + "ms");
+      } catch (ExecutionException e) {
+        // authReply is only ever completed with a value, but get() declares this; fail closed.
+        throw abortHandshake(ws, "authorization wait failed: " + e.getCause());
+      }
+      if (authStatus == null) {
+        // onClose/onError complete with null: the socket died mid-handshake. abort() on a dead
+        // socket is harmless; the point is reconnecting NOW instead of stalling out the full wait.
+        throw abortHandshake(ws, "socket closed before the authorization reply");
+      }
+      if (!"authorized".equals(authStatus)) {
+        throw abortHandshake(
+            ws,
+            "authorization reply status="
+                + authStatus
+                + "; refusing to subscribe on an unauthorized socket");
+      }
       sendListen(ws);
       long recycleAfterMs = props.recycleAfterMs();
       if (recycleAfterMs > 0L) {
@@ -687,6 +728,23 @@ public class AlpacaTradeUpdatesStream {
     }
 
     /**
+     * #751 failure path: tears down a socket whose auth handshake did not end in {@code
+     * authorized}. Abort FIRST, then clear the handle in a finally — the same ordering invariant as
+     * the recycle path above: until the abort has been attempted the socket may still be live, so a
+     * concurrent {@link #stop()} that reads the handle can find and close it; the finally clears it
+     * on both paths so a throwing {@code abort()} cannot strand a stale handle. Returns the
+     * exception for the caller to throw, which {@link #runForever} turns into backoff + reconnect.
+     */
+    private RuntimeException abortHandshake(WebSocket ws, String reason) {
+      try {
+        ws.abort();
+      } finally {
+        currentSocket.compareAndSet(ws, null);
+      }
+      return new RuntimeException("trade-updates handshake failed: " + reason);
+    }
+
+    /**
      * #715 instrumentation delegates. The Listener is a nested type holding only an {@code owner}
      * reference, so it reaches the shared metrics the same way it already reaches {@link
      * #handleFrame} — through the runner that owns the tenant identity.
@@ -745,7 +803,7 @@ public class AlpacaTradeUpdatesStream {
     // frames entirely — permanently mute, strictly worse than the bug this logging exists to find.
     // Hence the `path()`-only idiom below: path() yields MissingNode rather than null, so no
     // traversal here can NPE. Never reach for `root.get(...).path(...)` in this method.
-    private void handleFrame(String frame) {
+    private void handleFrame(String frame, CompletableFuture<String> authReply) {
       JsonNode root;
       try {
         root = mapper.readTree(frame);
@@ -786,6 +844,11 @@ public class AlpacaTradeUpdatesStream {
       if ("authorization".equals(streamName)) {
         JsonNode authData = root.path("data");
         String status = authData.path("status").asText("");
+        // #751: unblock the handshake gate FIRST — connectAndRun is parked on this future, and
+        // nothing (not even logging) may stand between the observed reply and the gate. complete()
+        // cannot throw, and is a no-op on any authorization frame after the first, so a
+        // mid-session re-auth message cannot re-arm an already-decided handshake.
+        authReply.complete(status);
         // An unauthorized socket stays OPEN and simply honors no subscriptions — indistinguishable
         // from a healthy quiet one, which is how the June header-auth bug (#471) hid. Anything that
         // is not explicitly "authorized" warns, including a reply with no status at all: an
@@ -810,7 +873,8 @@ public class AlpacaTradeUpdatesStream {
         } else {
           log.warn(
               "fill-listener[{}] authorization reply NOT authorized status={} action={} message={}"
-                  + " — the socket will stay open and deliver nothing",
+                  + " — an unauthorized socket delivers nothing; the handshake gate (#751) aborts"
+                  + " it if this was the auth reply",
               tenant,
               status,
               authData.path("action").asText(""),
@@ -958,6 +1022,15 @@ public class AlpacaTradeUpdatesStream {
   private final class Listener implements WebSocket.Listener {
     private final CountDownLatch closed;
     private final TenantRunner owner;
+
+    /**
+     * #751: this connection's authorization-reply gate. Completed with the observed {@code status}
+     * by {@code handleFrame}, or with {@code null} from {@link #onClose}/{@link #onError} so a
+     * socket that dies mid-handshake unparks {@code connectAndRun} immediately instead of stalling
+     * out the full {@link #AUTH_REPLY_TIMEOUT}.
+     */
+    private final CompletableFuture<String> authReply;
+
     private final StringBuilder partialFrame = new StringBuilder();
 
     /**
@@ -975,9 +1048,10 @@ public class AlpacaTradeUpdatesStream {
      */
     private final ByteArrayOutputStream partialBinaryFrame = new ByteArrayOutputStream();
 
-    Listener(CountDownLatch closed, TenantRunner owner) {
+    Listener(CountDownLatch closed, TenantRunner owner, CompletableFuture<String> authReply) {
       this.closed = closed;
       this.owner = owner;
+      this.authReply = authReply;
     }
 
     @Override
@@ -1004,7 +1078,7 @@ public class AlpacaTradeUpdatesStream {
         String frame = partialFrame.toString();
         partialFrame.setLength(0);
         owner.recordPartialBytes(0L);
-        owner.handleFrame(frame);
+        owner.handleFrame(frame, authReply);
       }
       webSocket.request(1);
       return null;
@@ -1032,7 +1106,7 @@ public class AlpacaTradeUpdatesStream {
         String frame = partialBinaryFrame.toString(StandardCharsets.UTF_8);
         partialBinaryFrame.reset();
         owner.recordPartialBytes(0L);
-        owner.handleFrame(frame);
+        owner.handleFrame(frame, authReply);
       }
       webSocket.request(1);
       return null;
@@ -1042,6 +1116,8 @@ public class AlpacaTradeUpdatesStream {
     public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
       log.info("fill-listener[{}] ws closed code={} reason={}", owner.tenant, statusCode, reason);
       closed.countDown();
+      // #751: no-op after the reply was seen; before it, unparks the handshake gate immediately.
+      authReply.complete(null);
       return CompletableFuture.completedFuture(null);
     }
 
@@ -1049,6 +1125,7 @@ public class AlpacaTradeUpdatesStream {
     public void onError(WebSocket webSocket, Throwable error) {
       log.warn("fill-listener[{}] ws error: {}", owner.tenant, error.toString());
       closed.countDown();
+      authReply.complete(null);
     }
   }
 }

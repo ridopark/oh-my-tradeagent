@@ -39,8 +39,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Drives {@link AlpacaTradeUpdatesStream} against an in-process Java-WebSocket server. Pins the
- * Alpaca trade-updates handshake shape (auth → listen → events) and the listener's filter / dedup /
- * reconnect contracts.
+ * Alpaca trade-updates handshake shape (auth → authorized reply → listen → events) and the
+ * listener's filter / dedup / reconnect contracts.
  */
 class AlpacaTradeUpdatesStreamTest {
 
@@ -104,6 +104,122 @@ class AlpacaTradeUpdatesStreamTest {
     assertThat(listen).isNotNull();
     assertThat(listen).contains("\"action\":\"listen\"");
     assertThat(listen).contains("\"trade_updates\"");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // #751 — the listen frame must be gated on an OBSERVED authorized reply. An unauthorized socket
+  // stays OPEN and honors no subscriptions (how the June header-auth bug #471 hid), and a `listen`
+  // processed before the auth is applied is dropped the same silent way. The #715 recycle
+  // re-handshakes every live socket every interval, so this race re-rolls ~4x/socket/hour forever.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Happy path, with the ordering pinned: withhold the authorized reply and prove NO listen goes
+   * out, then release it and prove the handshake completes end-to-end through subscription
+   * confirmation. The 800ms hold is what falsifies an ungated handshake — pre-#751 code sends
+   * listen back-to-back with auth and reddens the isNull() assertion immediately.
+   */
+  @Test
+  void listenIsSentOnlyAfterTheAuthorizedReply() throws Exception {
+    server.authReplyMode = RecordingWsServer.AuthReplyMode.SILENT;
+    stream.start();
+
+    String auth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(auth).isNotNull().contains("\"action\":\"auth\"");
+    assertThat(server.frames.poll(800L, TimeUnit.MILLISECONDS))
+        .as("listen was sent before the broker said authorized — the #751 race")
+        .isNull();
+
+    server.broadcastBinary(
+        "{\"stream\":\"authorization\",\"data\":"
+            + "{\"status\":\"authorized\",\"action\":\"authenticate\"}}");
+    String listen = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(listen).isNotNull().contains("\"action\":\"listen\"").contains("trade_updates");
+
+    // The gated path still reaches a confirmable subscription.
+    server.broadcastBinary("{\"stream\":\"listening\",\"data\":{\"streams\":[\"trade_updates\"]}}");
+    long deadline = System.currentTimeMillis() + AWAIT_MS;
+    while (registry.counter("fill_listener.subscription_confirmed").count() < 1.0
+        && System.currentTimeMillis() < deadline) {
+      Thread.sleep(20L);
+    }
+    assertThat(registry.counter("fill_listener.subscription_confirmed").count()).isEqualTo(1.0);
+  }
+
+  /**
+   * Failure branch 1: the broker NEVER answers the auth frame. The socket must be aborted within
+   * the bound and the runner must reconnect — never a mute-but-open socket parked for the pod's
+   * life (the #715 symptom by another route), and never a listen frame on an unconfirmed socket.
+   */
+  @Test
+  void authReplyNeverArrivingAbortsTheSocketWithinTheBoundAndNeverSendsListen() throws Exception {
+    server.authReplyMode = RecordingWsServer.AuthReplyMode.SILENT;
+    stream.start();
+
+    String firstAuth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(firstAuth).isNotNull().contains("\"action\":\"auth\"");
+
+    // A SECOND auth frame proves the first socket was torn down and reconnected. The 15s ceiling
+    // = the 10s gate + reconnect backoff + margin; without the guard the runner parks in
+    // closed.await() forever and this poll times out.
+    String reconnectAuth = server.frames.poll(15_000L, TimeUnit.MILLISECONDS);
+    assertThat(reconnectAuth)
+        .as("socket was not aborted within the bound — mute-but-open, the state #751 forbids")
+        .isNotNull()
+        .contains("\"action\":\"auth\"");
+    assertThat(registry.counter("fill_listener.reconnects").count()).isGreaterThanOrEqualTo(1.0);
+
+    // listen must NEVER have been sent on an unconfirmed socket.
+    List<String> all = new ArrayList<>(List.of(firstAuth, reconnectAuth));
+    all.addAll(drainFrames(300));
+    assertThat(all).noneMatch(f -> f.contains("\"action\":\"listen\""));
+
+    // Aborted means GONE: exactly the one reconnected client remains. Without the abort, the
+    // timed-out socket stays open on the server alongside the new one.
+    awaitLiveClients(1);
+  }
+
+  /**
+   * Failure branch 2: the broker answers {@code unauthorized}. Same contract — abort so the runner
+   * reconnects (credentials are re-resolved on every connect, so a rotation heals it), and never
+   * send listen after a failed auth.
+   */
+  @Test
+  void unauthorizedReplyAbortsTheSocketAndNeverSendsListen() throws Exception {
+    server.authReplyMode = RecordingWsServer.AuthReplyMode.UNAUTHORIZED;
+    stream.start();
+
+    String firstAuth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(firstAuth).isNotNull().contains("\"action\":\"auth\"");
+    // The reply arrives instantly, so the reconnect's auth retry is one backoff away.
+    String reconnectAuth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
+    assertThat(reconnectAuth)
+        .as("an unauthorized socket must be aborted and retried, not left open and mute")
+        .isNotNull()
+        .contains("\"action\":\"auth\"");
+    assertThat(registry.counter("fill_listener.reconnects").count()).isGreaterThanOrEqualTo(1.0);
+
+    // Watch several full refuse/retry cycles: every frame is an auth, listen NEVER goes out.
+    List<String> all = new ArrayList<>(List.of(firstAuth, reconnectAuth));
+    all.addAll(drainFrames(500));
+    assertThat(all).noneMatch(f -> f.contains("\"action\":\"listen\""));
+
+    // Each refused socket must be gone before the next attempt; a missing abort accumulates
+    // open-and-mute sockets on the server, one per retry.
+    assertThat(server.liveClients())
+        .as("refused sockets are piling up open on the server — the abort is missing")
+        .isLessThanOrEqualTo(1);
+  }
+
+  /** Polls until the server sees exactly {@code expected} live sockets; asserts at the deadline. */
+  private void awaitLiveClients(int expected) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + AWAIT_MS;
+    while (server.liveClients() != expected && System.currentTimeMillis() < deadline) {
+      Thread.sleep(25L);
+    }
+    assertThat(server.liveClients())
+        .as("aborted handshake sockets must be GONE, not left mute-but-open")
+        .isEqualTo(expected);
   }
 
   @Test
@@ -768,7 +884,9 @@ class AlpacaTradeUpdatesStreamTest {
           "{\"stream\":\"authorization\",\"data\":"
               + "{\"status\":\"unauthorized\",\"action\":\"authenticate\"}}");
 
-      ILoggingEvent event = awaitLog(logs, "authorization reply");
+      // #751: the fixture's auto-authorized handshake logs an INFO "authorization reply" line
+      // first, so await the WARN branch's distinctive text.
+      ILoggingEvent event = awaitLog(logs, "NOT authorized");
       assertThat(event).isNotNull();
       assertThat(event.getLevel())
           .as("a refused handshake must not be indistinguishable from a successful one")
@@ -791,7 +909,9 @@ class AlpacaTradeUpdatesStreamTest {
       server.broadcastBinary(
           "{\"stream\":\"authorization\",\"data\":{\"message\":\"access key verification failed\"}}");
 
-      ILoggingEvent event = awaitLog(logs, "authorization reply");
+      // #751: await the WARN's own payload, not "authorization reply" — the fixture's
+      // auto-authorized handshake already logged an INFO line matching that.
+      ILoggingEvent event = awaitLog(logs, "access key verification failed");
       assertThat(event).isNotNull();
       assertThat(event.getLevel()).isEqualTo(Level.WARN);
       assertThat(event.getFormattedMessage()).contains("access key verification failed");
@@ -822,7 +942,9 @@ class AlpacaTradeUpdatesStreamTest {
           "{\"stream\":\"authorization\",\"data\":"
               + "{\"status\":\"unauthorized\",\"action\":\"listen\"}}");
 
-      ILoggingEvent event = awaitLog(logs, "authorization reply");
+      // #751: await action=listen itself — the fixture's auto-authorized handshake already
+      // logged an INFO "authorization reply" line that would match first.
+      ILoggingEvent event = awaitLog(logs, "action=listen");
       assertThat(event).isNotNull();
       assertThat(event.getLevel()).isEqualTo(Level.WARN);
       assertThat(event.getFormattedMessage())
@@ -1436,10 +1558,28 @@ class AlpacaTradeUpdatesStreamTest {
     }
   }
 
-  /** Java-WebSocket server fixture that records inbound frames and broadcasts test events. */
+  /**
+   * Java-WebSocket server fixture that records inbound frames, broadcasts test events, and — #751 —
+   * ANSWERS the auth frame. The pre-#751 fixture recorded frames but never replied, which is
+   * exactly how four documented invariants could invert while 46/46 stayed green (#736 review): a
+   * guard whose triggering input the fixture cannot produce is decoration. Every mode here is a
+   * reply the stream must react to (authorized → listen; unauthorized/silent → abort), so each
+   * asserted behavior is reachable and falsifiable.
+   */
   private static class RecordingWsServer extends WebSocketServer {
+    /** How this server answers an inbound {@code {"action":"auth",...}} frame. */
+    enum AuthReplyMode {
+      /** Reply {@code status=authorized} — the default, so the handshake completes. */
+      AUTHORIZED,
+      /** Reply {@code status=unauthorized} — bad credentials. */
+      UNAUTHORIZED,
+      /** Never reply — the mute broker; the stream must time out and abort. */
+      SILENT
+    }
+
     final BlockingQueue<String> frames = new LinkedBlockingQueue<>();
     final List<WebSocket> clients = new ArrayList<>();
+    volatile AuthReplyMode authReplyMode = AuthReplyMode.AUTHORIZED;
     private final CountDownLatch started = new CountDownLatch(1);
 
     RecordingWsServer(int port) {
@@ -1463,6 +1603,25 @@ class AlpacaTradeUpdatesStreamTest {
     @Override
     public void onMessage(WebSocket conn, String message) {
       frames.add(message);
+      // #751: answer the auth frame ON ITS OWN CONNECTION (never broadcast — per-tenant tests run
+      // several sockets against one server). Replies go out as BINARY, the channel Alpaca actually
+      // uses (#693). The listen frame is deliberately NOT auto-acked: tests that assert on the
+      // `listening` branch send that reply themselves.
+      if (message.contains("\"action\":\"auth\"")) {
+        String reply =
+            switch (authReplyMode) {
+              case AUTHORIZED ->
+                  "{\"stream\":\"authorization\",\"data\":"
+                      + "{\"status\":\"authorized\",\"action\":\"authenticate\"}}";
+              case UNAUTHORIZED ->
+                  "{\"stream\":\"authorization\",\"data\":"
+                      + "{\"status\":\"unauthorized\",\"action\":\"authenticate\"}}";
+              case SILENT -> null;
+            };
+        if (reply != null) {
+          conn.send(ByteBuffer.wrap(reply.getBytes(StandardCharsets.UTF_8)));
+        }
+      }
     }
 
     @Override
