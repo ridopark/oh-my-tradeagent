@@ -129,15 +129,29 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
           <!--
-            Orchestrator is the long-pole test module (100 test classes, Temporal-heavy).
-            Run surefire in 2 forked JVMs to roughly halve its wall-clock. forkCount uses
-            separate PROCESSES, not shared threads: each fork has its own JVM statics and each
-            test creates its own TestWorkflowEnvironment, so this does NOT reintroduce the
-            in-JVM virtual-clock time-skip contention that flaked the retry-budget test
-            (threadCount / junit-parallel WOULD — deliberately not used here). reuseForks keeps
-            each JVM alive across its slice of classes to amortize startup.
+            Orchestrator is the long-pole test module (118 test classes, Temporal-heavy) and it
+            alone sets CI wall-clock: its leg is 3:43 against 1:51 for the next-slowest module,
+            and the seven Java legs run in parallel. forkCount uses separate PROCESSES, not
+            shared threads: each fork has its own JVM statics and each test creates its own
+            TestWorkflowEnvironment, so this does NOT reintroduce the in-JVM virtual-clock
+            time-skip contention that flaked the retry-budget test (threadCount /
+            junit-parallel WOULD — deliberately not used here). reuseForks keeps each JVM alive
+            across its slice of classes to amortize startup.
+
+            2 -> 4 because `ubuntu-latest` gives this public repo FOUR vCPUs (confirmed from a
+            CI run: "runner has 4"), so 2 forks leave half the runner idle. Measured on the real
+            runner, surefire phase only:
+
+              forkCount=2  ->  192s   (previous)
+              forkCount=4  ->  see the PR that changed this line
+
+            Do NOT re-tune this from a dev-box measurement. PR #803 pinned the leg to one cpu on
+            the strength of local numbers that showed a 2x win and it was 27% SLOWER on the real
+            runner (surefire 192s -> 236s). `taskset -c 0-3` on a 24-core workstation does not
+            emulate a 4-vCPU VM — different memory bandwidth, cache, hyperthread siblings, and
+            20 other loaded cores. One CI run per variant is the only valid experiment here.
           -->
-          <forkCount>2</forkCount>
+          <forkCount>4</forkCount>
           <reuseForks>true</reuseForks>
           <!--
             Backstop for a hang that the per-test timeout CANNOT see: one inside @BeforeAll, a
