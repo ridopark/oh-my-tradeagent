@@ -46,8 +46,12 @@ const LIVE_WS_URL = "wss://api.alpaca.markets/stream";
 // to it and fail the R-6.5 account-uniqueness check; the operator supplies the account per-tenant via
 // the keys step), alert_webhook_url (prod_real's private Discord webhook — a live secret that must
 // never live in source), and tenant_id/strategy_id (the form injects these). The live variant already
-// carries the activate-live gate's required invariants (daily_loss_threshold>0,
-// notional_cap_pct_of_capital_base set, capital_source=account_cash) so later activation passes.
+// carries the activate-live gate's required invariants (notional_cap_pct_of_capital_base set,
+// capital_source=account_cash) so later activation passes: the per-strategy daily_loss_threshold is
+// deliberately ABSENT — the create path arms the tenant account cap in-txn (#660), which satisfies
+// the activation loss-gate invariant, and a stale per-strategy threshold is exactly what halted
+// prod-kipark on 2026-08-19 (#767/#748). trail_giveback_pct is set so de-risk-on-followup-cue can
+// arm its chandelier trail if later enabled (#768 — every live tenant was missing it).
 const copytradeConfig = (brokerTarget: string) =>
   JSON.stringify(
     {
@@ -71,8 +75,8 @@ const copytradeConfig = (brokerTarget: string) =>
       exit_reprice_steps: 3,
       force_close_0dte_et: "14:45",
       reset_cooldown_secs: 60,
-      daily_loss_threshold: 2500.0,
       default_stc_fraction: 0.3,
+      trail_giveback_pct: 0.3,
       flatten_lead_minutes: 30,
       pending_ttl_live_secs: 30,
       pending_ttl_paper_secs: 90,
