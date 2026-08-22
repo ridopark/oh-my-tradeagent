@@ -1288,6 +1288,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       this.lastTickAt = OffsetDateTime.parse(in.getCarriedLastTickAt());
     }
     this.entryBrokerOrderId = in.getCarriedEntryBrokerOrderId();
+    // #807 breakeven floor: the basis (fill truth) and the operator-arm exemption MUST survive the
+    // roll. An absent basis falls back to entry_premium inside entryBasis() (quote, not fill —
+    // degraded but floored); a LOST operator flag would subject an operator-armed underwater
+    // trail to the floor and stop it out at basis on the next tick.
+    this.entryFillPrice = in.getCarriedEntryFillPrice();
+    this.trailArmedByOperator = Boolean.TRUE.equals(in.getCarriedTrailArmedByOperator());
     // #738: entry-growth counters. BOTH must be present to keep growing across the roll; a
     // pre-#738 carried input lacks them, and growth arithmetic against an unknown base could
     // double-book — so absent means DISABLED (Long.MAX_VALUE blocks every delta), which is
@@ -1416,6 +1422,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       next.setCarriedLastTickAt(lastTickAt.toString());
     }
     next.setCarriedEntryBrokerOrderId(entryBrokerOrderId);
+    // #807: floor basis + operator-arm exemption (see the @WorkflowInit hydration comment).
+    if (entryFillPrice != null && entryFillPrice.signum() > 0) {
+      next.setCarriedEntryFillPrice(entryFillPrice);
+    }
+    next.setCarriedTrailArmedByOperator(trailArmedByOperator);
     // #738: entry-growth counters, carried as a PAIR (the hydrator requires both). Skipped when
     // growth is disabled on this run (MAX_VALUE) so the next run stays disabled too.
     if (entryBookedQty != Long.MAX_VALUE) {
