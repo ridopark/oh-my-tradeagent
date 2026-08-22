@@ -383,6 +383,33 @@ class PremiumSubscriptionRecoveryTest {
   //      sweep, processing is oldest-first
   // ---------------------------------------------------------------------------
 
+  /**
+   * THE #784-review bug (retry/cap interaction): with MORE armed trails than the per-sweep cap,
+   * attempt 2 must recover the REMAINDER — not re-spend the whole cap on dedup-reuses of the
+   * positions attempt 1 already subscribed, truncate the same tail again, and give up after
+   * maxAttempts with the newest trails permanently orphaned. Already-recovered workflows must be
+   * carried across attempts within one recovery run and consume ZERO cap on later sweeps.
+   */
+  @org.junit.jupiter.api.Test
+  void overCapBook_isFullyRecoveredAcrossRetries_notGivenUpOn() {
+    List<String> listed = new ArrayList<>();
+    for (int i = 25; i >= 1; i--) {
+      listed.add(armedWf(i));
+    }
+    for (int i = 1; i <= 25; i++) {
+      wireArmed(armedWf(i), occFor(i), true, false);
+    }
+    wireList(listed.toArray(String[]::new));
+
+    PremiumSubscriptionRecovery r = recovery(); // cap 20, maxAttempts 5
+    r.runLoop();
+
+    // ALL 25 end up subscribed, and the run completes instead of giving up.
+    assertThat(provider.listeners.keySet()).hasSize(25);
+    assertThat(allLogs()).contains("premium-recovery-complete");
+    assertThat(allLogs()).doesNotContain("premium-recovery-gave-up");
+  }
+
   @Test
   void capCountsSubscriptionsNotExaminations_oldestFirst() {
     // Visibility returns NEWEST-first: wf-25 (newest) … wf-01 (oldest). Interleave 5 unarmed

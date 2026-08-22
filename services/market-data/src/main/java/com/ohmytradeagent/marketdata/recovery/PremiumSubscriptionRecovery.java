@@ -81,6 +81,16 @@ public class PremiumSubscriptionRecovery {
   private final int maxAttempts;
   private final Duration retryBackoff;
   private final int maxSubscriptions;
+
+  /**
+   * Workflows already re-subscribed by THIS recovery run (#784 review: retry/cap interaction).
+   * Without it, a book larger than the per-sweep cap can never finish: on every retry the sweep
+   * re-subscribes the same oldest positions (each a Phase-1 dedup REUSE that still counts against
+   * the cap), truncates the same tail, and gives up after maxAttempts with the newest trails
+   * permanently orphaned. Carried across attempts, cleared per run; a skip here costs ZERO cap.
+   */
+  private final java.util.Set<String> recoveredThisRun = new java.util.HashSet<>();
+
   private final Duration sweepDeadline;
 
   private final MeterRegistry registry;
@@ -171,6 +181,7 @@ public class PremiumSubscriptionRecovery {
   void runLoop() {
     try {
       int attempts = 0;
+      recoveredThisRun.clear();
       while (true) {
         ZonedDateTime nowEt = ZonedDateTime.ofInstant(clock.instant(), MarketHours.ET);
         if (!MarketHours.isRegularTradingHours(nowEt)) {
@@ -240,7 +251,7 @@ public class PremiumSubscriptionRecovery {
     Tally tally = new Tally();
     int processed = 0;
     for (String workflowId : workflowIds) {
-      if (tally.recovered >= maxSubscriptions) {
+      if (tally.newSubs >= maxSubscriptions) {
         truncate(tally, "subscription cap " + maxSubscriptions, workflowIds.size() - processed);
         break;
       }
@@ -270,6 +281,12 @@ public class PremiumSubscriptionRecovery {
    * continues to the next workflow.
    */
   private void recoverOne(String workflowId, Tally tally) {
+    if (recoveredThisRun.contains(workflowId)) {
+      // Recovered by an earlier attempt of THIS run: still armed, still listed, but its
+      // subscription is live. Skipping costs zero cap, which is what lets a >cap book converge.
+      tally.recovered++;
+      return;
+    }
     try {
       WorkflowStub stub = workflowClient.newUntypedWorkflowStub(workflowId);
       // One query covers BOTH trail kinds: `trailingArmed` (chandelier/operator) AND `armed` (the
@@ -308,6 +325,8 @@ public class PremiumSubscriptionRecovery {
       SubscribePremiumResult result = subscribeActivity.subscribePremium(request);
       if (result != null && result.getStatus() == SubscribePremiumResult.Status.SUBSCRIBED) {
         tally.recovered++;
+        tally.newSubs++;
+        recoveredThisRun.add(workflowId);
       } else {
         // FAILED is the one case the tally exists to catch — never skipped_unarmed.
         tally.failed++;
@@ -353,6 +372,12 @@ public class PremiumSubscriptionRecovery {
   /** Mutable per-sweep counters; published as an immutable {@link Sweep} at end of attempt. */
   private static final class Tally {
     int recovered;
+
+    /**
+     * NEW provider subscriptions this sweep — the cap gates on THIS, never on carried-over skips.
+     */
+    int newSubs;
+
     int failed;
     int skippedUnarmed;
     int skippedClosed;
