@@ -77,6 +77,10 @@ class TradeContextRepositorySqlTest {
     ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
     verify(dsl).execute(sql.capture(), any(Object[].class));
     assertThat(sql.getValue()).contains("INSERT INTO trade_context");
+    // The live 2026-08-22 binding bug: jOOQ sends OffsetDateTime as a STRING param, so entry_at
+    // MUST carry an explicit ::timestamptz cast or Postgres rejects every entry row (and the
+    // fail-soft wrapper hides it). This token is the only guard a non-Postgres test can hold.
+    assertThat(sql.getValue()).contains("?::timestamptz");
     assertThat(sql.getValue()).contains("ON CONFLICT (signal_id, tenant_id) DO NOTHING");
   }
 
