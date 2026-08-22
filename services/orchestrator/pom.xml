@@ -129,15 +129,33 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
           <!--
-            Orchestrator is the long-pole test module (100 test classes, Temporal-heavy).
-            Run surefire in 2 forked JVMs to roughly halve its wall-clock. forkCount uses
-            separate PROCESSES, not shared threads: each fork has its own JVM statics and each
-            test creates its own TestWorkflowEnvironment, so this does NOT reintroduce the
-            in-JVM virtual-clock time-skip contention that flaked the retry-budget test
-            (threadCount / junit-parallel WOULD — deliberately not used here). reuseForks keeps
-            each JVM alive across its slice of classes to amortize startup.
+            Orchestrator is the long-pole test module (118 test classes, Temporal-heavy) and it
+            gets FASTER with LESS parallelism, not more. TestWorkflowEnvironment's virtual-clock
+            time-skipping only engages while the JVM is quiescent; give the suite real parallelism
+            and something is always runnable, so workflow timers stop being skipped and degrade
+            into REAL-time waits. Measured on the full suite (1420 tests, 2026-08-22):
+
+              1 core,  forkCount=1  ->  84s / 98s / 99s  (3 runs, 0 failures)   <- this config
+              2 cores, forkCount=1  -> 122s
+              2 cores, forkCount=2  -> 117s
+              4 cores, forkCount=2  -> 116s, 149s                               <- the old config
+              4 cores, forkCount=4  -> 151s
+              4 cores, forkCount=6  -> 148s
+
+            forkCount 2 -> 4 -> 6 is FLAT (149/151/148s): raising it is not a speed fix, it has
+            been measured. The controlled comparison is the forkCount=1 pair — one JVM, 1 core 84s
+            vs 2 cores 122s. So: ONE fork, and the CI workflow pins this module's `mvn verify` to
+            a single cpu with `taskset -c 0` — forkCount=1 alone is only half the fix, because one
+            JVM with 4 cores is 122s, no better than the old config.
+
+            A surefire <jvm> wrapper was tried first so the pinning would travel with the pom;
+            surefire re-derives the JDK path from <jvm> and does not honour a wrapper's affinity
+            call (the forked JVM came back with the full cpu set). Keep the pinning in ci.yml.
+
+            The same degradation is what stretches PositionWorkflowImplTest's wait helpers from
+            <0.5s to >25s on a loaded runner, which is where its CI flakes come from.
           -->
-          <forkCount>2</forkCount>
+          <forkCount>1</forkCount>
           <reuseForks>true</reuseForks>
           <!--
             Backstop for a hang that the per-test timeout CANNOT see: one inside @BeforeAll, a

@@ -207,12 +207,44 @@ jobs:
           mvn -B -ntp -pl ${{ matrix.module }} -am install
           -DskipTests -Dspotless.check.skip=true
 
+      # Orchestrator ONLY: pin to a single cpu. Its suite is Temporal TestWorkflowEnvironment-heavy
+      # and gets FASTER with less parallelism — the test env's virtual-clock time-skipping only
+      # engages while the JVM is quiescent, so real parallelism turns skipped workflow timers into
+      # REAL-time waits. Measured on the full suite (1420 tests, 2026-08-22):
+      #   1 core/forkCount=1  84s 98s 99s   |   2 cores/fc=1 122s   |   4 cores/fc=2 116s-149s
+      #   4 cores/fc=4 151s   |   4 cores/fc=6 148s   (fc 2->4->6 is FLAT — raising it is not a fix)
+      # The controlled pair is one JVM at 1 core (84s) vs 2 cores (122s). Pairs with forkCount=1 in
+      # services/orchestrator/pom.xml; BOTH halves are needed. The same degradation is what stretches
+      # PositionWorkflowImplTest's waits past their 50s helper deadline and flakes CI.
+      #
+      # CAVEAT, deliberately recorded: this pins the WHOLE `mvn verify`, so the failsafe
+      # Testcontainers phase (10 Postgres + 1 Redis) is pinned too, and that half is UNMEASURED.
+      # Those numbers above are surefire-only, taken on a 24-core dev box where the ITs skip
+      # (they need RUN_DB_ITS=true + Docker, and a skip is not a pass). Reasoning — not
+      # measurement — says the impact is small: taskset constrains the maven JVM, not the Docker
+      # containers, which are separate processes, and the IT JVM is mostly blocked on container
+      # I/O. If the IT phase regresses on the first run, split this into a pinned `test` step and
+      # an unpinned `verify` step rather than reverting the pin.
+      # A silent no-op here would be invisible: if the taskset prefix below ever stops
+      # evaluating (expression typo, taskset missing from the image), CI stays GREEN and merely
+      # runs slow again, so nothing would ever tell us the pin was lost. nproc honours cpu
+      # affinity, so this fails loudly the moment the pin is not in effect.
+      - name: Assert single-cpu pin is in effect (orchestrator only)
+        if: matrix.module == 'services/orchestrator'
+        run: |
+          command -v taskset >/dev/null || { echo "::error::taskset not present on this runner"; exit 1; }
+          n=$(taskset -c 0 nproc)
+          echo "cpus visible under 'taskset -c 0': $n (runner has $(nproc))"
+          [ "$n" = "1" ] || { echo "::error::taskset -c 0 did not pin (nproc=$n)"; exit 1; }
+
       - name: mvn verify (${{ matrix.module }})
         env:
           # Enables ContractActivitiesImplIT (Testcontainers Postgres). The IT is gated so a
           # local `mvn verify` on a Docker-Desktop-on-WSL2 workstation can skip it cleanly.
           RUN_DB_ITS: "true"
-        run: mvn -B -ntp -pl ${{ matrix.module }} verify
+        run: >-
+          ${{ matrix.module == 'services/orchestrator' && 'taskset -c 0' || '' }}
+          mvn -B -ntp -pl ${{ matrix.module }} verify
 
       # The per-module `verify` above only spotless-checks its own module. The root aggregator
       # pom.xml is in no leg's reactor (step 1 skips spotless via -am; step 2 drops -am), so its
