@@ -47,3 +47,7 @@ class KillSwitchWorkflowInput(BaseModel):
     """
     Carry-forward trading day from a prior run. Absent on fresh bootstrap; next heartbeat refreshes via calendar.todayEt().
     """
+    last_still_tripped_page_day: date | None = None
+    """
+    #669 carry: the trading day the once-per-day still-tripped page last fired (or was quiet-stamped on the trip day). Carried across continue-as-new so the roll day neither loses its page nor duplicates it; absent on a pre-#669 carry, where the first tripped tick quiet-stamps (one page skipped, once, ever).
+    """

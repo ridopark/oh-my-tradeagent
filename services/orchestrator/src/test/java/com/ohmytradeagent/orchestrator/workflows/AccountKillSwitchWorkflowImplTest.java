@@ -900,9 +900,9 @@ class AccountKillSwitchWorkflowImplTest {
   // The widened schema guard REJECTS a newer-than-build carry (schema_version 6) at @WorkflowInit —
   // an old build must never silently accept a payload it cannot interpret. Uses a dedicated env
   // whose worker FAILS the workflow (not just the task) on the guard's IllegalArgumentException so
-  // the rejection surfaces via getResult; v5 acceptance is proven by the restore/carry tests above.
+  // the rejection surfaces via getResult; v6 acceptance is proven by the restore/carry tests above.
   @Test
-  void schemaGuard_rejectsSchemaVersionAboveFive() {
+  void schemaGuard_rejectsSchemaVersionAboveSix() {
     TestWorkflowEnvironment guardEnv = TestWorkflowEnvironment.newInstance();
     try {
       Worker w = guardEnv.newWorker(CORE_QUEUE);
@@ -914,7 +914,8 @@ class AccountKillSwitchWorkflowImplTest {
       guardEnv.start();
 
       AccountKillSwitchWorkflowInput tooNew = new AccountKillSwitchWorkflowInput();
-      tooNew.setSchemaVersion(6L);
+      // #669 widened the ceiling to 6 (last_still_tripped_page_day carry); 7 is the too-new probe.
+      tooNew.setSchemaVersion(7L);
       tooNew.setTenantId("dev");
       AccountKillSwitchWorkflow stub =
           guardEnv
@@ -1502,6 +1503,14 @@ class AccountKillSwitchWorkflowImplTest {
   void carryForwardInput_bumpsSchemaVersionOnlyWhenNewerFieldCarried() {
     LocalDate day = LocalDate.of(2026, 5, 14);
 
+    // v6 (#669): the still-tripped page day is carried — a persistently-tripped cap rolls via
+    // continue-as-new roughly daily, and losing this field loses that day's page.
+    AccountKillSwitchWorkflowInput withPageDay =
+        AccountKillSwitchWorkflowImpl.carryForwardInput(
+            "dev", true, "manual:ops", "operator:x", null, null, day, null, 0, null, null, day);
+    assertThat(withPageDay.getSchemaVersion()).isEqualTo(6L);
+    assertThat(withPageDay.getLastStillTrippedPageDay()).isEqualTo(day);
+
     // v5: the reset-banner open-exposure cache is carried (with the sod_equity/debounce it
     // implies).
     AccountKillSwitchWorkflowInput withExposure =
@@ -1516,7 +1525,8 @@ class AccountKillSwitchWorkflowImplTest {
             new BigDecimal("5000"),
             1,
             2,
-            new BigDecimal("-1500"));
+            new BigDecimal("-1500"),
+            null);
     assertThat(withExposure.getSchemaVersion()).isEqualTo(5L);
     assertThat(withExposure.getLastOpenPositions()).isEqualTo(2L);
     assertThat(withExposure.getLastOpenMtm()).isEqualByComparingTo(new BigDecimal("-1500"));
@@ -1525,7 +1535,7 @@ class AccountKillSwitchWorkflowImplTest {
     // is exposure state -> stamp v5, MTM absent.
     AccountKillSwitchWorkflowInput exposureCountOnly =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", false, "", "", null, null, day, null, 0, 0, null);
+            "dev", false, "", "", null, null, day, null, 0, 0, null, null);
     assertThat(exposureCountOnly.getSchemaVersion()).isEqualTo(5L);
     assertThat(exposureCountOnly.getLastOpenPositions()).isEqualTo(0L);
     assertThat(exposureCountOnly.getLastOpenMtm()).isNull();
@@ -1533,7 +1543,7 @@ class AccountKillSwitchWorkflowImplTest {
     // v4: a nonzero mid-debounce count is carried (with the sod_equity it implies); no exposure.
     AccountKillSwitchWorkflowInput withDebounce =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", false, "", "", null, null, day, new BigDecimal("5000"), 1, null, null);
+            "dev", false, "", "", null, null, day, new BigDecimal("5000"), 1, null, null, null);
     assertThat(withDebounce.getSchemaVersion()).isEqualTo(4L);
     assertThat(withDebounce.getConsecutiveMtmUnavailableTicks()).isEqualTo(1L);
     assertThat(withDebounce.getSodEquity()).isEqualByComparingTo(new BigDecimal("5000"));
@@ -1543,7 +1553,7 @@ class AccountKillSwitchWorkflowImplTest {
     // v3: sod_equity captured but no active debounce (count==0) -> ticks absent, NOT a v4.
     AccountKillSwitchWorkflowInput withEquity =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", false, "", "", null, null, day, new BigDecimal("5000"), 0, null, null);
+            "dev", false, "", "", null, null, day, new BigDecimal("5000"), 0, null, null, null);
     assertThat(withEquity.getSchemaVersion()).isEqualTo(3L);
     assertThat(withEquity.getSodEquity()).isEqualByComparingTo(new BigDecimal("5000"));
     assertThat(withEquity.getConsecutiveMtmUnavailableTicks()).isNull();
@@ -1551,7 +1561,7 @@ class AccountKillSwitchWorkflowImplTest {
     // v2: no newer field carried -> byte-identical legacy shape.
     AccountKillSwitchWorkflowInput noEquity =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", false, "", "", null, null, day, null, 0, null, null);
+            "dev", false, "", "", null, null, day, null, 0, null, null, null);
     assertThat(noEquity.getSchemaVersion()).isEqualTo(2L);
     assertThat(noEquity.getSodEquity()).isNull();
     assertThat(noEquity.getConsecutiveMtmUnavailableTicks()).isNull();

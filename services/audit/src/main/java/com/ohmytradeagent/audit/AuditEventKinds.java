@@ -207,12 +207,6 @@ public final class AuditEventKinds {
           "DeriskArmSkipped",
           "DeriskNoOpenPosition",
           "DeriskSkippedDisabled",
-          // #669: once-per-day still-tripped page (KillSwitchWorkflowImpl AND
-          // AccountKillSwitchWorkflowImpl — same kind, workflow identity distinguishes).
-          "KillSwitchStillTripped",
-          // #668: an operator trip took ownership of an auto-tripped switch (actor/reason
-          // overwritten, no second cascade) so the rollover-clear can never re-arm it.
-          "KillSwitchTripReattributed",
           // PositionWorkflowImpl
           "PositionEntered",
           // #738: a post-confirm broker report on the entry order grew the managed lot.
@@ -374,6 +368,12 @@ public final class AuditEventKinds {
           // so this kind does not reach Discord. Observability-only — in ALL_KINDS only, not in any
           // *_KINDS lifecycle group.
           "KillSwitchClearedOnRollover",
+          // #669: once-per-day still-tripped page (KillSwitchWorkflowImpl AND
+          // AccountKillSwitchWorkflowImpl — same kind, workflow identity distinguishes).
+          "KillSwitchStillTripped",
+          // #668: an operator trip took ownership of an auto-tripped switch (actor/reason
+          // overwritten, no second cascade) so the rollover-clear can never re-arm it.
+          "KillSwitchTripReattributed",
           // AccountKillSwitchWorkflowImpl cap-inactive observability (PR #504 follow-up): the
           // account pct cap is configured but failed to ARM for N consecutive heartbeats (the
           // portfolio safety net is OFF) / has re-armed. Both page via AccountKillSwitchCapAlerter.

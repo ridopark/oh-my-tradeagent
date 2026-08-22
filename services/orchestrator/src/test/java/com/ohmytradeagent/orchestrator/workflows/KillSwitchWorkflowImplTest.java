@@ -884,6 +884,38 @@ class KillSwitchWorkflowImplTest {
     assertThat(countKind("KillSwitchClearedOnRollover")).isEqualTo(0L);
   }
 
+  /**
+   * Review blocker on this PR: a persistently-tripped switch rolls via continue-as-new roughly
+   * daily, and an UNCARRIED page-day resets to null on the fresh run — which the tripped branch
+   * quiet-stamps as "trip day", silently LOSING that day's page. Force a roll between the trip and
+   * the next trading day and assert the page still fires.
+   */
+  @Test
+  void stillTrippedPage_survivesContinueAsNew() throws Exception {
+    when(calendar.isMarketOpen()).thenReturn(true);
+    // Watermark so low every tick (or two) rolls the run — the fresh run's FIRST tick then lands
+    // on day 2, which is exactly the uncarried-field loss case: null -> quiet-stamp day 2, page
+    // gone. With the carry, day 2 pages normally.
+    KillSwitchWorkflowImpl.historyLengthWatermark = 10L;
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-still-can");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("live_deactivation:one_click", "operator:ridopark"));
+
+    // Trip-day ticks: rolls happen; no page is due today.
+    for (int i = 0; i < 3; i++) {
+      env.sleep(Duration.ofSeconds(65));
+    }
+    assertThat(countKind("KillSwitchStillTripped")).isEqualTo(0L);
+
+    // Next trading day, post-roll: the carried page-day means this morning's page still fires.
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(65));
+    env.sleep(Duration.ofSeconds(65));
+    waitForAuditKind("KillSwitchStillTripped");
+    assertThat(countKind("KillSwitchStillTripped")).isEqualTo(1L);
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+  }
+
   /** Idempotency preserved: a repeat OPERATOR trip on an operator-tripped switch still rejects. */
   @Test
   void operatorTrip_overOperatorTrip_staysRejected() {

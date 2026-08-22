@@ -241,10 +241,10 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   private LocalDate tradingDay;
 
   /**
-   * Issue #669: the trading day the still-tripped page last fired, bounding it to once per day.
-   * Deliberately NOT carried across this workflow's continue-as-new: the worst case after a roll is
-   * ONE duplicate page that day, and a duplicate page on a halted tenant is noise worth having
-   * rather than carry-plumbing worth maintaining.
+   * Issue #669: the trading day the still-tripped page last fired (or was quiet-stamped on the trip
+   * day), bounding the page to once per day. CARRIED across continue-as-new — review-caught: an
+   * uncarried field resets to null, the tripped branch reads null as "trip day" and quiet-stamps,
+   * and the roll day would LOSE its page entirely (never duplicate it).
    */
   private LocalDate lastStillTrippedPageDay;
 
@@ -265,7 +265,7 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   // auditEvent() with input == null.
   @WorkflowInit
   public KillSwitchWorkflowImpl(KillSwitchWorkflowInput in) {
-    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 2L) {
+    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 3L) {
       throw new IllegalArgumentException(
           "KillSwitchWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
@@ -289,6 +289,9 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     }
     if (in.getTradingDay() != null) {
       this.tradingDay = in.getTradingDay();
+    }
+    if (in.getLastStillTrippedPageDay() != null) {
+      this.lastStillTrippedPageDay = in.getLastStillTrippedPageDay();
     }
   }
 
@@ -331,7 +334,9 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
    */
   private KillSwitchWorkflowInput buildCarryForwardInput() {
     KillSwitchWorkflowInput carry = new KillSwitchWorkflowInput();
-    carry.setSchemaVersion(2L);
+    // #669: v3 ONLY when the page-day is carried, so a never-tripped carry stays the v2 shape an
+    // old pod mid-rollout accepts (same discipline as AccountKillSwitchWorkflowImpl's builder).
+    carry.setSchemaVersion(lastStillTrippedPageDay != null ? 3L : 2L);
     carry.setTenantId(input.getTenantId());
     carry.setStrategyId(input.getStrategyId());
     carry.setTripped(tripped);
@@ -344,6 +349,10 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     carry.setTrippedAt(trippedAt);
     carry.setCoolingDownUntil(coolingDownUntil);
     carry.setTradingDay(tradingDay);
+    // #669 review fix: carry the page day — without it the roll day LOSES its page (the null
+    // quiet-stamp reads a fresh run as "trip day"), the exact inverse of the duplicate the
+    // original javadoc guessed at.
+    carry.setLastStillTrippedPageDay(lastStillTrippedPageDay);
     return carry;
   }
 

@@ -506,7 +506,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
-    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 5L) {
+    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 6L) {
       throw new IllegalArgumentException(
           "AccountKillSwitchWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
@@ -528,6 +528,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     if (in.getTradingDay() != null) {
       this.tradingDay = in.getTradingDay();
+    }
+    if (in.getLastStillTrippedPageDay() != null) {
+      this.lastStillTrippedPageDay = in.getLastStillTrippedPageDay();
     }
     if (in.getSodEquity() != null) {
       this.sodEquity = in.getSodEquity();
@@ -689,7 +692,8 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         sodEquity,
         consecutiveMtmUnavailableTicks,
         lastOpenPositions,
-        lastOpenMtm);
+        lastOpenMtm,
+        lastStillTrippedPageDay);
   }
 
   /**
@@ -723,12 +727,15 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       BigDecimal sodEquity,
       int consecutiveMtmUnavailableTicks,
       Integer lastOpenPositions,
-      BigDecimal lastOpenMtm) {
+      BigDecimal lastOpenMtm,
+      LocalDate lastStillTrippedPageDay) {
     AccountKillSwitchWorkflowInput carry = new AccountKillSwitchWorkflowInput();
     carry.setSchemaVersion(
-        (lastOpenPositions != null || lastOpenMtm != null)
-            ? 5L
-            : (consecutiveMtmUnavailableTicks > 0 ? 4L : (sodEquity != null ? 3L : 2L)));
+        lastStillTrippedPageDay != null
+            ? 6L
+            : ((lastOpenPositions != null || lastOpenMtm != null)
+                ? 5L
+                : (consecutiveMtmUnavailableTicks > 0 ? 4L : (sodEquity != null ? 3L : 2L))));
     carry.setTenantId(tenantId);
     carry.setTripped(tripped);
     if (reason != null && !reason.isEmpty()) {
@@ -759,6 +766,13 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     if (lastOpenMtm != null) {
       carry.setLastOpenMtm(lastOpenMtm);
+    }
+    // #669 review fix: carry the still-tripped page day — a persistently-tripped cap rolls via
+    // continue-as-new roughly daily, and an uncarried field quiet-stamps on the fresh run, LOSING
+    // that day's page (the exact long-lived-trip scenario the page exists for). Set ONLY when
+    // non-null so a never-tripped carry stays the older byte-identical shape.
+    if (lastStillTrippedPageDay != null) {
+      carry.setLastStillTrippedPageDay(lastStillTrippedPageDay);
     }
     return carry;
   }
