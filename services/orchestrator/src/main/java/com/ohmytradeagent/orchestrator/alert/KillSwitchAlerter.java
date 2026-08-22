@@ -43,8 +43,16 @@ public class KillSwitchAlerter {
 
   private static final Logger log = LoggerFactory.getLogger(KillSwitchAlerter.class);
 
-  /** The single audit kind this alerter pages on. */
+  /** The trip page this alerter has always owned. */
   private static final String KILL_SWITCH_TRIPPED_KIND = "KillSwitchTripped";
+
+  /**
+   * Issue #669: the once-per-trading-day "STILL tripped" morning page from BOTH kill-switch
+   * workflows (per-strategy and account cap — same kind; workflow identity rides the row). AMBER,
+   * not red: nothing new went wrong, but a halted tenant must never be indistinguishable from a
+   * healthy idle one (staging_paper sat halted nine silent days).
+   */
+  static final String KILL_SWITCH_STILL_TRIPPED_KIND = "KillSwitchStillTripped";
 
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
@@ -73,13 +81,16 @@ public class KillSwitchAlerter {
    */
   public void onAuditEvent(AuditEvent event) {
     try {
-      if (event == null
-          || event.getKind() == null
-          || !KILL_SWITCH_TRIPPED_KIND.equals(event.getKind())) {
+      if (event == null || event.getKind() == null) {
+        return;
+      }
+      boolean stillTripped = KILL_SWITCH_STILL_TRIPPED_KIND.equals(event.getKind());
+      if (!stillTripped && !KILL_SWITCH_TRIPPED_KIND.equals(event.getKind())) {
         return;
       }
       String url = webhookResolver.resolve(event.getTenantId(), event.getStrategyId());
-      webhookClient.postEmbedToUrl(url, buildEmbed(event));
+      webhookClient.postEmbedToUrl(
+          url, stillTripped ? buildStillTrippedEmbed(event) : buildEmbed(event));
     } catch (RuntimeException e) {
       // Defensive: a notification must never break the audit write / trading path.
       log.warn("kill-switch-alert build/dispatch failed kind={}", safeKind(event), e);
@@ -94,6 +105,30 @@ public class KillSwitchAlerter {
    * because a render that throws is swallowed by {@link #onAuditEvent}'s catch — which would
    * SILENTLY LOSE the page that exists to surface a halted real-money strategy.
    */
+  /**
+   * Issue #669: the AMBER morning still-tripped page. Headline carries the ORIGINAL actor/reason —
+   * that is what the operator must decide about (clear it, reset it, or accept another halted day).
+   * Every key null-safe, same swallowed-render discipline as {@link #buildEmbed}.
+   */
+  private WebhookEmbed buildStillTrippedEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    java.util.List<WebhookEmbed.Field> fields = new java.util.ArrayList<>();
+    fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
+    fields.add(new WebhookEmbed.Field("strategy_id", orNa(event.getStrategyId()), false));
+    fields.add(new WebhookEmbed.Field("actor", subjectStr(subject, "actor"), false));
+    fields.add(new WebhookEmbed.Field("reason", subjectStr(subject, "reason"), false));
+    fields.add(new WebhookEmbed.Field("tripped_at", subjectStr(subject, "tripped_at"), false));
+    fields.add(new WebhookEmbed.Field("trading_day", subjectStr(subject, "trading_day"), false));
+    return new WebhookEmbed(
+        ":large_orange_circle: Kill switch STILL tripped — no entries until cleared",
+        "Daily reminder: this switch has been tripped since tripped_at and is refusing every"
+            + " entry. Nothing new went wrong — but a halted tenant must never look like a healthy"
+            + " idle one.",
+        AlertColors.YELLOW,
+        "workflow_id: " + orNa(event.getWorkflowId()),
+        fields);
+  }
+
   private WebhookEmbed buildEmbed(AuditEvent event) {
     Map<String, Object> subject = event.getSubject();
     String reason = subjectStr(subject, "reason");

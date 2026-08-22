@@ -254,6 +254,23 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       "account-killswitch-clear-daily-loss-trip-on-rollover-v1";
 
   /**
+   * Issue #669: once-per-day still-tripped page, mirroring the per-strategy switch. The existing
+   * re-page (Phase 2b) fires only while HOLDING — a tripped-and-flat cap said nothing, forever.
+   * Read appended LAST after the rollover-clear gate (marker order preserved); at {@code
+   * DEFAULT_VERSION} the tripped branch is byte-identical (both new commands strictly behind
+   * v&gt;=1). NOT reusing {@code VERSION_ACCOUNT_TRIP_REPAGE_WHILE_HOLDING}: in-flight v1 histories
+   * of that marker exist and must not gain commands.
+   */
+  static final String VERSION_ACCOUNT_STILL_TRIPPED_PAGE =
+      "account-killswitch-still-tripped-page-v1";
+
+  /**
+   * Issue #669: the daily still-tripped page, actor-agnostic. Same kind name as the per-strategy
+   * switch's — the alerter renders workflow identity from the row.
+   */
+  private static final String KIND_KILL_SWITCH_STILL_TRIPPED = "KillSwitchStillTripped";
+
+  /**
    * Phase 2b (risk C1): emitted (and Discord-paged via {@code AccountKillSwitchCapAlerter}) on the
    * bounded periodic re-page while the account cap stays tripped AND market-open AND holding open
    * positions. Carries the open-position count, current MTM (when priceable), and
@@ -372,6 +389,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private OffsetDateTime trippedAt;
   private OffsetDateTime coolingDownUntil;
   private LocalDate tradingDay;
+
+  /**
+   * Issue #669: the trading day the still-tripped page last fired (once-per-day bound). NOT carried
+   * across continue-as-new — worst case is one duplicate page the day of a roll.
+   */
+  private LocalDate lastStillTrippedPageDay;
 
   /**
    * PLAN-2026-07-22 (issue #591, risk C6): last-heartbeat open-book exposure cached into queryable
@@ -786,6 +809,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     int clearDailyLossOnRollover =
         Workflow.getVersion(
             VERSION_ACCOUNT_CLEAR_DAILY_LOSS_ON_ROLLOVER, Workflow.DEFAULT_VERSION, 1);
+    // #669: appended after the rollover-clear read (recorded marker order preserved).
+    int stillTrippedPageVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_STILL_TRIPPED_PAGE, Workflow.DEFAULT_VERSION, 1);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -817,6 +843,28 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       this.tradingDay = today;
     }
     if (tripped) {
+      // #669: once per trading day, first market-open tick, page that the cap is STILL tripped —
+      // the holding re-page below covers only a non-empty book, and a tripped-and-flat cap
+      // previously said nothing forever. Runs BEFORE the holding re-page so the morning page is
+      // unconditional on the book; the two are complementary (daily morning marker vs bounded
+      // intraday re-page while holding).
+      if (stillTrippedPageVersion >= 1 && lastStillTrippedPageDay == null) {
+        // Trip day (or a fresh run adopted already-tripped): the trip itself paged — the daily
+        // reminder starts on the NEXT day. Quiet stamp, no page. (doTrip also stamps, but a trip
+        // landing before the first heartbeat sees tradingDay still null.)
+        lastStillTrippedPageDay = today;
+      } else if (stillTrippedPageVersion >= 1
+          && !today.equals(lastStillTrippedPageDay)
+          && calendar.isMarketOpen()) {
+        lastStillTrippedPageDay = today;
+        auditLog(
+            KIND_KILL_SWITCH_STILL_TRIPPED,
+            subject(
+                "reason", reason,
+                "actor", actor,
+                "tripped_at", trippedAt,
+                "trading_day", today));
+      }
       // Phase 2b (risk C1): while tripped + market-open + holding, emit a bounded periodic re-page
       // so the alert-only posture is a control, not a one-shot page. Strictly v>=1; at
       // DEFAULT_VERSION this is the byte-identical bare early-return (no re-page).
@@ -1549,6 +1597,8 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     this.reason = tripReason;
     this.actor = tripActor;
     this.trippedAt = workflowNow();
+    // #669: the trip itself pages loudly today — the daily still-tripped reminder starts TOMORROW.
+    this.lastStillTrippedPageDay = tradingDay;
 
     // Read the gate ONCE at a stable point before any command. The skip-flatten branch (and its
     // flatten=manual subject key) is strictly behind v>=1 AND an auto: reason; at DEFAULT_VERSION

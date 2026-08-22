@@ -2333,4 +2333,33 @@ class AccountKillSwitchWorkflowImplTest {
   private void waitForAuditKind(String kind) throws InterruptedException {
     waitForKindCount(kind, 1L);
   }
+
+  /**
+   * Issue #669: a tripped-and-FLAT account cap previously said nothing forever (the holding re-page
+   * requires open positions). Now: nothing more on the trip day, then exactly one still-tripped
+   * page per subsequent trading day. An operator trip is used — the sticky actor class the rollover
+   * never clears.
+   */
+  @Test
+  void heartbeat_stillTrippedFlat_pagesOncePerSubsequentDay() throws Exception {
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-still-flat");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("manual:operator_halt", "operator:ridopark"));
+
+    // Trip-day ticks: the trip page already fired; the daily reminder starts tomorrow.
+    env.sleep(Duration.ofSeconds(75));
+    env.sleep(Duration.ofSeconds(65));
+    assertThat(countKind("KillSwitchStillTripped")).isEqualTo(0L);
+
+    // Day 2, flat book: exactly one page across several ticks.
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(65));
+    env.sleep(Duration.ofSeconds(65));
+    waitForAuditKind("KillSwitchStillTripped");
+    assertThat(countKind("KillSwitchStillTripped")).isEqualTo(1L);
+    assertThat(captureKind("KillSwitchStillTripped").getSubject())
+        .containsEntry("actor", "operator:ridopark")
+        .containsKey("tripped_at");
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+  }
 }

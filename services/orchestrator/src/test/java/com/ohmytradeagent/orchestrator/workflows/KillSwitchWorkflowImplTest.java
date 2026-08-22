@@ -776,4 +776,136 @@ class KillSwitchWorkflowImplTest {
   private void waitForAuditKind(String kind) throws InterruptedException {
     waitForKindCount(kind, 1L);
   }
+
+  // ---------- Issue #669: once-per-day still-tripped page ----------
+
+  /**
+   * A tripped switch previously said NOTHING on every subsequent tick, forever (staging_paper: nine
+   * silent days). Now: exactly one still-tripped page per trading day, on a market-open tick.
+   */
+  @Test
+  void heartbeat_stillTripped_pagesOncePerTradingDay() throws Exception {
+    when(calendar.isMarketOpen()).thenReturn(true);
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-still-tripped");
+    WorkflowStub.fromTyped(stub).start(input());
+    // Operator halt — the actor class the rollover-clear NEVER touches.
+    stub.trip(tripRequest("live_deactivation:one_click", "operator:ridopark"));
+
+    // Trip DAY ticks: the trip page already fired today — the daily reminder starts tomorrow.
+    env.sleep(Duration.ofSeconds(75));
+    env.sleep(Duration.ofSeconds(65));
+    assertThat(countKind("KillSwitchStillTripped")).isEqualTo(0L);
+
+    // Day 2: the operator trip persists, and exactly ONE page fires despite several ticks.
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(65));
+    env.sleep(Duration.ofSeconds(65));
+    env.sleep(Duration.ofSeconds(65));
+    waitForAuditKind("KillSwitchStillTripped");
+    assertThat(countKind("KillSwitchStillTripped")).isEqualTo(1L);
+    AuditEvent page = captureKind("KillSwitchStillTripped");
+    assertThat(page.getSubject())
+        .containsEntry("reason", "live_deactivation:one_click")
+        .containsEntry("actor", "operator:ridopark")
+        .containsKey("tripped_at");
+
+    // Day 3: a second page — one per day, forever, until cleared.
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 16));
+    env.sleep(Duration.ofSeconds(65));
+    waitForKindCount("KillSwitchStillTripped", 2L);
+    assertThat(countKind("KillSwitchStillTripped")).isEqualTo(2L);
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+  }
+
+  /** Market closed: the halted-overnight state pages nothing until the open. */
+  @Test
+  void heartbeat_stillTripped_saysNothingWhileMarketClosed() throws Exception {
+    when(calendar.isMarketOpen()).thenReturn(false);
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-still-closed");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("manual:ops", "operator:c"));
+    env.sleep(Duration.ofSeconds(75));
+    env.sleep(Duration.ofSeconds(65));
+    assertThat(countKind("KillSwitchStillTripped")).isEqualTo(0L);
+  }
+
+  /**
+   * The day-scoped auto:daily_loss trip is CLEARED by the rollover before the tripped branch runs —
+   * a cleared morning must page the clear, never a still-tripped.
+   */
+  @Test
+  void heartbeat_rolloverClearedTrip_neverPagesStillTripped() throws Exception {
+    when(calendar.isMarketOpen()).thenReturn(true);
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-still-vs-clear");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("auto:daily_loss", "auto:daily_loss"));
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(75));
+    waitForAuditKind("KillSwitchClearedOnRollover");
+    assertThat(countKind("KillSwitchStillTripped")).isEqualTo(0L);
+  }
+
+  // ---------- Issue #668: operator takeover of an auto-tripped switch ----------
+
+  /**
+   * THE deactivate-during-a-loss-day case: one-click Deactivate lands on a switch already tripped
+   * auto:daily_loss. Pre-#668 the trip was rejected as "already tripped", the deactivation reported
+   * success with actor still auto:daily_loss — and #667's rollover re-armed the strategy the next
+   * morning. Now the operator trip takes OWNERSHIP: actor/reason overwritten, reattribution
+   * audited, NO second cascade, and the rollover can never clear it.
+   */
+  @Test
+  void operatorTrip_overAutoTrip_takesOwnership_andSurvivesRollover() throws Exception {
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-takeover");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("auto:daily_loss", "auto:daily_loss"));
+
+    stub.trip(tripRequest("live_deactivation:one_click", "operator:ridopark"));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getActor()).isEqualTo("operator:ridopark");
+    assertThat(s.getReason()).isEqualTo("live_deactivation:one_click");
+    waitForAuditKind("KillSwitchTripReattributed");
+    AuditEvent reattributed = captureKind("KillSwitchTripReattributed");
+    assertThat(reattributed.getSubject())
+        .containsEntry("prior_actor", "auto:daily_loss")
+        .containsEntry("actor", "operator:ridopark");
+    // No SECOND cascade: the original trip flattened; a deactivation takeover must not re-fire a
+    // market flatten.
+    verify(cascade, org.mockito.Mockito.times(1))
+        .cascadeRiskBreach(anyString(), anyString(), anyString(), anyString(), anyString());
+
+    // The rollover must NOT re-arm: the actor is no longer the day-scoped auto:daily_loss.
+    when(calendar.isMarketOpen()).thenReturn(true);
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+    assertThat(countKind("KillSwitchClearedOnRollover")).isEqualTo(0L);
+  }
+
+  /** Idempotency preserved: a repeat OPERATOR trip on an operator-tripped switch still rejects. */
+  @Test
+  void operatorTrip_overOperatorTrip_staysRejected() {
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-op-over-op");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("manual:first", "operator:a"));
+    assertThatThrownBy(() -> stub.trip(tripRequest("manual:second", "operator:b")))
+        .hasStackTraceContaining("already_tripped");
+    assertThat(stub.killswitchState().getActor()).isEqualTo("operator:a");
+  }
+
+  /** An auto trip can never take over anything — only operators override. */
+  @Test
+  void autoTrip_overAutoTrip_staysRejected() {
+    KillSwitchWorkflow stub = newStub("t-dev/s-copytrade-v1/killswitch-auto-over-auto");
+    WorkflowStub.fromTyped(stub).start(input());
+    stub.trip(tripRequest("auto:daily_loss", "auto:daily_loss"));
+    assertThatThrownBy(
+            () ->
+                stub.trip(
+                    tripRequest("auto:missing_loss_threshold", "auto:missing_loss_threshold")))
+        .hasStackTraceContaining("already_tripped");
+    assertThat(stub.killswitchState().getActor()).isEqualTo("auto:daily_loss");
+  }
 }

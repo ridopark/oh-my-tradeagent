@@ -207,6 +207,12 @@ public final class AuditEventKinds {
           "DeriskArmSkipped",
           "DeriskNoOpenPosition",
           "DeriskSkippedDisabled",
+          // #669: once-per-day still-tripped page (KillSwitchWorkflowImpl AND
+          // AccountKillSwitchWorkflowImpl — same kind, workflow identity distinguishes).
+          "KillSwitchStillTripped",
+          // #668: an operator trip took ownership of an auto-tripped switch (actor/reason
+          // overwritten, no second cascade) so the rollover-clear can never re-arm it.
+          "KillSwitchTripReattributed",
           // PositionWorkflowImpl
           "PositionEntered",
           // #738: a post-confirm broker report on the entry order grew the managed lot.
