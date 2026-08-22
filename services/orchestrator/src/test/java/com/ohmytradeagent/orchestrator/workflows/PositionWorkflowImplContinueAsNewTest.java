@@ -285,6 +285,13 @@ class PositionWorkflowImplContinueAsNewTest {
     return st;
   }
 
+  /** Invocation count of {@code exec.placeOrder} so far — for delta (not absolute) assertions. */
+  private long placeOrderInvocations() {
+    return Mockito.mockingDetails(exec).getInvocations().stream()
+        .filter(i -> i.getMethod().getName().equals("placeOrder"))
+        .count();
+  }
+
   private void waitForPlaceOrderAtLeast(int n) throws InterruptedException {
     long deadline = System.currentTimeMillis() + 50_000;
     while (System.currentTimeMillis() < deadline) {
@@ -399,10 +406,17 @@ class PositionWorkflowImplContinueAsNewTest {
     PositionState state = stub.positionState();
     assertThat(state.remainingQty()).as("remaining lot carries").isEqualTo(3L);
 
-    // Redelivered pre-roll STC: the carried dedupe set must swallow it — no second sell.
+    // Redelivered pre-roll STC: the carried dedupe set must swallow it — NO NEW placement.
+    // Delta assertion, not an absolute times(1): under CI load Temporal can retry the FIRST
+    // placement's activity (same logical order, two mock invocations), which flaked the absolute
+    // count on 2026-08-22. A real dedupe failure still trips this — it would place AFTER the
+    // redelivery, moving the count.
+    long placementsBeforeRedelivery = placeOrderInvocations();
     stub.partialExit(partialExitRequest("sig-pre-roll", wfId, 0.5));
     Thread.sleep(1_000);
-    verify(exec, times(1)).placeOrder(any());
+    assertThat(placeOrderInvocations())
+        .as("a redelivered pre-roll STC must not place a new order")
+        .isEqualTo(placementsBeforeRedelivery);
 
     // A late broker report on the ENTRY order id must not be booked as an exit.
     stub.onFill(fill("brk-entry", 6L, new BigDecimal("2.30")));
