@@ -24,6 +24,13 @@ metadata:
     app: orchestrator
 spec:
   replicas: 1
+  # Issue #752: replicas:1 with the RollingUpdate default still runs TWO pods briefly on a roll
+  # (maxSurge 25% rounds up to 1). An old pod handed a continue-as-new carry-forward input with
+  # fields it does not know may fail to deserialize; Recreate removes the overlap entirely, exactly
+  # as market-data and both exec deployments already do for the same replicas:1 reason (#741).
+  # Workflows are durable, so the brief worker gap costs nothing.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: orchestrator

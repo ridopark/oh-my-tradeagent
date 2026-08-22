@@ -23,6 +23,36 @@ class MinPartialQtyBehavior(StrEnum):
     full_close = "full_close"
 
 
+class CarriedExitBookedByOrderItem(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_encoders={Decimal: float},
+    )
+    order_id: str
+    """
+    Broker order id of the booked exit fill.
+    """
+    qty: int
+    """
+    Cumulative booked exit quantity for this order.
+    """
+
+
+class CarriedPartialPlaceRetryAttempt(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_encoders={Decimal: float},
+    )
+    intent_key: str
+    """
+    The partial-exit intent key the attempts count belongs to.
+    """
+    attempts: int
+    """
+    Placement attempts consumed for this intent key.
+    """
+
+
 class PositionWorkflowInput(BaseModel):
     """
     Input to PositionWorkflow at start. Phase 0 ships the DTO slot; the workflow body lands in Phase 3.
@@ -130,4 +160,66 @@ class PositionWorkflowInput(BaseModel):
     ] = None
     """
     Carried from StrategyConfig.force_close_eod_et. Wall-clock time (HH:MM US/Eastern) for the blanket EOD force-flatten timer, replacing the hardcoded 15:55 ET. Optional/null/absent falls back to the legacy 15:55 ET to preserve pre-change behavior for replays of positions spawned before this field existed. The value flows through MarketCalendarActivities.durationUntilEodEt(LocalTime)'s replay-ignored activity input; consumption is getVersion-gated where the timer-arming command sequence changes.
+    """
+    carried_remaining_qty: Annotated[int | None, Field(ge=1)] = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The confirmed remaining lot size. Presence of this field IS the carried-run marker: hydration bypasses the first-fill await (the entry fill happened in a prior run; awaiting it again would emit PositionNeverFilled and abandon a live lot).
+    """
+    carried_entry_at: str | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. ISO-8601 instant of the original position confirm (F1 supersede correction-window guardrail + positionState display).
+    """
+    carried_partial_exited: bool | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Whether any partial exit was booked before the roll (F1 guardrail + positionState display).
+    """
+    carried_trailing_armed: bool | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Whether the chandelier trail was armed. A dropped value silently DISARMS a live stop across the roll.
+    """
+    carried_peak_premium: float | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The trail's ratcheted peak. THE dangerous field: a reset re-anchors the stop at the current premium, silently loosening it. Round-trip is pinned by a dedicated fire-at-same-price test.
+    """
+    carried_giveback_pct: float | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The armed trail's giveback fraction (threshold = peak * (1 - giveback)).
+    """
+    carried_ticks_received: Annotated[int | None, Field(ge=0)] = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Cumulative trail ticks across all runs; operator-visible in trailingState (a reset reads as a dead feed).
+    """
+    carried_last_tick_premium: float | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Last observed trail tick premium (trailingState/exitProximity staleness display).
+    """
+    carried_last_tick_at: str | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. ISO-8601 instant of the last observed trail tick.
+    """
+    carried_entry_broker_order_id: str | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The ENTRY order's broker order id (#738): the only thing distinguishing a late entry-side report from an exit fill.
+    """
+    carried_processed_signal_ids: list[str] | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. STC dedupe set. A dropped set lets a redelivered STC place a SECOND sell order.
+    """
+    carried_exit_booked_by_order: list[CarriedExitBookedByOrderItem] | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. #735 cumulative exit-fill ledger entries (broker_order_id -> booked qty); suppresses late duplicate broker reports. Bounded at 64 entries in the workflow.
+    """
+    carried_flatten_retry_sessions: Annotated[int | None, Field(ge=0)] = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Consumed flatten-retry session budget. A reset would grant extra retry sessions.
+    """
+    carried_partial_place_retry_sessions: Annotated[int | None, Field(ge=0)] = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Consumed partial-place retry session budget.
+    """
+    carried_partial_place_retry_attempts: (
+        list[CarriedPartialPlaceRetryAttempt] | None
+    ) = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Per-intent-key retry attempt counts; feed the :retry-N intent-key suffix, so a reset would mint a DUPLICATE client_order_id.
     """
