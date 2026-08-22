@@ -4,6 +4,8 @@ import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.ArmTrailRequest;
 import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.CarriedExitBookedEntry;
+import com.ohmytradeagent.contract.CarriedRetryAttemptEntry;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
@@ -19,6 +21,7 @@ import com.ohmytradeagent.contract.PremiumTick;
 import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.SubscribePremiumRequest;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
@@ -26,8 +29,10 @@ import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import com.ohmytradeagent.orchestrator.domain.OptionTick;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.common.SearchAttributeKey;
 import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
+import io.temporal.workflow.WorkflowInit;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
@@ -36,8 +41,10 @@ import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -891,6 +898,30 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private long remainingQty;
 
   /**
+   * Issue #752: continue-as-new once history crosses this, but ONLY at the quiet-position barrier
+   * ({@link #rollBarrierHolds()}). Package-private and non-final so tests can lower it via
+   * reflection — same KISS rationale as {@code KillSwitchWorkflowImpl.historyLengthWatermark}: no
+   * config knob with zero operational use.
+   *
+   * <p>The check is deliberately NOT {@code getVersion}-gated: on every history where the branch is
+   * not taken it emits no command (both kill-switch precedents omit a gate for the same reason),
+   * and gating it would resolve to {@code DEFAULT_VERSION} for every in-flight execution — the
+   * armed LEAP trails this exists to save would never roll. The precondition that makes the
+   * un-gated check safe is operational, enforced by the Phase 2 pre-deploy gate: every RUNNING
+   * position must be below the watermark at deploy time, else its next replay crosses mid-history
+   * and diverges (see docs/plans/PLAN-2026-08-22-position-continue-as-new.md §4).
+   */
+  static long historyLengthWatermark = 10_000L;
+
+  /**
+   * Issue #752: true when this run was minted by {@link #buildCarryForwardInput()} (marker: {@code
+   * carried_remaining_qty} present). A carried run's position was confirmed in a PRIOR run, so
+   * {@link #run} must bypass the first-fill await — awaiting a fill that already happened would
+   * time out, emit {@code PositionNeverFilled} and return, abandoning a live lot.
+   */
+  private boolean carriedRun;
+
+  /**
    * Issue #203: original BTO size from input.qty. Recorded only for the PositionNeverFilled audit
    * subject — never used for sizing under v=1, where remainingQty derives from the first onFill.
    */
@@ -1137,6 +1168,185 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    */
   private boolean partialExited;
 
+  /**
+   * Issue #752: hydrate carried state BEFORE any signal/query handler can run, so a tick, arm, or
+   * {@code trailingState} query arriving in the gap between run start and {@code run()}'s first
+   * statement observes the carried trail, not zeroes. {@code @WorkflowInit} emits no commands, so
+   * this is replay-neutral for every in-flight history (precedent: {@code
+   * AccountKillSwitchWorkflowImpl}). Fields NOT hydrated here are exactly the ones {@link
+   * #rollBarrierHolds()} proves are at their zero value at the moment of the roll — each exclusion
+   * is justified by a specific barrier conjunct, and pinned by the barrier tests. Timers are
+   * deliberately not carried: eod/expiry/flatten-lead durations derive from the OCC expiry plus
+   * config, so {@link #run} recomputes them correctly from the current clock — that is a property,
+   * not an omission.
+   */
+  @WorkflowInit
+  public PositionWorkflowImpl(PositionWorkflowInput in) {
+    if (in.getCarriedRemainingQty() == null) {
+      return; // parent-started or adoption-started input — nothing carried.
+    }
+    this.carriedRun = true;
+    this.remainingQty = in.getCarriedRemainingQty();
+    this.firstFillReceived = true;
+    this.positionConfirmed = true;
+    if (in.getCarriedEntryAt() != null) {
+      this.entryAt = OffsetDateTime.parse(in.getCarriedEntryAt());
+    }
+    this.partialExited = Boolean.TRUE.equals(in.getCarriedPartialExited());
+    this.trailingArmed = Boolean.TRUE.equals(in.getCarriedTrailingArmed());
+    this.peakPremium = in.getCarriedPeakPremium();
+    this.givebackPct = in.getCarriedGivebackPct();
+    this.ticksReceived = in.getCarriedTicksReceived() != null ? in.getCarriedTicksReceived() : 0L;
+    this.lastTickPremium = in.getCarriedLastTickPremium();
+    if (in.getCarriedLastTickAt() != null) {
+      this.lastTickAt = OffsetDateTime.parse(in.getCarriedLastTickAt());
+    }
+    this.entryBrokerOrderId = in.getCarriedEntryBrokerOrderId();
+    if (in.getCarriedProcessedSignalIds() != null) {
+      this.processedSignalIds.addAll(in.getCarriedProcessedSignalIds());
+    }
+    if (in.getCarriedExitBookedByOrder() != null) {
+      for (CarriedExitBookedEntry e : in.getCarriedExitBookedByOrder()) {
+        this.exitBookedByOrder.put(e.getOrderId(), e.getQty());
+      }
+    }
+    this.flattenRetrySessions =
+        in.getCarriedFlattenRetrySessions() != null
+            ? in.getCarriedFlattenRetrySessions().intValue()
+            : 0;
+    this.partialPlaceRetrySessions =
+        in.getCarriedPartialPlaceRetrySessions() != null
+            ? in.getCarriedPartialPlaceRetrySessions().intValue()
+            : 0;
+    if (in.getCarriedPartialPlaceRetryAttempts() != null) {
+      for (CarriedRetryAttemptEntry e : in.getCarriedPartialPlaceRetryAttempts()) {
+        this.partialPlaceRetryAttempts.put(e.getIntentKey(), e.getAttempts().intValue());
+      }
+    }
+  }
+
+  /**
+   * Issue #752: the roll is permitted ONLY when the position is provably quiet — no in-flight
+   * order, every pending deque empty, nothing latched, no armed retry timer, and not a
+   * watchlist-exit position (whose ~10 extra fields and first-fill-relative timers are a larger
+   * carry surface for zero coverage gain: those strategies run a 25-45 minute time stop and can
+   * never approach the watermark). Every field {@code buildCarryForwardInput} does NOT carry is
+   * proven zero by a conjunct here; the pairing is pinned by the barrier tests.
+   *
+   * <p>{@code !retryFlattenArmed}, {@code partialPlaceRetryPending == null} and {@code
+   * !partialPlaceRetryArmed} are load-bearing beyond signal-loss: each means a Temporal timer is
+   * armed (or has just fired) to re-drive work, and a timer does not survive continue-as-new —
+   * rolling would silently drop the retry. {@code partialPlaceRetryPending} is the long-lived
+   * conjunct: it is set the moment a partial-exit placement failure schedules the next-RTH-open
+   * re-drive and stays set for the whole scheduled-but-unfired window (hours, or a weekend), while
+   * {@code partialPlaceRetryArmed} is true only in the instant between the timer firing and the
+   * main loop draining it. Gating on the armed bit alone was a review-caught silent-loss bug: a
+   * roll inside the pending window discarded the re-drive (the 2026-06-25 QQQ incident class).
+   */
+  private boolean rollBarrierHolds() {
+    return remainingQty > 0
+        && positionConfirmed
+        && !exitInFlight
+        && lastFillEvent == null
+        && !flattenAwaitingLateFill
+        && !retryFlattenArmed
+        && partialPlaceRetryPending == null
+        && !partialPlaceRetryArmed
+        && pendingExits.isEmpty()
+        && pendingArms.isEmpty()
+        && pendingTicks.isEmpty()
+        && pendingRiskBreaches.isEmpty()
+        && pendingForceCloses.isEmpty()
+        && pendingPartialCloses.isEmpty()
+        && pendingSupersedes.isEmpty()
+        && !chandelierFireRequested
+        && !exitStopFireRequested
+        && !exitTimeStopFired
+        && !exitFeedStaleFired
+        && !eodFired
+        && !expiryFired
+        && !expiryLeadFired
+        && closeReason == null
+        && input.getTpRatio() == null;
+  }
+
+  /**
+   * Issue #752: the next run's input — every original field verbatim (except {@code qty}, which
+   * becomes the CURRENT remaining lot so {@code expectedQty} stays truthful) plus the {@code
+   * carried_*} state the barrier cannot prove zero. {@code carried_remaining_qty} presence is the
+   * carried-run marker {@code @WorkflowInit} keys on.
+   */
+  private PositionWorkflowInput buildCarryForwardInput() {
+    PositionWorkflowInput next = new PositionWorkflowInput();
+    next.setSchemaVersion(input.getSchemaVersion());
+    next.setTenantId(input.getTenantId());
+    next.setStrategyId(input.getStrategyId());
+    next.setEntrySignalId(input.getEntrySignalId());
+    next.setContractSymbol(input.getContractSymbol());
+    next.setQty(remainingQty);
+    next.setEntryPremium(input.getEntryPremium());
+    next.setSourceSignalWorkflowId(input.getSourceSignalWorkflowId());
+    next.setBrokerTarget(input.getBrokerTarget());
+    next.setEodForceFlatten(input.getEodForceFlatten());
+    next.setMinPartialQtyBehavior(input.getMinPartialQtyBehavior());
+    next.setFirstFillTtlSecs(input.getFirstFillTtlSecs());
+    next.setExitFillTtlSecs(input.getExitFillTtlSecs());
+    next.setForceClose0dteEt(input.getForceClose0dteEt());
+    next.setExitFloorAbs(input.getExitFloorAbs());
+    next.setExitFloorPct(input.getExitFloorPct());
+    next.setExpiryDayFloor(input.getExpiryDayFloor());
+    next.setFlattenLeadMinutes(input.getFlattenLeadMinutes());
+    next.setExitRepriceSteps(input.getExitRepriceSteps());
+    next.setExitRepriceTick(input.getExitRepriceTick());
+    next.setTpRatio(input.getTpRatio());
+    next.setSlPct(input.getSlPct());
+    next.setTpPartialFraction(input.getTpPartialFraction());
+    next.setTrailGivebackPct(input.getTrailGivebackPct());
+    next.setNoProgressTimeStopSecs(input.getNoProgressTimeStopSecs());
+    next.setForceCloseEodEt(input.getForceCloseEodEt());
+
+    next.setCarriedRemainingQty(remainingQty);
+    if (entryAt != null) {
+      next.setCarriedEntryAt(entryAt.toString());
+    }
+    next.setCarriedPartialExited(partialExited);
+    next.setCarriedTrailingArmed(trailingArmed);
+    next.setCarriedPeakPremium(peakPremium);
+    next.setCarriedGivebackPct(givebackPct);
+    next.setCarriedTicksReceived(ticksReceived);
+    next.setCarriedLastTickPremium(lastTickPremium);
+    if (lastTickAt != null) {
+      next.setCarriedLastTickAt(lastTickAt.toString());
+    }
+    next.setCarriedEntryBrokerOrderId(entryBrokerOrderId);
+    next.setCarriedProcessedSignalIds(new ArrayList<>(processedSignalIds));
+    if (!exitBookedByOrder.isEmpty()) {
+      List<CarriedExitBookedEntry> booked = new ArrayList<>();
+      exitBookedByOrder.forEach(
+          (k, v) -> {
+            CarriedExitBookedEntry e = new CarriedExitBookedEntry();
+            e.setOrderId(k);
+            e.setQty(v);
+            booked.add(e);
+          });
+      next.setCarriedExitBookedByOrder(booked);
+    }
+    next.setCarriedFlattenRetrySessions((long) flattenRetrySessions);
+    next.setCarriedPartialPlaceRetrySessions((long) partialPlaceRetrySessions);
+    if (!partialPlaceRetryAttempts.isEmpty()) {
+      List<CarriedRetryAttemptEntry> attempts = new ArrayList<>();
+      partialPlaceRetryAttempts.forEach(
+          (k, v) -> {
+            CarriedRetryAttemptEntry e = new CarriedRetryAttemptEntry();
+            e.setIntentKey(k);
+            e.setAttempts((long) v);
+            attempts.add(e);
+          });
+      next.setCarriedPartialPlaceRetryAttempts(attempts);
+    }
+    return next;
+  }
+
   @Override
   public String run(PositionWorkflowInput in) {
     this.input = in;
@@ -1281,7 +1491,20 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // spawning CopytradeSignalWorkflow); under v=DEFAULT_VERSION or when the input field is null,
     // it falls back to FIRST_FILL_TTL_SECS_DEFAULT to preserve pre-#212 replay semantics.
     long firstFillTtlSecs = resolveFirstFillTtlSecs(in);
-    if (deferVersion >= 1) {
+    // Issue #752: the SDK drops search attributes from the continue-as-new command (see the roll
+    // site), so a carried run re-asserts its own — losing ContractSymbol would silently break STC
+    // dispatch's Visibility fallback. Fresh history only (carriedRun is never true on a replaying
+    // legacy history), so this upsert command needs no version gate.
+    if (carriedRun) {
+      Workflow.upsertTypedSearchAttributes(
+          SearchAttributeKey.forKeyword("TenantStrategy")
+              .valueSet(WorkflowIds.tenantStrategy(in.getTenantId(), in.getStrategyId())),
+          SearchAttributeKey.forKeyword("ContractSymbol").valueSet(in.getContractSymbol()));
+    }
+    // Issue #752: a carried run's position was confirmed in a prior run (hydrated by
+    // @WorkflowInit); awaiting a first fill that already happened would time out and abandon the
+    // live lot as PositionNeverFilled. Fresh history, so this branch skip records no divergence.
+    if (deferVersion >= 1 && !carriedRun) {
       boolean filled =
           Workflow.await(
               Duration.ofSeconds(firstFillTtlSecs),
@@ -1361,6 +1584,23 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
 
     while (remainingQty > 0 && !eodFired && !expiryFired && !expiryLeadFired) {
+      // Issue #752: roll the run before Temporal's 10k-event terminal watermark, but ONLY when the
+      // position is provably quiet (rollBarrierHolds) so no buffered directive, in-flight order or
+      // latched fire is discarded at the run boundary. Not getVersion-gated — the check emits no
+      // command when not taken, which is exactly what lets it protect executions already in
+      // flight (see the historyLengthWatermark javadoc). Search attributes are passed explicitly
+      // rather than trusting server-side carry: losing ContractSymbol would silently degrade STC
+      // dispatch to the Redis pointer alone. continueAsNew throws DestroyWorkflowThreadError —
+      // nothing below it runs, and it must never sit inside a catch (RuntimeException).
+      if (Workflow.getInfo().getHistoryLength() > historyLengthWatermark && rollBarrierHolds()) {
+        // Search attributes are NOT passed here: SDK 1.27 silently drops both
+        // ContinueAsNewOptions.setSearchAttributes variants from the command (verified — the
+        // ContinuedAsNew event's searchAttributes is empty either way), so the carried run
+        // re-asserts them itself at startup (see the carriedRun upsert in run()) instead of
+        // trusting server-side inheritance. Losing ContractSymbol would silently degrade STC
+        // dispatch to the Redis pointer alone on a Visibility cache miss.
+        Workflow.continueAsNew(buildCarryForwardInput());
+      }
       Workflow.await(
           () ->
               !pendingExits.isEmpty()

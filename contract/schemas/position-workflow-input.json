@@ -74,7 +74,10 @@
     },
     "min_partial_qty_behavior": {
       "type": "string",
-      "enum": ["skip", "full_close"],
+      "enum": [
+        "skip",
+        "full_close"
+      ],
       "description": "Issue #205: carried over from the spawning CopytradeSignalWorkflow's StrategyConfig.min_partial_qty_behavior. Drives PositionWorkflow.processOne's pre-qtyToClose gate when remainingQty <= 1 AND floor(remainingQty * fraction) == 0. 'skip' emits PartialExitSkippedMinQty and places no order; 'full_close' closes the last contract. Optional/null treated as 'skip' to match the YAML comment's documented default. Gated behind Workflow.getVersion('min-partial-qty-skip', DEFAULT, 1) so in-flight pre-#205 workflows preserve legacy ceil(remainingQty * fraction) behavior on replay."
     },
     "first_fill_ttl_secs": {
@@ -159,6 +162,113 @@
       "type": "string",
       "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
       "description": "Carried from StrategyConfig.force_close_eod_et. Wall-clock time (HH:MM US/Eastern) for the blanket EOD force-flatten timer, replacing the hardcoded 15:55 ET. Optional/null/absent falls back to the legacy 15:55 ET to preserve pre-change behavior for replays of positions spawned before this field existed. The value flows through MarketCalendarActivities.durationUntilEodEt(LocalTime)'s replay-ignored activity input; consumption is getVersion-gated where the timer-arming command sequence changes."
+    },
+    "carried_remaining_qty": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The confirmed remaining lot size. Presence of this field IS the carried-run marker: hydration bypasses the first-fill await (the entry fill happened in a prior run; awaiting it again would emit PositionNeverFilled and abandon a live lot)."
+    },
+    "carried_entry_at": {
+      "type": "string",
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. ISO-8601 instant of the original position confirm (F1 supersede correction-window guardrail + positionState display)."
+    },
+    "carried_partial_exited": {
+      "type": "boolean",
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Whether any partial exit was booked before the roll (F1 guardrail + positionState display)."
+    },
+    "carried_trailing_armed": {
+      "type": "boolean",
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Whether the chandelier trail was armed. A dropped value silently DISARMS a live stop across the roll."
+    },
+    "carried_peak_premium": {
+      "type": "number",
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The trail's ratcheted peak. THE dangerous field: a reset re-anchors the stop at the current premium, silently loosening it. Round-trip is pinned by a dedicated fire-at-same-price test.",
+      "exclusiveMinimum": 0
+    },
+    "carried_giveback_pct": {
+      "type": "number",
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The armed trail's giveback fraction (threshold = peak * (1 - giveback))."
+    },
+    "carried_ticks_received": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Cumulative trail ticks across all runs; operator-visible in trailingState (a reset reads as a dead feed)."
+    },
+    "carried_last_tick_premium": {
+      "type": "number",
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Last observed trail tick premium (trailingState/exitProximity staleness display).",
+      "exclusiveMinimum": 0
+    },
+    "carried_last_tick_at": {
+      "type": "string",
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. ISO-8601 instant of the last observed trail tick."
+    },
+    "carried_entry_broker_order_id": {
+      "type": "string",
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The ENTRY order's broker order id (#738): the only thing distinguishing a late entry-side report from an exit fill."
+    },
+    "carried_processed_signal_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. STC dedupe set. A dropped set lets a redelivered STC place a SECOND sell order."
+    },
+    "carried_exit_booked_by_order": {
+      "type": "array",
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. #735 cumulative exit-fill ledger entries (broker_order_id -> booked qty); suppresses late duplicate broker reports. Bounded at 64 entries in the workflow.",
+      "items": {
+        "type": "object",
+        "javaType": "com.ohmytradeagent.contract.CarriedExitBookedEntry",
+        "additionalProperties": false,
+        "required": [
+          "order_id",
+          "qty"
+        ],
+        "properties": {
+          "order_id": {
+            "type": "string",
+            "description": "Broker order id of the booked exit fill."
+          },
+          "qty": {
+            "type": "integer",
+            "description": "Cumulative booked exit quantity for this order."
+          }
+        }
+      }
+    },
+    "carried_flatten_retry_sessions": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Consumed flatten-retry session budget. A reset would grant extra retry sessions."
+    },
+    "carried_partial_place_retry_sessions": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Consumed partial-place retry session budget."
+    },
+    "carried_partial_place_retry_attempts": {
+      "type": "array",
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Per-intent-key retry attempt counts; feed the :retry-N intent-key suffix, so a reset would mint a DUPLICATE client_order_id.",
+      "items": {
+        "type": "object",
+        "javaType": "com.ohmytradeagent.contract.CarriedRetryAttemptEntry",
+        "additionalProperties": false,
+        "required": [
+          "intent_key",
+          "attempts"
+        ],
+        "properties": {
+          "intent_key": {
+            "type": "string",
+            "description": "The partial-exit intent key the attempts count belongs to."
+          },
+          "attempts": {
+            "type": "integer",
+            "description": "Placement attempts consumed for this intent key."
+          }
+        }
+      }
     }
   }
 }
