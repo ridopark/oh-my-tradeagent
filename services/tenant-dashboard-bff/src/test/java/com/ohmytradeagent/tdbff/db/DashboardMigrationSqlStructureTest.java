@@ -275,4 +275,105 @@ class DashboardMigrationSqlStructureTest {
                     + "ON options_chat_message \\(posted_at\\)",
                 Pattern.DOTALL));
   }
+
+  // --- V13: trade_context (#783) — per-signal decision-time context + MFE/MAE + exit snapshot ---
+
+  @Test
+  void v13CreatesTradeContextKeyedBySignalAndTenant() throws IOException {
+    String sql = executableSql("/db/dashboard/V13__trade_context.sql");
+
+    assertThat(sql).contains("CREATE TABLE trade_context");
+    assertThat(sql)
+        .as("one row per copy trade, keyed by the id that flows end-to-end")
+        .containsPattern(Pattern.compile("PRIMARY KEY \\(signal_id, tenant_id\\)"));
+
+    // Entry snapshot: the unbackfillable model outputs plus NBBO/sizing context.
+    for (String col :
+        new String[] {
+          "workflow_id",
+          "contract_symbol",
+          "entry_premium",
+          "entry_qty",
+          "entry_bid",
+          "entry_ask",
+          "entry_spread",
+          "entry_iv",
+          "entry_delta",
+          "entry_gamma",
+          "entry_theta",
+          "entry_vega",
+          "underlying_spot",
+          "dte",
+          "moneyness",
+          "equity",
+          "capital_weight",
+          "entry_quote_state"
+        }) {
+      assertThat(sql).as("entry column %s", col).contains(col);
+    }
+    // Running excursion + exit fields (nullable — realized outcome joins happen at query time,
+    // see docs/ops/trade-outcome-join.md; this DB cannot reach the per-broker journal DBs).
+    for (String col :
+        new String[] {
+          "mfe_premium",
+          "mae_premium",
+          "exit_bid",
+          "exit_iv",
+          "realized_pnl",
+          "exit_reason",
+          "hold_minutes",
+          "alert_to_fill_latency_ms",
+          "slippage_vs_alert_pct",
+          "closed_at"
+        }) {
+      assertThat(sql).as("outcome column %s", col).contains(col);
+    }
+    assertThat(sql)
+        .as("status is a constrained open/closed lifecycle flag")
+        .containsPattern(Pattern.compile("status.*CHECK \\(status IN \\('open', ?'closed'\\)\\)"));
+  }
+
+  @Test
+  void v13CreatesTradeContextWriterRoleIdempotentlyWithPlaceholderPasswordNoLiteral()
+      throws IOException {
+    String sql = executableSql("/db/dashboard/V13__trade_context.sql");
+
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "IF NOT EXISTS \\(SELECT 1 FROM pg_roles WHERE rolname = 'trade_context_writer'\\)"));
+    assertThat(sql).contains("CREATE ROLE trade_context_writer LOGIN INHERIT PASSWORD");
+    assertThat(sql).contains("PASSWORD '${trade_context_writer_password}'");
+    assertThat(sql)
+        .as("no literal password: the only PASSWORD value is the placeholder")
+        .doesNotContainPattern(
+            Pattern.compile("PASSWORD\\s+'(?!\\$\\{trade_context_writer_password\\})"));
+  }
+
+  @Test
+  void v13GrantsAreExactlyLeastPrivilege() throws IOException {
+    String sql = executableSql("/db/dashboard/V13__trade_context.sql");
+
+    assertThat(sql)
+        .containsPattern(Pattern.compile("GRANT CONNECT ON DATABASE.*trade_context_writer"));
+    assertThat(sql).contains("GRANT USAGE ON SCHEMA public TO trade_context_writer");
+
+    // SELECT (ON CONFLICT arbiter probe + the close-vanished read-back), INSERT (entry row),
+    // UPDATE (MFE/MAE ratchet + exit append). Never DELETE — retention is indefinite by design.
+    Matcher m =
+        Pattern.compile(
+                "GRANT\\s+([A-Z, ]+?)\\s+ON\\s+trade_context\\b\\s+TO\\s+trade_context_writer")
+            .matcher(sql);
+    assertThat(m.find()).as("a GRANT ... ON trade_context TO trade_context_writer exists").isTrue();
+    assertThat(m.group(1).trim()).isEqualTo("SELECT, INSERT, UPDATE");
+
+    assertThat(sql)
+        .as("recorder role never gets DELETE as a granted privilege")
+        .doesNotContainPattern(
+            Pattern.compile("GRANT\\s+[A-Z, ]*DELETE", Pattern.CASE_INSENSITIVE));
+    assertThat(sql)
+        .as("V13 must not widen or even reference the other dashboard roles")
+        .doesNotContain("dashboard_readonly")
+        .doesNotContain("dashboard_writer");
+  }
 }

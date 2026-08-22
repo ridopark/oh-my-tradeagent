@@ -61,10 +61,54 @@ public class MarketDataOptionQuoteClient {
     }
   }
 
+  /**
+   * The IV + greeks snapshot for {@code occ} from the market-data worker's {@code
+   * /md/option/{occ}/greeks} endpoint (#783), or {@code null} when unavailable. Individual fields
+   * may still be null when the provider omits them. Read once per entry observation by the
+   * trade-context recorder — never on the per-poll hot path.
+   */
+  public OptionGreeksSnapshot optionGreeks(String occ) {
+    String compact = occ.replace(" ", "");
+    try {
+      Map<String, Object> body =
+          rest.get().uri("/md/option/{o}/greeks", compact).retrieve().body(MAP_TYPE);
+      if (body == null) {
+        return null;
+      }
+      return new OptionGreeksSnapshot(
+          decimal(body.get("iv")),
+          decimal(body.get("delta")),
+          decimal(body.get("gamma")),
+          decimal(body.get("theta")),
+          decimal(body.get("vega")));
+    } catch (RuntimeException e) {
+      log.warn("market-data greeks read failed for {}: {}", compact, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * The underlying's last-trade price from {@code /md/equity/{ticker}} (#783), or {@code null} when
+   * unavailable. Same fail-soft contract as the option reads.
+   */
+  public BigDecimal underlyingSpot(String ticker) {
+    try {
+      Map<String, Object> body = rest.get().uri("/md/equity/{t}", ticker).retrieve().body(MAP_TYPE);
+      return body == null ? null : decimal(body.get("price"));
+    } catch (RuntimeException e) {
+      log.warn("market-data equity read failed for {}: {}", ticker, e.getMessage());
+      return null;
+    }
+  }
+
   private static BigDecimal decimal(Object raw) {
     return raw == null ? null : new BigDecimal(raw.toString());
   }
 
   /** One NBBO snapshot. Any field may be null when the provider omitted it. */
   public record OptionQuote(BigDecimal bid, BigDecimal mid, BigDecimal ask) {}
+
+  /** One IV + greeks snapshot (#783). Any field may be null when the provider omitted it. */
+  public record OptionGreeksSnapshot(
+      BigDecimal iv, BigDecimal delta, BigDecimal gamma, BigDecimal theta, BigDecimal vega) {}
 }

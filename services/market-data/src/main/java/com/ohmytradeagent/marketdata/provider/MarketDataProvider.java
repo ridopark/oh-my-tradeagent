@@ -38,6 +38,15 @@ public interface MarketDataProvider {
   Optional<BigDecimal> snapshotEquityPrice(String ticker);
 
   /**
+   * One-shot REST snapshot of {@code occSymbol}'s implied volatility + greeks (#783), or {@link
+   * Optional#empty()} when the provider has none. Display/recording-only — never drives a trigger.
+   * Default empty so providers without a greeks surface (in-memory test fan-out) need no change.
+   */
+  default Optional<OptionGreeks> snapshotGreeks(String occSymbol) {
+    return Optional.empty();
+  }
+
+  /**
    * Opens a push subscription for {@code occSymbol}. Each premium tick from the provider feed is
    * delivered to {@code onTick}. Subscriptions are independent: closing one does not affect other
    * subscribers on the same symbol.
