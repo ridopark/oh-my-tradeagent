@@ -1181,6 +1181,50 @@ class PositionWorkflowImplTest {
   }
 
   /**
+   * Issue #753: when one broker order books TWICE at different prices, the second booking must be
+   * credited at the price its own contracts traded, not the order's running cumulative average.
+   * Order fills 2 @ 2.50 (cum avg 2.50), then completes at cumulative 5 @ cum avg 2.32 — the
+   * residual 3 actually traded at (5 x 2.32 - 2 x 2.50) / 3 = 2.20. Booking it at 2.32 overstates
+   * the exit credit by $36 on this leg.
+   */
+  @Test
+  void issue753_secondBookingOfOneOrder_carriesItsSlicePrice_notTheCumulativeAverage()
+      throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-753-price");
+    PositionWorkflowInput in = input(5);
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
+    in.setEodForceFlatten(Boolean.TRUE);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    stub.onFill(fill("brk-753", 2L, new BigDecimal("2.50")));
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() == 5L) {
+      Thread.sleep(50);
+    }
+    stub.onFill(fill("brk-753", 5L, new BigDecimal("2.32")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills).hasSize(2);
+    assertThat(((Number) fills.get(0).getSubject().get("avg_fill_price")).doubleValue())
+        .as("first booking is the whole delta — cumulative average IS the slice price")
+        .isEqualTo(2.50);
+    assertThat(((Number) fills.get(1).getSubject().get("avg_fill_price")).doubleValue())
+        .as("second booking must carry its own slice price, not the 2.32 running average")
+        .isEqualTo(2.20);
+    // The qty ledger is untouched by the price change.
+    assertThat(fills.stream().mapToLong(e -> asLong(e.getSubject().get("qty_filled"))).sum())
+        .isEqualTo(5L);
+  }
+
+  /**
    * Issue #735 duplicate guard: the SAME broker fill can reach the workflow via two evidences (a
    * cancel-on-filled return AND a buffered onFill). Re-reporting a cumulative already booked must
    * book NOTHING — not a second full decrement.
