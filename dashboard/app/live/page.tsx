@@ -14,6 +14,10 @@ import {
 import { TrimButton, type TrimActionResult } from "@/components/TrimButton";
 import { TrailLivenessProvider } from "@/components/TrailLiveness";
 import {
+  FloorBreachProvider,
+  FloorBreachBadge,
+} from "@/components/FloorBreach";
+import {
   StopLossButton,
   type StopLossActionResult,
 } from "@/components/StopLossButton";
@@ -373,7 +377,18 @@ export default async function LivePage() {
   // byte-for-byte as before. current_price is the broker mark; null ⇒ likely phantom (the button
   // surfaces a "clears the tracking" hint).
   const holdingsColumns: Column[] = [
-    { key: "contract_symbol", label: "Contract", render: contractCell },
+    {
+      key: "contract_symbol",
+      label: "Contract",
+      // Issue #779: the floor-breach badge (breach → solid red "FLOOR BREACH -NN%", unknown →
+      // grey "FLOOR ?", ok → nothing) renders beside the symbol. A badge only — never a button.
+      render: (v, row) => (
+        <span className="flex items-center gap-2">
+          {contractCell(v)}
+          <FloorBreachBadge workflowId={String(row.workflow_id)} />
+        </span>
+      ),
+    },
     { key: "remaining_qty", label: "Qty" },
     { key: "entry_premium", label: "Entry premium" },
     { key: "open_notional", label: "Cost", render: priceCell },
@@ -440,6 +455,7 @@ export default async function LivePage() {
 
   return (
     <TrailLivenessProvider>
+      <FloorBreachProvider>
       <Nav tenantId={session?.tenantId} />
       {/* Full-bleed: mounted OUTSIDE <main> so the tripped bar spans the viewport edge-to-edge
           (inside main's centered max-w-6xl it would be inset and capped — not the prominent bar). */}
@@ -533,6 +549,7 @@ export default async function LivePage() {
           />
         </section>
       </main>
+      </FloorBreachProvider>
     </TrailLivenessProvider>
   );
 }

@@ -661,6 +661,30 @@ export interface TrailLivenessResponse {
 export const getTrailLiveness = () =>
   bffGet<TrailLivenessResponse>("/api/trail-liveness");
 
+// Per-position floor-breach state (#779) for the /live red "FLOOR BREACH -NN%" badge.
+//
+// `floor_status` has THREE states and the third is load-bearing (same rule as trail-liveness):
+//   breach  — the live BID sits at/below entry x (1 - floor_breach_alert_pct); default -50%
+//   ok      — the bid sits above the line
+//   unknown — the quote could not be read, so we cannot say either way (renders "FLOOR ?")
+// Never collapse `unknown` into `ok`: a monitoring failure must not read as an all-clear.
+// ALERT-ONLY: this endpoint renders state; it never places, modifies, or cancels anything.
+export interface FloorBreachPosition {
+  workflow_id: string;
+  contract_symbol: string;
+  floor_status: "breach" | "ok" | "unknown";
+  loss_pct: number | null;
+  entry_premium: number | null;
+  current_bid: number | null;
+  floor_line: number | null;
+}
+export interface FloorBreachResponse {
+  tenant_id: string;
+  positions: FloorBreachPosition[];
+}
+export const getFloorBreach = () =>
+  bffGet<FloorBreachResponse>("/api/floor-breach");
+
 // Account portfolio history (/live equity chart). Parallel arrays indexed by `timestamps` (epoch
 // seconds): `equity` is the chart line, `profit_loss`/`profit_loss_pct` the range-aware headline,
 // `base_value` the dashed baseline / range start. Account-level / shared scope (same caveat as

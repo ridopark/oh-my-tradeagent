@@ -547,6 +547,14 @@ public final class AuditEventKinds {
           // above. Neutral events — in ALL_KINDS only, not in any *_KINDS lifecycle group.
           "TenantResidualCleanupRequested",
           "TenantResidualCleanupCompleted",
+          // Issue #779: emitted by the orchestrator's FloorBreachAlertLoop (alert/floorbreach/, a
+          // Spring @Scheduled bean entirely OUTSIDE Temporal and outside the trading path) when an
+          // open position's live BID breaches the floor_breach_alert_pct line (default -50% of
+          // entry premium), after 2-tick confirmation + hysteresis. ALERT-ONLY observability — the
+          // detector places/modifies/cancels NOTHING (enforced by
+          // FloorBreachNoTradingActionGuardTest). Pages RED via OrderFailureAlerter's after-commit
+          // funnel. NEUTRAL kind: in ALL_KINDS only, not in any *_KINDS lifecycle group.
+          "FloorBreachAlerted",
           // PLAN-2026-08-05-direct-live-tenant-onboarding: emitted by StrategyConfigWriter.create
           // when a LIVE create arms the tenant's account-level loss cap in-transaction (an INSERT
           // into tenant_config BEFORE the strategy_config INSERT) so the live-required gate passes
