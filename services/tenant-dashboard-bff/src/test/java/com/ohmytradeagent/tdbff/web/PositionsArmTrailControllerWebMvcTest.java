@@ -86,10 +86,53 @@ class PositionsArmTrailControllerWebMvcTest {
         .andExpect(jsonPath("$.peak_premium").value(2.50))
         .andExpect(jsonPath("$.stop_price").value(2.13));
 
-    // giveback is threaded through; peak_premium is deliberately NOT client-supplied.
+    // giveback is threaded through; with no anchor chosen, peak_premium stays absent (#778: the
+    // workflow resolves the anchor itself — this is the unchanged "recent" default).
     ArgumentCaptor<ArmTrailRequest> sent = ArgumentCaptor.forClass(ArmTrailRequest.class);
     verify(stub).update(eq("arm_trail"), eq(ArmTrailResult.class), sent.capture());
     assertGiveback(sent.getValue());
+  }
+
+  /**
+   * #778: the operator picked the "peak since entry" anchor from {@code GET /arm-anchors}; the
+   * chosen peak must ride the EXISTING {@code ArmTrailRequest.peakPremium} field unaltered.
+   */
+  @Test
+  void armTrail_withChosenPeak_threadsPeakPremiumThrough() throws Exception {
+    when(stub.update(eq("arm_trail"), eq(ArmTrailResult.class), any()))
+        .thenReturn(result(ArmTrailResult.Status.ARMED));
+
+    mvc.perform(
+            post("/api/positions/arm-trail")
+                .header("X-Tenant-Id", "acme")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    "{\"workflow_id\":\""
+                        + ownWorkflowId()
+                        + "\",\"giveback_pct\":0.35,\"peak_premium\":3.40}"))
+        .andExpect(status().isAccepted());
+
+    ArgumentCaptor<ArmTrailRequest> sent = ArgumentCaptor.forClass(ArmTrailRequest.class);
+    verify(stub).update(eq("arm_trail"), eq(ArmTrailResult.class), sent.capture());
+    org.assertj.core.api.Assertions.assertThat(sent.getValue().getPeakPremium())
+        .isEqualByComparingTo(new BigDecimal("3.40"));
+    org.assertj.core.api.Assertions.assertThat(sent.getValue().getGivebackPct())
+        .isEqualByComparingTo(new BigDecimal("0.35"));
+  }
+
+  /** #778: a non-positive peak violates the schema's own bound — 400, and no Update is sent. */
+  @Test
+  void armTrail_nonPositivePeak_isRejected400_beforeTemporal() throws Exception {
+    mvc.perform(
+            post("/api/positions/arm-trail")
+                .header("X-Tenant-Id", "acme")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    "{\"workflow_id\":\""
+                        + ownWorkflowId()
+                        + "\",\"giveback_pct\":0.35,\"peak_premium\":0}"))
+        .andExpect(status().isBadRequest());
+    verify(stub, never()).update(anyString(), any(), any());
   }
 
   private static void assertGiveback(ArmTrailRequest r) {

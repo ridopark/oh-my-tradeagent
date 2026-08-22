@@ -246,6 +246,15 @@ public class PositionsController {
           "giveback_pct must be between 0 and 0.5 (0 exclusive, 0.5 inclusive)");
     }
 
+    // #778: OPTIONAL operator-chosen anchor (the "peak since entry" option from GET /arm-anchors,
+    // sourced from trade_context.mfe_premium). Absent → exactly the previous behavior: the
+    // workflow resolves the anchor itself. Only the schema's own bound (> 0) is enforced here; the
+    // workflow's arm validator remains the authority on whether the anchor is usable.
+    Double peak = body.peakPremium();
+    if (peak != null && (!Double.isFinite(peak) || peak <= 0.0)) {
+      throw new IllegalArgumentException("peak_premium must be > 0 when present");
+    }
+
     ResponseEntity<Map<String, Object>> refusal = guardWorkflowId(tenant, workflowId);
     if (refusal != null) {
       return refusal;
@@ -255,9 +264,13 @@ public class PositionsController {
     ar.setSchemaVersion(1L);
     ar.setOperatorId(operatorId(req, tenant));
     ar.setGivebackPct(BigDecimal.valueOf(giveback));
-    // peak_premium is deliberately NOT threaded from the client. The workflow resolves the anchor
-    // itself from its own tracked bid / a fresh quote; a page-rendered premium is seconds stale,
-    // and an anchor that is too low sets the stop too low on a real-money position.
+    // peak_premium threads through ONLY when the operator explicitly chose the true-peak anchor
+    // (#778). A page-rendered CURRENT premium must still never be sent — the workflow's own
+    // resolution (omitted peak) stays the default for the "recent" choice, so a stale browser
+    // quote can never lower a real-money stop.
+    if (peak != null) {
+      ar.setPeakPremium(BigDecimal.valueOf(peak));
+    }
 
     ArmTrailResult result =
         updateResolvingAdoption(tenant, workflowId, "arm_trail", ArmTrailResult.class, ar);
@@ -426,13 +439,16 @@ public class PositionsController {
       @JsonProperty("workflow_id") String workflowId, String reason, Double fraction) {}
 
   /**
-   * {@code {"workflow_id": "...", "giveback_pct": 0.15}} — the /live Stop-loss body. No {@code
-   * reason} field: {@code ArmTrailRequest} has none, so {@code requireWorkflowIdAndReason} is
-   * deliberately NOT reused here. {@code @JsonProperty} is load-bearing on both fields — without it
-   * the wire names would be {@code workflowId}/{@code givebackPct} and the snake_case body the
-   * dashboard sends would bind null silently.
+   * {@code {"workflow_id": "...", "giveback_pct": 0.15, "peak_premium": 3.40}} — the /live
+   * Stop-loss body. {@code peak_premium} is OPTIONAL (#778): present only when the operator picked
+   * the "peak since entry" anchor offered by {@code GET /arm-anchors}; omitted, the workflow
+   * resolves the anchor itself exactly as before. No {@code reason} field: {@code ArmTrailRequest}
+   * has none, so {@code requireWorkflowIdAndReason} is deliberately NOT reused here.
+   * {@code @JsonProperty} is load-bearing on every field — without it the wire names would be
+   * camelCase and the snake_case body the dashboard sends would bind null silently.
    */
   public record ArmTrailPayload(
       @JsonProperty("workflow_id") String workflowId,
-      @JsonProperty("giveback_pct") Double givebackPct) {}
+      @JsonProperty("giveback_pct") Double givebackPct,
+      @JsonProperty("peak_premium") Double peakPremium) {}
 }
