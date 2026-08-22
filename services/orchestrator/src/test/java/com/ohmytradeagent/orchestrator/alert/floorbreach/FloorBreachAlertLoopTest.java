@@ -14,6 +14,7 @@ import static org.mockito.Mockito.when;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.alert.floorbreach.MarketDataOptionQuoteClient.OptionQuote;
+import com.ohmytradeagent.orchestrator.alert.tradecontext.TradeContextRecorder;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import com.ohmytradeagent.orchestrator.workflows.PositionState;
@@ -50,6 +51,7 @@ class FloorBreachAlertLoopTest {
   private FloorBreachThresholdResolver thresholdResolver;
   private FloorBreachStateStore stateStore;
   private AuditActivities audit;
+  private TradeContextRecorder recorder;
 
   @BeforeEach
   void setUp() {
@@ -59,6 +61,7 @@ class FloorBreachAlertLoopTest {
     thresholdResolver = mock(FloorBreachThresholdResolver.class);
     stateStore = new FloorBreachStateStore(wf -> null, Duration.ofHours(4));
     audit = mock(AuditActivities.class);
+    recorder = mock(TradeContextRecorder.class);
     when(registry.list()).thenReturn(List.of(new TenantStrategy(TENANT, STRATEGY)));
     lenient()
         .when(thresholdResolver.threshold(TENANT, STRATEGY))
@@ -67,7 +70,7 @@ class FloorBreachAlertLoopTest {
 
   private FloorBreachAlertLoop loop(boolean enabled) {
     return new FloorBreachAlertLoop(
-        registry, client, quoteClient, thresholdResolver, stateStore, audit, enabled);
+        registry, client, quoteClient, thresholdResolver, stateStore, audit, recorder, enabled);
   }
 
   private void stubOneRunningPosition(PositionState state) {
@@ -150,7 +153,65 @@ class FloorBreachAlertLoopTest {
   void disabledFlag_doesNoWorkAtAll() {
     FloorBreachAlertLoop loop = loop(false);
     loop.tick();
-    verifyNoInteractions(registry, client, quoteClient, audit);
+    verifyNoInteractions(registry, client, quoteClient, audit, recorder);
+  }
+
+  // --- #783: the trade-context recorder rides this loop but must never be able to break it ---
+
+  /** The issue's fail-soft requirement, tested explicitly: a THROWING recorder still pages. */
+  @Test
+  void throwingRecorder_neverBreaksTheAlertPath() {
+    stubOneRunningPosition(openPosition());
+    when(quoteClient.optionQuote(OCC))
+        .thenReturn(
+            new OptionQuote(
+                new BigDecimal("0.80"), new BigDecimal("1.00"), new BigDecimal("1.20")));
+    org.mockito.Mockito.doThrow(new IllegalStateException("recorder down"))
+        .when(recorder)
+        .observe(any(), anyString(), any(), any());
+    org.mockito.Mockito.doThrow(new IllegalStateException("recorder down"))
+        .when(recorder)
+        .closeVanished(any());
+
+    FloorBreachAlertLoop loop = loop(true);
+    loop.tick();
+    loop.tick();
+
+    verify(audit, times(1)).log(any());
+  }
+
+  @Test
+  void recorderObservesEveryEvaluatedPosition_withTheStateAndQuoteTheLoopFetched() {
+    stubOneRunningPosition(openPosition());
+    OptionQuote quote =
+        new OptionQuote(new BigDecimal("1.90"), new BigDecimal("2.00"), new BigDecimal("2.10"));
+    when(quoteClient.optionQuote(OCC)).thenReturn(quote);
+
+    loop(true).tick();
+
+    verify(recorder, times(1))
+        .observe(
+            org.mockito.ArgumentMatchers.argThat(ts -> ts.tenantId().equals(TENANT)),
+            org.mockito.ArgumentMatchers.eq(WF),
+            org.mockito.ArgumentMatchers.argThat(st -> OCC.equals(st.contractSymbol())),
+            org.mockito.ArgumentMatchers.eq(quote));
+  }
+
+  @Test
+  void closeVanishedRunsOnlyOffACompleteListing() {
+    stubOneRunningPosition(openPosition());
+    when(quoteClient.optionQuote(OCC))
+        .thenReturn(
+            new OptionQuote(
+                new BigDecimal("1.90"), new BigDecimal("2.00"), new BigDecimal("2.10")));
+    loop(true).tick();
+    verify(recorder, times(1)).closeVanished(java.util.Set.of(WF));
+
+    // A failed Visibility listing must not run the close pass — it would close live rows.
+    when(client.listExecutions(anyString()))
+        .thenThrow(new IllegalStateException("visibility down"));
+    loop(true).tick();
+    verify(recorder, times(1)).closeVanished(any());
   }
 
   @Test

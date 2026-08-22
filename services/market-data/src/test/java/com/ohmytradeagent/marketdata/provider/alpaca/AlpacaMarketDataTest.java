@@ -122,6 +122,85 @@ class AlpacaMarketDataTest {
     assertThat(q).isEmpty();
   }
 
+  // --- #783 snapshotGreeks: entry-time IV + greeks for the trade-context recorder ---
+
+  @Test
+  void snapshotGreeks_happyPath_extractsIvAndGreeks() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"snapshots\":{\"NVDA260516C00140000\":{"
+                    + "\"latestQuote\":{\"bp\":1.20,\"ap\":1.30,\"t\":\"2026-05-15T17:22:31Z\"},"
+                    + "\"impliedVolatility\":0.5432,"
+                    + "\"greeks\":{\"delta\":0.61,\"gamma\":0.042,\"theta\":-0.118,"
+                    + "\"vega\":0.093,\"rho\":0.021}}}}"));
+
+    Optional<com.ohmytradeagent.marketdata.provider.OptionGreeks> g =
+        provider.snapshotGreeks("NVDA  260516C00140000");
+
+    assertThat(g).isPresent();
+    assertThat(g.get().impliedVolatility()).isEqualByComparingTo("0.5432");
+    assertThat(g.get().delta()).isEqualByComparingTo("0.61");
+    assertThat(g.get().gamma()).isEqualByComparingTo("0.042");
+    assertThat(g.get().theta()).isEqualByComparingTo("-0.118");
+    assertThat(g.get().vega()).isEqualByComparingTo("0.093");
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getPath()).startsWith("/v1beta1/options/snapshots");
+    // Same compact-OCC contract as snapshotQuote: a padded symbol 400s at Alpaca.
+    assertThat(req.getPath()).contains("NVDA260516C00140000");
+    assertThat(req.getPath()).doesNotContain("%20").doesNotContain("+");
+  }
+
+  /** IV without a greeks node (Alpaca omits greeks on some illiquid contracts): partial record. */
+  @Test
+  void snapshotGreeks_missingGreeksNode_returnsIvWithNullGreeks() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"snapshots\":{\"NVDA260516C00140000\":{"
+                    + "\"latestQuote\":{\"bp\":1.20,\"ap\":1.30},"
+                    + "\"impliedVolatility\":0.44}}}"));
+
+    Optional<com.ohmytradeagent.marketdata.provider.OptionGreeks> g =
+        provider.snapshotGreeks("NVDA  260516C00140000");
+
+    assertThat(g).isPresent();
+    assertThat(g.get().impliedVolatility()).isEqualByComparingTo("0.44");
+    assertThat(g.get().delta()).isNull();
+    assertThat(g.get().theta()).isNull();
+  }
+
+  @Test
+  void snapshotGreeks_missingSnapshotOrNoFields_returnsEmpty() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"snapshots\":{}}"));
+    assertThat(provider.snapshotGreeks("NVDA  260516C00140000")).isEmpty();
+
+    // Snapshot present but carrying neither impliedVolatility nor greeks: nothing to record.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"snapshots\":{\"NVDA260516C00140000\":{"
+                    + "\"latestQuote\":{\"bp\":1.20,\"ap\":1.30}}}}"));
+    assertThat(provider.snapshotGreeks("NVDA  260516C00140000")).isEmpty();
+  }
+
+  @Test
+  void snapshotGreeks_5xx_returnsEmpty() {
+    server.enqueue(new MockResponse().setResponseCode(503).setBody("{\"message\":\"down\"}"));
+    assertThat(provider.snapshotGreeks("NVDA  260516C00140000")).isEmpty();
+  }
+
   // --- Phase 2c.3 option premium: REST poll fan-out (replaces the dead msgpack options WS) ---
 
   /**

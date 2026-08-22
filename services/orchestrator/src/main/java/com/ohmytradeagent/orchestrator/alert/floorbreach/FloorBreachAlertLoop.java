@@ -6,6 +6,7 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.alert.floorbreach.FloorBreachEvaluator.Evaluation;
 import com.ohmytradeagent.orchestrator.alert.floorbreach.FloorBreachStateStore.Decision;
 import com.ohmytradeagent.orchestrator.alert.floorbreach.MarketDataOptionQuoteClient.OptionQuote;
+import com.ohmytradeagent.orchestrator.alert.tradecontext.TradeContextRecorder;
 import com.ohmytradeagent.orchestrator.domain.OccSymbol;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
@@ -74,6 +75,7 @@ public class FloorBreachAlertLoop {
   private final FloorBreachThresholdResolver thresholdResolver;
   private final FloorBreachStateStore stateStore;
   private final AuditActivities audit;
+  private final TradeContextRecorder recorder;
   private final boolean enabled;
 
   /** Serializes ticks; {@code tryLock}-skip so a slow pass never stalls the scheduler pool. */
@@ -86,6 +88,7 @@ public class FloorBreachAlertLoop {
       FloorBreachThresholdResolver thresholdResolver,
       FloorBreachStateStore stateStore,
       AuditActivities audit,
+      TradeContextRecorder recorder,
       @Value("${alert.floor-breach.enabled:true}") boolean enabled) {
     this.registry = registry;
     this.client = client;
@@ -93,6 +96,7 @@ public class FloorBreachAlertLoop {
     this.thresholdResolver = thresholdResolver;
     this.stateStore = stateStore;
     this.audit = audit;
+    this.recorder = recorder;
     this.enabled = enabled;
   }
 
@@ -162,6 +166,13 @@ public class FloorBreachAlertLoop {
     // must not evict a live position's hysteresis state (which would cost a duplicate page later).
     if (!anyListingFailed) {
       stateStore.retainOnly(seenWorkflowIds);
+      // #783 exit append: a complete listing is also the authority on which recorded positions
+      // are gone. Belt-and-suspenders wrapped — the recorder is a passenger, never the driver.
+      try {
+        recorder.closeVanished(seenWorkflowIds);
+      } catch (RuntimeException e) {
+        log.warn("floor-breach: trade-context close pass failed: {}", e.getMessage());
+      }
     }
   }
 
@@ -189,6 +200,13 @@ public class FloorBreachAlertLoop {
     }
 
     OptionQuote quote = quoteClient.optionQuote(state.contractSymbol());
+    // #783 trade-context recording rides this poll (entry snapshot + MFE/MAE ratchet). Wrapped so
+    // a recorder failure can NEVER break the alert evaluation below — alerting stays primary.
+    try {
+      recorder.observe(ts, wfId, state, quote);
+    } catch (RuntimeException e) {
+      log.warn("floor-breach: trade-context observe failed wf={}: {}", wfId, e.getMessage());
+    }
     BigDecimal threshold = thresholdResolver.threshold(ts.tenantId(), ts.strategyId());
     Evaluation eval = FloorBreachEvaluator.evaluate(state.entryPremium(), quote, threshold);
     Decision decision = stateStore.onTick(wfId, eval, Instant.now());

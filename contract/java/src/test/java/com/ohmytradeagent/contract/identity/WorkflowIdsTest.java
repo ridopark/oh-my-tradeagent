@@ -137,4 +137,35 @@ class WorkflowIdsTest {
     assertThat(WorkflowIds.occFromPosition(null)).isNull();
     assertThat(WorkflowIds.occFromPosition("")).isNull();
   }
+
+  /**
+   * #783: the trade-context recorder keys its rows by the entry signal id, which the position
+   * workflow id already embeds after the OCC segment. It must round-trip what {@link
+   * WorkflowIds#position} builds — INCLUDING signal ids that contain slashes of their own
+   * (watchlist ids look like {@code wl/&lt;date&gt;/&lt;sym&gt;/&lt;right&gt;}).
+   */
+  @Test
+  void entrySignalIdFromPositionRoundTripsWhatPositionBuilds() {
+    String occ = "AMD   260819C00530000";
+    String signal = "chat-messages-769797179992571914-1538925306302439515:0";
+    String id = WorkflowIds.position("prod-kipark", "copytrade-v1", occ, signal);
+    assertThat(WorkflowIds.entrySignalIdFromPosition(id)).isEqualTo(signal);
+  }
+
+  @Test
+  void entrySignalIdFromPositionKeepsEmbeddedSlashes() {
+    String id =
+        WorkflowIds.position(
+            "acme", "watchlist-trigger-v1", "SPY   260609P00731000", "wl/2026-06-09/SPY/P");
+    assertThat(WorkflowIds.entrySignalIdFromPosition(id)).isEqualTo("wl/2026-06-09/SPY/P");
+  }
+
+  @Test
+  void entrySignalIdFromPositionRefusesMalformedIds() {
+    assertThat(WorkflowIds.entrySignalIdFromPosition("t-a/s-b/sig/some-signal")).isNull();
+    assertThat(WorkflowIds.entrySignalIdFromPosition("t-a/s-b/pos/OCCONLY")).isNull();
+    assertThat(WorkflowIds.entrySignalIdFromPosition("t-a/s-b/pos/OCC/")).isNull();
+    assertThat(WorkflowIds.entrySignalIdFromPosition(null)).isNull();
+    assertThat(WorkflowIds.entrySignalIdFromPosition("")).isNull();
+  }
 }

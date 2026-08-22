@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.marketdata.health.FeedHealth;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
+import com.ohmytradeagent.marketdata.provider.OptionGreeks;
 import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
 import com.ohmytradeagent.marketdata.provider.Quote;
 import com.ohmytradeagent.marketdata.provider.Subscription;
@@ -270,6 +271,52 @@ public class AlpacaMarketData implements MarketDataProvider {
       log.warn("Alpaca snapshotQuote failed for {}: {}", occSymbol, e.getMessage());
       return Optional.empty();
     }
+  }
+
+  @Override
+  public Optional<OptionGreeks> snapshotGreeks(String occSymbol) {
+    // Same snapshots endpoint (and the same compact-OCC contract) as snapshotQuote — Alpaca ships
+    // impliedVolatility + greeks alongside latestQuote in the one response. #783 reads them in a
+    // separate one-shot call at entry-observation time only, so the hot premium poll is untouched.
+    String compact = occSymbol.replace(" ", "");
+    try {
+      JsonNode body =
+          rest.get()
+              .uri("/v1beta1/options/snapshots?symbols={s}", compact)
+              .retrieve()
+              .body(JsonNode.class);
+      if (body == null) {
+        return Optional.empty();
+      }
+      JsonNode snapshot = body.path("snapshots").path(compact);
+      JsonNode iv = snapshot.path("impliedVolatility");
+      JsonNode greeks = snapshot.path("greeks");
+      if (!iv.isNumber() && !greeks.isObject()) {
+        // Neither field present (unknown symbol, or a contract Alpaca has no model outputs for).
+        return Optional.empty();
+      }
+      return Optional.of(
+          new OptionGreeks(
+              iv.isNumber() ? iv.decimalValue() : null,
+              numberOrNull(greeks.path("delta")),
+              numberOrNull(greeks.path("gamma")),
+              numberOrNull(greeks.path("theta")),
+              numberOrNull(greeks.path("vega"))));
+    } catch (HttpStatusCodeException e) {
+      log.warn(
+          "Alpaca snapshotGreeks failed for {}: status={} body={}",
+          occSymbol,
+          e.getStatusCode().value(),
+          e.getResponseBodyAsString());
+      return Optional.empty();
+    } catch (RuntimeException e) {
+      log.warn("Alpaca snapshotGreeks failed for {}: {}", occSymbol, e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  private static BigDecimal numberOrNull(JsonNode node) {
+    return node.isNumber() ? node.decimalValue() : null;
   }
 
   @Override

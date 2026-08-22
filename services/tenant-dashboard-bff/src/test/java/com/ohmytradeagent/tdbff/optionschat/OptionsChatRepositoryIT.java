@@ -55,7 +55,8 @@ class OptionsChatRepositoryIT {
         .placeholders(
             Map.of(
                 "dashboard_readonly_password", READONLY_PW,
-                "dashboard_writer_password", WRITER_PW))
+                "dashboard_writer_password", WRITER_PW,
+                "trade_context_writer_password", "tc-writer-test-pw"))
         .load()
         .migrate();
     // As the least-privilege role the BFF actually connects as — so a missing grant fails here too.

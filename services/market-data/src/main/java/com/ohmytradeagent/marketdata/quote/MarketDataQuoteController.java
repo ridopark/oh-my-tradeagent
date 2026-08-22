@@ -78,6 +78,24 @@ public class MarketDataQuoteController {
     return out;
   }
 
+  /**
+   * {@code {occ, iv, delta, gamma, theta, vega}} — the option's implied volatility + greeks (#783;
+   * null fields when unavailable). Read once per entry observation by the orchestrator's
+   * trade-context recorder — these are the fields no historical API can backfill.
+   */
+  @GetMapping("/md/option/{occ}/greeks")
+  public Map<String, Object> optionGreeks(@PathVariable("occ") String occ) {
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("occ", occ);
+    var greeks = provider.snapshotGreeks(occ);
+    out.put("iv", greeks.map(g -> (Object) g.impliedVolatility()).orElse(null));
+    out.put("delta", greeks.map(g -> (Object) g.delta()).orElse(null));
+    out.put("gamma", greeks.map(g -> (Object) g.gamma()).orElse(null));
+    out.put("theta", greeks.map(g -> (Object) g.theta()).orElse(null));
+    out.put("vega", greeks.map(g -> (Object) g.vega()).orElse(null));
+    return out;
+  }
+
   /** {@code {occ, bid, mid, ask}} — option NBBO (null fields when unavailable). */
   @GetMapping("/md/option/{occ}")
   public Map<String, Object> option(@PathVariable("occ") String occ) {

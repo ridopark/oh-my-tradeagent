@@ -185,6 +185,28 @@ public final class WorkflowIds {
     return occ.isBlank() ? null : occ;
   }
 
+  /**
+   * The entry signal id embedded in a {@code PositionWorkflow} id, or {@code null} if this is not
+   * one.
+   *
+   * <p>#783: the trade-context recorder keys its rows by {@code (signal_id, tenant_id)}; the id
+   * segment AFTER the OCC is exactly the {@code entrySignalId} that {@link #position} wrote, so no
+   * workflow query is needed to recover it. Everything after the first separator following the OCC
+   * belongs to the signal id — watchlist signal ids contain slashes of their own (they look like
+   * {@code wl/<date>/<sym>/<right>}), while the OCC never does.
+   *
+   * <p>Returns {@code null} rather than a best guess for anything malformed — a caller that cannot
+   * name the signal with certainty must not record against one.
+   */
+  public static String entrySignalIdFromPosition(String workflowId) {
+    if (occFromPosition(workflowId) == null) {
+      return null;
+    }
+    int start = workflowId.indexOf(POS_SEGMENT) + POS_SEGMENT.length();
+    String signalId = workflowId.substring(workflowId.indexOf('/', start) + 1);
+    return signalId.isBlank() ? null : signalId;
+  }
+
   /** Workflow ID prefix for {@code ReconciliationWorkflow} runs. The scheduler appends a run-id. */
   public static String reconciliationPrefix(
       String tenantId, String strategyId, String brokerTarget) {
