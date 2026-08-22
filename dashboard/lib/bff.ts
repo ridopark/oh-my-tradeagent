@@ -236,17 +236,25 @@ export type ArmTrailResult = {
 
 // Drive PositionWorkflow.arm_trail via the dark-gated BFF endpoint: arm the existing chandelier
 // trail on THIS position only. `givebackPct` must be in (0, 0.5]; the BFF pre-validates it so an
-// out-of-range value is a 400 rather than a Temporal update-rejected 409. peak_premium is
-// deliberately NOT sent — the workflow resolves the anchor from its own bid / a fresh quote, which
-// is strictly better than a page value that is already seconds stale.
+// out-of-range value is a 400 rather than a Temporal update-rejected 409.
+//
+// `peakPremium` (#778) is sent ONLY when the operator explicitly chose the "peak since entry"
+// anchor offered by fetchArmAnchors — never a page-rendered CURRENT premium, which is already
+// seconds stale. Omitted, the workflow resolves the anchor from its own bid / a fresh quote,
+// exactly as before.
 export async function armPositionTrail(
   workflowId: string,
   givebackPct: number,
   operatorId?: string,
+  peakPremium?: number,
 ): Promise<ArmTrailResult> {
   const { status, body } = await bffPost(
     "/api/positions/arm-trail",
-    { workflow_id: workflowId, giveback_pct: givebackPct },
+    {
+      workflow_id: workflowId,
+      giveback_pct: givebackPct,
+      ...(peakPremium != null ? { peak_premium: peakPremium } : {}),
+    },
     operatorId ? { "X-Operator-Id": operatorId } : undefined,
   );
   const b = body as {
@@ -276,6 +284,38 @@ export async function armPositionTrail(
     };
   }
   return { ok: false };
+}
+
+// The "peak since entry" candidate anchor for arming a trail (#778), from GET
+// /api/positions/arm-anchors — sourced server-side from the #783 trade_context recorder's
+// mfe_premium. `stop` is the fire threshold the BFF computed for the REQUESTED giveback.
+export type TruePeakAnchor = { peak: number; stop: number };
+
+// Fetch the true-peak anchor candidate for one position. FAIL-SOFT BY DESIGN: any non-200, a null
+// true_peak_anchor (recorder dark, table not yet migrated, row absent, unusable mfe), or a thrown
+// fetch resolves to null — the caller then renders exactly today's arm UI. The endpoint's
+// recent_anchor is deliberately not surfaced: "recent" is represented client-side as "the workflow
+// resolves it" (peak omitted from the arm), the same contract as before.
+export async function fetchArmAnchors(
+  workflowId: string,
+  givebackPct: number,
+): Promise<TruePeakAnchor | null> {
+  try {
+    const { status, body } = await bffGetRaw(
+      `/api/positions/arm-anchors?workflow_id=${encodeURIComponent(workflowId)}&giveback_pct=${givebackPct}`,
+    );
+    if (status !== 200) return null;
+    const b = body as {
+      true_peak_anchor?: { peak?: number; stop?: number } | null;
+    } | null;
+    const a = b?.true_peak_anchor;
+    if (a == null || a.peak == null || a.stop == null) return null;
+    if (!Number.isFinite(a.peak) || a.peak <= 0) return null;
+    return { peak: a.peak, stop: a.stop };
+  } catch {
+    // An anchor preview must never break the arm flow — degrade to recent-only.
+    return null;
+  }
 }
 
 // Typed result of a per-position partial close / "Trim" (POST /api/positions/partial-close). Same

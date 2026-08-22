@@ -84,6 +84,7 @@ export function StopLossButton({
   armedGivebackPct,
   armedStopPrice,
   action,
+  anchorsAction,
 }: {
   workflowId: string;
   symbol: string;
@@ -120,7 +121,17 @@ export function StopLossButton({
   action: (
     workflowId: string,
     givebackPct: number,
+    peakPremium?: number,
   ) => Promise<StopLossActionResult>;
+  // #778 arm-anchor choice: fetches the TRUE peak-since-entry candidate (trade_context.mfe_premium
+  // via the BFF), or null on every degraded state (recorder dark, table absent, row absent). Null
+  // — or an absent prop — renders exactly today's UI, no new chrome. The peak in the result is
+  // giveback-independent; the stop for the giveback actually picked is recomputed locally with
+  // stopPriceFor, which applies the same cent rounding as the BFF.
+  anchorsAction?: (
+    workflowId: string,
+    givebackPct: number,
+  ) => Promise<{ peak: number; stop: number } | null>;
 }) {
   // Explicit in-flight lock rather than useTransition's `pending`: React 18.3.1 closes a transition
   // scope at the first `await`, which would re-expose a clickable button mid-flight. See
@@ -132,6 +143,11 @@ export function StopLossButton({
   const [picking, setPicking] = useState(false);
   const [confirming, setConfirming] = useState<number | null>(null);
   const [result, setResult] = useState<StopLossActionResult | null>(null);
+  // #778: the true-peak-since-entry candidate, fetched once per picker open. Null = not available
+  // (or not fetched yet) = today's single-anchor flow.
+  const [truePeak, setTruePeak] = useState<{ peak: number; stop: number } | null>(
+    null,
+  );
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearTimer = () => {
@@ -177,18 +193,27 @@ export function StopLossButton({
     setConfirming(null);
     setPicking(true);
     armTimer();
+    // #778: fetch the true-peak candidate in the background while the operator picks a giveback.
+    // Fire-and-forget on purpose — the picker/confirm must never wait on it, and a late or failed
+    // fetch simply leaves today's single recent-anchor confirm. The peak itself is
+    // giveback-independent, so DEFAULT_GIVEBACK is only the server's stop-preview input.
+    setTruePeak(null);
+    anchorsAction?.(workflowId, DEFAULT_GIVEBACK).then(
+      (a) => setTruePeak(a),
+      () => setTruePeak(null),
+    );
   };
   const pick = (giveback: number) => {
     setPicking(false);
     setConfirming(giveback);
     armTimer();
   };
-  const fire = (giveback: number) => {
+  const fire = (giveback: number, peakPremium?: number) => {
     clearTimer();
     setPicking(false);
     setConfirming(null);
     setSubmitting(true);
-    action(workflowId, giveback)
+    action(workflowId, giveback, peakPremium)
       .then(setResult)
       .finally(() => setSubmitting(false));
   };
@@ -272,6 +297,22 @@ export function StopLossButton({
 
   if (confirming != null) {
     const stop = stopPriceFor(currentPrice, confirming);
+    // #778 anchor choice: offer the true peak-since-entry ONLY when it is materially (>2%) ABOVE
+    // the recent mark — a peak at/below the live price adds nothing the workflow's own resolution
+    // doesn't already cover, and anchoring BELOW it would set a lower stop. An unusable mark can't
+    // be compared, so the peak is offered and the operator sees both numbers. Otherwise this block
+    // renders exactly the pre-#778 single confirm.
+    const offeredPeak =
+      truePeak != null &&
+      (currentPrice == null ||
+        !Number.isFinite(currentPrice) ||
+        currentPrice <= 0 ||
+        truePeak.peak > currentPrice * 1.02)
+        ? truePeak
+        : null;
+    // Stop recomputed for the giveback actually picked — same cent rounding as the BFF preview.
+    const peakStop =
+      offeredPeak == null ? null : stopPriceFor(offeredPeak.peak, confirming);
     return (
       <div
         className="flex items-center gap-2"
@@ -280,6 +321,9 @@ export function StopLossButton({
       >
         <button
           type="button"
+          // The DEFAULT stays the recent-price arm (today's behavior): autofocused, so Enter arms
+          // it, and a true-peak anchor is only ever an explicit second click. A true-peak anchor
+          // can sit ABOVE the current bid (instant fire) — that risk must be chosen, not defaulted.
           autoFocus
           onClick={() => fire(confirming)}
           className="rounded border border-emerald-500/60 bg-emerald-600/20 px-2 py-1 text-xs font-medium text-emerald-100 hover:bg-emerald-600/30"
@@ -288,7 +332,18 @@ export function StopLossButton({
           {stop != null
             ? `, stop now ≈ $${stop.toFixed(2)}`
             : ", stop set from the live quote"}
+          {offeredPeak != null && " (recent price)"}
         </button>
+        {offeredPeak != null && (
+          <button
+            type="button"
+            onClick={() => fire(confirming, offeredPeak.peak)}
+            className="rounded border border-sky-500/60 bg-sky-600/20 px-2 py-1 text-xs font-medium text-sky-100 hover:bg-sky-600/30"
+          >
+            Peak since entry — ${offeredPeak.peak.toFixed(2)}
+            {peakStop != null && `, stop $${peakStop.toFixed(2)}`}
+          </button>
+        )}
         <button
           type="button"
           onClick={disarm}

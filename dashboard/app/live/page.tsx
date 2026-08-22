@@ -39,6 +39,8 @@ import {
   submitManualEntry,
   getEntryStatus,
   armPositionTrail,
+  fetchArmAnchors,
+  type TruePeakAnchor,
   forcePositionExit,
   trimPosition,
   NotAuthenticatedError,
@@ -165,6 +167,7 @@ async function trimAction(
 async function armTrailAction(
   workflowId: string,
   givebackPct: number,
+  peakPremium?: number,
 ): Promise<StopLossActionResult> {
   "use server";
   const s = await auth();
@@ -172,7 +175,7 @@ async function armTrailAction(
     return { ok: false, kind: "error" };
   }
   const operator = s.user?.email ?? s.user?.name ?? undefined;
-  const r = await armPositionTrail(workflowId, givebackPct, operator);
+  const r = await armPositionTrail(workflowId, givebackPct, operator, peakPremium);
   if (r.ok) {
     revalidatePath("/live");
     return {
@@ -192,6 +195,21 @@ async function armTrailAction(
     return { ok: false, kind: "rejected", reason: r.reason };
   }
   return { ok: false, kind: "error" };
+}
+
+// #778: fetch the "peak since entry" anchor candidate for the Stop-loss control. Read-only and
+// fail-soft end-to-end (fetchArmAnchors resolves null on every degraded state), so a failure here
+// can only ever mean the picker shows today's single recent-anchor flow.
+async function armAnchorsAction(
+  workflowId: string,
+  givebackPct: number,
+): Promise<TruePeakAnchor | null> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return null;
+  }
+  return fetchArmAnchors(workflowId, givebackPct);
 }
 
 // PLAN-2026-08-10-live-manual-bto: the three manual-entry server actions. Each re-verifies the
@@ -429,6 +447,7 @@ export default async function LivePage() {
                 row.trail_stop_price == null ? null : Number(row.trail_stop_price)
               }
               action={armTrailAction}
+              anchorsAction={armAnchorsAction}
             />
           )}
           {TRIM_WRITE_ENABLED && (
