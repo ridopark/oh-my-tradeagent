@@ -192,4 +192,51 @@ class StrategyConfigInvariantsTest {
         .as("pre_trade_check_enabled=null is advisory (warn only)")
         .doesNotThrowAnyException();
   }
+
+  // ---- Issue #804: coexisting per-strategy threshold + armed account cap WARNS ----
+
+  /**
+   * A present positive per-strategy daily_loss_threshold beside the armed account cap is legal
+   * (never a boot failure) but almost certainly unintended — the tighter rule trips first with a
+   * full cascade (the 2026-08-19 kipark halt). Pin the advisory WARN so the tripwire is real, and
+   * pin its ABSENCE when the threshold is absent so a clean estate boots quietly.
+   */
+  @org.junit.jupiter.api.Test
+  void coexistingPerStrategyThresholdBesideArmedCap_warnsButPasses() {
+    ch.qos.logback.classic.Logger logger =
+        (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(StrategyConfigInvariants.class);
+    ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+        new ch.qos.logback.core.read.ListAppender<>();
+    appender.start();
+    logger.addAppender(appender);
+    try {
+      StrategyConfig cfg = live();
+      cfg.setPreTradeCheckEnabled(true);
+      cfg.setDailyLossThreshold(new BigDecimal("2500"));
+
+      assertThatCode(
+              () ->
+                  StrategyConfigInvariants.validateLiveRequiredGates(
+                      cfg, PCT_ARMED, null, "acme/strat-a"))
+          .doesNotThrowAnyException();
+      org.assertj.core.api.Assertions.assertThat(appender.list)
+          .anyMatch(
+              e ->
+                  e.getLevel() == ch.qos.logback.classic.Level.WARN
+                      && e.getFormattedMessage().contains("ALONGSIDE the armed")
+                      && e.getFormattedMessage().contains("acme/strat-a")
+                      && e.getFormattedMessage().contains("2500"));
+
+      // Clean config: no coexistence WARN (the pre-trade WARN is a different message).
+      appender.list.clear();
+      StrategyConfig clean = live();
+      clean.setPreTradeCheckEnabled(true);
+      StrategyConfigInvariants.validateLiveRequiredGates(clean, PCT_ARMED, null, "acme/strat-a");
+      org.assertj.core.api.Assertions.assertThat(appender.list)
+          .noneMatch(e -> e.getFormattedMessage().contains("ALONGSIDE"));
+    } finally {
+      logger.detachAppender(appender);
+    }
+  }
 }
