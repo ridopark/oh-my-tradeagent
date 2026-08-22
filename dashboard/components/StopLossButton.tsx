@@ -229,7 +229,15 @@ export function StopLossButton({
     // whether or not anything is feeding the stop; the dot reads market-data's own poll clock, so
     // an orphaned subscription (#717) shows red beside a badge that still reads armed.
     return (
-      <span className="inline-flex items-center gap-1.5" role="status">
+      <span
+        className="inline-flex items-center gap-1.5"
+        role="status"
+        // #747: across a market close the stop is NOT a bound. The 2026-08-19 SPY open gapped
+        // straight through three armed trails: 25% configured, ~47% realized — the trail fired on
+        // the first tick of the session, exactly as designed, far below its threshold. The badge
+        // must not let "Trailing 25%" read as "worst case 25%" on an overnight hold.
+        title={`Held overnight, this stop is best-effort at the next open — the price can gap past it, so ${Math.round(armedGivebackPct * 100)}% is not a worst-case bound.`}
+      >
         <TrailFeedDot entry={liveness} />
         <span className="text-xs font-medium text-emerald-300">
           Trailing {Math.round(armedGivebackPct * 100)}%
@@ -351,6 +359,12 @@ export function StopLossButton({
         >
           Cancel
         </button>
+        {/* #747: said at DECISION time, not only on the armed badge — an operator choosing 25%
+            here is choosing "roughly my worst case" unless told otherwise. Across a gap it is
+            best-effort at the next open (SPY 2026-08-19: 25% configured, ~47% realized). */}
+        <span className="text-[11px] leading-tight text-slate-400">
+          Overnight, the stop fires at the next open — a gap can exceed the %.
+        </span>
       </div>
     );
   }
