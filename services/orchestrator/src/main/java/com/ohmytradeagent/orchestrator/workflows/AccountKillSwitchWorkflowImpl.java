@@ -1477,6 +1477,13 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   @Override
   public void tripValidator(TripKillSwitchRequest request) {
     if (tripped) {
+      // #668 scoping — DELIBERATELY no operator-takeover branch here, unlike
+      // KillSwitchWorkflowImpl. The takeover exists because one-click Deactivate trips the
+      // PER-STRATEGY switch and could land on its auto trip; the account cap has NO operator trip
+      // route at all (its external surface is state-read + reset — AccountKillSwitchController —
+      // and nothing else calls this update with an operator actor), so the
+      // operator-over-auto case is structurally unreachable. If an operator trip surface is ever
+      // added for the cap, port the takeover with it.
       throw new IllegalStateException("already_tripped");
     }
     if (request.getReason() == null || request.getReason().isBlank()) {
