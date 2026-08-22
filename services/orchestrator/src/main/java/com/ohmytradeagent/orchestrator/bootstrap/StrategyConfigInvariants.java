@@ -109,6 +109,32 @@ public final class StrategyConfigInvariants {
 
     requireNotionalCap(cfg, brokerTarget, label);
     warnIfPreTradeDisabled(cfg, label);
+    warnIfCoexistingPerStrategyThreshold(cfg, label);
+  }
+
+  /**
+   * Issue #804 (from the #748 sweep): a PRESENT, positive per-strategy {@code daily_loss_threshold}
+   * coexisting with the armed account cap silently overrides it — the tighter rule trips first with
+   * a full force-flatten cascade and nothing says so (the 2026-08-19 prod-kipark halt: the
+   * per-strategy 2500 tripped while the account cap at 10,397 correctly declined all day). The
+   * estate is clean today and #792 removed the onboarding template's seed, so this fires only on a
+   * manual write — exactly the case that needs a tripwire. Advisory WARN, never a boot failure (a
+   * wrong guard must never halt trading; the coexistence is legal, just almost certainly
+   * unintended). Reached only on the cap-aware path where the cap is armed — the un-armed case
+   * already threw above.
+   */
+  private static void warnIfCoexistingPerStrategyThreshold(StrategyConfig cfg, String label) {
+    BigDecimal perStrategy = cfg.getDailyLossThreshold();
+    if (perStrategy != null && perStrategy.signum() > 0) {
+      log.warn(
+          "live strategy {} carries a per-strategy daily_loss_threshold={} ALONGSIDE the armed"
+              + " account cap — the tighter rule trips first with a full force-flatten cascade"
+              + " (the 2026-08-19 kipark incident class, #748/#804). The account cap is meant to"
+              + " be the sole daily-loss breaker: remove the per-strategy field unless this tenant"
+              + " deliberately runs both.",
+          label,
+          perStrategy);
+    }
   }
 
   private static void requireNotionalCap(StrategyConfig cfg, String brokerTarget, String label) {
