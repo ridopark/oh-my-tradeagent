@@ -144,6 +144,21 @@ alert:
     # The /live dashboard link rendered into the Discord embed (a bare link — never a button).
     live-url: ${ALERT_FLOOR_BREACH_LIVE_URL:https://tradeagent.ridopark.com/live}
 
+# Issue #783: the trade-context recorder riding the #779 floor-breach poll (alert/tradecontext/,
+# observation-only — same no-trading guard-test contract as the host loop). It writes per-signal
+# entry snapshots + MFE/MAE + exit appends into the DASHBOARD DB's trade_context table as the
+# least-privilege trade_context_writer role (BFF migration V13). DARK by default: enabling requires
+# BOTH the flag AND real creds (TRADE_CONTEXT_WRITER_PASSWORD from the dashboard-secrets Secret —
+# the same secret the BFF's Flyway used to create the role). With the flag off, the recorder and
+# its datasource simply don't exist.
+trade-context:
+  recorder:
+    enabled: ${TRADE_CONTEXT_RECORDER_ENABLED:false}
+  db:
+    url: ${TRADE_CONTEXT_DB_URL:jdbc:postgresql://localhost:5432/dashboard}
+    user: ${TRADE_CONTEXT_DB_USER:trade_context_writer}
+    password: ${TRADE_CONTEXT_WRITER_PASSWORD:}
+
 management:
   endpoints:
     web:

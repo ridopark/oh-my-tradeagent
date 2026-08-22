@@ -41,6 +41,13 @@ spring:
       # BEFORE the role is created. Only consumed on a cluster that runs Flyway with this Secret set;
       # unit tests / ITs never run this migration via Spring (the migration IT drives Flyway directly).
       dashboard_writer_password: ${DASHBOARD_WRITER_PASSWORD}
+      # Injected into V13__trade_context.sql at migration time so the least-privilege
+      # trade_context_writer role (SELECT/INSERT/UPDATE on trade_context only — the ORCHESTRATOR's
+      # #783 recorder connects as it) is created with its real password, never a repo-readable
+      # literal. Same fail-closed contract as the two placeholders above: NO default, so an unset
+      # TRADE_CONTEXT_WRITER_PASSWORD fails resolution BEFORE the role is created. Set it from the
+      # dashboard-secrets Secret in prod (the orchestrator reads the SAME secret to connect).
+      trade_context_writer_password: ${TRADE_CONTEXT_WRITER_PASSWORD}
 
 # I-1a (operator-account-onboarding): dark gate for the operator-scoped cross-tenant admin read
 # (GET /api/admin/tenants). Default OFF — the controller bean is absent and the route 404s until an

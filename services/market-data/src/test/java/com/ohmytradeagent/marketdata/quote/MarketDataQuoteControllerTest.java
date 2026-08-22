@@ -71,6 +71,41 @@ class MarketDataQuoteControllerTest {
         .andExpect(jsonPath("$.ask").value(3.00));
   }
 
+  // --- #783 /md/option/{occ}/greeks: entry-time IV + greeks for the trade-context recorder ---
+
+  @Test
+  void optionGreeks_returnsIvAndGreeks() throws Exception {
+    when(provider.snapshotGreeks("NVDA260516C00140000"))
+        .thenReturn(
+            Optional.of(
+                new com.ohmytradeagent.marketdata.provider.OptionGreeks(
+                    new BigDecimal("0.5432"),
+                    new BigDecimal("0.61"),
+                    new BigDecimal("0.042"),
+                    new BigDecimal("-0.118"),
+                    new BigDecimal("0.093"))));
+
+    mvc.perform(get("/md/option/{occ}/greeks", "NVDA260516C00140000"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.occ").value("NVDA260516C00140000"))
+        .andExpect(jsonPath("$.iv").value(0.5432))
+        .andExpect(jsonPath("$.delta").value(0.61))
+        .andExpect(jsonPath("$.gamma").value(0.042))
+        .andExpect(jsonPath("$.theta").value(-0.118))
+        .andExpect(jsonPath("$.vega").value(0.093));
+  }
+
+  @Test
+  void optionGreeks_unavailable_nullFields() throws Exception {
+    when(provider.snapshotGreeks("SPY260609P00731000")).thenReturn(Optional.empty());
+
+    mvc.perform(get("/md/option/{occ}/greeks", "SPY260609P00731000"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.occ").value("SPY260609P00731000"))
+        .andExpect(jsonPath("$.iv").doesNotExist())
+        .andExpect(jsonPath("$.delta").doesNotExist());
+  }
+
   // --- /md/premium-subscriptions: the #717 trail-liveness wire contract ---
 
   private static final String OCC = "DRAM  270319C00100000";
