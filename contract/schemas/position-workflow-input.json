@@ -273,6 +273,16 @@
           }
         }
       }
+    },
+    "carried_entry_booked_qty": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. #738: cumulative entry qty already booked into the lot for the entry order. Carried as a PAIR with carried_expected_qty; either absent disables entry growth on the new run (pre-#738 behavior) — growth arithmetic against an unknown base could double-book."
+    },
+    "carried_expected_qty": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. #738: the ORIGINAL ordered qty (the roll resets qty to the remaining lot, which would wrongly cap entry growth). Pair of carried_entry_booked_qty."
     }
   }
 }

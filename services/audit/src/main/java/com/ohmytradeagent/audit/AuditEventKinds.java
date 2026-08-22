@@ -209,6 +209,8 @@ public final class AuditEventKinds {
           "DeriskSkippedDisabled",
           // PositionWorkflowImpl
           "PositionEntered",
+          // #738: a post-confirm broker report on the entry order grew the managed lot.
+          "PositionEntryIncreased",
           "PositionNeverFilled",
           "PartialExitRequested",
           "PartialExitFilled",
