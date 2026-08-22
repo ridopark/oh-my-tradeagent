@@ -56,6 +56,22 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   private static final String KIND_KILL_SWITCH_CLEARED_ON_ROLLOVER = "KillSwitchClearedOnRollover";
 
   /**
+   * Issue #669: the once-per-trading-day "this switch is STILL tripped" page. A tripped switch
+   * holding no positions previously emitted nothing, forever — staging_paper sat halted NINE DAYS
+   * (2026-08-03→12) indistinguishable from healthy idle. Actor-agnostic: every operator halt and
+   * sticky auto trip pages each morning until cleared or reset.
+   */
+  private static final String KIND_KILL_SWITCH_STILL_TRIPPED = "KillSwitchStillTripped";
+
+  /**
+   * Issue #668: an operator trip landed on a switch already auto-tripped and took OWNERSHIP of it
+   * (actor/reason overwritten, no second cascade). Without this, a one-click Deactivate during an
+   * auto:daily_loss day reported success while leaving actor=auto:daily_loss — and #667's rollover
+   * then silently re-armed a strategy the operator had deliberately shut off.
+   */
+  private static final String KIND_KILL_SWITCH_TRIP_REATTRIBUTED = "KillSwitchTripReattributed";
+
+  /**
    * The actor (and reason) stamped by the auto daily-loss heartbeat trip — the ONLY day-scoped trip
    * this workflow takes, and therefore the only one the rollover clears. Every other actor ({@code
    * operator:*} from {@code KillSwitchController} / {@code LiveActivationGateActivitiesImpl},
@@ -158,6 +174,16 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
       "killswitch-clear-daily-loss-trip-on-rollover-v1";
 
   /**
+   * Issue #669: gate for the once-per-day still-tripped page. Read right after the rollover-clear
+   * gate (same stable pre-tripped-return scope; appending after it keeps every recorded marker
+   * order). At {@code DEFAULT_VERSION} a tripped tick stays the byte-identical bare early-return;
+   * at {@code v>=1} the first market-open tick of a new trading day while tripped emits {@link
+   * #KIND_KILL_SWITCH_STILL_TRIPPED} (one isMarketOpen activity + one audit command, both strictly
+   * behind the gate).
+   */
+  static final String VERSION_KILLSWITCH_STILL_TRIPPED_PAGE = "killswitch-still-tripped-page-v1";
+
+  /**
    * Consecutive exec-realized-read failures the heartbeat tolerates before paging (guardrail G1). A
    * failed read is NEVER treated as a loss (never a spurious trip); the counter + bounded alert
    * make a persistent exec outage visible instead of silently skipping ticks forever. 3 ticks at
@@ -215,6 +241,14 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   private LocalDate tradingDay;
 
   /**
+   * Issue #669: the trading day the still-tripped page last fired (or was quiet-stamped on the trip
+   * day), bounding the page to once per day. CARRIED across continue-as-new — review-caught: an
+   * uncarried field resets to null, the tripped branch reads null as "trip day" and quiet-stamps,
+   * and the roll day would LOSE its page entirely (never duplicate it).
+   */
+  private LocalDate lastStillTrippedPageDay;
+
+  /**
    * Guardrail G1: consecutive exec-realized-read failures on the {@code v>=1} path (deterministic
    * workflow state, no commands). A failed read defers the trip this tick (never a spurious trip)
    * and increments this counter; on crossing {@link #REALIZED_READ_FAILURE_ALERT_TICKS} the
@@ -231,7 +265,7 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
   // auditEvent() with input == null.
   @WorkflowInit
   public KillSwitchWorkflowImpl(KillSwitchWorkflowInput in) {
-    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 2L) {
+    if (in.getSchemaVersion() == null || in.getSchemaVersion() > 3L) {
       throw new IllegalArgumentException(
           "KillSwitchWorkflowInput schema_version unsupported: " + in.getSchemaVersion());
     }
@@ -255,6 +289,9 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     }
     if (in.getTradingDay() != null) {
       this.tradingDay = in.getTradingDay();
+    }
+    if (in.getLastStillTrippedPageDay() != null) {
+      this.lastStillTrippedPageDay = in.getLastStillTrippedPageDay();
     }
   }
 
@@ -297,7 +334,9 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
    */
   private KillSwitchWorkflowInput buildCarryForwardInput() {
     KillSwitchWorkflowInput carry = new KillSwitchWorkflowInput();
-    carry.setSchemaVersion(2L);
+    // #669: v3 ONLY when the page-day is carried, so a never-tripped carry stays the v2 shape an
+    // old pod mid-rollout accepts (same discipline as AccountKillSwitchWorkflowImpl's builder).
+    carry.setSchemaVersion(lastStillTrippedPageDay != null ? 3L : 2L);
     carry.setTenantId(input.getTenantId());
     carry.setStrategyId(input.getStrategyId());
     carry.setTripped(tripped);
@@ -310,6 +349,10 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     carry.setTrippedAt(trippedAt);
     carry.setCoolingDownUntil(coolingDownUntil);
     carry.setTradingDay(tradingDay);
+    // #669 review fix: carry the page day — without it the roll day LOSES its page (the null
+    // quiet-stamp reads a fresh run as "trip day"), the exact inverse of the duplicate the
+    // original javadoc guessed at.
+    carry.setLastStillTrippedPageDay(lastStillTrippedPageDay);
     return carry;
   }
 
@@ -328,6 +371,9 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     int clearDailyLossOnRollover =
         Workflow.getVersion(
             VERSION_KILLSWITCH_CLEAR_DAILY_LOSS_ON_ROLLOVER, Workflow.DEFAULT_VERSION, 1);
+    // #669: read right after the rollover-clear gate (appended — recorded marker order preserved).
+    int stillTrippedPageVersion =
+        Workflow.getVersion(VERSION_KILLSWITCH_STILL_TRIPPED_PAGE, Workflow.DEFAULT_VERSION, 1);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -355,6 +401,29 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     }
 
     if (tripped) {
+      // #669: a tripped-and-FLAT switch previously said nothing, forever (staging_paper: nine
+      // silent days). Once per trading day, on the first market-open tick, page that the switch is
+      // STILL tripped — actor-agnostic, so operator halts and sticky auto trips all stay visible.
+      // The rollover-clear above runs first, so a switch it cleared never reaches this. Both new
+      // commands (isMarketOpen + the audit) are strictly behind the v>=1 gate; a tripped tick at
+      // DEFAULT_VERSION is the byte-identical bare return.
+      if (stillTrippedPageVersion >= 1 && lastStillTrippedPageDay == null) {
+        // Trip day (or a fresh run adopted already-tripped): the trip itself paged — the daily
+        // reminder starts on the NEXT day. Quiet stamp, no page. (doTrip also stamps, but a trip
+        // landing before the first heartbeat sees tradingDay still null.)
+        lastStillTrippedPageDay = today;
+      } else if (stillTrippedPageVersion >= 1
+          && !today.equals(lastStillTrippedPageDay)
+          && calendar.isMarketOpen()) {
+        lastStillTrippedPageDay = today;
+        auditLog(
+            KIND_KILL_SWITCH_STILL_TRIPPED,
+            subject(
+                "reason", reason,
+                "actor", actor,
+                "tripped_at", trippedAt,
+                "trading_day", today));
+      }
       return;
     }
     // #746: honour the cooldown doReset armed. Read AFTER the tripped early-return deliberately —
@@ -487,19 +556,53 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
 
   @Override
   public void tripValidator(TripKillSwitchRequest request) {
-    if (tripped) {
-      throw new IllegalStateException("already_tripped");
-    }
     if (request.getReason() == null || request.getReason().isBlank()) {
       throw new IllegalArgumentException("reason_required");
     }
     if (request.getActor() == null || request.getActor().isBlank()) {
       throw new IllegalArgumentException("actor_required");
     }
+    if (tripped) {
+      // #668: an OPERATOR trip landing on an AUTO-tripped switch is a takeover, not a duplicate.
+      // Rejecting it left actor=auto:daily_loss after a one-click Deactivate "succeeded", and
+      // #667's rollover then re-armed a strategy the operator had deliberately shut off (the two
+      // events are correlated: "lost money today" and "operator shuts it off"). Accept exactly
+      // that case; every other repeat trip stays the idempotent rejection. Validator changes are
+      // replay-safe by construction — a rejected update is never recorded, and a newly-ACCEPTED
+      // takeover only ever appears in new history.
+      boolean takeover = isAutoActor(actor) && !isAutoActor(request.getActor());
+      if (!takeover) {
+        throw new IllegalStateException("already_tripped");
+      }
+    }
+  }
+
+  private static boolean isAutoActor(String a) {
+    return a != null && a.startsWith("auto:");
   }
 
   @Override
   public void trip(TripKillSwitchRequest request) {
+    if (tripped) {
+      // #668 takeover (validator admitted it): make the operator's intent durable — overwrite
+      // actor/reason so the rollover-clear can never re-arm this — WITHOUT a second cascade (the
+      // original trip already flattened; a deactivation takeover must not fire another market
+      // flatten) and keeping the original trippedAt (the halt began then; only ownership changes).
+      // The audit is a new command, but only a newly-accepted takeover reaches here — no recorded
+      // history contains one, so no version gate is needed (same argument as arm_trail's).
+      Map<String, Object> subj =
+          subject(
+              "prior_actor", actor,
+              "prior_reason", reason,
+              "actor", request.getActor(),
+              "reason", request.getReason(),
+              "tripped_at", trippedAt,
+              "trading_day", tradingDay);
+      this.actor = request.getActor();
+      this.reason = request.getReason();
+      auditLog(KIND_KILL_SWITCH_TRIP_REATTRIBUTED, subj);
+      return;
+    }
     doTrip(request.getReason(), request.getActor(), request.getValue());
   }
 
@@ -623,6 +726,8 @@ public class KillSwitchWorkflowImpl implements KillSwitchWorkflow {
     this.reason = tripReason;
     this.actor = tripActor;
     this.trippedAt = workflowNow();
+    // #669: the trip itself pages loudly today — the daily still-tripped reminder starts TOMORROW.
+    this.lastStillTrippedPageDay = tradingDay;
 
     Map<String, Object> subj =
         subject(

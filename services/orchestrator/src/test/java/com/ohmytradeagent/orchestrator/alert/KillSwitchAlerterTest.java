@@ -252,6 +252,47 @@ class KillSwitchAlerterTest {
     assertThatCode(() -> alerter.onAuditEvent(event)).doesNotThrowAnyException();
   }
 
+  // ---------- Issue #669: the daily still-tripped page ----------
+
+  @Test
+  void killSwitchStillTrippedDispatchesAmberEmbedWithActorReasonTrippedAtTradingDay() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("reason", "live_deactivation:one_click");
+    subject.put("actor", "operator:ridopark");
+    subject.put("tripped_at", "2026-08-03T14:00:00Z");
+    subject.put("trading_day", "2026-08-12");
+    AuditEvent event = event("KillSwitchStillTripped", "t-dev/s-copytrade-v1/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(16705372); // AMBER/yellow — nothing NEW went wrong
+    assertThat(embed.title()).contains("STILL tripped");
+    assertThat(field(embed, "tenant_id")).isEqualTo("dev");
+    assertThat(field(embed, "strategy_id")).isEqualTo("copytrade-v1");
+    assertThat(field(embed, "actor")).isEqualTo("operator:ridopark");
+    assertThat(field(embed, "reason")).isEqualTo("live_deactivation:one_click");
+    assertThat(field(embed, "tripped_at")).isEqualTo("2026-08-03T14:00:00Z");
+    assertThat(field(embed, "trading_day")).isEqualTo("2026-08-12");
+    assertThat(embed.footer()).contains("t-dev/s-copytrade-v1/killswitch");
+  }
+
+  @Test
+  void killSwitchStillTripped_nullSubject_rendersNaAndNeverThrows() {
+    // The render-throw would be swallowed and SILENTLY LOSE the page — pin the null-safe path.
+    WebhookClient webhook = mock(WebhookClient.class);
+    KillSwitchAlerter alerter = new KillSwitchAlerter(webhook, RESOLVER);
+
+    AuditEvent ev = event("KillSwitchStillTripped", "wf-9", null);
+    assertThatCode(() -> alerter.onAuditEvent(ev)).doesNotThrowAnyException();
+    WebhookEmbed embed = capture(webhook);
+    assertThat(field(embed, "actor")).isEqualTo("n/a");
+    assertThat(field(embed, "reason")).isEqualTo("n/a");
+  }
+
   private static WebhookEmbed capture(WebhookClient webhook) {
     ArgumentCaptor<WebhookEmbed> captor = ArgumentCaptor.forClass(WebhookEmbed.class);
     verify(webhook, times(1))

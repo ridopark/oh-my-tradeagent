@@ -66,6 +66,11 @@
     "last_open_mtm": {
       "type": "number",
       "description": "Carry-forward SIGNED unrealized P&L ((liveBid-entry)*qty*100) cached from the last heartbeat that priced the book FULLY (quoteFailures==0). SIGNED — a positive value is a gain, not a loss. Carried across continueAsNew so the reset banner is not blank for up to one heartbeat after a same-day CAN; carried ONLY when the last heartbeat priced the book (a partial/absent valuation leaves it absent). Absent on fresh bootstrap and until the first fully-priced heartbeat. v5+."
+    },
+    "last_still_tripped_page_day": {
+      "type": "string",
+      "format": "date",
+      "description": "#669 carry: the trading day the once-per-day still-tripped page last fired (or was quiet-stamped on the trip day). Carried across continue-as-new so the roll day neither loses its page nor duplicates it; absent on a pre-#669 carry, where the first tripped tick quiet-stamps (one page skipped, once, ever)."
     }
   }
 }
