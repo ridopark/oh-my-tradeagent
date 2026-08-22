@@ -2557,6 +2557,21 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // No Workflow.getVersion gate, for the same reason partial_close has none: this Update is brand
     // new, so no recorded history contains an arm_trail invocation and a legacy replay never
     // reaches this handler. A marker here would be inert.
+    //
+    // Update-before-run() race (#723, CI "armTrail_* timed out after 60 seconds"): Temporal can
+    // dispatch an Update in the FIRST workflow task, before run() has executed `this.input = in`.
+    // Every sibling operator entry point guards this — partialExit/forceClose/partialClose buffer
+    // a directive on `input == null` — but this handler's contract is the synchronous
+    // ARMED/REJECTED answer the /live button renders, so it cannot return a placeholder. Block
+    // until run() has initialized instead: update handlers may await, and run() assigns `input` as
+    // its first statement in this same workflow task, so the wait resolves within the task.
+    // Without this, resolveTrailAnchor's input.getTenantId() NPEs, which fails the WHOLE workflow
+    // task; the server retries it forever (the update is never accepted OR rejected) — in CI that
+    // is the 60s armTrail_* timeout, and on a LIVE position it is a wedged real-money
+    // PositionWorkflow with buffered, unprocessed exits. No recorded history
+    // reaches this await un-initialized (the un-guarded path never completed a task), so it is
+    // replay-safe without a version marker.
+    Workflow.await(() -> input != null);
     ArmTrailResult result = new ArmTrailResult();
     result.setSchemaVersion(1L);
 
