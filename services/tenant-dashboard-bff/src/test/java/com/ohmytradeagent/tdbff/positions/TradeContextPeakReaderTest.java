@@ -112,20 +112,30 @@ class TradeContextPeakReaderTest {
   }
 
   /**
-   * Pin of the CONTRACT {@code WorkflowIds.entrySignalIdFromPosition} (consolidated after #786 merged; the local mirror was removed) —
-   * same cases as its contract-side test, so the two cannot drift silently before consolidation.
+   * Pin of the CONTRACT {@code WorkflowIds.entrySignalIdFromPosition} (consolidated after #786
+   * merged; the local mirror was removed) — same cases as its contract-side test, so the two cannot
+   * drift silently before consolidation.
    */
   @Test
   void entrySignalIdParsing_mirrorsThe786ContractHelper() {
-    assertThat(com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition(WF_ID)).isEqualTo("sig1");
+    assertThat(com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition(WF_ID))
+        .isEqualTo("sig1");
     // Watchlist signal ids contain slashes of their own; everything after the OCC belongs to them.
     assertThat(
             com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition(
                 "t-acme/s-watchlist-trigger-v1/pos/SPY   260609P00731000/wl/2026-06-09/SPY/P"))
         .isEqualTo("wl/2026-06-09/SPY/P");
-    assertThat(com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition(null)).isNull();
-    assertThat(com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition("")).isNull();
-    assertThat(com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition("t-acme/s-x/pos//sig")).isNull();
-    assertThat(com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition("t-acme/s-x/pos/OCC/")).isNull();
+    assertThat(com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition(null))
+        .isNull();
+    assertThat(com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition(""))
+        .isNull();
+    assertThat(
+            com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition(
+                "t-acme/s-x/pos//sig"))
+        .isNull();
+    assertThat(
+            com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition(
+                "t-acme/s-x/pos/OCC/"))
+        .isNull();
   }
 }
