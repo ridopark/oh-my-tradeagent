@@ -177,7 +177,7 @@ class PositionWorkflowInput(BaseModel):
     """
     Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Whether the chandelier trail was armed. A dropped value silently DISARMS a live stop across the roll.
     """
-    carried_peak_premium: float | None = None
+    carried_peak_premium: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The trail's ratcheted peak. THE dangerous field: a reset re-anchors the stop at the current premium, silently loosening it. Round-trip is pinned by a dedicated fire-at-same-price test.
     """
@@ -189,7 +189,7 @@ class PositionWorkflowInput(BaseModel):
     """
     Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Cumulative trail ticks across all runs; operator-visible in trailingState (a reset reads as a dead feed).
     """
-    carried_last_tick_premium: float | None = None
+    carried_last_tick_premium: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Last observed trail tick premium (trailingState/exitProximity staleness display).
     """

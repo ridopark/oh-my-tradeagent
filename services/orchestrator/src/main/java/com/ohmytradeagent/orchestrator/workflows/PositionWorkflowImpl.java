@@ -1233,9 +1233,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * never approach the watermark). Every field {@code buildCarryForwardInput} does NOT carry is
    * proven zero by a conjunct here; the pairing is pinned by the barrier tests.
    *
-   * <p>{@code !retryFlattenArmed} and {@code !partialPlaceRetryArmed} are load-bearing beyond
-   * signal-loss: each means a Temporal timer is armed to re-drive work, and a timer does not
-   * survive continue-as-new — rolling while one is armed would silently drop the retry.
+   * <p>{@code !retryFlattenArmed}, {@code partialPlaceRetryPending == null} and {@code
+   * !partialPlaceRetryArmed} are load-bearing beyond signal-loss: each means a Temporal timer is
+   * armed (or has just fired) to re-drive work, and a timer does not survive continue-as-new —
+   * rolling would silently drop the retry. {@code partialPlaceRetryPending} is the long-lived
+   * conjunct: it is set the moment a partial-exit placement failure schedules the next-RTH-open
+   * re-drive and stays set for the whole scheduled-but-unfired window (hours, or a weekend), while
+   * {@code partialPlaceRetryArmed} is true only in the instant between the timer firing and the
+   * main loop draining it. Gating on the armed bit alone was a review-caught silent-loss bug: a
+   * roll inside the pending window discarded the re-drive (the 2026-06-25 QQQ incident class).
    */
   private boolean rollBarrierHolds() {
     return remainingQty > 0
@@ -1244,6 +1250,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         && lastFillEvent == null
         && !flattenAwaitingLateFill
         && !retryFlattenArmed
+        && partialPlaceRetryPending == null
         && !partialPlaceRetryArmed
         && pendingExits.isEmpty()
         && pendingArms.isEmpty()

@@ -182,7 +182,8 @@
     },
     "carried_peak_premium": {
       "type": "number",
-      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The trail's ratcheted peak. THE dangerous field: a reset re-anchors the stop at the current premium, silently loosening it. Round-trip is pinned by a dedicated fire-at-same-price test."
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. The trail's ratcheted peak. THE dangerous field: a reset re-anchors the stop at the current premium, silently loosening it. Round-trip is pinned by a dedicated fire-at-same-price test.",
+      "exclusiveMinimum": 0
     },
     "carried_giveback_pct": {
       "type": "number",
@@ -195,7 +196,8 @@
     },
     "carried_last_tick_premium": {
       "type": "number",
-      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Last observed trail tick premium (trailingState/exitProximity staleness display)."
+      "description": "Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Last observed trail tick premium (trailingState/exitProximity staleness display).",
+      "exclusiveMinimum": 0
     },
     "carried_last_tick_at": {
       "type": "string",

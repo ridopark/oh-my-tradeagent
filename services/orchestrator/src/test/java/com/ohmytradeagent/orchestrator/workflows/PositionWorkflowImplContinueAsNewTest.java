@@ -285,6 +285,19 @@ class PositionWorkflowImplContinueAsNewTest {
     return st;
   }
 
+  private void waitForPlaceOrderAtLeast(int n) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 50_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, org.mockito.Mockito.atLeast(n)).placeOrder(any());
+        return;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+    verify(exec, org.mockito.Mockito.atLeast(n)).placeOrder(any());
+  }
+
   private void waitForPlaceOrderCount(int n) throws InterruptedException {
     long deadline = System.currentTimeMillis() + 50_000;
     while (System.currentTimeMillis() < deadline) {
@@ -466,6 +479,78 @@ class PositionWorkflowImplContinueAsNewTest {
     stub.onFill(fill("brk-exit", 3L, new BigDecimal("2.60")));
     String newRunId = feedTicksUntilRolled(stub, wfId, firstRunId);
     assertThat(newRunId).as("once quiet, the roll proceeds").isNotEqualTo(firstRunId);
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+  }
+
+  /**
+   * Review blocker on this PR: a partial-exit placement FAILURE schedules a next-RTH-open re-drive
+   * with {@code partialPlaceRetryPending} set but {@code partialPlaceRetryArmed} still false (the
+   * armed bit only flips in the instant between the timer firing and the loop draining it). That
+   * scheduled-but-unfired window can span hours or a weekend — and a roll during it would discard
+   * both the pending request and its timer, silently dropping the discretionary partial (the
+   * 2026-06-25 QQQ incident class). The barrier must treat pending-retry as busy for the whole
+   * window, then reopen once the retry resolves.
+   */
+  @Test
+  void scheduledPartialRetry_blocksRoll_untilResolved() throws Exception {
+    setWatermark(60L);
+    // Long next-open so the pending-but-unfired window persists across the tick pressure below.
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofHours(12));
+    // First placement (the partial) fails non-retryably -> schedules the re-drive; the re-driven
+    // placement succeeds.
+    when(exec.placeOrder(any()))
+        .thenThrow(
+            io.temporal.failure.ApplicationFailure.newNonRetryableFailure(
+                "broker 500", "test-failure"))
+        .thenReturn(submittedResult());
+    when(exec.cancelOrder(org.mockito.ArgumentMatchers.anyString()))
+        .thenAnswer(
+            inv -> {
+              OrderIntentResult r = submittedResult();
+              r.setState(OrderIntentResult.State.CANCELLED);
+              return r;
+            });
+
+    String wfId = "pos-can-retry-pending";
+    PositionWorkflow stub = newStub(wfId);
+    PositionWorkflowInput in = futureInput(6);
+    // Long exit-fill TTL: env.sleep only advances virtual time to just past the retry timer, so
+    // the re-driven placement is still awaiting its fill (clock frozen) when the test delivers it —
+    // otherwise the TTL elapses inside the sleep and the reprice/cancel cascade consumes the retry.
+    in.setExitFillTtlSecs(600L);
+    WorkflowStub.fromTyped(stub).start(in);
+    String firstRunId = currentRunId(wfId);
+    confirmEntry(stub, 6L);
+    stub.armChandelier(armPayload(wfId, "src-1", new BigDecimal("3.00"), new BigDecimal("0.20")));
+    waitForArmed(stub);
+
+    // The partial fails to place -> pending retry latched, timer armed 12h out.
+    stub.partialExit(partialExitRequest("sig-fail", wfId, 0.5));
+    long deadline = System.currentTimeMillis() + 50_000;
+    while (System.currentTimeMillis() < deadline
+        && auditKinds("PartialExitPlaceFailed").isEmpty()) {
+      Thread.sleep(50);
+    }
+    assertThat(auditKinds("PartialExitPlaceFailed")).isNotEmpty();
+
+    // Tick pressure far past the watermark during the scheduled-but-unfired window: the barrier
+    // must hold, else the pending retry and its timer are silently lost at the run boundary.
+    for (int i = 0; i < 30; i++) {
+      stub.chandelierTick(tick(new BigDecimal("2.50")));
+      Thread.sleep(20);
+    }
+    Thread.sleep(500);
+    assertThat(currentRunId(wfId))
+        .as("a scheduled partial-exit retry must block the roll for its whole pending window")
+        .isEqualTo(firstRunId);
+
+    // The retry timer fires; the re-driven partial places and (virtual clock frozen inside its
+    // fill window) fills; the position is quiet again — the barrier must reopen.
+    env.sleep(Duration.ofHours(12).plusMinutes(1));
+    waitForPlaceOrderAtLeast(2);
+    stub.onFill(fill("brk-exit", 3L, new BigDecimal("2.60")));
+    String newRunId = feedTicksUntilRolled(stub, wfId, firstRunId);
+    assertThat(newRunId).as("once the retry resolved, the roll proceeds").isNotEqualTo(firstRunId);
     assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
   }
 
