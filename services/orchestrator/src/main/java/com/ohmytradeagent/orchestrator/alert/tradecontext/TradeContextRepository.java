@@ -66,7 +66,13 @@ public class TradeContextRepository {
             + "contract_symbol, entry_at, entry_premium, entry_qty, entry_bid, entry_ask, "
             + "entry_spread, entry_iv, entry_delta, entry_gamma, entry_theta, entry_vega, "
             + "underlying_spot, dte, moneyness, capital_weight, entry_quote_state) "
-            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            // entry_at carries an EXPLICIT ::timestamptz cast: jOOQ's default binding sends
+            // OffsetDateTime as a STRING parameter, and Postgres refuses varchar->timestamptz in
+            // INSERT without one. Seen live 2026-08-22 on every entry row ("column entry_at is of
+            // type timestamp with time zone but expression is of type character varying"),
+            // silently swallowed by the fail-soft wrapper. The binding itself is invisible to any
+            // non-Postgres test; the cast token is what TradeContextRepositorySqlTest pins.
+            + "VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             + "ON CONFLICT (signal_id, tenant_id) DO NOTHING",
         e.signalId(),
         e.tenantId(),
