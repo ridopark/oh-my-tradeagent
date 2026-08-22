@@ -4,6 +4,7 @@ import com.ohmytradeagent.contract.EquityTick;
 import com.ohmytradeagent.contract.SubscribeEquityRequest;
 import com.ohmytradeagent.contract.SubscribeEquityResult;
 import com.ohmytradeagent.contract.activities.SubscribeEquityActivity;
+import com.ohmytradeagent.marketdata.MarketHours;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
 import com.ohmytradeagent.marketdata.provider.Subscription;
 import com.ohmytradeagent.marketdata.provider.Tick;
@@ -13,10 +14,8 @@ import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.time.Clock;
-import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -65,9 +64,7 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
 
   private static final Logger log = LoggerFactory.getLogger(SubscribeEquityActivityImpl.class);
 
-  private static final ZoneId ET = ZoneId.of("America/New_York");
-  private static final LocalTime RTH_OPEN = LocalTime.of(9, 30);
-  private static final LocalTime RTH_CLOSE = LocalTime.of(16, 0);
+  private static final ZoneId ET = MarketHours.ET;
 
   /**
    * Max age of an equity print before it is marked stale. A late/out-of-sequence tag (e.g. the
@@ -306,13 +303,8 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
   }
 
   boolean isRegularTradingHours() {
-    ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
-    DayOfWeek dow = now.getDayOfWeek();
-    if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) {
-      return false;
-    }
-    LocalTime t = now.toLocalTime();
-    return !t.isBefore(RTH_OPEN) && t.isBefore(RTH_CLOSE);
+    // Shared with the #776 boot-recovery gate — the check lives in MarketHours so they can't drift.
+    return MarketHours.isRegularTradingHours(ZonedDateTime.now(clock).withZoneSameInstant(ET));
   }
 
   EquityTick toEquityTick(Tick t) {

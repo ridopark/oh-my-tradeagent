@@ -101,6 +101,17 @@ spec:
             # Same class as the exec drift in #696.
             - name: ALPACA_STOCK_FEED
               value: sip
+            # #776 P2: Discord alert route for the premium-subscription boot recovery
+            # (PremiumSubscriptionRecovery): fires on attempts-exhausted, sweep truncation, and
+            # loop crash. Same operator-provisioned discord-alert-credentials Secret as
+            # exec/orchestrator; `optional: true` so the pod still boots when the secret is
+            # absent — the alerter is then log-only and recovery itself is unaffected.
+            - name: ALERT_DISCORD_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: discord-alert-credentials
+                  key: ALERT_DISCORD_WEBHOOK_URL
+                  optional: true
           # market-data-svc is a Temporal worker but keeps the default servlet web
           # stack so actuator (health / info / prometheus) is reachable on 8080. No
           # business-logic controllers; the worker poll loop is still the implicit
