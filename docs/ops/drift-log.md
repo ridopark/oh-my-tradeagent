@@ -49,3 +49,18 @@ See `docs/ops/k8s-drift-check.md` for the standing detection workflow
   defers the "how did the cluster drift / add `kubectl diff` to CI"
   question to a separate issue. `docs/ops/k8s-drift-check.md` already
   documents the operator setup for the `k8s-drift` workflow.
+
+## 2026-08-22 — strategy_config intentionally diverges from tenants ConfigMap (issue #780)
+
+- **What:** The `strategy_config` DB rows for `copytrade-v1` on `prod-kipark` /
+  `prod-jinchul` / `prod_real` now carry `capital_source=static` with equity-encoded
+  `capital_weight` (0.052 / 0.016 / 0.065), written by operator DB CAS
+  (`updated_by='static-sizing-cutover-780'`, versions 18/14/28). The tenants
+  ConfigMap still shows the old `account_cash` + 0.2/0.3 values.
+- **Why this is NOT drift to reconcile:** intentional, per issue #780 and
+  `docs/ops/copytrade-static-sizing-cutover.md`. Orchestrator boot seeding is
+  `INSERT ... ON CONFLICT DO NOTHING`, so a restart never reverts these rows; both
+  directions are explicit operator writes. Do NOT "fix" the ConfigMap mismatch by
+  re-applying it into the DB.
+- **Verification:** re-Activation post-write returned `ACTIVATED` ×3 through the
+  #789 equity-ceiling gate; fresh `LivePromotionApproved` audit rows 15:41:39-40Z.

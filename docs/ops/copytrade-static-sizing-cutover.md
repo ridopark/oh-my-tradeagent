@@ -296,13 +296,17 @@ execution). Rolled back per §5 (`static-sizing-rollback-780`, versions 17/13/27
 `TenantConfigChanged` audit row (that event comes from the /config writer path) — `updated_by` is
 the audit trail on this path; the §4d audit check applies to UI writes only.
 
+**Attempt 2 — 2026-08-22 (COMPLETED, post-#789):** executed after the activation-gate fix
+(PR #789) deployed (orchestrator digest verified, pod started 15:40:41Z). All three tenants in one
+market-closed session (Saturday); §4f BTO verification pending the next live BTO per tenant.
+
 | tenant | fresh-read version | old source/weight | equity ($, read at) | new weight | write (UI/CAS) | new version | re-Activated at | first BTO verified (qty/premium) |
 |---|---|---|---|---|---|---|---|---|
-| prod-kipark | | | | | | | | |
-| prod-jinchul | | | | | | | | |
-| prod_real | | | | | | | | |
+| prod-kipark | 17 | account_cash / 0.2 | 51,988.33 (2026-08-22 ~13:00Z) | 0.052 | CAS | 18 | 2026-08-22 15:41:39Z | pending next live BTO |
+| prod-jinchul | 13 | account_cash / 0.3 | 15,504.79 (2026-08-22 ~13:00Z) | 0.016 | CAS | 14 | 2026-08-22 15:41:40Z | pending next live BTO |
+| prod_real | 27 | account_cash / 0.3 | 65,435.96 (2026-08-22 ~13:00Z) | 0.065 | CAS | 28 | 2026-08-22 15:41:40Z | pending next live BTO |
 
-- `ORCHESTRATOR_CAPITAL_PER_STRATEGY` re-verified = ______ (must be 100000)
-- Drift-log entry appended: ______
-- Follow-up issue filed (`account_equity` capital_source): #______
-- Next monthly review due: ______
+- `ORCHESTRATOR_CAPITAL_PER_STRATEGY` re-verified = 100000 (both attempts)
+- Drift-log entry appended: yes — `docs/ops/drift-log.md` 2026-08-22 entry
+- Follow-up issue filed (`account_equity` capital_source): #790
+- Next monthly review due: 2026-09-22
