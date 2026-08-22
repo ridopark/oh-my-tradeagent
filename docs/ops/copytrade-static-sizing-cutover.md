@@ -179,6 +179,16 @@ curl -s 'http://copytrade.homelab.local/audit?tenant=<tenant>&strategy=copytrade
 
 ### e. Re-Activate (the edit halted live BTOs)
 
+> **Activation gate (learned the hard way, first execution 2026-08-22):** `LiveActivationWorkflowImpl`
+> step (c) originally hard-refused ANY non-`account_cash` capital_source
+> (`REJECTED_CAPITAL_SOURCE`), so this cutover's re-Activate was impossible and all three tenants
+> had to be rolled back (§5) the same day. Since version gate
+> `live-activation-static-capital-v1`, an explicit `static` IS activatable — but only when
+> `100000 × capital_weight ≤ 15% of the probed account equity` (fail-closed if weight/equity/base
+> are unreadable). The §4b weights (~10% of equity) pass with headroom; a stale weight after the
+> account shrinks >~35% will start REFUSING activation with a "static allocation ... exceeds"
+> reason — that is the §6 drift review telling you to recompute, not an infra failure.
+
 `capital_weight` is in the risk-relevant EXPOSURE set, so this write lands after the tenant's
 `LivePromotionApproved` and trips **`config_changed`**: the live dispatch verify **refuses live
 BTOs** until a fresh one-click **Activate** records a new `LivePromotionApproved`
@@ -275,6 +285,16 @@ future audit reads "intentional, #780" instead of "drift".
 ## 9. As-run record
 
 Fill in at execution time. Do not execute any write before the fresh-read row is filled in.
+
+**Attempt 1 — 2026-08-22 (ABORTED, rolled back same-session):** env re-verified 100000; fresh
+reads matched §3 (kipark v15, jinchul v11, prod_real v25); equity read via AccountSnapshotWorkflow
+— kipark $51,988.33 → 0.052, jinchul $15,504.79 → 0.016, prod_real $65,435.96 → 0.065; all three
+CAS writes landed (`static-sizing-cutover-780`, versions 16/12/26). Re-Activate then failed ×3
+with `REJECTED_CAPITAL_SOURCE` (the activation gate documented in §4e, undiscovered until this
+execution). Rolled back per §5 (`static-sizing-rollback-780`, versions 17/13/27) and re-Activated
+— all three `ACTIVATED` with correct expected_account_ids. Note: CAS writes do NOT emit a
+`TenantConfigChanged` audit row (that event comes from the /config writer path) — `updated_by` is
+the audit trail on this path; the §4d audit check applies to UI writes only.
 
 | tenant | fresh-read version | old source/weight | equity ($, read at) | new weight | write (UI/CAS) | new version | re-Activated at | first BTO verified (qty/premium) |
 |---|---|---|---|---|---|---|---|---|

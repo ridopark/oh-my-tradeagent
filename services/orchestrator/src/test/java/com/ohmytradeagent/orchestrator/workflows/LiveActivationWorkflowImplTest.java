@@ -223,16 +223,93 @@ class LiveActivationWorkflowImplTest {
     verify(promotion, never()).activate(any());
   }
 
-  @Test
-  void capitalSourceStatic_isRejectedCapitalSource_noActivate() {
+  // ---- #780 static-capital cases (fresh executions run at static-capital v>=1) ----------------
+
+  /** A compliant static-sizing config: like {@link #compliantConfig()} but static + a weight. */
+  private StrategyConfig staticConfig(String weight) {
     StrategyConfig cfg = compliantConfig();
     cfg.setCapitalSource(StrategyConfig.CapitalSource.STATIC);
-    when(strategy.get(TENANT, STRATEGY)).thenReturn(cfg);
+    cfg.setCapitalWeight(weight == null ? null : new BigDecimal(weight));
+    return cfg;
+  }
+
+  private void staticGatesPass(String weight, String equity, String staticBase) {
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(staticConfig(weight));
+    when(gate.killSwitchArmable(TENANT, STRATEGY)).thenReturn(true);
+    AccountSnapshotResult s = snap(ACCOUNT, new BigDecimal("5000"));
+    s.setEquity(equity == null ? null : new BigDecimal(equity));
+    when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class))).thenReturn(s);
+    when(strategy.capitalForStrategy(TENANT, STRATEGY))
+        .thenReturn(staticBase == null ? null : new BigDecimal(staticBase));
+  }
+
+  @Test
+  void capitalSourceStatic_withinEquityBound_activates() {
+    // The #780 cutover shape: base 100000 x weight 0.052 = 5200 allocation, ~10% of 52000 equity —
+    // inside the 15% ceiling, so the previously hard-rejected static source now activates.
+    staticGatesPass("0.052", "52000", "100000");
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.ACTIVATED);
+    verify(promotion, times(1)).activate(any());
+    verify(strategy, times(1)).capitalForStrategy(TENANT, STRATEGY);
+  }
+
+  @Test
+  void capitalSourceStatic_exceedingEquityBound_isRejectedCapitalSource_noActivate() {
+    // Old-style weight on the pod-global base: 100000 x 0.3 = 30000 against 52000 equity (57%) —
+    // exactly the oversizing hazard the original account_cash-only gate existed to stop.
+    staticGatesPass("0.3", "52000", "100000");
 
     LiveActivationResult result = activateStub().activateLive(activateReq());
 
     assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.REJECTED_CAPITAL_SOURCE);
+    assertThat(result.getReason()).contains("exceeds").contains("30000");
     verify(promotion, never()).activate(any());
+  }
+
+  @Test
+  void capitalSourceStatic_nullWeight_isRejectedCapitalSource_noActivate() {
+    staticGatesPass(null, "52000", "100000");
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.REJECTED_CAPITAL_SOURCE);
+    assertThat(result.getReason()).contains("capital_weight");
+    verify(promotion, never()).activate(any());
+  }
+
+  @Test
+  void capitalSourceStatic_noProbedEquity_isRejectedCapitalSource_noActivate() {
+    // Fail-closed: without a probed equity the allocation ceiling cannot be computed.
+    staticGatesPass("0.052", null, "100000");
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.REJECTED_CAPITAL_SOURCE);
+    assertThat(result.getReason()).contains("equity");
+    verify(promotion, never()).activate(any());
+  }
+
+  @Test
+  void capitalSourceStatic_noStaticBase_isRejectedCapitalSource_noActivate() {
+    staticGatesPass("0.052", "52000", null);
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.REJECTED_CAPITAL_SOURCE);
+    assertThat(result.getReason()).contains("static capital base");
+    verify(promotion, never()).activate(any());
+  }
+
+  @Test
+  void versionStaticCapitalConstantNameIsStable() throws Exception {
+    // Same pin as VERSION_ACCOUNT_CAP_AWARE: a rename would silently re-version in-flight
+    // activations.
+    Field marker = LiveActivationWorkflowImpl.class.getDeclaredField("VERSION_STATIC_CAPITAL");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("live-activation-static-capital-v1");
   }
 
   @Test
