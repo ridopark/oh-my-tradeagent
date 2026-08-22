@@ -770,6 +770,29 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_ENTRY_FILL_GROWS_LOT = "entry-fill-grows-lot-v1";
 
   /**
+   * PLAN-2026-08-19 Phase 1: the chandelier trail must never stop us out BELOW what we paid.
+   *
+   * <p>Before this, {@code processTick} computed {@code peak * (1 - giveback)} and {@code
+   * chandelierArmRejection} validated only {@code peak > 0} and the giveback band — {@code
+   * entryPremium} was referenced NOWHERE in the trail. A peak that barely cleared entry therefore
+   * armed a stop that could only lose: on 2026-08-19 SPY 260825P00760000 entered at 1.87, peaked at
+   * 1.99 (+6.4%), and a 25% giveback put the stop at 1.4925 — ~20% under water. It exited at 1.06
+   * for -$4,050 / -$4,050 / -$2,106 across prod-kipark / prod_real / prod-jinchul.
+   *
+   * <p>At {@code v>=1} the AUTOMATIC path (a) refuses to arm when {@code peak <= entryBasis}
+   * ({@code peak_below_entry}) and (b) floors the fire threshold at {@code entryBasis}. The
+   * OPERATOR {@code armTrail} button is deliberately EXEMPT from both — see {@code
+   * trailArmedByOperator}.
+   *
+   * <p>Gated because a changed threshold changes WHEN {@code chandelierFireRequested} latches, and
+   * therefore when {@code fireChandelier}'s flatten commands are issued — a recorded history
+   * replaying the same ticks would diverge. Read ONCE at the top of {@link #run} into {@code
+   * breakevenFloorVersion}, appended AFTER the entry-growth marker; marker order is part of the
+   * replay contract.
+   */
+  private static final String VERSION_CHANDELIER_BREAKEVEN_FLOOR = "chandelier-breakeven-floor-v1";
+
+  /**
    * Issue #762: an AUTOMATED daily-loss breach must not liquidate a position whose horizon outlives
    * the breaker's.
    *
@@ -988,6 +1011,26 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   /** Issue #738: {@link #VERSION_ENTRY_FILL_GROWS_LOT}, read once at the top of {@link #run}. */
   private int entryGrowthVersion = Workflow.DEFAULT_VERSION;
+
+  /** PLAN-2026-08-19 Phase 1 gate, read once in {@link #run}. */
+  private int breakevenFloorVersion = Workflow.DEFAULT_VERSION;
+
+  /**
+   * What the lot actually COST — the basis the breakeven floor is measured against. Seeded from the
+   * confirming first fill and re-read from each entry-growth report, whose {@code avgFillPrice} is
+   * the broker's CUMULATIVE average for the entry order, so this tracks true average cost as the
+   * lot grows (#738). Null only on the legacy pre-defer path, where {@link #entryBasis} falls back
+   * to the signal's quoted premium.
+   */
+  private BigDecimal entryFillPrice;
+
+  /**
+   * True when the live trail was armed by the OPERATOR button rather than the automatic signal
+   * path. The breakeven floor is deliberately not applied to it: an operator salvaging a losing
+   * position wants a stop under water, and {@code armTrail} has already ECHOED the stop price back
+   * to them — silently flooring it would hand back a stop that does not fire where they were told.
+   */
+  private boolean trailArmedByOperator;
 
   private String currentInFlightBrokerOrderId;
   private String currentInFlightSignalId;
@@ -1245,6 +1288,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       this.lastTickAt = OffsetDateTime.parse(in.getCarriedLastTickAt());
     }
     this.entryBrokerOrderId = in.getCarriedEntryBrokerOrderId();
+    // #807 breakeven floor: the basis (fill truth) and the operator-arm exemption MUST survive the
+    // roll. An absent basis falls back to entry_premium inside entryBasis() (quote, not fill —
+    // degraded but floored); a LOST operator flag would subject an operator-armed underwater
+    // trail to the floor and stop it out at basis on the next tick.
+    this.entryFillPrice = in.getCarriedEntryFillPrice();
+    this.trailArmedByOperator = Boolean.TRUE.equals(in.getCarriedTrailArmedByOperator());
     // #738: entry-growth counters. BOTH must be present to keep growing across the roll; a
     // pre-#738 carried input lacks them, and growth arithmetic against an unknown base could
     // double-book — so absent means DISABLED (Long.MAX_VALUE blocks every delta), which is
@@ -1373,6 +1422,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       next.setCarriedLastTickAt(lastTickAt.toString());
     }
     next.setCarriedEntryBrokerOrderId(entryBrokerOrderId);
+    // #807: floor basis + operator-arm exemption (see the @WorkflowInit hydration comment).
+    if (entryFillPrice != null && entryFillPrice.signum() > 0) {
+      next.setCarriedEntryFillPrice(entryFillPrice);
+    }
+    next.setCarriedTrailArmedByOperator(trailArmedByOperator);
     // #738: entry-growth counters, carried as a PAIR (the hydrator requires both). Skipped when
     // growth is disabled on this run (MAX_VALUE) so the next run stays disabled too.
     if (entryBookedQty != Long.MAX_VALUE) {
@@ -1435,6 +1489,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // order is part of the replay contract) into the field the funnel + main-loop drain consult.
     this.entryGrowthVersion =
         Workflow.getVersion(VERSION_ENTRY_FILL_GROWS_LOT, Workflow.DEFAULT_VERSION, 1);
+    // Phase 1 breakeven-floor marker — appended AFTER the entry-growth marker (order is part of
+    // the replay contract) into the field processTick/processArm consult.
+    this.breakevenFloorVersion =
+        Workflow.getVersion(VERSION_CHANDELIER_BREAKEVEN_FLOOR, Workflow.DEFAULT_VERSION, 1);
     if (deferVersion == Workflow.DEFAULT_VERSION) {
       // Legacy in-flight workflows: preserve the original ordering — assign remainingQty from
       // input.qty and emit PositionEntered at workflow start so their recorded histories replay
@@ -1604,6 +1662,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               ? lastFillEvent.getAvgFillPrice()
               : in.getEntryPremium();
       this.remainingQty = firstFilledQty;
+      // Phase 1: the price we actually PAID is the breakeven floor's basis, not input.entryPremium.
+      this.entryFillPrice = firstFillPrice;
       // #738: the confirm books the FIRST fill; later cumulative reports on the entry order grow
       // the lot through bookEntryGrowth (delta vs this counter, capped at expectedQty).
       this.entryBookedQty = firstFilledQty;
@@ -2543,6 +2603,23 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       peakPremium = tick.getPremium();
     }
     BigDecimal threshold = peakPremium.multiply(BigDecimal.ONE.subtract(givebackPct));
+    // Phase 1: never trail BELOW what the lot cost. A higher threshold fires EARLIER on the same
+    // tick stream, so this exits at breakeven instead of riding the giveback under water. At
+    // DEFAULT_VERSION the unfloored threshold must replay byte-identically.
+    //
+    // TWO exemptions, both deliberate:
+    //  - operator-armed trails (trailArmedByOperator) — the button already quoted them the stop;
+    //  - the WATCHLIST runner (exitArmed || exitTargetFired) — that flow already sets its own
+    //    breakeven stop at exitStopLevel, and it debounces (EXIT_STOP_DEBOUNCE_TICKS). Flooring
+    //    the chandelier there raises it onto the same level and lets it fire on a SINGLE tick,
+    //    stealing the exit from the debounced stop and reporting chandelier_trail instead of
+    //    stop_loss. This is the copytrade chandelier's floor; the runner owns its own.
+    if (breakevenFloorVersion >= 1 && !trailArmedByOperator && !exitArmed && !exitTargetFired) {
+      BigDecimal basis = entryBasis();
+      if (basis != null && basis.signum() > 0 && basis.compareTo(threshold) > 0) {
+        threshold = basis;
+      }
+    }
     if (tick.getPremium().compareTo(threshold) <= 0 && !chandelierFireRequested) {
       chandelierFireRequested = true;
       fireTriggerTick = tick;
@@ -2559,6 +2636,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     BigDecimal peak = p.getPeakPremium();
     BigDecimal gb = p.getGivebackPct();
     String rejection = chandelierArmRejection(peak, gb);
+    // Phase 1: an anchor already at or under cost cannot protect a profit at ANY giveback — there
+    // is no stop below it that is not a loss. Refuse rather than arm something that looks
+    // protective and is not. Automatic path only; the operator button keeps its freedom.
+    if (rejection == null && breakevenFloorVersion >= 1) {
+      BigDecimal basis = entryBasis();
+      if (basis != null && basis.signum() > 0 && peak.compareTo(basis) <= 0) {
+        rejection = "peak_below_entry";
+      }
+    }
     if (rejection != null) {
       auditLog(
           KIND_CHANDELIER_ARM_REJECTED,
@@ -2615,6 +2701,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    *
    * @return the rejection reason, or {@code null} when the arm is legal
    */
+  /**
+   * The breakeven basis: what the lot cost. Prefers the price actually filled, falling back to the
+   * signal's quoted premium for legacy histories that never recorded a fill price.
+   */
+  private BigDecimal entryBasis() {
+    if (entryFillPrice != null && entryFillPrice.signum() > 0) {
+      return entryFillPrice;
+    }
+    return input.getEntryPremium();
+  }
+
   private static String chandelierArmRejection(BigDecimal peak, BigDecimal giveback) {
     if (peak == null || peak.signum() <= 0) {
       return "invalid_peak";
@@ -2744,6 +2841,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
 
     trailingArmed = true;
+    // Phase 1: exempts this trail from the breakeven floor — the operator was quoted this stop.
+    trailArmedByOperator = true;
     peakPremium = peak;
     givebackPct = gb;
     auditLog(
@@ -4477,6 +4576,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
     entryBookedQty += growth;
     remainingQty += growth;
+    // Phase 1: the entry order's cumulative avgFillPrice IS the running average cost of the lot,
+    // so the breakeven basis follows the growth instead of freezing at the first fill.
+    if (fillEvent.getAvgFillPrice() != null && fillEvent.getAvgFillPrice().signum() > 0) {
+      this.entryFillPrice = fillEvent.getAvgFillPrice();
+    }
     auditLog(
         KIND_POSITION_ENTRY_INCREASED,
         subject(

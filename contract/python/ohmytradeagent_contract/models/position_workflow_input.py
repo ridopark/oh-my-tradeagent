@@ -235,3 +235,11 @@ class PositionWorkflowInput(BaseModel):
     """
     Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. #738: the ORIGINAL ordered qty (the roll resets qty to the remaining lot, which would wrongly cap entry growth). Pair of carried_entry_booked_qty.
     """
+    carried_entry_fill_price: Annotated[Decimal | None, Field(gt=0.0)] = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Chandelier breakeven-floor basis (what the lot actually COST: the confirming fill's price, re-blended by #738 entry growth). Absent falls back to entry_premium — the signal's quote, which loses slippage/growth truth but never the floor entirely.
+    """
+    carried_trail_armed_by_operator: bool | None = None
+    """
+    Issue #752 continue-as-new carry-forward. Set ONLY by PositionWorkflowImpl.buildCarryForwardInput at the quiet-position barrier; absent on every parent-started or adoption-started input. Whether the armed trail came from the OPERATOR arm path (exempt from the breakeven floor — the button already quoted them the stop). Losing this across a roll would subject an operator-armed underwater trail to the floor and stop it out at basis — for an underwater LEAP, effectively at the next open.
+    """

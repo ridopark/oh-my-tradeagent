@@ -8,6 +8,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.ArmChandelierPayload;
+import com.ohmytradeagent.contract.ArmTrailRequest;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.OptionQuoteResult;
@@ -263,9 +264,15 @@ class PositionWorkflowImplContinueAsNewTest {
    */
   private String feedTicksUntilRolled(PositionWorkflow stub, String wfId, String initialRunId)
       throws InterruptedException {
+    return feedTicksUntilRolled(stub, wfId, initialRunId, new BigDecimal("2.50"));
+  }
+
+  private String feedTicksUntilRolled(
+      PositionWorkflow stub, String wfId, String initialRunId, BigDecimal neutralPremium)
+      throws InterruptedException {
     long deadline = System.currentTimeMillis() + 50_000;
     while (System.currentTimeMillis() < deadline) {
-      stub.chandelierTick(tick(new BigDecimal("2.50")));
+      stub.chandelierTick(tick(neutralPremium));
       Thread.sleep(50);
       String runId = currentRunId(wfId);
       if (!runId.equals(initialRunId)) {
@@ -566,6 +573,81 @@ class PositionWorkflowImplContinueAsNewTest {
     String newRunId = feedTicksUntilRolled(stub, wfId, firstRunId);
     assertThat(newRunId).as("once the retry resolved, the roll proceeds").isNotEqualTo(firstRunId);
     assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+  }
+
+  // ---------- #807 breakeven-floor state across the roll ----------
+
+  /**
+   * PR #807 review blocker: {@code trailArmedByOperator} must survive the roll. An OPERATOR-armed
+   * UNDERWATER trail (threshold far below cost — the operator chose that) whose flag is lost at the
+   * roll becomes subject to the auto breakeven floor, which raises the threshold to basis and stops
+   * the position out on the next tick. This is the exact live DRAM shape (basis ~3.3, 45% trail
+   * ~1.9).
+   */
+  @Test
+  void operatorArmedUnderwaterTrail_rollDoesNotSubjectItToTheBreakevenFloor() throws Exception {
+    setWatermark(60L);
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    String wfId = "pos-can-807-operator";
+    PositionWorkflow stub = newStub(wfId);
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    String firstRunId = currentRunId(wfId);
+    confirmEntry(stub, 5L); // basis 2.30
+
+    // OPERATOR arm at 45%: anchor resolves off the mocked quote (mid 2.55) -> threshold ~1.40,
+    // far below basis — deliberate, the operator was quoted this stop.
+    ArmTrailRequest arm = new ArmTrailRequest();
+    arm.setSchemaVersion(1L);
+    arm.setOperatorId("ops-1");
+    arm.setGivebackPct(new BigDecimal("0.45"));
+    stub.armTrail(arm);
+    waitForArmed(stub);
+
+    String newRunId = feedTicksUntilRolled(stub, wfId, firstRunId);
+    assertThat(newRunId).isNotEqualTo(firstRunId);
+
+    // A tick well below basis but ABOVE the operator threshold: the exemption must hold — no fire.
+    stub.chandelierTick(tick(new BigDecimal("2.00")));
+    Thread.sleep(1_000);
+    verify(exec, org.mockito.Mockito.never()).placeOrder(any());
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+  }
+
+  /**
+   * PR #807 review blocker, other half: {@code entryFillPrice} (the FILL basis) must survive the
+   * roll. The entry fills at 2.60 while the signal quoted 2.30; post-roll the floor must still bind
+   * at 2.60 — a lost fill price falls back to the 2.30 quote and a 2.50 tick would ride 30 cents
+   * under water without firing.
+   */
+  @Test
+  void autoArmedTrail_rollKeepsTheFillBasis_floorStillBindsAtCost() throws Exception {
+    setWatermark(60L);
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    String wfId = "pos-can-807-basis";
+    PositionWorkflow stub = newStub(wfId);
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    String firstRunId = currentRunId(wfId);
+    // Entry fills ABOVE the signal quote: fill truth 2.60, input entry_premium 2.30.
+    stub.onFill(fill("brk-entry", 5L, new BigDecimal("2.60")));
+
+    // AUTO arm (the de-risk/chandelier signal path — floor applies): peak 3.20, gb 0.20 ->
+    // raw threshold 2.56, floored to the 2.60 basis.
+    stub.armChandelier(armPayload(wfId, "src-1", new BigDecimal("3.20"), new BigDecimal("0.20")));
+    waitForArmed(stub);
+
+    // Neutral ticks must clear the FLOORED threshold (2.60), not just the raw one — 2.70.
+    String newRunId = feedTicksUntilRolled(stub, wfId, firstRunId, new BigDecimal("2.70"));
+    assertThat(newRunId).isNotEqualTo(firstRunId);
+
+    // 2.58: above the raw threshold AND above the 2.30 quote-fallback floor, below the 2.60 fill
+    // basis — fires ONLY if the fill basis survived the roll.
+    stub.chandelierTick(tick(new BigDecimal("2.58")));
+    waitForPlaceOrderCount(1);
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    assertThat(intent.getValue().getSide()).isEqualTo(OrderIntent.Side.SELL);
   }
 
   /** Below the watermark nothing rolls, no matter how quiet the position is. */

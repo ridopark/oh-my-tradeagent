@@ -1317,11 +1317,14 @@ class PositionWorkflowImplTest {
     env.sleep(Duration.ofMinutes(1));
     waitForPlaceOrderCount(1);
 
+    // The wait between fills polls the audit MOCK (pure client-side — no Temporal query, so no
+    // time-skip unlock): the positionState() polling this test originally used opened the
+    // #723-residual window where the server jumped the run to its execution timeout (hit twice
+    // 2026-08-22). Fully back-to-back sends are NOT safe either — a second fill landing inside
+    // the first's drain is wiped unprocessed by bookFlattenDelta's guardrail-#3 lastFillEvent
+    // clear (pre-existing narrow race, filed separately).
     stub.onFill(fill("brk-753", 2L, new BigDecimal("2.50")));
-    long deadline = System.currentTimeMillis() + 5_000;
-    while (System.currentTimeMillis() < deadline && stub.positionState().remainingQty() == 5L) {
-      Thread.sleep(50);
-    }
+    waitForAuditKind("PartialExitFilled");
     stub.onFill(fill("brk-753", 5L, new BigDecimal("2.32")));
     WorkflowStub.fromTyped(stub).getResult(String.class);
 
@@ -2663,6 +2666,149 @@ class PositionWorkflowImplTest {
     AuditEvent fired = captureKind("ChandelierTrailFired");
     assertThat(((Number) fired.getSubject().get("threshold")).doubleValue()).isEqualTo(2.70);
     assertThat(((Number) fired.getSubject().get("trigger_premium")).doubleValue()).isEqualTo(2.70);
+  }
+
+  @Test
+  void chandelierTick_floorClampsThresholdToEntryBasis_fires() throws Exception {
+    // Reproduces 2026-08-19 SPY 260825P00760000 across all three live tenants. Entry 1.87, the
+    // premium peaked at 1.99 (+6.4%), and a 25% giveback put the stop at 1.4925 -- ~20% BELOW what
+    // we paid. It exited at 1.06 for -$4,050 / -$4,050 / -$2,106. The trail never referenced the
+    // entry price, so a peak that barely cleared entry armed a stop that could only lose.
+    //
+    // DISCRIMINATING tick: 1.80 is above the unfloored threshold (1.4925) and below the floored one
+    // (1.87). Pre-fix this does NOT fire; post-fix it fires at breakeven.
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-floor-binds");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    stub.onFill(fill("brk-entry", 5L, new BigDecimal("1.87")));
+
+    stub.armChandelier(
+        armPayload("pos-floor-binds", "src-sig-1", new BigDecimal("1.99"), new BigDecimal("0.25")));
+    stub.chandelierTick(tick(new BigDecimal("1.80")));
+
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("1.80")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent fired = captureKind("ChandelierTrailFired");
+    assertThat(((Number) fired.getSubject().get("threshold")).doubleValue()).isEqualTo(1.87);
+  }
+
+  @Test
+  void armChandelier_peakAtOrBelowEntryBasis_rejects() throws Exception {
+    // A trail whose anchor is already at or under what we paid can only ever stop us out at a loss;
+    // there is no giveback small enough to make it a profit-protection stop. Refuse to arm it
+    // rather than arming something that looks protective and is not.
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-peak-below-entry");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L); // entry fill 2.30
+
+    stub.armChandelier(
+        armPayload(
+            "pos-peak-below-entry", "src-sig-1", new BigDecimal("2.20"), new BigDecimal("0.15")));
+
+    // Drive the workflow to completion before capturing: the arm path audits asynchronously, so
+    // asserting straight after the Update races the emission (same shape the other
+    // armChandelier_*_rejectsAndAuditsArmRejected tests use).
+    stub.partialExit(partialExitRequest("sig-close", "pos-peak-below-entry", 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-x", 5L, new BigDecimal("2.25")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent rej = captureKind("ChandelierArmRejected");
+    assertThat(rej.getSubject()).containsEntry("reason", "peak_below_entry");
+    // Never armed: no premium subscription was opened for it.
+    verify(marketData, never()).subscribePremium(any());
+  }
+
+  @Test
+  void chandelierFloor_usesActualFillPrice_notSignalPremium() throws Exception {
+    // The floor must be what we PAID, not what the signal quoted. Signal says 3.00, we filled at
+    // 1.87. Anchoring on the signal would reject this arm outright (peak 1.99 <= 3.00), so the fact
+    // that it arms AND floors at 1.87 is what proves the fill price is the basis.
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflowInput in = futureInput(5);
+    in.setEntryPremium(new BigDecimal("3.00"));
+    PositionWorkflow stub = newStub("pos-floor-uses-fill");
+    WorkflowStub.fromTyped(stub).start(in);
+    stub.onFill(fill("brk-entry", 5L, new BigDecimal("1.87")));
+
+    stub.armChandelier(
+        armPayload(
+            "pos-floor-uses-fill", "src-sig-1", new BigDecimal("1.99"), new BigDecimal("0.25")));
+    stub.chandelierTick(tick(new BigDecimal("1.80")));
+
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("1.80")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent fired = captureKind("ChandelierTrailFired");
+    assertThat(((Number) fired.getSubject().get("threshold")).doubleValue()).isEqualTo(1.87);
+  }
+
+  @Test
+  void chandelierFloor_followsEntryGrowthAverageCost_notTheFirstFill() throws Exception {
+    // #738 lets a post-confirm report on the ENTRY order grow the lot, and the broker's
+    // avgFillPrice on that report is the CUMULATIVE average for the order. If the floor froze at
+    // the first fill it would sit under the real cost of the grown lot and stop protecting it.
+    //
+    // Confirm 10 @ 1.00, then the order completes 20 @ 2.00 average -> basis must be 2.00.
+    // DISCRIMINATING tick: 1.90 is above the threshold a stale 1.00 basis would give (peak 2.10 *
+    // 0.75 = 1.575, unfloored) and at/below the 2.00 basis. Fires only if the basis followed.
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-floor-grows");
+    WorkflowStub.fromTyped(stub).start(futureInput(20));
+    stub.onFill(fill("brk-entry", 10L, new BigDecimal("1.00")));
+    // MUST let the confirm book the first fill before sending the growth report. onFill only
+    // assigns lastFillEvent, so two signals back-to-back let the second overwrite the first before
+    // run() wakes — the confirm would then see 2.00 itself and no growth would occur, which makes
+    // this test pass while checking nothing (verified by falsification).
+    //
+    // Wait on the QUERY, not the audit: waitForAuditKind's captureAll throws outright when the
+    // audit mock has had zero interactions yet, so it cannot be used as the first wait in a test.
+    waitForRemainingQty(stub, 10L);
+    stub.onFill(fill("brk-entry", 20L, new BigDecimal("2.00")));
+    waitForRemainingQty(stub, 20L);
+
+    stub.armChandelier(
+        armPayload("pos-floor-grows", "src-sig-1", new BigDecimal("2.10"), new BigDecimal("0.25")));
+    stub.chandelierTick(tick(new BigDecimal("1.90")));
+
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 20L, new BigDecimal("1.90")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent fired = captureKind("ChandelierTrailFired");
+    assertThat(((Number) fired.getSubject().get("threshold")).doubleValue()).isEqualTo(2.00);
+  }
+
+  @Test
+  void armTrail_operatorMayStillArmAndFireBelowEntryBasis() throws Exception {
+    // THE FORK, decided 2026-08-19: the breakeven floor is for the AUTOMATIC path only. An operator
+    // salvaging a losing position deliberately wants a stop under water, and the button already
+    // echoes the stop it is arming -- flooring it silently would hand back a stop that never fires
+    // where they were told. Default quote mid 2.55, giveback 0.20 -> stop 2.04, against an entry
+    // basis of 2.30. It must arm AND fire.
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-operator-below-entry");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L); // entry fill 2.30
+
+    ArmTrailResult r = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20")));
+    assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
+    assertThat(r.getStopPrice()).isEqualByComparingTo("2.04");
+
+    // 2.00 <= 2.04 fires. If the floor leaked onto the operator path the threshold would be 2.30
+    // and this tick would have fired at the wrong level (or the arm would have been refused).
+    stub.chandelierTick(tick(new BigDecimal("2.00")));
+
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-flatten", 5L, new BigDecimal("2.00")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    AuditEvent fired = captureKind("ChandelierTrailFired");
+    assertThat(((Number) fired.getSubject().get("threshold")).doubleValue()).isEqualTo(2.04);
   }
 
   @Test
@@ -5048,6 +5194,23 @@ class PositionWorkflowImplTest {
       st = stub.trailingState();
     }
     return st;
+  }
+
+  /**
+   * Waits for a workflow-state change via the QUERY rather than an audit. Needed when the wait is
+   * the FIRST thing a test blocks on: {@link #waitForAuditKind} routes through {@code captureAll},
+   * whose {@code verify(audit, atLeastOnce())} throws immediately on a mock with zero interactions
+   * instead of looping.
+   */
+  private void waitForRemainingQty(PositionWorkflow stub, long want) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 50_000;
+    while (System.currentTimeMillis() < deadline) {
+      if (stub.positionState().remainingQty() == want) {
+        return;
+      }
+      Thread.sleep(50);
+    }
+    assertThat(stub.positionState().remainingQty()).isEqualTo(want);
   }
 
   private void waitForPlaceOrderCount(int n) throws InterruptedException {
