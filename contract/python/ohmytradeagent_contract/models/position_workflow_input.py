@@ -36,6 +36,10 @@ class CarriedExitBookedByOrderItem(BaseModel):
     """
     Cumulative booked exit quantity for this order.
     """
+    notional: float | None = None
+    """
+    #753: cumulative booked notional (sum of qty x slice price) for this order, so a post-roll booking of the same order can be priced at its own slice instead of the running average. Optional — absent means unknown, and the next booking falls back to the cumulative-average price (pre-#753 behavior).
+    """
 
 
 class CarriedPartialPlaceRetryAttempt(BaseModel):

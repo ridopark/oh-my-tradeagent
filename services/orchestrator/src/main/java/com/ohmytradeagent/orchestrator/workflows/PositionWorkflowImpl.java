@@ -1014,7 +1014,17 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * synthesized fill) to the quantity already booked for that order, so a CUMULATIVE broker report
    * is converted to the un-booked delta exactly once. Bounded by {@link #EXIT_LEDGER_MAX_ORDERS}.
    */
-  private final Map<String, Long> exitBookedByOrder = new LinkedHashMap<>();
+  private final Map<String, BookedExit> exitBookedByOrder = new LinkedHashMap<>();
+
+  /**
+   * Issue #753: per-broker-order booked qty AND booked notional (qty x the price each booked slice
+   * actually traded at). The notional is what lets a SECOND booking of the same order be priced at
+   * its own slice's price instead of the order's running cumulative average — {@code deltaPrice =
+   * (cumQty x cumAvg - bookedNotional) / deltaQty}. {@code notional} is null when unknown (a
+   * pre-#753 carried run, or a fill that arrived with no price); the delta price then falls back to
+   * the cumulative average, which is exactly the pre-#753 behavior.
+   */
+  private record BookedExit(long qty, BigDecimal notional) {}
 
   private String flattenBookedKey;
 
@@ -1207,7 +1217,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     }
     if (in.getCarriedExitBookedByOrder() != null) {
       for (CarriedExitBookedEntry e : in.getCarriedExitBookedByOrder()) {
-        this.exitBookedByOrder.put(e.getOrderId(), e.getQty());
+        // #753: a null notional (pre-#753 carried run) hydrates as unknown — the next booking of
+        // that order prices at the cumulative average, the pre-#753 behavior.
+        this.exitBookedByOrder.put(e.getOrderId(), new BookedExit(e.getQty(), e.getNotional()));
       }
     }
     this.flattenRetrySessions =
@@ -1326,7 +1338,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
           (k, v) -> {
             CarriedExitBookedEntry e = new CarriedExitBookedEntry();
             e.setOrderId(k);
-            e.setQty(v);
+            e.setQty(v.qty());
+            // #753: notional rides along when known; setter skipped on null (optional field).
+            if (v.notional() != null) {
+              e.setNotional(v.notional());
+            }
             booked.add(e);
           });
       next.setCarriedExitBookedByOrder(booked);
@@ -4478,15 +4494,22 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       return 0L;
     }
     long filled = fillEvent.getFilledQty();
+    // #753: the price the emitted audit carries. Legacy (pre-ledger) path keeps the report's own
+    // average verbatim; the ledger path may replace it with the booking's slice price. The audit
+    // payload is activity INPUT, which Temporal replay does not validate — so changing the VALUE
+    // needs no version gate (the qty/emission decisions, which DO shape commands, are unchanged).
+    BigDecimal exitPrice = fillEvent.getAvgFillPrice();
     // Issue #735: convert the broker's CUMULATIVE filled_qty into the un-booked delta for this
     // broker order, clamped to the outstanding lot. Returning 0 here emits NO audit event — that
     // command-count change is precisely what VERSION_EXIT_CUMULATIVE_LEDGER fences off from the
     // in-flight v=0 executions.
     if (Workflow.getVersion(VERSION_EXIT_CUMULATIVE_LEDGER, Workflow.DEFAULT_VERSION, 1) >= 1) {
-      filled = bookableExitDelta(fillEvent);
+      ExitDelta bookedDelta = bookableExitDelta(fillEvent);
+      filled = bookedDelta.qty();
       if (filled <= 0) {
         return 0L;
       }
+      exitPrice = bookedDelta.price();
     }
     remainingQty -= filled;
     // F1 supersede guardrail: any exit fill that reduces the lot marks it as no-longer-untouched.
@@ -4507,7 +4530,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             "broker_order_id",
             fillEvent.getBrokerOrderId(),
             "avg_fill_price",
-            fillEvent.getAvgFillPrice());
+            exitPrice);
     // Issue #276 / Plan-2A R-AA-6: emit the per-symbol correlation key so the DailyPnl FIFO
     // grouping
     // matches this exit against its OWN symbol's entry basis. Replay-gated so legacy
@@ -4522,7 +4545,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // target partial AND the terminal close). filled is the leg qty; remainingQty was just
     // decremented, so remainingQty + filled is the qty before this leg. Inert for copytrade
     // (tp_ratio == null) and replay-gated under VERSION_WATCHLIST_EXIT.
-    emitWatchlistMeasurement(signalId, filled, remainingQty + filled, fillEvent.getAvgFillPrice());
+    emitWatchlistMeasurement(signalId, filled, remainingQty + filled, exitPrice);
     return filled;
   }
 
@@ -4545,8 +4568,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * clamped booking leaves the un-bookable remainder permanently unbooked instead of silently
    * absorbing it.
    */
-  private long bookableExitDelta(FillSignalPayload fillEvent) {
+  /**
+   * Issue #753: the qty AND the price a booking's own contracts actually traded at. {@code price}
+   * is null only when the broker report itself carried no price.
+   */
+  private record ExitDelta(long qty, BigDecimal price) {}
+
+  private ExitDelta bookableExitDelta(FillSignalPayload fillEvent) {
     String key = fillEvent.getBrokerOrderId();
+    BigDecimal cumAvg = fillEvent.getAvgFillPrice();
     if (key == null || key.isBlank()) {
       // No order identity, so no ledger is possible. Book the reported qty, still clamped. This
       // deliberately errs toward OVER-booking: an under-book leaves remainingQty stuck above zero
@@ -4554,23 +4584,52 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // which is worse than an early close that reconciliation will surface as an orphan. Real
       // Alpaca fills always carry an order id; synthesized fills inherit one from the broker
       // result, so this is a defensive branch rather than an expected path.
-      return Math.max(0L, Math.min(fillEvent.getFilledQty(), remainingQty));
+      return new ExitDelta(Math.max(0L, Math.min(fillEvent.getFilledQty(), remainingQty)), cumAvg);
     }
-    long alreadyBooked = exitBookedByOrder.getOrDefault(key, 0L);
+    BookedExit prior = exitBookedByOrder.get(key);
+    long alreadyBooked = prior == null ? 0L : prior.qty();
     long delta = fillEvent.getFilledQty() - alreadyBooked;
     if (delta <= 0) {
-      return 0L;
+      return new ExitDelta(0L, cumAvg);
     }
     long bookable = Math.min(delta, remainingQty);
     if (bookable <= 0) {
-      return 0L;
+      return new ExitDelta(0L, cumAvg);
     }
-    exitBookedByOrder.put(key, alreadyBooked + bookable);
+    // #753: price THIS booking at its own slice, not the order's running average. When one broker
+    // order books twice at different prices, the cumulative average credits the second slice at a
+    // blended price — realized P&L then overstates (or understates) the exit by
+    // (cumAvg - slicePrice) x qty. deltaNotional = cumQty x cumAvg - bookedNotional recovers the
+    // slice. Falls back to the cumulative average (the pre-#753 behavior) whenever the inputs
+    // cannot support the arithmetic: no price on the report, no prior booking (delta IS the
+    // cumulative), unknown prior notional (pre-#753 carried run), or a non-positive result from
+    // inconsistent broker numbers — never a price that cannot have traded.
+    BigDecimal deltaPrice = cumAvg;
+    if (cumAvg != null && alreadyBooked > 0 && prior.notional() != null) {
+      BigDecimal deltaNotional =
+          BigDecimal.valueOf(fillEvent.getFilledQty()).multiply(cumAvg).subtract(prior.notional());
+      BigDecimal candidate =
+          deltaNotional.divide(BigDecimal.valueOf(delta), 4, java.math.RoundingMode.HALF_UP);
+      if (candidate.signum() > 0) {
+        deltaPrice = candidate;
+      }
+    }
+    BigDecimal bookedNotional = null;
+    if (deltaPrice != null) {
+      BigDecimal priorNotional =
+          prior == null || prior.notional() == null
+              ? (alreadyBooked == 0 ? BigDecimal.ZERO : null)
+              : prior.notional();
+      if (priorNotional != null) {
+        bookedNotional = priorNotional.add(BigDecimal.valueOf(bookable).multiply(deltaPrice));
+      }
+    }
+    exitBookedByOrder.put(key, new BookedExit(alreadyBooked + bookable, bookedNotional));
     // Bounded, oldest-first. LinkedHashMap preserves insertion order, so replay is deterministic.
     while (exitBookedByOrder.size() > EXIT_LEDGER_MAX_ORDERS) {
       exitBookedByOrder.remove(exitBookedByOrder.keySet().iterator().next());
     }
-    return bookable;
+    return new ExitDelta(bookable, deltaPrice);
   }
 
   /**
