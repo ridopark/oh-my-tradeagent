@@ -42,7 +42,9 @@ public class TradeContextPeakReader {
     if (dashboardDsl == null) {
       return null;
     }
-    String signalId = entrySignalIdFromPosition(positionWorkflowId);
+    String signalId =
+        com.ohmytradeagent.contract.identity.WorkflowIds.entrySignalIdFromPosition(
+            positionWorkflowId);
     if (signalId == null) {
       return null;
     }
@@ -74,34 +76,4 @@ public class TradeContextPeakReader {
     }
   }
 
-  /**
-   * The entry signal id embedded in a {@code PositionWorkflow} id ({@code
-   * t-<tenant>/s-<strategy>/pos/<occ>/<entrySignalId>}), or {@code null} if this is not one.
-   *
-   * <p>LOCAL MIRROR of the unmerged #786 {@code WorkflowIds.entrySignalIdFromPosition} (the #783
-   * recorder derives its {@code signal_id} key the same way): everything after the first separator
-   * following the OCC is the signal id — watchlist signal ids contain slashes of their own ({@code
-   * wl/<date>/<sym>/<right>}), while the OCC never does. Duplicated here rather than added to the
-   * contract module so this branch does not collide with #786's identical addition; consolidate
-   * onto the contract helper when both merge.
-   */
-  static String entrySignalIdFromPosition(String workflowId) {
-    if (workflowId == null) {
-      return null;
-    }
-    int start = workflowId.indexOf("/pos/");
-    if (start < 0) {
-      return null;
-    }
-    start += "/pos/".length();
-    int end = workflowId.indexOf('/', start);
-    if (end < 0) {
-      return null;
-    }
-    if (workflowId.substring(start, end).isBlank()) {
-      return null; // blank OCC: not a well-formed position id, refuse to guess
-    }
-    String signalId = workflowId.substring(end + 1);
-    return signalId.isBlank() ? null : signalId;
-  }
 }
