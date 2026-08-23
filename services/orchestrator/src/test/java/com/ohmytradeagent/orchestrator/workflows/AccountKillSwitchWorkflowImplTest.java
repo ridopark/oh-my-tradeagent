@@ -902,7 +902,7 @@ class AccountKillSwitchWorkflowImplTest {
   // whose worker FAILS the workflow (not just the task) on the guard's IllegalArgumentException so
   // the rejection surfaces via getResult; v6 acceptance is proven by the restore/carry tests above.
   @Test
-  void schemaGuard_rejectsSchemaVersionAboveSix() {
+  void schemaGuard_rejectsSchemaVersionAboveSeven() {
     TestWorkflowEnvironment guardEnv = TestWorkflowEnvironment.newInstance();
     try {
       Worker w = guardEnv.newWorker(CORE_QUEUE);
@@ -914,8 +914,8 @@ class AccountKillSwitchWorkflowImplTest {
       guardEnv.start();
 
       AccountKillSwitchWorkflowInput tooNew = new AccountKillSwitchWorkflowInput();
-      // #669 widened the ceiling to 6 (last_still_tripped_page_day carry); 7 is the too-new probe.
-      tooNew.setSchemaVersion(7L);
+      // #670 widened the ceiling to 7 (tripped_trading_day carry); 8 is the too-new probe.
+      tooNew.setSchemaVersion(8L);
       tooNew.setTenantId("dev");
       AccountKillSwitchWorkflow stub =
           guardEnv
@@ -1503,11 +1503,42 @@ class AccountKillSwitchWorkflowImplTest {
   void carryForwardInput_bumpsSchemaVersionOnlyWhenNewerFieldCarried() {
     LocalDate day = LocalDate.of(2026, 5, 14);
 
+    // v7 (#670): the trip's trading-day tag is carried with a carried trip.
+    AccountKillSwitchWorkflowInput withTripDay =
+        AccountKillSwitchWorkflowImpl.carryForwardInput(
+            "dev",
+            true,
+            "auto:account_daily_loss",
+            "auto:account_daily_loss",
+            null,
+            null,
+            day,
+            null,
+            0,
+            null,
+            null,
+            day,
+            day);
+    assertThat(withTripDay.getSchemaVersion()).isEqualTo(7L);
+    assertThat(withTripDay.getTrippedTradingDay()).isEqualTo(day);
+
     // v6 (#669): the still-tripped page day is carried — a persistently-tripped cap rolls via
     // continue-as-new roughly daily, and losing this field loses that day's page.
     AccountKillSwitchWorkflowInput withPageDay =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", true, "manual:ops", "operator:x", null, null, day, null, 0, null, null, day);
+            "dev",
+            true,
+            "manual:ops",
+            "operator:x",
+            null,
+            null,
+            day,
+            null,
+            0,
+            null,
+            null,
+            day,
+            null);
     assertThat(withPageDay.getSchemaVersion()).isEqualTo(6L);
     assertThat(withPageDay.getLastStillTrippedPageDay()).isEqualTo(day);
 
@@ -1526,6 +1557,7 @@ class AccountKillSwitchWorkflowImplTest {
             1,
             2,
             new BigDecimal("-1500"),
+            null,
             null);
     assertThat(withExposure.getSchemaVersion()).isEqualTo(5L);
     assertThat(withExposure.getLastOpenPositions()).isEqualTo(2L);
@@ -1535,7 +1567,7 @@ class AccountKillSwitchWorkflowImplTest {
     // is exposure state -> stamp v5, MTM absent.
     AccountKillSwitchWorkflowInput exposureCountOnly =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", false, "", "", null, null, day, null, 0, 0, null, null);
+            "dev", false, "", "", null, null, day, null, 0, 0, null, null, null);
     assertThat(exposureCountOnly.getSchemaVersion()).isEqualTo(5L);
     assertThat(exposureCountOnly.getLastOpenPositions()).isEqualTo(0L);
     assertThat(exposureCountOnly.getLastOpenMtm()).isNull();
@@ -1543,7 +1575,19 @@ class AccountKillSwitchWorkflowImplTest {
     // v4: a nonzero mid-debounce count is carried (with the sod_equity it implies); no exposure.
     AccountKillSwitchWorkflowInput withDebounce =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", false, "", "", null, null, day, new BigDecimal("5000"), 1, null, null, null);
+            "dev",
+            false,
+            "",
+            "",
+            null,
+            null,
+            day,
+            new BigDecimal("5000"),
+            1,
+            null,
+            null,
+            null,
+            null);
     assertThat(withDebounce.getSchemaVersion()).isEqualTo(4L);
     assertThat(withDebounce.getConsecutiveMtmUnavailableTicks()).isEqualTo(1L);
     assertThat(withDebounce.getSodEquity()).isEqualByComparingTo(new BigDecimal("5000"));
@@ -1553,7 +1597,19 @@ class AccountKillSwitchWorkflowImplTest {
     // v3: sod_equity captured but no active debounce (count==0) -> ticks absent, NOT a v4.
     AccountKillSwitchWorkflowInput withEquity =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", false, "", "", null, null, day, new BigDecimal("5000"), 0, null, null, null);
+            "dev",
+            false,
+            "",
+            "",
+            null,
+            null,
+            day,
+            new BigDecimal("5000"),
+            0,
+            null,
+            null,
+            null,
+            null);
     assertThat(withEquity.getSchemaVersion()).isEqualTo(3L);
     assertThat(withEquity.getSodEquity()).isEqualByComparingTo(new BigDecimal("5000"));
     assertThat(withEquity.getConsecutiveMtmUnavailableTicks()).isNull();
@@ -1561,7 +1617,7 @@ class AccountKillSwitchWorkflowImplTest {
     // v2: no newer field carried -> byte-identical legacy shape.
     AccountKillSwitchWorkflowInput noEquity =
         AccountKillSwitchWorkflowImpl.carryForwardInput(
-            "dev", false, "", "", null, null, day, null, 0, null, null, null);
+            "dev", false, "", "", null, null, day, null, 0, null, null, null, null);
     assertThat(noEquity.getSchemaVersion()).isEqualTo(2L);
     assertThat(noEquity.getSodEquity()).isNull();
     assertThat(noEquity.getConsecutiveMtmUnavailableTicks()).isNull();
@@ -1695,6 +1751,80 @@ class AccountKillSwitchWorkflowImplTest {
     KillSwitchState s = stubAfter.killswitchState();
     assertThat(s.getOpenPositions()).isEqualTo(2L); // pre-fix: null
     assertThat(s.getOpenMtm()).isEqualByComparingTo("1500"); // pre-fix: null
+  }
+
+  // ---------- Issue #670: the armability-gated deferred rollover clear ----------
+
+  /**
+   * THE #670 window, closed: day 2 opens with the cap UN-ARMABLE (pct configured, SOD equity
+   * unreadable, no absolute fallback — prod-kipark's 2026-07-21 state). Pre-#670 the rollover
+   * cleared the trip anyway and the tenant traded all session with an inert cap. Now: the trip
+   * HOLDS while un-armable (no unprotected window), the un-armable ticks page CAP-INACTIVE, and the
+   * moment armability returns the deferred clear fires and normal evaluation resumes.
+   */
+  @Test
+  void staleTrip_holdsWhileUnarmable_pagesInactive_thenClearsWhenArmable()
+      throws InterruptedException {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000")); // trips the 5000 absolute on day 1
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-670");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    // Day 2 arrives with the cap UN-ARMABLE: absolute pulled, pct configured but equity dark.
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(null);
+    when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(new BigDecimal("0.40"));
+    when(accountSnapshot.accountSnapshot(any()))
+        .thenThrow(new IllegalStateException("equity_unavailable"));
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+
+    // Well past INACTIVE_ALERT_TICKS: the trip must HOLD and the inactive page must fire.
+    env.sleep(Duration.ofSeconds(8 * 60));
+    assertThat(stub.killswitchState().getTripped())
+        .as("an un-armable cap must not un-halt itself")
+        .isTrue();
+    assertThat(countKind("KillSwitchClearedOnRollover")).isZero();
+    waitForAuditKind("AccountKillSwitchCapInactive");
+    assertThat(countKind("AccountKillSwitchCapInactive")).isEqualTo(1L);
+
+    // Armability returns: the deferred clear fires with its marker and evaluation resumes.
+    org.mockito.Mockito.reset(accountSnapshot);
+    when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+    env.sleep(Duration.ofSeconds(65));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    waitForAuditKind("KillSwitchClearedOnRollover");
+    AuditEvent cleared = captureKind("KillSwitchClearedOnRollover");
+    assertThat(cleared.getSubject()).containsEntry("deferred_until_armable", true);
+    assertThat(String.valueOf(cleared.getSubject().get("prior_trading_day")))
+        .isEqualTo("2026-05-14");
+  }
+
+  /** Market closed at the rollover: the stale trip holds until the first OPEN tick, then clears. */
+  @Test
+  void staleTrip_holdsThroughClosedMarket_clearsAtTheOpen() throws InterruptedException {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-670-closed");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isTrue();
+
+    when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 15));
+    when(calendar.isMarketOpen()).thenReturn(false);
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    env.sleep(Duration.ofSeconds(2 * 60));
+    assertThat(stub.killswitchState().getTripped())
+        .as("pre-open, the overnight trip holds — no cleared-but-cannot-trip window")
+        .isTrue();
+    assertThat(countKind("KillSwitchClearedOnRollover")).isZero();
+
+    when(calendar.isMarketOpen()).thenReturn(true);
+    env.sleep(Duration.ofSeconds(65));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("KillSwitchClearedOnRollover")).isEqualTo(1L);
   }
 
   // ---------- cap-inactive observability alert (PR #504 follow-up) ----------
