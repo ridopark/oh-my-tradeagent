@@ -2749,6 +2749,27 @@ class PositionWorkflowImplTest {
   }
 
   @Test
+  void waitForAuditKind_withZeroAuditInteractions_timesOutWithADiagnosis() throws Exception {
+    // Regression guard for the wait helpers themselves.
+    //
+    // captureAll used verify(audit, atLeastOnce()), which THROWS WantedButNotInvoked the moment it
+    // reads a mock that has had zero interactions. Called from inside a polling loop that is there
+    // precisely to wait for the first interaction, that turned "nothing has been emitted yet" into
+    // an immediate hard failure reading "Actually, there were zero interactions with this mock" --
+    // naming neither the kind awaited nor the fact that it was a race. It also made this helper
+    // unusable as the FIRST wait in a test, which is exactly when it is most wanted.
+    //
+    // A fresh workflow that is never started has, by construction, produced no audits at all. The
+    // helper must POLL to its deadline and then fail with something that names the kind.
+    newStub("pos-wait-helper-diag"); // deliberately never started -> audit mock untouched
+
+    assertThatThrownBy(() -> waitForAuditKind("NeverEmittedKind", 200L))
+        .isInstanceOf(AssertionError.class)
+        .hasMessageContaining("NeverEmittedKind")
+        .hasMessageContaining("observed=");
+  }
+
+  @Test
   void chandelierTick_floorClampsThresholdToEntryBasis_fires() throws Exception {
     // Reproduces 2026-08-19 SPY 260825P00760000 across all three live tenants. Entry 1.87, the
     // premium peaked at 1.99 (+6.4%), and a 25% giveback put the stop at 1.4925 -- ~20% BELOW what
@@ -5275,11 +5296,26 @@ class PositionWorkflowImplTest {
    * a timeout returns the still-null state so the caller's assertion reports the real failure
    * rather than the wait.
    */
+  /**
+   * Real-time budget every bounded wait helper in this class shares.
+   *
+   * <p><b>Must stay comfortably under the per-test timeout in
+   * src/test/resources/junit-platform.properties.</b> When the two are close, a helper that
+   * exhausts its budget and a genuinely wedged test become indistinguishable: whichever fires first
+   * decides whether you get a NAMED assertion or a bare "timed out after N seconds" with no
+   * indication of what was being awaited. That ambiguity is what the per-test timeout was
+   * introduced to remove, so eroding it defeats the purpose. If you raise this, raise that too.
+   */
+  private static final long WAIT_DEADLINE_MS = 50_000L;
+
+  /** Poll granularity for the bounded waiters. Cheap: each tick is one Mockito invocation read. */
+  private static final long POLL_INTERVAL_MS = 25L;
+
   private TrailingState waitForTickObserved(PositionWorkflow stub) throws InterruptedException {
-    long deadline = System.currentTimeMillis() + 50_000;
+    long deadline = System.currentTimeMillis() + WAIT_DEADLINE_MS;
     TrailingState st = stub.trailingState();
     while (System.currentTimeMillis() < deadline && st.lastTickObservedAt() == null) {
-      Thread.sleep(50);
+      Thread.sleep(POLL_INTERVAL_MS);
       st = stub.trailingState();
     }
     return st;
@@ -5292,26 +5328,26 @@ class PositionWorkflowImplTest {
    * instead of looping.
    */
   private void waitForRemainingQty(PositionWorkflow stub, long want) throws InterruptedException {
-    long deadline = System.currentTimeMillis() + 50_000;
+    long deadline = System.currentTimeMillis() + WAIT_DEADLINE_MS;
     while (System.currentTimeMillis() < deadline) {
       if (stub.positionState().remainingQty() == want) {
         return;
       }
-      Thread.sleep(50);
+      Thread.sleep(POLL_INTERVAL_MS);
     }
     assertThat(stub.positionState().remainingQty()).isEqualTo(want);
   }
 
   private void waitForPlaceOrderCount(int n) throws InterruptedException {
-    // 50s deadline — CI runners under load have hit >25s waiting for signal-driven workflow
+    // WAIT_DEADLINE_MS — CI runners under load have hit >25s waiting for signal-driven workflow
     // activity dispatch through TestWorkflowEnvironment; the happy path returns in <0.5s.
-    long deadline = System.currentTimeMillis() + 50_000;
+    long deadline = System.currentTimeMillis() + WAIT_DEADLINE_MS;
     while (System.currentTimeMillis() < deadline) {
       try {
         verify(exec, times(n)).placeOrder(any());
         return;
       } catch (AssertionError ignored) {
-        Thread.sleep(50);
+        Thread.sleep(POLL_INTERVAL_MS);
       }
     }
     verify(exec, times(n)).placeOrder(any());
@@ -5319,11 +5355,14 @@ class PositionWorkflowImplTest {
 
   private AuditEvent captureKind(String kind) {
     ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
-    verify(audit, atLeastOnce()).log(captor.capture());
+    verify(audit, atLeast(0)).log(captor.capture());
     return captor.getAllValues().stream()
         .filter(e -> kind.equals(e.getKind()))
         .reduce((a, b) -> b)
-        .orElseThrow(() -> new AssertionError("no audit event with kind=" + kind));
+        .orElseThrow(
+            () ->
+                new AssertionError(
+                    "no audit event with kind=" + kind + "; observed=" + observedKinds()));
   }
 
   /**
@@ -5334,15 +5373,29 @@ class PositionWorkflowImplTest {
    * signal/fill can race ahead of the emission and make a later {@link #captureKind} flaky.
    */
   private void waitForAuditKind(String kind) throws InterruptedException {
-    long deadline = System.currentTimeMillis() + 50_000;
+    waitForAuditKind(kind, WAIT_DEADLINE_MS);
+  }
+
+  /** Deadline-injectable form, so the timeout path itself can be tested without burning 50s. */
+  private void waitForAuditKind(String kind, long deadlineMs) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + deadlineMs;
     while (System.currentTimeMillis() < deadline) {
       if (!captureAll(kind).isEmpty()) {
         return;
       }
-      Thread.sleep(50);
+      Thread.sleep(POLL_INTERVAL_MS);
     }
     if (captureAll(kind).isEmpty()) {
-      throw new AssertionError("timed out waiting for audit event with kind=" + kind);
+      // Name what DID arrive. "timed out waiting for OperatorTrimRequested" alone cannot
+      // distinguish "the workflow never got there" from "it emitted something else first", and
+      // that difference is the whole diagnosis.
+      throw new AssertionError(
+          "timed out after "
+              + deadlineMs
+              + "ms waiting for audit event with kind="
+              + kind
+              + "; observed="
+              + observedKinds());
     }
   }
 
@@ -5351,9 +5404,26 @@ class PositionWorkflowImplTest {
     throw new AssertionError("expected Number, got " + o);
   }
 
+  /**
+   * Every audit event captured so far, filtered by kind.
+   *
+   * <p>{@code atLeast(0)}, NOT {@code atLeastOnce()}: this is read from polling loops, and with
+   * {@code atLeastOnce()} a mock that has had ZERO interactions yet throws {@code
+   * WantedButNotInvoked} straight out of the loop instead of letting it wait. That turns "the
+   * workflow has not emitted anything yet" into a hard failure reading "Actually, there were zero
+   * interactions with this mock", which names neither the kind awaited nor the fact that it was a
+   * timing race. It also made {@link #waitForAuditKind} unusable as the FIRST wait in a test.
+   */
   private List<AuditEvent> captureAll(String kind) {
     ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
-    verify(audit, atLeastOnce()).log(captor.capture());
+    verify(audit, atLeast(0)).log(captor.capture());
     return captor.getAllValues().stream().filter(e -> kind.equals(e.getKind())).toList();
+  }
+
+  /** Kinds observed so far, in order, for failure messages. */
+  private List<String> observedKinds() {
+    ArgumentCaptor<AuditEvent> captor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeast(0)).log(captor.capture());
+    return captor.getAllValues().stream().map(AuditEvent::getKind).toList();
   }
 }
