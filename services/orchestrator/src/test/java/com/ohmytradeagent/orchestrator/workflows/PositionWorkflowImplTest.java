@@ -4975,9 +4975,12 @@ class PositionWorkflowImplTest {
   @Test
   void armTrail_operatorArmsAndStopIsPeakAnchored() throws Exception {
     // This is a copytrade position (no watchlist exit armed), so the tick loop routes to
-    // processTick and compares the MID. The anchor must be in that same space: the default quote's
-    // mid is 2.55, so a 20% giveback anchors at 2.55 and stops at 2.04. It is deliberately NOT the
-    // bid (2.50 -> 2.00); see armTrail_copytradePosition_anchorsOnTheMid... for why that matters.
+    // processTick — which at VERSION_CHANDELIER_TRAIL_ON_BID (Phase 4) compares the BID. The anchor
+    // must be in that same space, so the default quote's bid of 2.50 at a 20% giveback anchors at
+    // 2.50 and stops at 2.00. It is deliberately NOT the mid (2.55 -> 2.04), which is what this
+    // test asserted before Phase 4; see
+    // armTrail_copytradePosition_anchorsOnTheBidTheTickLoopWillCompare
+    // for why the space has to match.
     PositionWorkflow stub = newStub("pos-armtrail-ok");
     WorkflowStub.fromTyped(stub).start(futureInput(5));
     confirmEntry(stub, 5L);

@@ -1911,10 +1911,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // Then drain ticks. For a watchlist-exit-active position (exit armed, or the target already
       // armed the runner's trail) processExitTick owns the tick: it evaluates the bid-based stop /
       // target AND feeds the chandelier trail on the BID (per spec). Otherwise processTick runs the
-      // copytrade chandelier path unchanged on the mid. NOT a smoothed mid — the schema claimed a
-      // 5-10s smoothing window that has never existed (corrected 2026-08-16); this is a plain
-      // (bid+ask)/2 from one REST snapshot, so a one-sided NBBO collapse halves it in a single
-      // tick.
+      // copytrade chandelier path — which, at VERSION_CHANDELIER_TRAIL_ON_BID (Phase 4, #690), is
+      // ALSO fed the BID via bidAsPremiumTick in the else branch below. So both routes now compare
+      // bids; only a tick with no usable bid still falls back to the raw premium.
+      //
+      // That raw premium is the MID, and NOT a smoothed one — the schema claimed a 5-10s smoothing
+      // window that has never existed (corrected 2026-08-16); it is a plain (bid+ask)/2 from one
+      // REST snapshot, so a one-sided NBBO collapse halves it in a single tick. Watching it was the
+      // defect Phase 4 fixes: a bid is always <= the mid, so a mid-space trail crosses its own
+      // threshold LATER in a collapse than a bid-space one does.
       while (!pendingTicks.isEmpty()) {
         PremiumTick t = pendingTicks.poll();
         // Stamp BEFORE the route fork and regardless of what is armed. This is the only point both
@@ -1930,6 +1935,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
           // Phase 4: the copytrade trail compares the BID it can actually sell at. Same helper the
           // watchlist runner already uses. Falls back to the raw mid tick when a tick carries no
           // usable bid, which is the pre-Phase-4 behaviour.
+          //
+          // Deliberately STRICTER than processExitTick's null-only bid check: a zero/negative bid
+          // is not a price the trail could ever act on, and here it would silently become the
+          // comparison value for every subsequent tick. Falling back to the mid is the conservative
+          // read. The feed's #690 poll guard rejects no-bid quotes upstream, so neither branch is
+          // expected to be reached — this is a backstop, not a path.
           processTick(
               trailOnBidVersion >= 1 && t.getBid() != null && t.getBid().signum() > 0
                   ? bidAsPremiumTick(t, t.getBid())
@@ -3572,9 +3583,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       } else {
         // Issue #216 retry: fresh intent_key (the prior one was cancelled) and fresh limit price.
         // Source preference under VERSION_EXIT_RETRY_SOURCE_ORDER v>=1 (#227):
-        //   lastTickPremium (most recent chandelier mid) > req.getRefPremium() (author-posted price
+        //   lastTickPremium (most recent chandelier tick) > req.getRefPremium() (author-posted
+        // price
         //   treated as a fresh quote) > peakPremium (chandelier high-water-mark; last-resort
         //   because it is biased high for SELL exits and so over-quotes the bid).
+        // Phase 4 note: lastTickPremium was the MID for copytrade positions and the BID for
+        // watchlist-exit ones. At VERSION_CHANDELIER_TRAIL_ON_BID it is the BID on both routes
+        // (mid only when a tick carried no usable bid), so this fallback is now closer to what a
+        // SELL will actually execute at. Safety-neutral-to-positive, and it does not change the
+        // preference order — a live quote is still tried first.
         // Under v=DEFAULT_VERSION (in-flight workflows that already executed the retry branch
         // under PR #226) the original lastTick → peak → ref chain is preserved for byte-identical
         // replay. Both branches are deterministic and need no activity call.
