@@ -793,6 +793,33 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_CHANDELIER_BREAKEVEN_FLOOR = "chandelier-breakeven-floor-v1";
 
   /**
+   * PLAN-2026-08-19 Phase 4 (#690): the copytrade trail must evaluate the BID it can actually sell
+   * at, not the MID.
+   *
+   * <p>{@code PremiumTick.premium} is a plain {@code (bid+ask)/2} from one REST snapshot, but every
+   * exit sells the bid. Watching the higher number means the trail fires LATE, and on a widening
+   * book the bid can walk through the stop while the mid barely moves. 2026-08-19 SPY
+   * 260825P00760000 latched at a 1.4925 threshold and filled at 1.06 — a 29% gap through its own
+   * stop.
+   *
+   * <p>The watchlist runner already solved this: {@code processExitTick} hands {@code processTick}
+   * a tick whose premium IS the evaluated bid via {@code bidAsPremiumTick}. At {@code v>=1} the
+   * COPYTRADE branch of the tick fork does the same, falling back to the mid when a tick carries no
+   * usable bid (the feed's #690 poll guard rejects no-bid quotes, so that is a backstop, not a
+   * path).
+   *
+   * <p><b>{@link #resolveTrailAnchor} moves with it, and must.</b> That method exists to keep the
+   * operator's anchor in the SAME price space as the ticks it will meet; leaving it on the mid
+   * while the loop compares bids would echo a mid-derived stop and then fire at a different level —
+   * exactly the failure it was written to prevent.
+   *
+   * <p>Gated because a different comparison space changes WHEN the fire latches, and so when the
+   * flatten commands are issued. Appended after the breakeven-floor marker; order is part of the
+   * replay contract.
+   */
+  private static final String VERSION_CHANDELIER_TRAIL_ON_BID = "chandelier-trail-on-bid-v1";
+
+  /**
    * Issue #762: an AUTOMATED daily-loss breach must not liquidate a position whose horizon outlives
    * the breaker's.
    *
@@ -1014,6 +1041,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   /** PLAN-2026-08-19 Phase 1 gate, read once in {@link #run}. */
   private int breakevenFloorVersion = Workflow.DEFAULT_VERSION;
+
+  /** PLAN-2026-08-19 Phase 4 gate, read once in {@link #run}. */
+  private int trailOnBidVersion = Workflow.DEFAULT_VERSION;
 
   /**
    * What the lot actually COST — the basis the breakeven floor is measured against. Seeded from the
@@ -1493,6 +1523,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // the replay contract) into the field processTick/processArm consult.
     this.breakevenFloorVersion =
         Workflow.getVersion(VERSION_CHANDELIER_BREAKEVEN_FLOOR, Workflow.DEFAULT_VERSION, 1);
+    // Phase 4 trail-on-bid marker — appended AFTER the breakeven-floor marker (order is part of
+    // the replay contract).
+    this.trailOnBidVersion =
+        Workflow.getVersion(VERSION_CHANDELIER_TRAIL_ON_BID, Workflow.DEFAULT_VERSION, 1);
     if (deferVersion == Workflow.DEFAULT_VERSION) {
       // Legacy in-flight workflows: preserve the original ordering — assign remainingQty from
       // input.qty and emit PositionEntered at workflow start so their recorded histories replay
@@ -1877,10 +1911,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // Then drain ticks. For a watchlist-exit-active position (exit armed, or the target already
       // armed the runner's trail) processExitTick owns the tick: it evaluates the bid-based stop /
       // target AND feeds the chandelier trail on the BID (per spec). Otherwise processTick runs the
-      // copytrade chandelier path unchanged on the mid. NOT a smoothed mid — the schema claimed a
-      // 5-10s smoothing window that has never existed (corrected 2026-08-16); this is a plain
-      // (bid+ask)/2 from one REST snapshot, so a one-sided NBBO collapse halves it in a single
-      // tick.
+      // copytrade chandelier path — which, at VERSION_CHANDELIER_TRAIL_ON_BID (Phase 4, #690), is
+      // ALSO fed the BID via bidAsPremiumTick in the else branch below. So both routes now compare
+      // bids; only a tick with no usable bid still falls back to the raw premium.
+      //
+      // That raw premium is the MID, and NOT a smoothed one — the schema claimed a 5-10s smoothing
+      // window that has never existed (corrected 2026-08-16); it is a plain (bid+ask)/2 from one
+      // REST snapshot, so a one-sided NBBO collapse halves it in a single tick. Watching it was the
+      // defect Phase 4 fixes: a bid is always <= the mid, so a mid-space trail crosses its own
+      // threshold LATER in a collapse than a bid-space one does.
       while (!pendingTicks.isEmpty()) {
         PremiumTick t = pendingTicks.poll();
         // Stamp BEFORE the route fork and regardless of what is armed. This is the only point both
@@ -1893,7 +1932,19 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         if (exitArmed || (exitTargetFired && trailingArmed)) {
           processExitTick(t);
         } else {
-          processTick(t);
+          // Phase 4: the copytrade trail compares the BID it can actually sell at. Same helper the
+          // watchlist runner already uses. Falls back to the raw mid tick when a tick carries no
+          // usable bid, which is the pre-Phase-4 behaviour.
+          //
+          // Deliberately STRICTER than processExitTick's null-only bid check: a zero/negative bid
+          // is not a price the trail could ever act on, and here it would silently become the
+          // comparison value for every subsequent tick. Falling back to the mid is the conservative
+          // read. The feed's #690 poll guard rejects no-bid quotes upstream, so neither branch is
+          // expected to be reached — this is a backstop, not a path.
+          processTick(
+              trailOnBidVersion >= 1 && t.getBid() != null && t.getBid().signum() > 0
+                  ? bidAsPremiumTick(t, t.getBid())
+                  : t);
         }
       }
       if (chandelierFireRequested) {
@@ -2873,8 +2924,13 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * peak must be in the same price space as the ticks it will be compared against. The main loop
    * routes a tick to {@link #processExitTick} — which trails on the BID via {@code
    * bidAsPremiumTick} — when {@code exitArmed || (exitTargetFired && trailingArmed)}, and otherwise
-   * to {@link #processTick}, which compares the raw premium: the MID. So a copytrade position,
-   * which is what the operator Stop-loss button mostly targets, evaluates the mid.
+   * to {@link #processTick}.
+   *
+   * <p><b>As of {@link #VERSION_CHANDELIER_TRAIL_ON_BID} (Phase 4) the copytrade route ALSO hands
+   * {@code processTick} a bid, so every route is bid-space and this method returns the bid
+   * unconditionally.</b> Below that version the original split stands and the paragraphs that
+   * follow describe it: {@code processTick} compared the raw premium, the MID, so a copytrade
+   * position — which is what the operator Stop-loss button mostly targets — evaluated the mid.
    *
    * <p>Anchoring on the bid regardless would be wrong in a way the operator can see. Since ask >=
    * bid, the mid always exceeds a bid anchor, so the FIRST tick ratchets the peak into mid space
@@ -2904,7 +2960,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    *     REJECTS rather than arming at a guessed level
    */
   private BigDecimal resolveTrailAnchor() {
-    boolean bidSpace = exitArmed || exitTargetFired;
+    // Phase 4: once the copytrade tick loop compares BIDS too, every route is bid-space and the
+    // anchor must follow — see VERSION_CHANDELIER_TRAIL_ON_BID. Below that version the original
+    // mid-for-copytrade split stands, so legacy histories replay unchanged.
+    boolean bidSpace = trailOnBidVersion >= 1 || exitArmed || exitTargetFired;
     BigDecimal best = bidSpace && lastBid != null && lastBid.signum() > 0 ? lastBid : null;
     GetOptionQuoteRequest qreq = new GetOptionQuoteRequest();
     qreq.setSchemaVersion(1L);
@@ -3524,9 +3583,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       } else {
         // Issue #216 retry: fresh intent_key (the prior one was cancelled) and fresh limit price.
         // Source preference under VERSION_EXIT_RETRY_SOURCE_ORDER v>=1 (#227):
-        //   lastTickPremium (most recent chandelier mid) > req.getRefPremium() (author-posted price
+        //   lastTickPremium (most recent chandelier tick) > req.getRefPremium() (author-posted
+        // price
         //   treated as a fresh quote) > peakPremium (chandelier high-water-mark; last-resort
         //   because it is biased high for SELL exits and so over-quotes the bid).
+        // Phase 4 note: lastTickPremium was the MID for copytrade positions and the BID for
+        // watchlist-exit ones. At VERSION_CHANDELIER_TRAIL_ON_BID it is the BID on both routes
+        // (mid only when a tick carried no usable bid), so this fallback is now closer to what a
+        // SELL will actually execute at. Safety-neutral-to-positive, and it does not change the
+        // preference order — a live quote is still tried first.
         // Under v=DEFAULT_VERSION (in-flight workflows that already executed the retry branch
         // under PR #226) the original lastTick → peak → ref chain is preserved for byte-identical
         // replay. Both branches are deterministic and need no activity call.
