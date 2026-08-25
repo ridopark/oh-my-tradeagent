@@ -153,8 +153,11 @@ class PositionWorkflowImplUpdateBeforeInitTest {
     // timed out. Post-fix the handler awaits run()'s init and answers in the same workflow task.
     ArmTrailResult r = pending.get(30, TimeUnit.SECONDS);
     assertThat(r.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
-    assertThat(r.getPeakPremium()).isEqualByComparingTo("2.50");
-    // 2.50 * (1 - 0.35) = 1.625, penny-rounded — same mid-space anchor the post-fill tests prove.
-    assertThat(r.getStopPrice()).isEqualByComparingTo("1.63");
+    // BID-anchored (#811) — and deterministically so: this test's prior pin of the 2.50 MID was
+    // itself the init race in action (the update read trailOnBidVersion before run() assigned it).
+    // The initGatesResolved guard makes the first-WFT update wait for the version block.
+    assertThat(r.getPeakPremium()).isEqualByComparingTo("2.00");
+    // 2.00 * (1 - 0.35) = 1.30.
+    assertThat(r.getStopPrice()).isEqualByComparingTo("1.30");
   }
 }

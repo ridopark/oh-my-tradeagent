@@ -1057,6 +1057,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   /** Issue #808: {@link #VERSION_FILL_COMPARE_AND_CLEAR}, read once at the top of {@link #run}. */
   private int fillClearVersion = Workflow.DEFAULT_VERSION;
 
+  /**
+   * True once {@link #run} has assigned EVERY top-of-run version field. The #799 update guard
+   * awaited only {@code input != null} — but the version fields land several (yieldable) statements
+   * later, so an Update racing into that window read them at DEFAULT_VERSION and, e.g., resolved
+   * the trail anchor in the pre-#811 MID space (caught as a 2.04-vs-2.00 CI failure). Update
+   * handlers that consult version fields must await this, not just {@code input}.
+   */
+  private boolean initGatesResolved;
+
   /** PLAN-2026-08-19 Phase 1 gate, read once in {@link #run}. */
   private int breakevenFloorVersion = Workflow.DEFAULT_VERSION;
 
@@ -1548,6 +1557,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // the replay contract).
     this.trailOnBidVersion =
         Workflow.getVersion(VERSION_CHANDELIER_TRAIL_ON_BID, Workflow.DEFAULT_VERSION, 1);
+    // LAST of the top-of-run version block, by contract — append later markers ABOVE this line.
+    this.initGatesResolved = true;
     if (deferVersion == Workflow.DEFAULT_VERSION) {
       // Legacy in-flight workflows: preserve the original ordering — assign remainingQty from
       // input.qty and emit PositionEntered at workflow start so their recorded histories replay
@@ -2835,7 +2846,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // PositionWorkflow with buffered, unprocessed exits. No recorded history
     // reaches this await un-initialized (the un-guarded path never completed a task), so it is
     // replay-safe without a version marker.
-    Workflow.await(() -> input != null);
+    Workflow.await(() -> input != null && initGatesResolved);
     ArmTrailResult result = new ArmTrailResult();
     result.setSchemaVersion(1L);
 
