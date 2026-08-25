@@ -1722,10 +1722,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       }
       // First fill confirms the position. remainingQty MUST come from the fill, not input.qty —
       // partial fills are possible and the audit + downstream logic must reflect the real qty.
-      long firstFilledQty = lastFillEvent.getFilledQty();
+      // #808 review fix: snapshot BEFORE the yielding auditLog below — re-reading the field after
+      // the yield made the compare-and-clear compare the field to itself, wiping a fill that
+      // landed during the audit (the one site that missed the snapshot discipline).
+      FillSignalPayload drainedEntryFill = lastFillEvent;
+      long firstFilledQty = drainedEntryFill.getFilledQty();
       BigDecimal firstFillPrice =
-          lastFillEvent.getAvgFillPrice() != null
-              ? lastFillEvent.getAvgFillPrice()
+          drainedEntryFill.getAvgFillPrice() != null
+              ? drainedEntryFill.getAvgFillPrice()
               : in.getEntryPremium();
       this.remainingQty = firstFilledQty;
       // Phase 1: the price we actually PAID is the breakeven floor's basis, not input.entryPremium.
@@ -1735,7 +1739,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       this.entryBookedQty = firstFilledQty;
       // #738: remember WHICH broker order is ours on the entry side, so a later fill of it can
       // never be mistaken for an exit fill.
-      this.entryBrokerOrderId = lastFillEvent.getBrokerOrderId();
+      this.entryBrokerOrderId = drainedEntryFill.getBrokerOrderId();
       this.positionConfirmed = true;
       // F1 supersede guardrail: stamp the confirm instant (deterministic Workflow clock).
       this.entryAt = workflowNow();
@@ -1751,9 +1755,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               "entry_premium",
               firstFillPrice));
       // Clear lastFillEvent so the next processOne()'s await for the partial-exit fill doesn't
-      // immediately observe the stale entry fill. #808: compare-and-clear — a second fill that
-      // landed while the confirm ran survives.
-      clearDrainedFill(lastFillEvent);
+      // immediately observe the stale entry fill. #808: compare-and-clear on the PRE-YIELD
+      // snapshot — a second fill that landed while the confirm's audit ran survives.
+      clearDrainedFill(drainedEntryFill);
 
       // Phase 3: arm the watchlist-trigger exit on the long option. Inert unless the exit is
       // enabled

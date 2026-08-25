@@ -1307,6 +1307,52 @@ class PositionWorkflowImplTest {
   }
 
   /**
+   * Issue #808, review-caught residual: the ENTRY-CONFIRMATION drain re-read the field after the
+   * yielding PositionEntered auditLog, so a second fill landing DURING the confirm's audit was
+   * wiped by a compare-and-clear that compared the field to itself. Two back-to-back entry-order
+   * reports: the confirm books 2, the growth report (cum 5) must survive the confirm's audit
+   * in-flight window and grow the lot to 5.
+   */
+  @Test
+  void issue808_secondFillDuringEntryConfirmAudit_survivesAndGrowsTheLot() throws Exception {
+    // PIN the interleave: hold the PositionEntered audit activity open until the second fill has
+    // been sent, so the second report deterministically lands inside the confirm's yield window —
+    // the exact wipe the post-yield field re-read caused (scheduler-dependent otherwise).
+    java.util.concurrent.CountDownLatch inConfirmAudit = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.CountDownLatch releaseAudit = new java.util.concurrent.CountDownLatch(1);
+    org.mockito.Mockito.doAnswer(
+            inv -> {
+              AuditEvent e = inv.getArgument(0);
+              if ("PositionEntered".equals(e.getKind())) {
+                inConfirmAudit.countDown();
+                releaseAudit.await(10, java.util.concurrent.TimeUnit.SECONDS);
+              }
+              return null;
+            })
+        .when(audit)
+        .log(any());
+
+    PositionWorkflow stub = newStub("pos-808-confirm-race");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+
+    stub.onFill(fill("brk-entry", 2L, new BigDecimal("2.30")));
+    assertThat(inConfirmAudit.await(15, java.util.concurrent.TimeUnit.SECONDS))
+        .as("the confirm's audit must be in flight before the second report is sent")
+        .isTrue();
+    stub.onFill(fill("brk-entry", 5L, new BigDecimal("2.32")));
+    releaseAudit.countDown();
+
+    // The OUTCOME is the invariant, not the mechanism: depending on whether the second report
+    // lands before run() wakes (confirm books cum-5 directly) or during the confirm's audit
+    // (survives the drain, growth books +3), the lot must end at 5. Pre-fix, the second timing
+    // wiped the report and the lot stuck at 2 forever.
+    waitForRemainingQty(stub, 5L);
+    assertThat(stub.positionState().remainingQty())
+        .as("the second entry report must never be lost — the lot ends at 5 by either path")
+        .isEqualTo(5L);
+  }
+
+  /**
    * Issue #808: {@code lastFillEvent} is a single-slot buffer, and the drain sites' unconditional
    * clear could wipe a SECOND fill that landed inside the FIRST's drain window — the workflow then
    * awaited a fill that had already arrived, forever (found deterministically while de-flaking the
