@@ -1,5 +1,6 @@
 package com.ohmytradeagent.orchestrator.config;
 
+import com.ohmytradeagent.contract.temporal.LenientDataConverter;
 import com.ohmytradeagent.orchestrator.activities.AccountKillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.AccountPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.AccountSnapshotMetricsActivities;
@@ -83,7 +84,13 @@ public class TemporalWorkerConfig {
   @Bean
   public WorkflowClient workflowClient(WorkflowServiceStubs service) {
     return WorkflowClient.newInstance(
-        service, WorkflowClientOptions.newBuilder().setNamespace(namespace).build());
+        service,
+        WorkflowClientOptions.newBuilder()
+            .setNamespace(namespace)
+            // #772: lenient payload deserialization so a since-removed schema field in a recorded
+            // history can never wedge a replay. Write-path schema validation stays strict.
+            .setDataConverter(LenientDataConverter.instance())
+            .build());
   }
 
   @Bean
