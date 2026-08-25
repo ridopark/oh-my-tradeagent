@@ -3,6 +3,7 @@ package com.ohmytradeagent.marketdata.config;
 import com.ohmytradeagent.contract.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.contract.activities.SubscribeEquityActivity;
 import com.ohmytradeagent.contract.activities.SubscribePremiumActivity;
+import com.ohmytradeagent.contract.temporal.LenientDataConverter;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
 import io.temporal.serviceclient.WorkflowServiceStubs;
@@ -38,7 +39,13 @@ public class TemporalWorkerConfig {
   @Bean
   public WorkflowClient workflowClient(WorkflowServiceStubs service) {
     return WorkflowClient.newInstance(
-        service, WorkflowClientOptions.newBuilder().setNamespace(namespace).build());
+        service,
+        WorkflowClientOptions.newBuilder()
+            .setNamespace(namespace)
+            // #772: lenient payload deserialization so a since-removed schema field in a recorded
+            // history can never wedge a replay. Write-path schema validation stays strict.
+            .setDataConverter(LenientDataConverter.instance())
+            .build());
   }
 
   @Bean

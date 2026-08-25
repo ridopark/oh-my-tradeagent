@@ -6,6 +6,7 @@ import com.ohmytradeagent.contract.activities.MarketCalendarActivity;
 import com.ohmytradeagent.contract.activities.PortfolioHistoryActivity;
 import com.ohmytradeagent.contract.activities.PreTradeCheckActivity;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
+import com.ohmytradeagent.contract.temporal.LenientDataConverter;
 import com.ohmytradeagent.exec.activities.ExecActivities;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
@@ -41,7 +42,13 @@ public class TemporalWorkerConfig {
   @Bean
   public WorkflowClient workflowClient(WorkflowServiceStubs service) {
     return WorkflowClient.newInstance(
-        service, WorkflowClientOptions.newBuilder().setNamespace(namespace).build());
+        service,
+        WorkflowClientOptions.newBuilder()
+            .setNamespace(namespace)
+            // #772: lenient payload deserialization so a since-removed schema field in a recorded
+            // history can never wedge a replay. Write-path schema validation stays strict.
+            .setDataConverter(LenientDataConverter.instance())
+            .build());
   }
 
   @Bean
