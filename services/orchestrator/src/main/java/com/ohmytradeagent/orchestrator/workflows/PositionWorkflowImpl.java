@@ -770,6 +770,21 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_ENTRY_FILL_GROWS_LOT = "entry-fill-grows-lot-v1";
 
   /**
+   * Issue #808: {@code lastFillEvent} is a single-slot buffer, and every drain site ended with an
+   * unconditional {@code lastFillEvent = null} — so a SECOND fill signal landing inside the first's
+   * drain window was wiped unprocessed (deterministic repro: two back-to-back onFills wedge the
+   * workflow awaiting a fill that already arrived). At {@code v>=1} every drain compare-and-clears
+   * on the exact drained reference ({@link #clearDrainedFill}) so a newer arrival survives to be
+   * booked, and the three pure stale-discard sites skip the clear entirely ({@link
+   * #discardStaleFill}) — safe post-#735, because the cumulative ledger books any stale re-drain to
+   * a 0-delta (no command, no double-decrement). Read ONCE at the top of {@link #run} after the
+   * entry-growth marker; at {@code DEFAULT_VERSION} every site keeps the byte-identical
+   * unconditional clear (in-flight histories where the race wiped a fill produced no commands for
+   * it, and must replay that way).
+   */
+  private static final String VERSION_FILL_COMPARE_AND_CLEAR = "fill-compare-and-clear-v1";
+
+  /**
    * PLAN-2026-08-19 Phase 1: the chandelier trail must never stop us out BELOW what we paid.
    *
    * <p>Before this, {@code processTick} computed {@code peak * (1 - giveback)} and {@code
@@ -1038,6 +1053,18 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   /** Issue #738: {@link #VERSION_ENTRY_FILL_GROWS_LOT}, read once at the top of {@link #run}. */
   private int entryGrowthVersion = Workflow.DEFAULT_VERSION;
+
+  /** Issue #808: {@link #VERSION_FILL_COMPARE_AND_CLEAR}, read once at the top of {@link #run}. */
+  private int fillClearVersion = Workflow.DEFAULT_VERSION;
+
+  /**
+   * True once {@link #run} has assigned EVERY top-of-run version field. The #799 update guard
+   * awaited only {@code input != null} — but the version fields land several (yieldable) statements
+   * later, so an Update racing into that window read them at DEFAULT_VERSION and, e.g., resolved
+   * the trail anchor in the pre-#811 MID space (caught as a 2.04-vs-2.00 CI failure). Update
+   * handlers that consult version fields must await this, not just {@code input}.
+   */
+  private boolean initGatesResolved;
 
   /** PLAN-2026-08-19 Phase 1 gate, read once in {@link #run}. */
   private int breakevenFloorVersion = Workflow.DEFAULT_VERSION;
@@ -1519,6 +1546,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // order is part of the replay contract) into the field the funnel + main-loop drain consult.
     this.entryGrowthVersion =
         Workflow.getVersion(VERSION_ENTRY_FILL_GROWS_LOT, Workflow.DEFAULT_VERSION, 1);
+    // #808 marker — appended after the entry-growth read (marker order is the replay contract).
+    this.fillClearVersion =
+        Workflow.getVersion(VERSION_FILL_COMPARE_AND_CLEAR, Workflow.DEFAULT_VERSION, 1);
     // Phase 1 breakeven-floor marker — appended AFTER the entry-growth marker (order is part of
     // the replay contract) into the field processTick/processArm consult.
     this.breakevenFloorVersion =
@@ -1527,6 +1557,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // the replay contract).
     this.trailOnBidVersion =
         Workflow.getVersion(VERSION_CHANDELIER_TRAIL_ON_BID, Workflow.DEFAULT_VERSION, 1);
+    // LAST of the top-of-run version block, by contract — append later markers ABOVE this line.
+    this.initGatesResolved = true;
     if (deferVersion == Workflow.DEFAULT_VERSION) {
       // Legacy in-flight workflows: preserve the original ordering — assign remainingQty from
       // input.qty and emit PositionEntered at workflow start so their recorded histories replay
@@ -1690,10 +1722,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       }
       // First fill confirms the position. remainingQty MUST come from the fill, not input.qty —
       // partial fills are possible and the audit + downstream logic must reflect the real qty.
-      long firstFilledQty = lastFillEvent.getFilledQty();
+      // #808 review fix: snapshot BEFORE the yielding auditLog below — re-reading the field after
+      // the yield made the compare-and-clear compare the field to itself, wiping a fill that
+      // landed during the audit (the one site that missed the snapshot discipline).
+      FillSignalPayload drainedEntryFill = lastFillEvent;
+      long firstFilledQty = drainedEntryFill.getFilledQty();
       BigDecimal firstFillPrice =
-          lastFillEvent.getAvgFillPrice() != null
-              ? lastFillEvent.getAvgFillPrice()
+          drainedEntryFill.getAvgFillPrice() != null
+              ? drainedEntryFill.getAvgFillPrice()
               : in.getEntryPremium();
       this.remainingQty = firstFilledQty;
       // Phase 1: the price we actually PAID is the breakeven floor's basis, not input.entryPremium.
@@ -1703,7 +1739,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       this.entryBookedQty = firstFilledQty;
       // #738: remember WHICH broker order is ours on the entry side, so a later fill of it can
       // never be mistaken for an exit fill.
-      this.entryBrokerOrderId = lastFillEvent.getBrokerOrderId();
+      this.entryBrokerOrderId = drainedEntryFill.getBrokerOrderId();
       this.positionConfirmed = true;
       // F1 supersede guardrail: stamp the confirm instant (deterministic Workflow clock).
       this.entryAt = workflowNow();
@@ -1719,8 +1755,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               "entry_premium",
               firstFillPrice));
       // Clear lastFillEvent so the next processOne()'s await for the partial-exit fill doesn't
-      // immediately observe the stale entry fill.
-      this.lastFillEvent = null;
+      // immediately observe the stale entry fill. #808: compare-and-clear on the PRE-YIELD
+      // snapshot — a second fill that landed while the confirm's audit ran survives.
+      clearDrainedFill(drainedEntryFill);
 
       // Phase 3: arm the watchlist-trigger exit on the long option. Inert unless the exit is
       // enabled
@@ -1829,8 +1866,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // bounce it off the funnel's refusal. Version-guarded: at v=0 this whole branch is
       // unreachable (entryGrowthVersion stays DEFAULT), so legacy replays are untouched.
       if (entryGrowthVersion >= 1 && isEntryOrderFill(lastFillEvent)) {
-        bookEntryGrowth(lastFillEvent);
-        lastFillEvent = null;
+        FillSignalPayload drained = lastFillEvent;
+        bookEntryGrowth(drained);
+        clearDrainedFill(drained);
         continue;
       }
       // Plan-2A R-AA-1: apply a LATE fill of a resting in-loop-flatten bounded limit, so a
@@ -1838,8 +1876,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // flatten-await flag (set only when an in-loop flatten returned unfilled) so it never races
       // processOne's own fill handling.
       if (flattenAwaitingLateFill && lastFillEvent != null) {
-        emitExitFill("flatten-" + (closeReason != null ? closeReason : "flatten"), lastFillEvent);
-        lastFillEvent = null;
+        FillSignalPayload drained = lastFillEvent;
+        emitExitFill("flatten-" + (closeReason != null ? closeReason : "flatten"), drained);
+        clearDrainedFill(drained);
         if (remainingQty == 0) {
           flattenAwaitingLateFill = false;
           break;
@@ -2138,8 +2177,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                 flattenBookedQty = 0L;
               }
               flattenBookedQty += lastFillEvent.getFilledQty();
-              emitExitFill("flatten-" + reason, lastFillEvent);
-              lastFillEvent = null;
+              FillSignalPayload drained = lastFillEvent;
+              emitExitFill("flatten-" + reason, drained);
+              clearDrainedFill(drained);
               continue;
             }
             // Phase 1 (PLAN-2026-06-30): the next-session timer woke us with lastFillEvent == null.
@@ -2219,8 +2259,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
           // limit; apply it and re-evaluate. A re-arm cycle re-places on the next late fill.
           Workflow.await(() -> lastFillEvent != null);
           if (lastFillEvent != null) {
-            emitExitFill("flatten-" + reason, lastFillEvent);
-            lastFillEvent = null;
+            FillSignalPayload drained = lastFillEvent;
+            emitExitFill("flatten-" + reason, drained);
+            clearDrainedFill(drained);
           }
         }
       }
@@ -2809,7 +2850,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // PositionWorkflow with buffered, unprocessed exits. No recorded history
     // reaches this await un-initialized (the un-guarded path never completed a task), so it is
     // replay-safe without a version marker.
-    Workflow.await(() -> input != null);
+    Workflow.await(() -> input != null && initGatesResolved);
     ArmTrailResult result = new ArmTrailResult();
     result.setSchemaVersion(1L);
 
@@ -3646,7 +3687,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         intent = exitIntent(req, retryQty, intentKey, freshLimit);
       }
 
-      lastFillEvent = null;
+      discardStaleFill(); // #808: v>=1 keeps a racing fill; the ledger 0-books any stale re-drain.
       currentInFlightIntentKey = intentKey;
       // B2 (PLAN-exit-place-duplicate-422-crash) replay gate. v=DEFAULT_VERSION keeps the original
       // UNCAUGHT placeOrder call so in-flight histories replay byte-identically (the only new
@@ -3810,8 +3851,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         }
         // A fill landed. Book it and CLEAR it — the pre-#735 code left lastFillEvent set here, so
         // a stale cumulative could be drained a second time downstream.
-        applyExitFill(req, lastFillEvent);
-        lastFillEvent = null;
+        FillSignalPayload drained = lastFillEvent;
+        applyExitFill(req, drained);
+        clearDrainedFill(drained);
         // Termination: each iteration blocks on the SAME bounded await, so this is driven by
         // inbound broker signals rather than spinning, and a non-fill wakeup breaks above. A
         // duplicate cumulative books 0 under the #735 ledger — it emits no audit command, so it
@@ -3918,8 +3960,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             // BOTH describe this one broker fill. We just booked it from the authoritative cancel
             // return; clear lastFillEvent so the lateFillReconcile block below does NOT book it a
             // second time (which would double-decrement remainingQty and emit two PartialExitFilled
-            // for one fill). The reconciled remainingQty already reflects broker truth.
-            lastFillEvent = null;
+            // for one fill). The reconciled remainingQty already reflects broker truth. #808: at
+            // v>=1 the discard is skipped — the ledger books the duplicate to 0, and a NEWER fill
+            // buffered here must survive.
+            discardStaleFill();
           }
         }
         // VERSION_EXIT_RETRY_LATE_FILL_RECONCILE v>=1: the original exit order can fill LATE — its
@@ -3931,9 +3975,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         // full qty.
         if (lateFillReconcileVersion >= 1) {
           if (lastFillEvent != null) {
-            applyExitFill(req, lastFillEvent);
-            lastFillEvent =
-                null; // processed exactly once — never re-counted on the retry iteration
+            // #808 (review-caught 14th site): snapshot BEFORE applyExitFill's yielding audit —
+            // compare-and-clear on the snapshot processes this fill exactly once while a fill
+            // landing during the yield survives for the next drain.
+            FillSignalPayload drained = lastFillEvent;
+            applyExitFill(req, drained);
+            clearDrainedFill(drained);
           }
           // remainingQty - targetRemaining is inherently <= remainingQty (the anti-naked-short
           // guarantee): clamped at 0 below, never re-ceil'd. If the late fill already drove
@@ -4212,7 +4259,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     BigDecimal flattenLimit = immediacy ? null : computeBoundedFlattenLimit(reason);
     OrderIntent intent = flattenIntent(flattenIntentKey, reason, flattenLimit);
 
-    lastFillEvent = null;
+    discardStaleFill(); // #808: v>=1 keeps a racing fill; the ledger 0-books any stale re-drain.
     // R-AA-1: a placeOrder exception (a visible non-retryable ApplicationFailure) propagates out of
     // run() as a visible workflow failure — an ALLOWED terminal. We do NOT swallow it on v>=1: a
     // silently-swallowed failure plus a re-arm loop would spin forever, and the safety contract is
@@ -4236,8 +4283,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // fill-applier so the flatten fill emits PartialExitFilled (enters realized P&L). A synthetic
       // signal_id flatten-<reason> matches flattenIntent's signal_id.
       long flattenedThisFill = lastFillEvent.getFilledQty();
-      emitExitFill("flatten-" + reason, lastFillEvent);
-      lastFillEvent = null;
+      FillSignalPayload drained = lastFillEvent;
+      emitExitFill("flatten-" + reason, drained);
+      clearDrainedFill(drained);
       flattenAwaitingLateFill = false;
       if (remainingQty == 0) {
         // Lifecycle marker (P&L-neutral): the realized-P&L credit rode the PartialExitFilled above.
@@ -4612,6 +4660,29 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     return emitExitFill(req.getSignalId(), fillEvent);
   }
 
+  /**
+   * Issue #808: clear the fill buffer ONLY if it still holds the event we just drained — a newer
+   * fill that landed mid-drain survives to be booked on the next wake. Legacy behavior
+   * (unconditional clear) below {@code v1} for byte-identical replay.
+   */
+  private void clearDrainedFill(FillSignalPayload drained) {
+    if (fillClearVersion < 1 || lastFillEvent == drained) {
+      lastFillEvent = null;
+    }
+  }
+
+  /**
+   * Issue #808: the pure stale-discard sites (pre-placement resets, the dual-evidence dedupe). At
+   * {@code v>=1} the discard is SKIPPED: the #735 cumulative ledger books any stale re-drain to a
+   * 0-delta (no command, no double-decrement), while a genuinely NEW fill wiped here was exactly
+   * the bug. Costs at most one wasted drain cycle.
+   */
+  private void discardStaleFill() {
+    if (fillClearVersion < 1) {
+      lastFillEvent = null;
+    }
+  }
+
   /** True iff this fill reports on OUR entry order (post-confirm — the id is captured there). */
   private boolean isEntryOrderFill(FillSignalPayload fillEvent) {
     return entryBrokerOrderId != null
@@ -4721,7 +4792,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // guardrail #3 lastFillEvent clear is preserved below.
     if (Workflow.getVersion(VERSION_EXIT_CUMULATIVE_LEDGER, Workflow.DEFAULT_VERSION, 1) >= 1) {
       long booked = emitExitFill("flatten-" + reason, terminalFill);
-      lastFillEvent = null;
+      // #808 (review nit): terminalFill is ALWAYS freshly synthesized, never the buffered
+      // reference — a CAS here could structurally never clear. Say what actually happens: the
+      // stale-discard is skipped at v>=1 and the ledger 0-books any buffered duplicate.
+      discardStaleFill();
       return booked;
     }
     if (!intentKey.equals(flattenBookedKey)) {
@@ -4749,8 +4823,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             .withAvgFillPrice(terminalFill.getAvgFillPrice())
             .withFilledAt(terminalFill.getFilledAt()));
     // Guardrail #3: clear lastFillEvent so the L1110/L1318/L1356 onFill drains do NOT re-book this
-    // same broker fill (double-decrement).
-    lastFillEvent = null;
+    // same broker fill (double-decrement). #808 (review nit): terminalFill is never the buffered
+    // reference — the honest form is the stale-discard, skipped at v>=1 (legacy path anyway; the
+    // ledger 0-books duplicates on fresh runs).
+    discardStaleFill();
     return bookable;
   }
 
@@ -5026,8 +5102,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     if (lastFillEvent != null) {
       // Drain a real in-flight fill before zeroing — emitExitFill decrements remainingQty by the
       // booked fill and emits PartialExitFilled (enters realized P&L).
-      emitExitFill(signalId, lastFillEvent);
-      lastFillEvent = null;
+      FillSignalPayload drained = lastFillEvent;
+      emitExitFill(signalId, drained);
+      clearDrainedFill(drained);
     }
     long remainingQtyBefore = remainingQty;
     auditLog(

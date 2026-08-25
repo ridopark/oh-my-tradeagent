@@ -1307,6 +1307,91 @@ class PositionWorkflowImplTest {
   }
 
   /**
+   * Issue #808, review-caught residual: the ENTRY-CONFIRMATION drain re-read the field after the
+   * yielding PositionEntered auditLog, so a second fill landing DURING the confirm's audit was
+   * wiped by a compare-and-clear that compared the field to itself. Two back-to-back entry-order
+   * reports: the confirm books 2, the growth report (cum 5) must survive the confirm's audit
+   * in-flight window and grow the lot to 5.
+   */
+  @Test
+  void issue808_secondFillDuringEntryConfirmAudit_survivesAndGrowsTheLot() throws Exception {
+    // PIN the interleave: hold the PositionEntered audit activity open until the second fill has
+    // been sent, so the second report deterministically lands inside the confirm's yield window —
+    // the exact wipe the post-yield field re-read caused (scheduler-dependent otherwise).
+    java.util.concurrent.CountDownLatch inConfirmAudit = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.CountDownLatch releaseAudit = new java.util.concurrent.CountDownLatch(1);
+    org.mockito.Mockito.doAnswer(
+            inv -> {
+              AuditEvent e = inv.getArgument(0);
+              if ("PositionEntered".equals(e.getKind())) {
+                inConfirmAudit.countDown();
+                releaseAudit.await(10, java.util.concurrent.TimeUnit.SECONDS);
+              }
+              return null;
+            })
+        .when(audit)
+        .log(any());
+
+    PositionWorkflow stub = newStub("pos-808-confirm-race");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+
+    stub.onFill(fill("brk-entry", 2L, new BigDecimal("2.30")));
+    assertThat(inConfirmAudit.await(15, java.util.concurrent.TimeUnit.SECONDS))
+        .as("the confirm's audit must be in flight before the second report is sent")
+        .isTrue();
+    stub.onFill(fill("brk-entry", 5L, new BigDecimal("2.32")));
+    releaseAudit.countDown();
+
+    // The OUTCOME is the invariant, not the mechanism: depending on whether the second report
+    // lands before run() wakes (confirm books cum-5 directly) or during the confirm's audit
+    // (survives the drain, growth books +3), the lot must end at 5. Pre-fix, the second timing
+    // wiped the report and the lot stuck at 2 forever.
+    waitForRemainingQty(stub, 5L);
+    assertThat(stub.positionState().remainingQty())
+        .as("the second entry report must never be lost — the lot ends at 5 by either path")
+        .isEqualTo(5L);
+  }
+
+  /**
+   * Issue #808: {@code lastFillEvent} is a single-slot buffer, and the drain sites' unconditional
+   * clear could wipe a SECOND fill that landed inside the FIRST's drain window — the workflow then
+   * awaited a fill that had already arrived, forever (found deterministically while de-flaking the
+   * #753 test: back-to-back sends wedged 3/3). With compare-and-clear the newer fill survives: both
+   * cumulative reports book and the position closes. Back-to-back on PURPOSE — no wait between the
+   * sends is the whole point.
+   */
+  @Test
+  void issue808_backToBackFills_secondSurvivesTheFirstsDrain_andThePositionCloses()
+      throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofMillis(100));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-808-backtoback");
+    PositionWorkflowInput in = input(5);
+    in.setContractSymbol(FUTURE_OCC_SYMBOL);
+    in.setEodForceFlatten(Boolean.TRUE);
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+
+    env.sleep(Duration.ofMinutes(1));
+    waitForPlaceOrderCount(1);
+
+    // Two cumulative reports, deliberately back-to-back.
+    stub.onFill(fill("brk-808", 2L, new BigDecimal("2.50")));
+    stub.onFill(fill("brk-808", 5L, new BigDecimal("2.40")));
+
+    String result = WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(result).isEqualTo("pos-808-backtoback");
+
+    List<AuditEvent> fills = captureAll("PartialExitFilled");
+    assertThat(fills.stream().mapToLong(e -> asLong(e.getSubject().get("qty_filled"))).sum())
+        .as("both cumulative reports must book — the whole 5-lot, never a wedge at 3")
+        .isEqualTo(5L);
+    AuditEvent closed = captureKind("PositionClosed");
+    assertThat(asLong(closed.getSubject().get("remaining_qty"))).isEqualTo(0L);
+  }
+
+  /**
    * Issue #753: when one broker order books TWICE at different prices, the second booking must be
    * credited at the price its own contracts traded, not the order's running cumulative average.
    * Order fills 2 @ 2.50 (cum avg 2.50), then completes at cumulative 5 @ cum avg 2.32 — the
