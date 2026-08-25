@@ -3975,9 +3975,12 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         // full qty.
         if (lateFillReconcileVersion >= 1) {
           if (lastFillEvent != null) {
-            applyExitFill(req, lastFillEvent);
-            lastFillEvent =
-                null; // processed exactly once — never re-counted on the retry iteration
+            // #808 (review-caught 14th site): snapshot BEFORE applyExitFill's yielding audit —
+            // compare-and-clear on the snapshot processes this fill exactly once while a fill
+            // landing during the yield survives for the next drain.
+            FillSignalPayload drained = lastFillEvent;
+            applyExitFill(req, drained);
+            clearDrainedFill(drained);
           }
           // remainingQty - targetRemaining is inherently <= remainingQty (the anti-naked-short
           // guarantee): clamped at 0 below, never re-ceil'd. If the late fill already drove
@@ -4789,9 +4792,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // guardrail #3 lastFillEvent clear is preserved below.
     if (Workflow.getVersion(VERSION_EXIT_CUMULATIVE_LEDGER, Workflow.DEFAULT_VERSION, 1) >= 1) {
       long booked = emitExitFill("flatten-" + reason, terminalFill);
-      // #808: CAS on the drained object — a synthesized terminalFill differing from a buffered
-      // duplicate leaves the buffer, and the ledger 0-books that duplicate on its own drain.
-      clearDrainedFill(terminalFill);
+      // #808 (review nit): terminalFill is ALWAYS freshly synthesized, never the buffered
+      // reference — a CAS here could structurally never clear. Say what actually happens: the
+      // stale-discard is skipped at v>=1 and the ledger 0-books any buffered duplicate.
+      discardStaleFill();
       return booked;
     }
     if (!intentKey.equals(flattenBookedKey)) {
@@ -4819,8 +4823,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             .withAvgFillPrice(terminalFill.getAvgFillPrice())
             .withFilledAt(terminalFill.getFilledAt()));
     // Guardrail #3: clear lastFillEvent so the L1110/L1318/L1356 onFill drains do NOT re-book this
-    // same broker fill (double-decrement). #808: compare-and-clear (see the ledger-path note).
-    clearDrainedFill(terminalFill);
+    // same broker fill (double-decrement). #808 (review nit): terminalFill is never the buffered
+    // reference — the honest form is the stale-discard, skipped at v>=1 (legacy path anyway; the
+    // ledger 0-books duplicates on fresh runs).
+    discardStaleFill();
     return bookable;
   }
 
