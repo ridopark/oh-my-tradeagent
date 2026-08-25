@@ -1787,6 +1787,70 @@ class CopytradeSignalWorkflowImplTest {
     return c;
   }
 
+  // ---------- Issue #579: the LIVE entry TTL must read the live-named field ----------
+
+  /** Approved-mock chain for an arbitrary config (mirrors setupApprovedMocks). */
+  private void setupApprovedMocksWith(StrategyConfig cfg) {
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+  }
+
+  /**
+   * Issue #579 Finding 2: a LIVE entry read the PAPER-named TTL field, so tuning
+   * pending_ttl_live_secs silently did not move the live entry window. Discriminating config:
+   * live=1s, paper=3600s — the EntryExpired audit's ttl_secs pins WHICH field the await used
+   * (pre-fix: 3600).
+   */
+  @Test
+  void liveEntry_ttlExpiry_readsTheLiveField() {
+    StrategyConfig cfg = config();
+    cfg.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_LIVE);
+    cfg.setPendingTtlLiveSecs(1L);
+    cfg.setPendingTtlPaperSecs(3600L);
+    cfg.setRepegAfterMs(0L); // isolate the TTL: per-tenant re-peg off-switch
+    setupApprovedMocksWith(cfg);
+    // The LIVE dispatch gate must pass for the order to reach its TTL.
+    when(auditQuery.checkLivePromotion(anyString(), anyString(), anyString(), any()))
+        .thenReturn(LivePromotionStatus.VALID);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-L", "stub-intent-L"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-L", "stub-intent-L"));
+
+    runWorkflow(btoPayload());
+
+    AuditEvent expired = capture("EntryExpired");
+    assertThat(((Number) expired.getSubject().get("ttl_secs")).longValue())
+        .as("the LIVE entry window must come from pending_ttl_live_secs")
+        .isEqualTo(1L);
+  }
+
+  /** The paper entry keeps reading the paper-named field — unchanged semantics. */
+  @Test
+  void paperEntry_ttlExpiry_stillReadsThePaperField() {
+    StrategyConfig cfg = config();
+    cfg.setPendingTtlPaperSecs(1L);
+    cfg.setPendingTtlLiveSecs(3600L);
+    cfg.setRepegAfterMs(0L);
+    setupApprovedMocksWith(cfg);
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-P", "stub-intent-P"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-P", "stub-intent-P"));
+
+    runWorkflow(btoPayload());
+
+    AuditEvent expired = capture("EntryExpired");
+    assertThat(((Number) expired.getSubject().get("ttl_secs")).longValue()).isEqualTo(1L);
+  }
+
   private void setupApprovedMocks() {
     StrategyConfig cfg = config();
     cfg.setPendingTtlPaperSecs(1L); // short TTL so test exits quickly

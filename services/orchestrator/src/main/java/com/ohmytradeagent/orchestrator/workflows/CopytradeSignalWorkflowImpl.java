@@ -314,6 +314,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // Read UNCONDITIONALLY at a stable scope, mirroring VERSION_NOTIONAL_CAP_CLAMP.
   private static final String VERSION_BTO_ENTRY_REPEG = "bto-entry-repeg-v1";
 
+  /** Issue #579: live-aware entry TTL selection — see {@link #entryPendingTtlSecs}. */
+  private static final String VERSION_ENTRY_TTL_LIVE_AWARE = "entry-ttl-live-aware-v1";
+
   // Edited-signal supersede (F1) correction window: a prior leg may be auto-superseded ONLY when
   // its
   // confirmed entry is within this window of the corrected signal's posted_at. A CODE CONSTANT by
@@ -669,7 +672,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         repegVersion >= 1
             && repegAfterMs > 0
             && !ceilingDisabled
-            && repegAfterMs < pendingTtlSecs(config) * 1000L;
+            && repegAfterMs < entryPendingTtlSecs(config) * 1000L;
     // The TRUE max cost of this entry: the re-peg may reach the ceiling, so the risk gates and
     // sizing must budget against the ceiling rather than the (tighter) initial peg. Gating against
     // the max is what lets the re-peg itself skip a re-check — it is already covered by the
@@ -992,7 +995,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     entryStatus.setContracts(contracts);
     entryStatus.setBrokerOrderId(placed.getBrokerOrderId());
 
-    long ttlSecs = pendingTtlSecs(config);
+    long ttlSecs = entryPendingTtlSecs(config);
     // Phase 5: also wake on risk_breach so the cascade can short-circuit the BTO.
     boolean filled;
     if (!repegActive) {
@@ -1349,7 +1352,7 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     String strategyId = payload.getStrategyId();
     String occ = resolved.optionSymbol();
 
-    long bufferSecs = pendingTtlSecs(config);
+    long bufferSecs = entryPendingTtlSecs(config);
     int maxAttempts = (int) Math.max(1L, bufferSecs / 10L);
     String positionId = positionLookup.findPositionWorkflowId(tenant, strategyId, occ);
     int attempts = 0;
@@ -2082,6 +2085,25 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   private long pendingTtlSecs(StrategyConfig config) {
     Long configured = config.getPendingTtlPaperSecs();
     return configured != null ? configured : DEFAULT_PENDING_TTL_PAPER_SECS;
+  }
+
+  /**
+   * Issue #579 Finding 2: the entry path read the PAPER-named TTL field regardless of broker_target
+   * — an operator tuning {@code pending_ttl_live_secs} changed the child-position fill gates but
+   * NOT the live entry window, silently. At {@code v>=1} every entry-path consumer (the BTO entry
+   * await, the repeg-active predicate, the STC position-lookup buffer) resolves through the same
+   * live-aware selection the position path always used. {@code getVersion} is read HERE (idempotent
+   * per change-id) so each execution path records it at its own first use; at {@code
+   * DEFAULT_VERSION} the paper-named read is byte-identical — the await duration is a recorded
+   * timer command, so in-flight histories must keep their original TTL.
+   *
+   * <p>No live behavior change at cutover: every live tenant currently carries {@code
+   * pending_ttl_live_secs = 90}, equal to the paper-field/default value the entry read before —
+   * this makes the KNOB honest, it does not move it.
+   */
+  private long entryPendingTtlSecs(StrategyConfig config) {
+    int v = Workflow.getVersion(VERSION_ENTRY_TTL_LIVE_AWARE, Workflow.DEFAULT_VERSION, 1);
+    return v >= 1 ? selectPendingTtlSecs(config) : pendingTtlSecs(config);
   }
 
   /**
