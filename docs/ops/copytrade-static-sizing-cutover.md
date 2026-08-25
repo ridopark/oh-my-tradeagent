@@ -268,9 +268,14 @@ Set a durable reminder: session crons die with the session (cf. `reference_prod_
 
 ## 7. Out of scope / follow-up
 
-- **`account_equity` as a first-class `capital_source`** (auto-tracking base, sized off net-liq
-  equity like `account_cash` is off cash) would remove §6 entirely. Code change — out of scope
-  here. **File a follow-up issue** referencing #780 and this runbook when executing.
+- **`account_equity` as a first-class `capital_source`** — SHIPPED as #790: sizes off live
+  net-liquidation equity, `capital_weight` becomes a plain fraction (0.10 = 10% of equity),
+  fail-closed like `account_cash`. Migrating a tenant from the static encoding to
+  `account_equity` removes its §6 monthly-drift review: same DB-CAS + re-Activate procedure as
+  §4 (note `capital_weight` is tighten-only via /config, so a weight increase during migration —
+  e.g. static 0.052 → fraction 0.10 — needs the DB CAS path, not the editor). The activation
+  gate accepts `account_equity` directly (tracking source — no §4d encoded-weight ceiling
+  arithmetic). NOT yet migrated on any tenant; §6 stays in force until then.
 - Issue **#779** (−50% premium floor) composes with this change per the #780 issue discussion —
   independent, not blocked by this cutover.
 - Watchlist strategies remain on `account_cash` — explicitly untouched.

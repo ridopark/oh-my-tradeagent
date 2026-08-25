@@ -244,6 +244,65 @@ class LiveActivationWorkflowImplTest {
   }
 
   @Test
+  void capitalSourceAccountEquity_activates_withNoStaticWeightArithmetic() {
+    // #790: account_equity is a TRACKING source like account_cash — admitted through step (c)
+    // directly, with NONE of the static path's encoded-weight ceiling arithmetic: the static
+    // allocator must never be consulted. staticGatesPass wires a weight+equity that would trip
+    // the 15% ceiling if the static math wrongly ran (0.3 x 100000 = 30000 vs 52000 equity).
+    staticGatesPass("0.3", "52000", "100000");
+    StrategyConfig c = compliantConfig();
+    c.setCapitalSource(StrategyConfig.CapitalSource.ACCOUNT_EQUITY);
+    c.setCapitalWeight(new BigDecimal("0.3"));
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(c);
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.ACTIVATED);
+    verify(promotion, times(1)).activate(any());
+    verify(strategy, never()).capitalForStrategy(anyString(), anyString());
+  }
+
+  @Test
+  void capitalSourceAccountEquity_zeroCash_positiveEquity_activates() {
+    // Review-of-#816 Major finding: a fully-invested margin account runs cash ~0 (or negative)
+    // with legitimate positive equity — exactly the account account_equity serves. The step (e)
+    // probe must gate on the field the source sizes from (EQUITY), not on cash.
+    staticGatesPass("0.1", "52000", "100000");
+    StrategyConfig c = compliantConfig();
+    c.setCapitalSource(StrategyConfig.CapitalSource.ACCOUNT_EQUITY);
+    c.setCapitalWeight(new BigDecimal("0.1"));
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(c);
+    AccountSnapshotResult fullyInvested = snap(ACCOUNT, BigDecimal.ZERO);
+    fullyInvested.setEquity(new BigDecimal("52000"));
+    when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class))).thenReturn(fullyInvested);
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.ACTIVATED);
+    verify(promotion, times(1)).activate(any());
+  }
+
+  @Test
+  void capitalSourceAccountEquity_zeroEquity_rejectsAccount_noActivate() {
+    // The inverse guard: for account_equity the probe's funds check moved to equity — a zero
+    // equity refuses activation even when cash is positive (the sizing base is what must exist).
+    staticGatesPass("0.1", "52000", "100000");
+    StrategyConfig c = compliantConfig();
+    c.setCapitalSource(StrategyConfig.CapitalSource.ACCOUNT_EQUITY);
+    c.setCapitalWeight(new BigDecimal("0.1"));
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(c);
+    AccountSnapshotResult zeroEquity = snap(ACCOUNT, new BigDecimal("5000"));
+    zeroEquity.setEquity(BigDecimal.ZERO);
+    when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class))).thenReturn(zeroEquity);
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.REJECTED_ACCOUNT);
+    assertThat(result.getReason()).contains("equity");
+    verify(promotion, never()).activate(any());
+  }
+
+  @Test
   void capitalSourceStatic_withinEquityBound_activates() {
     // The #780 cutover shape: base 100000 x weight 0.052 = 5200 allocation, ~10% of 52000 equity —
     // inside the 15% ceiling, so the previously hard-rejected static source now activates.

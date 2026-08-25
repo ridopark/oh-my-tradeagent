@@ -260,6 +260,16 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // VERSION_LIVE_PROMOTION_GATE's "read unconditionally, branch only at v>=1" discipline.
   private static final String VERSION_ACCOUNT_CASH_SIZING = "account-cash-sizing-v1";
 
+  // #790 capital_source=account_equity: same shape as VERSION_ACCOUNT_CASH_SIZING, one version
+  // later. NOT to be confused with VERSION_ACCOUNT_EQUITY_DISPATCH ("account-equity-dispatch-v1"),
+  // the frozen legacy marker whose threaded value is nowadays CASH — this one gates equity SIZING.
+  // later. Gates ONLY the dispatch-enablement widening (an account_equity+no-cap strategy adds an
+  // AccountSnapshot command a legacy history never recorded); the equity-vs-cash-vs-static sizing
+  // branch itself feeds activity INPUTS only and needs no marker of its own. Read unconditionally,
+  // branch only at v>=1. No recorded history can carry capital_source=account_equity (the enum
+  // value did not exist), so every legacy replay takes DEFAULT_VERSION paths untouched.
+  private static final String VERSION_ACCOUNT_EQUITY_SIZING = "account-equity-sizing-v1";
+
   // Phase 7 (per-tenant strategy enable toggle): gate the fail-safe enable check added in process()
   // immediately after the strategy.get() fetch. A strategy whose StrategyConfig.enabled is
   // explicitly false admits no new entries — the signal is rejected before any exec stub is built
@@ -695,6 +705,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // also incompatible with account_cash sizing only on already-running legacy histories, where
     // capital_source physically could not have been account_cash anyway.
     BigDecimal accountCash = null;
+    // #790: the net-liquidation EQUITY from the SAME single snapshot dispatch (never a second
+    // command). null = never dispatched; ZERO = dispatched but unavailable (fail closed below).
+    BigDecimal accountEquity = null;
     if (preTradeDispatchVersion == Workflow.DEFAULT_VERSION) {
       // Legacy pre-#111 path: single checkEntry call with null preTradeResult. Reachable only by
       // CopytradeSignalWorkflow executions that began before the pre-trade-dispatch-v2 patch was
@@ -722,9 +735,19 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         if (accountEquityVersion == Workflow.DEFAULT_VERSION) {
           decision = risk.checkEntryWithLimit(payload, config, preTradeResult, maxEntryCost, null);
         } else {
-          // One dispatch feeds BOTH the notional-cap gate AND account_cash sizing — the cash read
-          // is fetched once and reused at the sizing block below, never dispatched twice.
-          accountCash = dispatchAccountSnapshot(payload, config);
+          // One dispatch feeds the notional-cap gate AND account_cash AND account_equity (#790)
+          // sizing — the snapshot is fetched once and reused at the sizing block below, never
+          // dispatched twice. The cash normalization (null result/cash -> ZERO) is byte-identical
+          // to the pre-#790 in-method normalization.
+          // null snapshot = never dispatched (no cap, no tracking source) and MUST stay null:
+          // checkEntryWithLimit treats null cash as no-cap-context, ZERO as fail-closed-reject.
+          AccountSnapshotResult accountSnapshot = dispatchAccountSnapshot(payload, config);
+          if (accountSnapshot != null) {
+            accountCash =
+                accountSnapshot.getCash() == null ? BigDecimal.ZERO : accountSnapshot.getCash();
+            accountEquity =
+                accountSnapshot.getEquity() == null ? BigDecimal.ZERO : accountSnapshot.getEquity();
+          }
           decision =
               risk.checkEntryWithLimit(payload, config, preTradeResult, maxEntryCost, accountCash);
         }
@@ -756,22 +779,28 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // entry — no placeOrder, no PositionWorkflow — and NEVER falls back to the static $100k.
     int cashSizingVersion =
         Workflow.getVersion(VERSION_ACCOUNT_CASH_SIZING, Workflow.DEFAULT_VERSION, 1);
+    int equitySizingVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_EQUITY_SIZING, Workflow.DEFAULT_VERSION, 1);
     BigDecimal capital;
     if (cashSizingVersion >= 1 && StrategyConfigs.accountCashSizing(config)) {
       if (accountCash == null || accountCash.signum() <= 0) {
-        logAudit(
-            payload,
-            KIND_SIGNAL_REJECTED,
-            subject(
-                "signal_id", payload.getSignalId(),
-                "reason_code", "CAPITAL_UNAVAILABLE",
-                "reason_detail", "capital_unavailable",
-                "outcome", "REJECTED"));
-        rejectStatus("CAPITAL_UNAVAILABLE", "capital_unavailable");
+        rejectCapitalUnavailable(payload);
         // Fail-closed: NO placeOrder, NO PositionWorkflow.
         return payload.getSignalId();
       }
       capital = accountCash;
+    } else if (equitySizingVersion >= 1 && StrategyConfigs.accountEquitySizing(config)) {
+      // #790: size from live net-liquidation equity — capital_weight is a plain fraction of the
+      // account (0.10 = 10% of equity), auto-tracking instead of the frozen static-weight
+      // encoding. Identical fail-closed contract to account_cash: null/zero equity (broker outage
+      // -> the zeroSnapshot sentinel, or a malformed result) REJECTS the entry and NEVER falls
+      // back to the static base.
+      if (accountEquity == null || accountEquity.signum() <= 0) {
+        rejectCapitalUnavailable(payload);
+        // Fail-closed: NO placeOrder, NO PositionWorkflow.
+        return payload.getSignalId();
+      }
+      capital = accountEquity;
     } else {
       capital = strategy.capitalForStrategy(payload.getTenantId(), payload.getStrategyId());
     }
@@ -1969,28 +1998,45 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     return r;
   }
 
+  /** The shared capital-sizing fail-closed rejection (account_cash and account_equity, #790). */
+  private void rejectCapitalUnavailable(CopytradeSignalPayload payload) {
+    logAudit(
+        payload,
+        KIND_SIGNAL_REJECTED,
+        subject(
+            "signal_id", payload.getSignalId(),
+            "reason_code", "CAPITAL_UNAVAILABLE",
+            "reason_detail", "capital_unavailable",
+            "outcome", "REJECTED"));
+    rejectStatus("CAPITAL_UNAVAILABLE", "capital_unavailable");
+  }
+
   /**
    * Dispatches the cross-service {@code AccountSnapshotActivity} over the {@code
-   * broker-<broker_target>} task queue and returns the account's <b>cash</b> balance — the cash
-   * component of the notional-cap gate's MTM-stable cost-basis capital base ({@code cash +
-   * sum_open_notional}, issue #323). Returns {@code null} when the notional-cap gate is disabled
-   * ({@code notional_cap_pct_of_capital_base} null, per {@link
-   * StrategyConfigs#notionalCapConfigured}) so the cross-service round-trip only fires when the
-   * strategy enabled the gate.
+   * broker-<broker_target>} task queue and returns the full {@link AccountSnapshotResult} — one
+   * dispatch feeding THREE consumers: the notional-cap gate's cash term ({@code cash +
+   * sum_open_notional}, issue #323), {@code account_cash} sizing, and {@code account_equity} sizing
+   * (#790, the {@code equity} field). Returns {@code null} when nothing enables the dispatch (no
+   * notional cap per {@link StrategyConfigs#notionalCapConfigured}, and neither tracking source
+   * selected at its v&gt;=1 marker) so the cross-service round-trip only fires when a consumer
+   * exists — callers MUST preserve that null (never-dispatched) distinct from the ZERO sentinel.
    *
    * <p>Fail-closed semantics: any exception (after Temporal's own retries), a null/blank {@code
-   * broker_target}, or a null result/cash yields {@code BigDecimal.ZERO}. The downstream {@code
-   * checkNotionalCap} gate rejects on a zero/missing capital base, so a broker outage (or a
-   * pre-#323 producer that omits {@code cash}) rejects entries rather than passing an unbounded cap
-   * — mirroring {@code dispatchPreTradeCheck}.
+   * broker_target}, or a null result yields the {@link #zeroSnapshot()} sentinel (cash and equity
+   * both ZERO). The downstream {@code checkNotionalCap} gate and both sizing branches reject on a
+   * zero/missing figure, so a broker outage rejects entries rather than passing an unbounded cap or
+   * a fabricated base — mirroring {@code dispatchPreTradeCheck}. Null FIELDS inside a non-null
+   * result are normalized to ZERO at the call site.
    *
    * <p>Determinism: the request is built from {@code config.broker_target + signal_id} only — no
    * clock reads, no random IDs. Safe to call inside the workflow body. The account figures are
-   * account-level, so the request carries no tenant/strategy. Reading {@code getCash()} instead of
-   * {@code getEquity()} is a field read on the same activity result — no history-shape change, so
-   * it stays within the existing {@code VERSION_ACCOUNT_EQUITY_DISPATCH} gate.
+   * account-level, so the request carries no tenant/strategy. Which FIELD a consumer reads off the
+   * result is a payload concern — no history-shape change, so field choice stays within the
+   * existing {@code VERSION_ACCOUNT_EQUITY_DISPATCH} gate; only the dispatch-ENABLEMENT widening
+   * carries its own markers (see {@code VERSION_ACCOUNT_CASH_SIZING} / {@code
+   * VERSION_ACCOUNT_EQUITY_SIZING}).
    */
-  private BigDecimal dispatchAccountSnapshot(
+  private AccountSnapshotResult dispatchAccountSnapshot(
       CopytradeSignalPayload payload, StrategyConfig config) {
     // Enablement mirrors RiskActivitiesImpl#resolveNotionalCapPct: the cap (and so the cash
     // dispatch) is on when notional_cap_pct_of_capital_base is set. Pre-#336 this tested the
@@ -2019,11 +2065,19 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         Workflow.getVersion(VERSION_ACCOUNT_CASH_SIZING, Workflow.DEFAULT_VERSION, 1);
     boolean cashSizingDispatch =
         cashSizingVersion >= 1 && StrategyConfigs.accountCashSizing(config);
-    if (!StrategyConfigs.notionalCapConfigured(config) && !cashSizingDispatch) {
+    // #790: account_equity widens the enablement exactly like account_cash did — same marker
+    // discipline (read unconditionally, widen only at v>=1), one version marker later.
+    int equitySizingVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_EQUITY_SIZING, Workflow.DEFAULT_VERSION, 1);
+    boolean equitySizingDispatch =
+        equitySizingVersion >= 1 && StrategyConfigs.accountEquitySizing(config);
+    if (!StrategyConfigs.notionalCapConfigured(config)
+        && !cashSizingDispatch
+        && !equitySizingDispatch) {
       return null;
     }
     if (config.getBrokerTarget() == null) {
-      return BigDecimal.ZERO;
+      return zeroSnapshot();
     }
     AccountSnapshotActivity accountStub =
         Workflow.newActivityStub(
@@ -2037,7 +2091,9 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     AccountSnapshotRequest request = buildAccountSnapshotRequest(payload, config);
     try {
       AccountSnapshotResult result = accountStub.accountSnapshot(request);
-      return result == null || result.getCash() == null ? BigDecimal.ZERO : result.getCash();
+      // A null result fails closed to the ZERO sentinel; null FIELDS inside a non-null result are
+      // normalized to ZERO at the call site, preserving the pre-#790 cash semantics exactly.
+      return result == null ? zeroSnapshot() : result;
     } catch (CanceledFailure cf) {
       throw cf;
     } catch (Exception e) {
@@ -2060,8 +2116,21 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         if (metricsError instanceof CanceledFailure cf) throw cf;
         // observability-only; never let a metrics failure flip the fail-closed outcome.
       }
-      return BigDecimal.ZERO;
+      return zeroSnapshot();
     }
+  }
+
+  /**
+   * The fail-closed dispatch sentinel: cash and equity both ZERO ("dispatched but unavailable"),
+   * driving every downstream consumer — the notional-cap gate, account_cash sizing, and
+   * account_equity sizing (#790) — to reject rather than size from a fabricated figure.
+   */
+  private static AccountSnapshotResult zeroSnapshot() {
+    AccountSnapshotResult zero = new AccountSnapshotResult();
+    zero.setSchemaVersion(1L);
+    zero.setEquity(BigDecimal.ZERO);
+    zero.setCash(BigDecimal.ZERO);
+    return zero;
   }
 
   /**
