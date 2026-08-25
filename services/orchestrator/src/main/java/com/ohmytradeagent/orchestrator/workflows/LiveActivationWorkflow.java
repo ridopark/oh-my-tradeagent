@@ -33,10 +33,11 @@ public interface LiveActivationWorkflow {
 
   /**
    * Server-side fail-closed activation: verify the stored config is live, the live loss gates are
-   * set, {@code capital_source == account_cash}, the kill switch is armable, and a fresh account
-   * probe returns a real account with positive cash; on pass emit a fresh {@code
-   * LivePromotionApproved} row. Returns {@code ACTIVATED} (+ {@code expected_account_id}) or one
-   * {@code REJECTED_*}.
+   * set, {@code capital_source} is a tracking source ({@code account_cash} / {@code
+   * account_equity}, #790) or a ceiling-validated {@code static} (#780), the kill switch is
+   * armable, and a fresh account probe returns a real account with positive cash; on pass emit a
+   * fresh {@code LivePromotionApproved} row. Returns {@code ACTIVATED} (+ {@code
+   * expected_account_id}) or one {@code REJECTED_*}.
    */
   @WorkflowMethod
   LiveActivationResult activateLive(LiveActivationRequest request);

@@ -53,11 +53,12 @@ import java.time.Duration;
  *       satisfies the invariant (per-strategy daily_loss_threshold optional) — a {@code -live}
  *       tenant with NO armed cap is still {@code REJECTED_CONFIG}. At {@code DEFAULT_VERSION} the
  *       pre-3b 2-arg gate (daily_loss_threshold &gt; 0 + notional cap set) runs unchanged.
- *   <li>{@code capital_source == account_cash} → else {@code REJECTED_CAPITAL_SOURCE} (checked
- *       HERE, NOT inside the byte-stable {@code StrategyConfigInvariants}). #780 + version gate
- *       {@code live-activation-static-capital-v1}: at {@code v>=1} an explicit {@code static} is
- *       admitted and validated after step 5's probe instead — {@code base × capital_weight} must
- *       not exceed 15% of the probed equity (see {@link #VERSION_STATIC_CAPITAL}).
+ *   <li>{@code capital_source} ∈ {{@code account_cash}, {@code account_equity} (#790)} → else
+ *       {@code REJECTED_CAPITAL_SOURCE} (checked HERE, NOT inside the byte-stable {@code
+ *       StrategyConfigInvariants}). #780 + version gate {@code live-activation-static-capital-v1}:
+ *       at {@code v>=1} an explicit {@code static} is admitted and validated after step 5's probe
+ *       instead — {@code base × capital_weight} must not exceed 15% of the probed equity (see
+ *       {@link #VERSION_STATIC_CAPITAL}).
  *   <li>kill switch armable ({@code LiveActivationGateActivities.killSwitchArmable}); not → {@code
  *       REJECTED_KILLSWITCH}.
  *   <li>fresh account probe ({@code AccountSnapshotActivity} on {@code broker-<target>}); blank
@@ -182,10 +183,18 @@ public class LiveActivationWorkflowImpl
     boolean staticCapital =
         staticCapitalVersion >= 1
             && config.getCapitalSource() == StrategyConfig.CapitalSource.STATIC;
-    if (!staticCapital && config.getCapitalSource() != StrategyConfig.CapitalSource.ACCOUNT_CASH) {
+    // #790: account_equity is a TRACKING source like account_cash — it sizes from the live
+    // account, so it needs none of the static path's encoded-weight-vs-equity arithmetic and is
+    // admitted directly. Pure predicate widening on an enum value no recorded history can carry
+    // (it did not exist), so legacy replays are untouched and no version gate is needed — unlike
+    // static (VERSION_STATIC_CAPITAL), which appends a net-new capitalForStrategy command.
+    boolean trackingSource =
+        config.getCapitalSource() == StrategyConfig.CapitalSource.ACCOUNT_CASH
+            || config.getCapitalSource() == StrategyConfig.CapitalSource.ACCOUNT_EQUITY;
+    if (!staticCapital && !trackingSource) {
       return result(
           LiveActivationResult.Outcome.REJECTED_CAPITAL_SOURCE,
-          "capital_source must be account_cash for live activation",
+          "capital_source must be account_cash, account_equity, or static for live activation",
           null);
     }
 
@@ -195,14 +204,24 @@ public class LiveActivationWorkflowImpl
           LiveActivationResult.Outcome.REJECTED_KILLSWITCH, "kill switch not armable", null);
     }
 
-    // (e) fresh account probe — blank account_number or non-positive cash refuses.
+    // (e) fresh account probe — blank account_number or a non-positive SIZING BASE refuses. The
+    // funds check matches the field the source will actually size from: account_equity checks
+    // net-liquidation EQUITY (a fully-invested margin account legitimately runs cash ~0/negative
+    // with positive equity — exactly the account shape account_equity serves), every other source
+    // keeps the pre-#790 cash check. Pure predicate branching on an enum value no recorded
+    // history can carry — no version gate needed.
     AccountSnapshotResult snapshot = probeAccount(request, config);
     String accountNumber = snapshot == null ? null : snapshot.getAccountNumber();
-    BigDecimal cash = snapshot == null ? null : snapshot.getCash();
-    if (accountNumber == null || accountNumber.isBlank() || cash == null || cash.signum() <= 0) {
+    boolean equitySource = config.getCapitalSource() == StrategyConfig.CapitalSource.ACCOUNT_EQUITY;
+    BigDecimal sizingBase =
+        snapshot == null ? null : (equitySource ? snapshot.getEquity() : snapshot.getCash());
+    if (accountNumber == null
+        || accountNumber.isBlank()
+        || sizingBase == null
+        || sizingBase.signum() <= 0) {
       return result(
           LiveActivationResult.Outcome.REJECTED_ACCOUNT,
-          "account probe returned no account or non-positive cash",
+          "account probe returned no account or non-positive " + (equitySource ? "equity" : "cash"),
           null);
     }
 

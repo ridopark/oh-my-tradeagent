@@ -34,4 +34,15 @@ public final class StrategyConfigs {
   public static boolean accountCashSizing(StrategyConfig config) {
     return config.getCapitalSource() == StrategyConfig.CapitalSource.ACCOUNT_CASH;
   }
+
+  /**
+   * #790: {@code capital_source == account_equity} — size from live net-liquidation equity, with
+   * {@code capital_weight} a plain fraction of the account. Used in the same two lockstep places as
+   * {@link #accountCashSizing}: the account-snapshot dispatch enablement and the sizing-source
+   * switch. Null/absent {@code capital_source} stays {@code static}; this is false unless the
+   * strategy explicitly opted in.
+   */
+  public static boolean accountEquitySizing(StrategyConfig config) {
+    return config.getCapitalSource() == StrategyConfig.CapitalSource.ACCOUNT_EQUITY;
+  }
 }
