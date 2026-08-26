@@ -127,7 +127,7 @@ alert:
     # silently reopen. Mirrors OrderFailureAlerter.DEFAULT_FAILURE_KINDS.
     # Issue #779: FloorBreachAlerted (the -50%-of-entry floor-breach page) ships in this IMAGE
     # default too — same no-alert-gap rationale as every kind before it.
-    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,BtoCorrectionSuperseded,EntryWorkflowFailed,FloorBreachAlerted,PositionPartialCoverage,PositionLotCorrected}
+    failure-kinds: ${ALERT_DISCORD_FAILURE_KINDS:OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,BtoCorrectionSuperseded,EntryWorkflowFailed,FloorBreachAlerted,PositionPartialCoverage,PositionLotCorrected,OrderCancelFailed}
     signal-feed:
       # Issue #308: mirror every BTO/STC/AVG signal (received + outcome) to the same webhook.
       # Off by default — opt in via ALERT_SIGNAL_FEED_ENABLED=true. Independent of failure alerts.

@@ -4994,6 +4994,45 @@ class PositionWorkflowImplTest {
         .isEqualTo(CorrectBookedLotResult.Outcome.REJECTED_JOURNAL_MISMATCH);
   }
 
+  /**
+   * #827-follow-up (shipped in #828): a concurrent IDENTICAL correction that books while the first
+   * handler is suspended on the journal read must leave the first caller a truthful no-op
+   * rejection, not a second zero-growth APPLIED. Deterministic interleave: the journal-read stub
+   * itself fires the competing correction on its first invocation, so the inner update completes
+   * (APPLIED, books 2 -> 21) before the outer resumes into its post-yield re-check.
+   */
+  @Test
+  void correctBookedLot_concurrentIdenticalCorrection_secondHearsNoOp() throws Exception {
+    java.util.concurrent.atomic.AtomicInteger journalReads =
+        new java.util.concurrent.atomic.AtomicInteger();
+    final PositionWorkflow[] stubRef = new PositionWorkflow[1];
+    when(exec.getOrderStatus(anyString()))
+        .thenAnswer(
+            inv -> {
+              if (journalReads.getAndIncrement() == 0) {
+                // The competing correction lands while the outer handler is suspended HERE.
+                CorrectBookedLotResult inner = stubRef[0].correctBookedLot(correction(21));
+                assertThat(inner.getOutcome()).isEqualTo(CorrectBookedLotResult.Outcome.APPLIED);
+              }
+              return journalRow(OrderIntentResult.State.FILLED, 21L, "2.79");
+            });
+    PositionWorkflow stub = newStub("pos-correct-race");
+    PositionWorkflowInput in = futureInput(21);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 2L);
+    waitForAuditKind("PositionEntered");
+    stubRef[0] = stub;
+
+    CorrectBookedLotResult outer = stub.correctBookedLot(correction(21));
+
+    assertThat(outer.getOutcome())
+        .isEqualTo(CorrectBookedLotResult.Outcome.REJECTED_QTY_NOT_ABOVE_BOOKED);
+    assertThat(outer.getDetail()).contains("another correction booked to 21");
+    // Exactly ONE booking happened.
+    assertThat(captureAll("PositionLotCorrected")).hasSize(1);
+  }
+
   /** Falsify-review: the three validator refusals, individually. */
   @Test
   void correctBookedLot_validatorRefusals() throws Exception {

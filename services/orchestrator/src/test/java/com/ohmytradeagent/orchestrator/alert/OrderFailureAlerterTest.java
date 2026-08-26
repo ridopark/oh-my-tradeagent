@@ -800,6 +800,45 @@ class OrderFailureAlerterTest {
     alerter.onAuditEvent(event("PositionLotCorrected", null, new java.util.LinkedHashMap<>()));
   }
 
+  // ---- Issue #821: the whole allowlist-drift class, structurally ----
+
+  /**
+   * #821: application.yml DEFINES alert.discord.failure-kinds, shadowing the @Value image default —
+   * so a kind present only in DEFAULT_FAILURE_KINDS silently pages NOTHING in prod. This drift
+   * shipped at least twice (OrderCancelFailed sat dark since it was added; #817's first cut
+   * repeated it and was caught by two reviewers independently). One structural test ends the class:
+   * EVERY kind in the constant must appear in the packaged yml, so the next added kind cannot ship
+   * half-wired. The per-kind mirror tests above remain as documentation of each kind's shipping
+   * story.
+   */
+  @Test
+  void everyDefaultFailureKindIsMirroredInApplicationYml_821() throws Exception {
+    String appYml =
+        new String(
+            OrderFailureAlerterTest.class.getResourceAsStream("/application.yml").readAllBytes(),
+            java.nio.charset.StandardCharsets.UTF_8);
+    // EXACT membership over the parsed yml list, not a raw substring match — a substring check
+    // is satisfied by a prefix-colliding kind (e.g. a yml carrying only PositionOrphanOngoing
+    // would falsely satisfy a constant entry PositionOrphan), which would quietly void the
+    // structural guarantee this test exists to give (#828 review).
+    java.util.regex.Matcher m =
+        java.util.regex.Pattern.compile("failure-kinds: \\$\\{ALERT_DISCORD_FAILURE_KINDS:([^}]*)}")
+            .matcher(appYml);
+    assertThat(m.find()).as("failure-kinds default line present in application.yml").isTrue();
+    java.util.Set<String> ymlKinds =
+        java.util.Arrays.stream(m.group(1).split(","))
+            .map(String::trim)
+            .collect(java.util.stream.Collectors.toSet());
+    for (String kind : OrderFailureAlerter.DEFAULT_FAILURE_KINDS.split(",")) {
+      assertThat(ymlKinds)
+          .as(
+              "application.yml alert.discord.failure-kinds must mirror %s EXACTLY — a kind only"
+                  + " in the image-default constant silently pages nothing in prod (#821)",
+              kind)
+          .contains(kind.trim());
+    }
+  }
+
   // ---- Issue #779: floor-breach alert paging ----
 
   @Test
