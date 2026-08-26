@@ -216,6 +216,30 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
           }
         }
       }
+      // #829: the pos:* key is SINGLE-SLOT per (tenant, strategy, occ) — a sibling position on
+      // the same key (prod_real SMCI: copytrade lot + manual lot) EVICTS the prior mapping, so
+      // the Redis-derived set alone under-counts coverage (live: sum=5 while owners held 21+5).
+      // Union in Visibility enumeration (the hasRunningOwnerForOcc idiom) so every RUNNING owner
+      // is summed regardless of cache eviction. Best-effort per strategy: a Visibility hiccup
+      // degrades to the cache-derived set (an under-count pages — the safe direction — never a
+      // masked orphan).
+      for (String sid : tenantStrategies.strategyIdsForTenant(tenantId)) {
+        if (sid == null || sid.isBlank()) {
+          continue;
+        }
+        try (Stream<WorkflowExecutionMetadata> stream =
+            workflowClient.listExecutions(visibilityQuery(tenantId, sid, occPadded))) {
+          stream.forEach(meta -> ownerWfIds.add(meta.getExecution().getWorkflowId()));
+        } catch (RuntimeException e) {
+          log.warn(
+              "sumRunningOwnerRemainingQtyForOcc visibility union failed tenant={} sid={} occ={}"
+                  + " err={}",
+              tenantId,
+              sid,
+              occPadded,
+              e.getMessage());
+        }
+      }
       long sum = 0L;
       for (String wfId : ownerWfIds) {
         if (!isPositionWorkflowRunning(wfId)) {

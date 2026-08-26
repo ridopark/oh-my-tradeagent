@@ -93,6 +93,60 @@ class PositionLookupActivitiesImplTest {
     assertThat(probe.sumRunningOwnerRemainingQtyForOcc("dev", OCC)).isEqualTo(50L);
   }
 
+  /**
+   * #829 — the live incident verbatim: the single-slot pos:* key holds only the manual sibling
+   * (remaining 5) because it evicted the corrected copytrade lot's mapping at spawn; Visibility
+   * still enumerates BOTH owners. The sum must be 26 (21 + 5), not the cache-derived 5 that was one
+   * recon sweep from a false "uncovered 21" partial-coverage page.
+   */
+  @Test
+  void sumRunningOwner_cacheEvictedSibling_visibilityUnionStillSumsBoth() {
+    PositionLookupActivitiesImpl probe = spy(svc);
+    String key = "pos:dev:copytrade-v1:" + OCC;
+    Cursor<String> cursor = cursorOf(key);
+    when(redis.scan(any(ScanOptions.class))).thenReturn(cursor);
+    ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+    when(redis.opsForValue()).thenReturn(valueOps);
+    when(valueOps.get(key)).thenReturn("wf-manual"); // the evictor won the slot
+    // metas built BEFORE the outer when() — metaAt stubs internally and nesting them inside
+    // another stubbing trips Mockito's unfinished-stubbing detection.
+    io.temporal.client.WorkflowExecutionMetadata manualMeta =
+        metaAt("wf-manual", "2026-08-25T18:09:00Z");
+    io.temporal.client.WorkflowExecutionMetadata copytradeMeta =
+        metaAt("wf-copytrade", "2026-08-25T17:58:00Z");
+    String q = PositionLookupActivitiesImpl.visibilityQuery("dev", "copytrade-v1", OCC);
+    when(workflowClient.listExecutions(q))
+        .thenReturn(java.util.stream.Stream.of(manualMeta, copytradeMeta));
+    doReturn(true).when(probe).isPositionWorkflowRunning("wf-manual");
+    doReturn(true).when(probe).isPositionWorkflowRunning("wf-copytrade");
+    stubPositionState("wf-manual", 5L);
+    stubPositionState("wf-copytrade", 21L);
+
+    assertThat(probe.sumRunningOwnerRemainingQtyForOcc("dev", OCC)).isEqualTo(26L);
+  }
+
+  /**
+   * #829 degrade path — the core safety claim pinned: a Visibility outage on the union loop must
+   * leave the cache-derived owner still summed (an under-count pages; it never throws and never
+   * zeroes a cache-confirmed owner).
+   */
+  @Test
+  void sumRunningOwner_visibilityThrows_degradesToCacheDerivedSum() {
+    PositionLookupActivitiesImpl probe = spy(svc);
+    String key = "pos:dev:copytrade-v1:" + OCC;
+    Cursor<String> cursor = cursorOf(key);
+    when(redis.scan(any(ScanOptions.class))).thenReturn(cursor);
+    ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+    when(redis.opsForValue()).thenReturn(valueOps);
+    when(valueOps.get(key)).thenReturn("wf-cached");
+    when(workflowClient.listExecutions(anyString()))
+        .thenThrow(new RuntimeException("visibility down"));
+    doReturn(true).when(probe).isPositionWorkflowRunning("wf-cached");
+    stubPositionState("wf-cached", 7L);
+
+    assertThat(probe.sumRunningOwnerRemainingQtyForOcc("dev", OCC)).isEqualTo(7L);
+  }
+
   @Test
   void sumRunningOwner_cachedWfNotRunning_returnsZero() {
     PositionLookupActivitiesImpl probe = spy(svc);
