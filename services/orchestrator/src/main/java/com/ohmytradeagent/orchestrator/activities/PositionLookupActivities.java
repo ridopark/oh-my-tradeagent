@@ -72,11 +72,16 @@ public interface PositionLookupActivities {
    * recon. Returns the summed {@code remainingQty} across every confirmed-RUNNING PositionWorkflow
    * (under ANY strategy of {@code tenantId}) that manages {@code occPadded}.
    *
-   * <p>Resolution is cache-driven (Redis SCAN of {@code pos:{tenant}:*:{occPadded}}), confirmed
-   * RUNNING per owner via {@link #isPositionWorkflowRunning}, with remaining qty read from each
-   * owner's {@code positionState} query. BEST-EFFORT / read-only: any error returns {@code 0L}
-   * (zero coverage → recon pages → safe degrade to today's behavior). {@code occPadded} must
-   * already be in the padded canonical form (see {@code OccSymbol.padded}).
+   * <p>Resolution UNIONS two owner sources (#829): the Redis SCAN of {@code
+   * pos:{tenant}:*:{occPadded}} AND per-tenant-strategy Temporal Visibility enumeration — the cache
+   * key is SINGLE-SLOT per (tenant, strategy, occ), so a sibling position on the same key evicts
+   * the prior mapping and the cache alone under-counts (live: covered=5 while owners held 21+5).
+   * Each union member is confirmed RUNNING via {@link #isPositionWorkflowRunning}, with remaining
+   * qty read from each owner's {@code positionState} query. A per-strategy Visibility failure
+   * degrades to the cache-derived set (an under-count pages — the safe direction). BEST-EFFORT /
+   * read-only: any error returns {@code 0L} (zero coverage → recon pages → safe degrade to today's
+   * behavior). {@code occPadded} must already be in the padded canonical form (see {@code
+   * OccSymbol.padded}).
    */
   long sumRunningOwnerRemainingQtyForOcc(String tenantId, String occPadded);
 
