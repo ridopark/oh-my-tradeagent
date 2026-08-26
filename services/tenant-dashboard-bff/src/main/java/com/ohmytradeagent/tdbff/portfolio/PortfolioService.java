@@ -5,6 +5,7 @@ import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -53,6 +54,9 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class PortfolioService {
+
+  // Equity-options contract multiplier (a premium is per-share; one contract covers 100 shares).
+  private static final BigDecimal OPTIONS_MULTIPLIER = BigDecimal.valueOf(100);
 
   private static final Logger log = LoggerFactory.getLogger(PortfolioService.class);
   private static final ZoneId MARKET_TZ = ZoneId.of("America/New_York");
@@ -304,19 +308,41 @@ public class PortfolioService {
     m.put("remaining_qty", p.remainingQty());
     m.put("entry_premium", p.entryPremium());
     m.put("open_notional", p.openNotional());
-    // Live broker marks (account-level), added only when this position matched a broker mark by
-    // OCC.
-    // current_price = per-unit mark; unrealized_pl = TOTAL since entry; unrealized_intraday_pl =
-    // TODAY'S. Omitted when there is no matching broker position (the row still renders).
+    // Live broker marks, joined by OCC. current_price is the shared per-unit mark. The two P&L
+    // figures are PER-ROW (#832): the broker's numbers are ACCOUNT-POSITION-level, and attaching
+    // them verbatim duplicated the whole contract's P&L onto every sibling workflow row sharing
+    // the OCC (live: a 5-lot and a 21-lot both showed the combined 26-lot -1194).
+    //   unrealized_pl        = (current − entry_premium) × remaining_qty × 100 — the row's OWN
+    //                          basis; proration would mis-state both rows when sibling bases
+    //                          differ.
+    //   unrealized_intraday  = broker intraday × remaining_qty / broker_qty — proration by qty is
+    //                          EXACT here: (current − lastday) is identical per contract
+    //                          regardless of entry basis.
+    // Uncomputable fields are omitted (missing entry/qty/mark) — the row still renders, matching
+    // the no-matching-mark degrade.
     if (marks != null) {
       if (marks.currentPrice() != null) {
         m.put("current_price", marks.currentPrice());
       }
-      if (marks.unrealizedPl() != null) {
-        m.put("unrealized_pl", marks.unrealizedPl());
+      if (marks.currentPrice() != null && p.entryPremium() != null) {
+        m.put(
+            "unrealized_pl",
+            marks
+                .currentPrice()
+                .subtract(p.entryPremium())
+                .multiply(BigDecimal.valueOf(p.remainingQty()))
+                .multiply(OPTIONS_MULTIPLIER)
+                .setScale(2, RoundingMode.HALF_UP));
       }
-      if (marks.unrealizedIntradayPl() != null) {
-        m.put("unrealized_intraday_pl", marks.unrealizedIntradayPl());
+      if (marks.unrealizedIntradayPl() != null
+          && marks.brokerQty() != null
+          && marks.brokerQty() > 0) {
+        m.put(
+            "unrealized_intraday_pl",
+            marks
+                .unrealizedIntradayPl()
+                .multiply(BigDecimal.valueOf(p.remainingQty()))
+                .divide(BigDecimal.valueOf(marks.brokerQty()), 2, RoundingMode.HALF_UP));
       }
     }
     // Armed-trailing-stop state, straight off the position's own workflow. trailing_armed is

@@ -55,9 +55,18 @@ public class BrokerPositionsClient {
   // once as an explicit ParameterizedType to avoid a transitive Guava TypeToken dependency.
   private static final Type POSITIONS_RESULT_TYPE = listOf(BrokerPosition.class);
 
-  /** Live marks for one broker-held position. Any field may be null when the broker omits it. */
+  /**
+   * Live marks for one broker-held position. Any field may be null when the broker omits it. {@code
+   * brokerQty} (#832) is the broker POSITION's total contract count — the divisor that lets the
+   * caller prorate the account-level intraday figure onto sibling workflow rows sharing this OCC
+   * (exact for intraday: {@code current − lastday} is identical per contract regardless of entry
+   * basis).
+   */
   public record PositionMarks(
-      BigDecimal currentPrice, BigDecimal unrealizedPl, BigDecimal unrealizedIntradayPl) {}
+      BigDecimal currentPrice,
+      BigDecimal unrealizedPl,
+      BigDecimal unrealizedIntradayPl,
+      Long brokerQty) {}
 
   private final WorkflowClient client;
   private final String orchestratorTaskQueue;
@@ -142,7 +151,8 @@ public class BrokerPositionsClient {
       }
       out.put(
           occ,
-          new PositionMarks(p.getCurrentPrice(), p.getUnrealizedPl(), p.getUnrealizedIntradayPl()));
+          new PositionMarks(
+              p.getCurrentPrice(), p.getUnrealizedPl(), p.getUnrealizedIntradayPl(), p.getQty()));
     }
     return out;
   }

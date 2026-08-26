@@ -332,7 +332,10 @@ class PortfolioServiceTest {
             Map.of(
                 compactOcc,
                 new BrokerPositionsClient.PositionMarks(
-                    new BigDecimal("1.20"), new BigDecimal("180.00"), new BigDecimal("-15.00"))));
+                    new BigDecimal("1.20"),
+                    new BigDecimal("180.00"),
+                    new BigDecimal("-15.00"),
+                    5L)));
 
     Map<String, Object> body = service.portfolio("acme");
 
@@ -347,6 +350,140 @@ class PortfolioServiceTest {
     assertThat((BigDecimal) pos.get("current_price")).isEqualByComparingTo("1.20");
     assertThat((BigDecimal) pos.get("unrealized_pl")).isEqualByComparingTo("180.00");
     assertThat((BigDecimal) pos.get("unrealized_intraday_pl")).isEqualByComparingTo("-15.00");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void siblingRowsSharingOneOcc_getPerRowPnl_notTheCombinedBrokerFigure() {
+    // #832, the live incident verbatim: manual 5-lot @2.78 and healed 21-lot @2.805 share one
+    // broker position (qty 26, mark 2.33, total -1194.00, intraday -1274.00 off lastday 2.82).
+    // Pre-fix BOTH rows displayed the combined -1194/-1274. Correct per-row: totals from each
+    // row's OWN basis (-225.00 and -997.50 — proration would mis-state both, bases differ);
+    // today prorated by qty (EXACT for intraday: (current-lastday) is per-contract identical):
+    // -1274 x 5/26 = -245.00 and x 21/26 = -1029.00.
+    String paddedOcc = "SMCI  261120C00050000";
+    String compactOcc = "SMCI261120C00050000";
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                new OpenPosition(
+                    "wf-manual",
+                    "s1",
+                    paddedOcc,
+                    5,
+                    new BigDecimal("2.78"),
+                    new BigDecimal("1390.00")),
+                new OpenPosition(
+                    "wf-copytrade",
+                    "s1",
+                    paddedOcc,
+                    21,
+                    new BigDecimal("2.805"),
+                    new BigDecimal("5890.50"))));
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
+    when(brokerPositions.marksFor("alpaca-paper", "acme", "s1"))
+        .thenReturn(
+            Map.of(
+                compactOcc,
+                new BrokerPositionsClient.PositionMarks(
+                    new BigDecimal("2.33"),
+                    new BigDecimal("-1194.00"),
+                    new BigDecimal("-1274.00"),
+                    26L)));
+
+    Map<String, Object> body = service.portfolio("acme");
+
+    var positions = (List<Map<String, Object>>) body.get("open_positions");
+    assertThat(positions).hasSize(2);
+    Map<String, Object> manual =
+        positions.stream().filter(x -> "wf-manual".equals(x.get("workflow_id"))).findFirst().get();
+    Map<String, Object> healed =
+        positions.stream()
+            .filter(x -> "wf-copytrade".equals(x.get("workflow_id")))
+            .findFirst()
+            .get();
+    assertThat((BigDecimal) manual.get("unrealized_pl")).isEqualByComparingTo("-225.00");
+    assertThat((BigDecimal) healed.get("unrealized_pl")).isEqualByComparingTo("-997.50");
+    assertThat((BigDecimal) manual.get("unrealized_intraday_pl")).isEqualByComparingTo("-245.00");
+    assertThat((BigDecimal) healed.get("unrealized_intraday_pl")).isEqualByComparingTo("-1029.00");
+    // Shared per-unit mark stays shared.
+    assertThat((BigDecimal) manual.get("current_price")).isEqualByComparingTo("2.33");
+    assertThat((BigDecimal) healed.get("current_price")).isEqualByComparingTo("2.33");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void perRowPnl_nullSafety_missingEntryOrQty_omitsOnlyTheUncomputableField() {
+    // entry_premium null -> no total; brokerQty null -> no today; row still renders with mark.
+    String paddedOcc = "SMCI  261120C00050000";
+    String compactOcc = "SMCI261120C00050000";
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(new OpenPosition("wf1", "s1", paddedOcc, 5, null, new BigDecimal("0"))));
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
+    when(brokerPositions.marksFor("alpaca-paper", "acme", "s1"))
+        .thenReturn(
+            Map.of(
+                compactOcc,
+                new BrokerPositionsClient.PositionMarks(
+                    new BigDecimal("2.33"),
+                    new BigDecimal("-1194.00"),
+                    new BigDecimal("-1274.00"),
+                    null)));
+
+    Map<String, Object> body = service.portfolio("acme");
+
+    Map<String, Object> pos = ((List<Map<String, Object>>) body.get("open_positions")).get(0);
+    assertThat((BigDecimal) pos.get("current_price")).isEqualByComparingTo("2.33");
+    assertThat(pos).doesNotContainKey("unrealized_pl");
+    assertThat(pos).doesNotContainKey("unrealized_intraday_pl");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void perRowPnl_brokerQtyZero_omitsTodayWithoutArithmeticException() {
+    // Review F3: the divide guard is load-bearing — positionItem runs in a bare loop with no
+    // try/catch, so an ArithmeticException here would 500 the whole portfolio payload for the
+    // tenant. brokerQty=0 is contract-forbidden (minimum 1) but only by convention.
+    String paddedOcc = "SMCI  261120C00050000";
+    String compactOcc = "SMCI261120C00050000";
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                new OpenPosition(
+                    "wf1", "s1", paddedOcc, 5, new BigDecimal("2.78"), new BigDecimal("1390"))));
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
+    when(brokerPositions.marksFor("alpaca-paper", "acme", "s1"))
+        .thenReturn(
+            Map.of(
+                compactOcc,
+                new BrokerPositionsClient.PositionMarks(
+                    new BigDecimal("2.33"),
+                    new BigDecimal("-1194.00"),
+                    new BigDecimal("-1274.00"),
+                    0L)));
+
+    Map<String, Object> body = service.portfolio("acme");
+
+    Map<String, Object> pos = ((List<Map<String, Object>>) body.get("open_positions")).get(0);
+    // Total still computes (own basis); TODAY is omitted — never an ArithmeticException.
+    assertThat((BigDecimal) pos.get("unrealized_pl")).isEqualByComparingTo("-225.00");
+    assertThat(pos).doesNotContainKey("unrealized_intraday_pl");
   }
 
   @Test
@@ -374,7 +511,7 @@ class PortfolioServiceTest {
             Map.of(
                 "NVDA260516C00140000",
                 new BrokerPositionsClient.PositionMarks(
-                    new BigDecimal("3.00"), new BigDecimal("90.00"), new BigDecimal("10.00"))));
+                    new BigDecimal("3.00"), new BigDecimal("90.00"), new BigDecimal("10.00"), 3L)));
 
     Map<String, Object> body = service.portfolio("acme");
 
