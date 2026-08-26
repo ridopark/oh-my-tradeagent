@@ -726,6 +726,162 @@ class ReconciliationWorkflowImplTest {
         .containsEntry("first_seen_at", tick3FirstSeen.toString());
   }
 
+  // ---------- #817: partial coverage (under-booked owner / partial sibling coverage) ----------
+
+  /**
+   * #817 first sweep: a RUNNING owner exists (existence check satisfied) but the owners' remaining
+   * qty (7) does not cover the broker lot (26) — the 2026-08-25 live shape verbatim. The first
+   * sweep must emit only the non-paging OBSERVED marker (a transient mid-entry sweep between a fill
+   * slice and the cache seed must not page), and never a PositionOrphan.
+   */
+  @Test
+  void ownerRunning_underBooked_firstSweepObservesOnly() {
+    String ownerWfId = "pos/" + PADDED_OCC + "/chat-1";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(PADDED_OCC, 26L, new BigDecimal("2.87"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(PADDED_OCC)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-1:0", PADDED_OCC)));
+    when(positionLookup.findPositionWorkflowId(eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC)))
+        .thenReturn(ownerWfId);
+    when(positionLookup.isPositionWorkflowRunning(eq(ownerWfId))).thenReturn(true);
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(PADDED_OCC)))
+        .thenReturn(7L);
+    when(auditQuery.countPriorByKind(anyString(), anyString(), anyString(), anyString(), any()))
+        .thenReturn(0L);
+
+    runWorkflow();
+
+    AuditEvent observed = captureKind("PositionPartialCoverageObserved");
+    assertThat(((Number) observed.getSubject().get("broker_qty")).longValue()).isEqualTo(26L);
+    assertThat(((Number) observed.getSubject().get("covered_qty")).longValue()).isEqualTo(7L);
+    assertThat(((Number) observed.getSubject().get("uncovered_qty")).longValue()).isEqualTo(19L);
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionPartialCoverage".equals(e.getKind())));
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+  }
+
+  /**
+   * #817 second consecutive sweep (a prior OBSERVED marker exists in the window): the PAGING
+   * PositionPartialCoverage fires with broker 26 / covered 7 / uncovered 19 — the plan's success
+   * criterion encoded on the live incident numbers.
+   */
+  @Test
+  void ownerRunning_underBooked_secondSweepPages() {
+    String ownerWfId = "pos/" + PADDED_OCC + "/chat-1";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(PADDED_OCC, 26L, new BigDecimal("2.87"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(PADDED_OCC)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-1:0", PADDED_OCC)));
+    when(positionLookup.findPositionWorkflowId(eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC)))
+        .thenReturn(ownerWfId);
+    when(positionLookup.isPositionWorkflowRunning(eq(ownerWfId))).thenReturn(true);
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(PADDED_OCC)))
+        .thenReturn(7L);
+    when(auditQuery.countPriorByKind(
+            anyString(), anyString(), anyString(), eq("PositionPartialCoverage"), any()))
+        .thenReturn(0L);
+    when(auditQuery.countPriorByKind(
+            anyString(), anyString(), anyString(), eq("PositionPartialCoverageObserved"), any()))
+        .thenReturn(1L);
+
+    runWorkflow();
+
+    AuditEvent page = captureKind("PositionPartialCoverage");
+    assertThat(page.getSubject()).containsEntry("option_symbol", PADDED_OCC);
+    assertThat(((Number) page.getSubject().get("uncovered_qty")).longValue()).isEqualTo(19L);
+  }
+
+  /** #817: full coverage emits NEITHER partial-coverage kind — the check must stay silent. */
+  @Test
+  void ownerRunning_fullCoverage_noPartialCoverageEmit() {
+    String ownerWfId = "pos/" + PADDED_OCC + "/chat-1";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(PADDED_OCC, 26L, new BigDecimal("2.87"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(PADDED_OCC)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-1:0", PADDED_OCC)));
+    when(positionLookup.findPositionWorkflowId(eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC)))
+        .thenReturn(ownerWfId);
+    when(positionLookup.isPositionWorkflowRunning(eq(ownerWfId))).thenReturn(true);
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(PADDED_OCC)))
+        .thenReturn(26L);
+
+    runWorkflow();
+
+    Mockito.verify(audit, never())
+        .log(
+            Mockito.argThat(
+                e ->
+                    e != null
+                        && String.valueOf(e.getKind()).startsWith("PositionPartialCoverage")));
+  }
+
+  /**
+   * #817 missing branch, owner EXISTS (visibility probe true): the existence-based suppression
+   * keeps PRECEDENCE over the partial-coverage page — the surplus is the OWNING strategy's to page,
+   * and its own recon does so via the owner-running branch (see the ownerRunning_* tests, which
+   * encode the live incident). This sibling-strategy sweep suppresses exactly as pre-#817. Pin:
+   * SuppressedSiblingOwner emitted, NO partial-coverage kind, NO PositionOrphan.
+   */
+  @Test
+  void missingBranch_partialCoverage_ownerExists_suppressionKeepsPrecedence() {
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(PADDED_OCC, 26L, new BigDecimal("2.87"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(PADDED_OCC)))
+        .thenReturn(5L);
+    when(positionLookup.hasRunningOwnerForOcc(eq("dev"), eq(PADDED_OCC))).thenReturn(true);
+
+    runWorkflow();
+
+    captureKind("PositionOrphanSuppressedSiblingOwner");
+    Mockito.verify(audit, never())
+        .log(
+            Mockito.argThat(
+                e ->
+                    e != null
+                        && String.valueOf(e.getKind()).startsWith("PositionPartialCoverage")));
+    Mockito.verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+  }
+
+  /** #817: once paged in the window (prior page row exists), every later sweep stays quiet. */
+  @Test
+  void ownerRunning_alreadyPagedInWindow_staysQuiet() {
+    String ownerWfId = "pos/" + PADDED_OCC + "/chat-1";
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(PADDED_OCC, 26L, new BigDecimal("2.87"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(PADDED_OCC)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-1:0", PADDED_OCC)));
+    when(positionLookup.findPositionWorkflowId(eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC)))
+        .thenReturn(ownerWfId);
+    when(positionLookup.isPositionWorkflowRunning(eq(ownerWfId))).thenReturn(true);
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(PADDED_OCC)))
+        .thenReturn(7L);
+    when(auditQuery.countPriorByKind(
+            anyString(), anyString(), anyString(), eq("PositionPartialCoverage"), any()))
+        .thenReturn(1L);
+
+    runWorkflow();
+
+    Mockito.verify(audit, never())
+        .log(
+            Mockito.argThat(
+                e ->
+                    e != null
+                        && String.valueOf(e.getKind()).startsWith("PositionPartialCoverage")));
+  }
+
   // ---------- Cross-strategy recon orphan suppression (shared broker account) ----------
 
   @Test
@@ -788,7 +944,10 @@ class ReconciliationWorkflowImplTest {
   @Test
   void missingBranch_partialSiblingCoverage_stillPages() {
     // SAFETY-CRITICAL: a sibling owner covers only PART of the broker lot (5 of 10) → suppression
-    // must NOT fire (the uncovered 5 is a genuine orphan), so the PositionOrphan still pages.
+    // must NOT fire (the uncovered 5 is a genuine surplus). #817 SUPERSEDES the original contract
+    // here: the page is now the debounced DEDICATED kind (PositionPartialCoverage, second sweep)
+    // instead of an immediate generic PositionOrphan — first sweep writes only the observed
+    // marker. What this test still pins, unchanged: partial coverage NEVER silently suppresses.
     String paddedOcc = PADDED_OCC;
     when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
     when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
@@ -798,16 +957,19 @@ class ReconciliationWorkflowImplTest {
     when(positionLookup.sumRunningOwnerRemainingQtyForOcc(eq("dev"), eq(paddedOcc))).thenReturn(5L);
     // Visibility fallback also does not fully cover (no running owner found) → falls through.
     when(positionLookup.hasRunningOwnerForOcc(anyString(), anyString())).thenReturn(false);
-    // Phase 3: past the first-page debounce (2nd sweep — prior observation marker exists).
-    when(auditQuery.countPriorPositionOrphanObserved(
-            eq("dev"), eq("copytrade-v1"), eq(paddedOcc), eq("missing"), any()))
+    // #817: past the partial-coverage debounce (2nd sweep — prior observed marker exists).
+    when(auditQuery.countPriorByKind(
+            anyString(), anyString(), anyString(), eq("PositionPartialCoverageObserved"), any()))
         .thenReturn(1L);
 
     ReconciliationSummary summary = runWorkflow();
 
-    assertThat(summary.getPositionOrphans()).isEqualTo(1L);
-    AuditEvent orphan = captureKind("PositionOrphan");
-    assertThat(orphan.getSubject()).containsEntry("journal_status", "missing");
+    // NOT counted as a PositionOrphan: the summary counter keeps meaning "PositionOrphan
+    // emissions" (review finding — silent metric shift otherwise).
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    AuditEvent page = captureKind("PositionPartialCoverage");
+    assertThat(((Number) page.getSubject().get("covered_qty")).longValue()).isEqualTo(5L);
+    assertThat(((Number) page.getSubject().get("uncovered_qty")).longValue()).isEqualTo(5L);
     Mockito.verify(audit, never())
         .log(
             Mockito.argThat(

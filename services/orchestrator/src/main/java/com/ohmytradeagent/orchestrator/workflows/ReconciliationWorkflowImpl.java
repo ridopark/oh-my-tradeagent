@@ -87,6 +87,18 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   // lot qty for this OCC. Non-paging observability only (NOT in OrderFailureAlerter's allowlist).
   private static final String KIND_POSITION_ORPHAN_SUPPRESSED_SIBLING =
       "PositionOrphanSuppressedSiblingOwner";
+
+  // #817: a running sibling owner EXISTS but its remaining qty does NOT cover the broker lot —
+  // the 2026-08-25 under-booking shape (broker 26, owners 7). Existence-only owner checks and the
+  // qty-blind visibility fallback both swallowed it. PAGING kind (OrderFailureAlerter allowlist),
+  // emitted only on a SECOND sweep within the debounce window; the first sweep writes the
+  // non-paging observed
+  // marker below (mirrors the PositionOrphanObserved debounce — a transient mid-entry sweep
+  // between a fill slice and the cache seed must not page).
+  static final String KIND_POSITION_PARTIAL_COVERAGE = "PositionPartialCoverage";
+
+  // #817: the non-paging first-sweep marker for the partial-coverage debounce.
+  static final String KIND_POSITION_PARTIAL_COVERAGE_OBSERVED = "PositionPartialCoverageObserved";
   // Phase 3 (2026-06-24 remediation): non-paging first-sweep observation marker for the missing
   // branch. Emitted instead of a PositionOrphan when a missing-no-owner position is seen for the
   // FIRST time in the debounce window; the actual page only fires once a prior marker proves a
@@ -114,6 +126,15 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
    * under v&gt;=1 the same-day-post-close refuse also applies.
    */
   private static final String VERSION_REFUSE_EXPIRED_SAMEDAY = "recon-refuse-expired-sameday-v1";
+
+  /**
+   * #817 version marker for the partial-coverage sweep. Gates every new command the check adds —
+   * the coverage-sum activity on the owner-running path, the two countPriorByKind reads, and the
+   * observed/page audit logs. Recon runs are short-lived, but a worker restart replays an in-flight
+   * run, so command-shape changes ARE version-gated (same rationale as
+   * missing-visibility-fallback). Read ONCE outside the position loop.
+   */
+  private static final String VERSION_PARTIAL_COVERAGE = "recon-partial-coverage-v1";
 
   /** Hard expiry-session close in America/New_York (16:00 ET); past this a 0DTE OCC is done. */
   private static final LocalTime ET_MARKET_CLOSE = LocalTime.of(16, 0);
@@ -323,6 +344,9 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     // maybeAutoAdopt; NOT read freshly per position.
     int refuseExpiredSameday =
         Workflow.getVersion(VERSION_REFUSE_EXPIRED_SAMEDAY, Workflow.DEFAULT_VERSION, 1);
+    // #817: read ONCE outside the loop (command-stream determinism regardless of position count).
+    int partialCoverageVersion =
+        Workflow.getVersion(VERSION_PARTIAL_COVERAGE, Workflow.DEFAULT_VERSION, 1);
     long positionOrphans = 0;
     for (BrokerPosition p : brokerPositions) {
       List<JournalEntry> filled =
@@ -401,6 +425,20 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
                   "owner_scope", "account"));
           continue;
         }
+        // #817: 0 < covered < broker is a GENUINE surplus (the 2026-08-25 under-booking shape).
+        // Placed BELOW the visibility fallback and the F2b account probe so both existence-based
+        // suppressions keep their precedence (a cross-tenant shared-account owner still
+        // suppresses); what changes is only the final emission: partial coverage pages the
+        // DEDICATED debounced kind instead of the generic PositionOrphan. NOT counted in
+        // positionOrphans — the lot HAS an owner, and the summary counter keeps meaning
+        // "PositionOrphan emissions" (review finding: silent metric shift otherwise).
+        if (partialCoverageVersion >= 1
+            && coveredQty > 0
+            && brokerQty > 0
+            && coveredQty < brokerQty) {
+          maybeEmitPartialCoverage(in, occPadded, brokerQty, coveredQty, debounceSince);
+          continue;
+        }
         emitPositionOrphanWithDebounce(
             in,
             p,
@@ -431,6 +469,21 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       // Confirm-running guards a stale cache pointing at a since-completed PositionWorkflow.
       boolean ownerRunning =
           ownerWfId != null && positionLookup.isPositionWorkflowRunning(ownerWfId);
+      if (ownerRunning && partialCoverageVersion >= 1) {
+        // #817: the owner check above is EXISTENCE-only by design (#432) — an under-booked
+        // PositionWorkflow (booked 2 of a 21-lot fill) satisfies it while the surplus rides
+        // unmanaged. Sum the running owners' remaining qty and page (debounced) when it does not
+        // cover the broker lot. covered==0 is excluded: a cache miss on a genuinely-owned lot
+        // must keep degrading to silence here, not a false surplus page (the missing branch's
+        // visibility fallback owns that shape).
+        String occPaddedOwned = OccSymbol.padded(p.getOptionSymbol());
+        long ownedCovered =
+            positionLookup.sumRunningOwnerRemainingQtyForOcc(in.getTenantId(), occPaddedOwned);
+        long ownedBrokerQty = p.getQty() == null ? 0L : p.getQty();
+        if (ownedCovered > 0 && ownedBrokerQty > 0 && ownedCovered < ownedBrokerQty) {
+          maybeEmitPartialCoverage(in, occPaddedOwned, ownedBrokerQty, ownedCovered, debounceSince);
+        }
+      }
       if (!ownerRunning) {
         // Genuine orphan: a FILLED journal anchor exists but no running PositionWorkflow manages
         // the
@@ -505,6 +558,48 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
               "error_message", e.getMessage()));
     }
     return summary;
+  }
+
+  /**
+   * #817: two-sweep debounced partial-coverage page. First sweep in the window writes the
+   * non-paging OBSERVED marker; a second consecutive sweep emits the PAGING kind; once paged, the
+   * window stays quiet (no per-sweep re-page). All commands on this path are gated by
+   * VERSION_PARTIAL_COVERAGE at the call sites.
+   */
+  private void maybeEmitPartialCoverage(
+      ReconciliationWorkflowInput in,
+      String occPadded,
+      long brokerQty,
+      long coveredQty,
+      OffsetDateTime debounceSince) {
+    long priorPages =
+        auditQuery.countPriorByKind(
+            in.getTenantId(),
+            in.getStrategyId(),
+            occPadded,
+            KIND_POSITION_PARTIAL_COVERAGE,
+            debounceSince);
+    if (priorPages > 0) {
+      return;
+    }
+    long priorObserved =
+        auditQuery.countPriorByKind(
+            in.getTenantId(),
+            in.getStrategyId(),
+            occPadded,
+            KIND_POSITION_PARTIAL_COVERAGE_OBSERVED,
+            debounceSince);
+    Map<String, Object> subj =
+        subject(
+            "option_symbol", occPadded,
+            "broker_qty", brokerQty,
+            "covered_qty", coveredQty,
+            "uncovered_qty", brokerQty - coveredQty);
+    auditLog(
+        priorObserved == 0
+            ? KIND_POSITION_PARTIAL_COVERAGE_OBSERVED
+            : KIND_POSITION_PARTIAL_COVERAGE,
+        subj);
   }
 
   /**
