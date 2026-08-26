@@ -6,8 +6,10 @@ import java.time.OffsetDateTime;
 /**
  * Snapshot of one {@code order_intent_journal} row.
  *
- * <p>Issue #165: {@code filledQty}, {@code avgFillPrice}, and {@code filledAt} are populated only
- * for FILLED rows. For all other states they are {@code null}.
+ * <p>Issue #165: {@code filledQty}, {@code avgFillPrice}, and {@code filledAt} are populated for
+ * FILLED rows and, since #819, for CANCELLED rows whose order partially filled before the remainder
+ * was cancelled (state stays the authority on terminal outcome). Historically populated only for
+ * FILLED rows. For all other states they are {@code null}.
  */
 public record JournaledOrder(
     String intentKey,

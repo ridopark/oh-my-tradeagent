@@ -837,6 +837,60 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void getPartialFillSnapshot_partiallyFilledCancelledOrder_returnsQtyWithNullFilledAt()
+      throws Exception {
+    // #819 goal-review criterion: the REAL Alpaca body for a partially-filled-then-cancelled
+    // order — filled_qty positive, filled_avg_price set, filled_at NULL (Alpaca sets filled_at
+    // only on complete fills). getFillDetail THROWS on this shape (its complete-fill contract),
+    // which silently defeated the partial-cancel persistence; the partial-tolerant snapshot must
+    // parse it.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"alp-1\",\"status\":\"canceled\",\"filled_qty\":\"2\","
+                    + "\"filled_avg_price\":\"2.805\",\"filled_at\":null}"));
+
+    BrokerFillDetail d = broker.getPartialFillSnapshot("alp-1");
+
+    assertThat(d.filledQty()).isEqualTo(2L);
+    assertThat(d.avgFillPrice()).isEqualByComparingTo("2.805");
+    assertThat(d.filledAt()).isNull();
+  }
+
+  @Test
+  void getPartialFillSnapshot_zeroFillCancel_returnsZeroWithoutThrowing() throws Exception {
+    // The common TTL-cancel shape: nothing filled. Must be exception-free (hot path).
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"alp-1\",\"status\":\"canceled\",\"filled_qty\":\"0\","
+                    + "\"filled_avg_price\":null,\"filled_at\":null}"));
+
+    BrokerFillDetail d = broker.getPartialFillSnapshot("alp-1");
+
+    assertThat(d.filledQty()).isEqualTo(0L);
+    assertThat(d.avgFillPrice()).isNull();
+  }
+
+  @Test
+  void getPartialFillSnapshot_positiveQtyNoPrice_throwsProtocolError() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"alp-1\",\"status\":\"canceled\",\"filled_qty\":\"2\","
+                    + "\"filled_avg_price\":null,\"filled_at\":null}"));
+
+    assertThatThrownBy(() -> broker.getPartialFillSnapshot("alp-1"))
+        .hasMessageContaining("no avg price");
+  }
+
+  @Test
   void getFillDetail_brokerReturnsFilledOrder_returnsParsedDetail() throws Exception {
     // Issue #165: when cancel races a fill, the activity calls getFillDetail to
     // capture broker-confirmed filled_qty / avg_fill_price / filled_at and reconcile

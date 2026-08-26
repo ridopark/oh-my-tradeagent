@@ -38,6 +38,7 @@ public class FillListenerMetrics {
   private final Counter recycles;
   private final Counter eventsUnknownOrder;
   private final Counter signalWorkflowNotFound;
+  private final Counter entryReroutes;
   private final Counter signalErrors;
   private final Counter pollCycles;
   private final Counter pollRowsScanned;
@@ -155,6 +156,12 @@ public class FillListenerMetrics {
     this.signalWorkflowNotFound =
         Counter.builder("fill_listener.signal_workflow_not_found")
             .description("Workflow already completed when the signal arrived (benign).")
+            .register(registry);
+    this.entryReroutes =
+        Counter.builder("fill_listener.entry_straggler_reroutes")
+            .description(
+                "#819: entry fills rerouted to the owning PositionWorkflow after the parent"
+                    + " signal workflow completed — feeds #801 lot growth.")
             .register(registry);
     this.signalErrors =
         Counter.builder("fill_listener.signal_errors")
@@ -281,6 +288,10 @@ public class FillListenerMetrics {
 
   public void recordSignalWorkflowNotFound() {
     signalWorkflowNotFound.increment();
+  }
+
+  public void recordEntryReroute() {
+    entryReroutes.increment();
   }
 
   public void recordSignalError() {

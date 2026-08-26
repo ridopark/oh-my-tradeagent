@@ -267,6 +267,28 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   }
 
   @Override
+  public void markCancelledWithFill(
+      String intentKey, long filledQty, BigDecimal avgFillPrice, OffsetDateTime filledAt) {
+    OffsetDateTime now = OffsetDateTime.now();
+    // Guarded like markFilled (audit blocker): if the WS/poller already terminalized the row
+    // FILLED between the cancel attempt and this write, an unguarded update would DEMOTE
+    // FILLED -> CANCELLED and rewrite the fill columns with the (possibly staler) cancel-path
+    // read. The subsequent findByIntentKey re-read then returns the FILLED truth.
+    dsl.update(TABLE)
+        .set(field("state"), OrderState.CANCELLED.name())
+        .set(field("filled_qty"), filledQty)
+        .set(field("avg_fill_price"), avgFillPrice)
+        .set(field("filled_at"), filledAt)
+        .set(field("last_state_at"), now)
+        .set(field("version"), field("version", Long.class).plus(1))
+        .where(field("intent_key", String.class).eq(intentKey))
+        .and(
+            field("state", String.class)
+                .in(OrderState.RECORDED.name(), OrderState.SUBMITTED.name()))
+        .execute();
+  }
+
+  @Override
   public void markCancelFailed(String intentKey, String brokerReason) {
     OffsetDateTime now = OffsetDateTime.now();
     dsl.update(TABLE)

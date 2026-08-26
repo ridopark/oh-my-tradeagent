@@ -55,6 +55,21 @@ public interface OptionsBroker {
   BrokerFillDetail getFillDetail(String brokerOrderId);
 
   /**
+   * #819: PARTIAL-TOLERANT fill snapshot for the cancel path. {@link #getFillDetail} is
+   * complete-fill-only by contract — Alpaca sets {@code filled_at} ONLY when an order fills
+   * completely, so a partially-filled-then-cancelled order (filled_qty &gt; 0, filled_at null)
+   * makes it THROW, which silently defeated the partial-cancel persistence (goal-review finding).
+   * This variant requires only a parseable filled_qty; avg price must accompany a positive qty;
+   * {@code filledAt} may be null (harmless — every realized/FIFO scan filters state='FILLED'). A
+   * zero-fill cancel returns qty 0 rather than throwing, keeping the hot TTL-cancel path
+   * exception-free. Default throws UnsupportedOperationException so non-Alpaca fakes degrade
+   * through the caller's best-effort catch.
+   */
+  default BrokerFillDetail getPartialFillSnapshot(String brokerOrderId) {
+    throw new UnsupportedOperationException("partial fill snapshot not implemented");
+  }
+
+  /**
    * Phase 5 reconciliation: list currently-open broker orders. Default returns an empty list so the
    * Phase 5 reconciliation workflow degrades cleanly against brokers that don't expose this yet
    * (the in-memory {@link com.ohmytradeagent.exec.broker.stub.StubBroker}, or providers whose

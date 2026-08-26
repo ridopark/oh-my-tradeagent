@@ -514,6 +514,285 @@ class FillDispatcherImplTest {
             eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")));
   }
 
+  // ---------- #819 Phase B: entry straggler reroute ----------
+
+  /**
+   * #819: an ENTRY fill whose parent signal workflow already completed (the straggler slice that
+   * used to be dropped) is rerouted ONCE to the owning PositionWorkflow, whose id is derived from
+   * the journal row through the SHARED contract helper — the exact id is asserted so a format drift
+   * between exec and orchestrator cannot pass. Feeds #801's bookEntryGrowth.
+   */
+  @Test
+  void dispatch_entryStragglerWorkflowNotFound_reroutesToPositionWorkflow() {
+    when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(COPYTRADE_ENTRY_ROW));
+    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any()))
+        .thenReturn(true);
+    String parentId = "t-dev/s-copytrade-v1/sig/sig-42";
+    String positionId =
+        com.ohmytradeagent.contract.identity.WorkflowIds.position(
+            "dev", "copytrade-v1", "SPY   260519C00737000", "sig-42");
+    WorkflowStub parentStub = mock(WorkflowStub.class);
+    WorkflowStub positionStub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(parentId)).thenReturn(parentStub);
+    when(workflowClient.newUntypedWorkflowStub(positionId)).thenReturn(positionStub);
+    WorkflowExecution parentExec = WorkflowExecution.newBuilder().setWorkflowId(parentId).build();
+    doThrow(new WorkflowNotFoundException(parentExec, "CopytradeSignalWorkflow", null))
+        .when(parentStub)
+        .signal(eq("onFill"), any());
+
+    dispatcher.dispatch(FILL);
+
+    ArgumentCaptor<Object> arg = ArgumentCaptor.forClass(Object.class);
+    verify(positionStub).signal(eq("onFill"), arg.capture());
+    assertThat(arg.getValue())
+        .isInstanceOfSatisfying(
+            FillSignalPayload.class, p -> assertThat(p.getFilledQty()).isEqualTo(5L));
+    // Falsify finding 3: the plan's own criterion — the first live straggler must be observable.
+    assertThat(registry.counter("fill_listener.entry_straggler_reroutes").count()).isEqualTo(1.0);
+    assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(1.0);
+    // The event was DELIVERED, not dropped: the drop counter must not fire.
+    assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(0.0);
+  }
+
+  /**
+   * #819 goal-review finding 7: a RE-PEGGED replacement's key (`<wf-id>:entry:repeg-1`) must
+   * reroute too — same owning position; endsWith(":entry") would have silently excluded it.
+   */
+  @Test
+  void dispatch_repegReplacementStraggler_reroutesToSamePosition() {
+    String repegKey = COPYTRADE_ENTRY_INTENT_KEY + ":repeg-1";
+    JournaledOrder repegRow =
+        new JournaledOrder(
+            repegKey,
+            "sig-42",
+            "dev",
+            "copytrade-v1",
+            "alpaca-paper",
+            "ck-42r",
+            "SPY   260519C00737000",
+            "BUY",
+            5L,
+            new BigDecimal("0.84"),
+            OrderState.SUBMITTED,
+            "brk-42r",
+            OffsetDateTime.parse("2026-05-19T17:08:00Z"),
+            OffsetDateTime.parse("2026-05-19T17:08:01Z"),
+            OffsetDateTime.parse("2026-05-19T17:08:01Z"),
+            null,
+            null,
+            null,
+            null,
+            null,
+            1L);
+    when(journal.findByBrokerOrderId("brk-42r")).thenReturn(Optional.of(repegRow));
+    when(journal.markFilled(eq(repegKey), anyLong(), any(), any())).thenReturn(true);
+    String positionId =
+        com.ohmytradeagent.contract.identity.WorkflowIds.position(
+            "dev", "copytrade-v1", "SPY   260519C00737000", "sig-42");
+    WorkflowStub primaryStub = mock(WorkflowStub.class);
+    WorkflowStub positionStub = mock(WorkflowStub.class);
+    // resolveWorkflowId reconstructs the copytrade signal wf id for this row.
+    when(workflowClient.newUntypedWorkflowStub("t-dev/s-copytrade-v1/sig/sig-42"))
+        .thenReturn(primaryStub);
+    when(workflowClient.newUntypedWorkflowStub(positionId)).thenReturn(positionStub);
+    doThrow(
+            new WorkflowNotFoundException(
+                WorkflowExecution.newBuilder()
+                    .setWorkflowId("t-dev/s-copytrade-v1/sig/sig-42")
+                    .build(),
+                "CopytradeSignalWorkflow",
+                null))
+        .when(primaryStub)
+        .signal(eq("onFill"), any());
+
+    dispatcher.dispatch(
+        new BrokerFillEvent(
+            "brk-42r",
+            "ck-42r",
+            5L,
+            new BigDecimal("0.84"),
+            OffsetDateTime.parse("2026-05-19T17:08:11Z"),
+            BrokerFillEvent.Source.WS));
+
+    verify(positionStub).signal(eq("onFill"), any());
+  }
+
+  /**
+   * #819: an EXIT fill's WorkflowNotFound keeps today's benign-drop behavior — exit fills already
+   * route to the position workflow by intent-key prefix, so a reroute would signal the SAME gone
+   * workflow (or worse, a wrongly-derived one).
+   */
+  @Test
+  void dispatch_exitIntentWorkflowNotFound_neverReroutes() {
+    JournaledOrder exitRow =
+        new JournaledOrder(
+            STC_POSITION_WF_ID + ":exit:sig-77",
+            "sig-77",
+            "dev",
+            "copytrade-v1",
+            "alpaca-paper",
+            "ck-77",
+            "SPY   260519C00737000",
+            "SELL",
+            5L,
+            new BigDecimal("0.84"),
+            OrderState.SUBMITTED,
+            "brk-77",
+            OffsetDateTime.parse("2026-05-19T17:08:00Z"),
+            OffsetDateTime.parse("2026-05-19T17:08:01Z"),
+            OffsetDateTime.parse("2026-05-19T17:08:01Z"),
+            null,
+            null,
+            null,
+            null,
+            null,
+            1L);
+    when(journal.findByBrokerOrderId("brk-77")).thenReturn(Optional.of(exitRow));
+    when(journal.markFilled(anyString(), anyLong(), any(), any())).thenReturn(true);
+    WorkflowStub exitStub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(STC_POSITION_WF_ID)).thenReturn(exitStub);
+    WorkflowExecution exec =
+        WorkflowExecution.newBuilder().setWorkflowId(STC_POSITION_WF_ID).build();
+    doThrow(new WorkflowNotFoundException(exec, "PositionWorkflow", null))
+        .when(exitStub)
+        .signal(eq("onFill"), any());
+
+    dispatcher.dispatch(
+        new BrokerFillEvent(
+            "brk-77",
+            "ck-77",
+            5L,
+            new BigDecimal("0.84"),
+            OffsetDateTime.parse("2026-05-19T17:08:11Z"),
+            BrokerFillEvent.Source.WS));
+
+    // Only the primary target was ever resolved — no reroute stub lookup happened.
+    verify(workflowClient, times(1)).newUntypedWorkflowStub(anyString());
+  }
+
+  /**
+   * Falsify finding 1: a non-NOT_FOUND Temporal failure MID-REROUTE must propagate AND be counted
+   * via signal_errors, exactly like the primary signal path — the uncounted-escape regression this
+   * pins was fixed once and had no test.
+   */
+  @Test
+  void dispatch_rerouteThrowsNonNotFound_propagatesAndCounts() {
+    when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(COPYTRADE_ENTRY_ROW));
+    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any()))
+        .thenReturn(true);
+    String parentId = "t-dev/s-copytrade-v1/sig/sig-42";
+    String positionId =
+        com.ohmytradeagent.contract.identity.WorkflowIds.position(
+            "dev", "copytrade-v1", "SPY   260519C00737000", "sig-42");
+    WorkflowStub parentStub = mock(WorkflowStub.class);
+    WorkflowStub positionStub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(parentId)).thenReturn(parentStub);
+    when(workflowClient.newUntypedWorkflowStub(positionId)).thenReturn(positionStub);
+    doThrow(
+            new WorkflowNotFoundException(
+                WorkflowExecution.newBuilder().setWorkflowId(parentId).build(),
+                "CopytradeSignalWorkflow",
+                null))
+        .when(parentStub)
+        .signal(eq("onFill"), any());
+    doThrow(new IllegalStateException("temporal unavailable"))
+        .when(positionStub)
+        .signal(eq("onFill"), any());
+
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> dispatcher.dispatch(FILL))
+        .isInstanceOf(IllegalStateException.class);
+    assertThat(registry.counter("fill_listener.signal_errors").count()).isEqualTo(1.0);
+  }
+
+  /**
+   * Falsify finding 4: pins the exit-marker guard's PRECEDENCE — a pathological key containing BOTH
+   * markers must be treated as an exit (no reroute). No real key has this shape (traced), but
+   * without the pin the guard reads as dead code and invites deletion.
+   */
+  @Test
+  void dispatch_keyWithBothMarkers_treatedAsExit_neverReroutes() {
+    String bothKey = STC_POSITION_WF_ID + ":exit:sig-x:entry";
+    JournaledOrder bothRow =
+        new JournaledOrder(
+            bothKey,
+            "sig-x",
+            "dev",
+            "copytrade-v1",
+            "alpaca-paper",
+            "ck-x",
+            "SPY   260519C00737000",
+            "SELL",
+            5L,
+            new BigDecimal("0.84"),
+            OrderState.SUBMITTED,
+            "brk-x",
+            OffsetDateTime.parse("2026-05-19T17:08:00Z"),
+            OffsetDateTime.parse("2026-05-19T17:08:01Z"),
+            OffsetDateTime.parse("2026-05-19T17:08:01Z"),
+            null,
+            null,
+            null,
+            null,
+            null,
+            1L);
+    when(journal.findByBrokerOrderId("brk-x")).thenReturn(Optional.of(bothRow));
+    when(journal.markFilled(anyString(), anyLong(), any(), any())).thenReturn(true);
+    WorkflowStub primaryStub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(STC_POSITION_WF_ID)).thenReturn(primaryStub);
+    doThrow(
+            new WorkflowNotFoundException(
+                WorkflowExecution.newBuilder().setWorkflowId(STC_POSITION_WF_ID).build(),
+                "PositionWorkflow",
+                null))
+        .when(primaryStub)
+        .signal(eq("onFill"), any());
+
+    dispatcher.dispatch(
+        new BrokerFillEvent(
+            "brk-x",
+            "ck-x",
+            5L,
+            new BigDecimal("0.84"),
+            OffsetDateTime.parse("2026-05-19T17:08:11Z"),
+            BrokerFillEvent.Source.WS));
+
+    verify(workflowClient, times(1)).newUntypedWorkflowStub(anyString());
+  }
+
+  /** #819: reroute target ALSO gone — falls through to today's benign log, nothing propagates. */
+  @Test
+  void dispatch_entryStragglerDoubleNotFound_staysBenign() {
+    when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(COPYTRADE_ENTRY_ROW));
+    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any()))
+        .thenReturn(true);
+    String parentId = "t-dev/s-copytrade-v1/sig/sig-42";
+    String positionId =
+        com.ohmytradeagent.contract.identity.WorkflowIds.position(
+            "dev", "copytrade-v1", "SPY   260519C00737000", "sig-42");
+    WorkflowStub parentStub = mock(WorkflowStub.class);
+    WorkflowStub positionStub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(parentId)).thenReturn(parentStub);
+    when(workflowClient.newUntypedWorkflowStub(positionId)).thenReturn(positionStub);
+    doThrow(
+            new WorkflowNotFoundException(
+                WorkflowExecution.newBuilder().setWorkflowId(parentId).build(),
+                "CopytradeSignalWorkflow",
+                null))
+        .when(parentStub)
+        .signal(eq("onFill"), any());
+    doThrow(
+            new WorkflowNotFoundException(
+                WorkflowExecution.newBuilder().setWorkflowId(positionId).build(),
+                "PositionWorkflow",
+                null))
+        .when(positionStub)
+        .signal(eq("onFill"), any());
+
+    dispatcher.dispatch(FILL); // must not throw
+
+    verify(positionStub).signal(eq("onFill"), any());
+  }
+
   @Test
   void dispatch_workflowAlreadyCompleted_swallowsException_butJournalStillTerminalized() {
     // #244: the strand fix. Even when the onFill signal target has already completed

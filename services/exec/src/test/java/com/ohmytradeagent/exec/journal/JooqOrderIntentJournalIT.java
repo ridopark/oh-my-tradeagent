@@ -220,9 +220,48 @@ class JooqOrderIntentJournalIT {
   }
 
   @Test
+  void markCancelledWithFill_onFilledRow_noOp_neverDemotes() {
+    // #819 audit blocker 2: if the WS/poller terminalized the row FILLED between the cancel
+    // attempt and the cancel-path write, the guarded writer must NOT demote FILLED -> CANCELLED
+    // nor rewrite the fill columns with the cancel-path read.
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "stub-intent-A");
+    journal.markFilled(
+        "intent-A", 21L, new BigDecimal("2.79"), OffsetDateTime.parse("2026-08-25T17:59:00Z"));
+
+    journal.markCancelledWithFill(
+        "intent-A", 2L, new BigDecimal("2.805"), OffsetDateTime.parse("2026-08-25T17:59:05Z"));
+
+    JournaledOrder after = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(after.state()).isEqualTo(OrderState.FILLED);
+    assertThat(after.filledQty()).isEqualTo(21L);
+    assertThat(after.avgFillPrice()).isEqualByComparingTo(new BigDecimal("2.79"));
+  }
+
+  @Test
+  void markCancelledWithFill_onSubmitted_writesFillWithCancelledAtomically() {
+    // filledAt is NULL deliberately — the ONLY shape the partial-tolerant Alpaca snapshot emits
+    // for a partial cancel (Alpaca sets filled_at only on complete fills). This IT is the one
+    // place the real production write shape meets Postgres (falsify-review finding 2: the unit
+    // layer and this IT previously tested contradictory assumptions).
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "stub-intent-A");
+
+    journal.markCancelledWithFill("intent-A", 2L, new BigDecimal("2.805"), null);
+
+    JournaledOrder after = journal.findByIntentKey("intent-A").orElseThrow();
+    assertThat(after.state()).isEqualTo(OrderState.CANCELLED);
+    assertThat(after.filledQty()).isEqualTo(2L);
+    assertThat(after.avgFillPrice()).isEqualByComparingTo(new BigDecimal("2.805"));
+    assertThat(after.filledAt()).isNull();
+  }
+
+  @Test
   void markFilled_onTerminalState_noOp() {
     // Issue #165: a repeat call on a row already in a terminal state must be a no-op
-    // (returns false) — the journal already reflects the final outcome.
+    // (returns false) — the journal already reflects the final outcome. (#819 adds
+    // markCancelledWithFill for partial-fill cancels; markFilled's guard is unchanged and this
+    // row, cancelled via the PLAIN path, still carries null fill fields.)
     journal.upsertIntent(intent("intent-A"));
     journal.markSubmittedIfRecorded("intent-A", "stub-intent-A");
     journal.markCancelled("intent-A");

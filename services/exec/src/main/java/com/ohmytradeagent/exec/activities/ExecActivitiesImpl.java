@@ -217,7 +217,38 @@ public class ExecActivitiesImpl implements ExecActivities {
     journal.markCancelAttempted(intentKey);
     CancelResponse cancel = broker.cancelOrder(row.brokerOrderId());
     switch (cancel.outcome()) {
-      case CANCELLED -> journal.markCancelled(intentKey);
+      case CANCELLED -> {
+        // #819: a cancelled order may have PARTIALLY — or, in the stale-cancel-response race,
+        // FULLY — filled first. Pull broker truth (the ALREADY_FILLED branch's proven read; works
+        // post-cancel) and route by quantity: a FULL fill reconciles to FILLED exactly like
+        // ALREADY_FILLED (audit blocker: writing a full fill as CANCELLED would hide the lot from
+        // every state==FILLED adoption path AND from recon's FILLED-only anchor — an invisible
+        // orphan); a genuine partial persists ATOMICALLY with the CANCELLED transition. Zero fill
+        // is byte-identical to the old plain markCancelled. Best-effort: a fill-detail failure
+        // degrades to plain markCancelled — a cancel must never fail because a fill-read did.
+        // (Alpaca returns null fill fields on a zero-fill cancel, so getFillDetail routinely
+        // throws there — logged at debug, not warn, to keep the hot TTL-cancel path quiet.)
+        BrokerFillDetail detail = null;
+        try {
+          detail = broker.getPartialFillSnapshot(row.brokerOrderId());
+        } catch (RuntimeException e) {
+          log.warn(
+              "cancelOrder: partial fill snapshot failed after cancel intent_key={}"
+                  + " broker_order_id={} err={} — recording plain CANCELLED",
+              intentKey,
+              row.brokerOrderId(),
+              e.getMessage());
+        }
+        if (detail != null && detail.filledQty() >= row.qty()) {
+          journal.markFilled(
+              intentKey, detail.filledQty(), detail.avgFillPrice(), detail.filledAt());
+        } else if (detail != null && detail.filledQty() > 0) {
+          journal.markCancelledWithFill(
+              intentKey, detail.filledQty(), detail.avgFillPrice(), detail.filledAt());
+        } else {
+          journal.markCancelled(intentKey);
+        }
+      }
       case FAILED -> journal.markCancelFailed(intentKey, cancel.brokerReason());
       case ALREADY_FILLED -> {
         // Issue #165: the broker filled the order while the cancel was in flight. Pull the
