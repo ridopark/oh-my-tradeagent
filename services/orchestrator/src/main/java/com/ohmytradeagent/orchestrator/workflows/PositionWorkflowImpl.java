@@ -6,6 +6,8 @@ import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CarriedExitBookedEntry;
 import com.ohmytradeagent.contract.CarriedRetryAttemptEntry;
+import com.ohmytradeagent.contract.CorrectBookedLotRequest;
+import com.ohmytradeagent.contract.CorrectBookedLotResult;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
@@ -70,6 +72,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * — realized P&L's entry basis stays the parent's {@code EntryFilled} rows.
    */
   private static final String KIND_POSITION_ENTRY_INCREASED = "PositionEntryIncreased";
+
+  // #820: an operator raised an under-booked entry lot to the journal's FILLED truth. PAGES (a
+  // manual real-money qty correction must be visible); allowlisted in OrderFailureAlerter +
+  // application.yml + the mirror test — the half-wired-kind lesson both #817 reviewers caught.
+  private static final String KIND_POSITION_LOT_CORRECTED = "PositionLotCorrected";
 
   private static final String KIND_PARTIAL_EXIT_REQUESTED = "PartialExitRequested";
   private static final String KIND_PARTIAL_EXIT_FILLED = "PartialExitFilled";
@@ -2815,6 +2822,165 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   }
 
   @Override
+  public void correctBookedLotValidator(CorrectBookedLotRequest request) {
+    // Validator rejections never enter history — cheapest refusal (armTrailValidator precedent).
+    // Only synchronous shape checks here; every state-dependent refusal lives in the handler so
+    // it is REPORTED as a typed outcome instead of a bare exception.
+    if (request == null || request.getOperatorId() == null || request.getOperatorId().isBlank()) {
+      throw new IllegalArgumentException("operator_id is required");
+    }
+    if (request.getReason() == null || request.getReason().isBlank()) {
+      throw new IllegalArgumentException("reason is required");
+    }
+    if (request.getQty() == null || request.getQty() <= 0L) {
+      throw new IllegalArgumentException("qty must be a positive total entry quantity");
+    }
+  }
+
+  @Override
+  public CorrectBookedLotResult correctBookedLot(CorrectBookedLotRequest request) {
+    // New Update — no recorded history contains it, so no version gate (arm_trail precedent).
+    // Same #799/#811 init-race guard as every operator entry point.
+    Workflow.await(() -> input != null && initGatesResolved);
+
+    long qty = request.getQty();
+    if (entryGrowthVersion < 1
+        || !positionConfirmed
+        || remainingQty <= 0
+        || closeReason != null
+        || eodFired
+        || expiryFired
+        || expiryLeadFired) {
+      return correctionRejected(
+          CorrectBookedLotResult.Outcome.REJECTED_NOT_CORRECTABLE,
+          "position is not in a correctable state (confirmed="
+              + positionConfirmed
+              + " remaining="
+              + remainingQty
+              + " closeReason="
+              + closeReason
+              + " growthVersion="
+              + entryGrowthVersion
+              + ")");
+    }
+    if (exitInFlight) {
+      // The resting exit was sized on the PRE-correction qty; correcting under it silently leaves
+      // the delta open when it fills. Retry after the exit terminalizes.
+      return correctionRejected(
+          CorrectBookedLotResult.Outcome.REJECTED_EXIT_IN_FLIGHT,
+          "an exit order is in flight; retry after it terminalizes");
+    }
+    if (trailingArmed) {
+      // The armed trail's stop/floor basis was resolved at arm time on the old lot; armTrail is
+      // deliberately idempotent and will not re-anchor. Runbook order: disarm, correct, re-arm.
+      return correctionRejected(
+          CorrectBookedLotResult.Outcome.REJECTED_TRAIL_ARMED,
+          "a trailing stop is armed and its basis will not re-anchor; no disarm lever exists yet"
+              + " (#825) — close via the trail or correct before arming");
+    }
+    if (qty <= entryBookedQty) {
+      return correctionRejected(
+          CorrectBookedLotResult.Outcome.REJECTED_QTY_NOT_ABOVE_BOOKED,
+          "requested total " + qty + " is not above the booked " + entryBookedQty);
+    }
+
+    // Journal cross-check: the operator's number must be CONFIRMED by the exec journal's entry
+    // row. Fail closed on anything else — including the re-pegged-entry case, where the :entry
+    // row is CANCELLED and the order of record is :entry:repeg-1 (never trust the typed number).
+    String entryIntentKey = input.getSourceSignalWorkflowId() + ":entry";
+    OrderIntentResult row = null;
+    try {
+      row = exec.getOrderStatus(entryIntentKey);
+    } catch (RuntimeException e) {
+      // fall through to the mismatch rejection with a null row
+    }
+    if (row == null
+        || row.getState() != OrderIntentResult.State.FILLED
+        || row.getFilledQty() == null
+        || row.getFilledQty() < qty) {
+      return correctionRejected(
+          CorrectBookedLotResult.Outcome.REJECTED_JOURNAL_MISMATCH,
+          "journal row "
+              + entryIntentKey
+              + " does not confirm qty "
+              + qty
+              + " (state="
+              + (row == null ? "unavailable" : row.getState())
+              + " filled_qty="
+              + (row == null ? null : row.getFilledQty())
+              + ")");
+    }
+
+    // Review finding 4: the getOrderStatus Activity SUSPENDED this handler — the main loop may
+    // have latched a close/exit/EOD in that window. Re-check the volatile guards before mutating.
+    if (remainingQty <= 0 || closeReason != null || eodFired || expiryFired || expiryLeadFired) {
+      return correctionRejected(
+          CorrectBookedLotResult.Outcome.REJECTED_NOT_CORRECTABLE,
+          "position state changed while verifying the journal; re-query and retry");
+    }
+    if (exitInFlight) {
+      return correctionRejected(
+          CorrectBookedLotResult.Outcome.REJECTED_EXIT_IN_FLIGHT,
+          "an exit order started while verifying the journal; retry after it terminalizes");
+    }
+    if (trailingArmed) {
+      return correctionRejected(
+          CorrectBookedLotResult.Outcome.REJECTED_TRAIL_ARMED,
+          "a trail armed while verifying the journal; its basis anchors the pre-correction lot");
+    }
+    long bookedBefore = entryBookedQty;
+    long remainingBefore = remainingQty;
+    BigDecimal priceBefore = entryFillPrice;
+    if (expectedQty < qty) {
+      expectedQty = qty;
+    }
+    // The #738 arithmetic books the delta and moves entryFillPrice to the journal's cumulative
+    // average — the avg price comes from the SAME confirmed row, never from operator input.
+    bookEntryGrowth(
+        new FillSignalPayload()
+            .withBrokerOrderId(entryBrokerOrderId)
+            .withFilledQty(qty)
+            .withAvgFillPrice(row.getAvgFillPrice())
+            .withFilledAt(workflowNow()));
+    Map<String, Object> subj = new LinkedHashMap<>();
+    subj.put("contract_symbol", input.getContractSymbol());
+    subj.put("entry_signal_id", input.getEntrySignalId());
+    subj.put("broker_order_id", entryBrokerOrderId);
+    subj.put("operator_id", request.getOperatorId());
+    subj.put("reason", request.getReason());
+    subj.put("actor", "operator:" + request.getOperatorId());
+    subj.put("qty_before", bookedBefore);
+    subj.put("qty_after", entryBookedQty);
+    subj.put("qty_added", entryBookedQty - bookedBefore);
+    subj.put("remaining_qty_before", remainingBefore);
+    subj.put("remaining_qty_after", remainingQty);
+    subj.put("expected_qty_after", expectedQty);
+    subj.put("journal_filled_qty", row.getFilledQty());
+    subj.put("avg_price_before", priceBefore);
+    subj.put("avg_price_after", entryFillPrice);
+    subj.put("partial_exited", partialExited);
+    auditLog(KIND_POSITION_LOT_CORRECTED, subj);
+
+    CorrectBookedLotResult applied = new CorrectBookedLotResult();
+    applied.setSchemaVersion(1L);
+    applied.setOutcome(CorrectBookedLotResult.Outcome.APPLIED);
+    applied.setBookedQty(entryBookedQty);
+    applied.setRemainingQty(remainingQty);
+    applied.setDetail(
+        "booked " + (entryBookedQty - bookedBefore) + " additional contracts from journal truth");
+    return applied;
+  }
+
+  private static CorrectBookedLotResult correctionRejected(
+      CorrectBookedLotResult.Outcome outcome, String detail) {
+    CorrectBookedLotResult r = new CorrectBookedLotResult();
+    r.setSchemaVersion(1L);
+    r.setOutcome(outcome);
+    r.setDetail(detail);
+    return r;
+  }
+
+  @Override
   public void armTrailValidator(ArmTrailRequest request) {
     // Validator rejections never enter history — the cheapest possible refusal, and it keeps a
     // malformed operator request from costing a workflow task.
@@ -4723,6 +4889,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             "entry_signal_id",
             input.getEntrySignalId(),
             "contract_symbol",
+            input.getContractSymbol(),
+            // #820: the realized-P&L FIFO keys entry basis on option_symbol (same padded OCC).
+            "option_symbol",
             input.getContractSymbol(),
             "qty_added",
             growth,

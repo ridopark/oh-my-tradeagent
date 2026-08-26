@@ -767,6 +767,39 @@ class OrderFailureAlerterTest {
     verify(webhook).postEmbedToUrl(any(), any());
   }
 
+  @Test
+  void positionLotCorrectedShipsInImageDefaultAndApplicationYml_820() throws Exception {
+    // Same half-wired-kind lesson as #817: application.yml DEFINES the allowlist property, so a
+    // kind only in the constant ships dark.
+    assertThat(OrderFailureAlerter.DEFAULT_FAILURE_KINDS).contains("PositionLotCorrected");
+    String appYml =
+        new String(
+            OrderFailureAlerterTest.class.getResourceAsStream("/application.yml").readAllBytes(),
+            java.nio.charset.StandardCharsets.UTF_8);
+    assertThat(appYml)
+        .as("application.yml alert.discord.failure-kinds must mirror PositionLotCorrected")
+        .contains("PositionLotCorrected");
+  }
+
+  @Test
+  void positionLotCorrected_rendersYellowEmbed_nullSafe() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
+    Map<String, Object> subject = new java.util.LinkedHashMap<>();
+    subject.put("contract_symbol", "SMCI  261120C00050000");
+    subject.put("qty_before", 2L);
+    subject.put("qty_after", 21L);
+    alerter.onAuditEvent(event("PositionLotCorrected", "pos-wf-1", subject));
+    org.mockito.ArgumentCaptor<WebhookEmbed> cap =
+        org.mockito.ArgumentCaptor.forClass(WebhookEmbed.class);
+    verify(webhook).postEmbedToUrl(any(), cap.capture());
+    assertThat(cap.getValue().color()).isEqualTo(AlertColors.YELLOW);
+    assertThat(cap.getValue().title()).contains("2").contains("21");
+    // And the all-keys-absent render must survive (a throw silently loses the page).
+    alerter.onAuditEvent(event("PositionLotCorrected", null, new java.util.LinkedHashMap<>()));
+  }
+
   // ---- Issue #779: floor-breach alert paging ----
 
   @Test

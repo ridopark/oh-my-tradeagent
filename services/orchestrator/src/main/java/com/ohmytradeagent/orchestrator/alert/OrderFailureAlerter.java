@@ -137,7 +137,7 @@ public class OrderFailureAlerter {
       "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
           + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,"
           + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted,"
-          + "PositionPartialCoverage";
+          + "PositionPartialCoverage,PositionLotCorrected";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -176,6 +176,11 @@ public class OrderFailureAlerter {
   // shape (option_symbol / broker_qty / covered_qty / uncovered_qty) has its own YELLOW embed:
   // the lot has an owner and needs qty correction, not the RED no-owner orphan framing.
   private static final String PARTIAL_COVERAGE_KIND = "PositionPartialCoverage";
+
+  // #820: operator lot correction — YELLOW, informational-but-must-be-visible (a manual
+  // real-money qty change). Subject shape (contract_symbol / qty_before / qty_after / operator)
+  // gets its own small embed.
+  private static final String LOT_CORRECTED_KIND = "PositionLotCorrected";
 
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
@@ -248,6 +253,8 @@ public class OrderFailureAlerter {
         embed = buildFloorBreachEmbed(event);
       } else if (PARTIAL_COVERAGE_KIND.equals(event.getKind())) {
         embed = buildPartialCoverageEmbed(event);
+      } else if (LOT_CORRECTED_KIND.equals(event.getKind())) {
+        embed = buildLotCorrectedEmbed(event);
       } else {
         embed = buildEmbed(event);
       }
@@ -296,6 +303,39 @@ public class OrderFailureAlerter {
     fields.add(new WebhookEmbed.Field("signal_id", subjectStr(subject, "signal_id"), false));
 
     return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
+
+  /**
+   * #820: the lot-correction page. YELLOW; every key null-safe (a throwing render is swallowed
+   * upstream and would silently lose the page).
+   */
+  private WebhookEmbed buildLotCorrectedEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    String symbolRaw = rawSubject(subject, "contract_symbol");
+    String before = subjectStr(subject, "qty_before");
+    String after = subjectStr(subject, "qty_after");
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("symbol", YahooOptionLink.markdown(symbolRaw), false));
+    fields.add(new WebhookEmbed.Field("qty_before", before, false));
+    fields.add(new WebhookEmbed.Field("qty_after", after, false));
+    fields.add(
+        new WebhookEmbed.Field(
+            "journal_filled_qty", subjectStr(subject, "journal_filled_qty"), false));
+    fields.add(new WebhookEmbed.Field("operator", subjectStr(subject, "operator_id"), false));
+    fields.add(new WebhookEmbed.Field("reason", subjectStr(subject, "reason"), false));
+    fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
+    return new WebhookEmbed(
+        ":large_yellow_circle: Position lot corrected — "
+            + orNa(symbolRaw)
+            + " "
+            + before
+            + " -> "
+            + after,
+        "An operator raised an under-booked entry lot to the exec journal's FILLED truth (#820)."
+            + " Exits, trails and the account cap now see the full lot.",
+        AlertColors.YELLOW,
+        "workflow_id: " + orNa(event.getWorkflowId()),
+        fields);
   }
 
   /**

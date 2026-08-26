@@ -86,6 +86,38 @@ class DailyPnlActivitiesImplIT {
   }
 
   @Test
+  void computeRealizedPnl_grownLot_carriesBasisForTheDelta_issue820() {
+    // #820 goal-review finding 1, on the live incident numbers: EntryFilled books only the first
+    // slice (2 @ 2.805); the growth/correction row carries the other 19 at the journal's
+    // cumulative 2.79. Exiting all 21 @ 2.90 must realize against BOTH bases:
+    //   2*(2.90-2.805) + 19*(2.90-2.79) = 0.19 + 2.09 = 2.28 -> * 100 = +228.
+    // Pre-fix, the 19 residual contracts were credited RAW PROCEEDS (19*2.90*100 = +5510 on top
+    // of the matched 2) — phantom profit in the very ledger the daily-loss breaker reads.
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "EntryFilled",
+        "2026-08-25T17:58:30Z",
+        "{\"avg_fill_price\":\"2.805\",\"filled_qty\":2,\"option_symbol\":\"SMCI  261120C00050000\"}");
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PositionEntryIncreased",
+        "2026-08-26T14:00:00Z",
+        "{\"avg_fill_price\":\"2.79\",\"qty_added\":19,\"option_symbol\":\"SMCI  261120C00050000\"}");
+    insertAudit(
+        "dev",
+        "copytrade-v1",
+        "PartialExitFilled",
+        "2026-08-26T17:30:00Z",
+        "{\"avg_fill_price\":\"2.90\",\"qty_filled\":21,\"option_symbol\":\"SMCI  261120C00050000\"}");
+
+    BigDecimal pnl = svc.computeRealizedPnl("dev", "copytrade-v1", LocalDate.of(2026, 8, 26));
+
+    assertThat(pnl).isEqualByComparingTo("228.00");
+  }
+
+  @Test
   void computeRealizedPnl_entryWithNoExit_excludesOpenDebit_issue273() {
     // Issue #273 regression: the 2026-05-28 fixture — two BTO entries, ZERO exits.
     // CRWV 12 @ 2.86 (= 12 * 2.86 * 100 = 3432 entry cost) and
