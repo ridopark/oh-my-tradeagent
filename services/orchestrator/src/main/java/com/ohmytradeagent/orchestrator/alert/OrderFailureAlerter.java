@@ -136,7 +136,8 @@ public class OrderFailureAlerter {
   static final String DEFAULT_FAILURE_KINDS =
       "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
           + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,"
-          + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted";
+          + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted,"
+          + "PositionPartialCoverage";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -169,6 +170,12 @@ public class OrderFailureAlerter {
   // threshold / entry_at / dte) differs from both the BTO/STC order-failure shape and the flatten
   // shape, so it renders via its own buildFloorBreachEmbed (the subject-shape-split precedent).
   private static final String FLOOR_BREACH_KIND = "FloorBreachAlerted";
+
+  // #817: partial sibling coverage — a running PositionWorkflow owns PART of the broker lot
+  // (2026-08-25: booked 2 of a 21-lot fill; the surplus rides with no stop/trim/trail). Subject
+  // shape (option_symbol / broker_qty / covered_qty / uncovered_qty) has its own YELLOW embed:
+  // the lot has an owner and needs qty correction, not the RED no-owner orphan framing.
+  private static final String PARTIAL_COVERAGE_KIND = "PositionPartialCoverage";
 
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
@@ -239,6 +246,8 @@ public class OrderFailureAlerter {
         embed = buildFlattenEmbed(event);
       } else if (FLOOR_BREACH_KIND.equals(event.getKind())) {
         embed = buildFloorBreachEmbed(event);
+      } else if (PARTIAL_COVERAGE_KIND.equals(event.getKind())) {
+        embed = buildPartialCoverageEmbed(event);
       } else {
         embed = buildEmbed(event);
       }
@@ -287,6 +296,45 @@ public class OrderFailureAlerter {
     fields.add(new WebhookEmbed.Field("signal_id", subjectStr(subject, "signal_id"), false));
 
     return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
+
+  /**
+   * #817: the partial-coverage page. YELLOW — the lot HAS a running owner, but the owner's booked
+   * qty does not cover the broker lot, so the uncovered contracts have no stop/trim/trail and an
+   * author exit will under-sell. Every key null-safe (a throwing render is swallowed upstream and
+   * would silently lose the page).
+   */
+  private WebhookEmbed buildPartialCoverageEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    String symbolRaw = rawSubject(subject, "option_symbol");
+    String brokerQty = subjectStr(subject, "broker_qty");
+    String coveredQty = subjectStr(subject, "covered_qty");
+    String uncoveredQty = subjectStr(subject, "uncovered_qty");
+
+    String title =
+        ":large_yellow_circle: Partial position coverage — broker holds "
+            + brokerQty
+            + " "
+            + orNa(symbolRaw)
+            + ", workflows track only "
+            + coveredQty;
+
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("kind", String.valueOf(event.getKind()), false));
+    fields.add(new WebhookEmbed.Field("symbol", YahooOptionLink.markdown(symbolRaw), false));
+    fields.add(new WebhookEmbed.Field("broker_qty", brokerQty, false));
+    fields.add(new WebhookEmbed.Field("covered_qty", coveredQty, false));
+    fields.add(new WebhookEmbed.Field("uncovered_qty", uncoveredQty, false));
+    fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
+    fields.add(new WebhookEmbed.Field("strategy_id", orNa(event.getStrategyId()), false));
+    return new WebhookEmbed(
+        title,
+        "The uncovered contracts have NO stop/trim/trail and an author exit will UNDER-SELL —"
+            + " correct the owning workflow's lot (issue #820) or manage the surplus manually in"
+            + " Alpaca.",
+        AlertColors.YELLOW,
+        "workflow_id: " + orNa(event.getWorkflowId()),
+        fields);
   }
 
   /**

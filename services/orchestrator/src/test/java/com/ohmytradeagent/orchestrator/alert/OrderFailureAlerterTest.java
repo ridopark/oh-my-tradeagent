@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.alert;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -706,6 +707,64 @@ class OrderFailureAlerterTest {
     assertThat(appYml)
         .as("application.yml alert.discord.failure-kinds default must mirror EntryWorkflowFailed")
         .contains("EntryWorkflowFailed");
+  }
+
+  // ---- Issue #817: partial-coverage paging ----
+
+  @Test
+  void positionPartialCoverageShipsInImageDefaultAndApplicationYml_817() throws Exception {
+    // The page must ship via the IMAGE default (DEFAULT_FAILURE_KINDS + application.yml), NOT via
+    // ALERT_DISCORD_FAILURE_KINDS env — application.yml DEFINES the property, so the @Value inline
+    // default is shadowed in prod; a kind added only to the constant ships dark (both #817
+    // reviewers independently caught exactly that on the first cut of this branch).
+    assertThat(OrderFailureAlerter.DEFAULT_FAILURE_KINDS).contains("PositionPartialCoverage");
+
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
+    assertThat(alerter.failureKinds()).contains("PositionPartialCoverage");
+
+    String appYml =
+        new String(
+            OrderFailureAlerterTest.class.getResourceAsStream("/application.yml").readAllBytes(),
+            java.nio.charset.StandardCharsets.UTF_8);
+    assertThat(appYml)
+        .as("application.yml alert.discord.failure-kinds must mirror PositionPartialCoverage")
+        .contains("PositionPartialCoverage");
+  }
+
+  @Test
+  void positionPartialCoverage_rendersYellowOwnerAwareEmbed() {
+    // A render that throws is swallowed by onAuditEvent and silently LOSES the page — pin the
+    // embed shape (every other custom builder is pinned; review finding S4).
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
+
+    Map<String, Object> subject = new java.util.LinkedHashMap<>();
+    subject.put("option_symbol", "SMCI  261120C00050000");
+    subject.put("broker_qty", 26L);
+    subject.put("covered_qty", 7L);
+    subject.put("uncovered_qty", 19L);
+    alerter.onAuditEvent(event("PositionPartialCoverage", "recon-wf-1", subject));
+
+    org.mockito.ArgumentCaptor<WebhookEmbed> cap =
+        org.mockito.ArgumentCaptor.forClass(WebhookEmbed.class);
+    verify(webhook).postEmbedToUrl(any(), cap.capture());
+    WebhookEmbed embed = cap.getValue();
+    assertThat(embed.color()).isEqualTo(AlertColors.YELLOW);
+    assertThat(embed.title()).contains("26").contains("7").contains("SMCI");
+    assertThat(embed.description()).contains("UNDER-SELL");
+  }
+
+  @Test
+  void positionPartialCoverage_nullSafeRender_neverThrows() {
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
+    // Every subject key absent — the render must survive (a throw is swallowed and loses pages).
+    alerter.onAuditEvent(event("PositionPartialCoverage", null, new java.util.LinkedHashMap<>()));
+    verify(webhook).postEmbedToUrl(any(), any());
   }
 
   // ---- Issue #779: floor-breach alert paging ----

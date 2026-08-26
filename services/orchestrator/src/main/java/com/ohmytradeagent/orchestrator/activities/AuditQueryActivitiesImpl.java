@@ -150,6 +150,37 @@ public class AuditQueryActivitiesImpl implements AuditQueryActivities {
   }
 
   @Override
+  public long countPriorByKind(
+      String tenantId, String strategyId, String optionSymbol, String kind, OffsetDateTime since) {
+    if (dsl == null) {
+      return 0L;
+    }
+    try {
+      Record r =
+          dsl.fetchOne(
+              "SELECT COUNT(*) FROM audit_log "
+                  + "WHERE tenant_id = ? AND strategy_id = ? AND kind = ? "
+                  + "AND occurred_at >= ? "
+                  + "AND subject ->> 'option_symbol' = ?",
+              tenantId,
+              strategyId,
+              kind,
+              Timestamp.from(since.toInstant()),
+              optionSymbol);
+      return r == null ? 0L : r.get(0, Long.class);
+    } catch (RuntimeException e) {
+      log.warn(
+          "countPriorByKind failed tenant={} strategy={} occ={} kind={}; returning 0",
+          tenantId,
+          strategyId,
+          optionSymbol,
+          kind,
+          e);
+      return 0L;
+    }
+  }
+
+  @Override
   public long countPriorPositionOrphanOngoing(
       String tenantId,
       String strategyId,

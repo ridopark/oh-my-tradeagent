@@ -439,6 +439,10 @@ public final class AuditEventKinds {
           // OrderFailureAlerter's DEFAULT_FAILURE_KINDS, so it does not page Discord. Placed in
           // ALL_KINDS only, not in any *_KINDS lifecycle group.
           "PositionOrphanSuppressedSiblingOwner",
+          // #817: partial sibling coverage — a running owner tracks only PART of the broker lot.
+          // Neutral kinds (neither open nor close a lifecycle): the debounce marker + the page.
+          "PositionPartialCoverageObserved",
+          "PositionPartialCoverage",
           // Phase 3 (2026-06-24 remediation): non-paging first-sweep observation marker emitted by
           // ReconciliationWorkflowImpl on the missing branch. The first sweep observing a
           // missing-no-owner position writes this marker instead of paging; the actual

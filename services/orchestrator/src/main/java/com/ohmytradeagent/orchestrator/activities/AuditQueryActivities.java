@@ -77,6 +77,20 @@ public interface AuditQueryActivities {
       String tenantId, String strategyId, String intentKey, OffsetDateTime since);
 
   /**
+   * #817 partial-coverage debounce: prior {@code audit_log} rows of an arbitrary {@code kind} for
+   * this (tenant, strategy, option_symbol) since {@code since}. Generic sibling of the
+   * orphan-specific counters above so new debounced kinds stop needing a bespoke method each.
+   * Fail-open to 0 like the others (a query outage must degrade to "first sweep", never wedge
+   * recon).
+   */
+  long countPriorByKind(
+      String tenantId,
+      String strategyId,
+      String optionSymbol,
+      String kind,
+      java.time.OffsetDateTime since);
+
+  /**
    * Counts prior {@code PositionOrphanOngoing} audit rows for {@code (tenant_id, strategy_id)} with
    * the same debounce key (option_symbol + journal_status) within the window. Used to enforce
    * "escalate once per window": if any {@code PositionOrphanOngoing} row already exists for this
