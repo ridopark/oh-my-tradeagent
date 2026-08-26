@@ -775,6 +775,305 @@ class CopytradeSignalWorkflowImplTest {
     assertThat((String) f.get(null)).isEqualTo("copytrade-entry-getorderstatus-reconcile-v1");
   }
 
+  /**
+   * #818: a SLICED entry (partial slice then terminal cumulative) must book the TERMINAL qty. The
+   * partial (2) does not satisfy the await; the terminal (5, cumulative per Alpaca semantics) does;
+   * EntryFilled carries 5 and the spawned PositionWorkflow books 5 (child registered in this
+   * harness — end-to-end). Pre-#818 the first slice unblocked the await and EntryFilled carried 2 —
+   * the 2026-08-25 live incident shape (sabotage direction).
+   */
+  @Test
+  void handleBto_slicedEntryFills_booksTerminalQty() throws Exception {
+    setupApprovedMocks();
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-SL", "brk-sl"));
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("sliced-bto-1")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, atLeastOnce()).placeOrder(any());
+        break;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+
+    // Two slices, cumulative filled_qty (Alpaca WS semantics): 2 then 5-of-5 (terminal).
+    wf.onFill(
+        new FillSignalPayload()
+            .withBrokerOrderId("brk-sl")
+            .withFilledQty(2L)
+            .withAvgFillPrice(new BigDecimal("0.80"))
+            .withFilledAt(OffsetDateTime.parse("2026-05-24T17:00:00Z")));
+    wf.onFill(
+        new FillSignalPayload()
+            .withBrokerOrderId("brk-sl")
+            .withFilledQty(5L)
+            .withAvgFillPrice(new BigDecimal("0.84"))
+            .withFilledAt(OffsetDateTime.parse("2026-05-24T17:00:02Z")));
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(5L);
+    // The child runs under PARENT_CLOSE_POLICY_ABANDON — its PositionEntered write races the
+    // parent's getResult, so poll rather than assert immediately (full-suite flake otherwise).
+    AuditEvent entered = null;
+    long childDeadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < childDeadline) {
+      try {
+        entered = capture("PositionEntered");
+        break;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+    assertThat(entered).as("child PositionEntered within 5s").isNotNull();
+    assertThat(((Number) entered.getSubject().get("qty")).longValue()).isEqualTo(5L);
+  }
+
+  /**
+   * #818 lost-terminal-event net: only a PARTIAL slice arrives (the terminal WS event is lost —
+   * observed socket-drop bursts do not replay). The await must NOT book the partial; the TTL path's
+   * cancelOrder reconciles broker truth — here the broker reports the order fully FILLED in the
+   * cancel race, so the cancel-on-filled recovery adopts the FULL qty.
+   */
+  @Test
+  void handleBto_partialSliceThenLostTerminal_ttlCancelAdoptsBrokerTruth() throws Exception {
+    setupApprovedMocks();
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-LT", "brk-lt"));
+    OrderIntentResult cancelFilled = new OrderIntentResult();
+    cancelFilled.setSchemaVersion(1L);
+    cancelFilled.setIntentKey("intent-LT");
+    cancelFilled.setBrokerOrderId("brk-lt");
+    cancelFilled.setState(OrderIntentResult.State.FILLED);
+    cancelFilled.setFilledQty(5L);
+    cancelFilled.setAvgFillPrice(new BigDecimal("0.85"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelFilled);
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("lost-terminal-1")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, atLeastOnce()).placeOrder(any());
+        break;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+    wf.onFill(
+        new FillSignalPayload()
+            .withBrokerOrderId("brk-lt")
+            .withFilledQty(2L)
+            .withAvgFillPrice(new BigDecimal("0.80"))
+            .withFilledAt(OffsetDateTime.parse("2026-05-24T17:00:00Z")));
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(5L);
+    assertThat(filled.getSubject()).containsEntry("recovery", "cancel_on_filled");
+  }
+
+  /**
+   * #818: a genuinely partial lot at TTL — cancel returns CANCELLED (remainder cancelled) and the
+   * getOrderStatus recheck also reports no terminal fill. The LOCALLY-held partial (fillEvent) must
+   * be BOOKED (EntryFilled recovery=partial_at_ttl, PositionWorkflow spawned at qty=2) — not
+   * expired to zero booked contracts, which would leave a genuinely-filled lot fully unmanaged
+   * (worse than the pre-#818 under-booking). No EntryExpired is emitted.
+   */
+  @Test
+  void handleBto_partialSliceAtTtl_cancelledRemainder_booksThePartial() throws Exception {
+    setupApprovedMocks();
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-PT", "brk-pt"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-PT", "brk-pt"));
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("partial-ttl-1")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, atLeastOnce()).placeOrder(any());
+        break;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+    wf.onFill(
+        new FillSignalPayload()
+            .withBrokerOrderId("brk-pt")
+            .withFilledQty(2L)
+            .withAvgFillPrice(new BigDecimal("0.80"))
+            .withFilledAt(OffsetDateTime.parse("2026-05-24T17:00:00Z")));
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(filled.getSubject()).containsEntry("recovery", "partial_at_ttl");
+    assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(2L);
+    Mockito.verify(audit, Mockito.never())
+        .log(Mockito.argThat(e -> e != null && "EntryExpired".equals(e.getKind())));
+    AuditEvent entered = null;
+    long childDeadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < childDeadline) {
+      try {
+        entered = capture("PositionEntered");
+        break;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+    assertThat(entered).as("child PositionEntered within 5s").isNotNull();
+    assertThat(((Number) entered.getSubject().get("qty")).longValue()).isEqualTo(2L);
+  }
+
+  /**
+   * #818: a breach arriving MID-SLICES must not discard the partial. The cancel reports no fill
+   * (CANCELLED), so the locally-held partial is booked (EntryFilled recovery=breach_partial_fill,
+   * PositionWorkflow spawned) and THEN the breach abort is recorded for the cancelled remainder —
+   * both events tell the true story. Pre-#818 the branch required fillEvent == null so this was
+   * unreachable; the risk review flagged it as the one changed branch with no test.
+   */
+  @Test
+  void handleBto_breachMidSlices_booksPartialThenRecordsAbort() throws Exception {
+    setupApprovedMocks();
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-BR", "brk-br"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-BR", "brk-br"));
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("breach-partial-1")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, atLeastOnce()).placeOrder(any());
+        break;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+    wf.onFill(
+        new FillSignalPayload()
+            .withBrokerOrderId("brk-br")
+            .withFilledQty(2L)
+            .withAvgFillPrice(new BigDecimal("0.80"))
+            .withFilledAt(OffsetDateTime.parse("2026-05-24T17:00:00Z")));
+    wf.riskBreach(riskBreach("auto:daily_loss", "auto:daily_loss"));
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(filled.getSubject()).containsEntry("recovery", "breach_partial_fill");
+    assertThat(((Number) filled.getSubject().get("filled_qty")).longValue()).isEqualTo(2L);
+    AuditEvent abort = capture("SignalAbortedByRiskBreach");
+    assertThat(abort.getSubject()).containsEntry("stage", "bto_pre_fill_partial_adopted");
+    // PR #824 review (Major): auditRiskBreachAbort stamps entryStatus=ABORTED; the adoption must
+    // stamp FILLED last, or the operator-facing query reports ABORTED for a live booked lot.
+    assertThat(wf.entryStatus().getState()).isEqualTo(CopytradeEntryStatus.State.FILLED);
+  }
+
+  /**
+   * #818: a partial fill must SKIP the re-peg — cancelling a partially-filled order and placing a
+   * full-size replacement would over-buy. Partial slice stands through window-1 expiry AND the full
+   * TTL: with the skip, placeOrder fires exactly ONCE and cancelOrder exactly once (the TTL
+   * cancel), ending in EntryExpired. The sabotage direction (re-peg not skipped) cancels the
+   * original and places a replacement — placeOrder(2) / cancelOrder(2) — and fails both counts. (No
+   * terminal fill is sent: a same-batch terminal signal evaluates before the window-1 timer and
+   * would mask the re-peg decision entirely.)
+   */
+  @Test
+  void handleBto_partialFillPresent_skipsRepeg() throws Exception {
+    StrategyConfig cfg = config();
+    cfg.setPendingTtlPaperSecs(30L);
+    cfg.setRepegAfterMs(500L);
+    when(strategy.get("dev", "copytrade-v1")).thenReturn(cfg);
+    when(risk.checkEntryWithLimit(any(), eq(cfg), any(), any(), any()))
+        .thenReturn(RiskDecision.approved());
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(strategy.capitalForStrategy("dev", "copytrade-v1")).thenReturn(new BigDecimal("100000"));
+    when(exec.cancelOrder(anyString())).thenReturn(cancelledResult("intent-RP", "brk-rp"));
+    // A live ask BETWEEN the initial peg (2.30) and the ceiling (2.53): the sabotage direction's
+    // re-peg then genuinely cancels and places a replacement. (An unavailable quote, or an ask at
+    // or below the initial peg, makes repegEntry decline for its own reasons and would mask the
+    // skip under test — diagnosed live: ask=0.86 produced reason=repeg_skipped.)
+    when(optionQuote.getOptionQuote(any())).thenReturn(quoteWithAsk(new BigDecimal("2.40")));
+    when(exec.placeOrder(any())).thenReturn(submittedResult("intent-RP", "brk-rp"));
+
+    CopytradeSignalWorkflow wf =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CopytradeSignalWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("repeg-skip-1")
+                    .build());
+    WorkflowStub.fromTyped(wf).start(btoPayload());
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        verify(exec, atLeastOnce()).placeOrder(any());
+        break;
+      } catch (AssertionError ignored) {
+        Thread.sleep(50);
+      }
+    }
+    // Partial slice lands in the first peg window and stays the ONLY fill through window-1 expiry
+    // and the TTL.
+    wf.onFill(
+        new FillSignalPayload()
+            .withBrokerOrderId("brk-rp")
+            .withFilledQty(2L)
+            .withAvgFillPrice(new BigDecimal("0.80"))
+            .withFilledAt(OffsetDateTime.parse("2026-05-24T17:00:00Z")));
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    verify(exec, Mockito.times(1)).placeOrder(any());
+    verify(exec, Mockito.times(1)).cancelOrder(anyString());
+    // End state: the TTL cancel books the standing partial (see the partial-at-TTL test) — the
+    // discriminator HERE is the counts above: the sabotage direction re-pegs (placeOrder x2,
+    // cancelOrder x2).
+    AuditEvent filled = capture("EntryFilled");
+    assertThat(filled.getSubject()).containsEntry("recovery", "partial_at_ttl");
+  }
+
   @Test
   void onFill_signaledTwice_spawnsPositionWorkflowExactlyOnce() throws Exception {
     // Phase 4 of the fill-listener plan pins the at-least-once safety claim: the WS listener and

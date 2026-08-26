@@ -303,6 +303,22 @@ class CopytradeSignalWorkflowImplLegacyReplayTest {
    * risk.checkEntry(payload, config, null)} call must be tolerated by this comparison against the
    * recorded 2-arg input bytes.
    */
+  /**
+   * #818: replays a REAL pre-#818 history whose entry await unblocked on a PARTIAL fill
+   * (filledQty=2 of 5) and started the child. Every older copytrade fixture is pre-fill (zero
+   * signal events, zero child starts), so the suite stayed green even with the
+   * entry-await-terminal-fill-v1 gate deleted — this fixture is the one that makes the gate
+   * load-bearing: unversioned terminal-await code would keep waiting at the recorded first-slice
+   * signal, diverge from the recorded CancelTimer/EntryFilled/StartChildWorkflowExecution commands,
+   * and fail replay. Verified during implementation: deleting the gate turns exactly this test red.
+   */
+  @Test
+  void pre818PartialFillHistoryReplaysAgainstCurrentImplWithoutNonDeterminism() throws Exception {
+    WorkflowReplayer.replayWorkflowExecutionFromResource(
+        "temporal/replay/copytrade-signal-pre-818-partial-fill-legacy-history.json",
+        CopytradeSignalWorkflowImpl.class);
+  }
+
   @Test
   void legacyPre111HistoryReplaysAgainstCurrentImplWithoutNonDeterminism() throws Exception {
     assertThat(getClass().getClassLoader().getResource(FIXTURE_RESOURCE))

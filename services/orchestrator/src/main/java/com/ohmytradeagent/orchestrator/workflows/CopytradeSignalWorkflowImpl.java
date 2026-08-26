@@ -178,6 +178,16 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
   // interesting signal). Mirrors WatchlistTriggerWorkflowImpl's RECOVERY_* distinction.
   private static final String RECOVERY_CANCEL_ON_FILLED = "cancel_on_filled";
   private static final String RECOVERY_GETORDERSTATUS_RECONCILE = "getorderstatus_reconcile";
+
+  // #818: the entry ended (TTL cancel / breach cancel) with the broker reporting NO terminal fill
+  // through the reconcile probes, but the workflow LOCALLY holds a positive-qty partial in
+  // fillEvent (the WS partial_fill slices — broker's own cumulative for OUR order; superseded-
+  // order fills are diverted to droppedSupersededFill and can never land here). Book that lot:
+  // an under-booked-by-a-late-slice position (#801 growth + #817 page absorb it) beats a fully
+  // unmanaged one. Pre-#818 these were nearly unreachable (any slice unblocked the await).
+  private static final String RECOVERY_PARTIAL_AT_TTL = "partial_at_ttl";
+
+  private static final String RECOVERY_PARTIAL_AT_BREACH = "breach_partial_fill";
   // Issue #112: Gate the 3-activity pre-trade dispatch (assertPreTradeCheckRoutable →
   // dispatchPreTradeCheck → checkEntryWithLimit(payload, config, preTradeResult, limit))
   // introduced in PR #111 and tightened in #198 to thread the slip-adjusted limit through.
@@ -326,6 +336,18 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
 
   /** Issue #579: live-aware entry TTL selection — see {@link #entryPendingTtlSecs}. */
   private static final String VERSION_ENTRY_TTL_LIVE_AWARE = "entry-ttl-live-aware-v1";
+
+  // #818: the entry await must unblock on the TERMINAL cumulative fill, not the first partial
+  // slice. Alpaca WS fill events carry filled_qty as the cumulative-so-far and onFill is
+  // last-write-wins, so waiting for filledQty >= contracts books the whole lot (2026-08-25:
+  // prod_real booked 2 of a 21-lot sliced fill; the other 19 rode unmanaged). Gates: the await
+  // conditions, the breach-branch fill test, the repeg partial-fill skip, and the
+  // startPositionWorkflow expectedQty feed. At DEFAULT_VERSION every site is byte-identical to
+  // the first-slice behavior. Lost-terminal-event net: if the terminal WS event never arrives,
+  // the TTL path's cancelOrder reconciles broker truth (ALREADY_FILLED -> full-qty adoption);
+  // a genuinely partial lot at TTL is cancelled remainder-only and its filled portion surfaces
+  // via the #817 partial-coverage page until #819 teaches the cancel result to carry it.
+  private static final String VERSION_ENTRY_AWAIT_TERMINAL = "entry-await-terminal-fill-v1";
 
   // Edited-signal supersede (F1) correction window: a prior leg may be auto-superseded ONLY when
   // its
@@ -1003,6 +1025,12 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       }
     }
 
+    // #818: read once on the main path before the order exists; startPositionWorkflow re-reads
+    // the same ID (cached, consistent within an execution). orderedQty is the effectively-final
+    // capture of the (possibly operator-overridden) contract count for the await lambdas.
+    int entryAwaitTerminalVersion =
+        Workflow.getVersion(VERSION_ENTRY_AWAIT_TERMINAL, Workflow.DEFAULT_VERSION, 1);
+    final long orderedQty = contracts;
     String intentKey = Workflow.getInfo().getWorkflowId() + ":entry";
     OrderIntent intent = newIntent(payload, config, resolved, contracts, intentKey, priced.limit());
     OrderIntentResult placed = exec.placeOrder(intent);
@@ -1030,32 +1058,43 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     if (!repegActive) {
       filled =
           Workflow.await(
-              Duration.ofSeconds(ttlSecs), () -> fillEvent != null || riskBreachReceived);
+              Duration.ofSeconds(ttlSecs),
+              () -> entryFillComplete(orderedQty, entryAwaitTerminalVersion) || riskBreachReceived);
     } else {
       // PLAN-2026-08-04-bto-entry-repeg: split the TTL into [initial peg | re-peg] windows. The
       // first window is today's behavior verbatim — the tight limit gets first refusal. Only if it
       // has NOT filled do we spend the wider budget, and then only as far as the live ask.
       filled =
           Workflow.await(
-              Duration.ofMillis(repegAfterMs), () -> fillEvent != null || riskBreachReceived);
+              Duration.ofMillis(repegAfterMs),
+              () -> entryFillComplete(orderedQty, entryAwaitTerminalVersion) || riskBreachReceived);
       if (!filled) {
-        RepegOutcome outcome =
-            repegEntry(payload, config, resolved, contracts, intentKey, placed, priced.limit());
-        if (outcome.adopted()) {
-          // The original order filled in the cancel race; repegEntry already emitted EntryFilled
-          // and started the PositionWorkflow. No replacement was placed — nothing left to await.
-          return payload.getSignalId();
-        }
-        if (outcome.replacement() != null) {
-          // The replacement is now the order of record: the TTL-expiry and cancel-on-filled paths
-          // below must act on ITS key/broker id, not the cancelled original's.
-          placed = outcome.replacement();
-          intentKey = placed.getIntentKey();
+        // #818: a PARTIAL fill on the original order must SKIP the re-peg. Cancelling a
+        // partially-filled order and placing a full-size replacement would over-buy (partial +
+        // replacement > ordered). Keep the original order standing and spend the remaining TTL
+        // waiting for its terminal fill. Reachable only at v>=1: at DEFAULT_VERSION any fill made
+        // filled=true above, so this branch preserves the legacy command stream exactly.
+        boolean partialFillPresent = entryAwaitTerminalVersion >= 1 && fillEvent != null;
+        if (!partialFillPresent) {
+          RepegOutcome outcome =
+              repegEntry(payload, config, resolved, contracts, intentKey, placed, priced.limit());
+          if (outcome.adopted()) {
+            // The original order filled in the cancel race; repegEntry already emitted EntryFilled
+            // and started the PositionWorkflow. No replacement was placed — nothing left to await.
+            return payload.getSignalId();
+          }
+          if (outcome.replacement() != null) {
+            // The replacement is now the order of record: the TTL-expiry and cancel-on-filled
+            // paths below must act on ITS key/broker id, not the cancelled original's.
+            placed = outcome.replacement();
+            intentKey = placed.getIntentKey();
+          }
         }
         filled =
             Workflow.await(
                 Duration.ofSeconds(ttlSecs).minus(Duration.ofMillis(repegAfterMs)),
-                () -> fillEvent != null || riskBreachReceived);
+                () ->
+                    entryFillComplete(orderedQty, entryAwaitTerminalVersion) || riskBreachReceived);
       }
     }
 
@@ -1084,7 +1123,11 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
               "superseded_order_fill_dropped_possible_unmanaged_lot"));
     }
 
-    if (riskBreachReceived && fillEvent == null) {
+    // #818: at v>=1 a breach with only a PARTIAL fill also takes the cancel-reconcile path — the
+    // broker-confirmed cancel result is the fill truth (full fill in the race -> adopt; partial ->
+    // #819's gap, surfaced by the #817 page). At DEFAULT_VERSION this is byte-identical to the
+    // old fillEvent == null test.
+    if (riskBreachReceived && !entryFillComplete(orderedQty, entryAwaitTerminalVersion)) {
       // Cascade arrived before the onFill signal landed — but the broker may have already filled
       // (the async onFill races the breach and can lose). Issue #274: reconcile broker truth via
       // cancelOrder, which returns state=FILLED with broker-confirmed filled_qty/avg_fill_price on
@@ -1121,6 +1164,24 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
       }
       if (cancelResult.getState() == OrderIntentResult.State.FILLED) {
         handleCancelOnFilled(payload, config, resolved, cancelResult, RECOVERY_CANCEL_ON_FILLED);
+        return payload.getSignalId();
+      }
+      // #818: the cancel reported no fill, but slices already landed locally — book them, THEN
+      // record the breach abort for the cancelled remainder. Both events tell the true story;
+      // discarding fillEvent here left a real filled lot with no workflow (risk-review finding).
+      // Reachable only at v>=1: at DEFAULT_VERSION this branch required fillEvent == null.
+      if (entryAwaitTerminalVersion >= 1
+          && fillEvent != null
+          && fillEvent.getFilledQty() != null
+          && fillEvent.getFilledQty() > 0L) {
+        // Order matters (PR #824 review, Major): auditRiskBreachAbort STAMPS entryStatus=ABORTED
+        // as well as writing the audit row, so the abort must be recorded FIRST and the adoption
+        // LAST — adoptLocalPartialFill's filledStatus then leaves the operator-facing
+        // entryStatus() Query reporting FILLED for a lot that is genuinely booked and managed
+        // (the same adopted-lot-reports-FILLED contract as the TTL/cancel-on-filled paths). Both
+        // audit rows are emitted either way; only the final mutable status differs.
+        auditRiskBreachAbort(payload, "bto_pre_fill_partial_adopted", intentKey);
+        adoptLocalPartialFill(payload, config, resolved, RECOVERY_PARTIAL_AT_BREACH);
         return payload.getSignalId();
       }
       // Genuinely cancelled (or any non-FILLED state): keep audit-and-abort.
@@ -1275,6 +1336,50 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     entryStatus.setReasonDetail(riskBreachReason);
   }
 
+  /**
+   * #818: adopt the LOCALLY-held partial fill (the {@code fillEvent} field) when the entry ended
+   * without a broker-confirmed terminal fill. Same EntryFilled/filledStatus/startPositionWorkflow
+   * trio as the happy path, with the {@code recovery} label carrying why. Caller gates on the
+   * terminal-await version and a positive filledQty.
+   */
+  private void adoptLocalPartialFill(
+      CopytradeSignalPayload payload,
+      StrategyConfig config,
+      ContractResolveResult resolved,
+      String recovery) {
+    Map<String, Object> subj =
+        subject(
+            "signal_id", payload.getSignalId(),
+            "broker_order_id", fillEvent.getBrokerOrderId(),
+            "filled_qty", fillEvent.getFilledQty(),
+            "avg_fill_price", fillEvent.getAvgFillPrice(),
+            "outcome", "FILLED",
+            "recovery", recovery);
+    if (Workflow.getVersion(VERSION_ENTRY_FILLED_OPTION_SYMBOL, Workflow.DEFAULT_VERSION, 1) >= 1) {
+      subj.put("option_symbol", resolved.optionSymbol());
+    }
+    logAudit(payload, KIND_ENTRY_FILLED, subj);
+    filledStatus(resolved, fillEvent);
+    startPositionWorkflow(payload, config, resolved, fillEvent);
+  }
+
+  /**
+   * #818: is the entry fill COMPLETE enough to book? At {@code DEFAULT_VERSION}: any fill (the
+   * legacy first-slice behavior, byte-identical). At v&gt;=1: only a cumulative filled_qty covering
+   * the ordered contracts. {@code onFill} is last-write-wins and Alpaca's filled_qty is cumulative,
+   * so intermediate slices simply re-arm the await until the terminal one lands.
+   */
+  private boolean entryFillComplete(long contracts, int terminalAwaitVersion) {
+    if (fillEvent == null) {
+      return false;
+    }
+    if (terminalAwaitVersion < 1) {
+      return true;
+    }
+    Long filledQty = fillEvent.getFilledQty();
+    return filledQty != null && filledQty >= contracts;
+  }
+
   private void startPositionWorkflow(
       CopytradeSignalPayload payload,
       StrategyConfig config,
@@ -1303,7 +1408,17 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     posInput.setStrategyId(strategyId);
     posInput.setEntrySignalId(payload.getSignalId());
     posInput.setContractSymbol(resolved.optionSymbol());
-    posInput.setQty(fill.getFilledQty());
+    // #818: input.qty is the child's EXPECTED qty (#203) and the #801 entry-growth cap. Feed the
+    // ORDERED contracts (entryStatus.contracts, set at submit on every spawn path) so a late
+    // straggler slice can still grow the lot to the ceiling; the legacy branch keeps the fill's
+    // own qty byte-identically. Falls back to the fill qty if contracts is unset (defensive —
+    // every path sets it before any spawn).
+    Long orderedContracts = entryStatus.getContracts();
+    boolean expectedQtyFromOrder =
+        Workflow.getVersion(VERSION_ENTRY_AWAIT_TERMINAL, Workflow.DEFAULT_VERSION, 1) >= 1
+            && orderedContracts != null
+            && orderedContracts > 0;
+    posInput.setQty(expectedQtyFromOrder ? orderedContracts : fill.getFilledQty());
     posInput.setEntryPremium(
         fill.getAvgFillPrice() != null ? fill.getAvgFillPrice() : payload.getPrice());
     posInput.setSourceSignalWorkflowId(Workflow.getInfo().getWorkflowId());
@@ -1837,6 +1952,32 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
         handleCancelOnFilled(payload, config, resolved, status, RECOVERY_GETORDERSTATUS_RECONCILE);
         return;
       }
+    }
+
+    // #818: neither reconcile probe found a terminal fill, but partial slices already landed
+    // locally in fillEvent (the cancel destroyed the remainder; exec's cancel path does not yet
+    // carry the filled portion — #819). Book the partial instead of expiring to ZERO booked
+    // contracts, which would leave a genuinely-filled lot fully unmanaged (arch-review finding:
+    // a regression vs the old first-slice booking). Gated: at DEFAULT_VERSION fillEvent here is
+    // always null (any slice made filled=true upstream), so the legacy path is byte-identical.
+    if (Workflow.getVersion(VERSION_ENTRY_AWAIT_TERMINAL, Workflow.DEFAULT_VERSION, 1) >= 1
+        && fillEvent != null
+        && fillEvent.getFilledQty() != null
+        && fillEvent.getFilledQty() > 0L) {
+      logAuditWhileOrderLive(
+          payload,
+          KIND_ORDER_CANCELLED,
+          subject(
+              "intent_key",
+              cancelResult.getIntentKey(),
+              "broker_order_id",
+              cancelResult.getBrokerOrderId(),
+              "reason",
+              REASON_TTL_EXPIRED,
+              "note",
+              "remainder_cancelled_partial_booked"));
+      adoptLocalPartialFill(payload, config, resolved, RECOVERY_PARTIAL_AT_TTL);
+      return;
     }
 
     if (cancelResult.getState() == OrderIntentResult.State.CANCELLED) {
