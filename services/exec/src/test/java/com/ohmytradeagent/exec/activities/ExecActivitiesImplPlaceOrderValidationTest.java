@@ -260,6 +260,13 @@ class ExecActivitiesImplPlaceOrderValidationTest {
     }
 
     @Override
+    public void markCancelledWithFill(
+        String intentKey,
+        long filledQty,
+        java.math.BigDecimal avgFillPrice,
+        java.time.OffsetDateTime filledAt) {}
+
+    @Override
     public void markCancelFailed(String intentKey, String brokerReason) {
       throw fail();
     }

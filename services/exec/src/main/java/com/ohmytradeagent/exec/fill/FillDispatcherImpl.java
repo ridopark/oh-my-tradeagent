@@ -175,8 +175,39 @@ public class FillDispatcherImpl implements FillDispatcher {
           event.brokerOrderId(),
           event.filledQty());
     } catch (WorkflowNotFoundException e) {
-      // Benign: the journal is already terminalized above, so the position is not stranded — recon
-      // / adoption can spawn the owner workflow from the FILLED row.
+      // #819 Phase B: for an ENTRY intent, the primary target is the PARENT signal workflow,
+      // which completes as soon as the entry confirms — a later cumulative slice (the straggler)
+      // then lands here and used to be dropped, leaving #801's growth path in PositionWorkflow
+      // starved (the 2026-08-25 under-booking's dispatch half). The owning PositionWorkflow's id
+      // is fully derivable from the journal row via the SHARED contract identity helper (exec and
+      // orchestrator use the same WorkflowIds.position, so the format cannot drift): reroute the
+      // signal there once. bookEntryGrowth books the cumulative delta capped at the ordered qty,
+      // so a stale or duplicate report books 0. Exit intents keep today's benign log — their
+      // fills already route to the position workflow by intent-key prefix.
+      String rerouteId = entryRerouteWorkflowId(order);
+      if (rerouteId != null) {
+        try {
+          workflowClient.newUntypedWorkflowStub(rerouteId).signal(SIGNAL_NAME, payload);
+          metrics.recordDispatched();
+          metrics.recordEntryReroute();
+          log.info(
+              "fill-dispatcher entry straggler rerouted to position workflow_id={}"
+                  + " broker_order_id={} filled_qty={}",
+              rerouteId,
+              event.brokerOrderId(),
+              event.filledQty());
+          return;
+        } catch (WorkflowNotFoundException alsoGone) {
+          // The position workflow is also gone (closed / never spawned) — fall through to the
+          // benign log; recon / adoption owns the residue from the terminalized journal row.
+        } catch (RuntimeException rerouteFailure) {
+          // Goal-review finding 9: a non-NOT_FOUND Temporal failure mid-reroute must be counted
+          // like the sibling signal path, not escape uncounted. Callers wrap dispatch, so the
+          // rethrow cannot wedge the listener.
+          metrics.recordSignalError();
+          throw rerouteFailure;
+        }
+      }
       log.info(
           "fill-dispatcher workflow already completed workflow_id={} broker_order_id={}",
           workflowId,
@@ -186,6 +217,23 @@ public class FillDispatcherImpl implements FillDispatcher {
       metrics.recordSignalError();
       throw e;
     }
+  }
+
+  /**
+   * #819: the reroute target for an ENTRY intent's straggler fill — the owning PositionWorkflow id,
+   * built from the journal row's identity fields through the SHARED contract helper. Returns null
+   * for exit intents (`:exit:` marker in the key) and for rows missing any identity field
+   * (fail-safe: no reroute, keep the benign-drop path).
+   */
+  private static String entryRerouteWorkflowId(JournaledOrder order) {
+    String intentKey = order.intentKey();
+    if (intentKey == null
+        || !intentKey.contains(ENTRY_INTENT_KEY_MARKER)
+        || intentKey.contains(EXIT_INTENT_KEY_MARKER)) {
+      return null;
+    }
+    return WorkflowIds.position(
+        order.tenantId(), order.strategyId(), order.optionSymbol(), order.signalId());
   }
 
   private static String resolveWorkflowId(JournaledOrder order) {

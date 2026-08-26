@@ -130,6 +130,20 @@ public interface OrderIntentJournal {
   void markCancelled(String intentKey);
 
   /**
+   * #819: broker-confirmed cancel of a PARTIALLY-filled order — one atomic UPDATE writing the
+   * CANCELLED state AND the broker-truth fill detail together (the fill must never be recorded
+   * after the state flip: the CANCELLED transition removes the row from the poller's scope, so a
+   * crash between two writes would lose the filled portion exactly the way #819 exists to stop).
+   * Fill fields on a CANCELLED row mean "this much filled before the remainder was cancelled";
+   * state remains the authority on terminal outcome (nothing may infer FILLED from qty alone).
+   */
+  void markCancelledWithFill(
+      String intentKey,
+      long filledQty,
+      java.math.BigDecimal avgFillPrice,
+      java.time.OffsetDateTime filledAt);
+
+  /**
    * Records a cancel-on-filled or other broker-rejected cancel as a non-state- changing event.
    * State stays SUBMITTED; {@code last_error} captures the broker reason for reconciliation /
    * runbook follow-up.

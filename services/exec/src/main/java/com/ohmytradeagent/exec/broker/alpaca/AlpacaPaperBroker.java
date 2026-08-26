@@ -440,6 +440,38 @@ public class AlpacaPaperBroker implements OptionsBroker {
     return new BrokerFillDetail(resp.filledQty(), resp.filledAvgPrice(), resp.filledAt());
   }
 
+  @Override
+  public BrokerFillDetail getPartialFillSnapshot(String brokerOrderId) {
+    AlpacaOrderResponse resp;
+    try {
+      resp =
+          client
+              .get()
+              .uri("/v2/orders/{id}", brokerOrderId)
+              .retrieve()
+              .body(AlpacaOrderResponse.class);
+    } catch (HttpStatusCodeException e) {
+      throw mapError(e);
+    }
+    // #819: partial-tolerant by design — filled_at is null on any not-completely-filled order,
+    // and a zero-fill cancel legitimately reports qty 0. Only a positive qty with NO price is a
+    // protocol violation.
+    if (resp == null || resp.filledQty() == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca partial fill snapshot missing filled_qty for " + brokerOrderId,
+          "BrokerProtocolError");
+    }
+    if (resp.filledQty() > 0 && resp.filledAvgPrice() == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Alpaca reported filled_qty="
+              + resp.filledQty()
+              + " with no avg price for "
+              + brokerOrderId,
+          "BrokerProtocolError");
+    }
+    return new BrokerFillDetail(resp.filledQty(), resp.filledAvgPrice(), resp.filledAt());
+  }
+
   /**
    * Over-exit sentinel: returns true if the 422 body indicates Alpaca rejected the order because
    * the specified {@code sell_to_close} could not be reconciled with an open long position — the
