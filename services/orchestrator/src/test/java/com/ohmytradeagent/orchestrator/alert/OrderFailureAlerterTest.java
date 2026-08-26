@@ -817,11 +817,23 @@ class OrderFailureAlerterTest {
         new String(
             OrderFailureAlerterTest.class.getResourceAsStream("/application.yml").readAllBytes(),
             java.nio.charset.StandardCharsets.UTF_8);
+    // EXACT membership over the parsed yml list, not a raw substring match — a substring check
+    // is satisfied by a prefix-colliding kind (e.g. a yml carrying only PositionOrphanOngoing
+    // would falsely satisfy a constant entry PositionOrphan), which would quietly void the
+    // structural guarantee this test exists to give (#828 review).
+    java.util.regex.Matcher m =
+        java.util.regex.Pattern.compile("failure-kinds: \\$\\{ALERT_DISCORD_FAILURE_KINDS:([^}]*)}")
+            .matcher(appYml);
+    assertThat(m.find()).as("failure-kinds default line present in application.yml").isTrue();
+    java.util.Set<String> ymlKinds =
+        java.util.Arrays.stream(m.group(1).split(","))
+            .map(String::trim)
+            .collect(java.util.stream.Collectors.toSet());
     for (String kind : OrderFailureAlerter.DEFAULT_FAILURE_KINDS.split(",")) {
-      assertThat(appYml)
+      assertThat(ymlKinds)
           .as(
-              "application.yml alert.discord.failure-kinds must mirror %s — a kind only in the"
-                  + " image-default constant silently pages nothing in prod (#821)",
+              "application.yml alert.discord.failure-kinds must mirror %s EXACTLY — a kind only"
+                  + " in the image-default constant silently pages nothing in prod (#821)",
               kind)
           .contains(kind.trim());
     }

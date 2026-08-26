@@ -2928,6 +2928,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
           CorrectBookedLotResult.Outcome.REJECTED_TRAIL_ARMED,
           "a trail armed while verifying the journal; its basis anchors the pre-correction lot");
     }
+    if (qty <= entryBookedQty) {
+      // PR #827 review (discretionary; merged without it — applied here): a concurrent identical
+      // correction may have booked while this handler was suspended on the journal read; the
+      // second caller must hear the truth (no-op), not a second APPLIED.
+      return correctionRejected(
+          CorrectBookedLotResult.Outcome.REJECTED_QTY_NOT_ABOVE_BOOKED,
+          "another correction booked to " + entryBookedQty + " while verifying; nothing to add");
+    }
     long bookedBefore = entryBookedQty;
     long remainingBefore = remainingQty;
     BigDecimal priceBefore = entryFillPrice;
