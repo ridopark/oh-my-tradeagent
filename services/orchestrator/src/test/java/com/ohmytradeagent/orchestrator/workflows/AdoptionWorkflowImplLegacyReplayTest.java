@@ -489,5 +489,15 @@ class AdoptionWorkflowImplLegacyReplayTest {
     public ArmTrailResult armTrail(ArmTrailRequest request) {
       return null;
     }
+
+    @Override
+    public void correctBookedLotValidator(
+        com.ohmytradeagent.contract.CorrectBookedLotRequest request) {}
+
+    @Override
+    public com.ohmytradeagent.contract.CorrectBookedLotResult correctBookedLot(
+        com.ohmytradeagent.contract.CorrectBookedLotRequest request) {
+      return null;
+    }
   }
 }

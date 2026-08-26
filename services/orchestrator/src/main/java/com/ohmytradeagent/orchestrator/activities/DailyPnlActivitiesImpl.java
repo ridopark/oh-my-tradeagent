@@ -129,8 +129,14 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
     // growing without limit (see REALIZED_LOOKBACK_DAYS). Anchored to tradingDay (the Activity
     // input, ~= today on the heartbeat), so the window is deterministic and replay-stable.
     LocalDate sinceEtDay = tradingDay.minusDays(REALIZED_LOOKBACK_DAYS);
+    // #820 review finding 1: entry basis comes from EntryFilled PLUS the #738/#820 growth rows
+    // (PositionEntryIncreased carries the delta qty + the journal's cumulative avg price). Without
+    // them, a grown/corrected lot's exit FIFO-exhausts the first-slice basis and the residual is
+    // credited at RAW PROCEEDS — ~+$5k of phantom realized gain on the prod_real SMCI heal, in the
+    // very ledger the daily-loss breaker reads. One time-ordered stream (single query, kind IN)
+    // so growth lots interleave at their true occurred_at.
     Map<String, Deque<Lot>> entriesBySymbol =
-        fetchLots(tenantId, strategyId, "EntryFilled", "filled_qty", sinceEtDay);
+        fetchEntryLotsIncludingGrowth(tenantId, strategyId, sinceEtDay);
     Map<String, Deque<Lot>> exitsBySymbol =
         fetchLots(tenantId, strategyId, "PartialExitFilled", "qty_filled", sinceEtDay);
 
@@ -213,6 +219,30 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
    * figure and never crashes the activity. Rows lacking {@code option_symbol} (pre-change history)
    * are grouped under the {@link #NO_SYMBOL_BUCKET} key.
    */
+  /**
+   * #820: EntryFilled rows plus PositionEntryIncreased growth rows as ONE time-ordered basis
+   * stream. The growth row's qty key is {@code qty_added}; its price is the entry order's
+   * cumulative average at that point (bookEntryGrowth). COALESCE picks whichever key the row
+   * carries; ordering by occurred_at keeps a lot's growth strictly after its first slice.
+   */
+  private Map<String, Deque<Lot>> fetchEntryLotsIncludingGrowth(
+      String tenantId, String strategyId, LocalDate sinceEtDay) {
+    String sql =
+        "SELECT (subject->>'avg_fill_price')::numeric AS price, "
+            + "COALESCE(subject->>'filled_qty', subject->>'qty_added')::numeric AS qty, "
+            + "subject->>'option_symbol' AS option_symbol, "
+            + "(occurred_at AT TIME ZONE 'America/New_York')::date AS et_date "
+            + "FROM audit_log "
+            + "WHERE tenant_id = ? AND strategy_id = ? "
+            + "AND kind IN ('EntryFilled', 'PositionEntryIncreased') "
+            + "AND subject->>'avg_fill_price' IS NOT NULL "
+            + "AND COALESCE(subject->>'filled_qty', subject->>'qty_added') IS NOT NULL "
+            + "AND (occurred_at AT TIME ZONE 'America/New_York')::date >= ? "
+            + "ORDER BY occurred_at ASC, event_id ASC";
+    Result<Record> rows = dsl.fetch(sql, tenantId, strategyId, sinceEtDay);
+    return lotsFromRows(rows);
+  }
+
   private Map<String, Deque<Lot>> fetchLots(
       String tenantId, String strategyId, String kind, String qtyKey, LocalDate sinceEtDay) {
     if (!ALLOWED_QTY_KEYS.contains(qtyKey)) {
@@ -238,6 +268,10 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
             + "AND (occurred_at AT TIME ZONE 'America/New_York')::date >= ? "
             + "ORDER BY occurred_at ASC, event_id ASC";
     Result<Record> rows = dsl.fetch(sql, tenantId, strategyId, kind, sinceEtDay);
+    return lotsFromRows(rows);
+  }
+
+  private static Map<String, Deque<Lot>> lotsFromRows(Result<Record> rows) {
     Map<String, Deque<Lot>> lotsBySymbol = new LinkedHashMap<>();
     for (Record r : rows) {
       BigDecimal price = r.get("price", BigDecimal.class);
@@ -252,13 +286,7 @@ public class DailyPnlActivitiesImpl implements DailyPnlActivities {
         // under Temporal retry).
         qtyLong = qty.longValueExact();
       } catch (ArithmeticException ex) {
-        log.warn(
-            "fetchLots: skipping {} row with fractional/oversized {}={} (tenant={} strategy={})",
-            kind,
-            qtyKey,
-            qty,
-            tenantId,
-            strategyId);
+        log.warn("lot row skipped: fractional/oversized qty={}", qty);
         continue;
       }
       String symbol = r.get("option_symbol", String.class);

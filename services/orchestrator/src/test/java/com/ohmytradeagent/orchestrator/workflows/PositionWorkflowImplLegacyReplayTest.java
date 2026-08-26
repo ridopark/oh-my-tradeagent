@@ -611,6 +611,16 @@ class PositionWorkflowImplLegacyReplayTest {
       return null;
     }
 
+    @Override
+    public void correctBookedLotValidator(
+        com.ohmytradeagent.contract.CorrectBookedLotRequest request) {}
+
+    @Override
+    public com.ohmytradeagent.contract.CorrectBookedLotResult correctBookedLot(
+        com.ohmytradeagent.contract.CorrectBookedLotRequest request) {
+      return null;
+    }
+
     private OrderIntent exitIntent(PartialExitRequest req, long qty, String intentKey) {
       OrderIntent i = new OrderIntent();
       i.setSchemaVersion(1L);

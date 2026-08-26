@@ -3,6 +3,8 @@ package com.ohmytradeagent.orchestrator.workflows;
 import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.ArmTrailRequest;
 import com.ohmytradeagent.contract.ArmTrailResult;
+import com.ohmytradeagent.contract.CorrectBookedLotRequest;
+import com.ohmytradeagent.contract.CorrectBookedLotResult;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
@@ -159,4 +161,21 @@ public interface PositionWorkflow {
 
   @UpdateMethod(name = "arm_trail")
   ArmTrailResult armTrail(ArmTrailRequest request);
+
+  /**
+   * #820: operator lever that raises an UNDER-BOOKED entry lot to the exec journal's FILLED truth
+   * (the 2026-08-25 sliced-fill incident: booked 2 of a 21-lot fill). A thin front-end over the
+   * #738 {@code bookEntryGrowth} delta arithmetic — it raises {@code expectedQty} then books the
+   * delta, incrementing {@code entryBookedQty} AND {@code remainingQty} together; it never assigns
+   * {@code remainingQty} absolutely (a position with booked partial exits would re-add sold
+   * contracts and over-sell the next close). The handler cross-checks the requested qty against the
+   * journal's entry row and fails closed on any mismatch — the operator's number is a confirmation,
+   * not the source of truth. An Update because every refusal must be REPORTED: a silently dropped
+   * correction leaves a real-money lot believed tracked when it is not.
+   */
+  @UpdateValidatorMethod(updateName = "correct_booked_lot")
+  void correctBookedLotValidator(CorrectBookedLotRequest request);
+
+  @UpdateMethod(name = "correct_booked_lot")
+  CorrectBookedLotResult correctBookedLot(CorrectBookedLotRequest request);
 }

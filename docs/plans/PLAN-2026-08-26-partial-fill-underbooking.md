@@ -71,6 +71,33 @@ operator identity in the audit row. Then run it on the three positions (2→21, 
 SMCI/SPY, prod_real+jinchul must be completed MANUALLY in Alpaca (under-sell alert =
 the recon P1 page).
 
+## P4 heal runbook (operator, post-deploy)
+
+Order per the risk sign-off: **project cap headroom → verify single owner → verify trail unarmed
+→ correct → verify dashboard → (only then) arm any trail.**
+
+1. **Cap headroom**: correcting SMCI 2→21 multiplies that position's account-cap MTM contribution
+   ~10x on the next heartbeat. If the corrected open MTM would breach the tenant threshold,
+   correct one position at a time watching the heartbeat, or raise the cap first (DB CAS — the
+   writer is tighten-only).
+2. **Single owner**: exactly one running PositionWorkflow per (tenant, OCC) being corrected, and
+   no PositionAdopted row since 2026-08-25 (a second owner = double-booked → over-sell).
+3. **Trail unarmed** (`trailingState` query): the handler refuses on an armed trail and NO disarm
+   lever exists yet (#825) — an armed-trail position cannot be corrected without closing.
+4. **Find the workflow IDs** (homelab):
+   `temporal workflow list --namespace copytrade --query "WorkflowType='PositionWorkflow' AND ExecutionStatus='Running' AND ContractSymbol='SMCI  261120C00050000'"`
+5. **Correct** (one per position; qty = the journal FILLED truth; the handler re-verifies against
+   the exec journal and refuses on any mismatch — the typed number is a cross-check):
+   ```
+   temporal workflow update --namespace copytrade --workflow-id <pos-wf-id> \
+     --name correct_booked_lot \
+     --input '{"schema_version":1,"qty":21,"operator_id":"ridopark@gmail.com","reason":"sliced-fill under-booking 2026-08-25, plan P4"}'
+   ```
+   Targets: prod_real SMCI 2→21, prod-jinchul SPY 260901C00772000 1→6, prod-jinchul SMCI 4→5.
+6. **Verify**: dashboard rows match Alpaca; one `PositionLotCorrected` YELLOW page per correction;
+   the #817 partial-coverage page STOPS on the next recon sweep; the realized-P&L ledger carries
+   the delta's basis (`PositionEntryIncreased` rows now feed the FIFO — the phantom-profit fix).
+
 ## Success criteria
 - P1: partial-coverage page fires on the CURRENT live state (broker 26 vs covered 7).
 - P2: sliced-fill test books ordered qty; all legacy replay fixtures green.

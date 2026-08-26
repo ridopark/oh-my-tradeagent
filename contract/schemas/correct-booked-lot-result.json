@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/correct-booked-lot-result.json",
+  "title": "CorrectBookedLotResult",
+  "description": "Result of PositionWorkflow.correct_booked_lot (#820). APPLIED carries the post-correction counters; every rejection names its reason so the operator knows the real-money lot is still under-tracked.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.CorrectBookedLotResult",
+  "additionalProperties": false,
+  "required": ["schema_version", "outcome"],
+  "properties": {
+    "schema_version": { "type": "integer", "description": "Payload schema version; 1." },
+    "outcome": {
+      "type": "string",
+      "enum": ["APPLIED", "REJECTED_NOT_CORRECTABLE", "REJECTED_QTY_NOT_ABOVE_BOOKED", "REJECTED_JOURNAL_MISMATCH", "REJECTED_EXIT_IN_FLIGHT", "REJECTED_TRAIL_ARMED"],
+      "description": "APPLIED = booked. REJECTED_NOT_CORRECTABLE = position unconfirmed/closed/flattening (nothing to grow). REJECTED_QTY_NOT_ABOVE_BOOKED = requested qty <= currently booked (downward/no-op refused). REJECTED_JOURNAL_MISMATCH = the exec journal's entry row is not FILLED at >= the requested qty (incl. the re-pegged-entry case where the :entry row is CANCELLED — fail closed, never trust the typed number). REJECTED_EXIT_IN_FLIGHT = a resting exit was sized on the pre-correction qty; retry after it terminalizes. REJECTED_TRAIL_ARMED = an armed trail's stop basis predates the correction; disarm/correct/re-arm (runbook order)."
+    },
+    "detail": { "type": "string", "description": "Human-readable rejection detail / applied summary." },
+    "booked_qty": { "type": "integer", "description": "entryBookedQty after the call (present on APPLIED)." },
+    "remaining_qty": { "type": "integer", "description": "remainingQty after the call (present on APPLIED)." }
+  }
+}

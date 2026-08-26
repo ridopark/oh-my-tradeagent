@@ -442,6 +442,8 @@ public final class AuditEventKinds {
           // #817: partial sibling coverage — a running owner tracks only PART of the broker lot.
           // Neutral kinds (neither open nor close a lifecycle): the debounce marker + the page.
           "PositionPartialCoverageObserved",
+          // #820: operator raised an under-booked lot to journal truth (neutral kind).
+          "PositionLotCorrected",
           "PositionPartialCoverage",
           // Phase 3 (2026-06-24 remediation): non-paging first-sweep observation marker emitted by
           // ReconciliationWorkflowImpl on the missing branch. The first sweep observing a

@@ -17,6 +17,8 @@ import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.ArmTrailRequest;
 import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.CorrectBookedLotRequest;
+import com.ohmytradeagent.contract.CorrectBookedLotResult;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
@@ -4963,6 +4965,281 @@ class PositionWorkflowImplTest {
   }
 
   // ---------- helpers ----------
+
+  // ---------- #820: correct_booked_lot ----------
+
+  /** Falsify-review: each journal sub-guard pinned individually (the shipped test tripped both). */
+  @Test
+  void correctBookedLot_journalSubGuards_pinnedIndividually() throws Exception {
+    PositionWorkflow stub = newStub("pos-correct-7");
+    PositionWorkflowInput in = futureInput(21);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 2L);
+    waitForAuditKind("PositionEntered");
+
+    // FILLED but filled_qty null (schema: only "typically" populated) — must reject, never NPE.
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.FILLED, null, null));
+    assertThat(stub.correctBookedLot(correction(21)).getOutcome())
+        .isEqualTo(CorrectBookedLotResult.Outcome.REJECTED_JOURNAL_MISMATCH);
+    // Non-FILLED state carrying a filled_qty — state alone must reject.
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.SUBMITTED, 21L, "2.79"));
+    assertThat(stub.correctBookedLot(correction(21)).getOutcome())
+        .isEqualTo(CorrectBookedLotResult.Outcome.REJECTED_JOURNAL_MISMATCH);
+    // Activity throws (exec down) — fail closed, never wedge.
+    when(exec.getOrderStatus(anyString())).thenThrow(new RuntimeException("exec down"));
+    assertThat(stub.correctBookedLot(correction(21)).getOutcome())
+        .isEqualTo(CorrectBookedLotResult.Outcome.REJECTED_JOURNAL_MISMATCH);
+  }
+
+  /** Falsify-review: the three validator refusals, individually. */
+  @Test
+  void correctBookedLot_validatorRefusals() throws Exception {
+    PositionWorkflow stub = newStub("pos-correct-8");
+    PositionWorkflowInput in = futureInput(21);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 2L);
+    waitForAuditKind("PositionEntered");
+
+    CorrectBookedLotRequest noOp = correction(21);
+    noOp.setOperatorId(" ");
+    assertThatThrownBy(() -> stub.correctBookedLot(noOp)).hasStackTraceContaining("operator_id");
+    CorrectBookedLotRequest noReason = correction(21);
+    noReason.setReason(" ");
+    assertThatThrownBy(() -> stub.correctBookedLot(noReason)).hasStackTraceContaining("reason");
+    CorrectBookedLotRequest badQty = correction(0);
+    assertThatThrownBy(() -> stub.correctBookedLot(badQty)).hasStackTraceContaining("qty");
+  }
+
+  /**
+   * Falsify-review boundary: two sequential corrections (2 -> 10 -> 21 against journal 21) both
+   * apply — pins that the growth call books the REQUESTED cumulative, not the journal row's.
+   */
+  @Test
+  void correctBookedLot_sequentialCorrections_bothApply() throws Exception {
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.FILLED, 21L, "2.79"));
+    PositionWorkflow stub = newStub("pos-correct-9");
+    PositionWorkflowInput in = futureInput(21);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 2L);
+    waitForAuditKind("PositionEntered");
+
+    CorrectBookedLotResult first = stub.correctBookedLot(correction(10));
+    assertThat(first.getOutcome()).isEqualTo(CorrectBookedLotResult.Outcome.APPLIED);
+    assertThat(first.getRemainingQty()).isEqualTo(10L);
+    CorrectBookedLotResult second = stub.correctBookedLot(correction(21));
+    assertThat(second.getOutcome()).isEqualTo(CorrectBookedLotResult.Outcome.APPLIED);
+    assertThat(second.getRemainingQty()).isEqualTo(21L);
+  }
+
+  /** Falsify-review: a CLOSED position refuses — the not-correctable set's key conjunct. */
+  @Test
+  void correctBookedLot_closedPosition_rejectsNotCorrectable() throws Exception {
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.FILLED, 21L, "2.79"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-correct-10");
+    PositionWorkflowInput in = futureInput(2);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 2L);
+    waitForAuditKind("PositionEntered");
+    // Full close via force_close (partial_close refuses fraction 1.0 by design).
+    stub.forceClose(forceCloseRequest("ops-1", "close for test"));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-close", 2L, new BigDecimal("2.90")));
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+
+    // A COMPLETED workflow refuses the update entirely (any throwable is the refusal); the
+    // point pinned: no path exists to grow a closed position's lot.
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> stub.correctBookedLot(correction(21)))
+        .isInstanceOf(Exception.class);
+  }
+
+  private static OrderIntentResult journalRow(
+      OrderIntentResult.State state, Long filledQty, String avg) {
+    OrderIntentResult r = new OrderIntentResult();
+    r.setSchemaVersion(1L);
+    r.setIntentKey("src-wf:entry");
+    r.setBrokerOrderId("brk-entry");
+    r.setState(state);
+    r.setFilledQty(filledQty);
+    if (avg != null) {
+      r.setAvgFillPrice(new BigDecimal(avg));
+    }
+    return r;
+  }
+
+  private static CorrectBookedLotRequest correction(long qty) {
+    CorrectBookedLotRequest req = new CorrectBookedLotRequest();
+    req.setSchemaVersion(1L);
+    req.setQty(qty);
+    req.setOperatorId("ops-1");
+    req.setReason("sliced-fill under-booking 2026-08-25, plan P4");
+    return req;
+  }
+
+  /**
+   * #820 happy path on the live incident shape: confirmed at 2, journal FILLED at 21 — the
+   * correction books the 19-lot delta through the #738 growth arithmetic, moves the price basis to
+   * the journal's cumulative average, and audits PositionLotCorrected.
+   */
+  @Test
+  void correctBookedLot_underBooked_journalConfirms_growsLot() throws Exception {
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.FILLED, 21L, "2.79"));
+    PositionWorkflow stub = newStub("pos-correct-1");
+    PositionWorkflowInput in = futureInput(21);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 2L);
+    // The update must not race the entry-fill booking (PositionEntered is the confirm).
+    waitForAuditKind("PositionEntered");
+
+    CorrectBookedLotResult r = stub.correctBookedLot(correction(21));
+
+    assertThat(r.getOutcome()).isEqualTo(CorrectBookedLotResult.Outcome.APPLIED);
+    assertThat(r.getBookedQty()).isEqualTo(21L);
+    assertThat(r.getRemainingQty()).isEqualTo(21L);
+    AuditEvent corrected = captureKind("PositionLotCorrected");
+    assertThat(((Number) corrected.getSubject().get("qty_before")).longValue()).isEqualTo(2L);
+    assertThat(((Number) corrected.getSubject().get("qty_added")).longValue()).isEqualTo(19L);
+    assertThat(corrected.getSubject()).containsEntry("actor", "operator:ops-1");
+    assertThat(((Number) corrected.getSubject().get("journal_filled_qty")).longValue())
+        .isEqualTo(21L);
+    AuditEvent grew = captureKind("PositionEntryIncreased");
+    assertThat(((Number) grew.getSubject().get("qty_added")).longValue()).isEqualTo(19L);
+    // Falsify-review pins: the handler must read THE ENTRY row (":entry" — the most load-bearing
+    // string in it) and move the price basis to the journal's cumulative average (feeds the #807
+    // breakeven floor; a 21-lot on the 2-lot basis under-protects real money).
+    ArgumentCaptor<String> keyCap = ArgumentCaptor.forClass(String.class);
+    verify(exec, atLeastOnce()).getOrderStatus(keyCap.capture());
+    assertThat(keyCap.getAllValues()).contains("src-wf:entry");
+    assertThat(new BigDecimal(String.valueOf(grew.getSubject().get("avg_fill_price"))))
+        .isEqualByComparingTo("2.79");
+  }
+
+  /**
+   * #820 goal-review finding 3 — THE prod_real SMCI shape verbatim: spawned with input.qty = the
+   * FIRST SLICE (2), so expectedQty == entryBookedQty == 2 and the #801 growth cap is 0 until the
+   * handler raises expectedQty. Deleting the raise makes every other test stay green while the LIVE
+   * heal fails with "growth did not apply" — this test is the one that goes red.
+   */
+  @Test
+  void correctBookedLot_expectedQtyEqualsBooked_raisesCapAndGrows() throws Exception {
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.FILLED, 21L, "2.79"));
+    PositionWorkflow stub = newStub("pos-correct-6");
+    PositionWorkflowInput in = futureInput(2); // pre-#818 parent: qty = first slice
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 2L);
+    waitForAuditKind("PositionEntered");
+
+    CorrectBookedLotResult r = stub.correctBookedLot(correction(21));
+
+    assertThat(r.getOutcome()).isEqualTo(CorrectBookedLotResult.Outcome.APPLIED);
+    assertThat(r.getBookedQty()).isEqualTo(21L);
+    assertThat(r.getRemainingQty()).isEqualTo(21L);
+  }
+
+  /**
+   * #820 THE guardrail test (the 2026-08-17 over-sell class): after a booked partial exit the
+   * correction must ADD THE DELTA, never assign the journal total to remainingQty — sold contracts
+   * must not be re-added. Confirmed 5, partial exit 2 (remaining 3), journal 21: remaining becomes
+   * 3 + 16 = 19, NOT 21.
+   */
+  @Test
+  void correctBookedLot_afterPartialExit_neverReaddsSoldContracts() throws Exception {
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.FILLED, 21L, "2.79"));
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-correct-2");
+    PositionWorkflowInput in = futureInput(21);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+    // Operator trim 40% of 5 -> 2 contracts; fill it so the exit terminalizes.
+    stub.partialClose(partialCloseRequest("ops-1", "trim", 0.4));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-trim", 2L, new BigDecimal("2.90")));
+    waitForAuditKind("PartialExitFilled");
+
+    CorrectBookedLotResult r = stub.correctBookedLot(correction(21));
+
+    assertThat(r.getOutcome()).isEqualTo(CorrectBookedLotResult.Outcome.APPLIED);
+    assertThat(r.getBookedQty()).isEqualTo(21L);
+    assertThat(r.getRemainingQty()).isEqualTo(19L);
+  }
+
+  /**
+   * #820 fail-closed: the journal does not confirm the operator's number — the :entry row is
+   * CANCELLED (the re-pegged-entry shape, where the order of record is :entry:repeg-1). Nothing
+   * changes; the typed number is never trusted.
+   */
+  @Test
+  void correctBookedLot_journalCancelled_rejectsMismatch() throws Exception {
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.CANCELLED, null, null));
+    PositionWorkflow stub = newStub("pos-correct-3");
+    PositionWorkflowInput in = futureInput(21);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 2L);
+    // The update must not race the entry-fill booking (PositionEntered is the confirm).
+    waitForAuditKind("PositionEntered");
+
+    CorrectBookedLotResult r = stub.correctBookedLot(correction(21));
+
+    assertThat(r.getOutcome()).isEqualTo(CorrectBookedLotResult.Outcome.REJECTED_JOURNAL_MISMATCH);
+    Mockito.verify(audit, Mockito.never())
+        .log(Mockito.argThat(e -> e != null && "PositionLotCorrected".equals(e.getKind())));
+  }
+
+  /** #820: downward / no-op corrections are refused — reductions are the exit path's job. */
+  @Test
+  void correctBookedLot_qtyNotAboveBooked_rejects() throws Exception {
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.FILLED, 21L, "2.79"));
+    PositionWorkflow stub = newStub("pos-correct-4");
+    PositionWorkflowInput in = futureInput(21);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 5L);
+    // The update must not race the entry-fill booking (PositionEntered is the confirm).
+    waitForAuditKind("PositionEntered");
+
+    assertThat(stub.correctBookedLot(correction(5)).getOutcome())
+        .isEqualTo(CorrectBookedLotResult.Outcome.REJECTED_QTY_NOT_ABOVE_BOOKED);
+    assertThat(stub.correctBookedLot(correction(3)).getOutcome())
+        .isEqualTo(CorrectBookedLotResult.Outcome.REJECTED_QTY_NOT_ABOVE_BOOKED);
+  }
+
+  /**
+   * #820: an armed trail refuses the correction — its stop/floor basis was anchored on the old lot
+   * and armTrail is deliberately idempotent (will not re-anchor). Runbook order: disarm, correct,
+   * re-arm.
+   */
+  @Test
+  void correctBookedLot_trailArmed_rejects() throws Exception {
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.FILLED, 21L, "2.79"));
+    PositionWorkflow stub = newStub("pos-correct-5");
+    PositionWorkflowInput in = futureInput(21);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 2L);
+    assertThat(stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20"))).getStatus())
+        .isEqualTo(ArmTrailResult.Status.ARMED);
+
+    assertThat(stub.correctBookedLot(correction(21)).getOutcome())
+        .isEqualTo(CorrectBookedLotResult.Outcome.REJECTED_TRAIL_ARMED);
+  }
 
   private PositionWorkflow newStub(String workflowId) {
     return env.getWorkflowClient()

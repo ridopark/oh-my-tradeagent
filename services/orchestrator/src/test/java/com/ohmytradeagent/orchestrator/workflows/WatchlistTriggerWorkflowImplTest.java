@@ -1431,6 +1431,16 @@ class WatchlistTriggerWorkflowImplTest {
     public ArmTrailResult armTrail(ArmTrailRequest request) {
       return null;
     }
+
+    @Override
+    public void correctBookedLotValidator(
+        com.ohmytradeagent.contract.CorrectBookedLotRequest request) {}
+
+    @Override
+    public com.ohmytradeagent.contract.CorrectBookedLotResult correctBookedLot(
+        com.ohmytradeagent.contract.CorrectBookedLotRequest request) {
+      return null;
+    }
   }
 
   // Pre-open arm: the first equity subscribe (before 09:30 ET) is GATED; the leg must NOT give up.
