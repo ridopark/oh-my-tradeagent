@@ -17,7 +17,16 @@ import org.springframework.stereotype.Component;
 public class YamlStrategyRegistry implements StrategyRegistry {
 
   private final Path tenantsDir;
-  private final ObjectMapper yaml = new ObjectMapper(new YAMLFactory());
+  // #649: reads are LENIENT (unknown keys ignored) so a dev YAML or the live tenants ConfigMap
+  // carrying a since-removed schema key can never crash boot ENUM+SEEDING — the same
+  // reads-forgive / writes-validate posture as the #772 Temporal converter. The /config write path
+  // is
+  // DTO-mediated (unknown keys dropped at the gateway binding) — reads and writes both forgive.
+  private final ObjectMapper yaml =
+      new ObjectMapper(new YAMLFactory())
+          .configure(
+              com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+              false);
 
   public YamlStrategyRegistry(@Value("${orchestrator.tenants-dir:tenants}") String tenantsDir) {
     this.tenantsDir = Path.of(tenantsDir);

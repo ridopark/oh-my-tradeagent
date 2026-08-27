@@ -295,14 +295,40 @@ class StrategyConfigWriterTest {
   }
 
   @Test
-  void rejectsMaxNotionalPerSignalIncrease() {
-    StrategyConfig stored = liveSafeStored();
-    stored.setMaxNotionalPerSignal(new BigDecimal("1000"));
+  void rejectsNullReplacingRequiredExposureField() {
+    // #649 review follow-through: the requireNotIncreased null-branch ("dropping a cap is not a
+    // tightening") lost its only OPTIONAL exposure fields with the dead caps — every surviving
+    // EXPOSURE field (max_contracts, min_contracts, max_positions, capital_weight) is REQUIRED,
+    // so clearing one is refused by the required-check BEFORE the exposure comparison. This pins
+    // that refusal (the operator cannot null a live exposure control either way); the
+    // requireNotIncreased null-branch itself is now defensive-unreachable and documented as such.
+    StrategyConfig stored = liveSafeStored(); // capital_weight = 0.10
     StrategyConfig next = copy(stored);
-    next.setMaxNotionalPerSignal(new BigDecimal("5000"));
+    next.setCapitalWeight(null);
+    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
+        .isInstanceOf(InvalidConfigException.class)
+        .hasMessageContaining("capital_weight");
+  }
+
+  @Test
+  void rejectsMaxPositionsIncrease() {
+    // #649 review: pre-existing gap — half the surviving EXPOSURE set had no per-field pin.
+    StrategyConfig stored = liveSafeStored(); // max_positions = 5
+    StrategyConfig next = copy(stored);
+    next.setMaxPositions(9L);
     assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
         .isInstanceOf(DangerousFieldChangeRejected.class)
-        .hasMessageContaining("max_notional_per_signal");
+        .hasMessageContaining("max_positions");
+  }
+
+  @Test
+  void rejectsMinContractsIncrease() {
+    StrategyConfig stored = liveSafeStored(); // min_contracts = 1
+    StrategyConfig next = copy(stored);
+    next.setMinContracts(3L);
+    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
+        .isInstanceOf(DangerousFieldChangeRejected.class)
+        .hasMessageContaining("min_contracts");
   }
 
   @Test
@@ -316,17 +342,6 @@ class StrategyConfigWriterTest {
 
     assertThat(newVersion).isEqualTo(2L);
     verify(audit).log(any());
-  }
-
-  @Test
-  void rejectsNullReplacingNonNullCap() {
-    StrategyConfig stored = liveSafeStored();
-    stored.setMaxNotionalPerSignal(new BigDecimal("1000"));
-    StrategyConfig next = copy(stored);
-    next.setMaxNotionalPerSignal(null); // removing a cap is NOT a tightening
-    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
-        .isInstanceOf(DangerousFieldChangeRejected.class)
-        .hasMessageContaining("max_notional_per_signal");
   }
 
   // --- create: arm-on-create account cap (PLAN-2026-08-05-direct-live-tenant-onboarding) ---

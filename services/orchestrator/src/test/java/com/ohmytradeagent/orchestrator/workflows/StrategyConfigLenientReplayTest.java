@@ -91,7 +91,7 @@ class StrategyConfigLenientReplayTest {
                     .fromPayload(recorded, StrategyConfig.class, StrategyConfig.class))
         .hasRootCauseInstanceOf(UnrecognizedPropertyException.class)
         .rootCause()
-        .hasMessageContaining("since_removed_field_772");
+        .hasMessageContaining("watchlist_expiry_rule");
 
     StrategyConfig lenient =
         LenientDataConverter.instance()

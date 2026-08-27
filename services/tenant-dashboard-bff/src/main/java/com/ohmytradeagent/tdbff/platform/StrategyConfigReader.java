@@ -40,14 +40,7 @@ public class StrategyConfigReader {
           // is the sole daily-loss breaker), so it is dropped from DANGEROUS to mirror the writer.
           "DANGEROUS",
               List.of("broker_target", "broker_account_id", "notional_cap_pct_of_capital_base"),
-          "EXPOSURE",
-              List.of(
-                  "max_contracts",
-                  "min_contracts",
-                  "max_positions",
-                  "capital_weight",
-                  "max_notional_per_signal",
-                  "max_daily_notional_deployed"));
+          "EXPOSURE", List.of("max_contracts", "min_contracts", "max_positions", "capital_weight"));
 
   private final DSLContext orchestratorDsl;
   private final ObjectMapper objectMapper;

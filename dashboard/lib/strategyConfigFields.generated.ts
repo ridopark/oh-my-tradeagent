@@ -42,11 +42,6 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     description: "Routes Activities to the broker-<value> task queue. Phase 2c.2 introduced the <provider>-<env> shape (e.g. alpaca-paper). The legacy bare paper/live values are admitted ONLY for deserialization of pre-2c.2 audit records; configuring an active strategy with them produces a non-retryable InvalidBrokerTargetError because no worker polls broker-paper / broker-live. Required — always present (identity/routing/whitelist).",
   },
   {
-    field: "bto_price_move_reject_pct",
-    kind: "number",
-    description: "Issue #3 (Phase 2a hardening): BTO secondary price-move gate. Reject BTO when bid/ask (mid) has moved more than this fraction from payload.price since posted_at, regardless of signal age. Default 0.10 (10%). Documented gate spec: actual quote fetch + rejection wiring lands with market-data integration; this field is the configuration surface for the gate and the corresponding RejectionReason is BTO_PRICE_MOVED. NOT WIRED (2026-07-27): no code reads this field — the price-move gate is unimplemented; the field is inert (config surface only).",
-  },
-  {
     field: "capital_source",
     kind: "string",
     options: [
@@ -90,11 +85,6 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     field: "drawdown_velocity_threshold",
     kind: "number",
     description: "Issue #6 portfolio-level gate: per-minute MTM loss rate (absolute dollars/minute) at which new entries are blocked. Reject with DRAWDOWN_VELOCITY_EXCEEDED when sampled loss rate over the trailing minute >= drawdown_velocity_threshold. Opt-in: null disables the gate. Intraday rate-of-loss circuit breaker complementing daily_loss_threshold (which is a cumulative bound).",
-  },
-  {
-    field: "earnings_window_hours",
-    kind: "number",
-    description: "Issue #19 (quant-analyst review): veto entries whose holding window straddles an earnings release within N hours of payload.posted_at (lookahead) or payload.expiry (lookback). Reject BTO with EARNINGS_WINDOW_BLOCKED when the underlying has a scheduled earnings event inside [now, now + earnings_window_hours] OR inside [expiry - earnings_window_hours, expiry]. Closes the IV-crush failure mode between BTO and STC. Opt-in: null/0 disables the gate. Spec-only field in this PR; runtime wiring (earnings calendar source, exec-svc lookup) lands separately.",
   },
   {
     field: "enabled",
@@ -178,24 +168,9 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     description: "Watchlist-trigger gap tolerance as a fraction of `trigger`. A trigger that gaps through its level by more than this fraction at open is treated as gapped (handled per entry_mode) rather than a clean breakout. Optional and null-when-absent; the watchlist consumer applies the 0.005 (0.5%) code default when unset, so copytrade configs that never set it carry no inert value. Reasonable range is typically 0.001-0.02 (0.1%-2%); values outside this are accepted but rarely sensible.",
   },
   {
-    field: "halt_check_enabled",
-    kind: "boolean",
-    description: "Issue #19 (quant-analyst review): if true, gates the future market-data-svc underlying-halt subscription that PositionWorkflow consumes to force-flat affected positions. When the underlying enters an LULD pause the option bid collapses to zero and the position becomes unexitable except by exercise; PositionWorkflow will force-flat with UNDERLYING_HALTED on receipt of the halt signal so the position closes the moment the halt clears. Opt-in: null/false disables the subscription. Spec-only field in this PR; market-data-svc halt subscription + PositionWorkflow handler land separately.",
-  },
-  {
     field: "max_contracts",
     kind: "number",
     description: "Upper clamp on computed quantity. min<=max enforced by application validator (cross-field constraint not expressible in JSON Schema). Required — always present (core sizing / position bounds).",
-  },
-  {
-    field: "max_daily_notional_deployed",
-    kind: "number",
-    description: "Issue #17 (quant-analyst review): hard per-day dollar cap on cumulative entry notional deployed (sum of qty * fill_premium * 100 for SignalAccepted BTO entries today, UTC trading day). Reject new BTO entries with DAILY_NOTIONAL_DEPLOYED_EXCEEDED when today_deployed + new_notional > max_daily_notional_deployed. Complements max_notional_per_signal (per-signal bound) by capping total daily capital at risk against premium-spike over-leverage across many signals. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.",
-  },
-  {
-    field: "max_notional_per_signal",
-    kind: "number",
-    description: "Issue #17 (quant-analyst review): hard per-signal dollar cap on entry notional. The sizing formula sources price from the contract-resolver's freshly-fetched ask (or mid clamped to ask) instead of payload.price (which is 5-30s stale). After computing qty = clamp(floor(allocation / (price * 100)), min_contracts, max_contracts), reject the signal with NOTIONAL_PER_SIGNAL_EXCEEDED when clamp(floor(...), min, max) == min AND min * price * 100 > max_notional_per_signal — silently over-sizing on a high-IV ticker is the failure mode this gate prevents. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.",
   },
   {
     field: "max_positions",
@@ -226,11 +201,6 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     field: "max_slippage_pct",
     kind: "number",
     description: "Issue #4: Fractional slippage cap (e.g. 0.05 = 5%) applied to payload.price when computing the BTO limit ladder. BTO limit = min(ask, payload.price + max_slippage_abs, payload.price * (1 + max_slippage_pct)). Combined with max_slippage_abs via min() so both caps apply simultaneously. Spec-only field in this PR; runtime use lands with the BTO pricing-ladder implementation. Unset (null or 0): the percentage term drops from the BTO entry-limit; with max_slippage_abs also unset the limit mirrors the signal price.",
-  },
-  {
-    field: "max_spread_pct",
-    kind: "number",
-    description: "Issue #19 (quant-analyst review): max admissible bid/ask spread as a fraction of mid at BTO submit time, enforced at contract-resolver-svc against the freshly-fetched NBBO quote. Reject BTO with BTO_SPREAD_TOO_WIDE when (ask - bid) / mid > max_spread_pct (where mid = (ask + bid) / 2). The companion BTO_BID_ZERO rejection always fires unconditionally when bid == 0 regardless of this threshold — a no-bid option cannot be exited except by exercise and must never be entered. Opt-in: null disables the spread gate (BTO_BID_ZERO still enforced). Spec-only field in this PR; runtime wiring lands separately.",
   },
   {
     field: "min_contracts",
@@ -350,16 +320,6 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     description: "Watchlist-trigger exit: reward:risk ratio for the premium take-profit. The first take-profit triggers when the live bid reaches entry_premium * (1 + tp_ratio * sl_pct) (= +tp_ratio*R, where R = sl_pct * entry_premium). Carried into PositionWorkflowInput.tp_ratio at handoff. Opt-in: null/absent disables the premium TP/SL/trail exit entirely, preserving the copytrade-only exit behavior. The runner's trailing leg reuses the pre-existing trail_giveback_pct field (the Phase-4 chandelier giveback) rather than re-declaring it, which is why this exit feature adds tp_ratio/sl_pct/tp_partial_fraction/no_progress_time_stop_secs but not trail_giveback_pct. PositionWorkflowImpl gates consumption behind Workflow.getVersion.",
   },
   {
-    field: "trail_debounce_ticks",
-    kind: "number",
-    description: "Issue #14 (Phase 4 chandelier-trail debounce): require N consecutive ticks with mid below `peak_premium * (1 - trail_giveback_pct)` before firing the trail exit. A single sub-threshold print (bad NBBO, halted side) MUST NOT trigger an exit on options where premium can flicker tens of percent between adjacent ticks. Default 2 when null. PositionWorkflow.chandelier_tick handler resets the streak on any tick at-or-above the threshold. NOT WIRED (2026-07-27): despite the above, no runtime consumer reads this field — the chandelier debounce uses a hardcoded tick count; the field is inert.",
-  },
-  {
-    field: "trail_disarm_minutes_before_close",
-    kind: "number",
-    description: "Issue #14 (Phase 4 chandelier-trail EOD disarm): disarm the trail in the final N minutes before market close so the EOD timer handles the exit instead. Past this disarm window theta giveback dominates real momentum and the trail becomes a noise-driven flush. Default 30 when null. PositionWorkflow.chandelier_tick checks `now >= market_close - trail_disarm_minutes_before_close minutes` on every tick. NOT WIRED (2026-07-27): despite the above, no runtime consumer reads this field — the trail disarm is not driven by it; the field is inert.",
-  },
-  {
     field: "trail_giveback_pct",
     kind: "number",
     description: "Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured. Unset (null/≤0): the chandelier/runner trail arm is rejected (invalid_giveback), so the trailing stop never arms.",
@@ -368,14 +328,6 @@ export const STRATEGY_CONFIG_FIELDS: GeneratedConfigField[] = [
     field: "trail_on_partial",
     kind: "boolean",
     description: "Phase 4: arm CHANDELIER_TRAIL on first partial exit. Unset: treated as false — the chandelier trail is NOT armed on the first partial exit.",
-  },
-  {
-    field: "watchlist_expiry_rule",
-    kind: "string",
-    options: [
-      { value: "NEAREST_WEEKLY", label: "Nearest weekly" },
-    ],
-    description: "Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY picks the nearest weekly expiry on/after et_date. Optional and null-when-absent; the watchlist consumer resolves the nearest weekly expiry unconditionally, so an unset value is spec-only and never leaks into non-watchlist configs.",
   },
 ];
 

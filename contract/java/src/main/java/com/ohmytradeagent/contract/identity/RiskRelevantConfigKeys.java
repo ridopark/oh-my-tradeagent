@@ -60,8 +60,6 @@ public final class RiskRelevantConfigKeys {
           "min_contracts",
           "max_positions",
           "capital_weight",
-          "max_notional_per_signal",
-          "max_daily_notional_deployed",
           // risk-manager additions
           "same_underlying_count",
           "sector_concentration_cap",

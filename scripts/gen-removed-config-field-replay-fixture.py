@@ -22,7 +22,18 @@ SRC = REPLAY / "copytrade-signal-pre-111-legacy-history.json"
 DST = REPLAY / "copytrade-signal-removed-config-field-history.json"
 SCHEMA = ROOT / "contract/schemas/strategy-config.json"
 
-INJECT = {"since_removed_field_772": "legacy-value", "since_removed_numeric_knob_772": 42}
+# #649 made the synthetic keys real: watchlist_expiry_rule and bto_price_move_reject_pct are
+# GENUINELY-removed schema fields recorded in live histories (watchlist_expiry_rule is the exact
+# field whose presence in a recorded config killed the first #649 attempt).
+# ORDER MATTERS: Jackson's UnrecognizedPropertyException names the FIRST unknown key in JSON
+# order, and the strict-direction test asserts on watchlist_expiry_rule — the GENUINE removed
+# field — so it must lead. The synthetics keep the fixture discriminating as the schema evolves.
+INJECT = {
+    "watchlist_expiry_rule": "NEAREST_WEEKLY",
+    "bto_price_move_reject_pct": 0.10,
+    "since_removed_field_772": "legacy-value",
+    "since_removed_numeric_knob_772": 42,
+}
 
 history = json.loads(SRC.read_text())
 event = history["events"][12]

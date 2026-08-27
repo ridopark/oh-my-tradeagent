@@ -41,7 +41,9 @@ class YamlStrategyRegistryTest {
     // Issue #3: per-side signal-age defaults.
     assertThat(cfg.getMaxSignalAgeBtoSecs()).isEqualTo(30L);
     assertThat(cfg.getMaxSignalAgeStcSecs()).isEqualTo(60L);
-    assertThat(cfg.getBtoPriceMoveRejectPct().compareTo(new java.math.BigDecimal("0.10"))).isZero();
+    // #649: bto_price_move_reject_pct was removed from the schema; the fixture DELIBERATELY still
+    // carries it — this load doubles as the stale-key-tolerance regression for the boot reader
+    // (a live YAML/ConfigMap block carrying a since-removed key must never crash seeding).
     assertThat(cfg.getMaxPositions()).isEqualTo(5L);
     assertThat(cfg.getCapitalWeight().compareTo(new java.math.BigDecimal("0.2"))).isZero();
     assertThat(cfg.getSkipAvg()).isTrue();
@@ -166,16 +168,18 @@ class YamlStrategyRegistryTest {
   }
 
   @Test
-  void issue338_rejectsRemovedNotionalCapEquityAlias(@TempDir Path tenantsDir) throws Exception {
-    // #338: the deprecated notional_cap_pct_of_equity alias is gone from the schema, and the
-    // generated POJO carries no catch-all (jsonschema2pojo includeAdditionalProperties=false), so
-    // a config still setting it now FAILS TO LOAD. That loudness is the point: every live tenant
-    // was verified migrated before the removal, so a config still carrying the field is a stale
-    // config someone needs to see — NOT a value to quietly drop, which would silently leave the
-    // notional-cap gate unconfigured (a fail-OPEN on a risk gate).
-    //
-    // The registry wraps the Jackson failure in IllegalStateException("Failed to parse <path>"),
-    // so the field name lives on the CAUSE, not the top-level message.
+  void issue649_removedAliasIsIgnoredOnRead_capSafetyLivesInTheBootInvariant(
+      @TempDir Path tenantsDir) throws Exception {
+    // SUPERSEDES the #338-era strict-read pin. Reads are now LENIENT (#649/#772 posture): a YAML
+    // still carrying the removed notional_cap_pct_of_equity alias LOADS, with the unknown key
+    // ignored — a stale key must never crash boot ENUM+SEEDING. The old test's fail-open concern
+    // (silently dropping the only configured cap) is answered at a DIFFERENT layer: a -LIVE
+    // strategy without the canonical notional_cap_pct_of_capital_base fails
+    // StrategyConfigInvariants.requireNotionalCap at boot, loudly. (Paper strategies have no cap
+    // requirement by design — no real money — so a stale alias there yields no cap, silently;
+    // that is the accepted paper-scope residual of the reads-forgive posture.) This test pins the
+    // read half;
+    // the invariant half is pinned in StrategyConfigInvariants' own tests.
     Path file = tenantsDir.resolve("dev/strategies/copytrade-v1.yaml");
     Files.createDirectories(file.getParent());
     Files.writeString(
@@ -193,14 +197,16 @@ class YamlStrategyRegistryTest {
         capital_weight: 0.2
         min_contracts: 1
         max_contracts: 5
-        notional_cap_pct_of_equity: 0.40
+        notional_cap_pct_of_equity: 0.5
         """);
-
     YamlStrategyRegistry registry = new YamlStrategyRegistry(tenantsDir.toString());
 
-    assertThatThrownBy(() -> registry.get("dev", "copytrade-v1"))
-        .isInstanceOf(IllegalStateException.class)
-        .hasStackTraceContaining("notional_cap_pct_of_equity");
+    StrategyConfig cfg = registry.get("dev", "copytrade-v1");
+
+    assertThat(cfg.getStrategyId()).isEqualTo("copytrade-v1");
+    // The removed alias is IGNORED — and the canonical cap is genuinely unset, which is exactly
+    // the state the live-boot invariant exists to refuse.
+    assertThat(cfg.getNotionalCapPctOfCapitalBase()).isNull();
   }
 
   @Test

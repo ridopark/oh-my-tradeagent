@@ -14,8 +14,7 @@ package com.ohmytradeagent.orchestrator.platform;
  *       notional_cap_pct_of_capital_base}) — must equal stored; changing them is deferred to P3
  *       dual-control.
  *   <li>EXPOSURE ({@code max_contracts}, {@code min_contracts}, {@code max_positions}, {@code
- *       capital_weight}, {@code max_notional_per_signal}, {@code max_daily_notional_deployed}) —
- *       must not increase vs stored.
+ *       capital_weight}) — must not increase vs stored.
  * </ul>
  *
  * Nothing is persisted when this is thrown.

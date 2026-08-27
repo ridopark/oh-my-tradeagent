@@ -19,11 +19,13 @@ import io.temporal.common.converter.JacksonJsonPayloadConverter;
  * converter is that leniency, in one place.
  *
  * <p><b>Why here and not the generated POJOs:</b> every contract schema declares {@code
- * "additionalProperties": false}, which is what the {@code /config} write path validates against —
- * flipping the schemas (or the jsonschema2pojo {@code includeAdditionalProperties} flag, which the
- * schema-level setting overrides anyway) would make a typo'd config key silently legal at WRITE
- * time. Transport-layer leniency keeps write-side validation strict while letting old histories
- * replay: unknown-at-read is forgiven, unknown-at-write still fails loudly.
+ * "additionalProperties": false}, which the generated POJOs mirror (there is no runtime JSON-Schema
+ * validator; the /config write path is DTO-mediated at the gateway binding, so unknown keys are
+ * dropped, not rejected) — flipping the schemas (or the jsonschema2pojo {@code
+ * includeAdditionalProperties} flag, which the schema-level setting overrides anyway) would make a
+ * typo'd config key silently legal at WRITE time. Transport-layer leniency keeps write-side
+ * validation strict while letting old histories replay: unknown-at-read is forgiven,
+ * unknown-at-write still fails loudly.
  *
  * <p><b>Deployment ordering (the point of the issue):</b> the pod doing the replay is the one that
  * needs the leniency. This must be live on EVERY worker service before any schema field is actually

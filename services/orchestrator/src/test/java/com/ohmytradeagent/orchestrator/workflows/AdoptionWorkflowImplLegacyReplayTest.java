@@ -27,6 +27,7 @@ import com.ohmytradeagent.contract.RiskBreachPayload;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.contract.temporal.LenientDataConverter;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
@@ -34,8 +35,10 @@ import io.temporal.activity.ActivityOptions;
 import io.temporal.api.enums.v1.IndexedValueType;
 import io.temporal.api.enums.v1.ParentClosePolicy;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowClientOptions;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.common.WorkflowExecutionHistory;
+import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
@@ -137,8 +140,23 @@ class AdoptionWorkflowImplLegacyReplayTest {
             FIXTURE_RESOURCE)
         .isNotNull();
 
-    WorkflowReplayer.replayWorkflowExecutionFromResource(
-        FIXTURE_RESOURCE, AdoptionWorkflowImpl.class);
+    // #649: the recorded config in this fixture carries watchlist_expiry_rule — a field REMOVED
+    // from the schema. Production workers deserialize through the #772 LenientDataConverter, so
+    // the replay must run under the SAME converter (the strict test-env default would fail with
+    // UnrecognizedPropertyException — the exact failure that killed the first #649 attempt, now
+    // the expected-and-handled shape). StrategyConfigLenientReplayTest pins that the strict
+    // default still rejects removed-field payloads, so this leniency stays honest.
+    TestEnvironmentOptions options =
+        TestEnvironmentOptions.newBuilder()
+            .setWorkflowClientOptions(
+                WorkflowClientOptions.newBuilder()
+                    .setDataConverter(LenientDataConverter.instance())
+                    .build())
+            .build();
+    try (TestWorkflowEnvironment lenientEnv = TestWorkflowEnvironment.newInstance(options)) {
+      WorkflowReplayer.replayWorkflowExecutionFromResource(
+          FIXTURE_RESOURCE, lenientEnv, AdoptionWorkflowImpl.class);
+    }
   }
 
   // ---------------------------------------------------------------------------

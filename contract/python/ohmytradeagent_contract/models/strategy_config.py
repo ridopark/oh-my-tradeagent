@@ -46,14 +46,6 @@ class EntryMode(StrEnum):
     retest = "RETEST"
 
 
-class WatchlistExpiryRule(StrEnum):
-    """
-    Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY picks the nearest weekly expiry on/after et_date. Optional and null-when-absent; the watchlist consumer resolves the nearest weekly expiry unconditionally, so an unset value is spec-only and never leaks into non-watchlist configs.
-    """
-
-    nearest_weekly = "NEAREST_WEEKLY"
-
-
 class StrategyConfig(BaseModel):
     """
     Per-strategy configuration loaded from tenants/<tenant>/strategies/<strategy>.yaml. Drives risk gates, sizing, and exit logic in CopytradeSignalWorkflow + PositionWorkflow. Phase 2a consumes a minimal required subset (author whitelist, signal-age, max-positions, capital-weight sizing); fields used only in later phases are optional and documented inline.
@@ -94,10 +86,6 @@ class StrategyConfig(BaseModel):
     max_signal_age_stc_secs: Annotated[int, Field(ge=1, le=3600)]
     """
     Reject STC signals older than this. Risk gate SIGNAL_TOO_OLD on exceed. Issue #3 (Phase 2a hardening): STC tolerates a larger window than BTO because exiting late is generally safer than entering late, but a 1800s default still permits adverse selection on partial fills. Defaults: 60s for STC. Any value above 120s is an explicit per-strategy override.
-    """
-    bto_price_move_reject_pct: Annotated[float | None, Field(gt=0.0, le=1.0)] = None
-    """
-    Issue #3 (Phase 2a hardening): BTO secondary price-move gate. Reject BTO when bid/ask (mid) has moved more than this fraction from payload.price since posted_at, regardless of signal age. Default 0.10 (10%). Documented gate spec: actual quote fetch + rejection wiring lands with market-data integration; this field is the configuration surface for the gate and the corresponding RejectionReason is BTO_PRICE_MOVED. NOT WIRED (2026-07-27): no code reads this field — the price-move gate is unimplemented; the field is inert (config surface only).
     """
     max_signal_age_secs: Annotated[int | None, Field(ge=1, le=3600)] = None
     """
@@ -179,14 +167,6 @@ class StrategyConfig(BaseModel):
     """
     Phase 4: trailing-stop giveback fraction once armed. Also used as the STC giveback coefficient in the Issue #4 STC pricing ladder (limit = max(bid, ref_premium - ref_premium * trail_giveback_pct)) when no dedicated STC giveback field is configured. Unset (null/≤0): the chandelier/runner trail arm is rejected (invalid_giveback), so the trailing stop never arms.
     """
-    trail_debounce_ticks: Annotated[int | None, Field(ge=1)] = None
-    """
-    Issue #14 (Phase 4 chandelier-trail debounce): require N consecutive ticks with mid below `peak_premium * (1 - trail_giveback_pct)` before firing the trail exit. A single sub-threshold print (bad NBBO, halted side) MUST NOT trigger an exit on options where premium can flicker tens of percent between adjacent ticks. Default 2 when null. PositionWorkflow.chandelier_tick handler resets the streak on any tick at-or-above the threshold. NOT WIRED (2026-07-27): despite the above, no runtime consumer reads this field — the chandelier debounce uses a hardcoded tick count; the field is inert.
-    """
-    trail_disarm_minutes_before_close: Annotated[int | None, Field(ge=0)] = None
-    """
-    Issue #14 (Phase 4 chandelier-trail EOD disarm): disarm the trail in the final N minutes before market close so the EOD timer handles the exit instead. Past this disarm window theta giveback dominates real momentum and the trail becomes a noise-driven flush. Default 30 when null. PositionWorkflow.chandelier_tick checks `now >= market_close - trail_disarm_minutes_before_close minutes` on every tick. NOT WIRED (2026-07-27): despite the above, no runtime consumer reads this field — the trail disarm is not driven by it; the field is inert.
-    """
     daily_loss_threshold: Annotated[Decimal | None, Field(gt=0.0)] = None
     """
     Phase 5: KillSwitchWorkflow auto-trip threshold (absolute dollars) on realized cumulative daily loss for (tenant, strategy). Auto-trip fires when realizedPnL <= -daily_loss_threshold. Phase 5 ships realized-only PnL composition (sum of EntryFilled/ExitFilled premia from audit_log); MTM on open positions lands in Phase 5b. Deprecated/dead field: the tenant account-wide daily-loss cap is now the sole daily-loss breaker, so a null/≤0 value here never trips a kill switch.
@@ -237,26 +217,6 @@ class StrategyConfig(BaseModel):
     """
     Issue #15 (quant-analyst review): wall-clock time (HH:MM in US/Eastern) at which PositionWorkflow force-flats non-0DTE positions for the EOD sweep. Default 15:45 ET when null. The prior 15:55 ET default left only 5 minutes of book depth before close for liquidation; 15:45 ET preserves a 15-minute window of reasonable spreads. Spec-only field in this PR; PositionWorkflow timer wiring lands separately.
     """
-    max_notional_per_signal: Annotated[Decimal | None, Field(gt=0.0)] = None
-    """
-    Issue #17 (quant-analyst review): hard per-signal dollar cap on entry notional. The sizing formula sources price from the contract-resolver's freshly-fetched ask (or mid clamped to ask) instead of payload.price (which is 5-30s stale). After computing qty = clamp(floor(allocation / (price * 100)), min_contracts, max_contracts), reject the signal with NOTIONAL_PER_SIGNAL_EXCEEDED when clamp(floor(...), min, max) == min AND min * price * 100 > max_notional_per_signal — silently over-sizing on a high-IV ticker is the failure mode this gate prevents. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.
-    """
-    max_daily_notional_deployed: Annotated[Decimal | None, Field(gt=0.0)] = None
-    """
-    Issue #17 (quant-analyst review): hard per-day dollar cap on cumulative entry notional deployed (sum of qty * fill_premium * 100 for SignalAccepted BTO entries today, UTC trading day). Reject new BTO entries with DAILY_NOTIONAL_DEPLOYED_EXCEEDED when today_deployed + new_notional > max_daily_notional_deployed. Complements max_notional_per_signal (per-signal bound) by capping total daily capital at risk against premium-spike over-leverage across many signals. Opt-in: null disables the gate. Spec-only field in this PR; runtime sizing wiring lands separately.
-    """
-    max_spread_pct: Annotated[float | None, Field(gt=0.0, le=1.0)] = None
-    """
-    Issue #19 (quant-analyst review): max admissible bid/ask spread as a fraction of mid at BTO submit time, enforced at contract-resolver-svc against the freshly-fetched NBBO quote. Reject BTO with BTO_SPREAD_TOO_WIDE when (ask - bid) / mid > max_spread_pct (where mid = (ask + bid) / 2). The companion BTO_BID_ZERO rejection always fires unconditionally when bid == 0 regardless of this threshold — a no-bid option cannot be exited except by exercise and must never be entered. Opt-in: null disables the spread gate (BTO_BID_ZERO still enforced). Spec-only field in this PR; runtime wiring lands separately.
-    """
-    earnings_window_hours: Annotated[int | None, Field(ge=0)] = None
-    """
-    Issue #19 (quant-analyst review): veto entries whose holding window straddles an earnings release within N hours of payload.posted_at (lookahead) or payload.expiry (lookback). Reject BTO with EARNINGS_WINDOW_BLOCKED when the underlying has a scheduled earnings event inside [now, now + earnings_window_hours] OR inside [expiry - earnings_window_hours, expiry]. Closes the IV-crush failure mode between BTO and STC. Opt-in: null/0 disables the gate. Spec-only field in this PR; runtime wiring (earnings calendar source, exec-svc lookup) lands separately.
-    """
-    halt_check_enabled: bool | None = None
-    """
-    Issue #19 (quant-analyst review): if true, gates the future market-data-svc underlying-halt subscription that PositionWorkflow consumes to force-flat affected positions. When the underlying enters an LULD pause the option bid collapses to zero and the position becomes unexitable except by exercise; PositionWorkflow will force-flat with UNDERLYING_HALTED on receipt of the halt signal so the position closes the moment the halt clears. Opt-in: null/false disables the subscription. Spec-only field in this PR; market-data-svc halt subscription + PositionWorkflow handler land separately.
-    """
     eod_force_flatten: bool | None = None
     """
     Issue #202: gate the EOD force-flatten timer (15:55 ET) in PositionWorkflow. Default true (null treated as true) preserves the pre-issue-202 behavior for every strategy that doesn't explicitly opt out. Copytrade strategies that mirror an external Discord author MUST set this to false — the only normal exit for an author-mirror position is an STC message from the author; force-flattening at EOD diverges from the author's actual position and breaks mirror fidelity. The expiry-close timer (0DTE physical-expiry handling), chandelier trail (when armed), risk-breach, and operator force_close remain available as emergency exits regardless of this flag.
@@ -292,10 +252,6 @@ class StrategyConfig(BaseModel):
     entry_mode: EntryMode | None = None
     """
     Watchlist-trigger entry style. BREAKOUT enters when the underlying first trades through `trigger` in `direction`. RETEST waits for a pullback that retests the trigger level before entering. Optional and null-when-absent; the watchlist consumer applies the BREAKOUT code default when unset, so copytrade configs that never set it carry no inert value.
-    """
-    watchlist_expiry_rule: WatchlistExpiryRule | None = None
-    """
-    Rule selecting the option expiry for a watchlist trigger entry. NEAREST_WEEKLY picks the nearest weekly expiry on/after et_date. Optional and null-when-absent; the watchlist consumer resolves the nearest weekly expiry unconditionally, so an unset value is spec-only and never leaks into non-watchlist configs.
     """
     gap_tolerance_pct: Annotated[float | None, Field(ge=0.0)] = None
     """

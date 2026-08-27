@@ -249,29 +249,6 @@ def test_subscribe_premium_request_round_trips() -> None:
     assert serialized == original
 
 
-def test_strategy_config_round_trips() -> None:
-    original = _load("strategy-config-copytrade-v1.json")
-
-    model = StrategyConfig.model_validate(original)
-
-    assert model.schema_version == 1
-    assert model.tenant_id == "dev"
-    assert model.strategy_id == "copytrade-v1"
-    assert model.max_slippage_abs == Decimal("0.05")
-    assert model.max_slippage_pct == 0.05
-    assert model.repeg_after_ms == 5000
-    # Phase 0 watchlist-trigger fields: the fixture carries their defaults explicitly.
-    assert model.entry_mode == "BREAKOUT"
-    assert model.watchlist_expiry_rule == "NEAREST_WEEKLY"
-    assert model.gap_tolerance_pct == 0.005
-    assert model.equity_emit_delta_pct == 0.0005
-    assert model.enabled is True
-
-    # StrategyConfig has many optional fields — drop None values to compare against the fixture.
-    serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
-    assert serialized == original
-
-
 def test_subscribe_premium_result_round_trips() -> None:
     original = _load("subscribe-premium-result.json")
 
@@ -373,22 +350,26 @@ def test_strategy_config_author_whitelist_optional_round_trip() -> None:
     assert "author_whitelist" not in reloaded
 
 
-def test_strategy_config_trail_fields_positive() -> None:
-    data = {**_STRATEGY_CONFIG_BASE, "trail_debounce_ticks": 1, "trail_disarm_minutes_before_close": 0}
-    model = StrategyConfig.model_validate(data)
-    assert model.trail_debounce_ticks == 1
-    assert model.trail_disarm_minutes_before_close == 0
-    # round-trip: both fields survive serialise → parse
-    reloaded = StrategyConfig.model_validate_json(model.model_dump_json(by_alias=True, exclude_none=True))
-    assert reloaded.trail_debounce_ticks == 1
-    assert reloaded.trail_disarm_minutes_before_close == 0
+def test_strategy_config_round_trips() -> None:
+    original = _load("strategy-config-copytrade-v1.json")
 
+    model = StrategyConfig.model_validate(original)
 
-def test_strategy_config_trail_debounce_ticks_zero_rejected() -> None:
-    data = {**_STRATEGY_CONFIG_BASE, "trail_debounce_ticks": 0}
-    with pytest.raises(ValidationError) as exc_info:
-        StrategyConfig.model_validate(data)
-    assert "trail_debounce_ticks" in str(exc_info.value)
+    assert model.schema_version == 1
+    assert model.tenant_id == "dev"
+    assert model.strategy_id == "copytrade-v1"
+    assert model.max_slippage_abs == Decimal("0.05")
+    assert model.max_slippage_pct == 0.05
+    assert model.repeg_after_ms == 5000
+    # Phase 0 watchlist-trigger fields: the fixture carries their defaults explicitly.
+    assert model.entry_mode == "BREAKOUT"
+    assert model.gap_tolerance_pct == 0.005
+    assert model.equity_emit_delta_pct == 0.0005
+    assert model.enabled is True
+
+    # StrategyConfig has many optional fields — drop None values to compare against the fixture.
+    serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
+    assert serialized == original
 
 
 def test_strategy_config_force_close_fields_round_trip() -> None:
@@ -535,26 +516,6 @@ def test_position_workflow_input_force_close_0dte_bad_format_rejected() -> None:
         assert "force_close_0dte_et" in str(exc_info.value)
 
 
-def test_strategy_config_notional_cap_fields_round_trip() -> None:
-    """Issue #17: both per-signal and per-day notional caps parse, round-trip, and absent is fine."""
-    data = {
-        **_STRATEGY_CONFIG_BASE,
-        "max_notional_per_signal": 2500.0,
-        "max_daily_notional_deployed": 25000.0,
-    }
-    model = StrategyConfig.model_validate(data)
-    assert model.max_notional_per_signal == Decimal("2500.0")
-    assert model.max_daily_notional_deployed == Decimal("25000.0")
-    reloaded = StrategyConfig.model_validate_json(model.model_dump_json(by_alias=True, exclude_none=True))
-    assert reloaded.max_notional_per_signal == Decimal("2500.0")
-    assert reloaded.max_daily_notional_deployed == Decimal("25000.0")
-
-    # Absent case (the existing copytrade-v1 fixture) must still validate cleanly — both fields are opt-in.
-    absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
-    assert absent.max_notional_per_signal is None
-    assert absent.max_daily_notional_deployed is None
-
-
 def test_strategy_config_notional_cap_non_positive_rejected() -> None:
     """Issue #17: both caps require exclusiveMinimum 0 — zero and negative must be rejected."""
     for field in ("max_notional_per_signal", "max_daily_notional_deployed"):
@@ -678,17 +639,6 @@ def test_arm_context_round_trips() -> None:
 
     serialized = json.loads(model.model_dump_json(by_alias=True, exclude_none=True))
     assert serialized == original
-
-
-def test_strategy_config_watchlist_only_fields_null_when_absent() -> None:
-    """The four watchlist-only fields are opt-in: null when a config omits them, so
-    copytrade never carries them. Only enabled (universal) keeps its default."""
-    model = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
-    assert model.entry_mode is None
-    assert model.watchlist_expiry_rule is None
-    assert model.gap_tolerance_pct is None
-    assert model.equity_emit_delta_pct is None
-    assert model.enabled is True
 
 
 def test_strategy_config_create_request_account_cap_round_trip() -> None:

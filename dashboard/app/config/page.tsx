@@ -38,7 +38,21 @@ const ENABLED_FIELD = "enabled";
 // the sole daily-loss breaker; the dead per-strategy field is hidden from /config (still nullable in
 // the schema). It must be FILTERED OUT explicitly — classOf() defaults unlisted fields to SAFE,
 // which would otherwise render it as an editable input.
-const DEPRECATED_HIDDEN_FIELDS = new Set(["daily_loss_threshold"]);
+// #649: the nine removed schema fields join the hidden set — live DB rows still carry a few of
+// them until their next save (which drops the stale key at the DTO boundary); rendering them as
+// SAFE editable inputs whose edits are silently discarded would be worse than hiding them.
+const DEPRECATED_HIDDEN_FIELDS = new Set([
+  "daily_loss_threshold",
+  "trail_debounce_ticks",
+  "trail_disarm_minutes_before_close",
+  "max_spread_pct",
+  "earnings_window_hours",
+  "halt_check_enabled",
+  "bto_price_move_reject_pct",
+  "watchlist_expiry_rule",
+  "max_notional_per_signal",
+  "max_daily_notional_deployed",
+]);
 
 function resolveEnabled(config: Record<string, unknown>): boolean {
   // Absent OR null (JSONB null / older configs that predate the flag) -> enabled, matching the
