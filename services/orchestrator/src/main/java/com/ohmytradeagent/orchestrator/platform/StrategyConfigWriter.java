@@ -42,8 +42,9 @@ import org.springframework.stereotype.Component;
  *       {@code account_daily_loss_pct} is the sole daily-loss breaker — so it is no longer
  *       DANGEROUS; it falls through to SAFE and is freely writable.)
  *   <li><b>EXPOSURE / tighten-only</b> ({@code max_contracts}, {@code min_contracts}, {@code
- *       max_positions}, {@code capital_weight}, {@code max_notional_per_signal}, {@code
- *       max_daily_notional_deployed}) — must not increase vs stored.
+ *       max_positions}, {@code capital_weight}) — must not increase vs stored. ({@code
+ *       max_notional_per_signal} / {@code max_daily_notional_deployed} were removed in #649 — caps
+ *       that capped nothing.)
  *   <li><b>SAFE</b> — every other field is freely writable.
  * </ul>
  *
@@ -625,14 +626,10 @@ public class StrategyConfigWriter {
     requireNotIncreased("min_contracts", stored.getMinContracts(), next.getMinContracts());
     requireNotIncreased("max_positions", stored.getMaxPositions(), next.getMaxPositions());
     requireNotIncreased("capital_weight", stored.getCapitalWeight(), next.getCapitalWeight());
-    requireNotIncreased(
-        "max_notional_per_signal",
-        stored.getMaxNotionalPerSignal(),
-        next.getMaxNotionalPerSignal());
-    requireNotIncreased(
-        "max_daily_notional_deployed",
-        stored.getMaxDailyNotionalDeployed(),
-        next.getMaxDailyNotionalDeployed());
+    // #649: max_notional_per_signal / max_daily_notional_deployed were "caps that cap nothing" —
+    // read only by this tighten-only write guard, never checked against an order at runtime.
+    // Removed from the schema; portfolio exposure is covered by the wired
+    // notional_cap_pct_of_capital_base.
   }
 
   private static void requireIdentity(String field, Object stored, Object next) {
@@ -676,6 +673,8 @@ public class StrategyConfigWriter {
    * conservatively rejected (dropping a cap is not a tightening); otherwise reject when next &gt;
    * stored. Only equal-or-lower exposure is permitted at runtime.
    */
+  // #649: the next==null branch below is defensive-unreachable — every surviving EXPOSURE field
+  // is REQUIRED, so a null replacement is refused by requireNonNull before the comparison.
   private static <T extends Comparable<T>> void requireNotIncreased(
       String field, T stored, T next) {
     if (stored == null) {

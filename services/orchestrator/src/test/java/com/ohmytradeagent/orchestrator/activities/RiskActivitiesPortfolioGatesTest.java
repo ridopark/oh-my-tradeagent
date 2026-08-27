@@ -829,7 +829,6 @@ class RiskActivitiesPortfolioGatesTest {
     c.setAuthorWhitelist(Set.of("acme_trader", "beta_signals"));
     c.setMaxSignalAgeBtoSecs(30L);
     c.setMaxSignalAgeStcSecs(60L);
-    c.setBtoPriceMoveRejectPct(new BigDecimal("0.10"));
     c.setMaxPositions(5L);
     c.setCapitalWeight(new BigDecimal("0.2"));
     c.setMinContracts(1L);

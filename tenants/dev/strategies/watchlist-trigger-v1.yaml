@@ -25,7 +25,6 @@ max_positions: 3
 #   gap_tolerance_pct 0.005   — a trigger that gaps through its level by >0.5% at open is treated as gapped.
 #   equity_emit_delta_pct     — min 0.05% underlying move before a new equity tick is emitted (tick throttle).
 entry_mode: BREAKOUT
-watchlist_expiry_rule: NEAREST_WEEKLY
 gap_tolerance_pct: 0.005
 equity_emit_delta_pct: 0.0005
 

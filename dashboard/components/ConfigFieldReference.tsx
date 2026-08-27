@@ -235,14 +235,6 @@ const CONFIG_FIELDS: ConfigField[] = [
       "BREAKOUT — a long setup enters the moment price trades through the trigger, without waiting for a pullback.",
   },
   {
-    field: "watchlist_expiry_rule",
-    what: "The rule that selects which option expiry a watchlist-trigger entry buys.",
-    effect:
-      "NEAREST_WEEKLY (default; unset treated as NEAREST_WEEKLY) picks the nearest weekly expiry on or after the trigger's et_date.",
-    example:
-      "NEAREST_WEEKLY — a trigger firing today buys the nearest weekly expiry on or after today.",
-  },
-  {
     field: "gap_tolerance_pct",
     what: "Watchlist-trigger entry: the chase-cap band around the trigger level, as a fraction of the trigger.",
     effect:
@@ -324,13 +316,6 @@ const CONFIG_FIELDS: ConfigField[] = [
       "'skip' (default) places no order and rides the last contract to trail/EOD/STC; 'full_close' closes that last contract on the partial signal.",
     example:
       'full_close — with 1 contract left, a "sell half" signal closes that last contract instead of skipping it.',
-  },
-  {
-    field: "bto_price_move_reject_pct",
-    what: "Reject a BTO when the option's mid has moved more than this fraction from the signal price since it was posted.",
-    effect:
-      "BTO_PRICE_MOVED rejection regardless of signal age — blocks entering after a large move. Default 0.10 (10%).",
-    example: "0.10 — if the price moved more than 10% from the author's posted price, the entry is rejected.",
   },
   {
     field: "notional_cap_pct_of_capital_base",

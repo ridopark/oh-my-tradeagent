@@ -20,7 +20,6 @@ max_signal_age_stc_secs: 60
 # Issue #3: BTO secondary price-move gate (documented; market-data wiring lands
 # separately). Rejects BTO when bid/ask (mid) has moved more than this fraction
 # from payload.price since posted_at, regardless of age.
-bto_price_move_reject_pct: 0.10
 max_positions: 5
 
 # Phase 2a sizing

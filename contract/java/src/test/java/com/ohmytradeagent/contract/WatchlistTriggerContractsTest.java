@@ -110,7 +110,6 @@ class WatchlistTriggerContractsTest {
     StrategyConfig deserialized = mapper.readValue(json, StrategyConfig.class);
 
     assertThat(deserialized.getEntryMode()).isNull();
-    assertThat(deserialized.getWatchlistExpiryRule()).isNull();
     assertThat(deserialized.getGapTolerancePct()).isNull();
     assertThat(deserialized.getEquityEmitDeltaPct()).isNull();
     assertThat(deserialized.getEnabled()).isTrue();
@@ -156,8 +155,6 @@ class WatchlistTriggerContractsTest {
     assertThat(deserialized.getStrategyId()).isEqualTo("copytrade-v1");
     assertThat(deserialized.getCapitalSource()).isEqualTo(StrategyConfig.CapitalSource.STATIC);
     assertThat(deserialized.getEntryMode()).isEqualTo(StrategyConfig.EntryMode.BREAKOUT);
-    assertThat(deserialized.getWatchlistExpiryRule())
-        .isEqualTo(StrategyConfig.WatchlistExpiryRule.NEAREST_WEEKLY);
     assertThat(deserialized.getGapTolerancePct()).isEqualByComparingTo(new BigDecimal("0.005"));
     assertThat(deserialized.getEquityEmitDeltaPct()).isEqualByComparingTo(new BigDecimal("0.0005"));
     assertThat(deserialized.getEnabled()).isTrue();

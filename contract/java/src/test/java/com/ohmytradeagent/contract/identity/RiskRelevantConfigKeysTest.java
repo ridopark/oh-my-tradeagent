@@ -84,9 +84,11 @@ class RiskRelevantConfigKeysTest {
             "max_contracts",
             "min_contracts",
             "max_positions",
-            "capital_weight",
-            "max_notional_per_signal",
-            "max_daily_notional_deployed");
+            "capital_weight");
+    // #649: max_notional_per_signal / max_daily_notional_deployed were removed with their fields —
+    // caps that capped nothing (write-guard only, no runtime gate). The set must NOT carry ghosts
+    // of removed schema properties (the everyKeyIsARealStrategyConfigProperty test above enforces
+    // that structurally — the exact #338 ghost-key lesson).
   }
 
   @Test
